@@ -356,7 +356,7 @@ impl WireTransport for QueuedWireTransport {
 }
 
 struct ConnectedClient {
-    db: Db<MemoryStorage>,
+    db: Db,
     wire: QueuedWireTransport,
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
 }
@@ -386,7 +386,7 @@ fn open_connected_client(
 
 fn pump_websocket(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    db: &Db<MemoryStorage>,
+    db: &Db,
     wire: &QueuedWireTransport,
 ) -> bool {
     let mut saw_server_frames = false;
@@ -413,7 +413,7 @@ fn pump_websocket(
 
 fn pump_websocket_once(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    db: &Db<MemoryStorage>,
+    db: &Db,
     wire: &QueuedWireTransport,
 ) -> bool {
     block_on(db.tick()).expect("drive client db");
@@ -438,7 +438,7 @@ fn pump_websocket_once(
 }
 fn pump_websocket_once_allow_close(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    db: &Db<MemoryStorage>,
+    db: &Db,
     wire: &QueuedWireTransport,
 ) {
     block_on(db.tick()).expect("drive client db");

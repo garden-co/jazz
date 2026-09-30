@@ -3,6 +3,8 @@
 //! This deliberately duplicates the small schema surface needed by the
 //! benchmark. It does not import an application runtime or fixture helper.
 
+pub mod live_view;
+
 use std::collections::BTreeMap;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, PreparedQuery, block_on};
@@ -18,7 +20,7 @@ const LABELS: usize = 8;
 const ARTISTS: usize = 32;
 const CATALOGS: usize = 4;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 /// Prepared BigLabel fixture. Construction and seeding are intentionally kept
 /// outside the measured closure.

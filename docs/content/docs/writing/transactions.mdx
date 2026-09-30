@@ -4,8 +4,6 @@ description: Group related reads and writes into one mergeable or exclusive tran
 reviewedAt: "b29b48d1a"
 ---
 
-import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
-
 A transaction groups related writes under one commit. Reads made through the transaction can see
 its staged writes, while code outside the transaction cannot see them until it commits.
 
@@ -58,10 +56,15 @@ The callback form commits automatically when the callback finishes. In TypeScrip
 transaction back if the callback throws or returns a rejected promise. In Rust, it leaves the
 transaction uncommitted if the callback returns `Err`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -116,9 +119,18 @@ A transaction can fail at three points:
 3. The authority can reject a committed transaction later. In TypeScript, `wait(...)` then rejects
    with `PersistedWriteRejectedError` and Jazz removes the rejected local changes.
 
-<include cwd lang="ts" meta='title="app.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-errors-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-errors-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-errors-effect
+    </include>
+  </Tab>
+</Tabs>
 
 Use `db.onMutationError(...)` as a fallback for later rejections when your code does not keep and
 wait on the transaction result.
@@ -129,10 +141,15 @@ An exclusive transaction reads from a stable transaction snapshot. The authority
 and writes, then accepts or rejects the transaction as one serialisable unit. This is useful when a
 write is valid only if the data you just read has not changed in a conflicting transaction.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-exclusive-transaction-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-exclusive-transaction-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -147,6 +164,14 @@ authority accepts the transaction and rejects if the authority rejects it.
 
 The Rust example uses the embedded `jazz::db::Db` API. An owning `ExclusiveTx` abandons the open
 transaction if it is dropped before `commit()` succeeds.
+
+<Callout type="warn">
+  The authority checks only the reads the writing client reports. That keeps honest writers from
+  acting on stale data, but it is not a security boundary: a client that under-reports its reads can
+  commit anyway. Enforce rules that must hold for every writer, such as "a membership needs a live
+  invite", in [permission policies](/docs/auth/permissions), or perform the write on your backend,
+  as the [invite links](/docs/recipes/access-control/invite-links) recipe does.
+</Callout>
 
 ## Manage a transaction yourself only when needed
 

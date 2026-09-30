@@ -1,6 +1,6 @@
 //! core update throughput benchmark for permissioned operations.
 //!
-//! Measures updates/second through `jazz::db::Db<MemoryStorage>` so this
+//! Measures updates/second through `jazz::db::Db` so this
 //! exercises the core replacement path instead of the legacy
 //! RuntimeCore/SchemaManager/SyncManager layers. The single-row case cycles
 //! through owned documents; the batch case applies 100 core updates per
@@ -21,7 +21,7 @@ use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
-type CoreDb = Db<MemoryStorage>;
+type CoreDb = Db;
 
 const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
 

@@ -7,7 +7,6 @@ import { layoutSequence, type Participant, type SequenceStep } from "./sequence-
 export type { Participant, SequenceStep } from "./sequence-layout";
 
 export type SequenceProps = {
-  eyebrow: string;
   description: ReactNode;
   participants: Participant[];
   steps: SequenceStep[];
@@ -85,11 +84,11 @@ function Lines({
   );
 }
 
-export function Sequence({ eyebrow, description, participants, steps }: SequenceProps) {
+export function Sequence({ description, participants, steps }: SequenceProps) {
   const L = layoutSequence(participants, steps);
 
   return (
-    <DiagramFrame eyebrow={eyebrow} description={description} responsive>
+    <DiagramFrame description={description} responsive>
       <DiagramStyles />
       <div className="diagram-host" style={{ width: "100%", overflowX: "auto" }}>
         <svg

@@ -31,3 +31,14 @@ fn additions_inside_the_live_playlist_window_are_shown() {
     }
     assert_eq!(fixture.open_playlist(), 16);
 }
+
+#[test]
+fn scrubbing_returns_only_the_requested_audio_window() {
+    use jazz_example_record_player_benchmark::audio::{ScrubFixture, expected_scrub_window};
+    let audio_bytes = 256 * 1024;
+    let fixture = ScrubFixture::new(audio_bytes);
+    assert_eq!(
+        fixture.scrub_to_middle(),
+        expected_scrub_window(audio_bytes)
+    );
+}

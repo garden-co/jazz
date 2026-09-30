@@ -111,13 +111,13 @@ it("tells Expo Go and old development builds that a native artifact is required"
 
 it("rejects an installed native build with an incompatible ABI before executing a command", async () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => 2,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1 + 1,
     execute: jest.fn(),
   };
   const relay = loadRelay(nativeRelay);
 
   await expect(relay.executeNativeRelayCommand("AA==")).rejects.toThrow(
-    "Jazz native relay ABI 2 is incompatible with JavaScript ABI 1..=1; install a matching native development or release build.",
+    `Jazz native relay ABI ${NATIVE_RELAY_ABI_V1 + 1} is incompatible with JavaScript ABI ${NATIVE_RELAY_ABI_V1}..=${NATIVE_RELAY_ABI_V1}; install a matching native development or release build.`,
   );
   expect(nativeRelay.execute).not.toHaveBeenCalled();
 });
@@ -215,7 +215,7 @@ it("rejects a missing, malformed, or ABI-incompatible bindings-installed JSI for
   for (const factory of [
     undefined,
     {},
-    { abiVersion: 2, openAttached: () => foregroundFixture() },
+    { abiVersion: NATIVE_RELAY_ABI_V1 + 1, openAttached: () => foregroundFixture() },
   ]) {
     const nativeRelay: FixtureNativeRelay = {
       getAbiVersion: () => NATIVE_RELAY_ABI_V1,
@@ -397,6 +397,32 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
   expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(1, 0))).toThrow(
     "unknown or malformed command response",
   );
+});
+
+it("decodes a core operation error with its stable code beside the unchanged reason", () => {
+  const relay = loadRelay(null);
+  const code = Array.from("not_observed", (char) => char.charCodeAt(0));
+  const reason = Array.from("NotObserved: oops", (char) => char.charCodeAt(0));
+
+  expect(
+    relay.decodeNativeForegroundResponse(
+      Uint8Array.of(25, code.length, ...code, reason.length, ...reason),
+    ),
+  ).toEqual({ type: "operationError", code: "not_observed", reason: "NotObserved: oops" });
+  // An uncoded failure keeps response 8 and has no code.
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(8, 4, 111, 111, 112, 115))).toEqual({
+    type: "operationError",
+    reason: "oops",
+  });
+  for (const malformed of [
+    Uint8Array.of(25),
+    Uint8Array.of(25, 3, 110, 111),
+    Uint8Array.of(25, 1, 110),
+    Uint8Array.of(25, 1, 110, 4, 111, 111, 112),
+    Uint8Array.of(25, 1, 110, 1, 111, 0),
+  ]) {
+    expect(() => relay.decodeNativeForegroundResponse(malformed)).toThrow(/malformed/i);
+  }
 });
 
 it("decodes canonical foreground handles through the JavaScript safe integer limit", () => {

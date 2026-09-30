@@ -2777,7 +2777,7 @@ mod tests {
     }
 
     struct TestClient {
-        db: Db<CoreMemoryStorage>,
+        db: Db,
         transport: TestWireTransport,
         todos_table: TableSchema,
         received: Rc<RefCell<Vec<SyncMessage>>>,
@@ -2842,7 +2842,7 @@ mod tests {
             }
         }
 
-        fn write_todo(&self, title: &str) -> WriteHandle<CoreMemoryStorage> {
+        fn write_todo(&self, title: &str) -> WriteHandle {
             jazz::db::block_on(self.db.insert(
                 "todos",
                 RowCells::from([
@@ -3066,7 +3066,7 @@ mod tests {
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
-        write: &WriteHandle<CoreMemoryStorage>,
+        write: &WriteHandle,
     ) -> WriteState {
         let start = tokio::time::Instant::now();
         loop {

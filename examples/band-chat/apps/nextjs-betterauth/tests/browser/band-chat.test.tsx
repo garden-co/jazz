@@ -1,5 +1,5 @@
-import { afterEach, expect, it } from "vitest";
-import { page } from "vitest/browser";
+import { afterEach, it } from "vitest";
+import { page, userEvent } from "vitest/browser";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createAccountManager, type AccountStore, type DbConfig } from "jazz-tools";
@@ -16,25 +16,16 @@ import { BandChatPreview } from "../../src/BandChat";
 
 type PreviewLabel = "owner" | "guest" | "local";
 const mounts: Array<{ root: Root; element: HTMLDivElement; label: PreviewLabel }> = [];
-let invitation:
-  | {
-      input: HTMLInputElement;
-      form: HTMLFormElement;
-      expectedValue: string;
-      submitted: boolean;
-      reachedRoot: boolean;
-    }
-  | undefined;
+
 function failureDiagnostics() {
   // Emit only synthetic labels, counts and categories. Never include DOM text,
   // input contents, canonical authors, tokens, server URLs or raw errors.
   const previews = mounts.map(({ element, label }) => ({
     label,
     connected: element.isConnected,
-    rooms: element.querySelectorAll("button.room").length,
-    conversation: element.querySelector(".conversation") !== null,
-    memberships: element.querySelectorAll("[aria-label='Room membership'] li").length,
-    inviteInput: element.querySelector("input[aria-label='Invite account ID']") !== null,
+    rooms: element.querySelectorAll("nav a, nav button").length,
+    messages: element.querySelectorAll("[data-message-id]").length,
+    dialogs: document.querySelectorAll("dialog[open]").length,
     alerts: [...element.querySelectorAll("[role='alert']")].map((alert) => {
       const message = alert.textContent ?? "";
       if (/permission|unauthori[sz]ed|forbidden|denied/i.test(message)) return "permission";
@@ -44,19 +35,7 @@ function failureDiagnostics() {
       return "other";
     }),
   }));
-  return JSON.stringify({
-    previews,
-    invitation: invitation
-      ? {
-          submitted: invitation.submitted,
-          reachedRoot: invitation.reachedRoot,
-          inputConnected: invitation.input.isConnected,
-          formConnected: invitation.form.isConnected,
-          inputMatchesExpected: invitation.input.value === invitation.expectedValue,
-          inputCleared: invitation.input.value === "",
-        }
-      : null,
-  });
+  return JSON.stringify({ previews });
 }
 
 async function waitFor(check: () => boolean, message: string, timeoutMs = 5_000) {
@@ -94,7 +73,11 @@ async function localPreviewConfig(): Promise<DbConfig> {
   };
 }
 
-async function mount(config: DbConfig | undefined = undefined, label: PreviewLabel = "local") {
+async function mount(
+  config: DbConfig | undefined = undefined,
+  label: PreviewLabel = "local",
+  initialParams?: Record<string, string>,
+) {
   const selectedConfig = config ?? (await localPreviewConfig());
   const element = document.createElement("div");
   element.dataset.testid = `preview-${label}`;
@@ -102,21 +85,59 @@ async function mount(config: DbConfig | undefined = undefined, label: PreviewLab
   const root = createRoot(element);
   mounts.push({ root, element, label });
   await act(async () => {
-    root.render(<BandChatPreview config={selectedConfig} />);
+    root.render(<BandChatPreview config={selectedConfig} initialParams={initialParams} />);
   });
-  await waitFor(() => element.querySelector("#room-name") !== null, "room composer should render");
   return element;
 }
 
 afterEach(async () => {
-  invitation = undefined;
   for (const { root, element } of mounts.splice(0)) {
     await act(async () => root.unmount());
     element.remove();
   }
 });
 
-it("negotiates persistent browser workers and renders the owner, guest-message, and removal flow", async () => {
+function preview(element: HTMLDivElement) {
+  return page.getByTestId(element.dataset.testid!);
+}
+
+function openDialog() {
+  return page.getByRole("dialog");
+}
+
+function hasText(element: HTMLElement, text: string) {
+  return element.textContent?.includes(text) ?? false;
+}
+
+async function setUpProfile(element: HTMLDivElement, name: string) {
+  await waitFor(
+    () => hasText(element, "Set up your profile"),
+    "profile setup should render",
+    15_000,
+  );
+  await preview(element).getByLabelText("Display name").fill(name);
+  await preview(element).getByRole("button", { name: "Continue", exact: true }).click();
+  await waitFor(() => hasText(element, name), "profile should be saved", 15_000);
+}
+
+async function createRoom(element: HTMLDivElement, name: string) {
+  await preview(element).getByRole("button", { name: "New room", exact: true }).first().click();
+  await openDialog().getByLabelText("Room name").fill(name);
+  await openDialog().getByRole("button", { name: "Create room", exact: true }).click();
+  await waitFor(
+    () => element.querySelector("h2")?.textContent === name,
+    `${name} should open`,
+    15_000,
+  );
+}
+
+async function sendMessage(element: HTMLDivElement, text: string) {
+  await preview(element).getByRole("textbox", { name: "Message input" }).fill(text);
+  await preview(element).getByRole("button", { name: "Send", exact: true }).click();
+  await waitFor(() => hasText(element, text), "sent message should render", 15_000);
+}
+
+it("negotiates persistent browser workers and renders the owner, join-request, message, and removal flow", async () => {
   // Regression: a persistent browser worker creates its NativeRuntimeAdapter
   // around WasmDb, then uses that artifact's feature mask for the server Hello.
   // Removing WasmDb.wireFeatures makes this first remote worker connection fail
@@ -137,13 +158,10 @@ it("negotiates persistent browser workers and renders the owner, guest-message, 
     schema: app,
     permissions,
   });
-  const ownerUserId = "browser-owner";
-  const guestUserId = "browser-guest";
-  const ownerToken = await getJazzServerJwtForUser(ownerUserId, undefined, server.appId);
-  const guestToken = await getJazzServerJwtForUser(guestUserId, undefined, server.appId);
+  const ownerToken = await getJazzServerJwtForUser("browser-owner", undefined, server.appId);
+  const guestToken = await getJazzServerJwtForUser("browser-guest", undefined, server.appId);
   const ownerAccount = await enrollTestAccount(server, ownerToken);
   const guestAccount = await enrollTestAccount(server, guestToken);
-  const guestAuthor = guestAccount.id;
   const owner = await mount(
     {
       appId: server.appId,
@@ -153,7 +171,17 @@ it("negotiates persistent browser workers and renders the owner, guest-message, 
     },
     "owner",
   );
+  await setUpProfile(owner, "Olive Owner");
   await createRoom(owner, "Owner room");
+
+  // The owner shares the room link from the invite dialog.
+  await preview(owner).getByRole("button", { name: "Invite", exact: true }).click();
+  const linkInput = openDialog().getByLabelText("Room link");
+  await waitFor(() => (linkInput.element() as HTMLInputElement).value.includes("join="), "link");
+  const roomId = new URL((linkInput.element() as HTMLInputElement).value).searchParams.get("join")!;
+  // Dialogs are modal; close it so the second preview can be used.
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => document.querySelector("dialog[open]") === null, "invite dialog closes");
 
   const guest = await mount(
     {
@@ -163,147 +191,125 @@ it("negotiates persistent browser workers and renders the owner, guest-message, 
       serverUrl: server.serverUrl,
     },
     "guest",
+    { join: roomId },
   );
-  await createRoom(guest, "Guest profile bootstrap");
-  // Both previews have an invitation form. Keep every action scoped even if
-  // one preview finishes loading before the other.
+  await setUpProfile(guest, "Gus Guest");
+  // The guest cannot read the room yet; asking to join is all it can do.
+  await preview(guest).getByRole("button", { name: "Ask to join", exact: true }).click();
   await waitFor(
-    () => guest.querySelector("input[aria-label='Invite account ID']") !== null,
-    "guest bootstrap room should finish loading",
+    () => hasText(guest, "Waiting for the room creator"),
+    "guest should see its pending request",
+    15_000,
   );
 
-  await preview(owner).getByLabelText("Invite account ID", { exact: true }).fill(guestAuthor);
-  // Creating the guest's bootstrap room can rerender the owner's membership
-  // panel. Reacquire the controlled input after React commits the value so the
-  // submit event reaches the currently connected form.
-  const currentInvitee = currentInput(owner, "input[aria-label='Invite account ID']");
-  const observation = {
-    input: currentInvitee,
-    form: currentInvitee.closest("form")!,
-    expectedValue: guestAuthor,
-    submitted: false,
-    reachedRoot: false,
-  };
-  invitation = observation;
-  owner.addEventListener(
-    "submit",
-    () => {
-      observation.reachedRoot = true;
-    },
-    { once: true },
-  );
-  observation.submitted = true;
-  await preview(owner).getByRole("button", { name: "Invite member", exact: true }).click();
+  await preview(owner)
+    .getByRole("button", { name: /^Invite( \d+)?$/ })
+    .click();
   await waitFor(
-    () => owner.textContent?.includes(guestAuthor) ?? false,
-    "owner should render the invited guest",
+    () => hasText(openDialog().element() as HTMLElement, "Gus Guest"),
+    "owner should see the join request with the guest's name",
     15_000,
   );
+  await openDialog().getByRole("button", { name: "Admit", exact: true }).click();
   await waitFor(
-    () =>
-      [...guest.querySelectorAll("button")].some((button) =>
-        button.textContent?.includes("Owner room"),
-      ),
-    "guest should receive the invited room",
+    () => !hasText(openDialog().element() as HTMLElement, "Asking to join"),
+    "the admitted request should clear",
     15_000,
   );
-  const ownerRoom = [...guest.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
-    button.textContent?.includes("Owner room"),
-  )!;
-  await act(async () => ownerRoom.click());
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => document.querySelector("dialog[open]") === null, "members dialog closes");
+
   await waitFor(
-    () => guest.querySelector("input[aria-label='Message']") !== null,
-    "guest should finish loading the selected room",
+    () => guest.querySelector("h2")?.textContent === "Owner room",
+    "guest should open the room once admitted",
     15_000,
   );
-  await preview(guest).getByLabelText("Message", { exact: true }).fill("Guest is on the setlist");
-  await preview(guest).getByRole("button", { name: "Send locally", exact: true }).click();
+  await sendMessage(guest, "Guest is on the setlist");
   await waitFor(
-    () => owner.textContent?.includes("Guest is on the setlist") ?? false,
+    () => hasText(owner, "Guest is on the setlist"),
     "owner should receive the guest message",
     15_000,
   );
 
-  const guestMembership = [...owner.querySelectorAll("li")].find((row) =>
-    row.textContent?.includes(guestAuthor),
-  )!;
-  await act(async () => guestMembership.querySelector<HTMLButtonElement>("button")!.click());
+  await preview(owner)
+    .getByRole("button", { name: /^Invite( \d+)?$/ })
+    .click();
+  await waitFor(() => document.querySelector("dialog[open]") !== null, "members dialog opens");
+  const dialog = openDialog().element() as HTMLElement;
+  const guestRow = [...dialog.querySelectorAll("li")].find((row) => hasText(row, "Gus Guest"))!;
+  await act(async () =>
+    [...guestRow.querySelectorAll("button")].find((button) => hasText(button, "Remove"))!.click(),
+  );
+  // Once removed, the guest leaves the member list.
   await waitFor(
-    () => !owner.textContent?.includes(guestAuthor),
+    () =>
+      ![...(openDialog().element() as HTMLElement).querySelectorAll("li")].some(
+        (row) => hasText(row, "Gus Guest") && hasText(row, "Remove"),
+      ),
     "owner should render the guest removal",
     15_000,
   );
   // Revocation is an authority boundary, not a promise to erase rows already
   // retained in the guest's local-first store. The permission receipt proves
   // that a post-removal write is rejected at the serving authority.
-});
+}, 90_000);
 
 async function enrollTestAccount(server: { appId: string; serverUrl: string }, token: string) {
   const accounts = await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl });
   return accounts.registerJWT({ getToken: async () => token });
 }
 
-function preview(element: HTMLDivElement) {
-  return page.getByTestId(element.dataset.testid!);
-}
-
-function currentInput(element: HTMLElement, selector: string): HTMLInputElement {
-  const input = element.querySelector<HTMLInputElement>(selector);
-  if (!input?.isConnected) {
-    throw new Error(`expected a connected input for selector ${selector}`);
-  }
-  return input;
-}
-
-async function createRoom(element: HTMLDivElement, name: string) {
-  await preview(element).getByPlaceholder("Rehearsal", { exact: true }).fill(name);
-  await preview(element).getByRole("button", { name: "Create room", exact: true }).click();
-  await waitFor(
-    () => element.textContent?.includes(`# ${name}`) ?? false,
-    `${name} should be visible`,
-    15_000,
-  );
-}
-
-it("creates a local room, sends a message, and applies client-side picker validation", async () => {
+it("creates a local room, sends and reacts to a message, and applies client-side picker validation", async () => {
   const element = await mount();
-  await preview(element).getByPlaceholder("Rehearsal", { exact: true }).fill("Soundcheck");
-  await preview(element).getByRole("button", { name: "Create room", exact: true }).click();
-  await waitFor(
-    () => element.textContent?.includes("# Soundcheck") ?? false,
-    "room should be visible",
-  );
+  await setUpProfile(element, "Lou Local");
+  await createRoom(element, "Soundcheck");
 
-  const guestAccountId = crypto.randomUUID();
-  await preview(element).getByLabelText("Invite account ID", { exact: true }).fill(guestAccountId);
-  await preview(element).getByRole("button", { name: "Invite member", exact: true }).click();
+  await sendMessage(element, "Amp warmed up");
+  await preview(element).getByRole("button", { name: "React", exact: true }).click();
+  await page.getByRole("button", { name: "🔥", exact: true }).click();
   await waitFor(
-    () => element.textContent?.includes(guestAccountId) ?? false,
-    "invited member should be visible",
-  );
-  const guestMembership = [...element.querySelectorAll("li")].find((row) =>
-    row.textContent?.includes(guestAccountId),
-  )!;
-  await act(async () => guestMembership.querySelector<HTMLButtonElement>("button")!.click());
-  await waitFor(
-    () => !element.textContent?.includes(guestAccountId),
-    "removed member should disappear",
-  );
-
-  await preview(element).getByLabelText("Message", { exact: true }).fill("Amp warmed up");
-  await preview(element).getByRole("button", { name: "Send locally", exact: true }).click();
-  await waitFor(
-    () => element.textContent?.includes("Amp warmed up") ?? false,
-    "local message should render",
+    () =>
+      [...element.querySelectorAll("button[aria-pressed='true']")].some((button) =>
+        hasText(button, "🔥 1"),
+      ),
+    "own reaction should render as pressed",
   );
 
   const attachment = element.querySelector<HTMLInputElement>("input[aria-label='Attachment']")!;
   Object.defineProperty(attachment, "files", {
     configurable: true,
-    value: [new File([new Uint8Array(256 * 1024 + 1)], "too-big.png", { type: "image/png" })],
+    value: [new File([new Uint8Array(10 * 1024 * 1024 + 1)], "too-big.png", { type: "image/png" })],
   });
   await act(async () => attachment.dispatchEvent(new Event("change", { bubbles: true })));
-  expect(element.querySelector("[role='alert']")?.textContent).toContain(
-    "256 KiB; this is client-side validation only",
+  await waitFor(
+    () =>
+      [...element.querySelectorAll("[role='alert']")].some((alert) =>
+        hasText(alert as HTMLElement, "client-side validation only"),
+      ),
+    "oversized attachment should be rejected by the picker",
+  );
+
+  // An accepted file streams into its own message and renders as a download chip.
+  Object.defineProperty(attachment, "files", {
+    configurable: true,
+    value: [new File(["Opening: Blue in Green"], "setlist.txt", { type: "text/plain" })],
+  });
+  await act(async () => attachment.dispatchEvent(new Event("change", { bubbles: true })));
+  await preview(element).getByRole("button", { name: "Send", exact: true }).click();
+  await waitFor(
+    () =>
+      [...element.querySelectorAll("[data-message-id]")].some((message) =>
+        hasText(message as HTMLElement, "setlist.txt"),
+      ),
+    "sent attachment should render in the timeline",
+    15_000,
+  );
+
+  // A sketch is posted as its own message with a shared drawing surface.
+  await preview(element).getByRole("button", { name: "Sketch", exact: true }).click();
+  await waitFor(
+    () => element.querySelector("[data-message-id] svg.sketch-surface") !== null,
+    "sketch should render in the timeline",
+    15_000,
   );
 });

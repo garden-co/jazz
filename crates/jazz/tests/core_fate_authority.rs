@@ -81,7 +81,7 @@ fn write_only_schema() -> JazzSchema {
     )
 }
 
-fn open_db(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_db(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> Db {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
@@ -126,7 +126,7 @@ impl WireTransport for QueuedWireTransport {
 
 fn connect_client_to_core(
     core: &mut InMemoryServerShell,
-    client: &Db<TestStorage>,
+    client: &Db,
     client_wire: &QueuedWireTransport,
     identity: AuthorSubject,
 ) -> ServerSession {
@@ -137,7 +137,7 @@ fn connect_client_to_core(
 }
 
 fn pump_client_core(
-    client: &Db<TestStorage>,
+    client: &Db,
     wire: &QueuedWireTransport,
     core: &mut InMemoryServerShell,
     session: ServerSession,
@@ -151,7 +151,7 @@ fn pump_client_core(
     block_on(client.tick()).unwrap();
 }
 
-fn visible_titles(db: &Db<TestStorage>, tier: DurabilityTier) -> Vec<String> {
+fn visible_titles(db: &Db, tier: DurabilityTier) -> Vec<String> {
     let query = Query::from("todos");
     let prepared = db.prepare_query(&query).unwrap();
     block_on(db.all(

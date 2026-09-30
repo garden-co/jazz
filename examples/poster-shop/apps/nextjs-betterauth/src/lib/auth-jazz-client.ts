@@ -1,7 +1,9 @@
 import { app } from "@/schema";
+import permissions from "@/permissions";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 import { configuredIssuer } from "./identity";
+import { jazzEnv } from "./jazz-env";
 import { serverSecret } from "./server-secret";
 
 const createRequire =
@@ -20,6 +22,7 @@ declare global {
 export async function authJazzClient(): Promise<JazzClient> {
   const pending = (globalThis.__posterShopAuthSession ??= createJazzSession({
     app,
+    permissions,
     // These explicit local defaults let Next evaluate auth routes during a
     // bare production build. Deployments replace both public values.
     appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "poster-shop-local",
@@ -28,7 +31,12 @@ export async function authJazzClient(): Promise<JazzClient> {
     initial: {
       backendSecret: serverSecret("BACKEND_SECRET", "poster-shop-development-backend-secret"),
     },
-    env: configuredIssuer === "http://127.0.0.1:3000" ? "dev" : "prod",
+    env: jazzEnv,
+    // `forRequest` and `withAttributionForRequest` verify Better Auth bearer
+    // JWTs against this app's own JWKS before resolving the Jazz account.
+    jwksUrl: `${configuredIssuer}/api/auth/jwks`,
+    jwtIssuer: configuredIssuer,
+    jwtAudience: configuredIssuer,
     tier: "global",
   }));
   try {

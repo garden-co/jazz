@@ -51,10 +51,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -66,11 +63,7 @@ fn open_node(
     (temp_dir, node)
 }
 
-fn reopen_node(
-    temp_dir: &tempfile::TempDir,
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> NodeState<RocksDbStorage> {
+fn reopen_node(temp_dir: &tempfile::TempDir, node_uuid: NodeUuid, schema: JazzSchema) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
@@ -88,7 +81,7 @@ fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
 }
 
 fn commit(
-    ui: &mut NodeState<RocksDbStorage>,
+    ui: &mut NodeState,
     row_uuid: RowUuid,
     made_at: u64,
     title: &str,
@@ -112,7 +105,7 @@ fn commit(
 }
 
 fn deletion(
-    ui: &mut NodeState<RocksDbStorage>,
+    ui: &mut NodeState,
     row_uuid: RowUuid,
     made_at: u64,
     event: DeletionEvent,
@@ -131,7 +124,7 @@ fn deletion(
     })
 }
 
-fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
+fn relay_ingest(node: &mut NodeState, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -145,7 +138,7 @@ fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
     });
 }
 
-fn apply_message(node: &mut NodeState<RocksDbStorage>, message: SyncMessage) -> Vec<SyncMessage> {
+fn apply_message(node: &mut NodeState, message: SyncMessage) -> Vec<SyncMessage> {
     block_on(async {
         let outcome = node.apply_sync_message(message).await.unwrap();
         node.persist_and_settle_outcome(outcome).await.unwrap()
@@ -153,17 +146,13 @@ fn apply_message(node: &mut NodeState<RocksDbStorage>, message: SyncMessage) -> 
 }
 
 fn transaction_state(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     tx_id: TxId,
 ) -> (Fate, Option<jazz::time::GlobalTime>, DurabilityTier) {
     block_on(node.transaction_state(tx_id)).unwrap()
 }
 
-fn core_ingest(
-    node: &mut NodeState<RocksDbStorage>,
-    message: &SyncMessage,
-    now: u64,
-) -> SyncMessage {
+fn core_ingest(node: &mut NodeState, message: &SyncMessage, now: u64) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -182,23 +171,19 @@ fn core_ingest(
     fate
 }
 
-fn install_uuid_sub_claim(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
+fn install_uuid_sub_claim(node: &mut NodeState, identity: AuthorSubject) {
     if identity != AuthorSubject::SYSTEM {
         node.admit_test_session_claims(identity, BTreeMap::new());
     }
 }
 
-fn apply_fate(node: &mut NodeState<RocksDbStorage>, fate: &SyncMessage) {
+fn apply_fate(node: &mut NodeState, fate: &SyncMessage) {
     for message in [fate.clone(), fate.clone()] {
         apply_message(node, message);
     }
 }
 
-fn refresh(
-    upstream: &mut NodeState<RocksDbStorage>,
-    downstream: &mut NodeState<RocksDbStorage>,
-    peer: &mut PeerState,
-) {
+fn refresh(upstream: &mut NodeState, downstream: &mut NodeState, peer: &mut PeerState) {
     install_uuid_sub_claim(upstream, peer.identity());
     let update = block_on(common::direct_query_update(
         upstream,
@@ -209,7 +194,7 @@ fn refresh(
     apply_message(downstream, update);
 }
 
-fn rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
+fn rows(node: &mut NodeState) -> Vec<(RowUuid, Value)> {
     let schema = schema();
     let table = &schema.tables[0];
     block_on(node.current_rows("todos", DurabilityTier::Global))
@@ -219,7 +204,7 @@ fn rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
         .collect()
 }
 
-fn subscription_rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
+fn subscription_rows(node: &mut NodeState) -> Vec<(RowUuid, Value)> {
     let schema = schema();
     let table = &schema.tables[0];
     block_on(node.subscription_current_rows("todos", DurabilityTier::Global))
