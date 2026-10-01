@@ -13,3 +13,4 @@ Expose `spaceSchema` through `jazz-tools/e2ee` for application composition, and 
 the consolidated recovery decoder for space status. Replay checks each root's
 deterministic ID. Recovery status and device reads propagate full-history failures
 rather than reporting them as unavailable deliveries.
+Use the current global query tier for space authority observations.
