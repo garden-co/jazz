@@ -19,7 +19,7 @@ export type HeroMetric = {
 export type HeroVideo = {
   /**
    * An H.264 MP4 under docs/public, at most MAX_BYTES (scripts/example-videos/encode.mjs).
-   * Written by `pnpm --filter docs capture:example-videos` or encoded from a walkthrough recording.
+   * Written by `node scripts/example-videos/<id>.mjs` (see walkthrough.mjs).
    */
   src: string;
   poster: string;
@@ -79,7 +79,7 @@ export const heroExamples: HeroExample[] = [
       src: "/examples/videos/band-chat.mp4",
       poster: "/examples/videos/band-chat.jpg",
       caption:
-        "A guest asks to join a room, the creator admits them, history appears, and after removal the guest's offline send is rejected.",
+        "A guest asks to join a room and the creator admits them; the room and its history appear in his list, replies arrive live, and a message he sends with the Wi-Fi off arrives once it's back.",
     },
     metrics: [
       {
@@ -133,7 +133,7 @@ export const heroExamples: HeroExample[] = [
       src: "/examples/videos/stage-plan.mp4",
       poster: "/examples/videos/stage-plan.jpg",
       caption:
-        "A crew chief and a crew member in two browsers: the invite link, card moves on each other's board, and edits made with Sync off arriving once it's back on.",
+        "A crew chief and a crew member in two browsers: the invite link, card moves and task comments arriving live, edits made with the Wi-Fi off syncing once it's back, and a live checklist filter.",
     },
     metrics: [
       {
@@ -182,7 +182,7 @@ export const heroExamples: HeroExample[] = [
       src: "/examples/videos/band-book.mp4",
       poster: "/examples/videos/band-book.jpg",
       caption:
-        'A bandmate shares one song with a "Can edit" link; the guest sees only that song and its subpage, and typing shows up in both copies live.',
+        'A bandmate shares one song with a "Can edit" link; the guest sees only that song and its subpage, typing shows up in both copies live, and edits made while his Wi-Fi is off merge once it’s back.',
     },
     metrics: [
       {
@@ -220,7 +220,7 @@ export const heroExamples: HeroExample[] = [
       src: "/examples/videos/world-tour.mp4",
       poster: "/examples/videos/world-tour.jpg",
       caption:
-        "The tour manager sees all 12 stops while a fan with the public link sees only the confirmed ones; a stop the manager confirms appears on the fan's globe live.",
+        "The tour manager sees every stop while a fan with the public link sees only the confirmed ones; a stop the manager confirms appears on the fan's globe live, and one confirmed with the Wi-Fi off arrives once it's back.",
     },
     metrics: [
       {
@@ -251,7 +251,7 @@ export const heroExamples: HeroExample[] = [
       src: "/examples/videos/wequencer.mp4",
       poster: "/examples/videos/wequencer.jpg",
       caption:
-        "Two bandmates in one session: pattern edits, Play, tempo and mutes follow on both screens.",
+        "Two bandmates in one session: it appears in the second one's list live, then pattern edits, Play and tempo follow on both screens, and steps added while he's offline arrive when his Wi-Fi is back.",
     },
     metrics: [
       {
@@ -294,7 +294,7 @@ export const heroExamples: HeroExample[] = [
       src: "/examples/videos/poster-shop.mp4",
       poster: "/examples/videos/poster-shop.jpg",
       caption:
-        "A second editor joins by invite link; her cursor and edits arrive live, then an image upload, a checkpoint and a reload with everything kept.",
+        "A second editor joins by invite link; her cursor and edits arrive live, edits she makes with the Wi-Fi off sync once it's back, then a named checkpoint.",
     },
     metrics: [
       {
@@ -372,7 +372,7 @@ export const heroExamples: HeroExample[] = [
       src: "/examples/videos/epic-drop.mp4",
       poster: "/examples/videos/epic-drop.jpg",
       caption:
-        'Uploads and previews in a shared folder; a second account joins by "Can edit" link, and uploads and renames sync both ways.',
+        'Uploads and previews in a shared folder; a second account joins by "Can edit" link, his upload appears in the open folder live, and a rename made while he’s offline reaches him once his Wi-Fi is back.',
     },
     metrics: [
       {
@@ -411,7 +411,7 @@ export const heroExamples: HeroExample[] = [
       src: "/examples/videos/jamazon.mp4",
       poster: "/examples/videos/jamazon.jpg",
       caption:
-        "A guest cart carried into a new account, a quantity change arriving from a second device, an offline edit, then checkout and the order's timeline updating live.",
+        "A live catalogue search, a guest cart carried into a new account, a quantity change arriving on a phone, an edit made on the phone with the Wi-Fi off, then checkout and the order's status updating live on both screens.",
     },
     metrics: [],
     plannedMetrics:
@@ -503,7 +503,7 @@ export const heroExamples: HeroExample[] = [
       src: "/examples/videos/big-label.mp4",
       poster: "/examples/videos/big-label.jpg",
       caption:
-        "An admin adds a viewer by email; the label appears in the viewer's menu live, read-only, and a new artist shows up without a reload.",
+        "An admin adds a viewer by email; the label appears in the viewer's menu live, read-only, a new artist shows up in the viewer's filtered search without a reload, and a rename reaches him once his Wi-Fi is back.",
     },
     metrics: [
       {
