@@ -219,6 +219,13 @@ shapes named `jazz-query:<shape_id>`, are cached by
 cache key because the same semantic shape can be prepared with different
 claim- or caller-supplied binding columns after policy augmentation.
 
+Prepared CurrentRows materialization projects canonical current-row fields plus
+the required named `__jazz_deleted` lifecycle marker. The application terminal
+projection is not a substitute for this internal carrier: it may omit the
+marker. Claim-routing fields remain routing inputs, not materialization output.
+Include-deleted decoding resolves the marker from the returned descriptor rather
+than inferring its position from the application schema (`INV-LOWER-19`).
+
 There is one intended lowered-query core. That core takes an explicit **base
 source expression graph** (for example visible current rows for a table/tier,
 historic cuts, snapshot-qualified branch sources, explicit prefixes,
