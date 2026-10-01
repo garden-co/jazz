@@ -2791,7 +2791,6 @@ export class Db {
     );
   }
 
-
   private handleMutationError(event: MutationErrorEvent): void {
     if (this.mutationErrorListeners.size === 0) {
       console.error("Unhandled Jazz mutation error", event);
@@ -3462,14 +3461,7 @@ export class Db {
       return withTransactionAdmission(
         ownerClient,
         prerequisite,
-        () =>
-          new Transaction(
-            kind,
-            (schema) => this.getClient(schema),
-            context,
-            ownerClient,
-            e2ee,
-          ),
+        () => new Transaction(kind, (schema) => this.getClient(schema), context, ownerClient, e2ee),
       );
     return new Transaction(
       kind,
