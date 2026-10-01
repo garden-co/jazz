@@ -2085,7 +2085,9 @@ where
         .await
     }
 
-    pub(crate) async fn query_rows_including_deleted_in_read_view_authorization_mode(
+    /// Materialize include-deleted rows in the caller's exact read view.
+    #[doc(hidden)]
+    pub async fn query_rows_including_deleted_in_read_view_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
