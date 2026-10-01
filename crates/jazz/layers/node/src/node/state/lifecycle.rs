@@ -46,6 +46,14 @@ where
         Ok(self.database.pending_large_value_uploads().await?.len())
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn pending_uploads_for_test(
+        &self,
+    ) -> Result<Vec<groove::large_values::PendingLargeValueUpload>, Error> {
+        Ok(self.database.pending_large_value_uploads().await?)
+    }
+
 }
 
 /// Constructors erase the concrete storage into [`BoxedStorage`] at the
