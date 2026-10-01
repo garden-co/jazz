@@ -1284,6 +1284,54 @@ mod tests {
         );
     }
 
+    /// Persisted exclusive predicate reads store canonical binding bytes and
+    /// decode them back (garden-co/jazz#3663). Every decodable tag must
+    /// round-trip to the same bytes, and anything else is refused.
+    #[test]
+    fn canonical_binding_bytes_decode_round_trips_and_rejects_the_rest() {
+        let values = BTreeMap::from([
+            ("a".to_owned(), Value::U8(1)),
+            ("b".to_owned(), Value::U16(2)),
+            ("c".to_owned(), Value::U32(3)),
+            ("d".to_owned(), Value::U64(4)),
+            ("e".to_owned(), Value::F64(-0.5)),
+            ("f".to_owned(), Value::Bool(true)),
+            ("g".to_owned(), Value::String("ü".to_owned())),
+            ("h".to_owned(), Value::Bytes(vec![0, 255])),
+            ("i".to_owned(), Value::Uuid(uuid::Uuid::from_bytes([7; 16]))),
+            ("j".to_owned(), Value::EnumTag(3)),
+            (
+                "k".to_owned(),
+                Value::Tuple(vec![Value::I64(-6), Value::I32(-7)]),
+            ),
+            (
+                "l".to_owned(),
+                Value::Array(vec![
+                    Value::Nullable(None),
+                    Value::Nullable(Some(Box::new(Value::U8(9)))),
+                ]),
+            ),
+        ]);
+        let bytes = canonical_binding_bytes_for_values(&values).unwrap();
+        assert_eq!(binding_values_from_canonical_bytes(&bytes).unwrap(), values);
+
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(binding_values_from_canonical_bytes(&trailing).is_err());
+        assert!(binding_values_from_canonical_bytes(&bytes[..bytes.len() - 1]).is_err());
+        assert!(binding_values_from_canonical_bytes(b"jazz-binding-v1").is_err());
+
+        let descriptor = RecordDescriptor::new([("x", ValueType::U8)]);
+        let record = Value::Record(OwnedRecord::new(
+            descriptor.create(&[Value::U8(1)]).unwrap(),
+            descriptor,
+        ));
+        let record_bytes =
+            canonical_binding_bytes_for_values(&BTreeMap::from([("r".to_owned(), record)]))
+                .unwrap();
+        assert!(binding_values_from_canonical_bytes(&record_bytes).is_err());
+    }
+
     #[test]
     fn canonical_bytes_stability_golden() {
         let validated = Query::from("issues")
