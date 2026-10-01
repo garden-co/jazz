@@ -46,11 +46,11 @@ it.each(["warm", "cold", "concurrent", "immediate commit"])(
       if (scenario === "cold")
         expect(
           await bob.all(app.proposals.where({ id: "00000000-0000-4000-8000-000000000002" }), {
-            tier: "edge",
+            tier: "remote",
           }),
         ).toEqual([]);
       const ordinary =
-        scenario === "cold" ? undefined : await bob.all(app.proposals, { tier: "edge" });
+        scenario === "cold" ? undefined : await bob.all(app.proposals, { tier: "remote" });
       if (scenario === "immediate commit") {
         const tx = bob.beginExclusiveTransaction();
         const reading = tx.allSettledForE2ee(app.proposals);
@@ -94,7 +94,7 @@ it.each(["warm", "cold", "concurrent", "immediate commit"])(
       expect(firstSettlement.position).toBe(sibling.position);
       expect(later.transactionId).not.toBe(firstSettlement.transactionId);
       expect(BigInt(later.position)).toBeGreaterThan(BigInt(firstSettlement.position));
-      expect(await bob.all(app.proposals, { tier: "edge" })).toEqual(snapshot.rows);
+      expect(await bob.all(app.proposals, { tier: "remote" })).toEqual(snapshot.rows);
     } finally {
       await Promise.all(clients.map((db) => db.shutdown()));
       await server.stop();
