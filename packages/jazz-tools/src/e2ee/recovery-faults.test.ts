@@ -175,10 +175,10 @@ it.each(["parser", "recipient-open", "signing"])(
       const before = await client.e2ee.devices.list();
       const pending = before.find((row) => row.id !== creator!.id)!;
       const approvals = await client.all(deviceRequestApp.__e2ee_device_approvals, {
-        tier: "edge",
+        tier: "remote",
       });
       const deliveries = await client.all(deviceRequestApp.__e2ee_device_deliveries, {
-        tier: "edge",
+        tier: "remote",
       });
       failImport = true;
       const error = await client.e2ee.recovery
@@ -194,12 +194,12 @@ it.each(["parser", "recipient-open", "signing"])(
       expect(String(error)).not.toContain(sensitive);
       expect(error).not.toHaveProperty("cause");
       expect(await client.e2ee.devices.list()).toEqual(before);
-      expect(await client.all(deviceRequestApp.__e2ee_device_approvals, { tier: "edge" })).toEqual(
-        approvals,
-      );
-      expect(await client.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "edge" })).toEqual(
-        deliveries,
-      );
+      expect(
+        await client.all(deviceRequestApp.__e2ee_device_approvals, { tier: "remote" }),
+      ).toEqual(approvals);
+      expect(
+        await client.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "remote" }),
+      ).toEqual(deliveries);
       failImport = false;
       await client.e2ee.recovery.use(material).wait();
       expect(await client.e2ee.devices.list()).toContainEqual(

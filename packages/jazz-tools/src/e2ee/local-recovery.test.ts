@@ -38,14 +38,14 @@ it("explicitly restores protected recovery material from a local-first account",
     await first.e2ee.devices.list();
     const { material } = await first.e2ee.recovery.create().wait();
     const protectors = await first.all(deviceRequestApp.__e2ee_recovery_protectors, {
-      tier: "edge",
+      tier: "remote",
     });
     expect(protectors).toHaveLength(1);
     expect(new TextDecoder().decode(protectors[0]!.material)).not.toContain(material);
     const outsider = await createDb(await localAccountConfig(server.appId, server.url));
     clients.push(outsider);
     expect(
-      await outsider.all(deviceRequestApp.__e2ee_recovery_protectors, { tier: "edge" }),
+      await outsider.all(deviceRequestApp.__e2ee_recovery_protectors, { tier: "remote" }),
     ).toEqual([]);
     await expect(
       outsider

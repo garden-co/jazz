@@ -33,7 +33,7 @@ it("recovers an existing account onto a fresh device without another device onli
     expect(creator).toMatchObject({ state: "active" });
     const roots = await first.all(
       deviceRequestApp.__e2ee_account_roots.where({ accountId: account.account.id }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     expect(roots).toHaveLength(1);
     const { material } = await first.e2ee.recovery.create().wait();
@@ -56,7 +56,7 @@ it("recovers an existing account onto a fresh device without another device onli
     expect(
       await reopened.all(
         deviceRequestApp.__e2ee_account_roots.where({ accountId: account.account.id }),
-        { tier: "edge" },
+        { tier: "remote" },
       ),
     ).toEqual(roots);
     expect(await reopened.e2ee.devices.list()).toContainEqual(
