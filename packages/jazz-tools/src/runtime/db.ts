@@ -1,3 +1,4 @@
+import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { AccountHandle } from "../accounts/state.js";
@@ -278,13 +279,11 @@ export interface DbSubscriptionSource {
   all?<T extends { id: string }>(
     query: QueryBuilder<T>,
     options?: QueryOptions,
-    session?: Session,
   ): Promise<T[]> | T[];
   subscribeDelta<T extends { id: string }>(
     query: QueryBuilder<T>,
     callbacks: ((delta: SubscriptionDelta<T>) => void) | DbDeltaSubscriptionCallbacks<T>,
     options?: QueryOptions,
-    session?: Session,
   ): SubscriptionHandle;
 }
 
@@ -334,12 +333,6 @@ export interface DeleteOptions extends TimestampOverrideOptions {
   branch?: Branch;
   base?: BranchBase;
 }
-
-type DbRuntimeOperationContext = {
-  session?: Session;
-  attribution?: string;
-  readSession?: Session;
-};
 
 function branchColumn(schema: WasmSchema, name: string): ColumnDescriptor {
   const matches = Object.values(schema)
@@ -702,6 +695,32 @@ function requirePageRange(from: number, to: number, column: string): void {
   if (from > to) {
     throw new Error(`Large-value page for "${column}" must have from <= to.`);
   }
+}
+
+/** Validate an `update` call's `applyDiffs` option and lower it to wire descriptors. */
+function lowerApplyDiffs(
+  table: TableProxy<any, any, any, any, any>,
+  data: Record<string, unknown>,
+  diffs: unknown,
+): WireLargeValueUpdate[] {
+  if (diffs === undefined) return [];
+  if (typeof diffs !== "object" || diffs === null || Array.isArray(diffs)) {
+    throw new Error("update option applyDiffs must be an object keyed by column name.");
+  }
+  if (Object.keys(data).some((column) => Object.hasOwn(diffs, column))) {
+    throw new Error("update replacements and applyDiffs must not both specify the same column.");
+  }
+  const { ordinary, descriptors } = splitLargeValueUpdate(
+    diffs as Record<string, unknown>,
+    table._schema,
+    table._table,
+  );
+  if (Object.keys(ordinary).length > 0) {
+    throw new Error(
+      "update option applyDiffs accepts only field diff descriptors, not whole-column values.",
+    );
+  }
+  return descriptors;
 }
 
 function splitLargeValueUpdate(
@@ -1206,13 +1225,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   constructor(
     readonly kind: TKind,
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
-    private readonly session?: Session,
-    private readonly attribution?: string,
+    private readonly context: DbAccessContext | null = null,
     ownerClient?: JazzClient,
-    // Reads authorize as the Db's read session, like reads outside the
-    // transaction. Attributed Dbs read with backend authority while their
-    // `session` only supplies write provenance.
-    private readonly readSession?: Session,
   ) {
     if (ownerClient) this.bindOwnerClient(ownerClient);
   }
@@ -1237,11 +1251,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   private bindOwnerClient(ownerClient: JazzClient): void {
+    const { writeSession: session, attribution } = this.context ?? {};
     dbTxHandleBindings.set(this, {
       ownerClient,
-      openTransactionId: ownerClient.beginTransaction(this.kind, this.session, this.attribution),
-      session: this.session,
-      attribution: this.attribution,
+      openTransactionId: ownerClient.beginTransaction(this.kind, session, attribution),
+      session,
+      attribution,
     });
   }
 
@@ -1390,13 +1405,37 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * The update is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
+  update<
+    T,
+    Init,
+    StreamingInit,
+    StreamingUpdate,
+    LargeValueUpdate,
+    TReplacements extends Partial<Init>,
+  >(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate> & {
+      readonly _largeValueUpdateType: LargeValueUpdate;
+    },
+    id: string,
+    data: TReplacements,
+    options?: TypedUpdateOptionsWithDiffs<TReplacements, LargeValueUpdate>,
+  ): void;
   update<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
     options?: UpdateOptions,
+  ): void;
+  update(
+    table: TableProxy<any, any, any, any, any>,
+    id: string,
+    data: Record<string, unknown>,
+    options?: UpdateOptions & { applyDiffs?: object },
   ): void {
     this.bindTable(table);
+    // Diffs are staged against this transaction's own view of the row, so
+    // they compose with its earlier writes and commit atomically with them.
+    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecordForOperation(
       "Update",
@@ -1407,6 +1446,20 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("update");
     const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
+    if (descriptors.length > 0) {
+      client.updateLargeValuesInternal(
+        table._table,
+        id,
+        updates,
+        descriptors,
+        normalizedOptions?.updatedAt,
+        session,
+        attribution,
+        openTransactionId,
+        normalizedOptions?.branch,
+      );
+      return;
+    }
     client.updateInternal(
       table._table,
       id,
@@ -1457,7 +1510,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private async readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     this.bindQuery(query);
     const client = this.resolveClient(query._schema);
-    const { openTransactionId, session } = this.requireBinding("query");
+    const { openTransactionId } = this.requireBinding("query");
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
@@ -1479,7 +1532,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         localUpdates: "deferred",
         openTransactionId,
       },
-      this.readSession ?? session,
+      this.context?.readSession,
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
@@ -1570,10 +1623,8 @@ export class Db {
   private connection: ConnectionManager;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  private isShuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
   private readonly shutdownAbort = new AbortController();
-  private runtimeOperationContextOverride: DbRuntimeOperationContext | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
     StoredActiveQuerySubscriptionTrace
@@ -1625,10 +1676,10 @@ export class Db {
         inspectorAttachmentRequested
           ? this.allFromInspectorAttachment(query, options)
           : this.allInternal(query, lowerPublicDbQueryOptions(options)),
-      subscribeDelta: (query, callback, options, session) =>
+      subscribeDelta: (query, callback, options) =>
         inspectorAttachmentRequested
-          ? this.subscribeFromInspectorAttachment(query, callback, options, session)
-          : this.subscribeDelta(query, callback, lowerPublicDbQueryOptions(options), session),
+          ? this.subscribeFromInspectorAttachment(query, callback, options)
+          : this.subscribeDelta(query, callback, lowerPublicDbQueryOptions(options)),
     });
   }
 
@@ -1643,7 +1694,7 @@ export class Db {
         return thisDb.runtimeSource;
       },
       get isShuttingDown() {
-        return thisDb.isShuttingDown;
+        return thisDb.shutdownPromise !== null;
       },
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
       clearAuthError: () => this.authStateStore.clearError(),
@@ -1693,13 +1744,12 @@ export class Db {
     query: QueryBuilder<T>,
     callback: ((delta: SubscriptionDelta<T>) => void) | DbDeltaSubscriptionCallbacks<T>,
     options?: QueryOptions,
-    session?: Session,
   ): SubscriptionHandle {
     let inner: SubscriptionHandle | null = null;
     let cancelled = false;
     const ready = this.inspectorAttachmentOptions(query, options).then((prepared) => {
       if (cancelled) return;
-      inner = this.subscribeDelta(query, callback, prepared, session);
+      inner = this.subscribeDelta(query, callback, prepared);
       return inner.ready;
     });
     const handle = (() => {
@@ -1730,7 +1780,7 @@ export class Db {
   }
 
   private refreshLocalFirstToken(): void {
-    if (!this._localFirstSecret || this.isShuttingDown) return;
+    if (!this._localFirstSecret || this.shutdownPromise) return;
 
     try {
       const ttlSeconds = 3600;
@@ -1776,37 +1826,27 @@ export class Db {
     publish();
   }
 
-  protected applyAuthUpdate(
-    token: string | null,
-    trustedReservedSession?: Session,
-    nativeAccountRefresh = false,
-  ): boolean {
-    if (!nativeAccountRefresh) this.runtimeSource.assertAuthUpdateAllowed();
+  protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
+    this.runtimeSource.assertAuthUpdateAllowed();
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousCookieSession = this.config.cookieSession;
     const previousTrustedReservedSession = getTrustedReservedSession(this.config);
-    const nextConfig = {
-      ...this.config,
-      jwtToken,
-      cookieSession: undefined,
-    } as DbConfig;
-    setTrustedReservedSession(nextConfig, trustedReservedSession);
     const credentialsChanged =
-      previousToken !== nextConfig.jwtToken ||
+      previousToken !== jwtToken ||
       previousCookieSession !== undefined ||
       JSON.stringify(previousTrustedReservedSession) !== JSON.stringify(trustedReservedSession);
     if (!credentialsChanged && this.authStateStore.getState().error === undefined) return false;
 
-    if (!nativeAccountRefresh) {
-      if (!this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)) return false;
-      this.connection.updateAuth({
-        mode: "bearer",
-        jwtToken,
-        trustedReservedSession,
-      });
-    }
+    if (!this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)) return false;
+    this.connection.updateAuth({ mode: "bearer", jwtToken, trustedReservedSession });
+    this.publishAuthUpdate(jwtToken, trustedReservedSession);
+    return true;
+  }
 
+  private publishAuthUpdate(jwtToken?: string, trustedReservedSession?: Session): void {
+    const nextConfig = { ...this.config, jwtToken, cookieSession: undefined } as DbConfig;
+    setTrustedReservedSession(nextConfig, trustedReservedSession);
     const nextInternalSession = resolveClientInternalSessionSync(nextConfig);
     this.config.jwtToken = jwtToken;
     this.config.cookieSession = undefined;
@@ -1814,7 +1854,6 @@ export class Db {
     this.publishAuthStateWithInternalSession(nextInternalSession, () => {
       this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
     });
-    return true;
   }
 
   protected applyCookieSessionUpdate(session: Session | null): boolean {
@@ -1899,8 +1938,10 @@ export class Db {
     return setWriteWaitReadiness(handle, (tier) => this.ensureReady(tier));
   }
 
-  protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
-    return this.runtimeOperationContextOverride;
+  protected getAccessContext(): DbAccessContext | null {
+    // Ordinary Dbs use the client's session. BackendDb overrides this to supply
+    // per-Db session and attribution without changing the shared client's identity.
+    return null;
   }
 
   private handleMutationError(event: MutationErrorEvent): void {
@@ -1911,19 +1952,6 @@ export class Db {
     }
     for (const listener of this.mutationErrorListeners) {
       listener(event);
-    }
-  }
-
-  private withRuntimeOperationContext<TResult>(
-    context: DbRuntimeOperationContext,
-    operation: () => TResult,
-  ): TResult {
-    const previous = this.runtimeOperationContextOverride;
-    this.runtimeOperationContextOverride = context;
-    try {
-      return operation();
-    } finally {
-      this.runtimeOperationContextOverride = previous;
     }
   }
 
@@ -1948,8 +1976,9 @@ export class Db {
               "local-first",
             )
           : undefined;
-      const nativeRefresh = this.runtimeSource.refreshAccountToken(token);
-      this.applyAuthUpdate(token, reserved ?? undefined, nativeRefresh);
+      if (!this.authStateStore.validateJwtToken(token, reserved ?? undefined)) return token;
+      this.connection.refreshAccountAuth(token, reserved ?? undefined);
+      this.publishAuthUpdate(token, reserved ?? undefined);
       return token;
     } catch (error) {
       this.markUnauthenticated("invalid");
@@ -2030,7 +2059,7 @@ export class Db {
    * {@link reconnect} to resume sync using the same Db instance.
    */
   async disconnect(): Promise<void> {
-    if (this.isShuttingDown || this.shutdownPromise) {
+    if (this.shutdownPromise) {
       throw new Error("Cannot disconnect a Db that is shutting down.");
     }
 
@@ -2044,7 +2073,7 @@ export class Db {
   async reconnect(): Promise<void> {
     // Sync recovery is safe before teardown starts; it must remain available
     // while a graceful transition waits for previously committed writes.
-    if ((this.isShuttingDown || this.shutdownPromise) && !this.cancelSyncShutdown) {
+    if (this.shutdownPromise && !this.cancelSyncShutdown) {
       throw new Error("Cannot reconnect a Db that is shutting down.");
     }
 
@@ -2103,12 +2132,12 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     const inserted = client.insert(
       table._table,
       values,
       normalizeInsertOptions(table._schema, table._table, options),
-      context?.session,
+      context?.writeSession,
       context?.attribution,
     );
     return this.wrapWriteWait(
@@ -2140,7 +2169,7 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     const branch = deriveStreamingInsertBranch(table, ordinaryData);
     return client.insertStreaming(
       table._table,
@@ -2152,7 +2181,7 @@ export class Db {
         table._table,
         branch ? { ...options, branch } : options,
       ),
-      context?.session,
+      context?.writeSession,
       context?.attribution,
     );
   }
@@ -2172,7 +2201,7 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     return client.updateStreaming(
       table._table,
       id,
@@ -2180,7 +2209,7 @@ export class Db {
       column,
       source,
       normalizeUpdateOptions(table._schema, table._table, options),
-      context?.session,
+      context?.writeSession,
       context?.attribution,
     );
   }
@@ -2200,7 +2229,7 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     return client.upsertStreaming(
       table._table,
       id,
@@ -2208,7 +2237,7 @@ export class Db {
       column,
       source,
       normalizeUpdateOptions(table._schema, table._table, options),
-      context?.session,
+      context?.writeSession,
       context?.attribution,
     );
   }
@@ -2232,13 +2261,13 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     const restored = client.restore(
       table._table,
       id,
       values,
       normalizeRestoreOptions(table._schema, table._table, options),
-      context?.session,
+      context?.writeSession,
       context?.attribution,
     );
     return this.wrapWriteWait(
@@ -2269,14 +2298,14 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     return this.wrapWriteWait(
       client.upsert(
         table._table,
         id,
         values,
         normalizeUpdateOptions(table._schema, table._table, options),
-        context?.session,
+        context?.writeSession,
         context?.attribution,
       ),
     );
@@ -2315,16 +2344,7 @@ export class Db {
     options?: UpdateOptions & { applyDiffs?: object },
   ): WriteHandle {
     const client = this.getClient(table._schema);
-    const diffs = options?.applyDiffs;
-    if (
-      diffs !== undefined &&
-      (typeof diffs !== "object" || diffs === null || Array.isArray(diffs))
-    ) {
-      throw new Error("update option applyDiffs must be an object keyed by column name.");
-    }
-    if (diffs && Object.keys(data).some((column) => Object.hasOwn(diffs, column))) {
-      throw new Error("update replacements and applyDiffs must not both specify the same column.");
-    }
+    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecordForOperation(
       "Update",
@@ -2332,31 +2352,19 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
-    if (diffs !== undefined) {
-      const { ordinary, descriptors } = splitLargeValueUpdate(
-        diffs as Record<string, unknown>,
-        table._schema,
-        table._table,
+    const context = this.getAccessContext();
+    if (descriptors.length > 0) {
+      return this.wrapWriteWait(
+        client.updateLargeValues(
+          table._table,
+          id,
+          updates,
+          descriptors,
+          normalizeUpdateOptions(table._schema, table._table, options),
+          context?.writeSession,
+          context?.attribution,
+        ),
       );
-      if (Object.keys(ordinary).length > 0) {
-        throw new Error(
-          "update option applyDiffs accepts only field diff descriptors, not whole-column values.",
-        );
-      }
-      if (descriptors.length > 0) {
-        return this.wrapWriteWait(
-          client.updateLargeValues(
-            table._table,
-            id,
-            updates,
-            descriptors,
-            normalizeUpdateOptions(table._schema, table._table, options),
-            context?.session,
-            context?.attribution,
-          ),
-        );
-      }
     }
     return this.wrapWriteWait(
       client.update(
@@ -2364,7 +2372,7 @@ export class Db {
         id,
         updates,
         normalizeUpdateOptions(table._schema, table._table, options),
-        context?.session,
+        context?.writeSession,
         context?.attribution,
       ),
     );
@@ -2377,13 +2385,13 @@ export class Db {
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
     const client = this.getClient(table._schema);
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     return this.wrapWriteWait(
       client.delete(
         table._table,
         id,
         normalizeUpdateOptions(table._schema, table._table, options),
-        context?.session,
+        context?.writeSession,
         context?.attribution,
       ),
     );
@@ -2399,19 +2407,15 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
-    return client.requestInsertPermissionAdvice(table._table, values, context?.session);
+    const context = this.getAccessContext();
+    return client.requestInsertPermissionAdvice(table._table, values, context?.writeSession);
   }
 
   /** Request authoritative permission advice for reading a row. */
   async canRead<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
-    const context = this.getRuntimeOperationContext();
-    return client.requestReadPermissionAdvice(
-      table._table,
-      id,
-      context?.readSession ?? context?.session,
-    );
+    const context = this.getAccessContext();
+    return client.requestReadPermissionAdvice(table._table, id, context?.readSession);
   }
 
   /** Request authoritative permission advice for updating a row. */
@@ -2428,20 +2432,20 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
-    return client.requestUpdatePermissionAdvice(table._table, id, updates, context?.session);
+    const context = this.getAccessContext();
+    return client.requestUpdatePermissionAdvice(table._table, id, updates, context?.writeSession);
   }
 
   /** Request authoritative permission advice for deleting a row. */
   async canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
-    const context = this.getRuntimeOperationContext();
-    return client.requestDeletePermissionAdvice(table._table, id, context?.session);
+    const context = this.getAccessContext();
+    return client.requestDeletePermissionAdvice(table._table, id, context?.writeSession);
   }
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
     this.assertOpen();
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     const ownerClient = this.getCurrentClient();
     if (kind === "exclusive" && !ownerClient) {
       throw new Error(
@@ -2453,23 +2457,13 @@ export class Db {
       return withTransactionAdmission(
         ownerClient,
         prerequisite,
-        () =>
-          new Transaction(
-            kind,
-            (schema) => this.getClient(schema),
-            context?.session,
-            context?.attribution,
-            ownerClient,
-            context?.readSession,
-          ),
+        () => new Transaction(kind, (schema) => this.getClient(schema), context, ownerClient),
       );
     return new Transaction(
       kind,
       (schema) => this.getClient(schema),
-      context?.session,
-      context?.attribution,
+      context,
       ownerClient ?? undefined,
-      context?.readSession,
     );
   }
 
@@ -2579,7 +2573,7 @@ export class Db {
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     const effectiveTier = resolveEffectiveQueryExecutionOptions(
       { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
       queryOptions,
@@ -2587,11 +2581,7 @@ export class Db {
     await this.ensureReady(readinessTier(effectiveTier));
     const rows =
       context || usesRelationTraversal
-        ? await client.queryInternal(
-            wasmQuery,
-            queryOptions,
-            context?.readSession ?? context?.session,
-          )
+        ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
         : await client.queryInternal(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
@@ -2733,7 +2723,7 @@ export class Db {
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
-    const context = this.getRuntimeOperationContext();
+    const readSession = this.getAccessContext()?.readSession ?? session;
     type NativeSubscription = {
       id: number | null;
       installing: boolean;
@@ -2875,7 +2865,7 @@ export class Db {
             },
           },
           subscriptionOptions,
-          context?.readSession ?? context?.session ?? session,
+          readSession,
         );
       } catch (error) {
         subscription.installing = false;
@@ -2928,7 +2918,7 @@ export class Db {
     };
     const ready = initialReadiness
       ?.then(() => {
-        if (unsubscribed || terminalized || activeSubscription === null || this.isShuttingDown) {
+        if (unsubscribed || terminalized || activeSubscription === null || this.shutdownPromise) {
           return;
         }
         deliveryReady = true;
@@ -2938,7 +2928,7 @@ export class Db {
         }
       })
       .catch((error: unknown) => {
-        if (unsubscribed || terminalized || activeSubscription === null || this.isShuttingDown) {
+        if (unsubscribed || terminalized || activeSubscription === null || this.shutdownPromise) {
           return;
         }
         // Admission failed after native registration. Terminalize the same
@@ -2970,7 +2960,7 @@ export class Db {
       )
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
-          if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
+          if (unsubscribed || readyAbort.signal.aborted || this.shutdownPromise) return;
           terminalizeSubscription(initialSubscription, error);
         });
     } else {
@@ -2987,15 +2977,16 @@ export class Db {
    *
    * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
-  async shutdown(options: ShutdownOptions = {}): Promise<void> {
+  shutdown(options: ShutdownOptions = {}): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
-    this.shutdownPromise = this.runShutdown(options);
-    try {
-      await this.shutdownPromise;
-    } catch (error) {
-      if (!this.isShuttingDown) this.shutdownPromise = null;
-      throw error;
-    }
+    // Publish the promise before teardown can synchronously call back into Db.
+    let resolveShutdown!: (result: Promise<void>) => void;
+    const shutdown = new Promise<void>((resolve) => {
+      resolveShutdown = resolve;
+    });
+    this.shutdownPromise = shutdown;
+    resolveShutdown(this.runShutdown(options));
+    return shutdown;
   }
 
   private cancelSyncShutdown: (() => void) | undefined;
@@ -3006,7 +2997,7 @@ export class Db {
   }
 
   protected assertOpen(): void {
-    if (this.isShuttingDown || this.shutdownPromise) {
+    if (this.shutdownPromise) {
       throw new Error("Cannot operate on a Db that is shutting down or closed.");
     }
   }
@@ -3015,13 +3006,12 @@ export class Db {
 
   /** @internal Dispose account refresh and invalidation observers with the context. */
   onShutdown(listener: () => void): () => void {
-    if (this.isShuttingDown) listener();
+    if (this.shutdownPromise) listener();
     else this.shutdownListeners.add(listener);
     return () => this.shutdownListeners.delete(listener);
   }
 
   private async runShutdown(options: ShutdownOptions): Promise<void> {
-    this.isShuttingDown = true;
     if (options.waitForSync) {
       const syncAbort = new AbortController();
       const cancelled = new Promise<never>((_resolve, reject) => {
@@ -3038,7 +3028,7 @@ export class Db {
         ]);
       } catch (error) {
         syncAbort.abort();
-        this.isShuttingDown = false;
+        this.shutdownPromise = null;
         throw new GracefulShutdownSyncError(error);
       } finally {
         this.cancelSyncShutdown = undefined;

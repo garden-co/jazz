@@ -82,7 +82,6 @@ hex = "0.4"
 rand = "0.8"
 rustc-hash.workspace = true
 serde_bytes = "0.11"
-jsonschema = { version = "0.42", default-features = false }
 internment = "0.8"
 smallvec = { version = "1.11", features = ["serde"] }
 stacker = "0.1"
