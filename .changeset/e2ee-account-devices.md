@@ -1,5 +1,5 @@
 ---
-"jazz-tools": minor
+"jazz-tools": patch
 ---
 
 Add explicitly configured authenticated account/device E2EE lifecycle: durable device keys,
