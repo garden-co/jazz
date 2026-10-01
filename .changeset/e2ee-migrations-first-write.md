@@ -23,6 +23,9 @@ wait handles now reject before preparing provisional keys, grants or ciphertext,
 and caller mutations cannot change a captured branch target. Existing-space
 branch writes are unchanged. Public exclusive transactions still capture their
 snapshot at `begin`; only internal admission helpers may defer opening.
+Initial prepared writes and their exclusive retries share the originating
+per-Db access context, including its session and attribution references, without
+restoring the removed ambient operation-context wrappers.
 
 For local qualification, preserve canonical temporary-directory environment
 variables through Turbo's strict test boundary. Keep invalid-authority and
