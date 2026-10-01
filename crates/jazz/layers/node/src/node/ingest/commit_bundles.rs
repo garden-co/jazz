@@ -62,6 +62,36 @@ where
         } else {
             tx
         };
+        let mut updates = Box::pin(self.ingest_commit_unit_checked(
+            tx,
+            versions,
+            now_ms,
+            ingest_context,
+        ))
+        .await?;
+        // Every fate decided here, refusals included, releases the writes
+        // parked on it; the wait of every expired parked write ends too.
+        let released = Box::pin(
+            self.release_units_awaiting_predecessors(updates.value(), Some(now_ms)),
+        )
+        .await?;
+        updates.extend(released);
+        updates.extend(self.drain_parked_commit_units().await?);
+        Ok(updates)
+    }
+
+    /// Authority ingest of one received unit: the receipt and size checks,
+    /// then one admission attempt.
+    async fn ingest_commit_unit_checked(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        now_ms: u64,
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
+    where
+        S: ReopenableStorage,
+    {
         // A checked wire decoder already validated these exact receipts.
         if ingest_context.is_none_or(|context| {
             !context.trust.is_trusted() && !context.version_receipts_validated
@@ -92,18 +122,13 @@ where
         let clock_before_ingest = self.clock.clone();
         // One admission attempt includes policy evaluation and storage repair.
         // Its future must not be embedded in this outer retry/clock owner.
-        let mut updates = match Box::pin(self
-            .ingest_commit_unit_once(tx, versions, now_ms, ingest_context))
-            .await
-        {
-            Ok(updates) => updates,
+        match Box::pin(self.ingest_commit_unit_once(tx, versions, now_ms, ingest_context)).await {
+            Ok(updates) => Ok(updates),
             Err(error) => {
                 self.restore_clock_after_failed_authority_ingest(clock_before_ingest);
-                return Err(error);
+                Err(error)
             }
-        };
-        updates.extend(self.drain_parked_commit_units().await?);
-        Ok(updates)
+        }
     }
 
     /// Undo speculative authority clock work after a rejected ingest without
@@ -503,23 +528,6 @@ where
         )? {
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
-        // A write chained on its writer's pending predecessor waits for that
-        // predecessor's fate: an ordering race (it may arrive later, or be
-        // held here as a relayed or recovered Pending) is not a refusal.
-        if self
-            .park_commit_unit_awaiting_predecessor(
-                &tx,
-                &versions,
-                now_ms,
-                CommitUnitParkMode {
-                    ingest_context,
-                    ..CommitUnitParkMode::default()
-                },
-            )
-            .await?
-        {
-            return Ok(PublicationOutcome::settled(Vec::new()));
-        }
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
         // Validate untrusted metadata before a missing ordinary history parent
         // can park the unit. Otherwise malformed provenance would leave an
@@ -542,6 +550,46 @@ where
                 global_time: None,
                 durability: None,
             }]));
+        }
+        // The cheap identity checks run before a write may wait below, so
+        // only an admitted writer can hold parking.
+        if let Err(reason) = commit_unit_admission_subject(&tx, ingest_context) {
+            let fate = Fate::Rejected(reason);
+            self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
+            return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
+                tx_id: tx.tx_id,
+                fate,
+                global_time: None,
+                durability: None,
+            }]));
+        }
+        // A write chained on its writer's pending predecessor waits for that
+        // predecessor's fate: an ordering race (it may arrive later, or be
+        // held here as a relayed or recovered Pending) is not a refusal.
+        match self
+            .park_commit_unit_awaiting_predecessor(
+                &tx,
+                &versions,
+                now_ms,
+                CommitUnitParkMode {
+                    ingest_context,
+                    ..CommitUnitParkMode::default()
+                },
+            )
+            .await?
+        {
+            PredecessorPark::Ready => {}
+            PredecessorPark::Parked => return Ok(PublicationOutcome::settled(Vec::new())),
+            PredecessorPark::Full => {
+                return self
+                    .reject_malformed_commit(
+                        tx,
+                        "too many writes of this writer are waiting for a pending predecessor"
+                            .to_owned(),
+                    )
+                    .await
+                    .map(PublicationOutcome::settled);
+            }
         }
         if let Some(reason) = Box::pin(self.commit_unit_write_policy_rejection(
             &tx,

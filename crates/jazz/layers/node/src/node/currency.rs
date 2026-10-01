@@ -140,7 +140,9 @@ where
         Ok(versions)
     }
 
-    #[allow(dead_code)] // Stage 1 read primitive; production reads switch in Stage 2.
+    /// The row's local winner (its newest pending write, else its newest
+    /// accepted one). Update and delete permission advice read it through
+    /// `local_current_row_exists`.
     pub(super) async fn query_local_winner(
         &mut self,
         table: &str,

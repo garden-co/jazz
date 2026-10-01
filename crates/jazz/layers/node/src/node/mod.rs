@@ -944,6 +944,29 @@ struct Parking {
     parked_commit_units: BTreeMap<TxId, ParkedCommitUnit>,
     /// Catalogue commit units waiting to be applied in dependency order.
     parked_catalogue_commit_units: BTreeSet<TxId>,
+    /// Authority commit units waiting for their writer's pending
+    /// predecessor to get a fate here (SPEC 4 §4.6).
+    awaiting_predecessor: PredecessorParking,
+}
+
+/// Commit units parked at the fate authority until the pending predecessor
+/// their base names has a fate. Bounded per writer node and per session
+/// identity, expiring after [`ingest::PREDECESSOR_PARK_TTL_MS`], and indexed
+/// by predecessor so a fate releases only the units that wait on it.
+#[derive(Clone, Debug, Default)]
+struct PredecessorParking {
+    units: BTreeMap<TxId, PredecessorParkedUnit>,
+    by_predecessor: BTreeMap<TxId, BTreeSet<TxId>>,
+    by_expiry: BTreeSet<(u64, TxId)>,
+    per_writer_node: BTreeMap<NodeUuid, usize>,
+    per_session: std::collections::HashMap<AuthorSubject, usize>,
+}
+
+#[derive(Clone, Debug)]
+struct PredecessorParkedUnit {
+    unit: ParkedCommitUnit,
+    predecessor: TxId,
+    expires_at_ms: u64,
 }
 
 /// Recently stored transaction versions with a row-addressable cache view.

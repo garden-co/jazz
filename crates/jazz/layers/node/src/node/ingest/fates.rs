@@ -616,34 +616,11 @@ where
         versions: &[VersionRecord],
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<Option<RejectionReason>, Error> {
-        if ingest_context.is_some_and(|context| context.trust == CommitUnitTrust::TrustedAdmin) {
-            return Ok(None);
-        }
-        let permission_subject = match ingest_context {
-            Some(context) => {
-                if context.trust == CommitUnitTrust::Session && tx.made_by != context.identity {
-                    return Ok(Some(RejectionReason::AuthorizationDenied));
-                }
-                match context.trust {
-                    CommitUnitTrust::Session => context.identity,
-                    // Relay transport has no permission subject. A relayed
-                    // write must reach a serving authority through its
-                    // topology-owned admission path; it cannot borrow SYSTEM
-                    // or the transport identity here.
-                    CommitUnitTrust::Relay => {
-                        return Ok((!context.admitted_write_authorization).then_some(RejectionReason::AuthorizationDenied));
-                    }
-                    CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => tx.permission_subject.unwrap_or(tx.made_by),
-                    CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
-                }
-            }
-            None => tx.permission_subject.unwrap_or(tx.made_by),
+        let permission_subject = match commit_unit_admission_subject(tx, ingest_context) {
+            Err(reason) => return Ok(Some(reason)),
+            Ok(None) => return Ok(None),
+            Ok(Some(subject)) => subject,
         };
-        // Gate the effective permission subject so relayed anonymous sessions
-        // stay read-only without changing trusted-backend attribution.
-        if permission_subject.is_anonymous() {
-            return Ok(Some(RejectionReason::AuthorizationDenied));
-        }
         // Non-root branch writes have mandatory canonical operation intent.
         // Do not treat an absent descriptor as an ordinary insert: that would
         // let a raw sender relabel an inherited first-head overlay and bypass
@@ -826,48 +803,83 @@ where
     /// predecessor its base names has no fate here (SPEC 4 §4.6, "Ancestor
     /// at Core"): Core resolves the write's ancestor only once it knows
     /// whether that predecessor is in history. The unit re-enters authority
-    /// ingest when the predecessor's fate is stored. A base whose
-    /// predecessor can never be resolved (another node's transaction, or one
-    /// not older than the write) is not parked; ancestor resolution refuses
-    /// it.
+    /// ingest when the predecessor's fate is stored, or is refused once
+    /// [`PREDECESSOR_PARK_TTL_MS`] passes. A base whose predecessor can never
+    /// be resolved (another node's transaction, or one not older than the
+    /// write) is not parked; ancestor resolution refuses it. Callers run the
+    /// unit's cheap admission checks first, so only an admitted writer can
+    /// park, and at most [`MAX_PREDECESSOR_PARKED_PER_WRITER_NODE`] units per
+    /// writer node and [`MAX_PREDECESSOR_PARKED_PER_SESSION`] per session
+    /// identity.
     pub(super) async fn park_commit_unit_awaiting_predecessor(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
         now_ms: u64,
         mode: CommitUnitParkMode,
-    ) -> Result<bool, Error> {
-        if !self.commit_unit_awaits_predecessor(tx, versions).await? {
-            return Ok(false);
-        }
-        if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
+    ) -> Result<PredecessorPark, Error> {
+        let Some(predecessor) = self.commit_unit_awaited_predecessor(tx, versions).await? else {
+            return Ok(PredecessorPark::Ready);
+        };
+        let parking = &mut self.parking.awaiting_predecessor;
+        if let Some(existing) = parking.units.get_mut(&tx.tx_id) {
+            let existing = &mut existing.unit;
             if existing.tx != *tx || existing.versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
+            if !CommitUnitIngestContext::same_parked_authority(
+                existing.ingest_context,
+                mode.ingest_context,
+            ) {
+                return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            if let (Some(existing), Some(resent)) =
+                (existing.ingest_context.as_mut(), mode.ingest_context)
+            {
+                existing.version_receipts_validated &= resent.version_receipts_validated;
+            }
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
-            return Ok(true);
+            return Ok(PredecessorPark::Parked);
+        }
+        let session = predecessor_park_session(mode.ingest_context);
+        if parking
+            .per_writer_node
+            .get(&tx.tx_id.node)
+            .is_some_and(|count| *count >= MAX_PREDECESSOR_PARKED_PER_WRITER_NODE)
+            || session.is_some_and(|session| {
+                parking
+                    .per_session
+                    .get(&session)
+                    .is_some_and(|count| *count >= MAX_PREDECESSOR_PARKED_PER_SESSION)
+            })
+        {
+            return Ok(PredecessorPark::Full);
         }
         self.sync_metrics.parked_orphans += 1;
-        self.parking.parked_commit_units.insert(
+        parking.insert(
             tx.tx_id,
-            ParkedCommitUnit {
-                tx: tx.clone(),
-                versions: versions.to_vec(),
-                now_ms,
-                ingest_context: mode.ingest_context,
-                ingress_role: mode.ingress_role,
+            PredecessorParkedUnit {
+                unit: ParkedCommitUnit {
+                    tx: tx.clone(),
+                    versions: versions.to_vec(),
+                    now_ms,
+                    ingest_context: mode.ingest_context,
+                    ingress_role: mode.ingress_role,
+                },
+                predecessor,
+                expires_at_ms: now_ms.saturating_add(PREDECESSOR_PARK_TTL_MS),
             },
         );
-        Ok(true)
+        Ok(PredecessorPark::Parked)
     }
 
-    /// Whether a version of the unit names a pending predecessor of its own
-    /// writer, older than it, that has no fate here yet.
-    pub(super) async fn commit_unit_awaits_predecessor(
+    /// The pending predecessor a version of the unit names, of its own
+    /// writer and older than it, that has no fate here yet.
+    pub(super) async fn commit_unit_awaited_predecessor(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
-    ) -> Result<bool, Error> {
+    ) -> Result<Option<TxId>, Error> {
         for version in versions {
             let Some(predecessor) = version.base().pending else {
                 continue;
@@ -876,12 +888,100 @@ where
                 continue;
             }
             match self.query_transaction(predecessor).await? {
-                None => return Ok(true),
-                Some(stored) if matches!(stored.fate, Fate::Pending) => return Ok(true),
+                None => return Ok(Some(predecessor)),
+                Some(stored) if matches!(stored.fate, Fate::Pending) => {
+                    return Ok(Some(predecessor));
+                }
                 Some(_) => {}
             }
         }
-        Ok(false)
+        Ok(None)
+    }
+
+    /// Release the units parked on a predecessor once fates are stored, and
+    /// refuse the units whose wait expired by `now_ms` (when given). `fates`
+    /// are the fate updates just produced; every fate a released unit gets
+    /// releases its own successors in turn. A unit that already has a fate
+    /// here (its parked copy is stale) is dropped without a second fate.
+    pub(super) async fn release_units_awaiting_predecessors(
+        &mut self,
+        fates: &[SyncMessage],
+        now_ms: Option<u64>,
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let mut updates = PublicationOutcome::settled(Vec::new());
+        let mut fated = decided_fate_tx_ids(fates);
+        if let Some(now_ms) = now_ms {
+            let expired = self
+                .parking
+                .awaiting_predecessor
+                .by_expiry
+                .range(..=(now_ms, TxId::new(TxTime(u64::MAX), NodeUuid::from_bytes([0xff; 16]))))
+                .map(|(_, tx_id)| *tx_id)
+                .collect::<Vec<_>>();
+            for tx_id in expired {
+                let Some(parked) = self.parking.awaiting_predecessor.remove(tx_id) else {
+                    continue;
+                };
+                if self.has_decided_fate(tx_id).await? {
+                    continue;
+                }
+                self.sync_metrics.parked_orphans_resolved += 1;
+                let messages = self
+                    .reject_malformed_commit(
+                        parked.unit.tx,
+                        format!(
+                            "pending predecessor {:?} got no fate within {} ms",
+                            parked.predecessor, PREDECESSOR_PARK_TTL_MS
+                        ),
+                    )
+                    .await?;
+                fated.extend(decided_fate_tx_ids(&messages));
+                updates.extend(PublicationOutcome::settled(messages));
+            }
+        }
+        while let Some(tx_id) = fated.pop_front() {
+            // A fate for a parked unit itself leaves its parked copy stale.
+            self.parking.awaiting_predecessor.remove(tx_id);
+            let Some(successors) = self
+                .parking
+                .awaiting_predecessor
+                .by_predecessor
+                .get(&tx_id)
+                .cloned()
+            else {
+                continue;
+            };
+            for successor in successors {
+                let Some(parked) = self.parking.awaiting_predecessor.remove(successor) else {
+                    continue;
+                };
+                if self.has_decided_fate(successor).await? {
+                    continue;
+                }
+                self.sync_metrics.parked_orphans_resolved += 1;
+                let unit = parked.unit;
+                let outcome = Box::pin(self.ingest_commit_unit_once(
+                    unit.tx,
+                    unit.versions,
+                    unit.now_ms,
+                    unit.ingest_context,
+                ))
+                .await?;
+                fated.extend(decided_fate_tx_ids(outcome.value()));
+                updates.extend(outcome);
+            }
+        }
+        Ok(updates)
+    }
+
+    async fn has_decided_fate(&mut self, tx_id: TxId) -> Result<bool, Error> {
+        Ok(self
+            .query_transaction(tx_id)
+            .await?
+            .is_some_and(|stored| !matches!(stored.fate, Fate::Pending)))
     }
 
     pub(super) async fn drain_parked_commit_units(
@@ -892,24 +992,20 @@ where
     {
         let mut updates = PublicationOutcome::settled(Vec::new());
         loop {
-            let parked = self
+            let ready = self
                 .parking
                 .parked_commit_units
                 .iter()
-                .filter(|(_, unit)| unit.ingress_role != ParkedIngressRole::Relay)
-                .map(|(tx_id, unit)| (*tx_id, unit.tx.clone(), unit.versions.clone()))
+                .filter(|(_, unit)| {
+                    unit.ingress_role != ParkedIngressRole::Relay
+                        && unit.versions.iter().all(|version| {
+                            self.catalogue
+                                .catalogue_schemas
+                                .contains_key(&version.schema_version())
+                        })
+                })
+                .map(|(tx_id, _)| *tx_id)
                 .collect::<Vec<_>>();
-            let mut ready = Vec::new();
-            for (tx_id, tx, versions) in parked {
-                if versions.iter().all(|version| {
-                    self.catalogue
-                        .catalogue_schemas
-                        .contains_key(&version.schema_version())
-                }) && !self.commit_unit_awaits_predecessor(&tx, &versions).await?
-                {
-                    ready.push(tx_id);
-                }
-            }
             if ready.is_empty() {
                 break;
             }
@@ -921,12 +1017,18 @@ where
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
-                updates.extend(self.ingest_commit_unit_once(
+                let outcome = self.ingest_commit_unit_once(
                     unit.tx,
                     unit.versions,
                     unit.now_ms,
                     unit.ingest_context,
-                ).await?);
+                ).await?;
+                let released = Box::pin(
+                    self.release_units_awaiting_predecessors(outcome.value(), None),
+                )
+                .await?;
+                updates.extend(outcome);
+                updates.extend(released);
             }
         }
         Ok(updates)
@@ -1094,4 +1196,135 @@ where
         Ok(rejected_payload)
     }
 
+}
+
+/// Whether an authority commit unit waits for its pending predecessor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PredecessorPark {
+    /// The unit names no predecessor without a fate: ingest continues.
+    Ready,
+    /// The unit waits for its predecessor's fate.
+    Parked,
+    /// The unit would wait, but its writer node or session has too many
+    /// writes waiting already.
+    Full,
+}
+
+/// The session identity a parked unit counts against, when it came over an
+/// authenticated end-user session. Trusted links forward many writers under
+/// one identity and are bounded per writer node only.
+fn predecessor_park_session(context: Option<CommitUnitIngestContext>) -> Option<AuthorSubject> {
+    context
+        .filter(|context| context.trust == CommitUnitTrust::Session)
+        .map(|context| context.identity)
+}
+
+/// The transactions the fate updates among `messages` decide.
+fn decided_fate_tx_ids(messages: &[SyncMessage]) -> VecDeque<TxId> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::FateUpdate { tx_id, fate, .. } if !matches!(fate, Fate::Pending) => {
+                Some(*tx_id)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+impl PredecessorParking {
+    fn insert(&mut self, tx_id: TxId, parked: PredecessorParkedUnit) {
+        self.by_predecessor
+            .entry(parked.predecessor)
+            .or_default()
+            .insert(tx_id);
+        self.by_expiry.insert((parked.expires_at_ms, tx_id));
+        *self.per_writer_node.entry(tx_id.node).or_default() += 1;
+        if let Some(session) = predecessor_park_session(parked.unit.ingest_context) {
+            *self.per_session.entry(session).or_default() += 1;
+        }
+        self.units.insert(tx_id, parked);
+    }
+
+    fn remove(&mut self, tx_id: TxId) -> Option<PredecessorParkedUnit> {
+        let parked = self.units.remove(&tx_id)?;
+        if let Some(successors) = self.by_predecessor.get_mut(&parked.predecessor) {
+            successors.remove(&tx_id);
+            if successors.is_empty() {
+                self.by_predecessor.remove(&parked.predecessor);
+            }
+        }
+        self.by_expiry.remove(&(parked.expires_at_ms, tx_id));
+        decrement_count(&mut self.per_writer_node, &tx_id.node);
+        if let Some(session) = predecessor_park_session(parked.unit.ingest_context)
+            && let Some(count) = self.per_session.get_mut(&session)
+        {
+            *count -= 1;
+            if *count == 0 {
+                self.per_session.remove(&session);
+            }
+        }
+        Some(parked)
+    }
+
+    /// How many units are parked.
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.units.len()
+    }
+}
+
+fn decrement_count(counts: &mut BTreeMap<NodeUuid, usize>, key: &NodeUuid) {
+    if let Some(count) = counts.get_mut(key) {
+        *count -= 1;
+        if *count == 0 {
+            counts.remove(key);
+        }
+    }
+}
+
+/// The cheap identity part of commit-unit admission: the permission subject
+/// write policies evaluate, or the refusal when the connection may not make
+/// the unit at all. `Ok(None)` means no policy evaluation is owed (a trusted
+/// admin, or a relay whose connection already proved the write). It reads
+/// no storage, so the fate authority runs it before holding a unit.
+pub(super) fn commit_unit_admission_subject(
+    tx: &Transaction,
+    ingest_context: Option<CommitUnitIngestContext>,
+) -> Result<Option<AuthorSubject>, RejectionReason> {
+    let permission_subject = match ingest_context {
+        Some(context) => {
+            if context.trust == CommitUnitTrust::TrustedAdmin {
+                return Ok(None);
+            }
+            if context.trust == CommitUnitTrust::Session && tx.made_by != context.identity {
+                return Err(RejectionReason::AuthorizationDenied);
+            }
+            match context.trust {
+                CommitUnitTrust::Session => context.identity,
+                // Relay transport has no permission subject. A relayed
+                // write must reach a serving authority through its
+                // topology-owned admission path; it cannot borrow SYSTEM
+                // or the transport identity here.
+                CommitUnitTrust::Relay => {
+                    return if context.admitted_write_authorization {
+                        Ok(None)
+                    } else {
+                        Err(RejectionReason::AuthorizationDenied)
+                    };
+                }
+                CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
+                    tx.permission_subject.unwrap_or(tx.made_by)
+                }
+                CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
+            }
+        }
+        None => tx.permission_subject.unwrap_or(tx.made_by),
+    };
+    // Gate the effective permission subject so relayed anonymous sessions
+    // stay read-only without changing trusted-backend attribution.
+    if permission_subject.is_anonymous() {
+        return Err(RejectionReason::AuthorizationDenied);
+    }
+    Ok(Some(permission_subject))
 }

@@ -698,6 +698,305 @@ fn chained_write_over_a_predecessor_core_holds_pending_waits_for_its_fate() {
     );
 }
 
+/// Core's authority ingest of `unit` at `now_ms`, settled.
+fn ingest_at(core: &mut NodeState, unit: SyncMessage, now_ms: u64) -> Vec<SyncMessage> {
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected a commit unit");
+    };
+    let outcome =
+        crate::local_executor::block_on(core.ingest_commit_unit(tx, versions, now_ms)).unwrap();
+    settle_outcome(core, outcome).unwrap()
+}
+
+/// `unit` with its versions' row timestamps outside the HLC range: Core
+/// refuses it before admission, as a malformed authored version.
+fn with_malformed_timestamps(unit: SyncMessage) -> SyncMessage {
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected a commit unit");
+    };
+    let schema = two_column_schema();
+    let table = schema.tables.iter().find(|table| table.name == "todos").unwrap();
+    let versions = versions
+        .into_iter()
+        .map(|version| {
+            VersionRecord::from_cells(
+                table,
+                version.schema_version(),
+                version.row_uuid(),
+                tx.made_by,
+                u64::MAX,
+                tx.made_by,
+                u64::MAX,
+                &todo_cells("bad", "bad"),
+                None,
+            )
+            .unwrap()
+            .with_base(version.base())
+        })
+        .collect();
+    SyncMessage::CommitUnit { tx, versions }
+}
+
+/// INV-HIST-20: a predecessor that Core refuses still releases the write
+/// parked on it, also when the refusal happens before admission (here a
+/// malformed authored version). The released write merges against the
+/// settled image, since a rejected predecessor contributes nothing. A
+/// second parked write whose own copy was refused meanwhile gets no second
+/// fate when its predecessor is decided.
+///
+/// ```text
+/// carol ──e2──► core            parked on e1
+/// carol ──e1 (malformed)──► core  e1 rejected, then e2 accepted
+/// carol ──e4──► core            parked on e3
+/// carol ──e4 (malformed)──► core  e4 rejected, parked copy dropped
+/// carol ──e3──► core            e3 accepted, no fate for e4
+/// ```
+#[test]
+fn rejected_predecessor_releases_the_write_parked_on_it() {
+    let target = row(0x94);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let carol = &mut writers[0].1;
+    let (e1, e1_unit) = offline_edit(carol, target, 100, &[("title", "c1")]);
+    let (e2, e2_unit) = offline_edit(carol, target, 101, &[("body", "c2")]);
+    let parked = core.apply_sync_message_settled(e2_unit).unwrap();
+    assert_eq!(fate_for(&parked, e2), None);
+    let decided = core
+        .apply_sync_message_settled(with_malformed_timestamps(e1_unit))
+        .unwrap();
+    assert!(matches!(
+        fate_for(&decided, e1),
+        Some(Fate::Rejected(RejectionReason::MalformedCommit(_)))
+    ));
+    assert_eq!(fate_for(&decided, e2), Some(&Fate::Accepted));
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("base", "c2")
+    );
+
+    let (e3, e3_unit) = offline_edit(carol, target, 102, &[("title", "c3")]);
+    let (e4, e4_unit) = offline_edit(carol, target, 103, &[("title", "c4")]);
+    assert_eq!(fate_for(&core.apply_sync_message_settled(e4_unit.clone()).unwrap(), e4), None);
+    let refused = core
+        .apply_sync_message_settled(with_malformed_timestamps(e4_unit))
+        .unwrap();
+    assert!(matches!(
+        fate_for(&refused, e4),
+        Some(Fate::Rejected(RejectionReason::MalformedCommit(_)))
+    ));
+    assert_eq!(core.parking.awaiting_predecessor.len(), 0);
+    let decided = core.apply_sync_message_settled(e3_unit).unwrap();
+    assert_eq!(fate_for(&decided, e3), Some(&Fate::Accepted));
+    assert_eq!(fate_for(&decided, e4), None, "e4 was decided once already");
+}
+
+/// INV-HIST-20: a chain of parked writes drains in order once its first
+/// predecessor is decided: e3 waits on e2, which waits on e1. A resend of a
+/// parked unit under another authority is a conflict.
+///
+/// ```text
+/// carol ──e3──► core   parked on e2
+/// carol ──e2──► core   parked on e1
+/// carol ──e1──► core   e1, e2, e3 accepted   title=c3
+/// ```
+#[test]
+fn two_level_parked_chain_drains_in_order() {
+    let target = row(0x95);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let carol = &mut writers[0].1;
+    let (e1, e1_unit) = offline_edit(carol, target, 100, &[("title", "c1")]);
+    let (e2, e2_unit) = offline_edit(carol, target, 101, &[("body", "c2")]);
+    let (e3, e3_unit) = offline_edit(carol, target, 102, &[("title", "c3")]);
+    assert_eq!(fate_for(&core.apply_sync_message_settled(e3_unit.clone()).unwrap(), e3), None);
+    assert_eq!(fate_for(&core.apply_sync_message_settled(e2_unit).unwrap(), e2), None);
+    assert_eq!(core.parking.awaiting_predecessor.len(), 2);
+    // The same unit resent under another authority conflicts with the
+    // parked one, as in the schema parker.
+    assert!(matches!(
+        crate::local_executor::block_on(core.apply_sync_message_with_ingest_context(
+            e3_unit,
+            Some(CommitUnitIngestContext {
+                identity: AuthorSubject::SYSTEM,
+                trust: CommitUnitTrust::TrustedBackend,
+                admitted_write_authorization: false,
+                version_receipts_validated: false,
+            }),
+        )),
+        Err(Error::ConflictingCommitUnit(tx)) if tx == e3
+    ));
+    assert_eq!(core.parking.awaiting_predecessor.len(), 2);
+    let decided = core.apply_sync_message_settled(e1_unit).unwrap();
+    let order = decided
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::FateUpdate { tx_id, fate: Fate::Accepted, .. } => Some(*tx_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(order, vec![e1, e2, e3]);
+    assert_eq!(core.parking.awaiting_predecessor.len(), 0);
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("c3", "c2")
+    );
+    assert!(lost_cells_at_core(&mut core, e3).is_empty());
+}
+
+/// Parked writes live in memory only. After a Core restart the writer
+/// resends its pending writes, and the chain converges as if nothing had
+/// been parked.
+///
+/// ```text
+/// carol ──e2──► core   parked on e1
+/// core restarts        parking empty
+/// carol ──e2, e1──► core   e2 parked again, then e1 and e2 accepted
+/// ```
+#[test]
+fn parked_writes_converge_after_a_core_restart() {
+    let target = row(0x96);
+    let (mut writers, core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let carol = &mut writers[0].1;
+    let (e1, e1_unit) = offline_edit(carol, target, 100, &[("title", "c1")]);
+    let (e2, e2_unit) = offline_edit(carol, target, 101, &[("body", "c2")]);
+    assert_eq!(fate_for(&core.apply_sync_message_settled(e2_unit.clone()).unwrap(), e2), None);
+    drop(core);
+    let mut core = reopen_node_at(&core_dir, node(9), two_column_schema());
+    assert_eq!(core.parking.awaiting_predecessor.len(), 0);
+    assert_eq!(core.transaction_state_settled(e2), None, "a parked write is never stored");
+    let resent = core.apply_sync_message_settled(e2_unit).unwrap();
+    assert_eq!(fate_for(&resent, e2), None);
+    let decided = core.apply_sync_message_settled(e1_unit).unwrap();
+    assert_eq!(fate_for(&decided, e1), Some(&Fate::Accepted));
+    assert_eq!(fate_for(&decided, e2), Some(&Fate::Accepted));
+    let image = todo_cells("c1", "c2");
+    assert_eq!(rows_at(&mut core, "todos", DurabilityTier::Global)[&target], image);
+    // carol converges on Core's image once the fates arrive.
+    for message in decided {
+        carol.apply_sync_message_settled(message).unwrap();
+    }
+    sync_table_rows_to(&mut core, carol, "todos");
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
+        assert_eq!(rows_at(carol, "todos", tier)[&target], image);
+    }
+}
+
+/// N1: a writer cannot fill Core's parking. Writes naming a predecessor
+/// Core never sees park only up to the per-writer-node cap; the next one is
+/// refused with a fate. A session that may not make the write at all (its
+/// identity is not the write's author, or it is anonymous) is refused
+/// before it can park.
+#[test]
+fn predecessor_parking_is_bounded_and_admits_first() {
+    let target = row(0x97);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    // Cheap admission runs before parking. Each session write below names
+    // a predecessor Core never sees.
+    let (_erin_dir, mut erin) = open_node_with_schema(node(0x30), two_column_schema());
+    let anonymous = AuthorSubject::reserved(AuthorSubject::ANONYMOUS_ISSUER, "visitor").unwrap();
+    assert!(anonymous.is_anonymous());
+    let erin_author = AuthorSubject::for_test_bytes([0x30; 16]);
+    for (index, (made_by, identity)) in [
+        // The session is not the write's author.
+        (erin_author, AuthorSubject::for_test_bytes([0x31; 16])),
+        // The session is its author, but anonymous sessions are read-only.
+        (anonymous, anonymous),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let at_ms = 2_000 + 2 * index as u64;
+        offline_edit(&mut erin, target, at_ms, &[("title", "p")]);
+        let (w, w_unit) = offline_edit(&mut erin, target, at_ms + 1, &[("title", "w")]);
+        let SyncMessage::CommitUnit { mut tx, versions } = w_unit else {
+            panic!("expected a commit unit");
+        };
+        assert!(versions[0].base().pending.is_some(), "w is chained");
+        tx.made_by = made_by;
+        let w_unit = SyncMessage::CommitUnit { tx, versions };
+        let outcome = crate::local_executor::block_on(core.apply_sync_message_with_ingest_context(
+            w_unit,
+            Some(CommitUnitIngestContext {
+                identity,
+                trust: CommitUnitTrust::Session,
+                admitted_write_authorization: false,
+                version_receipts_validated: false,
+            }),
+        ));
+        if made_by.is_anonymous() {
+            // An anonymous author cannot even be recorded on a rejection.
+            assert!(matches!(outcome, Err(Error::UnadmittedWriteAuthor)));
+        } else {
+            let messages = settle_outcome(&mut core, outcome.unwrap()).unwrap();
+            assert_eq!(
+                fate_for(&messages, w),
+                Some(&Fate::Rejected(RejectionReason::AuthorizationDenied)),
+                "{identity:?}"
+            );
+        }
+        assert_eq!(core.parking.awaiting_predecessor.len(), 0);
+    }
+
+    let carol = &mut writers[0].1;
+    let cap = crate::node::ingest::MAX_PREDECESSOR_PARKED_PER_WRITER_NODE;
+    let mut last = None;
+    for index in 0..=cap as u64 {
+        let (tx, unit) = offline_edit(carol, target, 1_000 + 2 * index, &[("title", "flood")]);
+        // Each write names a predecessor of carol's that never reaches Core.
+        let fake = TxId::new(TxTime(tx.time.0 - 1), tx.node);
+        let SyncMessage::CommitUnit { versions, .. } = &unit else {
+            panic!("expected a commit unit");
+        };
+        let base = crate::protocol::RowBase {
+            pending: Some(fake),
+            ..versions[0].base()
+        };
+        let messages = core.apply_sync_message_settled(with_base(unit, base)).unwrap();
+        if (index as usize) < cap {
+            assert_eq!(fate_for(&messages, tx), None, "write {index} parks");
+        } else {
+            last = Some((tx, messages));
+        }
+    }
+    let (tx, messages) = last.unwrap();
+    let Some(Fate::Rejected(RejectionReason::MalformedCommit(reason))) = fate_for(&messages, tx)
+    else {
+        panic!("the write over the cap is refused: {messages:?}");
+    };
+    assert!(reason.contains("too many writes"), "{reason}");
+    assert_eq!(core.parking.awaiting_predecessor.len(), cap);
+}
+
+/// N1/N4: a parked write whose predecessor never reaches Core gets a fate
+/// once its wait expires, on the next authority ingest. The refusal is
+/// stored, so the predecessor arriving afterwards does not decide it again.
+///
+/// ```text
+/// carol ──e2──► core            t=1000, parked on e1
+/// dave  ──other row──► core     t=1000+TTL: e2 refused
+/// carol ──e1──► core            e1 accepted, no second fate for e2
+/// ```
+#[test]
+fn parked_write_expires_with_a_fate() {
+    let target = row(0x98);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
+    let (e1, e1_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "c1")]);
+    let (e2, e2_unit) = offline_edit(&mut writers[0].1, target, 101, &[("title", "c2")]);
+    let (dave_tx, dave_unit) =
+        offline_edit(&mut writers[1].1, row(0x99), 50, &[("title", "dave")]);
+    assert_eq!(fate_for(&ingest_at(&mut core, e2_unit, 1_000), e2), None);
+    let ttl = crate::node::ingest::PREDECESSOR_PARK_TTL_MS;
+    let later = ingest_at(&mut core, dave_unit, 1_000 + ttl);
+    assert_eq!(fate_for(&later, dave_tx), Some(&Fate::Accepted));
+    let Some(Fate::Rejected(RejectionReason::MalformedCommit(reason))) = fate_for(&later, e2)
+    else {
+        panic!("the expired write gets a fate: {later:?}");
+    };
+    assert!(reason.contains("got no fate"), "{reason}");
+    assert_eq!(core.parking.awaiting_predecessor.len(), 0);
+    let decided = ingest_at(&mut core, e1_unit, 1_000 + ttl);
+    assert_eq!(fate_for(&decided, e1), Some(&Fate::Accepted));
+    assert_eq!(fate_for(&decided, e2), None);
+}
+
 /// `counters` with plain `title` and `body`, and in the descendant also
 /// `notes`, all text.
 fn plain_counters_schema(with_notes: bool) -> JazzSchema {

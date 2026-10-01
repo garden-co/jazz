@@ -163,7 +163,8 @@ baseline, frozen fresh rather than appended to v3, is:
   optional; both absent for an insert or a blind update) and empty
   `lost_cells`; Core resolves the base to the write's ancestor or rejects the
   write as `MalformedCommit`, and holds the unit without a fate while its
-  pending predecessor has none at Core yet (SPEC 4 §4.6). A history record that a view
+  pending predecessor has none at Core yet, bounded per writer and in time
+  (SPEC 4 §4.6). A history record that a view
   update or relay forwards carries the base and lost cells Core stored, and
   takes its seq from the bundle's accepted `GlobalTime`. `FateUpdate` is
   unchanged;

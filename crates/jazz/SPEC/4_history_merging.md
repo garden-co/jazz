@@ -23,7 +23,7 @@ Invariant digest:
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
 - `INV-HIST-15`: Core's post-image MUST be a deterministic function of the accepted writes in seq order and of each write's base: no wall clock, writer clock or other node-local state enters a merged value. Concurrent writes to different cells give the same post-image in any seq order, merge-strategy ops commute, and when two concurrent writes change one plain cell the one Core sequences first keeps it.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
-- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another ancestor. A write whose predecessor has no fate at Core yet MUST wait, without a fate, until that fate is stored, and is then resolved.
+- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another ancestor. A write whose predecessor has no fate at Core yet MUST wait, without a fate, until that fate (acceptance or any rejection) is stored, and is then resolved; it MUST pass its cheap admission checks before it waits, the waiting writes of one writer node and of one session identity MUST be bounded, and a write that waits longer than the bound MUST be refused with a fate. A write MUST never get a second fate from a stale parked copy.
 - `INV-HIST-21`: A write's own patch MUST be recoverable from its history record (the post-image restricted to `authored_columns`, overridden by `lost_cells`), and the ancestor of a chained write MUST be built from those patches, never from Core's post-images of the writer's earlier writes.
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6), so it overrides every value it observed whatever its clock. Core orders writes by its own seq, never by writer clocks, and does not reject a write because the writer's clock is behind.
@@ -306,10 +306,28 @@ or names no accepted history record of the row (for example a seq above the
 row's current seq, or a seq of another row's write), when `P`'s node is not
 `N`, and when `P` is not older than `W`. A predecessor Core holds no fate for
 yet (it has not arrived, or Core holds it as a relayed or recovered Pending
-unit) is an ordering race, not a refusal: Core parks `W`, with no fate, like
-a unit whose schema has not arrived, and ingests it again once `P`'s fate is
-stored; the parking is in memory, and a writer resends its pending writes on
-reconnect. Core never guesses an ancestor. Uploads carry no lost cells; a nonempty `lost_cells` on an upload is
+unit) is an ordering race, not a refusal: Core parks `W`, with no fate, and
+ingests it again once `P`'s fate is stored, whether `P` is accepted or
+rejected (a refusal before admission included). Parking is bounded:
+
+- `W` parks only after its cheap admission checks pass (the session is
+  `W`'s author and not anonymous, the clock is within tolerance, and the
+  provenance is well formed); a failing `W` gets its refusal at once.
+- At most 256 writes of one writer node, and 1024 of one authenticated
+  session identity, wait at once; Core refuses a write over either cap with
+  a `MalformedCommit` fate.
+- A write waits at most 5 minutes from its arrival. On the first authority
+  ingest after that, Core refuses it with a `MalformedCommit` fate saying
+  its predecessor got no fate, so the writer always gets one (also when `P`
+  never reaches Core).
+- Parked writes are indexed by `P`: a fate releases only the writes that
+  wait on it, and a released write's own fate releases its successors in
+  turn.
+- A write that gets a fate while a parked copy of it waits (for example a
+  refused resend) drops that copy, and is never decided twice.
+
+The parking is in memory: a Core restart forgets it, and a writer resends
+its pending writes on reconnect. Core never guesses an ancestor. Uploads carry no lost cells; a nonempty `lost_cells` on an upload is
 malformed.
 
 **Merge rule (Core only).** For each plain cell `c` the write authored, and
