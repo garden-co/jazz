@@ -3,8 +3,7 @@
 use super::*;
 
 #[cfg(feature = "testing")]
-async fn create_parent_child_exclusively(
-) -> (crate::db::Db<groove::storage::TestStorage>, crate::tx::Fate) {
+async fn create_parent_child_exclusively() -> (crate::db::Db, crate::tx::Fate) {
     use crate::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps};
     use groove::storage::TestStorage;
 
@@ -73,7 +72,7 @@ async fn create_parent_child_exclusively(
             .await
             .expect("progress authority handshake");
     }
-    let tx_id = crate::tools::OpenTransactionId::new();
+    let tx_id = crate::db::OpenTransactionId::new();
     alice
         .begin_exclusive(tx_id)
         .await
@@ -136,55 +135,58 @@ async fn create_parent_child_exclusively(
 /// alice -- exclusive parent + child, exact absence --> authority
 ///       <-- whole bundle accepted; both public rows visible --
 #[cfg(feature = "testing")]
-#[tokio::test]
-async fn candidate_exists_accepts_authorized_parent_child_exclusive_create() {
-    let (alice, fate) = create_parent_child_exclusively().await;
-    assert_eq!(
-        fate,
-        crate::tx::Fate::Accepted,
-        "authorized parent and dependent child must be accepted atomically"
-    );
-    let schema = alice
-        .catalogue_schema(alice.current_write_schema().unwrap().schema)
-        .unwrap();
-    let parents = schema
-        .tables()
-        .iter()
-        .find(|table| table.name == "parents")
-        .unwrap();
-    let children = schema
-        .tables()
-        .iter()
-        .find(|table| table.name == "children")
-        .unwrap();
-    assert_eq!(
-        alice
-            .local_current_row("parents", crate::ids::RowUuid(uuid::Uuid::from_u128(10)))
-            .await
-            .unwrap()
-            .map(|row| (row.row_uuid(), row.cell(parents, "title"))),
-        Some((
-            crate::ids::RowUuid(uuid::Uuid::from_u128(10)),
-            Some(Value::String("Alice's parent".to_owned()))
-        )),
-    );
-    assert_eq!(
-        alice
-            .local_current_row("children", crate::ids::RowUuid(uuid::Uuid::from_u128(11)))
-            .await
-            .unwrap()
-            .map(|row| (
-                row.row_uuid(),
-                row.cell(children, "parent_id"),
-                row.cell(children, "title")
+#[test]
+fn candidate_exists_accepts_authorized_parent_child_exclusive_create() {
+    crate::db::block_on(async {
+        let (alice, fate) = create_parent_child_exclusively().await;
+        assert_eq!(
+            fate,
+            crate::tx::Fate::Accepted,
+            "authorized parent and dependent child must be accepted atomically"
+        );
+        let schema = alice
+            .catalogue_schema(alice.current_write_schema().unwrap().schema)
+            .unwrap();
+        let parents = schema
+            .tables()
+            .iter()
+            .find(|table| table.name == "parents")
+            .unwrap();
+        let children = schema
+            .tables()
+            .iter()
+            .find(|table| table.name == "children")
+            .unwrap();
+        assert_eq!(
+            alice
+                .local_current_row("parents", crate::ids::RowUuid(uuid::Uuid::from_u128(10)))
+                .await
+                .unwrap()
+                .map(|row| (row.row_uuid(), row.cell(parents, "title"))),
+            Some((
+                crate::ids::RowUuid(uuid::Uuid::from_u128(10)),
+                Some(Value::String("Alice's parent".to_owned()))
             )),
-        Some((
-            crate::ids::RowUuid(uuid::Uuid::from_u128(11)),
-            Some(Value::Uuid(uuid::Uuid::from_u128(10))),
-            Some(Value::String("Alice's child".to_owned())),
-        )),
-    );
+        );
+        assert_eq!(
+            alice
+                .local_current_row("children", crate::ids::RowUuid(uuid::Uuid::from_u128(11)))
+                .await
+                .unwrap()
+                .map(|row| (
+                    row.row_uuid(),
+                    row.cell(children, "parent_id"),
+                    row.cell(children, "title")
+                )),
+            Some((
+                crate::ids::RowUuid(uuid::Uuid::from_u128(11)),
+                Some(Value::Uuid(uuid::Uuid::from_u128(10))),
+                Some(Value::String("Alice's child".to_owned())),
+            )),
+        );
+    });
 }
+
 
 #[cfg(feature = "testing")]
 mod proof_graph {
@@ -195,8 +197,8 @@ mod proof_graph {
     use groove::storage::TestStorage;
 
     struct Fixture {
-        alice: Db<TestStorage>,
-        authority: Db<TestStorage>,
+        alice: Db,
+        authority: Db,
     }
 
     fn author(name: &str) -> AuthorSubject {
@@ -264,7 +266,7 @@ mod proof_graph {
             .build()
     }
 
-    // The public core Db accepts Groove cells, not row_input!'s tools values.
+    // The public core Db accepts Groove cells, not row_input!'s public schema values.
     fn cells(parent: u128, seed: bool, allowed: bool, scope: &str) -> BTreeMap<String, Value> {
         BTreeMap::from([
             ("parent_id".to_owned(), Value::Uuid(row(parent).0)),
@@ -315,7 +317,7 @@ mod proof_graph {
         }
 
         async fn stage(&self, rows: &[(u128, BTreeMap<String, Value>)]) -> TxId {
-            let id = crate::tools::OpenTransactionId::new();
+            let id = crate::db::OpenTransactionId::new();
             self.alice.begin_exclusive(id).await.unwrap();
             let tx = self.alice.exclusive_tx_ref(id);
             for (id, cells) in rows {
@@ -389,171 +391,191 @@ mod proof_graph {
 
     /// Reverse coordinate order requires dependency wakeups, not table order
     /// or a single scan. Every row is in the same physical table.
-    #[tokio::test]
-    async fn candidate_chain_reaches_fixed_point_in_reverse_row_order() {
-        let fixture = Fixture::new(schema(policy(parent(true, true))), author("alice")).await;
-        fixture
-            .check(
-                &[
-                    (1, cells(2, false, true, "room")),
-                    (2, cells(3, false, true, "room")),
-                    (3, cells(3, true, true, "room")),
-                ],
-                true,
-            )
-            .await;
-    }
-
-    #[tokio::test]
-    async fn candidate_failed_parent_rolls_back_independent_seed_and_child() {
-        let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
-        fixture
-            .check(
-                &[
-                    (1, cells(2, false, true, "room")),
-                    (2, cells(2, true, false, "room")),
-                    (3, cells(3, true, true, "room")),
-                ],
-                false,
-            )
-            .await;
-    }
-
-    #[tokio::test]
-    async fn candidate_self_and_mutual_cycles_without_seed_are_denied() {
-        for rows in [
-            vec![(1, cells(1, false, true, "room"))],
-            vec![
-                (1, cells(2, false, true, "room")),
-                (2, cells(1, false, true, "room")),
-            ],
-        ] {
-            let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
-            fixture.check(&rows, false).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn candidate_independent_or_arm_seeds_a_mutual_cycle() {
-        let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
-        fixture
-            .check(
-                &[
-                    (1, cells(2, false, true, "room")),
-                    (2, cells(1, true, true, "room")),
-                ],
-                true,
-            )
-            .await;
-    }
-
-    #[tokio::test]
-    async fn candidate_extra_correlation_cannot_borrow_another_room() {
-        let fixture = Fixture::new(schema(policy(parent(true, true))), author("alice")).await;
-        fixture
-            .check(
-                &[
-                    (1, cells(2, false, true, "first")),
-                    (2, cells(2, true, true, "second")),
-                ],
-                false,
-            )
-            .await;
-    }
-
-    #[tokio::test]
-    async fn candidate_unmarked_same_table_alias_cannot_borrow_marked_evidence() {
-        let fixture = Fixture::new(
-            schema(policy(PublicPolicyExpr::and(vec![
-                parent(true, false),
-                parent(false, false),
-            ]))),
-            author("alice"),
-        )
-        .await;
-        fixture
-            .check(
-                &[
-                    (1, cells(2, false, true, "room")),
-                    (2, cells(2, true, true, "room")),
-                ],
-                false,
-            )
-            .await;
-    }
-
-    #[tokio::test]
-    async fn candidate_source_keeps_accepted_rows_when_created_rows_are_added() {
-        let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
-        fixture
-            .check(&[(10, cells(10, true, true, "room"))], true)
-            .await;
-        fixture
-            .check(
-                &[
-                    (1, cells(2, false, true, "room")),
-                    (2, cells(10, false, true, "room")),
-                ],
-                true,
-            )
-            .await;
-    }
-
-    #[tokio::test]
-    async fn candidate_session_subject_cannot_be_spoofed_by_made_by() {
-        let fixture = Fixture::new(schema(policy(parent(true, false))), author("bob")).await;
-        fixture
-            .check(
-                &[
-                    (1, cells(2, false, true, "room")),
-                    (2, cells(2, true, true, "room")),
-                ],
-                false,
-            )
-            .await;
-    }
-
-    #[tokio::test]
-    async fn candidate_updated_parent_is_not_same_commit_created_evidence() {
-        let fixture = Fixture::new(schema(policy(parent(true, true))), author("alice")).await;
-        fixture
-            .check(&[(10, cells(10, true, true, "old"))], true)
-            .await;
-        let tx = fixture
-            .stage(&[
-                (1, cells(10, false, true, "new")),
-                (10, cells(10, true, true, "new")),
-            ])
-            .await;
-        assert_eq!(
-            fixture.settle(tx).await,
-            Fate::Rejected(RejectionReason::AuthorizationDenied)
-        );
-        fixture
-            .assert_rows(&[(1, cells(10, false, true, "new"))], false)
-            .await;
-        fixture
-            .assert_rows(&[(10, cells(10, true, true, "old"))], true)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn candidate_proof_work_overflow_rejects_the_complete_unit() {
-        let fixture = Fixture::new(schema(policy(parent(true, true))), author("alice")).await;
-        let rows = (1..=1500)
-            .map(|id| {
-                (
-                    id,
-                    cells(
-                        if id == 1500 { id } else { id + 1 },
-                        id == 1500,
-                        true,
-                        "room",
-                    ),
+    #[test]
+    fn candidate_chain_reaches_fixed_point_in_reverse_row_order() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(schema(policy(parent(true, true))), author("alice")).await;
+            fixture
+                .check(
+                    &[
+                        (1, cells(2, false, true, "room")),
+                        (2, cells(3, false, true, "room")),
+                        (3, cells(3, true, true, "room")),
+                    ],
+                    true,
                 )
-            })
-            .collect::<Vec<_>>();
-        fixture.check(&rows, false).await;
+                .await;
+        });
+    }
+
+    #[test]
+    fn candidate_failed_parent_rolls_back_independent_seed_and_child() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
+            fixture
+                .check(
+                    &[
+                        (1, cells(2, false, true, "room")),
+                        (2, cells(2, true, false, "room")),
+                        (3, cells(3, true, true, "room")),
+                    ],
+                    false,
+                )
+                .await;
+        });
+    }
+
+    #[test]
+    fn candidate_self_and_mutual_cycles_without_seed_are_denied() {
+        crate::db::block_on(async {
+            for rows in [
+                vec![(1, cells(1, false, true, "room"))],
+                vec![
+                    (1, cells(2, false, true, "room")),
+                    (2, cells(1, false, true, "room")),
+                ],
+            ] {
+                let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
+                fixture.check(&rows, false).await;
+            }
+        });
+    }
+
+    #[test]
+    fn candidate_independent_or_arm_seeds_a_mutual_cycle() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
+            fixture
+                .check(
+                    &[
+                        (1, cells(2, false, true, "room")),
+                        (2, cells(1, true, true, "room")),
+                    ],
+                    true,
+                )
+                .await;
+        });
+    }
+
+    #[test]
+    fn candidate_extra_correlation_cannot_borrow_another_room() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(schema(policy(parent(true, true))), author("alice")).await;
+            fixture
+                .check(
+                    &[
+                        (1, cells(2, false, true, "first")),
+                        (2, cells(2, true, true, "second")),
+                    ],
+                    false,
+                )
+                .await;
+        });
+    }
+
+    #[test]
+    fn candidate_unmarked_same_table_alias_cannot_borrow_marked_evidence() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(
+                schema(policy(PublicPolicyExpr::and(vec![
+                    parent(true, false),
+                    parent(false, false),
+                ]))),
+                author("alice"),
+            )
+            .await;
+            fixture
+                .check(
+                    &[
+                        (1, cells(2, false, true, "room")),
+                        (2, cells(2, true, true, "room")),
+                    ],
+                    false,
+                )
+                .await;
+        });
+    }
+
+    #[test]
+    fn candidate_source_keeps_accepted_rows_when_created_rows_are_added() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
+            fixture
+                .check(&[(10, cells(10, true, true, "room"))], true)
+                .await;
+            fixture
+                .check(
+                    &[
+                        (1, cells(2, false, true, "room")),
+                        (2, cells(10, false, true, "room")),
+                    ],
+                    true,
+                )
+                .await;
+        });
+    }
+
+    #[test]
+    fn candidate_session_subject_cannot_be_spoofed_by_made_by() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(schema(policy(parent(true, false))), author("bob")).await;
+            fixture
+                .check(
+                    &[
+                        (1, cells(2, false, true, "room")),
+                        (2, cells(2, true, true, "room")),
+                    ],
+                    false,
+                )
+                .await;
+        });
+    }
+
+    #[test]
+    fn candidate_updated_parent_is_not_same_commit_created_evidence() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(schema(policy(parent(true, true))), author("alice")).await;
+            fixture
+                .check(&[(10, cells(10, true, true, "old"))], true)
+                .await;
+            let tx = fixture
+                .stage(&[
+                    (1, cells(10, false, true, "new")),
+                    (10, cells(10, true, true, "new")),
+                ])
+                .await;
+            assert_eq!(
+                fixture.settle(tx).await,
+                Fate::Rejected(RejectionReason::AuthorizationDenied)
+            );
+            fixture
+                .assert_rows(&[(1, cells(10, false, true, "new"))], false)
+                .await;
+            fixture
+                .assert_rows(&[(10, cells(10, true, true, "old"))], true)
+                .await;
+        });
+    }
+
+    #[test]
+    fn candidate_proof_work_overflow_rejects_the_complete_unit() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(schema(policy(parent(true, true))), author("alice")).await;
+            let rows = (1..=1500)
+                .map(|id| {
+                    (
+                        id,
+                        cells(
+                            if id == 1500 { id } else { id + 1 },
+                            id == 1500,
+                            true,
+                            "room",
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            fixture.check(&rows, false).await;
+        });
     }
 
     /// Public schema admission must reject non-monotone/other-operation uses,
@@ -578,274 +600,290 @@ mod proof_graph {
         }
     }
 
-    #[tokio::test]
-    async fn candidate_nested_marked_occurrences_preserve_parent_correlations() {
-        let dependent = PublicPolicyExpr::exists_including_created(
-            "nodes",
-            PublicPolicyExpr::and(vec![outer("id", "parent_id"), parent(true, true)]),
-        );
-        let fixture = Fixture::new(schema(policy(dependent)), author("alice")).await;
-        fixture
-            .check(
-                &[
-                    (1, cells(2, false, true, "room")),
-                    (2, cells(3, false, true, "room")),
-                    (3, cells(3, true, true, "room")),
-                ],
-                true,
-            )
-            .await;
+    #[test]
+    fn candidate_nested_marked_occurrences_preserve_parent_correlations() {
+        crate::db::block_on(async {
+            let dependent = PublicPolicyExpr::exists_including_created(
+                "nodes",
+                PublicPolicyExpr::and(vec![outer("id", "parent_id"), parent(true, true)]),
+            );
+            let fixture = Fixture::new(schema(policy(dependent)), author("alice")).await;
+            fixture
+                .check(
+                    &[
+                        (1, cells(2, false, true, "room")),
+                        (2, cells(3, false, true, "room")),
+                        (3, cells(3, true, true, "room")),
+                    ],
+                    true,
+                )
+                .await;
+        });
     }
 
-    #[tokio::test]
-    async fn candidate_nested_unmarked_occurrence_remains_accepted_only() {
-        let dependent = PublicPolicyExpr::exists_including_created(
-            "nodes",
-            PublicPolicyExpr::and(vec![outer("id", "parent_id"), parent(false, true)]),
-        );
-        let fixture = Fixture::new(schema(policy(dependent)), author("alice")).await;
-        fixture
-            .check(
-                &[
-                    (1, cells(2, false, true, "room")),
-                    (2, cells(3, false, true, "room")),
-                    (3, cells(3, true, true, "room")),
-                ],
-                false,
-            )
-            .await;
+    #[test]
+    fn candidate_nested_unmarked_occurrence_remains_accepted_only() {
+        crate::db::block_on(async {
+            let dependent = PublicPolicyExpr::exists_including_created(
+                "nodes",
+                PublicPolicyExpr::and(vec![outer("id", "parent_id"), parent(false, true)]),
+            );
+            let fixture = Fixture::new(schema(policy(dependent)), author("alice")).await;
+            fixture
+                .check(
+                    &[
+                        (1, cells(2, false, true, "room")),
+                        (2, cells(3, false, true, "room")),
+                        (3, cells(3, true, true, "room")),
+                    ],
+                    false,
+                )
+                .await;
+        });
     }
 
-    #[tokio::test]
-    async fn candidate_conflicting_absent_inserts_accept_at_most_one_unit() {
-        let public_schema = schema(policy(parent(true, true)));
-        let fixture = Fixture::new(public_schema.clone(), author("alice")).await;
-        let compiled = crate::schema::JazzSchema::new(&public_schema).unwrap();
-        let families = compiled.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        let second = Db::open(DbConfig::new(
-            compiled,
-            TestStorage::new(&refs),
-            DbIdentity {
-                node: NodeUuid::from_bytes([0x73; 16]),
-                author: author("alice"),
-            },
-        ))
-        .await
-        .unwrap();
-        let (upstream, downstream) = duplex();
-        second.connect_upstream(upstream).await;
-        fixture
-            .authority
-            .accept_subscriber(downstream, author("alice"));
-        for _ in 0..32 {
-            fixture.tick(1).await;
-            second.tick().await.unwrap();
-        }
-        // Both replicas capture absence before either unit reaches authority.
-        let first_tx = fixture
-            .stage(&[
-                (1, cells(2, false, true, "first")),
-                (2, cells(2, true, true, "first")),
-            ])
-            .await;
-        let open = crate::tools::OpenTransactionId::new();
-        second.begin_exclusive(open).await.unwrap();
-        let tx = second.exclusive_tx_ref(open);
-        for (id, input) in [
-            (1, cells(2, false, true, "second")),
-            (2, cells(2, true, true, "second")),
-        ] {
-            tx.upsert("nodes", row(id), input, Default::default())
+    #[test]
+    fn candidate_conflicting_absent_inserts_accept_at_most_one_unit() {
+        crate::db::block_on(async {
+            let public_schema = schema(policy(parent(true, true)));
+            let fixture = Fixture::new(public_schema.clone(), author("alice")).await;
+            let compiled = crate::schema::JazzSchema::new(&public_schema).unwrap();
+            let families = compiled.column_families();
+            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+            let second = Db::open(DbConfig::new(
+                compiled,
+                TestStorage::new(&refs),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0x73; 16]),
+                    author: author("alice"),
+                },
+            ))
+            .await
+            .unwrap();
+            let (upstream, downstream) = duplex();
+            second.connect_upstream(upstream).await;
+            fixture
+                .authority
+                .accept_subscriber(downstream, author("alice"));
+            for _ in 0..32 {
+                fixture.tick(1).await;
+                second.tick().await.unwrap();
+            }
+            // Both replicas capture absence before either unit reaches authority.
+            let first_tx = fixture
+                .stage(&[
+                    (1, cells(2, false, true, "first")),
+                    (2, cells(2, true, true, "first")),
+                ])
+                .await;
+            let open = crate::db::OpenTransactionId::new();
+            second.begin_exclusive(open).await.unwrap();
+            let tx = second.exclusive_tx_ref(open);
+            for (id, input) in [
+                (1, cells(2, false, true, "second")),
+                (2, cells(2, true, true, "second")),
+            ] {
+                tx.upsert("nodes", row(id), input, Default::default())
+                    .await
+                    .unwrap();
+            }
+            let second_tx = second.commit_exclusive_handle(open).await.unwrap();
+            for _ in 0..128 {
+                fixture.tick(1).await;
+                second.tick().await.unwrap();
+            }
+            let first = fixture.alice.write_state(first_tx).unwrap().fate;
+            let second = second.write_state(second_tx).unwrap().fate;
+            assert!(
+                matches!(
+                    (&first, &second),
+                    (Fate::Accepted, Fate::Rejected(_)) | (Fate::Rejected(_), Fate::Accepted)
+                ),
+                "exact absence must select one whole unit: first={first:?}, second={second:?}",
+            );
+            let scope = if first == Fate::Accepted {
+                "first"
+            } else {
+                "second"
+            };
+            let schema = fixture
+                .authority
+                .catalogue_schema(fixture.authority.current_write_schema().unwrap().schema)
+                .unwrap();
+            let table = schema
+                .tables()
+                .iter()
+                .find(|table| table.name == "nodes")
+                .unwrap();
+            for id in [1, 2] {
+                assert_eq!(
+                    fixture
+                        .authority
+                        .local_current_row("nodes", row(id))
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .cell(table, "scope"),
+                    Some(Value::String(scope.to_owned())),
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn candidate_exclusive_branch_write_is_rejected_before_publication() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
+            let open = crate::db::OpenTransactionId::new();
+            fixture.alice.begin_exclusive(open).await.unwrap();
+            let tx = fixture.alice.exclusive_tx_ref(open);
+            let error = tx
+                .upsert(
+                    "nodes",
+                    row(1),
+                    cells(1, true, true, "draft"),
+                    crate::db::UpsertOptions {
+                        target: crate::db::WriteTarget::BranchView {
+                            head: crate::protocol::BranchSelector::new([(
+                                "scope",
+                                Value::String("draft".to_owned()),
+                            )]),
+                            base: None,
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, crate::db::ErrorCode::Schema);
+            fixture.alice.abandon_exclusive_handle(open).unwrap();
+            fixture
+                .assert_rows(&[(1, cells(1, true, true, "draft"))], false)
+                .await;
+        });
+    }
+
+    #[test]
+    fn candidate_mergeable_insert_can_use_accepted_evidence_or_independent_or_seed() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
+            let seed = fixture
+                .alice
+                .upsert(
+                    "nodes",
+                    row(10),
+                    cells(10, true, true, "room"),
+                    Default::default(),
+                )
                 .await
                 .unwrap();
-        }
-        let second_tx = second.commit_exclusive_handle(open).await.unwrap();
-        for _ in 0..128 {
-            fixture.tick(1).await;
-            second.tick().await.unwrap();
-        }
-        let first = fixture.alice.write_state(first_tx).unwrap().fate;
-        let second = second.write_state(second_tx).unwrap().fate;
-        assert!(
-            matches!(
-                (&first, &second),
-                (Fate::Accepted, Fate::Rejected(_)) | (Fate::Rejected(_), Fate::Accepted)
-            ),
-            "exact absence must select one whole unit: first={first:?}, second={second:?}",
-        );
-        let scope = if first == Fate::Accepted {
-            "first"
-        } else {
-            "second"
-        };
-        let schema = fixture
-            .authority
-            .catalogue_schema(fixture.authority.current_write_schema().unwrap().schema)
-            .unwrap();
-        let table = schema
-            .tables()
-            .iter()
-            .find(|table| table.name == "nodes")
-            .unwrap();
-        for id in [1, 2] {
+            assert_eq!(fixture.settle(seed.mergeable_tx_id()).await, Fate::Accepted);
+            let child = fixture
+                .alice
+                .upsert(
+                    "nodes",
+                    row(1),
+                    cells(10, false, true, "room"),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                fixture.settle(child.mergeable_tx_id()).await,
+                Fate::Accepted
+            );
+            fixture
+                .assert_rows(
+                    &[
+                        (1, cells(10, false, true, "room")),
+                        (10, cells(10, true, true, "room")),
+                    ],
+                    true,
+                )
+                .await;
+        });
+    }
+
+    #[test]
+    fn candidate_mergeable_unit_cannot_publish_created_witnesses() {
+        crate::db::block_on(async {
+            use crate::db::MergeableTxOps;
+            let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
+            let open = crate::db::OpenTransactionId::new();
+            fixture.alice.begin_mergeable(open).await.unwrap();
+            let tx = fixture.alice.mergeable_tx_ref(open);
+            let rows = [
+                (1, cells(2, false, true, "room")),
+                (2, cells(2, true, true, "room")),
+            ];
+            for (id, cells) in &rows {
+                tx.upsert("nodes", row(*id), cells.clone(), Default::default())
+                    .await
+                    .unwrap();
+            }
+            let committed = fixture.alice.commit_mergeable_handle(open).await.unwrap();
+            assert_eq!(
+                fixture.settle(committed).await,
+                Fate::Rejected(RejectionReason::AuthorizationDenied)
+            );
+            fixture.assert_rows(&rows, false).await;
+        });
+    }
+
+    #[test]
+    fn candidate_proof_cannot_use_unrelated_authority_local_pending_data() {
+        crate::db::block_on(async {
+            let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
+            let unrelated = fixture
+                .authority
+                .upsert(
+                    "nodes",
+                    row(10),
+                    cells(10, true, true, "room"),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
             assert_eq!(
                 fixture
                     .authority
-                    .local_current_row("nodes", row(id))
-                    .await
+                    .write_state(unrelated.mergeable_tx_id())
                     .unwrap()
-                    .unwrap()
-                    .cell(table, "scope"),
-                Some(Value::String(scope.to_owned())),
+                    .fate,
+                Fate::Pending
             );
-        }
-    }
-
-    #[tokio::test]
-    async fn candidate_exclusive_branch_write_is_rejected_before_publication() {
-        let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
-        let open = crate::tools::OpenTransactionId::new();
-        fixture.alice.begin_exclusive(open).await.unwrap();
-        let tx = fixture.alice.exclusive_tx_ref(open);
-        let error = tx
-            .upsert(
-                "nodes",
-                row(1),
-                cells(1, true, true, "draft"),
-                crate::db::UpsertOptions {
-                    target: crate::db::WriteTarget::BranchView {
-                        head: crate::protocol::BranchSelector::new([(
-                            "scope",
-                            Value::String("draft".to_owned()),
-                        )]),
-                        base: None,
-                    },
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, crate::db::ErrorCode::Schema);
-        fixture.alice.abandon_exclusive_handle(open).unwrap();
-        fixture
-            .assert_rows(&[(1, cells(1, true, true, "draft"))], false)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn candidate_mergeable_insert_can_use_accepted_evidence_or_independent_or_seed() {
-        let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
-        let seed = fixture
-            .alice
-            .upsert(
-                "nodes",
-                row(10),
-                cells(10, true, true, "room"),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(fixture.settle(seed.mergeable_tx_id()).await, Fate::Accepted);
-        let child = fixture
-            .alice
-            .upsert(
-                "nodes",
-                row(1),
-                cells(10, false, true, "room"),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            fixture.settle(child.mergeable_tx_id()).await,
-            Fate::Accepted
-        );
-        fixture
-            .assert_rows(
-                &[
-                    (1, cells(10, false, true, "room")),
-                    (10, cells(10, true, true, "room")),
-                ],
-                true,
-            )
-            .await;
-    }
-
-    #[tokio::test]
-    async fn candidate_mergeable_unit_cannot_publish_created_witnesses() {
-        use crate::db::MergeableTxOps;
-        let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
-        let open = crate::tools::OpenTransactionId::new();
-        fixture.alice.begin_mergeable(open).await.unwrap();
-        let tx = fixture.alice.mergeable_tx_ref(open);
-        let rows = [
-            (1, cells(2, false, true, "room")),
-            (2, cells(2, true, true, "room")),
-        ];
-        for (id, cells) in &rows {
-            tx.upsert("nodes", row(*id), cells.clone(), Default::default())
-                .await
-                .unwrap();
-        }
-        let committed = fixture.alice.commit_mergeable_handle(open).await.unwrap();
-        assert_eq!(
-            fixture.settle(committed).await,
-            Fate::Rejected(RejectionReason::AuthorizationDenied)
-        );
-        fixture.assert_rows(&rows, false).await;
-    }
-
-    #[tokio::test]
-    async fn candidate_proof_cannot_use_unrelated_authority_local_pending_data() {
-        let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
-        let unrelated = fixture
-            .authority
-            .upsert(
-                "nodes",
-                row(10),
-                cells(10, true, true, "room"),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
             fixture
-                .authority
-                .write_state(unrelated.mergeable_tx_id())
-                .unwrap()
-                .fate,
-            Fate::Pending
-        );
-        fixture
-            .check(&[(1, cells(10, false, true, "room"))], false)
-            .await;
-        assert_eq!(
-            fixture
-                .authority
-                .write_state(unrelated.mergeable_tx_id())
-                .unwrap()
-                .fate,
-            Fate::Pending
-        );
+                .check(&[(1, cells(10, false, true, "room"))], false)
+                .await;
+            assert_eq!(
+                fixture
+                    .authority
+                    .write_state(unrelated.mergeable_tx_id())
+                    .unwrap()
+                    .fate,
+                Fate::Pending
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn candidate_reverse_reference_postings_authorize_only_matching_parent() {
-        let reverse = PublicPolicyExpr::exists_including_created(
-            "nodes",
-            PublicPolicyExpr::and(vec![outer("parent_id", "id"), outer("scope", "scope")]),
-        );
-        let fixture = Fixture::new(schema(policy(reverse)), author("alice")).await;
-        fixture
-            .check(
-                &[
-                    (1, cells(1, false, true, "room")),
-                    (2, cells(1, true, true, "room")),
-                ],
-                true,
-            )
-            .await;
+    #[test]
+    fn candidate_reverse_reference_postings_authorize_only_matching_parent() {
+        crate::db::block_on(async {
+            let reverse = PublicPolicyExpr::exists_including_created(
+                "nodes",
+                PublicPolicyExpr::and(vec![outer("parent_id", "id"), outer("scope", "scope")]),
+            );
+            let fixture = Fixture::new(schema(policy(reverse)), author("alice")).await;
+            fixture
+                .check(
+                    &[
+                        (1, cells(1, false, true, "room")),
+                        (2, cells(1, true, true, "room")),
+                    ],
+                    true,
+                )
+                .await;
+        });
     }
 
     fn mixed_schema(required_local_witness: bool) -> PublicSchema {
@@ -922,7 +960,7 @@ mod proof_graph {
                 .fate,
             Fate::Pending
         );
-        let open = crate::tools::OpenTransactionId::new();
+        let open = crate::db::OpenTransactionId::new();
         fixture.alice.begin_exclusive(open).await.unwrap();
         let tx = fixture.alice.exclusive_tx_ref(open);
         tx.upsert(
@@ -975,178 +1013,186 @@ mod proof_graph {
         );
     }
 
-    #[tokio::test]
-    async fn candidate_mixed_unit_requires_accepted_evidence_for_unrelated_writes() {
-        mixed_local_admission_case(false).await;
+    #[test]
+    fn candidate_mixed_unit_requires_accepted_evidence_for_unrelated_writes() {
+        crate::db::block_on(async {
+            mixed_local_admission_case(false).await;
+        });
     }
 
-    #[tokio::test]
-    async fn candidate_mixed_unit_cannot_promote_local_admission_to_global_evidence() {
-        mixed_local_admission_case(true).await;
+    #[test]
+    fn candidate_mixed_unit_cannot_promote_local_admission_to_global_evidence() {
+        crate::db::block_on(async {
+            mixed_local_admission_case(true).await;
+        });
     }
 
     /// Alice cannot keep a marked INSERT grant that her same transaction revokes.
     /// alice -> authority: support admin -> viewer + marked child -> whole unit denied
-    #[tokio::test]
-    async fn candidate_marked_insert_cannot_keep_a_same_unit_demoted_grant() {
-        let public_schema = PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("support")
-                    .column("role", PublicColumnType::Text)
-                    .policies(
-                        PublicTablePolicies::new()
-                            .with_select(PublicPolicyExpr::True)
-                            .with_insert(PublicPolicyExpr::True)
-                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
-                    ),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("nodes")
-                    .fk_column("parent_id", "support")
-                    .column("scope", PublicColumnType::Text)
-                    .column("seed", PublicColumnType::Boolean)
-                    .column("allowed", PublicColumnType::Boolean)
-                    .policies(
-                        PublicTablePolicies::new()
-                            .with_select(PublicPolicyExpr::True)
-                            .with_insert(PublicPolicyExpr::exists_including_created(
-                                "support",
-                                PublicPolicyExpr::and(vec![
-                                    outer("id", "parent_id"),
-                                    PublicPolicyExpr::eq_literal(
-                                        "role",
-                                        PublicValue::Text("admin".to_owned()),
-                                    ),
-                                ]),
-                            )),
-                    ),
-            )
-            .build();
-        let fixture = Fixture::new(public_schema, author("alice")).await;
-        let support = fixture
-            .alice
-            .upsert(
+    #[test]
+    fn candidate_marked_insert_cannot_keep_a_same_unit_demoted_grant() {
+        crate::db::block_on(async {
+            let public_schema = PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("support")
+                        .column("role", PublicColumnType::Text)
+                        .policies(
+                            PublicTablePolicies::new()
+                                .with_select(PublicPolicyExpr::True)
+                                .with_insert(PublicPolicyExpr::True)
+                                .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                        ),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("nodes")
+                        .fk_column("parent_id", "support")
+                        .column("scope", PublicColumnType::Text)
+                        .column("seed", PublicColumnType::Boolean)
+                        .column("allowed", PublicColumnType::Boolean)
+                        .policies(
+                            PublicTablePolicies::new()
+                                .with_select(PublicPolicyExpr::True)
+                                .with_insert(PublicPolicyExpr::exists_including_created(
+                                    "support",
+                                    PublicPolicyExpr::and(vec![
+                                        outer("id", "parent_id"),
+                                        PublicPolicyExpr::eq_literal(
+                                            "role",
+                                            PublicValue::Text("admin".to_owned()),
+                                        ),
+                                    ]),
+                                )),
+                        ),
+                )
+                .build();
+            let fixture = Fixture::new(public_schema, author("alice")).await;
+            let support = fixture
+                .alice
+                .upsert(
+                    "support",
+                    row(10),
+                    BTreeMap::from([("role".to_owned(), Value::String("admin".to_owned()))]),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(fixture.settle(support.mergeable_tx_id()).await, Fate::Accepted);
+            let open = crate::db::OpenTransactionId::new();
+            fixture.alice.begin_exclusive(open).await.unwrap();
+            let tx = fixture.alice.exclusive_tx_ref(open);
+            tx.upsert(
                 "support",
                 row(10),
-                BTreeMap::from([("role".to_owned(), Value::String("admin".to_owned()))]),
+                BTreeMap::from([("role".to_owned(), Value::String("viewer".to_owned()))]),
                 Default::default(),
             )
             .await
             .unwrap();
-        assert_eq!(fixture.settle(support.mergeable_tx_id()).await, Fate::Accepted);
-        let open = crate::tools::OpenTransactionId::new();
-        fixture.alice.begin_exclusive(open).await.unwrap();
-        let tx = fixture.alice.exclusive_tx_ref(open);
-        tx.upsert(
-            "support",
-            row(10),
-            BTreeMap::from([("role".to_owned(), Value::String("viewer".to_owned()))]),
-            Default::default(),
-        )
-        .await
-        .unwrap();
-        tx.upsert("nodes", row(1), cells(10, false, true, "new"), Default::default())
-            .await
-            .unwrap();
-        let committed = fixture.alice.commit_exclusive_handle(open).await.unwrap();
-        assert_eq!(
-            fixture.settle(committed).await,
-            Fate::Rejected(RejectionReason::AuthorizationDenied),
-        );
-        for db in [&fixture.alice, &fixture.authority] {
-            assert!(db.local_current_row("nodes", row(1)).await.unwrap().is_none());
-            let support = db.local_current_row("support", row(10)).await.unwrap().unwrap();
-            let schema = db.catalogue_schema(db.current_write_schema().unwrap().schema).unwrap();
-            let table = schema.tables().iter().find(|table| table.name == "support").unwrap();
-            assert_eq!(support.cell(table, "role"), Some(Value::String("admin".to_owned())));
-        }
+            tx.upsert("nodes", row(1), cells(10, false, true, "new"), Default::default())
+                .await
+                .unwrap();
+            let committed = fixture.alice.commit_exclusive_handle(open).await.unwrap();
+            assert_eq!(
+                fixture.settle(committed).await,
+                Fate::Rejected(RejectionReason::AuthorizationDenied),
+            );
+            for db in [&fixture.alice, &fixture.authority] {
+                assert!(db.local_current_row("nodes", row(1)).await.unwrap().is_none());
+                let support = db.local_current_row("support", row(10)).await.unwrap().unwrap();
+                let schema = db.catalogue_schema(db.current_write_schema().unwrap().schema).unwrap();
+                let table = schema.tables().iter().find(|table| table.name == "support").unwrap();
+                assert_eq!(support.cell(table, "role"), Some(Value::String("admin".to_owned())));
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn candidate_unselected_insert_marker_keeps_update_evidence_accepted_only() {
-        let support_condition = outer("id", "parent_id");
-        let public_schema = PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("support")
-                    .column("name", PublicColumnType::Text)
-                    .policies(
-                        PublicTablePolicies::new()
-                            .with_select(PublicPolicyExpr::True)
-                            .with_insert(PublicPolicyExpr::True),
-                    ),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("nodes")
-                    .fk_column("parent_id", "support")
-                    .column("scope", PublicColumnType::Text)
-                    .column("seed", PublicColumnType::Boolean)
-                    .column("allowed", PublicColumnType::Boolean)
-                    .policies(
-                        PublicTablePolicies::new()
-                            .with_select(PublicPolicyExpr::True)
-                            .with_insert(PublicPolicyExpr::or(vec![
-                                PublicPolicyExpr::eq_literal("seed", PublicValue::Boolean(true)),
-                                PublicPolicyExpr::exists_including_created(
-                                    "support",
-                                    support_condition.clone(),
+    #[test]
+    fn candidate_unselected_insert_marker_keeps_update_evidence_accepted_only() {
+        crate::db::block_on(async {
+            let support_condition = outer("id", "parent_id");
+            let public_schema = PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("support")
+                        .column("name", PublicColumnType::Text)
+                        .policies(
+                            PublicTablePolicies::new()
+                                .with_select(PublicPolicyExpr::True)
+                                .with_insert(PublicPolicyExpr::True),
+                        ),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("nodes")
+                        .fk_column("parent_id", "support")
+                        .column("scope", PublicColumnType::Text)
+                        .column("seed", PublicColumnType::Boolean)
+                        .column("allowed", PublicColumnType::Boolean)
+                        .policies(
+                            PublicTablePolicies::new()
+                                .with_select(PublicPolicyExpr::True)
+                                .with_insert(PublicPolicyExpr::or(vec![
+                                    PublicPolicyExpr::eq_literal("seed", PublicValue::Boolean(true)),
+                                    PublicPolicyExpr::exists_including_created(
+                                        "support",
+                                        support_condition.clone(),
+                                    ),
+                                ]))
+                                .with_update(
+                                    Some(PublicPolicyExpr::Exists {
+                                        table: "support".to_owned(),
+                                        condition: Box::new(support_condition),
+                                    }),
+                                    PublicPolicyExpr::True,
                                 ),
-                            ]))
-                            .with_update(
-                                Some(PublicPolicyExpr::Exists {
-                                    table: "support".to_owned(),
-                                    condition: Box::new(support_condition),
-                                }),
-                                PublicPolicyExpr::True,
-                            ),
-                    ),
-            )
-            .build();
-        let fixture = Fixture::new(public_schema, author("alice")).await;
-        fixture
-            .check(&[(1, cells(10, true, true, "old"))], true)
-            .await;
-        let support = fixture
-            .authority
-            .upsert(
-                "support",
-                row(10),
-                BTreeMap::from([("name".to_owned(), Value::String("pending".to_owned()))]),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
+                        ),
+                )
+                .build();
+            let fixture = Fixture::new(public_schema, author("alice")).await;
             fixture
+                .check(&[(1, cells(10, true, true, "old"))], true)
+                .await;
+            let support = fixture
                 .authority
-                .write_state(support.mergeable_tx_id())
-                .unwrap()
-                .fate,
-            Fate::Pending
-        );
-        let update = fixture
-            .alice
-            .upsert(
-                "nodes",
-                row(1),
-                cells(10, false, true, "updated"),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            fixture.settle(update.mergeable_tx_id()).await,
-            Fate::Rejected(RejectionReason::AuthorizationDenied),
-        );
-        fixture
-            .assert_rows(&[(1, cells(10, true, true, "old"))], true)
-            .await;
-        assert_eq!(
+                .upsert(
+                    "support",
+                    row(10),
+                    BTreeMap::from([("name".to_owned(), Value::String("pending".to_owned()))]),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .authority
+                    .write_state(support.mergeable_tx_id())
+                    .unwrap()
+                    .fate,
+                Fate::Pending
+            );
+            let update = fixture
+                .alice
+                .upsert(
+                    "nodes",
+                    row(1),
+                    cells(10, false, true, "updated"),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                fixture.settle(update.mergeable_tx_id()).await,
+                Fate::Rejected(RejectionReason::AuthorizationDenied),
+            );
             fixture
-                .authority
-                .write_state(support.mergeable_tx_id())
-                .unwrap()
-                .fate,
-            Fate::Pending
-        );
+                .assert_rows(&[(1, cells(10, true, true, "old"))], true)
+                .await;
+            assert_eq!(
+                fixture
+                    .authority
+                    .write_state(support.mergeable_tx_id())
+                    .unwrap()
+                    .fate,
+                Fate::Pending
+            );
+        });
     }
 }
