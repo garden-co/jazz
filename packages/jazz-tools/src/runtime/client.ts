@@ -999,7 +999,7 @@ export class ExclusiveWriteHandle extends WriteHandle<void> {
   override wait(options?: { tier: DurabilityTier }): Promise<void>;
   override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<void> {
     await this.client().waitForExclusiveTransaction(
-      await this.txId,
+      this.txId,
       options === undefined ? undefined : resolveWriteWaitTier(options.tier),
     );
   }
@@ -1024,7 +1024,7 @@ export class ExclusiveWriteResult<T> extends WriteResult<T> {
   override wait(options?: { tier: DurabilityTier }): Promise<T>;
   override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<T> {
     await this.client().waitForExclusiveTransaction(
-      await this.txId,
+      this.txId,
       options === undefined ? undefined : resolveWriteWaitTier(options.tier),
     );
     return this.value;
