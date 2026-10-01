@@ -40,10 +40,12 @@ it("inspects recovery registration without enrolling a device or claiming recove
       },
     });
     expect(await untouched.read()).toBeNull();
-    expect(await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "edge" })).toEqual(
+    expect(await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" })).toEqual(
       [],
     );
-    expect(await observer.all(deviceRequestApp.__e2ee_account_roots, { tier: "edge" })).toEqual([]);
+    expect(await observer.all(deviceRequestApp.__e2ee_account_roots, { tier: "remote" })).toEqual(
+      [],
+    );
 
     const owner = await createDb({ ...account, e2ee: { store: store() } });
     clients.push(owner);
@@ -79,10 +81,10 @@ it("inspects recovery registration without enrolling a device or claiming recove
         validatedRootId: rootId,
       },
     });
-    const roots = await observer.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "edge" });
+    const roots = await observer.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" });
     expect(configured.account.recoveryRootIds).toEqual(roots.map((root) => root.id));
     expect(await untouched.read()).toBeNull();
-    expect(await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "edge" })).toEqual(
+    expect(await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" })).toEqual(
       requests,
     );
     for (const table of [
