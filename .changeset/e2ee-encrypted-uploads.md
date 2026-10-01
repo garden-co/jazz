@@ -25,4 +25,13 @@ proofless durable exclusive retries fail closed. Revocation does not erase
 previously uploaded ciphertext or previously held keys.
 
 Extend native, WASM and foreground stage/attach capabilities and codec contracts.
+Dropped or rejected raw streaming uploads queue exact cleanup on their live
+originating runtime, including foreign-runtime or schema rejection. Cleanup
+resolves the original upload's pending journal or promoted receipt, including
+an ambiguous promotion acknowledgement or cancellation before publication.
+Successful publication or staged-capability transfer hands off ownership once.
+Resident publications defer cleanup without a retry loop; owner ticks service
+the retained claim, and close stays retryable without retiring storage until
+admitted cleanup completes. Uploads do not keep their runtime alive or promise
+cleanup after it is closed or unavailable.
 Foreground codec coverage is not a claim of React Native E2EE qualification.

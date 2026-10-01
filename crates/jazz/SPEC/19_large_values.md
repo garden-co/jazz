@@ -279,6 +279,18 @@ against the published descriptor. Other writes and exclusive read dependencies
 are part of the same owner-row commit, with no database transaction held while
 the host produces bytes.
 
+Raw uploads retain origin-bound cleanup ownership until publication or a staged
+capability takes ownership. Rejected foreign-runtime/schema consumption and
+cancellation before that transfer retire the original pending journal or its
+promoted receipt, even if promotion committed without an acknowledgement.
+Groove resolves that original upload identity; Jazz does not decode its metadata.
+Resident publication defers cancellation without changing storage. The live
+owner retains cleanup debt and services one deferred claim per tick without
+scheduling a retry loop. Close drains admitted cleanup and returns retryable
+failure if publication still blocks retirement, leaving storage open for a
+normal tick and subsequent close. Uploads hold only a weak runtime reference;
+there is no cleanup guarantee after that owner closes or becomes unavailable.
+
 Retries must preserve the original exclusive evidence, never convert the upload
 to a mergeable write or refresh away stale dependencies. The existing durable
 exclusive restart limitation remains: reconstructed transactions lacking their
@@ -289,8 +301,12 @@ Groove encoding.
 
 Behavioural receipts are `staged_streaming_attaches_atomically_and_only_once`,
 `staged_streaming_rejects_foreign_runtime_identity_and_mergeable_transaction`,
-`staged_streaming_rollback_drop_and_overwrite_release_claims`, and
-`staged_streaming_rejection_retains_payload_across_reopen_and_retry`.
+`staged_streaming_rollback_drop_and_overwrite_release_claims`,
+`staged_streaming_rejection_retains_payload_across_reopen_and_retry`,
+`streaming_wrong_owner_consumption_releases_durable_pending_uploads`,
+`streaming_promotion_ack_loss_releases_the_original_upload_receipt`,
+`streaming_finish_cancellation_after_promotion_releases_unpublished_receipt`, and
+`streaming_cleanup_deferred_by_publication_keeps_close_retryable`.
 
 Sync is intentionally asymmetric. Upload is root-first push-before-row: the
 writer starts with the complete large-value descriptor, then sends only the
