@@ -125,6 +125,10 @@ The exhaustive Rust workspace target check remains in the lint partition.
 The TypeScript job's 90-minute outer allowance does not change individual test
 deadlines, consumer concurrency or the requirement to report every failing test.
 
+Authority-backed test reads use `tier: "remote"`; write acceptance uses
+`wait({ tier: "global" })`. The removed `"edge"` read tier must appear only in
+tests that explicitly exercise its rejection.
+
 ### Snapshot testing with insta in rust
 
 Sync integration tests use [insta](https://insta.rs) for inline snapshot assertions. Snapshots live directly in the test source as `@"..."` strings — no separate `.snap` files.
