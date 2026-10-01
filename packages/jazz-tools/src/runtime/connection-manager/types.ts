@@ -4,6 +4,7 @@ import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import type { AuthUpdate, DurabilityTier, JazzClient, MutationErrorEvent } from "../client.js";
 import type { DbConfig } from "../db.js";
+import type { Session } from "../context.js";
 import type { ForegroundNodeLease, RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
 import type { AuthFailureReason } from "../auth-state.js";
@@ -238,6 +239,19 @@ export abstract class ConnectionManager {
   abstract disconnect(): Promise<void>;
 
   abstract reconnect(): Promise<void>;
+
+  /** Renew account credentials and synchronize the client before Db publishes them. */
+  refreshAccountAuth(jwtToken: string, trustedReservedSession?: Session): void {
+    const auth: AuthUpdate = { mode: "bearer", jwtToken, trustedReservedSession };
+    if (this.host.runtimeSource.refreshAccountToken(jwtToken)) {
+      // The account capability owns transport auth; only the JS snapshot remains.
+      this.client?.acceptAuthUpdate(auth);
+    } else {
+      this.host.runtimeSource.assertAuthUpdateAllowed();
+      this.updateAuth(auth);
+    }
+  }
+
   updateAuth(auth: AuthUpdate): void {
     if (auth.mode === "bearer") {
       if (auth.jwtToken && auth.trustedReservedSession) {

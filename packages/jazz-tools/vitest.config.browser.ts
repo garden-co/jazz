@@ -6,6 +6,12 @@ import {
   liveAuthorityBackendInsert,
   liveAuthorityBackendClose,
 } from "./tests/browser/live-authority-replay-node.js";
+import {
+  largeValueRewriteBackendOpen,
+  largeValueRewriteBackendSeed,
+  largeValueRewriteBackendAppend,
+  largeValueRewriteBackendClose,
+} from "./tests/browser/large-value-rewrite-node.js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
@@ -158,13 +164,22 @@ export default defineConfig({
           if (!output) return null;
           // A reviewed source run exports to a new external candidate, never
           // overwriting a checked-in or previously produced physical receipt.
-          writeFileSync(output, `${JSON.stringify(records, null, 2)}\n`, { flag: "wx" });
+          writeFileSync(output, `${JSON.stringify(records, null, 2)}\n`, {
+            flag: "wx",
+          });
           return output;
         },
         liveAuthorityBackendOpen: async (_context, info) => liveAuthorityBackendOpen(info),
         liveAuthorityBackendInsert: async (_context, appId, seed, title) =>
           liveAuthorityBackendInsert(appId, seed, title),
         liveAuthorityBackendClose: async (_context, appId) => liveAuthorityBackendClose(appId),
+        largeValueRewriteBackendOpen: async (_context, info) => largeValueRewriteBackendOpen(info),
+        largeValueRewriteBackendSeed: async (_context, appId, conversationId, attachmentBytes) =>
+          largeValueRewriteBackendSeed(appId, conversationId, attachmentBytes),
+        largeValueRewriteBackendAppend: async (_context, appId, turnId, words, delayMs) =>
+          largeValueRewriteBackendAppend(appId, turnId, words, delayMs),
+        largeValueRewriteBackendClose: async (_context, appId) =>
+          largeValueRewriteBackendClose(appId),
         jazzBrowserTopologyLog: async (_context, status, label, elapsedMs) => {
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },

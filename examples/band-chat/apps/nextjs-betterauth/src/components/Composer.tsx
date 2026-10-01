@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useDb } from "jazz-tools/react";
 import {
   Button,
@@ -14,6 +14,8 @@ import {
 import { app } from "../../schema";
 import { attachmentAccept, attachmentProblem, formatBytes, isImageType } from "../lib/attachments";
 import { useObjectUrl } from "../lib/use-object-url";
+import { writeRejectionReason } from "../lib/write-rejection";
+import { useUnsentMessages } from "./UnsentNotices";
 
 interface PendingFile {
   key: string;
@@ -32,6 +34,7 @@ export function Composer({
   onStartSketch: () => void;
 }) {
   const db = useDb();
+  const unsent = useUnsentMessages();
   const fileInput = useRef<HTMLInputElement>(null);
   const [text, setText] = useState("");
   const [files, setFiles] = useState<PendingFile[]>([]);
@@ -51,8 +54,26 @@ export function Composer({
     setFiles((current) => [...current, ...accepted]);
   }
 
-  // The draft and pending files are cleared only once they are written, so a
-  // failed send keeps what the person typed and any files not yet sent.
+  // A rejected message comes back into an empty draft while this room is
+  // open. Its notice is shown above the rooms, so it stays even when the
+  // rejection means this room is gone.
+  useEffect(
+    () =>
+      unsent.onUnsent((message) => {
+        if (message.roomId === roomId && message.text)
+          setText((current) => (current ? current : message.text));
+      }),
+    [unsent, roomId],
+  );
+
+  // The draft and pending files are cleared only once they are written
+  // locally, so a send that fails here keeps what the person typed and any
+  // files not yet sent.
+  //
+  // A send commits locally first, so it works offline and clears the draft
+  // at once. The server can still reject it later, for example if a policy
+  // denies it once the sender was removed from the room, so each message is
+  // tracked until the server accepts or rejects it.
   async function send(value: string) {
     const body = value.trim();
     if ((!body && files.length === 0) || isSending) return;
@@ -64,17 +85,18 @@ export function Composer({
       if (outgoing.length === 0) {
         // The message and the room's new activity commit together. Members
         // may record activity on the room; the policy keeps its name fixed.
-        await db.transaction((tx) => {
+        const committed = await db.transaction((tx) => {
           tx.insert(app.messages, { ...base, text: body });
           tx.update(app.rooms, roomId, { lastActivityAt: new Date() });
         });
+        unsent.track(committed, { roomId, roomName, text: body });
         setText("");
         return;
       }
       // Each file becomes its own message; the text rides on the first one.
       // Bytes stream into the row instead of being copied through memory.
       for (const [index, { key, file }] of outgoing.entries()) {
-        await db.insertStreaming(app.messages, {
+        const inserted = await db.insertStreaming(app.messages, {
           ...base,
           text: index === 0 ? body : "",
           attachmentName: file.name,
@@ -82,10 +104,24 @@ export function Composer({
           attachmentSize: file.size,
           attachment: file.stream(),
         });
+        unsent.track(inserted, {
+          roomId,
+          roomName,
+          text: index === 0 ? body : "",
+          attachmentName: file.name,
+        });
         if (index === 0) setText("");
         setFiles((current) => current.filter((item) => item.key !== key));
       }
-      db.update(app.rooms, roomId, { lastActivityAt: new Date() });
+      // The messages are already sent. A rejected activity update only leaves
+      // the room lower in the list, so it is logged, not shown. Any other
+      // failure while waiting leaves the update committed locally.
+      db.update(app.rooms, roomId, { lastActivityAt: new Date() })
+        .wait({ tier: "global" })
+        .catch((cause: unknown) => {
+          const reason = writeRejectionReason(cause);
+          if (reason !== undefined) console.warn(`Room activity not updated: ${reason}`);
+        });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {

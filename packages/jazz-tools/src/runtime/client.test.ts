@@ -689,11 +689,25 @@ describe("public read tiers", () => {
   it("keeps the runtime's internal durability read names byte-for-byte compatible", () => {
     for (const tier of ["local", "global"] as const) {
       expect(resolveReadTier(tier)).toBe(tier);
-      expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({
-        tier,
-        localUpdates: "immediate",
-      });
     }
+    expect(resolveEffectiveQueryExecutionOptions({}, { tier: "local" })).toMatchObject({
+      tier: "local",
+      localUpdates: "immediate",
+    });
+  });
+
+  it("reads every server tier as remote, without pending local writes (#3902)", () => {
+    expect(resolveEffectiveQueryExecutionOptions({}, { tier: "global" })).toMatchObject({
+      tier: "global",
+      localUpdates: "deferred",
+    });
+    expect(
+      resolveEffectiveQueryExecutionOptions({}, { tier: "global", localUpdates: "immediate" }),
+    ).toMatchObject({ tier: "global", localUpdates: "deferred" });
+    // Outside the browser, a client with a server reads remote by default.
+    expect(
+      resolveEffectiveQueryExecutionOptions({ serverUrl: "http://localhost:1" }),
+    ).toMatchObject({ tier: "global", localUpdates: "deferred" });
   });
 
   it("infers the own-write overlay policy from the product read tier", () => {

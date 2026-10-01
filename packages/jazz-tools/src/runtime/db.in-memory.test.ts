@@ -199,6 +199,89 @@ describe("createDb in-memory driver", () => {
     });
   });
 
+  it("composes page-relative diffs inside mergeable and exclusive transactions", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-large-value-transaction-diff-test")),
+      driver: { type: "memory" },
+    });
+
+    const prefix = "a".repeat(70_000);
+    const { value: inserted } = db.insert(largeValues.documents, {
+      payload: new Uint8Array(),
+      body: prefix,
+      metadata: { nested: { answer: 42 } },
+      done: false,
+    });
+    const tail = (length: number) =>
+      largeValues.documents
+        .where({ id: inserted.id })
+        .select({ body: { from: prefix.length, to: prefix.length + length } });
+
+    const mergeable = await db.transaction(async (tx) => {
+      tx.update(
+        largeValues.documents,
+        inserted.id,
+        {},
+        {
+          applyDiffs: {
+            body: {
+              within: { from: prefix.length, to: prefix.length },
+              splices: [{ at: 0, delete: 0, insert: "one" }],
+            },
+          },
+        },
+      );
+      // The second append addresses the transaction's own first append.
+      tx.update(
+        largeValues.documents,
+        inserted.id,
+        { done: true },
+        {
+          applyDiffs: {
+            body: {
+              within: { from: prefix.length + 3, to: prefix.length + 3 },
+              splices: [{ at: 0, delete: 0, insert: "two" }],
+            },
+            metadata: { edits: [{ op: "set", at: "/nested/answer", value: 43 }] },
+          },
+        },
+      );
+      const [seen] = await tx.all(tail(6));
+      // Outside the transaction the committed body is still just the prefix.
+      const outside = await db!.one(largeValues.documents.where({ id: inserted.id }));
+      return { seen: seen?.body, outsideLength: outside?.body.length };
+    });
+    expect(mergeable.value).toEqual({ seen: "onetwo", outsideLength: prefix.length });
+    await mergeable.wait({ tier: "local" });
+    await expect(db.all(tail(6))).resolves.toEqual([{ id: inserted.id, body: "onetwo" }]);
+    await expect(db.one(largeValues.documents.where({ id: inserted.id }))).resolves.toMatchObject({
+      done: true,
+    });
+
+    await db.exclusiveTransaction((tx) => {
+      tx.update(
+        largeValues.documents,
+        inserted.id,
+        {},
+        {
+          applyDiffs: {
+            body: {
+              within: { from: prefix.length + 6, to: prefix.length + 6 },
+              splices: [{ at: 0, delete: 0, insert: "three" }],
+            },
+          },
+        },
+      );
+    });
+    await expect(db.all(tail(11))).resolves.toEqual([{ id: inserted.id, body: "onetwothree" }]);
+    const [metadata] = await db.all(
+      largeValues.documents
+        .where({ id: inserted.id })
+        .select({ metadata: { at: "/nested/answer" } }),
+    );
+    expect(metadata).toEqual({ id: inserted.id, metadata: 43 });
+  });
+
   it("keeps descriptor-shaped JSON values ordinary for direct and transactional upserts", async () => {
     db = await createDb({
       ...(await localAccountConfig("in-memory-large-value-json-upsert-shape-test")),

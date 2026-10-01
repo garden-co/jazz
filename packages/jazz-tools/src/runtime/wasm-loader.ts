@@ -4,6 +4,7 @@ import {
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
 import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
+import { installJsonSchemaValidator } from "./json-schema-validator.js";
 
 /** WASM-only loader, deliberately outside the shared client implementation. */
 export type WasmModule = typeof import("jazz-wasm");
@@ -51,8 +52,7 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
   const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);
   if (syncInitInput) {
     wasmModule.initSync(syncInitInput);
-    assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
-    return wasmModule;
+    return readyWasmModule(wasmModule);
   }
 
   let nodeInitDone = false;
@@ -76,7 +76,16 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
     else await wasmModule.default();
   }
 
-  assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
+  return readyWasmModule(wasmModule);
+}
+
+function readyWasmModule(wasmModule: any): WasmModule {
+  assertNativeArtifactCompatibility(wasmModule, "WASM", [
+    "initSync",
+    "WasmDb",
+    "setJsonSchemaValidator",
+  ]);
+  installJsonSchemaValidator(wasmModule);
   return wasmModule;
 }
 

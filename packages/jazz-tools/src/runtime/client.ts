@@ -695,8 +695,10 @@ export function resolveEffectiveQueryExecutionOptions(
   return {
     tier,
     ...(firstLoadRemoteWaitMs !== undefined ? { firstLoadRemoteWaitMs } : {}),
-    localUpdates:
-      options?.localUpdates ?? (selectedTier === ReadTier.Remote ? "deferred" : "immediate"),
+    // A server-tier read is a remote read: own writes show once the server
+    // confirms them. The old "global" read that also showed pending local
+    // writes is gone; acknowledgements could briefly drop rows from it (#3902).
+    localUpdates: tier === "global" ? "deferred" : (options?.localUpdates ?? "immediate"),
     propagation: selectedTier === "local-only" ? "local-only" : (options?.propagation ?? "full"),
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
@@ -1385,7 +1387,7 @@ export class JazzClient {
     return this;
   }
 
-  private updateAuthSnapshot(update: AuthUpdate): void {
+  private updateAuthSnapshot(update: AuthUpdate, updateRuntime = true): void {
     const previousJwtToken = this.context.jwtToken;
     const previousCookieSession = this.context.cookieSession;
     const previousTrustedReservedSession = getTrustedReservedSession(this.context);
@@ -1403,7 +1405,9 @@ export class JazzClient {
 
     try {
       this.resolvedSession = this.resolveSessionFromContext();
-      this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+      if (updateRuntime) {
+        this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+      }
     } catch (error) {
       this.context.jwtToken = previousJwtToken;
       this.context.cookieSession = previousCookieSession;
@@ -1415,6 +1419,11 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.updateAuthSnapshot({ mode: "bearer", jwtToken });
+  }
+
+  /** @internal Accept an auth update already applied by the owning connection. */
+  acceptAuthUpdate(update: AuthUpdate): void {
+    this.updateAuthSnapshot(update, false);
   }
 
   /** @internal Update a token minted by a dedicated first-party reserved auth flow. */
@@ -1853,16 +1862,14 @@ export class JazzClient {
     openTransactionId?: OpenTransactionId,
     branch?: BranchView,
   ): MutationResult {
-    if (openTransactionId || branch) {
-      throw new Error(
-        "Partial-value updates are not yet supported inside transactions or branch views.",
-      );
+    if (branch) {
+      throw new Error("Partial-value updates are not yet supported in branch views.");
     }
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      undefined,
+      openTransactionId,
       updatedAt,
     );
     if (!this.runtime.updateLargeValues) {

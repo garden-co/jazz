@@ -2,6 +2,9 @@ declare module "jazz-wasm" {
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
   export function nativeArtifactFingerprint(): string;
+  export function setJsonSchemaValidator(
+    compile: (schemaJson: string) => (instanceJson: string) => string | undefined,
+  ): void;
   export function setTraceEntryCollectionEnabled(enabled: boolean): void;
   export function drainTraceEntries(): unknown[];
   export function subscribeTraceEntries(callback: () => void): () => void;
@@ -182,6 +185,14 @@ declare module "jazz-wasm" {
       descriptors: unknown,
       updatedAtMs?: number | null,
     ): WasmWrite;
+    updateLargeValuesInTransaction(
+      openTransactionId: string,
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      descriptors: unknown,
+      updatedAtMs?: number | null,
+    ): void;
     requestUpdatePermissionAdvice(
       table: string,
       rowId: Uint8Array,

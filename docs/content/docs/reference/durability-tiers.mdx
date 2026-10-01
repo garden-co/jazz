@@ -38,6 +38,10 @@ New applications should use the two product read choices `"local-first"` and `"r
 - `"local-first"` uses cached local knowledge and shows pending local writes immediately, while still syncing.
 - `"remote"` uses the server's current query scope, without pending local writes. It waits while offline.
 
+Without a `tier`, browser clients read `"local-first"`. Other clients read `"remote"` when they have a
+server, and `"local-first"` when they don't. A remote read shows your own writes once the server has
+confirmed them, so wait for a write (`.wait({ tier: "global" })`) before reading it back.
+
 ### Waiting for the server (`firstLoadRemoteWaitMs`)
 
 A local-first read accepts an optional `firstLoadRemoteWaitMs` that bounds how long

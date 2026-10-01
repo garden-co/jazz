@@ -111,9 +111,15 @@ body {
   background: transparent;
 }
 
+/*
+ * Absolutely positioned, so it spans its grid area as an overlay without
+ * taking part in auto-placement: as an in-flow item it occupied one cell in
+ * every lane row, and each lane's cells skipped it, skewing the rows.
+ */
 .playhead {
+  position: absolute;
+  inset: 0;
   z-index: 0;
-  align-self: stretch;
   margin-block: calc(var(--spacing-1) * -1);
   border-radius: var(--radius-inner);
   background: var(--color-overlay-hover);

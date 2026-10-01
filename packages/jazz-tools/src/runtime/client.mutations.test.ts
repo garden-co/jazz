@@ -167,7 +167,7 @@ describe("JazzClient write attribution", () => {
           return true;
         },
       });
-      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      const tx = new Transaction(kind, () => client, null, client);
       const id = tx.openTransactionId();
       const result = await runInTransaction(
         tx,
@@ -200,7 +200,7 @@ describe("JazzClient write attribution", () => {
     });
     let continued = false;
     const { client } = makeClient();
-    const tx = new Transaction("exclusive", () => client, undefined, undefined, client);
+    const tx = new Transaction("exclusive", () => client, null, client);
     const id = tx.openTransactionId();
     client.prepareTransaction(id, async () => {
       started();
@@ -242,7 +242,7 @@ describe("JazzClient write attribution", () => {
         },
       });
       const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
-      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      const tx = new Transaction(kind, () => client, null, client);
       client.prepareTransaction(tx.openTransactionId(), async () => {
         await ready;
         prepared = "first";
@@ -302,7 +302,7 @@ describe("JazzClient write attribution", () => {
         },
       });
       const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
-      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      const tx = new Transaction(kind, () => client, null, client);
       const first = tx.all(app.todos, { tier: "local-first" });
       const second = tx.all(app.todos, { tier: "local-first" });
       try {
@@ -331,7 +331,7 @@ describe("JazzClient write attribution", () => {
       });
       const { client } = makeClient({ commitTransaction: () => pending });
       const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
-      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      const tx = new Transaction(kind, () => client, null, client);
       const committed = tx.commit();
       try {
         expect(committed).not.toBeInstanceOf(Promise);
@@ -366,7 +366,7 @@ describe("JazzClient write attribution", () => {
           await id;
         },
       });
-      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      const tx = new Transaction(kind, () => client, null, client);
       const result = await runInTransaction(tx, () => "callback value", client);
       const waiting =
         result instanceof ExclusiveWriteResult ? result.wait() : result.wait({ tier: "local" });
@@ -389,7 +389,7 @@ describe("JazzClient write attribution", () => {
             await id;
           },
         });
-        const tx = new Transaction(kind, () => client, undefined, undefined, client);
+        const tx = new Transaction(kind, () => client, null, client);
         const result = await runInTransaction(tx, () => "callback value", client);
         // Applications can attach their wait after the asynchronous failure arrives.
         await new Promise((resolve) => setTimeout(resolve, 0));
@@ -421,7 +421,7 @@ describe("JazzClient write attribution", () => {
           await persisted;
         },
       });
-      const tx = new Transaction(kind, () => client, undefined, undefined, client);
+      const tx = new Transaction(kind, () => client, null, client);
       const resultPromise = runInTransaction(tx, () => "callback value", client);
       try {
         // Runtime I/O is controlled; no transaction or write-handle method is mocked.

@@ -2050,7 +2050,6 @@ dependencies = [
  "jazz-storage-rocksdb",
  "jazz-storage-sqlite",
  "jazz-types",
- "jsonschema",
  "jsonwebtoken",
  "libc",
  "postcard",
@@ -2088,8 +2087,10 @@ name = "jazz-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "backtrace",
  "base64 0.22.1",
  "clap",
+ "flate2",
  "futures-util",
  "jazz",
  "jazz-native-transport",
@@ -2099,11 +2100,14 @@ dependencies = [
  "jazz-testkit",
  "jsonwebtoken",
  "libc",
+ "mappings",
  "mimalloc",
  "opentelemetry",
  "opentelemetry_sdk",
  "postcard",
+ "prost",
  "reqwest",
+ "rustc-demangle",
  "serde",
  "serde_json",
  "tempfile",
@@ -2891,6 +2895,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mappings"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bab1e61a4b76757edb59cd81fcaa7f3ba9018d43b527d9abfad877b4c6c60f2"
+dependencies = [
+ "anyhow",
+ "libc",
+ "once_cell",
+ "pprof_util",
+ "tracing",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3579,6 +3596,19 @@ dependencies = [
  "symbolic-demangle",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "pprof_util"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eea0cc524de808a6d98d192a3d99fe95617031ad4a52ec0a0f987ef4432e8fe1"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "num",
+ "paste",
+ "prost",
 ]
 
 [[package]]

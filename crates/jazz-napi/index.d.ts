@@ -31,6 +31,11 @@ export declare class NapiDb {
   update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
   updateInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): void
   /**
+   * Binding-only entrypoint for typed partial-value updates staged inside
+   * an open transaction. The transaction's bound identity authors them.
+   */
+  updateLargeValuesInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): void
+  /**
    * Binding-only entrypoint for typed partial-value updates. The public
    * TypeScript API validates column-kind-specific descriptors before they
    * reach this encoded boundary.
