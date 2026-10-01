@@ -264,20 +264,34 @@ export function StackDiagram() {
     { x: 404, title: "backend", lines: [...copy("in memory"), "typescript · rust"] },
     { x: 602, title: "agents & jobs", lines: [...copy("in memory"), "any server"] },
   ];
-  // Jazz Cloud sits centred above the peers. Every peer's wire enters it from
-  // below, at evenly spaced points along its bottom edge, and all four turn at
-  // the same height, so the one "sync" label between them covers them all.
+  // Jazz Cloud sits left-aligned with the web app. Every peer's wire enters it
+  // from below, at evenly spaced points along its bottom edge: the web app's
+  // goes straight up, the others turn, the farthest peer turning highest so
+  // wires never cross. The one "sync" label by their entries covers them all.
+  const coreX = 8;
   const coreW = 340;
-  const coreX = 400 - coreW / 2;
   const coreY = 16;
   const coreH = 82;
-  const peerY = 164;
-  const turnY = (coreY + coreH + peerY) / 2;
+  const coreBottom = coreY + coreH;
+  const peerY = 180;
+  const firstX = peers[0].x + w / 2;
+  // The last entry sits 54px in from the cloud's right edge; the rest share
+  // the span evenly.
+  const lastEntryX = coreX + coreW - 54;
+  const entryGap = (lastEntryX - firstX) / (peers.length - 1);
+  const turnGap = (peerY - coreBottom) / peers.length;
   const wires: Point[][] = peers.map((peer, index) => {
-    const entryX = coreX + (coreW * (index + 0.5)) / peers.length;
+    const entryX = firstX + index * entryGap;
     const peerX = peer.x + w / 2;
+    if (index === 0) {
+      return [
+        [entryX, coreBottom],
+        [peerX, peerY],
+      ];
+    }
+    const turnY = coreBottom + turnGap * (peers.length - index);
     return [
-      [entryX, coreY + coreH],
+      [entryX, coreBottom],
       [entryX, turnY],
       [peerX, turnY],
       [peerX, peerY],
@@ -285,7 +299,7 @@ export function StackDiagram() {
   });
   return (
     <Diagram
-      viewBox="0 0 800 300"
+      viewBox="0 0 800 316"
       label="Web apps, mobile apps, backends and agents each keep a partial local copy of the data they use, on disk or in memory, and sync it with Jazz Cloud, which holds all data and authorizes every write."
     >
       <Box
@@ -300,7 +314,7 @@ export function StackDiagram() {
       {wires.map((points) => (
         <Wire key={points[points.length - 1][0]} points={points} start />
       ))}
-      <Label x={400} y={turnY + 4} anchor="middle">
+      <Label x={firstX + entryGap / 2} y={coreBottom + 18} anchor="middle">
         sync
       </Label>
       {peers.map((peer) => (
@@ -314,7 +328,7 @@ export function StackDiagram() {
           lines={peer.lines}
         />
       ))}
-      <Label x={8} y={288} tone="muted">
+      <Label x={8} y={304} tone="muted">
         the clients and server modules making up your app
       </Label>
     </Diagram>
