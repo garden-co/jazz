@@ -37,7 +37,7 @@ export class DefinedTable<
       if (
         this.indexedColumns?.some((key) => key === name) ||
         this.branchColumns?.some((key) => key === name) ||
-        this.compositeIndexes?.some((index) => index.includes(name))
+        this.compositeIndexes?.some((index) => index.some((column) => column === name))
       )
         throw new Error(`Encrypted column "${name}" cannot be an ordinary index or branch key`);
     }
