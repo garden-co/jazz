@@ -306,7 +306,33 @@ impl<S: OrderedKvStorage> NodeState<S> {
         )
         .unwrap();
         values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(2);
+        // A legacy receipt has no Core seq, so its history records sit at
+        // seq 0, where a write without an accepted seq is stored.
+        let versions = self.query_versions_for_tx(tx_id).await.unwrap();
         let mut batch = self.database.open_batch();
+        for version in versions {
+            if version.seq().unwrap() == GlobalTime(0) {
+                continue;
+            }
+            let (history_table, _) = self
+                .version_storage_write_binding(&version, stored.tx.made_by)
+                .unwrap();
+            batch.delete(
+                history_table.as_ref(),
+                self.version_storage_primary_key(&version).unwrap(),
+            );
+            let pending = version.with_seq(GlobalTime(0)).unwrap();
+            let (history_table, record) = self
+                .version_storage_write_binding(&pending, stored.tx.made_by)
+                .unwrap();
+            batch.update_raw(
+                history_table.as_ref(),
+                self.version_storage_primary_key(&pending).unwrap(),
+                record,
+            );
+        }
+        self.invalidate_tx_version_tables_cache(tx_id);
+        self.history_tx_seqs.borrow_mut().clear();
         batch.update("jazz_transactions", values);
         let applied = self.apply_node_batch(batch).await.unwrap();
         let persisted = self.database.persist_with_progress(&applied).await;

@@ -455,6 +455,39 @@ impl Database {
         start: &[Value],
         end: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
+        self.primary_key_scan_range_raw_with_storage(&storage, table, start, end)
+            .await
+    }
+
+    /// [`Self::primary_key_scan_range_raw`] that also observes writes already
+    /// staged in `batch`.
+    pub async fn primary_key_scan_range_raw_in_batch(
+        &self,
+        batch: &DatabaseBatch,
+        table: &str,
+        start: &[Value],
+        end: &[Value],
+    ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
+        self.ensure_batch_storage_txn(batch)?;
+        let resident = self.resident_storage();
+        let overlay = StagedWriteOverlay::new(&resident, &batch.txn_operations);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+        self.primary_key_scan_range_raw_with_storage(&storage, table, start, end)
+            .await
+    }
+
+    async fn primary_key_scan_range_raw_with_storage<'a, T>(
+        &'a self,
+        storage: &T,
+        table: &str,
+        start: &[Value],
+        end: &[Value],
+    ) -> Result<Vec<EncodedKeyValue<'a>>, Error>
+    where
+        T: OrderedKvStorage,
+    {
         let table_schema = self.table(table)?;
         let primary_key = table_schema
             .primary_key
@@ -485,9 +518,7 @@ impl Database {
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut end_key, value)?;
         }
-        let resident = self.resident_storage();
-        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
-        let store = RecordStore::new(&storage, table, &descriptor);
+        let store = RecordStore::new(storage, table, &descriptor);
         store
             .range(&start_key, &end_key)
             .await?

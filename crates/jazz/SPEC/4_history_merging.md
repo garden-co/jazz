@@ -434,14 +434,14 @@ keys are node-local physical column ids (`u64::MAX` is `_deletion`, as in
 version. The record of a write that lost nothing has empty `lost_cells`, so
 the merge costs four small fields per history record in the common case.
 
-History holds accepted writes only, keyed `(branch_key, row_uuid, seq)`: "the
-row at seq `S`" is one point read, and "the row's writes after `S`" is one
-range read. Pending writes (a node's own uploads, and foreign writes a relay
-holds before their fate) are held in the lineage's pending table, keyed
-`(branch_key, row_uuid, tx_time, tx_node_id)`, with the same record layout and
-`seq = 0`. An accepted fate moves each of the transaction's records from the
-pending table to history at its seq in the batch that stores the fate; a
-rejected fate deletes them (SPEC 2 §2.7.1).
+History is keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`: "the row
+at seq `S`" is one prefix read, and "the row's writes after `S`" is one range
+read. Pending writes (a node's own uploads, and foreign writes a relay holds
+before their fate) are held in the same table with the same record layout and
+`seq = 0`, so they sort before every accepted write of the row and never fall
+in a range after a base seq. An accepted fate moves each of the transaction's
+records from its `seq = 0` key to its key at the transaction's seq in the batch
+that stores the fate; a rejected fate deletes them (SPEC 2 §2.7.1).
 
 **Wire layout.** The wire `VersionRecord` carries, after `authored_columns`,
 the version's `base` (`{ seq: Option<GlobalTime>, pending: Option<TxId> }`)

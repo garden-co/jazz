@@ -50,8 +50,8 @@ pub fn epoch_1_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
 ///
 /// `jazz.history-version-current.v4` is the linear row-state layout: one
 /// history record per accepted transaction holding the merged row state,
-/// `_deletion` as a cell, hidden `U48` column stamps, a `by_seq` current
-/// index and a per-row ahead overlay. History and ahead-current tables carry
+/// `_deletion` as a cell, history keyed by seq with each write's base and lost
+/// cells, a `by_seq` current index and a per-row ahead overlay. History and ahead-current tables carry
 /// no `by_tx` secondary index; the node-local `jazz_tx_touched_rows` record of
 /// each transaction lists the rows it touched instead. A history image stores `updated_by`
 /// only when it differs from its transaction's `made_by`.

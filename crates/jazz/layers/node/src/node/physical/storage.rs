@@ -76,6 +76,84 @@ where
             .map(Some)
     }
 
+    /// The wire spelling of `version`'s lost cells: keys become slots of its
+    /// authored table (`0` is `_deletion`, `i + 1` the `i`-th user column),
+    /// values keep their bytes (SPEC 4 §4.6, "Wire layout").
+    pub(super) fn lost_cells_for_wire(&self, version: &VersionRow) -> Result<Vec<u8>, Error> {
+        let stored = version.lost_cells_raw()?;
+        if stored.is_empty() {
+            return Ok(stored);
+        }
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("lost cells schema version alias missing"))?;
+        let table = self.table_in_schema_ref(version.table(), schema_version)?;
+        let mapping = self.lost_cells_mapping(schema_version, version.table())?;
+        let descriptor = version.record.descriptor();
+        super::lost_cells::rekey(&stored, |id| {
+            let slot = if PhysicalColumnId(id) == DELETION_COLUMN_ID {
+                0
+            } else {
+                let name = mapping
+                    .iter()
+                    .find_map(|(name, column)| (column.0 == id).then_some(name))
+                    .ok_or(Error::InvalidStoredValue(
+                        "lost cell column id is absent from its schema mapping",
+                    ))?;
+                table
+                    .columns
+                    .iter()
+                    .position(|column| &column.name == name)
+                    .ok_or(Error::InvalidStoredValue("lost cell column missing"))?
+                    as u64
+                    + 1
+            };
+            Ok((slot, lost_cell_type(&descriptor, slot)?))
+        })
+    }
+
+    /// The storage spelling of a wire version's lost cells: slots become
+    /// node-local physical column ids. An unknown slot is malformed.
+    pub(super) fn lost_cells_for_storage(&self, version: &VersionRecord) -> Result<Vec<u8>, Error> {
+        if version.lost_cells().is_empty() {
+            return Ok(Vec::new());
+        }
+        let schema_version = version.schema_version();
+        let table = self.table_in_schema_ref(version.table(), schema_version)?;
+        let mapping = self.lost_cells_mapping(schema_version, version.table())?;
+        let descriptor = super::codec::history_record_descriptor(table);
+        super::lost_cells::rekey(version.lost_cells(), |slot| {
+            let id = match slot {
+                0 => DELETION_COLUMN_ID,
+                slot => {
+                    let column = table
+                        .columns
+                        .get(usize::try_from(slot - 1).unwrap_or(usize::MAX))
+                        .ok_or(Error::InvalidStoredValue("lost cell slot out of range"))?;
+                    *mapping.get(&column.name).ok_or(Error::InvalidStoredValue(
+                        "lost cell column physical mapping missing",
+                    ))?
+                }
+            };
+            Ok((id.0, lost_cell_type(&descriptor, slot)?))
+        })
+    }
+
+    fn lost_cells_mapping(
+        &self,
+        schema_version: SchemaVersionId,
+        table: &str,
+    ) -> Result<&BTreeMap<String, PhysicalColumnId>, Error> {
+        self.catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(table))
+            .map(|mapping| &mapping.columns)
+            .ok_or(Error::InvalidStoredValue(
+                "lost cells physical table mapping missing",
+            ))
+    }
+
     /// Translate a logical contribution table at the local storage boundary.
     /// Physical ids are deliberately node-local and never cross the
     /// transaction/wire boundary.
@@ -379,13 +457,9 @@ where
                     }
                 }
                 // A current row has `global_time` where history has none,
-                // and no `counter_signs` after `authored_columns` where
-                // history has one: its stamp fields line up with history's.
-                let current_stamps_start =
-                    GlobalCurrentRowRecord::USER_CELLS + source_table.columns.len() + 1;
-                let source = if current && index >= current_stamps_start {
-                    index
-                } else if current && index > GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX {
+                // and ends at `authored_columns`, before history's
+                // `counter_signs` and merge fields.
+                let source = if current && index > GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX {
                     index - 1
                 } else {
                     index
@@ -446,7 +520,7 @@ where
         &self,
         version: &VersionRow,
     ) -> Result<PrimaryKeyValue, Error> {
-        Ok(history_primary_key(version))
+        history_primary_key(version)
     }
 
     /// Prepare authored-to-physical enum identities once per catalogue write
@@ -914,4 +988,21 @@ where
         ))
     }
 
+}
+
+/// The cell type of lost-cell `slot` in a history layout: `_deletion` or a
+/// user cell, each stored nullable.
+fn lost_cell_type(
+    descriptor: &groove::records::RecordDescriptor,
+    slot: u64,
+) -> Result<groove::records::ValueType, Error> {
+    let field = match slot {
+        0 => HistoryRowRecord::FIELD__DELETION_IDX,
+        slot => HistoryRowRecord::USER_CELLS + usize::try_from(slot - 1).unwrap_or(usize::MAX),
+    };
+    descriptor
+        .fields()
+        .get(field)
+        .map(|field| field.value_type.clone())
+        .ok_or(Error::InvalidStoredValue("lost cell slot out of range"))
 }

@@ -8,7 +8,7 @@
 //! sibling [`super::catalogue_ingest`] module.
 
 use super::*;
-use crate::protocol::{CatalogueAck, LensOp, SchemaLineagePublication, VersionBundleRef};
+use crate::protocol::{CatalogueAck, LensOp, RowBase, SchemaLineagePublication, VersionBundleRef};
 use crate::protocol_limits::{commit_unit_limit_violation, validate_shape_registration_size};
 use crate::schema::ColumnSchema;
 
@@ -45,6 +45,7 @@ include!("ingest/commit_bundles.rs");
 include!("ingest/fates.rs");
 include!("ingest/view_updates.rs");
 include!("ingest/validation.rs");
+include!("ingest/ancestor.rs");
 
 /// A sequence is the global-authority receipt. Peer payloads which pair it
 /// with a weaker durability must be rejected before they can reach storage.

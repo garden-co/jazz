@@ -1,11 +1,11 @@
-//! Per-column last-writer-wins by stamp.
+//! Concurrent edits merge one cell at a time against the writer's ancestor.
 //!
-//! Core merges every accepted write into the row one column at a time. Each
-//! plain column remembers the stamp of the write that last set it; a write
-//! sets a column it authored only when its stamp is at least that stamp. A
-//! write's stamp is its time, clamped by Core to when Core received it, so a
-//! client with a clock running ahead cannot make its values immune to later
-//! edits.
+//! Core merges every accepted write into the row one cell at a time. A write
+//! sets a cell it authored when nothing changed that cell since the image the
+//! writer made the write over; otherwise the value Core accepted first stays
+//! and the write's value is recorded as lost (SPEC 4 §4.6). Clocks take no
+//! part: a client with a clock running ahead cannot make its values immune to
+//! later edits, and one running behind still overrides what it saw.
 //!
 //! Every write below carries an explicit physical timestamp through the public
 //! `WriteContext::with_updated_at`, which is the client's clock for that write.
@@ -132,8 +132,8 @@ async fn offline_edits_to_different_columns_both_survive() {
             let server = JazzServer::start_with_schema(todo_schema())
                 .await
                 .expect("start test server");
-            let alice = connect(&server, "alice-column-stamps").await;
-            let bob = connect(&server, "bob-column-stamps").await;
+            let alice = connect(&server, "alice-concurrent-edits").await;
+            let bob = connect(&server, "bob-concurrent-edits").await;
             // Every timestamp stays in Core's past, so none of them is clamped.
             let base = wall_ms() - 60_000;
             let todo_id = seed_todo(&alice, &bob, base).await;
@@ -178,10 +178,10 @@ async fn offline_edits_to_different_columns_both_survive() {
 /// A late offline write loses the column a newer write already set, while
 /// its other columns still apply.
 ///
-/// Actors: alice goes offline and edits both the title and `done`; bob, later
-/// in time, retitles the todo and reaches Core first. When alice reconnects
-/// her title is older than bob's and loses; her `done` has no newer writer and
-/// applies.
+/// Actors: alice goes offline and edits both the title and `done`; bob
+/// retitles the todo and reaches Core first. When alice reconnects her title
+/// was written over the seeded title, which bob has changed since, so it
+/// loses; her `done` has no concurrent writer and applies.
 ///
 /// ```text
 /// alice ─offline─ t+1s {title="alice (stale)", done=true} ─────reconnect──┐
@@ -239,23 +239,21 @@ async fn late_offline_write_loses_newer_column_but_applies_the_rest() {
         .await;
 }
 
-/// A clock running ahead is clamped to Core's receive time, so a later write
-/// from a correct clock still wins.
+/// A clock running ahead gives a write no advantage: a later edit made after
+/// seeing its value overrides it, whatever that editor's clock says.
 ///
 /// Actors: mallory's clock runs 20 s ahead (inside Core's skew tolerance, so
-/// the write is accepted). Core stamps her title with the time it received it,
-/// not her claimed time. bob, offline and so unaware of mallory's write, then
-/// retitles the todo with his correct clock. His stamp is at least Core's
-/// receive time of mallory's write, so his title wins. Without the clamp
-/// mallory's claimed time would beat bob's for the next 20 seconds.
+/// the write is accepted). bob sees mallory's title, then retitles the todo
+/// with a clock that reads 20 s earlier than mallory's. bob's write was made
+/// over mallory's value, so it applies.
 ///
 /// ```text
-/// mallory ─(clock +20s) title="from the future"──► server  stamp = receive time
-/// bob ─offline─ (clock now) title="from the present" ─reconnect─► server
+/// mallory ─(clock +20s) title="from the future" ──► server ──► bob sees it
+/// bob ─(clock now) title="from the present" ──────► server
 ///                                                   = "from the present"
 /// ```
 #[tokio::test]
-async fn clock_ahead_is_clamped_so_a_later_write_still_wins() {
+async fn clock_ahead_gives_no_advantage_over_a_later_edit() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = JazzServer::start_with_schema(todo_schema())
@@ -265,7 +263,6 @@ async fn clock_ahead_is_clamped_so_a_later_write_still_wins() {
             let bob = connect(&server, "bob-clock-correct").await;
             let todo_id = seed_todo(&mallory, &bob, wall_ms()).await;
 
-            assert!(disconnect_client(&bob), "bob goes offline");
             let future_edit = at(&mallory, wall_ms() + 20_000)
                 .update(
                     "todos",
@@ -277,9 +274,9 @@ async fn clock_ahead_is_clamped_so_a_later_write_still_wins() {
                 )
                 .expect("mallory retitles with a clock ahead");
             settle(&mallory, future_edit, DurabilityTier::GlobalServer).await;
-            expect_todo(&mallory, "mallory", todo_id, todo("from the future", false)).await;
+            expect_todo(&bob, "bob", todo_id, todo("from the future", false)).await;
 
-            // Read bob's clock only after Core has accepted mallory's write.
+            // bob's clock reads well before mallory's claimed time.
             let present_edit = at(&bob, wall_ms())
                 .update(
                     "todos",
@@ -289,9 +286,7 @@ async fn clock_ahead_is_clamped_so_a_later_write_still_wins() {
                         Value::Text("from the present".to_owned()),
                     )],
                 )
-                .expect("bob retitles offline");
-            settle(&bob, present_edit, DurabilityTier::Local).await;
-            assert!(reconnect_client(&bob).await.expect("bob reconnects"));
+                .expect("bob retitles");
             settle(&bob, present_edit, DurabilityTier::GlobalServer).await;
 
             for (client, who) in [(&mallory, "mallory"), (&bob, "bob")] {

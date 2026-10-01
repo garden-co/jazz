@@ -110,7 +110,24 @@ where
                 // what peers receive for this transaction.
                 self.write_history_post_image(&mut batch, version, stored.tx.made_by)?;
             }
-            if !global_current_updates.is_empty() {
+            let mut moved = !global_current_updates.is_empty();
+            if matches!(stored.fate, Fate::Accepted) {
+                // Every pending record of an accepted write moves to its
+                // seq, also when the row's image here did not change.
+                for version in &tx_versions {
+                    let updated = global_current_updates.iter().any(|update| {
+                        update.table() == version.table()
+                            && update.branch_key() == version.branch_key()
+                            && update.row_uuid() == version.row_uuid()
+                    });
+                    if !updated && version.seq()? == GlobalTime(0) {
+                        let at_seq = version.with_seq(global_time)?;
+                        self.write_history_post_image(&mut batch, &at_seq, stored.tx.made_by)?;
+                        moved = true;
+                    }
+                }
+            }
+            if moved {
                 self.invalidate_tx_version_tables_cache(tx_id);
             }
             self.rebase_ahead_overlays(

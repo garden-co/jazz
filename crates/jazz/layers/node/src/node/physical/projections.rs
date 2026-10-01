@@ -831,44 +831,6 @@ where
                             ))?;
                             if available.contains(&name) {
                                 Ok(ProjectField::named(name))
-                            } else if let Some(cell) =
-                                name.strip_prefix(crate::schema::STAMP_FIELD_PREFIX)
-                            {
-                                // A stamp follows its cell. When the source
-                                // variant carries the cell under another
-                                // physical field (a lens Rename/Copy), take
-                                // that field's stamp; a cell the source does
-                                // not carry, or carries unstamped, is stamp 0.
-                                let source_cell = match target_columns_by_physical_field.get(cell)
-                                {
-                                    Some(column) => self.lens_current_cell(
-                                        source_schema,
-                                        &source_table_name,
-                                        &source_mapping,
-                                        &available,
-                                        target_schema,
-                                        target_table_name,
-                                        column,
-                                    )?,
-                                    None => None,
-                                };
-                                Ok(match source_cell {
-                                    Some(CurrentWinnerCellProjection::Field { name: source, .. })
-                                        if available.contains(
-                                            &crate::schema::stamp_field_name(&source),
-                                        ) =>
-                                    {
-                                        ProjectField::renamed(
-                                            crate::schema::stamp_field_name(&source),
-                                            name,
-                                        )
-                                    }
-                                    _ => ProjectField::literal_typed(
-                                        name,
-                                        Value::U48(0),
-                                        records::ValueType::U48,
-                                    ),
-                                })
                             } else if let Some(column) = target_columns_by_physical_field.get(&name)
                             {
                                 // Only mapped user columns can be absent because
@@ -1455,20 +1417,6 @@ where
                 )
             })
             .collect::<Vec<_>>();
-        // A stamp follows its cell: when the source variant carries a target
-        // cell under some physical field, the target stamp reads that field's
-        // stamp. A missing, lens-defaulted, or unstamped cell is stamp 0.
-        let source_fields = match shape {
-            ContentProjectionShape::History => {
-                physical_history_field_names_for_case(&source_table, source_mapping, present)?
-            }
-            ContentProjectionShape::Current => {
-                physical_current_field_names_for_case(&source_table, source_mapping, present)?
-            }
-        }
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-        let mut stamp_sources = BTreeMap::<String, String>::new();
         for column in &target_table.columns {
             let output = user_column_field(&column.name);
             let projection = match cells.remove(&column.name) {
@@ -1476,12 +1424,6 @@ where
                 None if present.is_some() => CellProjection::Missing,
                 None => return Ok(None),
             };
-            if let CellProjection::Field(source) = &projection {
-                let source_stamp = crate::schema::stamp_field_name(source);
-                if source_fields.contains(&source_stamp) {
-                    stamp_sources.insert(crate::schema::stamp_field_name(&output), source_stamp);
-                }
-            }
             match projection {
                 CellProjection::Field(source) => {
                     let column_id = target_mapping.columns.get(&column.name).copied().ok_or(
@@ -1589,19 +1531,12 @@ where
                 .iter()
                 .skip(user_cells + target_table.columns.len())
                 .map(|field| {
-                    let name = field
-                        .name
-                        .clone()
-                        .expect("Jazz trailing storage fields are named");
-                    if name == crate::schema::stamp_field_name("_deletion")
-                        || !name.starts_with(crate::schema::STAMP_FIELD_PREFIX)
-                    {
-                        ProjectField::named(name)
-                    } else if let Some(source) = stamp_sources.remove(&name) {
-                        ProjectField::renamed(source, name)
-                    } else {
-                        ProjectField::literal_typed(name, Value::U48(0), records::ValueType::U48)
-                    }
+                    ProjectField::named(
+                        field
+                            .name
+                            .clone()
+                            .expect("Jazz trailing storage fields are named"),
+                    )
                 }),
         );
         Ok(Some(fields))

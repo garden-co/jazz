@@ -2,28 +2,30 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Apply an accepted write to the row's post-image, one column at a time.
+    /// Apply an accepted write to the row's post-image, one cell at a time.
     ///
-    /// Plain columns are last-writer-wins per column by stamp. The write's
-    /// stamp is its transaction time clamped to the seq it was accepted at:
-    /// `min(tx physical ms, seq physical ms)`. Core mints the seq from its own
-    /// clock when it receives the write, so this is Core's zero-tolerance
-    /// clamp; every node replaying the same seq computes the same stamp. A
-    /// write sets each plain column it authored iff its stamp is at least the
-    /// column's stored stamp; ties go to the higher seq (writes apply in seq
-    /// order, so normally the incoming write). `_deletion` is one more stamped
-    /// column. Merge columns apply their op whatever the stamps. The row
-    /// keeps this write's identity (it is the row as of this seq); its
-    /// `updated_by`/`updated_at` follow the write with the highest stamp.
-    /// Returns `None` when the post-image does not change.
+    /// At the authority, a plain cell the write authored, and `_deletion`
+    /// when authored, takes the write's value iff nothing changed it since
+    /// the writer's image: the write's ancestor (`resolve_write_ancestor`)
+    /// holds the current value there, or does not know the cell. Otherwise
+    /// the accepted value stays and the write's value is recorded on its
+    /// history record as a lost cell (SPEC 4 §4.6). Cells are matched by
+    /// physical column id and compared only when the ancestor and the
+    /// current image both carry the column with the incoming layout's type.
+    /// Merge columns apply their op in seq order whatever the ancestor. The
+    /// post-image keeps the write's identity and layout (it is the row as of
+    /// this seq), takes `updated_by`/`updated_at` from the write, and keeps
+    /// `created_by`/`created_at`. Returns `None` when the post-image does
+    /// not change.
     ///
     /// Only the node that minted `global_time` (`authority`) derives the
     /// row's post-image. Any other node merging an accepted write here is an
     /// originator settling its own write when its fate arrives, and Core's
     /// image at that seq is authoritative: the local merge is only a
-    /// prediction of it, made over whatever image the node holds. So a
-    /// non-authority keeps what it holds, and takes Core's post-image when it
-    /// arrives (SPEC 4 §4.6), whenever
+    /// prediction of it, made by applying the write's patch over whatever
+    /// image the node holds, without resolving its base. So a non-authority
+    /// keeps what it holds, and takes Core's post-image when it arrives
+    /// (SPEC 4 §4.6), whenever
     ///
     /// - it already holds Core's image at a later seq, which counts this
     ///   write already (Core applies writes in seq order; merging the write
@@ -35,9 +37,9 @@ where
     ///   accepted the write, so this is the local image's staleness, never a
     ///   reason to fail the fate.
     ///
-    /// At the authority both of those are invariant violations (seqs are
-    /// minted in order, and `merge_op_rejection` refuses such writes before
-    /// a seq is minted) and remain errors.
+    /// At the authority those, and a base it cannot resolve, are invariant
+    /// violations (seqs are minted in order, and `merge_op_rejection`
+    /// refuses such writes before a seq is minted) and remain errors.
     pub(super) async fn merged_global_post_image(
         &mut self,
         batch: &DatabaseBatch,
@@ -48,16 +50,15 @@ where
         global_time: GlobalTime,
         authority: bool,
     ) -> Result<Option<VersionRow>, Error> {
-        use crate::node::col_stamps::{ColumnStamps, StampSlots};
-
-        let stamp = incoming
-            .tx_time()
-            .physical_ms()
-            .min(global_time.physical_ms());
-        let slots = StampSlots::for_table(table_schema);
         let authored = self.authored_columns_for_version(incoming)?;
         let authors = |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
         let incoming_descriptor = incoming.record.descriptor();
+        let base = incoming.base()?;
+        let at_seq = |values: Vec<Value>, lost: Vec<u8>| -> Result<VersionRow, Error> {
+            incoming
+                .with_record_values(values)?
+                .with_merge_fields(global_time, base, lost)
+        };
         let Some((previous, previous_seq)) = self
             .query_global_winner_with_seq_in_batch(
                 batch,
@@ -68,25 +69,12 @@ where
             )
             .await?
         else {
-            // The first image of a row: the columns this write authored
-            // carry its stamp; columns nobody has set yet carry 0.
-            let mut stamps = ColumnStamps::uniform(&slots, 0);
-            for (index, column) in table_schema.columns.iter().enumerate() {
-                if let Some(slot) = slots.column(index)
-                    && authors(&column.name)
-                {
-                    stamps.set(slot, stamp);
-                }
-            }
-            if authors(DELETION_COLUMN_NAME) {
-                stamps.set(slots.deletion(), stamp);
-            }
-            // Over no image, each counter cell's low bits are the written
-            // value itself (a delta from zero): the image keeps the cells.
+            // The first image of a row. Over no image, each counter cell's
+            // low bits are the written value itself (a delta from zero): the
+            // image keeps the cells.
             let mut values = incoming.record.to_values()?;
-            stamps.write_values(&mut values, &incoming_descriptor)?;
             crate::node::merge_ops::clear_counter_signs(&mut values, &incoming_descriptor);
-            return incoming.with_record_values(values).map(Some);
+            return at_seq(values, Vec::new()).map(Some);
         };
         let previous_tx = self.version_tx_id(&previous)?;
         if previous_tx == incoming_tx {
@@ -98,133 +86,205 @@ where
             debug_assert!(!authority, "the authority merged a write below the row's seq");
             return Ok(None);
         }
-        // Ties go to this write: writes apply in seq order, so it is later
-        // than every write already in the row.
-        let beats = |stored: u64| stamp >= stored;
-        // An unstamped previous image (legacy, or a lens-translated payload)
-        // counts as stamp 0 everywhere: any stamped write may replace it.
-        let previous_row_stamp = previous.max_col_stamp()?;
-        let incoming_is_newest = beats(previous_row_stamp);
-        if previous.schema_version_alias() != incoming.schema_version_alias() {
-            // Different authored layouts: keep whole-row last-writer-wins
-            // until post-images are stored in physical form. The winner's
-            // stamp covers every column of its image.
-            if !incoming_is_newest {
-                return Ok(None);
-            }
+        let same_layout = previous.schema_version_alias() == incoming.schema_version_alias();
+        if !authority && !same_layout {
+            // A prediction across layouts: the write replaces the row whole,
+            // keeping the merge columns' settled values (below).
             let mut values = incoming.record.to_values()?;
-            // A merge column the write did not author holds the writer's
-            // snapshot, not an op: it takes the row's settled value, so ops
-            // Core accepted since that snapshot survive (`INV-HIST-10`).
-            let carried = match self.cross_schema_settled_merge_cells(
+            let Ok(carried) = self.cross_schema_settled_merge_cells(
+                schema_version,
+                table_schema,
+                authored.as_ref(),
+                &previous,
+            )?
+            else {
+                return Ok(None);
+            };
+            for (field, value) in carried {
+                values[field] = value;
+            }
+            crate::node::merge_ops::clear_counter_signs(&mut values, &incoming_descriptor);
+            return at_seq(values, Vec::new()).map(Some);
+        }
+
+        // Which authored plain cells (and `_deletion`) apply. A prediction
+        // applies every authored cell.
+        let ancestor = if authority {
+            match self
+                .resolve_write_ancestor(
+                    batch,
+                    schema_version,
+                    &table_schema.name,
+                    incoming.branch_key(),
+                    incoming.row_uuid(),
+                    base,
+                    incoming_tx,
+                    previous_seq,
+                    incoming.authored_column_ids()?.as_ref(),
+                )
+                .await?
+            {
+                Ok(ancestor) => ancestor,
+                Err(_) => {
+                    return Err(Error::InvalidStoredValue(
+                        "accepted write has a base the authority cannot resolve",
+                    ));
+                }
+            }
+        } else {
+            WriteAncestor::AllApply
+        };
+        let current = self.image_physical_cells(&previous)?;
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(&table_schema.name))
+            .map(|mapping| mapping.columns.clone())
+            .ok_or(Error::InvalidStoredValue("incoming physical table mapping missing"))?;
+        // The current value of a cell when the current image carries its
+        // physical column with this layout's type.
+        let carried = |id: PhysicalColumnId, column_type: &ValueType| {
+            current
+                .get(&id)
+                .filter(|(current_type, _)| current_type == column_type)
+                .map(|(_, value)| value.clone())
+        };
+        let applies = |id: PhysicalColumnId, column_type: &ValueType| match &ancestor {
+            WriteAncestor::AllApply => true,
+            WriteAncestor::Cells(cells) => {
+                match (
+                    cells.get(&id).filter(|(ancestor_type, _)| ancestor_type == column_type),
+                    carried(id, column_type),
+                ) {
+                    (Some((_, ancestor)), Some(current)) => *ancestor == current,
+                    _ => true,
+                }
+            }
+        };
+
+        // The post-image keeps the incoming write's identity and layout:
+        // it is the row as of this write's seq.
+        let mut merged = incoming.record.to_values()?;
+        let previous_values = same_layout.then(|| previous.record.to_values()).transpose()?;
+        let counter_signs = incoming.counter_signs()?;
+        let mut lost = Vec::new();
+        let cell_value = |value: Option<Value>| Value::Nullable(value.map(Box::new));
+        let deletion_type = deletion_cell_type();
+        {
+            let field = HistoryRowRecord::FIELD__DELETION_IDX;
+            if authors(DELETION_COLUMN_NAME) {
+                if !applies(DELETION_COLUMN_ID, &deletion_type) {
+                    lost.push((
+                        DELETION_COLUMN_ID.0,
+                        incoming_descriptor.fields()[field].value_type.clone(),
+                        merged[field].clone(),
+                    ));
+                    merged[field] = cell_value(carried(DELETION_COLUMN_ID, &deletion_type).flatten());
+                }
+            } else if let Some(value) = carried(DELETION_COLUMN_ID, &deletion_type) {
+                merged[field] = cell_value(value);
+            }
+        }
+        let cross_layout_merge_cells = if same_layout {
+            Vec::new()
+        } else {
+            match self.cross_schema_settled_merge_cells(
                 schema_version,
                 table_schema,
                 authored.as_ref(),
                 &previous,
             )? {
                 Ok(carried) => carried,
-                Err(_) if !authority => return Ok(None),
                 Err(_) => {
                     return Err(Error::InvalidStoredValue(
                         "accepted cross-schema write cannot carry a merge column's settled value",
                     ));
                 }
-            };
-            for (field, value) in carried {
-                values[field] = value;
             }
-            ColumnStamps::uniform(&slots, stamp).write_values(&mut values, &incoming_descriptor)?;
-            crate::node::merge_ops::clear_counter_signs(&mut values, &incoming_descriptor);
-            return incoming.with_record_values(values).map(Some);
-        }
-        let mut stamps = previous
-            .col_stamps(table_schema)?
-            .unwrap_or_else(|| ColumnStamps::uniform(&slots, 0));
-        // A plain column takes this write's value iff the write authored it
-        // and its stamp is at least the column's stamp.
-        let mut wins = |name: &str, slot: usize| {
-            let wins = authors(name) && beats(stamps.get(slot));
-            if wins {
-                stamps.set(slot, stamp);
-            }
-            wins
         };
-        // The post-image keeps the incoming write's identity: it is the row
-        // as of this write's seq. Cells this write did not win keep their
-        // value from the previous image.
-        let mut merged = incoming.record.to_values()?;
-        let previous_values = previous.record.to_values()?;
-        let counter_signs = incoming.counter_signs()?;
-        let keep = |merged: &mut Vec<Value>, index: usize| {
-            merged[index] = previous_values[index].clone();
-        };
-        if !wins(DELETION_COLUMN_NAME, slots.deletion()) {
-            keep(&mut merged, HistoryRowRecord::FIELD__DELETION_IDX);
-        }
         for (index, column) in table_schema.columns.iter().enumerate() {
             let field = HistoryRowRecord::USER_CELLS + index;
-            match slots.column(index) {
-                Some(slot) => {
-                    if !wins(&column.name, slot) {
-                        keep(&mut merged, field);
+            let strategy = table_schema.merge_strategy(&column.name);
+            if strategy == crate::schema::MergeStrategy::Lww {
+                let id = *mapping
+                    .get(&column.name)
+                    .ok_or(Error::InvalidStoredValue("incoming column physical mapping missing"))?;
+                if authors(&column.name) {
+                    if !applies(id, &column.column_type) {
+                        lost.push((
+                            id.0,
+                            incoming_descriptor.fields()[field].value_type.clone(),
+                            merged[field].clone(),
+                        ));
+                        merged[field] = cell_value(carried(id, &column.column_type).flatten());
                     }
+                } else if let Some(value) = carried(id, &column.column_type) {
+                    // Unauthored cells keep the row's value where its image
+                    // carries the column, and the writer's snapshot
+                    // otherwise.
+                    merged[field] = cell_value(value);
                 }
-                None => {
-                    // Merge columns are ops: they apply in seq order
-                    // whatever their stamps.
-                    let strategy = table_schema.merge_strategy(&column.name);
-                    merged[field] = if authors(&column.name) {
-                        let negative = crate::node::merge_ops::counter_sign(
-                            table_schema,
-                            &counter_signs,
-                            index,
-                        );
-                        let applied = if strategy == crate::schema::MergeStrategy::Counter {
-                            match crate::node::merge_ops::counter_after_op(
-                                &column.column_type,
-                                &previous_values[field],
-                                &merged[field],
-                                negative,
-                            )? {
-                                Some(applied) => applied,
-                                // Out of range over a stale local image.
-                                None if !authority => return Ok(None),
-                                None => {
-                                    return Err(Error::InvalidStoredValue(
-                                        "accepted counter op leaves the column's range",
-                                    ));
-                                }
-                            }
-                        } else {
-                            crate::node::merge_ops::apply_merge_op(
-                                strategy,
-                                &column.column_type,
-                                &previous_values[field],
-                                &merged[field],
-                                negative,
-                            )?
-                        };
-                        // History cells are stored nullable.
-                        Value::Nullable(Some(Box::new(applied)))
-                    } else {
-                        previous_values[field].clone()
-                    };
-                }
+                continue;
             }
+            let Some(previous_values) = previous_values.as_ref() else {
+                // Across layouts the authority refused merge-column writes
+                // before minting the seq (#3899); unauthored merge cells take
+                // the row's settled value below.
+                if authors(&column.name) {
+                    return Err(Error::InvalidStoredValue(
+                        "accepted merge-column write across schema versions",
+                    ));
+                }
+                continue;
+            };
+            // Merge columns are ops: they apply in seq order.
+            merged[field] = if authors(&column.name) {
+                let negative =
+                    crate::node::merge_ops::counter_sign(table_schema, &counter_signs, index);
+                let applied = if strategy == crate::schema::MergeStrategy::Counter {
+                    match crate::node::merge_ops::counter_after_op(
+                        &column.column_type,
+                        &previous_values[field],
+                        &merged[field],
+                        negative,
+                    )? {
+                        Some(applied) => applied,
+                        // Out of range over a stale local image.
+                        None if !authority => return Ok(None),
+                        None => {
+                            return Err(Error::InvalidStoredValue(
+                                "accepted counter op leaves the column's range",
+                            ));
+                        }
+                    }
+                } else {
+                    crate::node::merge_ops::apply_merge_op(
+                        strategy,
+                        &column.column_type,
+                        &previous_values[field],
+                        &merged[field],
+                        negative,
+                    )?
+                };
+                // History cells are stored nullable.
+                Value::Nullable(Some(Box::new(applied)))
+            } else {
+                previous_values[field].clone()
+            };
         }
-        if !incoming_is_newest {
-            keep(&mut merged, HistoryRowRecord::FIELD_UPDATED_BY_IDX);
-            keep(&mut merged, HistoryRowRecord::FIELD_UPDATED_AT_IDX);
+        for (field, value) in cross_layout_merge_cells {
+            merged[field] = value;
         }
         for index in [
             HistoryRowRecord::FIELD_CREATED_BY_IDX,
             HistoryRowRecord::FIELD_CREATED_AT_IDX,
         ] {
-            keep(&mut merged, index);
+            merged[index] = previous.record.borrowed().get_idx(index)?;
         }
-        stamps.write_values(&mut merged, &incoming_descriptor)?;
         crate::node::merge_ops::clear_counter_signs(&mut merged, &incoming_descriptor);
-        incoming.with_record_values(merged).map(Some)
+        lost.sort_by_key(|(id, _, _)| *id);
+        at_seq(merged, super::lost_cells::encode(&lost)?).map(Some)
     }
 
     /// The authority refuses a write it cannot merge into the row without
@@ -245,13 +305,56 @@ where
     ///   also when the write's own table has no merge column.
     /// - A counter op that would take the column outside its type's range
     ///   over the row's current value. The op is not wrapped.
+    ///
+    /// It also refuses a write whose base it cannot resolve exactly
+    /// (`INV-HIST-20`), and an upload that carries lost cells: only the
+    /// authority records those.
     pub(super) async fn merge_op_rejection(
         &mut self,
+        tx_id: TxId,
         versions: &[VersionRecord],
     ) -> Result<Option<RejectionReason>, Error> {
         let batch = self.database.open_batch();
         for version in versions {
             let schema_version = version.schema_version();
+            if !version.lost_cells().is_empty() {
+                return Ok(Some(RejectionReason::MalformedCommit(format!(
+                    "row version for table '{}' carries lost cells; only the authority records them",
+                    version.table()
+                ))));
+            }
+            if !version.base().is_empty() {
+                let current_seq = self
+                    .global_current_seq_in_batch(
+                        &batch,
+                        schema_version,
+                        version.table(),
+                        version.branch_key(),
+                        version.row_uuid(),
+                    )
+                    .await?;
+                if let Err(reason) = self
+                    .resolve_write_ancestor(
+                        &batch,
+                        schema_version,
+                        version.table(),
+                        version.branch_key(),
+                        version.row_uuid(),
+                        version.base(),
+                        tx_id,
+                        current_seq,
+                        self.authored_column_ids_for_names(
+                            schema_version,
+                            version.table(),
+                            version.authored_columns(),
+                        )?
+                        .as_ref(),
+                    )
+                    .await?
+                {
+                    return Ok(Some(RejectionReason::MalformedCommit(reason)));
+                }
+            }
             let table_schema = self.table_in_schema(version.table(), schema_version)?;
             let authored = version.authored_columns();
             let authors =
@@ -657,18 +760,29 @@ where
         row_uuid: RowUuid,
         tx_time: TxTime,
         tx_node_alias: NodeAlias,) -> Result<Option<VersionRow>, Error> {
+        let seqs = history_seq_candidates(
+            self.history_tx_seq(Some(batch), tx_time, tx_node_alias).await?,
+        );
         for storage_table in self.version_storage_sources(table)? {
             let _ = schema_version;
-            let key = vec![
-                Value::Bytes(branch_key.canonical_bytes()),
-                Value::Uuid(row_uuid.0),
-                Value::U64(tx_time.0),
-                Value::U64(tx_node_alias.0),
-            ];
-            let raw = self
-                .database
-                .primary_key_get_raw_in_batch(batch, &storage_table, &key).await?;
-            let record = raw.map(|raw| raw.owned_record());
+            let mut record = None;
+            for seq in &seqs {
+                let key = history_key_values(
+                    &branch_key.canonical_bytes(),
+                    row_uuid,
+                    *seq,
+                    tx_time,
+                    tx_node_alias,
+                );
+                record = self
+                    .database
+                    .primary_key_get_raw_in_batch(batch, &storage_table, &key)
+                    .await?
+                    .map(|raw| raw.owned_record());
+                if record.is_some() {
+                    break;
+                }
+            }
             let Some(record) = record else {
                 continue;
             };
@@ -795,6 +909,13 @@ where
         tx_author: AuthorSubject,
     ) -> Result<(), Error> {
         let (history_table, record) = self.version_storage_write_binding(version, tx_author)?;
+        if version.seq()? != GlobalTime(0) {
+            // An accepted write's pending record, if any, moves to its seq.
+            batch.delete(
+                history_table.as_ref(),
+                self.version_storage_primary_key(&version.with_seq(GlobalTime(0))?)?,
+            );
+        }
         batch.update_raw(
             history_table.as_ref(),
             self.version_storage_primary_key(version)?,
@@ -826,14 +947,6 @@ where
             global_current_primary_key(version.branch_key(), version.row_uuid()),
             physical,
         );
-        // A node that has seen a column stamp must stamp its own later
-        // writes at least as high, so an edit made after observing a value
-        // is never older than that value. The row's identity is the write at
-        // its seq, which need not carry the row's highest stamp.
-        let observed = version.max_col_stamp()?;
-        self.merge_tx_time(TxTime::from_physical_ms(observed).map_err(|_| {
-            Error::InvalidStoredValue("column stamp exceeds the packed HLC range")
-        })?);
         let overlay_key = self.ahead_overlay_key(version)?;
         if self.ahead_current_keys.contains_key(&overlay_key) {
             self.mark_ahead_shadow_dirty(schema_version, version, true);

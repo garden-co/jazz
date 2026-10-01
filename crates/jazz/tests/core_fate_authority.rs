@@ -405,16 +405,13 @@ fn core_authority_rejects_write_only_update_and_upsert_and_rolls_back() {
 }
 
 /// Black-box regression for authored-column carriage across the public Db and
-/// sync/wire path. Bob explicitly writes the unchanged base title at the newer
-/// timestamp; that authored write must participate in per-column LWW and beat
-/// Alice's older concurrent title change after both commits cross the wire,
-/// without claiming Alice's independent `completed` edit.
-///
-/// Planted positive: removing `MergeableCommit::authored_columns` from the
-/// partial-update lowering makes Bob's entire materialized row look authored;
-/// Bob still wins `title`, but incorrectly reverts `completed` to false.
+/// sync/wire path. Bob explicitly writes the unchanged base title over the
+/// base image, concurrently with Alice changing both cells. Core sequences
+/// Alice's write first, so Bob's authored title is a cell that changed since
+/// his image and loses (SPEC 4 §4.6); his write must not claim Alice's
+/// independent `completed` edit either.
 #[test]
-fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
+fn explicit_unchanged_partial_write_survives_sync_without_overriding_a_concurrent_edit() {
     let schema = schema();
     let mut core = InMemoryServerShell::start(
         InMemoryServerShellConfig::new(schema.clone(), identity(0xc1, AuthorSubject::SYSTEM))
@@ -428,8 +425,8 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     let alice_session = connect_client_to_core(&mut core, &alice, &alice_wire, author(0xa2));
     let bob_session = connect_client_to_core(&mut core, &bob, &bob_wire, author(0xb2));
 
-    // Keep every transaction identity distinct and the LWW order explicit:
-    // TxId includes each client's already-distinct node id plus this HLC time.
+    // Keep every transaction identity distinct: TxId includes each client's
+    // already-distinct node id plus this HLC time.
     let row = RowUuid::from_bytes([0xd2; 16]);
     block_on(alice.insert(
         "todos",
@@ -497,7 +494,22 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     pump_client_core(&alice, &alice_wire, &mut core, alice_session);
     pump_client_core(&bob, &bob_wire, &mut core, bob_session);
     pump_client_core(&alice, &alice_wire, &mut core, alice_session);
-    assert_eq!(visible_titles(&alice, DurabilityTier::Global), ["base"]);
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    assert!(
+        matches!(
+            bob.write_state(explicit_write.mergeable_tx_id()).unwrap(),
+            jazz::db::WriteState {
+                fate: jazz::tx::Fate::Accepted,
+                durability: DurabilityTier::Global,
+                ..
+            }
+        ),
+        "Bob's write is accepted even though its title lost"
+    );
+    assert_eq!(
+        visible_titles(&alice, DurabilityTier::Global),
+        ["alice-change"]
+    );
     let prepared = alice.prepare_query(&Query::from("todos")).unwrap();
     let rows = block_on(alice.all(
         &prepared,
@@ -1105,14 +1117,16 @@ fn records_schema(gset: bool) -> JazzSchema {
 ///
 /// Mirrors `packages/jazz-tools/src/backend/concurrent-merge.integration.test.ts`,
 /// whose Counter-only and GSet-and-Counter cases run one after the other in
-/// one process against in-process servers. A merge column carries no
-/// last-writer-wins stamp slot, so the two tables have different stored row
-/// layouts even though their column names and types are identical.
+/// one process against in-process servers. The two tables have identical
+/// column names and types; only how Core merges `tags` differs.
 ///
 /// ```text
 /// for tags in [LWW, GSet]:            (fresh core, fresh app each round)
 ///   writer ──insert──► core ◄──update── observer   (concurrent)
 ///   editor ──Global read──► core ──► the one converged row
+///
+/// Both updates are made over the seed, and Core sequences the writer's
+/// first, so it keeps the plain cells both changed (SPEC 4 §4.6).
 /// ```
 #[test]
 fn apps_differing_only_in_a_merge_strategy_each_converge_in_one_process() {
@@ -1225,13 +1239,13 @@ fn apps_differing_only_in_a_merge_strategy_each_converge_in_one_process() {
         let table = &schema.tables[0];
         assert_eq!(
             rows[0].row.cell(table, "title"),
-            Some(Value::String("right".to_owned())),
-            "round {round}: the later title wins"
+            Some(Value::String("left".to_owned())),
+            "round {round}: the first-sequenced title stays"
         );
         let expected_tags = if gset {
             tags(&["left", "right", "seed"])
         } else {
-            tags(&["right"])
+            tags(&["left"])
         };
         assert_eq!(
             rows[0].row.cell(table, "tags"),

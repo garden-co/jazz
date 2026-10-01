@@ -953,13 +953,17 @@ pub struct VersionRecord {
     /// presence is unavailable; consumers must conservatively treat every
     /// present payload cell as authored.
     authored_columns: Option<BTreeSet<String>>,
-    /// Per-column last-writer-wins stamps of this row image: empty when every
-    /// stamp is `0` (an unstamped image such as an uploaded patch), otherwise
-    /// one unsigned 48-bit little-endian Unix-millisecond stamp per plain
-    /// column of the authored table in schema order, then one for `_deletion`,
-    /// with at least one nonzero stamp. Encoded as a postcard byte sequence
-    /// (varint length, raw bytes). See SPEC ch. 4, "Column stamps".
-    col_stamps: Vec<u8>,
+    /// The image this version's writer made it over (SPEC ch. 4 §4.6): the
+    /// settled seq the writer's image rested on and the writer's own pending
+    /// predecessor to this row, each optional. Both absent for an insert or a
+    /// blind update.
+    base: RowBase,
+    /// The writer's own values for the cells it authored but lost at Core,
+    /// as sparse cells keyed by slot (`0` is `_deletion`, `i + 1` the
+    /// authored table's `i`-th user column): empty when nothing was lost,
+    /// and always empty on an upload. Encoded as a postcard byte sequence.
+    /// See SPEC ch. 4 §4.6, "Lost cells".
+    lost_cells: Vec<u8>,
     /// Sign bits of this patch's counter ops: bit `i` (least significant
     /// first) is set when the op of the authored table's `i`-th counter
     /// column, in schema order, is negative. Empty when no op is negative,
@@ -969,13 +973,46 @@ pub struct VersionRecord {
     counter_signs: Vec<u8>,
 }
 
+/// The row image a version's writer made it over (SPEC ch. 4 §4.6).
+///
+/// `seq` is the seq of the settled image of the row the writer's node held;
+/// `pending` is the writer's own previous pending write to the row whose
+/// patch that image included. An insert and a blind update (a write to a row
+/// the writer's node holds no image of) carry neither.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub struct RowBase {
+    /// Seq of the settled image the writer's image rested on.
+    pub seq: Option<GlobalTime>,
+    /// The writer's own pending predecessor to this row.
+    pub pending: Option<TxId>,
+}
+
+impl RowBase {
+    /// Whether the version has no base (an insert or a blind update).
+    pub fn is_empty(&self) -> bool {
+        self.seq.is_none() && self.pending.is_none()
+    }
+}
+
 /// Explicit immutable-version row encoding. Outer sync framing owns lengths
 /// and resource bounds; this record role owns its discriminator and schema.
 mod version_record_wire_row {
     use super::*;
 
     // Version 2 (wire protocol v4): the record no longer carries `parents`,
-    // gains the `_deletion` cell, and travels beside `col_stamps`. Version 1
+    // gains the `_deletion` cell, and travels beside `base` and `lost_cells`. Version 1
     // rows (the DAG-history layout) are rejected rather than reinterpreted.
     const MAGIC: &[u8; 5] = b"JVRR\x02";
 
@@ -1590,7 +1627,8 @@ impl VersionRecord {
             branch_key: BranchKey::default(),
             record,
             authored_columns: None,
-            col_stamps: Vec::new(),
+            base: RowBase::default(),
+            lost_cells: Vec::new(),
             counter_signs: Vec::new(),
         }
     }
@@ -1618,15 +1656,26 @@ impl VersionRecord {
     }
 
     #[doc(hidden)]
-    pub fn with_col_stamps(mut self, col_stamps: Vec<u8>) -> Self {
-        self.col_stamps = col_stamps;
+    pub fn with_base(mut self, base: RowBase) -> Self {
+        self.base = base;
         self
     }
 
-    /// Per-column stamp carrier (see the `col_stamps` field).
+    /// The image this version's writer made it over (see the `base` field).
+    pub fn base(&self) -> RowBase {
+        self.base
+    }
+
     #[doc(hidden)]
-    pub fn col_stamps(&self) -> &[u8] {
-        &self.col_stamps
+    pub fn with_lost_cells(mut self, lost_cells: Vec<u8>) -> Self {
+        self.lost_cells = lost_cells;
+        self
+    }
+
+    /// Sparse lost-cell carrier (see the `lost_cells` field).
+    #[doc(hidden)]
+    pub fn lost_cells(&self) -> &[u8] {
+        &self.lost_cells
     }
 
     #[doc(hidden)]
@@ -1874,7 +1923,8 @@ impl Ord for VersionRecord {
             .then_with(|| self.branch_key.cmp(&other.branch_key))
             .then_with(|| self.record.raw().cmp(other.record.raw()))
             .then_with(|| self.authored_columns.cmp(&other.authored_columns))
-            .then_with(|| self.col_stamps.cmp(&other.col_stamps))
+            .then_with(|| self.base.cmp(&other.base))
+            .then_with(|| self.lost_cells.cmp(&other.lost_cells))
             .then_with(|| self.counter_signs.cmp(&other.counter_signs))
     }
 }
@@ -7002,12 +7052,13 @@ mod tests {
         assert_ne!(base.cmp(&authored), Ordering::Equal);
     }
 
-    /// `counter_signs` is the last field of a `VersionRecord`, after
-    /// `col_stamps`: a postcard byte string (varint length, raw bytes). An
-    /// image or a patch with no negative counter op ends in a single `0`; a
-    /// patch whose first counter op is negative ends in `[1, 0b1]`.
+    /// A `VersionRecord` ends with `base` (two postcard options), then
+    /// `lost_cells` and `counter_signs` (postcard byte strings: varint length,
+    /// raw bytes). An image or a patch with no base, no lost cell and no
+    /// negative counter op ends in `[0, 0, 0, 0]`; a patch whose first
+    /// counter op is negative ends in `[0, 0, 0, 1, 0b1]`.
     #[test]
-    fn version_record_counter_signs_follow_col_stamps_on_the_wire() {
+    fn version_record_ends_with_base_lost_cells_and_counter_signs_on_the_wire() {
         let table = TableSchema::new("counters", [ColumnSchema::new("count", ColumnType::U8)]);
         let image = VersionRecord::from_cells(
             &table,
@@ -7026,9 +7077,13 @@ mod tests {
 
         let image_bytes = postcard::to_allocvec(&image).unwrap();
         let negative_bytes = postcard::to_allocvec(&negative).unwrap();
-        // ... authored_columns, col_stamps (empty), counter_signs.
-        assert_eq!(&image_bytes[image_bytes.len() - 2..], &[0, 0]);
-        assert_eq!(&negative_bytes[negative_bytes.len() - 3..], &[0, 1, 0b1]);
+        // ... authored_columns, base (none, none), lost_cells (empty),
+        // counter_signs.
+        assert_eq!(&image_bytes[image_bytes.len() - 4..], &[0, 0, 0, 0]);
+        assert_eq!(
+            &negative_bytes[negative_bytes.len() - 5..],
+            &[0, 0, 0, 1, 0b1]
+        );
         assert_eq!(
             image_bytes[..image_bytes.len() - 1],
             negative_bytes[..negative_bytes.len() - 2]
@@ -7037,6 +7092,30 @@ mod tests {
         assert_eq!(decoded.counter_signs(), &[0b1]);
         assert_eq!(decoded, negative);
         assert_ne!(image.cmp(&negative), Ordering::Equal);
+
+        // A base is `Some(seq)` (tag 1, varint) then `Some(tx id)` (tag 1,
+        // varint time, the node uuid as a 16-byte string); lost cells are a
+        // byte string.
+        let based = image
+            .clone()
+            .with_base(RowBase {
+                seq: Some(GlobalTime(5)),
+                pending: Some(TxId::new(TxTime(7), NodeUuid::from_bytes([2; 16]))),
+            })
+            .with_lost_cells(vec![9, 8]);
+        let based_bytes = postcard::to_allocvec(&based).unwrap();
+        let mut tail = vec![1, 5, 1, 7, 16];
+        tail.extend([2; 16]);
+        tail.extend([2, 9, 8, 0]);
+        assert_eq!(&based_bytes[based_bytes.len() - tail.len()..], &tail[..]);
+        assert_eq!(
+            image_bytes[..image_bytes.len() - 4],
+            based_bytes[..based_bytes.len() - tail.len()]
+        );
+        let decoded: VersionRecord = postcard::from_bytes(&based_bytes).unwrap();
+        assert_eq!(decoded, based);
+        assert_eq!(decoded.base().seq, Some(GlobalTime(5)));
+        assert_eq!(decoded.lost_cells(), &[9, 8]);
     }
 
     fn sample_lens() -> MigrationLens {

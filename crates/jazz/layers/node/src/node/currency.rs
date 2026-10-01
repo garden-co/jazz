@@ -406,24 +406,26 @@ where
         // same-lineage layout is a byte-for-byte image of the history row.
         // History stores `updated_by` nullable; current always has it.
         let updated_by_idx = HistoryRowRecord::FIELD_UPDATED_BY_IDX;
-        // History also carries `counter_signs` (after `authored_columns`),
-        // which current lacks: a settled image's signs are empty.
+        // History also ends with `counter_signs` and the merge fields (after
+        // `authored_columns`), which current lacks: a settled image's signs
+        // are empty, its seq is the current row's, and the image carries no
+        // base or lost cells of its own.
         let Some(signs_idx) = history_descriptor.field_index(crate::schema::COUNTER_SIGNS_FIELD)
         else {
             return Ok(None);
         };
+        let synthesized = signs_idx..history_descriptor.fields().len();
         let source_of = |index: usize| {
-            if index > signs_idx {
-                index
-            } else if index >= global_time_idx {
+            if index >= global_time_idx {
                 index + 1
             } else {
                 index
             }
         };
-        if current_descriptor.fields().len() != history_descriptor.fields().len()
+        if current_descriptor.fields().len() + synthesized.len()
+            != history_descriptor.fields().len() + 1
             || (0..history_descriptor.fields().len()).any(|index| {
-                if index == signs_idx {
+                if synthesized.contains(&index) {
                     return false;
                 }
                 let source = source_of(index);
@@ -442,12 +444,18 @@ where
         let raw = history_descriptor.create_with_encoded_fields::<Error>(
             current.raw().len(),
             |index, output| {
-                if index == signs_idx {
-                    history_descriptor.encode_field_into(
-                        index,
-                        &Value::Bytes(Vec::new()),
-                        output,
-                    )?;
+                if synthesized.contains(&index) {
+                    let name = history_descriptor.fields()[index].name.as_deref();
+                    let value = match name {
+                        Some(crate::schema::SEQ_FIELD) => {
+                            Value::U64(current.get_nullable_u64(global_time_idx)?.unwrap_or(0))
+                        }
+                        Some(crate::schema::BASE_SEQ_FIELD | crate::schema::BASE_PENDING_FIELD) => {
+                            Value::Nullable(None)
+                        }
+                        _ => Value::Bytes(Vec::new()),
+                    };
+                    history_descriptor.encode_field_into(index, &value, output)?;
                     return Ok(());
                 }
                 if index == updated_by_idx {
@@ -611,22 +619,24 @@ where
         let touched_rows = self
             .load_tx_touched_rows(None, tx_id.time, tx.node_alias)
             .await?;
+        let seqs = history_seq_candidates(tx.global_time);
         for (table_id, branch_key, row_uuid) in touched_rows.iter() {
             let storage_table = physical_history_table_name(table_id);
-            let Some(record) = self
-                .database
-                .primary_key_get_raw(
-                    &storage_table,
-                    &[
-                        Value::Bytes(branch_key.to_vec()),
-                        Value::Uuid(row_uuid.0),
-                        Value::U64(tx_id.time.0),
-                        Value::U64(tx.node_alias.0),
-                    ],
-                )
-                .await?
-                .map(|raw| raw.owned_record())
-            else {
+            let mut found = None;
+            for seq in &seqs {
+                found = self
+                    .database
+                    .primary_key_get_raw(
+                        &storage_table,
+                        &history_key_values(branch_key, row_uuid, *seq, tx_id.time, tx.node_alias),
+                    )
+                    .await?
+                    .map(|raw| raw.owned_record());
+                if found.is_some() {
+                    break;
+                }
+            }
+            let Some(record) = found else {
                 continue;
             };
             versions.push(
@@ -794,6 +804,55 @@ where
         })
     }
 
+    fn remember_history_tx_seq(
+        &self,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+        record: BorrowedRecord<'_>,
+    ) -> Result<Option<GlobalTime>, Error> {
+        let global_time = record
+            .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+            .map(GlobalTime);
+        if let Some(global_time) = global_time {
+            let mut seqs = self.history_tx_seqs.borrow_mut();
+            if seqs.len() >= HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES {
+                seqs.clear();
+            }
+            seqs.insert((tx_time, tx_node_alias), global_time);
+        }
+        Ok(global_time)
+    }
+
+    /// The seq a transaction's history records are stored at: its global
+    /// time once it has one (SPEC 2 §2.7.1).
+    pub(super) async fn history_tx_seq(
+        &self,
+        batch: Option<&DatabaseBatch>,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) -> Result<Option<GlobalTime>, Error> {
+        if let Some(seq) = self.history_tx_seqs.borrow().get(&(tx_time, tx_node_alias)) {
+            return Ok(Some(*seq));
+        }
+        let primary_key = [Value::U64(tx_time.0), Value::U64(tx_node_alias.0)];
+        let raw = match batch {
+            Some(batch) => {
+                self.database
+                    .primary_key_get_raw_in_batch(batch, "jazz_transactions", &primary_key)
+                    .await?
+            }
+            None => {
+                self.database
+                    .primary_key_get_raw("jazz_transactions", &primary_key)
+                    .await?
+            }
+        };
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        self.remember_history_tx_seq(tx_time, tx_node_alias, raw.record())
+    }
+
     async fn load_history_tx_author(
         &mut self,
         batch: Option<&DatabaseBatch>,
@@ -815,6 +874,7 @@ where
         .ok_or(Error::InvalidStoredValue(
             "a history image without updated_by needs its transaction record",
         ))?;
+        self.remember_history_tx_seq(key.0, key.1, raw.record())?;
         let author = encode_history_updated_by(
             raw.record()
                 .get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
@@ -1080,6 +1140,7 @@ where
         if node_alias != expected_alias || time != tx_id.time {
             return Ok(None);
         }
+        self.remember_history_tx_seq(time, node_alias, record)?;
         decode(self, expected_alias, record).map(Some)
     }
 
@@ -1276,17 +1337,25 @@ where
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
         let _ = schema_version;
-        let key = vec![
-            Value::Bytes(branch_key.canonical_bytes()),
-            Value::Uuid(row_uuid.0),
-            Value::U64(tx_time.0),
-            Value::U64(tx_node_alias.0),
-        ];
-        let raw = self
-            .database
-            .primary_key_get_raw(storage_table, &key)
-            .await?
-            .map(|raw| raw.owned_record());
+        let seqs = history_seq_candidates(self.history_tx_seq(None, tx_time, tx_node_alias).await?);
+        let mut raw = None;
+        for seq in seqs {
+            let key = history_key_values(
+                &branch_key.canonical_bytes(),
+                row_uuid,
+                seq,
+                tx_time,
+                tx_node_alias,
+            );
+            raw = self
+                .database
+                .primary_key_get_raw(storage_table, &key)
+                .await?
+                .map(|raw| raw.owned_record());
+            if raw.is_some() {
+                break;
+            }
+        }
         let Some(record) = raw else {
             return Ok(None);
         };

@@ -24,8 +24,8 @@ mod claims_merge_integration;
 mod client_storage_shutdown_integration;
 #[path = "../clients_sync.rs"]
 mod clients_sync;
-#[path = "../column_stamps.rs"]
-mod column_stamps;
+#[path = "../concurrent_edits.rs"]
+mod concurrent_edits;
 #[path = "../durable_local_write_replay_integration.rs"]
 mod durable_local_write_replay_integration;
 #[path = "../flush_once_per_refresh.rs"]

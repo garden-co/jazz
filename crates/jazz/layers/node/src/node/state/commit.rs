@@ -357,6 +357,10 @@ where
                 self.query_local_winner_in_branch(&table_schema.name, &branch_key, commit.row_uuid)
                     .await?
             };
+            let previous_local_current_identity = previous_local_current
+                .as_ref()
+                .map(|overlay| self.version_tx_id(overlay))
+                .transpose()?;
             let previous_current = match previous_local_current {
                 Some(previous) => Some(previous),
                 None if !known_fresh_row => {
@@ -373,6 +377,27 @@ where
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
                 .unwrap_or((commit.made_by, provenance_at));
+            // The image this write is made over (SPEC 4 §4.6, "Base of a
+            // write"): the settled image's seq, and this node's own newest
+            // pending write to the row when the overlay holds one. An insert,
+            // and a write over no image of the row, have no base.
+            let mut base = crate::protocol::RowBase::default();
+            if previous_current.is_some() {
+                if let Some(overlay) = previous_local_current_identity {
+                    if overlay.node == self.node_uuid {
+                        base.pending = Some(overlay);
+                    }
+                }
+                base.seq = self
+                    .global_current_seq_in_batch(
+                        &batch,
+                        write_schema_version,
+                        &table_schema.name,
+                        &branch_key,
+                        commit.row_uuid,
+                    )
+                    .await?;
+            }
 
             let mut cells = commit.cells;
             for (column, value) in branch_cells {
@@ -465,9 +490,10 @@ where
                         cells,
                         authored_columns: authored_column_ids.clone(),
                         deletion,
-                        // A local patch is unstamped: Core stamps the
-                        // columns it authors when it merges the write.
-                        col_stamps: Vec::new(),
+                        // A pending write has no seq and has lost nothing.
+                        seq: GlobalTime(0),
+                        base,
+                        lost_cells: Vec::new(),
                         counter_signs,
                     },
                     (write_schema_version != self.catalogue.local_schema_version_id)

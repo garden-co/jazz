@@ -7,7 +7,7 @@
 
 use super::query_engine::user_column_field;
 use super::*;
-use crate::protocol::SnapshotRef;
+use crate::protocol::{RowBase, SnapshotRef};
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
 use crate::tx::{
     BranchViewCopyBase, BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation,
@@ -1927,6 +1927,7 @@ pub(super) trait VersionRecordFromNode: Sized {
         table: &TableSchema,
         schema_version: SchemaVersionId,
         authored_columns: Option<BTreeSet<String>>,
+        lost_cells: Vec<u8>,
     ) -> Result<Self, Error>;
 }
 
@@ -1962,6 +1963,7 @@ impl VersionRecordFromNode for VersionRecord {
         table: &TableSchema,
         schema_version: SchemaVersionId,
         authored_columns: Option<BTreeSet<String>>,
+        lost_cells: Vec<u8>,
     ) -> Result<Self, Error> {
         let descriptor = version_record_descriptors(table).1;
         let input = stored.record.borrowed();
@@ -2029,7 +2031,8 @@ impl VersionRecordFromNode for VersionRecord {
         )
         .with_branch_key(stored.branch_key().clone())
         .with_authored_columns(authored_columns)
-        .with_col_stamps(stored.col_stamps_wire()?)
+        .with_base(stored.base()?)
+        .with_lost_cells(lost_cells)
         .with_counter_signs(stored.counter_signs()?))
     }
 }
@@ -2186,18 +2189,20 @@ pub(super) struct VersionRowParts {
     pub(super) cells: BTreeMap<String, Value>,
     pub(super) authored_columns: Option<BTreeSet<PhysicalColumnId>>,
     pub(super) deletion: Option<DeletionEvent>,
-    /// Wire `col_stamps` carrier (SPEC 4.6): empty when every slot is `0`,
-    /// as for an unstamped image.
-    pub(super) col_stamps: Vec<u8>,
+    /// The write's accepted seq; `0` while pending (SPEC 4 §4.6).
+    pub(super) seq: GlobalTime,
+    /// The write's base (SPEC 4 §4.6, "Base of a write").
+    pub(super) base: RowBase,
+    /// The write's lost cells keyed by physical column id; empty when none.
+    pub(super) lost_cells: Vec<u8>,
     /// Sign bits of this patch's counter ops (`merge_ops::counter_signs`):
     /// empty when none is negative, and on every settled image.
     pub(super) counter_signs: Vec<u8>,
 }
 
 // Record layout depends on the table name (enum registry binding), the ordered
-// physical column shape, and each column's merge strategy (a merge column has
-// no last-writer-wins stamp field, SPEC 4.6) — not defaults, indices, or
-// policies. Compare all of it: schema objects are mutable, and two tables with
+// physical column shape, and each column's merge strategy — not defaults,
+// indices, or policies. Compare all of it: schema objects are mutable, and two tables with
 // the same name and column types but different merge strategies (two apps in
 // one process, or a strategy-only schema change) have different layouts.
 struct HistoryDescriptorCacheEntry {
@@ -2221,7 +2226,7 @@ pub(super) fn prepared_wire_record_descriptor(table: &TableSchema) -> records::R
     version_record_descriptors(table).1
 }
 
-fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+pub(super) fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     version_record_descriptors(table).0
 }
 
@@ -2335,6 +2340,8 @@ impl VersionRow {
         tx_node_alias: NodeAlias,
         schema_version_alias: SchemaVersionAlias,
         tx_time: TxTime,
+        seq: GlobalTime,
+        lost_cells: Vec<u8>,
         _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
         if !version.branch_key().is_canonical() {
@@ -2343,10 +2350,9 @@ impl VersionRow {
             ));
         }
         let deletion = version.deletion();
-        let stamp_values = super::col_stamps::wire_stamp_values(version.col_stamps(), table)?;
         super::merge_ops::validate_counter_signs(table, version.counter_signs())?;
-        // `authored_columns` and `counter_signs` precede the stamp fields.
-        let first_stamp_field = HistoryRowRecord::USER_CELLS + table.columns.len() + 2;
+        // `authored_columns` and `counter_signs` precede the merge fields.
+        let first_merge_field = HistoryRowRecord::USER_CELLS + table.columns.len() + 2;
         let descriptor = history_record_descriptor(table);
         let source = version.record().borrowed();
         let source_descriptor = source.descriptor();
@@ -2415,11 +2421,17 @@ impl VersionRow {
                     i if i == HistoryRowRecord::USER_CELLS + table.columns.len() + 1 => {
                         Value::Bytes(version.counter_signs().to_vec())
                     }
-                    i => stamp_values.get(i - first_stamp_field).cloned().ok_or(
-                        Error::InvalidStoredValue(
-                            "history layout does not match the table's stamp slots",
-                        ),
-                    )?,
+                    i => match i - first_merge_field {
+                        0 => Value::U64(seq.0),
+                        1 => base_seq_value(version.base()),
+                        2 => base_pending_value(version.base()),
+                        3 => Value::Bytes(lost_cells.clone()),
+                        _ => {
+                            return Err(Error::InvalidStoredValue(
+                                "history layout does not end with the merge fields",
+                            ));
+                        }
+                    },
                 };
                 descriptor.encode_field_into(index, &value, output)?;
                 Ok(())
@@ -2436,6 +2448,8 @@ impl VersionRow {
                 tx_node_alias,
                 schema_version_alias,
                 tx_time,
+                seq,
+                &lost_cells,
             )?;
             assert_eq!(
                 raw,
@@ -2623,27 +2637,83 @@ impl VersionRow {
         }
     }
 
-    /// The canonical wire `col_stamps` carrier of this row image (SPEC 4.6):
-    /// empty when every stamp field is `0` or the layout has none.
-    pub(super) fn col_stamps_wire(&self) -> Result<Vec<u8>, Error> {
-        super::col_stamps::wire_stamps(self.record.borrowed())
+    fn trailing_field(&self, name: &str) -> Result<Option<Value>, Error> {
+        let Some(field) = self.record.descriptor().field_index(name) else {
+            return Ok(None);
+        };
+        Ok(Some(self.record.borrowed().get_idx(field)?))
     }
 
-    /// The newest stamp field of this row image; `0` when unstamped.
-    pub(super) fn max_col_stamp(&self) -> Result<u64, Error> {
-        super::col_stamps::max_stamp(self.record.borrowed())
+    /// The write's accepted seq; `0` while it has no accepted fate (SPEC 4
+    /// §4.6, "Durable layout"), and on a layout without the field.
+    pub(super) fn seq(&self) -> Result<GlobalTime, Error> {
+        match self.trailing_field(crate::schema::SEQ_FIELD)? {
+            None => Ok(GlobalTime(0)),
+            Some(Value::U64(seq)) => Ok(GlobalTime(seq)),
+            Some(_) => Err(Error::InvalidStoredValue("history seq must be u64")),
+        }
     }
 
-    /// Read this image's stamp fields for its own table layout; `None` for a
-    /// layout without stamp fields.
-    pub(super) fn col_stamps(
+    /// The write's base (SPEC 4 §4.6, "Base of a write").
+    pub(super) fn base(&self) -> Result<RowBase, Error> {
+        let seq = match self.trailing_field(crate::schema::BASE_SEQ_FIELD)? {
+            None => None,
+            Some(value) => match nullable_value(value)? {
+                None => None,
+                Some(Value::U64(seq)) => Some(GlobalTime(seq)),
+                Some(_) => return Err(Error::InvalidStoredValue("history base_seq must be u64")),
+            },
+        };
+        let pending = match self.trailing_field(crate::schema::BASE_PENDING_FIELD)? {
+            None => None,
+            Some(value) => nullable_value(value)?.map(tx_id_from_value).transpose()?,
+        };
+        Ok(RowBase { seq, pending })
+    }
+
+    /// The write's lost cells, keyed by node-local physical column id
+    /// (`lost_cells`): empty when it lost nothing.
+    pub(super) fn lost_cells_raw(&self) -> Result<Vec<u8>, Error> {
+        match self.trailing_field(crate::schema::LOST_CELLS_FIELD)? {
+            None => Ok(Vec::new()),
+            Some(Value::Bytes(bytes)) => Ok(bytes),
+            Some(_) => Err(Error::InvalidStoredValue(
+                "history lost_cells must be bytes",
+            )),
+        }
+    }
+
+    /// This image with its trailing merge fields replaced. A layout without
+    /// the fields (none is written today) keeps its record.
+    pub(super) fn with_merge_fields(
         &self,
-        table: &TableSchema,
-    ) -> Result<Option<super::col_stamps::ColumnStamps>, Error> {
-        super::col_stamps::ColumnStamps::read(
-            self.record.borrowed(),
-            &super::col_stamps::StampSlots::for_table(table),
-        )
+        seq: GlobalTime,
+        base: RowBase,
+        lost_cells: Vec<u8>,
+    ) -> Result<Self, Error> {
+        let descriptor = self.record.descriptor();
+        let Some(seq_idx) = descriptor.field_index(crate::schema::SEQ_FIELD) else {
+            return Ok(self.clone());
+        };
+        let mut values = self.record.to_values()?;
+        values[seq_idx] = Value::U64(seq.0);
+        let mut set = |name: &str, value: Value| {
+            if let Some(idx) = descriptor.field_index(name) {
+                values[idx] = value;
+            }
+        };
+        set(crate::schema::BASE_SEQ_FIELD, base_seq_value(base));
+        set(crate::schema::BASE_PENDING_FIELD, base_pending_value(base));
+        set(crate::schema::LOST_CELLS_FIELD, Value::Bytes(lost_cells));
+        self.with_record_values(values)
+    }
+
+    /// This image at `seq`, keeping its base and lost cells.
+    pub(super) fn with_seq(&self, seq: GlobalTime) -> Result<Self, Error> {
+        if self.seq()? == seq {
+            return Ok(self.clone());
+        }
+        self.with_merge_fields(seq, self.base()?, self.lost_cells_raw()?)
     }
 
     pub(super) fn to_history_entry(
@@ -3820,11 +3890,21 @@ pub(super) fn history_values_from_parts(
     }
     values.push(authored_column_ids_value(version.authored_columns.as_ref()));
     values.push(Value::Bytes(version.counter_signs.clone()));
-    values.extend(super::col_stamps::wire_stamp_values(
-        &version.col_stamps,
-        table,
-    )?);
+    values.push(Value::U64(version.seq.0));
+    values.push(base_seq_value(version.base));
+    values.push(base_pending_value(version.base));
+    values.push(Value::Bytes(version.lost_cells.clone()));
     Ok(values)
+}
+
+/// History `base_seq` value of `base`.
+pub(super) fn base_seq_value(base: RowBase) -> Value {
+    Value::Nullable(base.seq.map(|seq| Box::new(Value::U64(seq.0))))
+}
+
+/// History `base_pending` value of `base`.
+pub(super) fn base_pending_value(base: RowBase) -> Value {
+    Value::Nullable(base.pending.map(|tx_id| Box::new(tx_id_value(tx_id))))
 }
 
 #[cfg(test)]
@@ -3835,6 +3915,8 @@ fn history_values_from_wire(
     tx_node_alias: NodeAlias,
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
+    seq: GlobalTime,
+    lost_cells: &[u8],
 ) -> Result<Vec<Value>, Error> {
     let mut values = Vec::with_capacity(HistoryRowRecord::USER_CELLS + table.columns.len());
     values.push(Value::Bytes(version.branch_key().canonical_bytes()));
@@ -3866,10 +3948,10 @@ fn history_values_from_wire(
     }
     values.push(authored_column_ids_value(authored_columns.as_ref()));
     values.push(Value::Bytes(version.counter_signs().to_vec()));
-    values.extend(super::col_stamps::wire_stamp_values(
-        version.col_stamps(),
-        table,
-    )?);
+    values.push(Value::U64(seq.0));
+    values.push(base_seq_value(version.base()));
+    values.push(base_pending_value(version.base()));
+    values.push(Value::Bytes(lost_cells.to_vec()));
     Ok(values)
 }
 
@@ -3884,13 +3966,58 @@ pub(super) fn deletion_event_value(deletion: DeletionEvent) -> Value {
     })
 }
 
-pub(super) fn history_primary_key(version: &VersionRow) -> PrimaryKeyValue {
+/// The history key of `version`: accepted writes are keyed by seq, pending
+/// ones (seq `0`) by their transaction (SPEC 2 §2.7.1).
+pub(super) fn history_primary_key(version: &VersionRow) -> Result<PrimaryKeyValue, Error> {
+    Ok(history_primary_key_at(
+        version.branch_key(),
+        version.row_uuid(),
+        version.seq()?,
+        version.tx_time(),
+        version.tx_node_alias(),
+    ))
+}
+
+pub(super) fn history_primary_key_at(
+    branch_key: &BranchKey,
+    row_uuid: RowUuid,
+    seq: GlobalTime,
+    tx_time: TxTime,
+    tx_node_alias: NodeAlias,
+) -> PrimaryKeyValue {
     PrimaryKeyValue::Composite(vec![
-        PrimaryKeyValue::Bytes(version.branch_key().canonical_bytes()),
-        PrimaryKeyValue::Uuid(version.row_uuid().0),
-        PrimaryKeyValue::U64(version.tx_time().0),
-        PrimaryKeyValue::U64(version.tx_node_alias().0),
+        PrimaryKeyValue::Bytes(branch_key.canonical_bytes()),
+        PrimaryKeyValue::Uuid(row_uuid.0),
+        PrimaryKeyValue::U64(seq.0),
+        PrimaryKeyValue::U64(tx_time.0),
+        PrimaryKeyValue::U64(tx_node_alias.0),
     ])
+}
+
+/// The seqs a transaction's history record may be stored at, most likely
+/// first: its global time, then `0` (pending, or not yet moved).
+pub(super) fn history_seq_candidates(global_time: Option<GlobalTime>) -> Vec<GlobalTime> {
+    match global_time {
+        Some(global_time) if global_time != GlobalTime(0) => vec![global_time, GlobalTime(0)],
+        _ => vec![GlobalTime(0)],
+    }
+}
+
+/// The history key values of a stored write, for point reads.
+pub(super) fn history_key_values(
+    branch_key: &[u8],
+    row_uuid: RowUuid,
+    seq: GlobalTime,
+    tx_time: TxTime,
+    tx_node_alias: NodeAlias,
+) -> Vec<Value> {
+    vec![
+        Value::Bytes(branch_key.to_vec()),
+        Value::Uuid(row_uuid.0),
+        Value::U64(seq.0),
+        Value::U64(tx_time.0),
+        Value::U64(tx_node_alias.0),
+    ]
 }
 
 pub(super) fn global_current_primary_key(
@@ -3944,14 +4071,6 @@ pub(super) fn global_current_values(
     values.push(authored_column_ids_value(
         version.authored_column_ids()?.as_ref(),
     ));
-    let slots = super::col_stamps::StampSlots::for_table(table);
-    values.extend(
-        version
-            .col_stamps(table)?
-            .unwrap_or_else(|| super::col_stamps::ColumnStamps::uniform(&slots, 0))
-            .values()
-            .collect::<Vec<_>>(),
-    );
     Ok(values)
 }
 

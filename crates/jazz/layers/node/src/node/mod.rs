@@ -319,7 +319,6 @@ fn hydrate_nested_payload_enum_cases(
 pub mod api_error;
 mod catalogue_ingest;
 mod codec;
-mod col_stamps;
 mod currency;
 mod database_slot;
 mod descriptor_roles;
@@ -327,6 +326,7 @@ mod eviction;
 mod exclusive_read_evidence;
 mod global_state;
 mod ingest;
+mod lost_cells;
 mod node_aliases;
 pub use node_aliases::NodeAliases;
 #[doc(hidden)]
@@ -613,6 +613,11 @@ pub struct NodeState<S = BoxedStorage> {
     /// change, so entries never go stale.
     /// Each entry is the encoded field, ready to splice into an image.
     history_tx_authors: BTreeMap<(TxTime, NodeAlias), Rc<[u8]>>,
+    /// Global times of transactions read from storage, which key their
+    /// history records (`history_tx_seq`). Bounded like
+    /// `history_tx_authors`; a transaction's global time never changes once
+    /// set, so entries never go stale.
+    history_tx_seqs: RefCell<FxHashMap<(TxTime, NodeAlias), GlobalTime>>,
     /// Set while this node (Core) mints a seq for an incoming patch.
     minting_global_time: bool,
 

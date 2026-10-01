@@ -187,7 +187,7 @@ where
             self.ingest_rejected_transaction(stored.tx, fate).await?;
             return Ok(PublicationOutcome::settled(()));
         }
-        if let Some(reason) = self.merge_op_rejection(&records).await? {
+        if let Some(reason) = self.merge_op_rejection(tx_id, &records).await? {
             let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(stored.tx, fate).await?;
             return Ok(PublicationOutcome::settled(()));
@@ -255,7 +255,7 @@ where
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
-        if let Some(reason) = self.merge_op_rejection(&versions).await? {
+        if let Some(reason) = self.merge_op_rejection(tx.tx_id, &versions).await? {
             let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
@@ -554,7 +554,7 @@ where
                 durability: None,
             }]));
         }
-        if let Some(reason) = self.merge_op_rejection(&versions).await? {
+        if let Some(reason) = self.merge_op_rejection(tx.tx_id, &versions).await? {
             let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
             return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
@@ -629,12 +629,26 @@ where
             let mut batch = self.database.open_batch();
             let mut version_bundles = Vec::new();
             let mut previously_stored = Vec::new();
+            // A write is stored at its seq once accepted, at 0 while pending
+            // (SPEC 2 §2.7.1). The authority compares a resent unit with its
+            // pending record and stores the post-image at the seq it mints.
+            let seq = match (&reconciled.fate, reconciled.global_time) {
+                (Fate::Accepted, Some(global_time)) if !self.minting_global_time => global_time,
+                _ => GlobalTime(0),
+            };
             for version in versions {
-                let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, &version).await?;
+                let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, seq, &version).await?;
                 let (table, record) = self.version_storage_write_binding(&stored, existing.tx.made_by)?;
                 let key = self.version_storage_primary_key(&stored)?;
                 if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
-                    // The authority's post-image replaces this node's copy.
+                    // The authority's post-image replaces this node's copy,
+                    // which moves from its pending key to its seq.
+                    if seq != GlobalTime(0) {
+                        batch.delete(
+                            table.as_ref(),
+                            self.version_storage_primary_key(&stored.with_seq(GlobalTime(0))?)?,
+                        );
+                    }
                     batch.update_raw(table.as_ref(), key, record);
                     version_bundles.push(version);
                     continue;
@@ -897,12 +911,13 @@ where
                 let author_schema = version.schema_version();
                 self.table_in_schema_ref(version.table(), author_schema)?;
                 let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
-                let source_table_schema = self.table_in_schema_ref(version.table(), author_schema)?;
                 let authored_column_ids = self.authored_column_ids_for_names(
                     author_schema,
                     version.table(),
                     version.authored_columns(),
                 )?;
+                let lost_cells = self.lost_cells_for_storage(version)?;
+                let source_table_schema = self.table_in_schema_ref(version.table(), author_schema)?;
                 let stored = VersionRow::from_wire_with_schema_version(
                     source_table_schema,
                     version,
@@ -910,6 +925,8 @@ where
                     tx_node_alias,
                     schema_version_alias,
                     tx.tx_id.time,
+                    global_time,
+                    lost_cells,
                     (author_schema != self.catalogue.local_schema_version_id)
                         .then_some(author_schema),
                 )?;

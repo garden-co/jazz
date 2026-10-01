@@ -3324,8 +3324,11 @@ fn decode_typed_version_witness(
         cells: BTreeMap::new(),
         authored_columns,
         deletion,
-        // Query witnesses do not project stamps: the image is unstamped.
-        col_stamps: Vec::new(),
+        // A query witness identifies its image's write; it projects no
+        // merge fields.
+        seq: crate::time::GlobalTime(0),
+        base: crate::protocol::RowBase::default(),
+        lost_cells: Vec::new(),
         counter_signs: Vec::new(),
     };
     let values = history_values_from_parts(table, &parts)?;
@@ -4809,7 +4812,9 @@ mod tests {
                 cells: BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
                 authored_columns: Some(BTreeSet::from([PhysicalColumnId(1)])),
                 deletion: None,
-                col_stamps: Vec::new(),
+                seq: crate::time::GlobalTime(0),
+                base: crate::protocol::RowBase::default(),
+                lost_cells: Vec::new(),
                 counter_signs: Vec::new(),
             },
             None,
@@ -4835,7 +4840,9 @@ mod tests {
                 cells: BTreeMap::new(),
                 authored_columns: None,
                 deletion: Some(DeletionEvent::Deleted),
-                col_stamps: Vec::new(),
+                seq: crate::time::GlobalTime(0),
+                base: crate::protocol::RowBase::default(),
+                lost_cells: Vec::new(),
                 counter_signs: Vec::new(),
             },
             None,

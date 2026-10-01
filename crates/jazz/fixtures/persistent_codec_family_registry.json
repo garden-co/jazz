@@ -384,8 +384,8 @@
         "anchor": "**Linear-history storage boundary (2026-09-29).**"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/layers/node/src/node/col_stamps.rs",
-        "anchor": "fn stamp_fields_are_hidden_u48_fields_after_authored_columns"
+        "path": "crates/jazz/layers/node/src/node/physical/tests.rs",
+        "anchor": "fn history_record_ends_with_merge_fields_and_is_keyed_by_seq"
       },
       "rejection_receipt": {
         "path": "crates/jazz/tests/storage_format_refusal.rs",

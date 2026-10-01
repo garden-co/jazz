@@ -5478,19 +5478,18 @@ fn subscription_opening_retains_selected_created_at_in_native_carrier() {
     block_on(subscription.close()).unwrap();
 }
 
-/// Per-column LWW stamps are storage-internal (SPEC 4.6). The host row
-/// grammar has no stamp field kind, so the native carrier is the only place
-/// a leak is observable: every public read path of a stamped row must publish
-/// a descriptor free of stamp fields.
+/// History rows carry merge fields (`seq`, `base_seq`, `base_pending`,
+/// `lost_cells`, SPEC 4 §4.6) that current rows do not. Every public read
+/// path publishes the current layout, without them.
 #[test]
-fn row_reads_never_publish_storage_internal_column_stamps() {
+fn row_reads_never_publish_history_merge_fields() {
     use crate::binding_codec::{RowDescriptorFieldName, row_batches};
 
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let id = row(0x7c);
     db.insert(
         "todos",
-        doctest_support::todo_cells("stamped", false),
+        doctest_support::todo_cells("merged", false),
         crate::db::InsertOptions {
             row_id: Some(id),
             updated_at_ms: Some(4_321),
@@ -5506,7 +5505,14 @@ fn row_reads_never_publish_storage_internal_column_stamps() {
     )
     .unwrap();
 
-    let assert_unstamped = |rows: &[CurrentRow], path: &str| {
+    let history_only = [
+        crate::schema::SEQ_FIELD,
+        crate::schema::BASE_SEQ_FIELD,
+        crate::schema::BASE_PENDING_FIELD,
+        crate::schema::LOST_CELLS_FIELD,
+        crate::schema::COUNTER_SIGNS_FIELD,
+    ];
+    let assert_current_layout = |rows: &[CurrentRow], path: &str| {
         assert!(!rows.is_empty(), "{path} returns the row");
         for batch in row_batches(rows).expect("rows encode for the native binding") {
             for field in &batch.descriptor {
@@ -5516,9 +5522,8 @@ fn row_reads_never_publish_storage_internal_column_stamps() {
                     | RowDescriptorFieldName::HiddenMetadata { name } => name,
                 };
                 assert!(
-                    !name.starts_with("_ts_") && field.value_type != ValueType::U48,
-                    "{path} publishes stamp field {name}: {:?}",
-                    field.value_type
+                    !history_only.contains(&name),
+                    "{path} publishes history field {name}"
                 );
             }
         }
@@ -5527,12 +5532,12 @@ fn row_reads_never_publish_storage_internal_column_stamps() {
     let current = block_on(db.local_current_row("todos", id))
         .unwrap()
         .expect("row is locally current");
-    assert_unstamped(std::slice::from_ref(&current), "local current row");
+    assert_current_layout(std::slice::from_ref(&current), "local current row");
 
     let query = db.table("todos");
     let prepared = db.prepare_query(&query).unwrap();
     let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
-    assert_unstamped(&rows, "query");
+    assert_current_layout(&rows, "query");
 
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
     let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
@@ -5540,36 +5545,8 @@ fn row_reads_never_publish_storage_internal_column_stamps() {
         panic!("expected opening subscription delta");
     };
     let rows = added.into_iter().map(|row| row.row).collect::<Vec<_>>();
-    assert_unstamped(&rows, "subscription");
+    assert_current_layout(&rows, "subscription");
     block_on(subscription.close()).unwrap();
-}
-
-#[test]
-fn queries_cannot_reference_storage_internal_column_stamps() {
-    // Current reads carry the stored layout, stamps included, so the stamp
-    // fields must stay unreachable from the public query surface.
-    let db = block_on(doctest_support::open_todos_db()).unwrap();
-    for stamp in ["_ts_title", "_ts__app_title", "_ts__deletion"] {
-        let filtered = Query::from("todos").filter(eq(col(stamp), lit(Value::U64(0))));
-        assert_eq!(
-            db.prepare_query(&filtered).unwrap_err().code,
-            ErrorCode::Query,
-            "filter on {stamp}"
-        );
-        let ordered = Query::from("todos").order_by(stamp, OrderDirection::Asc);
-        assert_eq!(
-            db.prepare_query(&ordered).unwrap_err().code,
-            ErrorCode::Query,
-            "order by {stamp}"
-        );
-        let mut selected = Query::from("todos");
-        selected.select = Some(vec![stamp.to_owned()]);
-        assert_eq!(
-            db.prepare_query(&selected).unwrap_err().code,
-            ErrorCode::Query,
-            "select {stamp}"
-        );
-    }
 }
 
 #[test]

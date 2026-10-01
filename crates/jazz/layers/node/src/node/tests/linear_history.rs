@@ -1,9 +1,9 @@
 // Linear Core-sequenced history: the user-visible guarantees that replaced the
 // version DAG's merge heads, merge versions, parked parents and rejection
 // cascades. Core sequences every accepted write, merges it into the row's
-// post-image one column at a time (per-column stamps for plain columns, ops
-// for merge-strategy columns), and every other node stores Core's post-images
-// under its own pending overlay (SPEC/4 §4.6).
+// post-image one cell at a time (a plain cell against the writer's ancestor,
+// ops for merge-strategy columns), and every other node stores Core's
+// post-images under its own pending overlay (SPEC/4 §4.6).
 
 /// Replicates the current rows of `table` from `core` to `receiver` through
 /// one whole-table view update, as a subscribed client would receive them.
@@ -48,7 +48,8 @@ fn core_fate(core: &mut NodeState, unit: SyncMessage) -> SyncMessage {
 
 /// INV-HIST-8: two writers edit different columns of one row without seeing
 /// each other. Both columns survive at Core, and on the shared column the
-/// higher stamp wins even though Core sequenced it first.
+/// write Core sequenced first keeps its value: the later one was made over an
+/// image without it, so its title is recorded as lost.
 #[test]
 fn concurrent_writes_to_different_columns_both_survive_at_core() {
     let schema = two_column_schema();
@@ -91,7 +92,8 @@ fn concurrent_writes_to_different_columns_both_survive_at_core() {
     }
 
     // bob's body has no competing writer and survives; bob's later-sequenced
-    // title carries the lower stamp and loses to alice's.
+    // title was written over the base title, which alice had changed, and
+    // loses to alice's.
     let expected = BTreeMap::from([(target, todo_cells("alice", "bob"))]);
     assert_eq!(
         rows_at(&mut core, "todos", DurabilityTier::Global),
@@ -110,7 +112,8 @@ fn concurrent_writes_to_different_columns_both_survive_at_core() {
 
 /// INV-HIST-10: two writers increment a counter from the same base without
 /// seeing each other. Core sums both deltas exactly instead of keeping one
-/// writer's absolute value; the plain column still takes the higher stamp.
+/// writer's absolute value; the plain column keeps the first-sequenced
+/// writer's value, which the second writer had not seen.
 #[test]
 fn concurrent_counter_increments_sum_exactly_at_core() {
     let schema = counter_schema();
@@ -148,7 +151,7 @@ fn concurrent_counter_increments_sum_exactly_at_core() {
     core_fate(&mut core, alice_unit);
     core_fate(&mut core, bob_unit);
 
-    let expected = BTreeMap::from([(target, counter_cells(18, "bob"))]);
+    let expected = BTreeMap::from([(target, counter_cells(18, "alice"))]);
     assert_eq!(
         rows_at(&mut core, "counters", DurabilityTier::Global),
         expected
@@ -161,10 +164,12 @@ fn concurrent_counter_increments_sum_exactly_at_core() {
 }
 
 /// INV-HIST-15: the same concurrent writes, delivered to Core in every order,
-/// produce the same post-image. Plain columns are decided by stamps, not by
-/// the seq Core happens to assign, and counter ops commute.
+/// produce the post-image their seq order and bases determine: counter ops
+/// commute, and the contested plain column keeps the value of the write Core
+/// sequenced first, since each later write was made over the base without it.
+/// Writer clocks play no part.
 #[test]
-fn core_post_image_is_independent_of_write_arrival_order() {
+fn core_post_image_is_determined_by_seq_order_and_bases() {
     let schema = counter_schema();
     let target = row(0x30);
     let (_base_dir, mut base_writer) = open_node_with_schema(node(1), schema.clone());
@@ -195,8 +200,7 @@ fn core_post_image_is_independent_of_write_arrival_order() {
         units.push(unit);
     }
 
-    // w1 carries the highest stamp (t=40) whatever seq it is given.
-    let expected = BTreeMap::from([(target, counter_cells(421, "w1"))]);
+    let titles = ["w1", "w2", "w3"];
     let orders: [[usize; 3]; 6] = [
         [0, 1, 2],
         [0, 2, 1],
@@ -211,6 +215,7 @@ fn core_post_image_is_independent_of_write_arrival_order() {
         for index in order {
             core_fate(&mut core, units[index].clone());
         }
+        let expected = BTreeMap::from([(target, counter_cells(421, titles[order[0]]))]);
         assert_eq!(
             rows_at(&mut core, "counters", DurabilityTier::Global),
             expected,
@@ -341,10 +346,10 @@ fn receiver_keeps_the_newest_seq_whatever_order_core_images_arrive() {
     }
 }
 
-/// INV-TX-6: a node that has applied a row stamps its later edits at least as
-/// high as the row's newest stamp, so an edit made after observing a value
-/// overrides it even when the editing node's clock is far behind. A writer
-/// with the same slow clock that never observed the value still loses.
+/// INV-TX-6: an edit carries the image it was made over as its base, so an
+/// edit made after observing a value overrides it even when the editing
+/// node's clock is far behind. A writer whose base predates the value loses
+/// on that cell whatever its clock.
 #[test]
 fn write_after_observing_a_value_overrides_it_despite_a_slow_clock() {
     let schema = two_column_schema();
@@ -377,7 +382,7 @@ fn write_after_observing_a_value_overrides_it_despite_a_slow_clock() {
         .unwrap();
     assert!(
         observer_tx.time.physical_ms() >= 1_000,
-        "the edit is stamped at least as high as the value it observed"
+        "the node's clock has observed the value's time"
     );
     let (stale_tx, stale_unit) = stale
         .commit_mergeable_unit_settled(
@@ -819,7 +824,7 @@ fn unsigned_counter_decrement_sums_with_a_concurrent_increment_at_core() {
     core_fate(&mut core, alice_unit);
     core_fate(&mut core, bob_unit);
 
-    let expected = BTreeMap::from([(target, unsigned_counter_cells(9, "bob"))]);
+    let expected = BTreeMap::from([(target, unsigned_counter_cells(9, "alice"))]);
     assert_eq!(
         rows_at(&mut core, "counters", DurabilityTier::Global),
         expected
@@ -1291,7 +1296,7 @@ fn counter_write_wider_than_half_the_type_applies_its_exact_delta_at_core() {
     assert_accepted(&core_fate(&mut core, alice_unit));
     assert_eq!(
         rows_at(&mut core, "counters", DurabilityTier::Global),
-        BTreeMap::from([(target, counter_cells(i32::MIN + 5, "alice"))])
+        BTreeMap::from([(target, counter_cells(i32::MIN + 5, "bob"))])
     );
 }
 

@@ -29,6 +29,10 @@ touched rows live in `jazz_tx_touched_rows`.
 History records carry an empty `counter_signs` byte string after
 `authored_columns` (SPEC 4 §4.3), so the history bytes and every digest below
 were regenerated when that field was added.
+History records are keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`
+and end with the ancestor-merge fields `seq`, `base_seq`, `base_pending` and
+`lost_cells` (SPEC 4 §4.6); no record carries column stamps any more. The
+corpus was regenerated again for that layout.
 
 | Store                               | Entries |
 | ----------------------------------- | ------: |
@@ -70,7 +74,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `78116b383fe820a7516f8e080b70b622750ed6fe1a4dae535f2ce568dd0f9fa3` |
-| SQLite payload      | `8e90f0f963a57e5d51e6b3d1ba7e4644b0c4d3cca4b2d4610337a07d7365a80a` |
-| gzip SQLite archive | `f30086f87ce44b54957600738bbc0411bcd929e3a78136d67ddb5a2e4b92904c` |
-| RocksDB archive     | `81bb87e54e2ac336a03e1ec7596b0d9f02f0eb3b115f09f197141c135aba5b08` |
+| logical pack        | `82d525cee1fb5b194887b93e971b1511a871d65d8a72943ea574be03d01bae53` |
+| SQLite payload      | `ec77e11c4208049ba63022c098065bdb6f97c28404b1eeb878bdc6b1a9c01c97` |
+| gzip SQLite archive | `dd635273be299e5d7cc70aa9a0dc0463962cc9a230945c5ef6eb17db498e6974` |
+| RocksDB archive     | `459c168aeec168221d8ccbffc3ea3dc3ab8485280aec6e16d4abca3dfa5ff166` |

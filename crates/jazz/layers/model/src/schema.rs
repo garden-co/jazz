@@ -1026,18 +1026,6 @@ impl TableSchema {
         self.history_storage_table()
     }
 
-    /// The hidden per-column LWW stamp fields of a row state: one `U48`
-    /// field per `Lww` user column in schema order, then `_deletion`.
-    #[doc(hidden)]
-    pub fn column_stamp_columns(&self) -> Vec<groove::schema::ColumnSchema> {
-        self.columns
-            .iter()
-            .filter(|user_column| self.merge_strategy(&user_column.name) == MergeStrategy::Lww)
-            .map(|user_column| column_stamp_column(&app_storage_column_name(&user_column.name)))
-            .chain(std::iter::once(column_stamp_column("_deletion")))
-            .collect()
-    }
-
     fn history_storage_table_named(&self, name: String) -> GrooveTableSchema {
         let mut columns = vec![
             column("branch_key", GrooveColumnType::Bytes),
@@ -1073,11 +1061,25 @@ impl TableSchema {
         // Sign bits of a pending patch's counter ops, one per counter column
         // in schema order (SPEC 4, "Counter ops"). Empty on a settled image.
         columns.push(column(COUNTER_SIGNS_FIELD, GrooveColumnType::Bytes));
-        columns.extend(self.column_stamp_columns());
+        // The write's accepted seq; 0 while it has no accepted fate (SPEC 4
+        // §4.6, "Durable layout").
+        columns.push(column(SEQ_FIELD, GrooveColumnType::U64));
+        // The write's base: the settled seq its writer's image rested on and
+        // the writer's own pending predecessor to this row.
+        columns.push(column(BASE_SEQ_FIELD, GrooveColumnType::U64.nullable()));
+        columns.push(column(BASE_PENDING_FIELD, tx_id_column().nullable()));
+        // The write's own values for the cells it authored but lost: empty,
+        // or sparse cells keyed by physical column id.
+        columns.push(column(LOST_CELLS_FIELD, GrooveColumnType::Bytes));
 
+        // Accepted writes are keyed by seq, so "the row at seq S" is a point
+        // read and "the row's writes after S" a range read. A write without
+        // an accepted fate has seq 0, and its transaction identity keeps it
+        // apart from the row's other pending writes.
         GrooveTableSchema::new(name, columns).with_primary_key(PrimaryKey::composite([
             PrimaryKeyColumn::bytes("branch_key"),
             PrimaryKeyColumn::uuid("row_uuid"),
+            PrimaryKeyColumn::integer(SEQ_FIELD, IntegerKeyType::U64),
             PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
             PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
         ]))
@@ -1117,7 +1119,6 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
-        content_columns.extend(self.column_stamp_columns());
         let mut content_table = GrooveTableSchema::new(
             format!("jazz_{}_global_current", self.name),
             content_columns,
@@ -1173,7 +1174,6 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
-        content_columns.extend(self.column_stamp_columns());
         GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
             // One overlay row per row: the newest pending local image.
             .with_primary_key(PrimaryKey::composite([
@@ -1360,31 +1360,27 @@ fn tx_id_column() -> GrooveColumnType {
     GrooveColumnType::Tuple(vec![GrooveColumnType::U64, GrooveColumnType::Uuid])
 }
 
-/// Name prefix of the hidden per-column LWW stamp fields of a row state.
+/// History field holding a write's accepted seq (0 while unfated).
 #[doc(hidden)]
-pub const STAMP_FIELD_PREFIX: &str = "_ts_";
+pub const SEQ_FIELD: &str = "seq";
+
+/// History field holding the settled seq of a write's base (SPEC 4 §4.6).
+#[doc(hidden)]
+pub const BASE_SEQ_FIELD: &str = "base_seq";
+
+/// History field holding the pending predecessor of a write's base.
+#[doc(hidden)]
+pub const BASE_PENDING_FIELD: &str = "base_pending";
+
+/// History field holding a write's lost cells (SPEC 4 §4.6).
+#[doc(hidden)]
+pub const LOST_CELLS_FIELD: &str = "lost_cells";
 
 /// History field carrying the sign bits of a patch's counter ops: bit `i`
 /// (least significant first) belongs to the table's `i`-th counter column in
 /// schema order. Empty when no op is negative, and on every settled image.
 #[doc(hidden)]
 pub const COUNTER_SIGNS_FIELD: &str = "counter_signs";
-
-/// Name of the hidden stamp field of the row-state cell field `cell_field`:
-/// `_ts__app_<column>` for a logical user cell, `_ts__app_<id>` for a
-/// physical one, and `_ts__deletion`.
-#[doc(hidden)]
-pub fn stamp_field_name(cell_field: &str) -> String {
-    format!("{STAMP_FIELD_PREFIX}{cell_field}")
-}
-
-/// Hidden constant-width stamp field of one row-state cell field: groove
-/// `U48` Unix milliseconds of the write that last set the cell. See
-/// `crates/jazz/SPEC/4_history_merging.md` ("Column stamps").
-#[doc(hidden)]
-pub fn column_stamp_column(cell_field: &str) -> groove::schema::ColumnSchema {
-    column(stamp_field_name(cell_field), GrooveColumnType::U48)
-}
 
 fn column(name: impl Into<String>, column_type: GrooveColumnType) -> groove::schema::ColumnSchema {
     groove::schema::ColumnSchema::new(name, column_type)

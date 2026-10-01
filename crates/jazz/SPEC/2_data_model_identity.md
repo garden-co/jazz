@@ -284,15 +284,14 @@ history (Core, relay and client stores on every adapter) declares the codec
 family `jazz.history-version-current.v4` in its storage manifest, in addition
 to the shared Jazz epoch-one profile. That family is the linear row-state
 layout: one history record per accepted transaction holding the row state after
-Core's merge, keyed `(branch_key, row_uuid, seq)` where `seq` is the
-transaction's accepted `GlobalTime`, with no secondary index; the record keeps
-the transaction identity in its `tx_time` and `tx_node_id` fields. Pending
-records (a node's own uploads, and foreign writes a relay holds before their
-fate) live in the lineage's pending table with the same record layout, keyed
-`(branch_key, row_uuid, tx_time, tx_node_id)` and with `seq = 0`; the batch
-that stores an accepted fate moves each of the transaction's pending records
-to history at its seq, and a rejected fate deletes them. A history and pending
-record ends, after `authored_columns` and the `counter_signs` bytes of a
+Core's merge, keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)` where
+`seq` is the transaction's accepted `GlobalTime`, with no secondary index.
+Pending records (a node's own uploads, and foreign writes a relay holds before
+their fate) live in the same table with the same record layout and `seq = 0`,
+so they sort before every accepted write of the row and are found by their
+`(tx_time, tx_node_id)`; the batch that stores an accepted fate moves each of
+the transaction's pending records to its key at the transaction's seq, and a
+rejected fate deletes them. A history record ends, after `authored_columns` and the `counter_signs` bytes of a
 patch's counter ops (SPEC 4 §4.3), with `seq`, the write's `base_seq` and
 `base_pending` and its `lost_cells` (SPEC 4 §4.6). Beside them: a
 global-current record per row with `global_time` (the row's seq) and index
@@ -302,9 +301,8 @@ ordinary nullable cell. No row state carries a timestamp used for merging.
 The history images of one transaction are found through that transaction's
 `jazz_tx_touched_rows` list (§2.8), not through an index: fate replay, relay
 forwarding and materialization read the listed `(table, branch, row)` keys at
-the transaction's seq (from its `jazz_transactions` record) in history, or at
-its `(tx_time, tx_node_id)` in the pending table while it has no accepted
-fate. "The row at seq `S`" and "the row's writes after `S`" are a point read
+the transaction's seq (from its `jazz_transactions` record) and its
+`(tx_time, tx_node_id)`, or at `seq = 0` while it has no accepted fate. "The row at seq `S`" and "the row's writes after `S`" are a point read
 and a range read of history (SPEC 4 §4.6). Recovery takes the transaction-clock
 high-water mark from the last `jazz_transactions` key. A history image's
 `updated_by` is null when it equals the `made_by` of the transaction its key
@@ -317,8 +315,8 @@ register tables, no shared deletion history, no `jazz_merge_heads`, no
 layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) or by the
 unreleased v2 (history and ahead-current `by_tx` indexes, no touched-row list)
 or v3 (`updated_by` stored in every history image) row layouts lacks the v4
-family (v4 itself is unreleased, and its history key, pending table and
-merge fields changed in place before release, without a new codec ID), so opening it fails at the manifest check, before any record is
+family (v4 itself is unreleased, and its history key and merge fields
+changed in place before release, without a new codec ID), so opening it fails at the manifest check, before any record is
 decoded, with the typed `groove::storage::Error::UnsupportedStorageCodecs`,
 which names the codec IDs the root lacks and the ones this build does not know.
 There is no migration: whether old stores are refused, discarded and resynced,
@@ -392,7 +390,7 @@ accepted/reopen/rebuild receipts for the same coordinate.
 - _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
   `jazz_rejected_transactions`;
 - _per physical lineage_ — `jazz_physical_{id}_history`, keyed by
-  `(row_uuid, tx_time, tx_node_id)`, plus a per-lineage combined derived current
+  `(branch_key, row_uuid, seq, tx_time, tx_node_id)` (`seq = 0` while pending), plus a per-lineage combined derived current
   row per exact branch key. The database has exactly one
   `jazz_deletion_history`, keyed by `(physical_table_id, branch_key,
 row_uuid, tx_time, tx_node_id)` and with a seek/index prefix

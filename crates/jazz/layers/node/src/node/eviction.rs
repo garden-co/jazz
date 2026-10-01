@@ -226,7 +226,7 @@ where
             let history_table = self.version_storage_table_for_row(&candidate.version)?;
             batch.delete(
                 history_table.as_ref(),
-                history_primary_key(&candidate.version),
+                history_primary_key(&candidate.version)?,
             );
             batch_deletes += 1;
             if low_water_bytes.is_some() {

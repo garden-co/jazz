@@ -111,7 +111,7 @@ where
     }
 
     async fn prepare_exact_history_version(
-        &mut self, tx_node_alias: NodeAlias, tx_time: TxTime, version: &VersionRecord,
+        &mut self, tx_node_alias: NodeAlias, tx_time: TxTime, seq: GlobalTime, version: &VersionRecord,
     ) -> Result<VersionRow, Error> {
         let author_schema = version.schema_version();
         // Fail with TableNotFound before allocating aliases or resolving authored
@@ -119,9 +119,10 @@ where
         self.table_in_schema_ref(version.table(), author_schema)?;
         let schema_alias = self.ensure_schema_version_alias(author_schema).await?;
         let authored = self.authored_column_ids_for_names(author_schema, version.table(), version.authored_columns())?;
+        let lost_cells = self.lost_cells_for_storage(version)?;
         let table = self.table_in_schema_ref(version.table(), author_schema)?;
         VersionRow::from_wire_with_schema_version(
-            table, version, authored, tx_node_alias, schema_alias, tx_time,
+            table, version, authored, tx_node_alias, schema_alias, tx_time, seq, lost_cells,
             (author_schema != self.catalogue.local_schema_version_id).then_some(author_schema),
         )
     }
@@ -337,6 +338,13 @@ where
                 version.authored_columns(),
             )?;
             let table_schema = self.table_in_schema(version.table(), author_schema)?;
+            let lost_cells = self.lost_cells_for_storage(&version)?;
+            // An accepted write is stored at its seq, a pending one at 0
+            // (SPEC 2 §2.7.1).
+            let seq = match (&fate, global_time) {
+                (Fate::Accepted, Some(global_time)) => global_time,
+                _ => GlobalTime(0),
+            };
             let stored = VersionRow::from_wire_with_schema_version(
                 &table_schema,
                 &version,
@@ -344,6 +352,8 @@ where
                 tx_node_alias,
                 schema_version_alias,
                 tx.tx_id.time,
+                seq,
+                lost_cells,
                 (author_schema != self.catalogue.local_schema_version_id)
                     .then_some(author_schema),
             )?;
@@ -411,6 +421,14 @@ where
             if !matches!(fate, Fate::Rejected(_)) {
                 let (history_table, groove_record) = self.version_storage_write_binding(&stored, tx.made_by)?;
                 let storage_key = self.version_storage_primary_key(&stored)?;
+                if tx_already_known && stored.seq()? != GlobalTime(0) {
+                    // The write is accepted now: its pending record moves to
+                    // its seq.
+                    batch.delete(
+                        history_table.as_ref(),
+                        self.version_storage_primary_key(&stored.with_seq(GlobalTime(0))?)?,
+                    );
+                }
                 if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
                     // The authority's post-image replaces this node's own copy.
                     batch.update_raw(history_table.as_ref(), storage_key, groove_record);

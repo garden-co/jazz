@@ -37,7 +37,7 @@ merge.
   `WIRE_PROTOCOL_VERSION`; TypeScript
   `packages/jazz-tools/src/runtime/native-runtime/websocket.ts`,
   `WIRE_PROTOCOL_VERSION`). Row payloads use `JVRR\x02` with no `parents`, a
-  `_deletion` cell and trailing `col_stamps`. `SyncMessage` tags 15/16 and
+  `_deletion` cell and trailing `base`, `lost_cells` and `counter_signs`. `SyncMessage` tags 15/16 and
   `KnownStateDeclaration` tag 2 are reserved and uninhabited. SPEC 8 records
   the boundary ("Linear-history boundary").
 - **Storage:** every root that stores rows opens with
@@ -48,6 +48,15 @@ merge.
   `jazz.author-alias.v1`). The storage epoch stays 1. Roots with no row
   history (server account registry, catalogue-entry store) keep
   `epoch_1_storage_codec_profile()` and are unaffected.
+- **Merge fields (ancestor merge, SPEC 4 §4.6):** within the same unreleased
+  `jazz.history-version-current.v4` family, history records are keyed
+  `(branch_key, row_uuid, seq, tx_time, tx_node_id)` (`seq = 0` while a write
+  is pending, moved to its seq when its accepted fate is stored) and end with
+  `seq`, `base_seq`, `base_pending` and `lost_cells`; the hidden column stamps
+  of earlier v4 builds are gone from history and current records. Only
+  unreleased builds of this branch ever wrote stamps, so no codec id changes
+  and no released root is affected. The native and browser corpora below were
+  regenerated in this layout.
 
 ## What old peers see
 
