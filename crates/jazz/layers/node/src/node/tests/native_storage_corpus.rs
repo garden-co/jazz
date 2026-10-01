@@ -2534,16 +2534,11 @@ fn published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent(
         PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
     ));
     let table = schema.tables().iter().find(|table| table.name == "todos").unwrap().clone();
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = YieldingStorage::wrap(
-        ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-            &path,
-            &refs,
-            RocksDurability::FullSync,
-            &epoch_1_storage_codec_profile().unwrap(),
-        )
-        .expect("current adapter opens the published alpha.56 client root"),
+    let storage = open_native_corpus_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(RocksDurability::FullSync),
+        &path,
+        schema.column_families(),
+        true,
     );
     let author = AuthorSubject::from_canonical(&text("/receipt/author")).unwrap();
     let tx_at = |record: &str| {
@@ -2565,7 +2560,7 @@ fn published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent(
         let mut state =
             crate::local_executor::block_on(NodeState::new(node(0x56), schema.clone(), storage)).unwrap();
         // The stored fields really are the legacy shape: Accepted, tag 2, no
-        // global time. Decoding, not a migration, turns that into Pending.
+        // global time. Admission preserves payload bytes; decoding makes it Pending.
         let unsettled = crate::local_executor::block_on(state.database.index_scan_raw(
             "jazz_transactions",
             "by_global_time",
@@ -2619,7 +2614,7 @@ fn published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent(
         assert_eq!(core_versions.len(), 1);
         assert_eq!(core_versions[0].row_uuid(), core_row);
     }
-    // Reopening only read the records; the alpha.56 bytes are unchanged.
+    // Epoch admission changed the manifest, not the alpha.56 record bytes.
     assert_eq!(stored_record(&edge_key).as_deref(), Some(edge_value.as_slice()));
     assert_eq!(stored_record(&core_key).as_deref(), Some(core_value.as_slice()));
 }
