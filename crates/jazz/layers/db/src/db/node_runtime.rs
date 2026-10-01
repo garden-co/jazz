@@ -1041,6 +1041,28 @@ where
         !self.pending_local_publications.borrow().is_empty()
     }
 
+    /// Local commits still settling before they join the upload outbox, with
+    /// the storage tables each one changed.
+    pub(super) fn pending_local_publication_tables(&self) -> Vec<(TxId, Vec<String>)> {
+        self.pending_local_publications
+            .borrow()
+            .iter()
+            .map(|pending| {
+                (
+                    pending.published.tx_id(),
+                    pending.published.changed_tables().to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    pub(super) fn is_pending_local_publication(&self, tx_id: TxId) -> bool {
+        self.pending_local_publications
+            .borrow()
+            .iter()
+            .any(|pending| pending.published.tx_id() == tx_id)
+    }
+
     fn poll_local_publication_settlement(
         &self,
         cx: &mut std::task::Context<'_>,
@@ -1415,6 +1437,9 @@ where
         if let Some(mut node) = self.node.try_lock() {
             if Self::abandon_transaction_for_maintenance(&mut node, open_tx_id).is_ok() {
                 self.clear_transaction_abandonment(open_tx_id);
+                if node.has_released_large_values() {
+                    self.schedule_tick(TickUrgency::Immediate);
+                }
             } else {
                 self.schedule_tick(TickUrgency::Immediate);
             }
@@ -1474,7 +1499,13 @@ where
 
     async fn drain_transaction_abandonments(&self) -> Result<usize, Error> {
         let mut node = self.node.lock().await;
-        self.finish_transaction_abandonment_shutdown_in(&mut node)
+        let drained = self.finish_transaction_abandonment_shutdown_in(&mut node);
+        // Groove defers eviction while a local publication is resident; a
+        // later tick picks the released roots up once it has settled.
+        if node.has_released_large_values() && !self.has_pending_local_publications() {
+            node.evict_released_large_values().await;
+        }
+        drained
     }
 
     /// Close transaction admission and transfer the final open-transaction
@@ -1492,8 +1523,26 @@ where
     }
 
     pub(super) async fn finish_transaction_abandonment_shutdown(&self) -> Result<usize, Error> {
-        let mut node = self.node.lock().await;
-        self.finish_transaction_abandonment_shutdown_in(&mut node)
+        let drained = {
+            let mut node = self.node.lock().await;
+            self.finish_transaction_abandonment_shutdown_in(&mut node)
+        };
+        // No later owner turn runs after close, so release now what the
+        // retired transactions staged.
+        self.evict_released_large_values().await;
+        drained
+    }
+
+    /// Best-effort eviction of Groove roots staged by abandoned transactions,
+    /// after settling earlier local publications so Groove does not defer it.
+    /// Whatever this misses is reclaimed by the staging TTL.
+    pub(super) async fn evict_released_large_values(&self) {
+        if !self.node.lock().await.has_released_large_values() {
+            return;
+        }
+        if let Ok(mut node) = self.lock_for_large_value_staging().await {
+            node.evict_released_large_values().await;
+        }
     }
 
     #[cfg(test)]
@@ -3159,6 +3208,9 @@ where
         if upstream_epoch.is_some() {
             // Releases empty openings that were waiting on this link.
             self.remote_link.upstream_detached();
+            // Commits that link sent are resent by the next one; until then a
+            // Global read must not treat them as ahead of its open.
+            self.outbox.borrow_mut().forget_on_wire();
         }
         for request_id in terminal_permission_advice {
             if let Some(waiter) = self
@@ -5430,6 +5482,18 @@ pub(super) fn route_upstream_subscription_rejection(
 pub trait Transport {
     /// Hand an outbound message to the binding's wire.
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
+    /// Like [`Self::send`], but backpressure hands the unsent message back
+    /// (`Ok(Some(message))`) so a caller that must retry it keeps no copy of
+    /// its own. The default copies the message before sending; bindings that
+    /// can return a rejected message override it.
+    fn try_send(&mut self, message: SyncMessage) -> Result<Option<SyncMessage>, TransportError> {
+        let retained = message.clone();
+        match self.send(message) {
+            Ok(()) => Ok(None),
+            Err(TransportError::Backpressure) => Ok(Some(retained)),
+            Err(error) => Err(error),
+        }
+    }
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
     /// Fallible receive poll for connection servicing.
@@ -5457,6 +5521,13 @@ pub trait Transport {
     /// Runtime owners retire only this peer; database/storage errors remain errors.
     fn has_terminal_failure(&self) -> bool {
         false
+    }
+
+    /// The structured error the remote peer sent before ending this link, if
+    /// it sent one. Owners use its retry guidance to decide whether to
+    /// reconnect.
+    fn remote_wire_error(&self) -> Option<crate::wire::WireError> {
+        None
     }
 
     /// Remaining time until an incomplete receive must be serviced, even if

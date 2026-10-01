@@ -115,6 +115,7 @@ pub struct TestingClient<'a> {
     user_id: Option<String>,
     auth: TestingClientAuth,
     storage: TestingClientStorage,
+    transport_control: Option<crate::TransportControl>,
     ready_table: Option<String>,
     ready_timeout: Option<Duration>,
 }
@@ -128,6 +129,7 @@ impl<'a> TestingClient<'a> {
             user_id: None,
             auth: TestingClientAuth::User,
             storage: TestingClientStorage::Memory,
+            transport_control: None,
             ready_table: None,
             ready_timeout: None,
         }
@@ -173,6 +175,12 @@ impl<'a> TestingClient<'a> {
         self
     }
 
+    /// Attach an explicit network gate to this client's server connections.
+    pub fn with_transport_control(mut self, control: crate::TransportControl) -> Self {
+        self.transport_control = Some(control);
+        self
+    }
+
     pub fn with_memory_storage(mut self) -> Self {
         self.storage = TestingClientStorage::Memory;
         self
@@ -198,12 +206,11 @@ impl<'a> TestingClient<'a> {
             .expect("enroll public test client");
         let deadline = tokio::time::Instant::now() + timeout;
 
-        let client = JazzClient::connect_with_native_transport(
-            context,
-            std::sync::Arc::new(RetryLaterConnector { deadline }),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("connect test client after retry-later: {error}"));
+        let connector =
+            self.controlled_connector(std::sync::Arc::new(RetryLaterConnector { deadline }));
+        let client = JazzClient::connect_with_native_transport(context, connector)
+            .await
+            .unwrap_or_else(|error| panic!("connect test client after retry-later: {error}"));
 
         if let Some(ready_table) = ready_table {
             wait_for_remote_query_ready(
@@ -230,7 +237,10 @@ impl<'a> TestingClient<'a> {
             .await
             .expect("enroll public test client");
 
-        let client = crate::connect(context.clone())
+        let connector = self.controlled_connector(std::sync::Arc::new(
+            jazz_native_transport::NativeWebSocketConnector,
+        ));
+        let client = JazzClient::connect_with_native_transport(context.clone(), connector)
             .await
             .expect("connect test client");
 
@@ -244,6 +254,19 @@ impl<'a> TestingClient<'a> {
         }
 
         (context, client)
+    }
+
+    fn controlled_connector(
+        &self,
+        inner: std::sync::Arc<dyn NativeTransportConnector>,
+    ) -> std::sync::Arc<dyn NativeTransportConnector> {
+        match &self.transport_control {
+            Some(control) => std::sync::Arc::new(crate::transport_control::ControlledConnector {
+                control: control.clone(),
+                inner,
+            }),
+            None => inner,
+        }
     }
 
     /// Builds a fresh test-client context.

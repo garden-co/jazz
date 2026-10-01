@@ -96,6 +96,128 @@ impl Binding {
     }
 }
 
+/// Canonical `jazz-binding-v0` bytes for binding values: the exact preimage of
+/// their [`BindingId`].
+#[doc(hidden)]
+pub fn canonical_binding_bytes_for_values(
+    values: &BTreeMap<String, Value>,
+) -> Result<Vec<u8>, QueryError> {
+    canonical_binding_bytes(values)
+}
+
+/// Decode canonical `jazz-binding-v0` bytes back into binding values.
+///
+/// Supports scalar, tuple, array and nullable values (tags 1-15). Record
+/// values (tag 16) are not decodable: their preimage carries a column-type
+/// descriptor this decoder does not rebuild. The result is only returned when
+/// re-encoding reproduces the input exactly, so a successful decode is
+/// canonical and yields the same [`BindingId`].
+#[doc(hidden)]
+pub fn binding_values_from_canonical_bytes(
+    bytes: &[u8],
+) -> Result<BTreeMap<String, Value>, QueryError> {
+    fn invalid() -> QueryError {
+        QueryError::OperandTypeMismatch
+    }
+    struct Reader<'a>(&'a [u8]);
+    impl<'a> Reader<'a> {
+        fn take(&mut self, len: usize) -> Result<&'a [u8], QueryError> {
+            if self.0.len() < len {
+                return Err(invalid());
+            }
+            let (head, tail) = self.0.split_at(len);
+            self.0 = tail;
+            Ok(head)
+        }
+        fn byte(&mut self) -> Result<u8, QueryError> {
+            Ok(self.take(1)?[0])
+        }
+        fn array<const N: usize>(&mut self) -> Result<[u8; N], QueryError> {
+            self.take(N)?.try_into().map_err(|_| invalid())
+        }
+        fn len(&mut self) -> Result<usize, QueryError> {
+            let len = u64::from_be_bytes(self.array()?);
+            let len = usize::try_from(len).map_err(|_| invalid())?;
+            // Every encoded element occupies at least one byte, so a length
+            // beyond the remaining input is malformed rather than allocatable.
+            if len > self.0.len() {
+                return Err(invalid());
+            }
+            Ok(len)
+        }
+        fn bytes(&mut self) -> Result<Vec<u8>, QueryError> {
+            let len = self.len()?;
+            Ok(self.take(len)?.to_vec())
+        }
+        fn string(&mut self) -> Result<String, QueryError> {
+            String::from_utf8(self.bytes()?).map_err(|_| invalid())
+        }
+        fn value(&mut self, depth: usize) -> Result<Value, QueryError> {
+            if depth > 64 {
+                return Err(invalid());
+            }
+            Ok(match self.byte()? {
+                1 => Value::U8(self.byte()?),
+                2 => Value::U16(u16::from_be_bytes(self.array()?)),
+                3 => Value::U32(u32::from_be_bytes(self.array()?)),
+                4 => Value::U64(u64::from_be_bytes(self.array()?)),
+                5 => Value::F64(f64::from_bits(u64::from_be_bytes(self.array()?))),
+                6 => match self.byte()? {
+                    0 => Value::Bool(false),
+                    1 => Value::Bool(true),
+                    _ => return Err(invalid()),
+                },
+                7 => Value::String(self.string()?),
+                8 => Value::Bytes(self.bytes()?),
+                9 => Value::Uuid(uuid::Uuid::from_bytes(self.array()?)),
+                10 => Value::EnumTag(self.byte()?),
+                11 => {
+                    let len = self.len()?;
+                    Value::Tuple(
+                        (0..len)
+                            .map(|_| self.value(depth + 1))
+                            .collect::<Result<_, _>>()?,
+                    )
+                }
+                12 => {
+                    let len = self.len()?;
+                    Value::Array(
+                        (0..len)
+                            .map(|_| self.value(depth + 1))
+                            .collect::<Result<_, _>>()?,
+                    )
+                }
+                13 => match self.byte()? {
+                    0 => Value::Nullable(None),
+                    1 => Value::Nullable(Some(Box::new(self.value(depth + 1)?))),
+                    _ => return Err(invalid()),
+                },
+                14 => Value::I64(i64::from_be_bytes(self.array()?)),
+                15 => Value::I32(i32::from_be_bytes(self.array()?)),
+                _ => return Err(invalid()),
+            })
+        }
+    }
+
+    let mut reader = Reader(bytes);
+    if reader.take(b"jazz-binding-v0".len())? != b"jazz-binding-v0" {
+        return Err(invalid());
+    }
+    let count = reader.len()?;
+    let mut values = BTreeMap::new();
+    for _ in 0..count {
+        let name = reader.string()?;
+        let value = reader.value(0)?;
+        if values.insert(name, value).is_some() {
+            return Err(invalid());
+        }
+    }
+    if !reader.0.is_empty() || canonical_binding_bytes(&values)? != bytes {
+        return Err(invalid());
+    }
+    Ok(values)
+}
+
 #[doc(hidden)]
 pub fn binding_id_for_values(
     values: &BTreeMap<String, Value>,

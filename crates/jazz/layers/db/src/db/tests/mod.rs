@@ -136,6 +136,7 @@ use wire_transport::byte_duplex_with_session;
 
 mod catalogue;
 mod chunk_io_pump;
+mod global_read_write_order;
 mod lifecycle;
 mod mutations;
 mod node_runtime;

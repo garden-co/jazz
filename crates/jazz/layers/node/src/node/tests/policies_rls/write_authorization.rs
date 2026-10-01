@@ -1984,6 +1984,123 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
     ));
 }
 
+/// An AND of two ORs expands to four policy branches, which lowering factors
+/// back into one union per OR. A write is accepted exactly when each OR has a
+/// satisfied alternative, whichever alternative that is.
+#[test]
+fn write_policy_and_of_ors_requires_one_alternative_per_factor() {
+    let writer = user(0xa3);
+    let policy = PublicPolicyExpr::And(vec![
+        PublicPolicyExpr::Or(vec![
+            public_literal_eq("isPublic", PublicValue::Boolean(true)),
+            public_outer_exists(
+                "editorInvites",
+                "canvas",
+                "id",
+                [public_claim_eq("userID", "sub")],
+            ),
+        ]),
+        PublicPolicyExpr::Or(vec![
+            public_literal_eq("isOpen", PublicValue::Boolean(true)),
+            public_outer_exists(
+                "reviewerInvites",
+                "canvas",
+                "id",
+                [public_claim_eq("userID", "sub")],
+            ),
+        ]),
+    ]);
+    let invites = |table| {
+        PublicTableSchemaBuilder::new(table)
+            .fk_column("canvas", "canvases")
+            .column("userID", PublicColumnType::Uuid)
+    };
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("canvases")
+                    .column("title", PublicColumnType::Text)
+                    .column("isPublic", PublicColumnType::Boolean)
+                    .column("isOpen", PublicColumnType::Boolean)
+                    .policies(public_write_policies(policy)),
+            )
+            .table(invites("editorInvites"))
+            .table(invites("reviewerInvites")),
+    );
+    let (_writer_dir, mut client) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, writer);
+
+    // (editor invite, reviewer invite, isPublic, isOpen, accepted)
+    let cases = [
+        (true, false, false, true, true),    // editor invite, open
+        (true, false, false, false, false),  // editor invite, second OR unmet
+        (false, true, true, false, true),    // public, reviewer invite
+        (false, true, false, false, false),  // reviewer invite, first OR unmet
+        (true, true, false, false, true),    // both invites
+        (true, true, true, true, true),      // every alternative
+        (false, false, true, true, true),    // both literal alternatives
+        (false, false, true, false, false),  // second OR unmet
+        (false, false, false, false, false), // nothing
+    ];
+    let mut global_time = 0;
+    for (index, (editor, reviewer, _, _, _)) in cases.iter().enumerate() {
+        let target = row(40 + index as u8);
+        for (invited, table, invite) in [
+            (*editor, "editorInvites", 60 + 2 * index as u8),
+            (*reviewer, "reviewerInvites", 61 + 2 * index as u8),
+        ] {
+            if !invited {
+                continue;
+            }
+            let tx = core
+                .commit_mergeable_settled(MergeableCommit::new(table, row(invite), 3).cells(
+                    BTreeMap::from([
+                        ("canvas".to_owned(), Value::Uuid(target.0)),
+                        ("userID".to_owned(), Value::Uuid(writer.test_uuid())),
+                    ]),
+                ))
+                .unwrap();
+            core.apply_fate_update(
+                tx,
+                Fate::Accepted,
+                Some(GlobalTime(global_time)),
+                Some(DurabilityTier::Global),
+            )
+            .unwrap();
+            global_time += 1;
+        }
+    }
+
+    for (index, (_, _, is_public, is_open, accepted)) in cases.into_iter().enumerate() {
+        let tx = client
+            .commit_mergeable_unit_settled(
+                MergeableCommit::new("canvases", row(40 + index as u8), 14 + index as u64)
+                    .made_by(writer)
+                    .cells(BTreeMap::from([
+                        ("title".to_owned(), Value::String(format!("case {index}"))),
+                        ("isPublic".to_owned(), Value::Bool(is_public)),
+                        ("isOpen".to_owned(), Value::Bool(is_open)),
+                    ])),
+            )
+            .unwrap();
+        let [fate] = core
+            .apply_sync_message_settled(tx.1)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let expected = if accepted {
+            Fate::Accepted
+        } else {
+            Fate::Rejected(RejectionReason::AuthorizationDenied)
+        };
+        assert!(
+            matches!(&fate, SyncMessage::FateUpdate { fate, .. } if *fate == expected),
+            "case {index}: {fate:?}"
+        );
+    }
+}
+
 #[test]
 fn read_policy_branch_or_join_allows_public_or_membership_reads() {
     let member = user(0xa1);

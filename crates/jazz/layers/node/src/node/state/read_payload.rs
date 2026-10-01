@@ -244,6 +244,8 @@ where
     }
 
     fn version_record_from_row(&self, version: &VersionRow) -> Result<VersionRecord, Error> {
+        #[cfg(feature = "cold-settle-attribution")]
+        version.record_conversion("version_row_to_wire", 0);
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(

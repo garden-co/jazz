@@ -1477,14 +1477,17 @@ fn terminal_support_rehydrates_after_provenance_only_policy_change() {
     let support_shape_id = original_scope.subscriptions[0].shape.shape_id();
     let support_binding_id = original_scope.subscriptions[0].binding.binding_id();
     let mut peer = PeerState::client_link(writer);
-    crate::local_executor::block_on(peer.prove_terminal_commit_support(
-        &mut node_state,
-        writer,
-        claims.clone(),
-        &versions,
-        tx.tx_id,
-    ))
-    .unwrap();
+    {
+        let mut scoped_node = node_state.scoped_active_session_claims(writer, claims.clone());
+        crate::local_executor::block_on(peer.prove_terminal_commit_support(
+            &mut scoped_node,
+            writer,
+            &claims,
+            &versions,
+            tx.tx_id,
+        ))
+        .unwrap();
+    }
 
     let policy_binding = (writer, claims.clone());
     let maintained_id = |peer: &PeerState| {
@@ -1537,14 +1540,17 @@ fn terminal_support_rehydrates_after_provenance_only_policy_change() {
         updated_rows.iter().any(|row| row.row_uuid() == resource),
         "the updated support query includes its matching witness",
     );
-    crate::local_executor::block_on(peer.prove_terminal_commit_support(
-        &mut node_state,
-        writer,
-        claims,
-        &versions,
-        tx.tx_id,
-    ))
-    .unwrap();
+    {
+        let mut scoped_node = node_state.scoped_active_session_claims(writer, claims.clone());
+        crate::local_executor::block_on(peer.prove_terminal_commit_support(
+            &mut scoped_node,
+            writer,
+            &claims,
+            &versions,
+            tx.tx_id,
+        ))
+        .unwrap();
+    }
     assert!(
         peer.maintained_subscription_view_metrics()
             .rehydrate_attempts
@@ -1585,7 +1591,6 @@ fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
         tx.tx_id,
     )
     .expect("SYSTEM must not bind session claims for a bypassed write");
-    assert_eq!(peer.terminal_authority_scope_proof_count(), 0);
 
     let denied = crate::local_executor::block_on(
         node_state.dry_run_mergeable_write_allows_in_schema(

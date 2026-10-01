@@ -5,8 +5,10 @@
 //! write ingest. It also retains the transaction memo used by view emission.
 
 use super::query_engine::{NormalizedRowSetShape, RowSetExpr};
+use super::query_eval::{TransactionOverlayTable, TransactionWriteOverlay};
 use super::*;
 use crate::protocol::PermissionAdviceAction;
+use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 pub(super) struct ViewEvaluationContext {
@@ -56,6 +58,223 @@ fn unresolved_provenance() -> RowProvenance {
         updated_by: AuthorSubject::SYSTEM,
         updated_at: 0,
     }
+}
+
+/// One row a candidate commit unit writes on the main branch, prepared as
+/// write-policy evidence for the unit's other writes (`INV-RLS-9`).
+struct CandidateEvidenceRow {
+    /// Logical table as the authored versions name it.
+    authored_table: String,
+    row_uuid: RowUuid,
+    /// Policy schema and table the row is projected into.
+    policy_schema: SchemaVersionId,
+    policy_table: String,
+    /// The row after the transaction. `None` only for a restore whose row
+    /// has no committed content to bring back.
+    after: Option<CurrentRow>,
+    /// The committed row an update replaces. It stays evidence until the
+    /// update's own checks pass.
+    before: Option<CurrentRow>,
+}
+
+impl CandidateEvidenceRow {
+    /// Whether this row is an update: its post-state replaces committed
+    /// content that ungrounded checks still read.
+    fn replaces_committed(&self) -> bool {
+        self.before.is_some() && self.after.is_some() && self.before != self.after
+    }
+
+    fn table_key(&self) -> (SchemaVersionId, String) {
+        (self.policy_schema, self.policy_table.clone())
+    }
+
+    /// What a check reads for this row: its post-transaction content once
+    /// the row is grounded, otherwise its committed content for an update
+    /// and nothing for an insert or restore. A restore with nothing to bring
+    /// back shows nothing either way.
+    fn shown(&self, grounded: bool) -> Option<CurrentRow> {
+        match &self.after {
+            None => None,
+            Some(after) if grounded => Some(after.clone()),
+            Some(_) => self.before.clone(),
+        }
+    }
+}
+
+/// The rows of one candidate commit unit, in `(authored_table, row_uuid)`
+/// order.
+#[derive(Default)]
+struct CandidateUnitEvidence {
+    rows: Vec<CandidateEvidenceRow>,
+}
+
+type OverlayTables = BTreeMap<(SchemaVersionId, String), Arc<TransactionOverlayTable>>;
+
+impl CandidateUnitEvidence {
+    fn row_index(&self, table: &str, row_uuid: RowUuid) -> Option<usize> {
+        self.rows
+            .binary_search_by(|row| {
+                (row.authored_table.as_str(), row.row_uuid).cmp(&(table, row_uuid))
+            })
+            .ok()
+    }
+
+    /// Rebuild the shared overlay tables named by `changed` (every table when
+    /// `None`) for the given grounded rows. Rows the unit deletes are not in
+    /// the evidence at all: a committed row stays visible as it was, and a
+    /// row the unit both inserts and deletes never counts.
+    fn rebuild_tables(
+        &self,
+        tables: &mut OverlayTables,
+        grounded: &[bool],
+        changed: Option<&BTreeSet<(SchemaVersionId, String)>>,
+    ) {
+        let mut rebuilt = BTreeMap::<(SchemaVersionId, String), BTreeMap<RowUuid, _>>::new();
+        for (index, row) in self.rows.iter().enumerate() {
+            let key = row.table_key();
+            if changed.is_some_and(|changed| !changed.contains(&key)) {
+                continue;
+            }
+            rebuilt
+                .entry(key)
+                .or_default()
+                .insert(row.row_uuid, row.shown(grounded[index]));
+        }
+        for (key, rows) in rebuilt {
+            tables.insert(key, Arc::new(TransactionOverlayTable::new(rows)));
+        }
+    }
+}
+
+/// Whether a write-policy clause can only grant more as rows are added:
+/// existential joins, inner relation joins, reachability, inheritance and
+/// row-level filters. `NOT` anywhere, a non-inner relation join, aggregates
+/// and limits or offsets count as non-monotone, conservatively.
+fn write_policy_query_is_monotone(query: &crate::query::Query) -> bool {
+    query.aggregate.is_none()
+        && query.limit.is_none()
+        && query.offset == 0
+        && query.array_subqueries.is_empty()
+        && predicates_are_monotone(&query.filters)
+        && query.joins.iter().all(join_is_monotone)
+        && query.reachable.iter().all(reachable_is_monotone)
+        && query.policy_branches.iter().all(|branch| {
+            predicates_are_monotone(&branch.filters)
+                && branch.joins.iter().all(join_is_monotone)
+                && branch.reachable.iter().all(reachable_is_monotone)
+        })
+        && query
+            .relation
+            .as_ref()
+            .is_none_or(|relation| relation_is_monotone(&relation.rel))
+}
+
+fn query_inherits(query: &crate::query::Query) -> bool {
+    !query.inherits.is_empty()
+        || query
+            .policy_branches
+            .iter()
+            .any(|branch| !branch.inherits.is_empty())
+}
+
+fn predicates_are_monotone(predicates: &[crate::query::Predicate]) -> bool {
+    predicates.iter().all(predicate_is_monotone)
+}
+
+fn predicate_is_monotone(predicate: &crate::query::Predicate) -> bool {
+    use crate::query::Predicate;
+    match predicate {
+        Predicate::Not(_) => false,
+        Predicate::All(predicates) | Predicate::Any(predicates) => {
+            predicates_are_monotone(predicates)
+        }
+        Predicate::EnumMatch { payload, .. } => predicate_is_monotone(payload),
+        _ => true,
+    }
+}
+
+fn join_is_monotone(join: &crate::query::JoinVia) -> bool {
+    predicates_are_monotone(&join.filters) && join.nested_joins.iter().all(join_is_monotone)
+}
+
+fn reachable_is_monotone(reachable: &crate::query::ReachableVia) -> bool {
+    predicates_are_monotone(&reachable.access_filters)
+        && predicates_are_monotone(&reachable.edge_filters)
+}
+
+fn relation_is_monotone(relation: &crate::query::RelationExpr) -> bool {
+    use crate::query::{RelationExpr, RelationJoinKind};
+    match relation {
+        RelationExpr::TableScan { .. } => true,
+        RelationExpr::Filter { input, predicate } => {
+            relation_is_monotone(input) && relation_predicate_is_monotone(predicate)
+        }
+        RelationExpr::Union { inputs } => inputs.iter().all(|arm| relation_is_monotone(&arm.input)),
+        RelationExpr::Join {
+            left,
+            right,
+            join_kind,
+            ..
+        } => {
+            matches!(join_kind, RelationJoinKind::Inner)
+                && relation_is_monotone(left)
+                && relation_is_monotone(right)
+        }
+        RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. } => relation_is_monotone(input),
+        RelationExpr::Gather { seed, step, .. } => {
+            relation_is_monotone(seed) && relation_is_monotone(step)
+        }
+        RelationExpr::Offset { .. } | RelationExpr::Limit { .. } => false,
+    }
+}
+
+fn relation_predicate_is_monotone(predicate: &crate::query::RelationPredicate) -> bool {
+    use crate::query::RelationPredicate;
+    match predicate {
+        RelationPredicate::Not(_) => false,
+        RelationPredicate::And(predicates) | RelationPredicate::Or(predicates) => {
+            predicates.iter().all(relation_predicate_is_monotone)
+        }
+        RelationPredicate::EnumMatch { payload, .. } => relation_predicate_is_monotone(payload),
+        _ => true,
+    }
+}
+
+/// The outcome of deciding every write policy of one commit unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UnitWritePolicyDecision {
+    Allowed,
+    Denied,
+    /// The unit's policy checks would read more of its own writes than the
+    /// evidence budget allows; the message names the unsupported pattern.
+    Unsupported(String),
+}
+
+/// How many overlaid rows of its own transaction a unit's write-policy
+/// checks may read in total, summed over every check. Each check reads the
+/// unit's rows in the tables its policy reads, so a unit whose policies read
+/// its own large table grows quadratically; above this bound the unit is
+/// rejected as not supported yet rather than evaluated at unbounded cost.
+pub(super) const MAX_TRANSACTION_POLICY_EVIDENCE_ROWS: usize = 1 << 18;
+
+fn unsupported_transaction_policy_evidence() -> UnitWritePolicyDecision {
+    UnitWritePolicyDecision::Unsupported(format!(
+        "Reading more than {MAX_TRANSACTION_POLICY_EVIDENCE_ROWS} rows of a transaction's own \
+         writes in its write-policy checks is not supported yet"
+    ))
+}
+
+fn current_row_cells(table: &TableSchema, row: &CurrentRow) -> BTreeMap<String, Value> {
+    table
+        .columns
+        .iter()
+        .filter_map(|column| {
+            row.cell(table, &column.name)
+                .map(|value| (column.name.clone(), value))
+        })
+        .collect()
 }
 
 impl<S> NodeState<S>
@@ -152,8 +371,446 @@ where
             None,
             candidate_tx_id,
             candidate_versions,
+            &TransactionWriteOverlay::default(),
         )
         .await
+    }
+
+    /// Decide every write policy of one commit unit (`INV-RLS-9`).
+    ///
+    /// A transaction reads its own writes, so its policy checks do too. Each
+    /// write's WITH CHECK clause (insert check, update check) reads committed
+    /// state overlaid with the unit's other inserts, restores and updates;
+    /// the unit's deletes are not overlaid, and the written row itself is
+    /// the inline candidate. A commit unit carries its writes as a canonical
+    /// set, not in write order, so the checks run to a fixpoint: a row's
+    /// post-transaction content becomes evidence once all of its own checks
+    /// pass ("grounded"), until then an update shows its committed content
+    /// and an insert or restore shows nothing, so writes cannot justify each
+    /// other in a cycle. When the fixpoint passes every write, each write
+    /// that passed before all the unit rows it reads were grounded is checked
+    /// once more against the unit's full post-state, and the unit is accepted
+    /// only if those checks pass too. USING clauses judge the rows the
+    /// transaction acts on as committed. Other transactions' writes are never
+    /// evidence.
+    ///
+    /// Each round shares one overlay per table among its checks, and a
+    /// failed write is re-checked only when a table its policy reads gained
+    /// grounded rows. A unit whose checks would read more than
+    /// [`MAX_TRANSACTION_POLICY_EVIDENCE_ROWS`] overlaid rows in total is
+    /// not supported yet.
+    pub(super) async fn commit_unit_write_policies_allow(
+        &mut self,
+        versions: &[VersionRecord],
+        author: AuthorSubject,
+        candidate_tx_id: TxId,
+    ) -> Result<UnitWritePolicyDecision, Error> {
+        let evidence =
+            Box::pin(self.candidate_unit_evidence(versions, author, candidate_tx_id)).await?;
+        if evidence.rows.is_empty() {
+            // No write can see another unit row: committed state alone
+            // decides each write.
+            for version in versions {
+                #[cfg(any(test, feature = "testing"))]
+                WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(count.get() + 1));
+                if !Box::pin(self.write_policy_allows_version_record_for_view(
+                    version,
+                    author,
+                    None,
+                    Some(candidate_tx_id),
+                    versions,
+                    &TransactionWriteOverlay::accepted_state(),
+                ))
+                .await?
+                {
+                    return Ok(UnitWritePolicyDecision::Denied);
+                }
+            }
+            return Ok(UnitWritePolicyDecision::Allowed);
+        }
+
+        let own_row = versions
+            .iter()
+            .map(|version| {
+                if version.branch_key().values.is_empty() {
+                    evidence.row_index(version.table(), version.row_uuid())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        // Versions still to pass per row, and per table the rows not yet
+        // grounded whose post-state differs from what an ungrounded row shows.
+        let mut unpassed = vec![0usize; evidence.rows.len()];
+        for own in own_row.iter().flatten() {
+            unpassed[*own] += 1;
+        }
+        // `ungrounded_live`: rows whose post-state differs from what they show
+        // while ungrounded (inserts, restores and updates). `ungrounded_updates`:
+        // the subset that replaces committed content (updates), the only rows
+        // whose grounding can take evidence away from a monotone policy.
+        let mut ungrounded_live = BTreeMap::<(SchemaVersionId, String), usize>::new();
+        let mut ungrounded_updates = BTreeMap::<(SchemaVersionId, String), usize>::new();
+        for row in &evidence.rows {
+            if row.after.is_some() {
+                *ungrounded_live.entry(row.table_key()).or_default() += 1;
+            }
+            if row.replaces_committed() {
+                *ungrounded_updates.entry(row.table_key()).or_default() += 1;
+            }
+        }
+        // Whether a passing check already saw everything the post-state
+        // could change for it. A monotone policy can only lose a pass to an
+        // update grounded later; any other policy to any ungrounded row.
+        let saw_post_state =
+            |own: Option<usize>,
+             monotone: bool,
+             reads: &BTreeSet<(SchemaVersionId, String)>,
+             grounded: &[bool],
+             ungrounded_live: &BTreeMap<(SchemaVersionId, String), usize>,
+             ungrounded_updates: &BTreeMap<(SchemaVersionId, String), usize>| {
+                reads.iter().all(|table| {
+                    let own_row = own
+                        .filter(|own| !grounded[*own])
+                        .map(|own| &evidence.rows[own])
+                        .filter(|row| row.table_key() == *table);
+                    if monotone {
+                        let own_counted = own_row.is_some_and(|row| row.replaces_committed());
+                        ungrounded_updates.get(table).copied().unwrap_or(0)
+                            == usize::from(own_counted)
+                    } else {
+                        let own_counted = own_row.is_some_and(|row| row.after.is_some());
+                        ungrounded_live.get(table).copied().unwrap_or(0) == usize::from(own_counted)
+                    }
+                })
+            };
+        let monotone = self.unit_write_policies_monotone(versions)?;
+        let mut grounded = vec![false; evidence.rows.len()];
+        let mut post_state_checked = vec![false; versions.len()];
+        let mut reads = vec![BTreeSet::<(SchemaVersionId, String)>::new(); versions.len()];
+        // The first round has nothing grounded, so every unit row shows what
+        // committed state already shows: it runs on committed state alone,
+        // with no overlaid rows and nothing charged to the evidence budget,
+        // and only records which tables each policy reads.
+        let mut tables = OverlayTables::new();
+        let mut first_round = true;
+        let mut spent = 0usize;
+        let mut failed = BTreeSet::new();
+        let mut pending = (0..versions.len()).collect::<Vec<_>>();
+        loop {
+            let overlay = TransactionWriteOverlay::from_tables(Arc::new(tables.clone()));
+            let mut newly_grounded = Vec::new();
+            for index in pending {
+                let Some(allowed) = Box::pin(self.unit_write_policy_check(
+                    versions,
+                    index,
+                    own_row[index],
+                    &evidence,
+                    &overlay,
+                    author,
+                    candidate_tx_id,
+                    &mut reads[index],
+                    &mut spent,
+                ))
+                .await?
+                else {
+                    return Ok(unsupported_transaction_policy_evidence());
+                };
+                if allowed {
+                    failed.remove(&index);
+                    post_state_checked[index] = saw_post_state(
+                        own_row[index],
+                        monotone[index],
+                        &reads[index],
+                        &grounded,
+                        &ungrounded_live,
+                        &ungrounded_updates,
+                    );
+                    // A row is grounded once every version the unit writes
+                    // for it has passed; it becomes evidence next round.
+                    if let Some(own) = own_row[index] {
+                        unpassed[own] -= 1;
+                        if unpassed[own] == 0 {
+                            newly_grounded.push(own);
+                        }
+                    }
+                } else {
+                    failed.insert(index);
+                }
+            }
+            if failed.is_empty() {
+                break;
+            }
+            let mut changed = BTreeSet::new();
+            for own in newly_grounded {
+                grounded[own] = true;
+                let row = &evidence.rows[own];
+                if row.after.is_some() {
+                    changed.insert(row.table_key());
+                    if let Some(count) = ungrounded_live.get_mut(&row.table_key()) {
+                        *count -= 1;
+                    }
+                }
+                if row.replaces_committed()
+                    && let Some(count) = ungrounded_updates.get_mut(&row.table_key())
+                {
+                    *count -= 1;
+                }
+            }
+            // Only a table that gained grounded rows can change a failed
+            // check's evidence. Without one, every failure is final.
+            if changed.is_empty() {
+                return Ok(UnitWritePolicyDecision::Denied);
+            }
+            if first_round {
+                evidence.rebuild_tables(&mut tables, &grounded, None);
+                first_round = false;
+            } else {
+                evidence.rebuild_tables(&mut tables, &grounded, Some(&changed));
+            }
+            pending = failed
+                .iter()
+                .copied()
+                .filter(|index| !reads[*index].is_disjoint(&changed))
+                .collect();
+        }
+
+        // Every write passed, so every row is grounded and the tables now
+        // show the unit's post-state. Re-check each write whose passing check
+        // read a unit row that was not grounded yet.
+        let final_pass = (0..versions.len())
+            .filter(|index| !post_state_checked[*index])
+            .collect::<Vec<_>>();
+        if final_pass.is_empty() {
+            return Ok(UnitWritePolicyDecision::Allowed);
+        }
+        grounded.fill(true);
+        evidence.rebuild_tables(&mut tables, &grounded, None);
+        let overlay = TransactionWriteOverlay::from_tables(Arc::new(tables));
+        for index in final_pass {
+            let Some(allowed) = Box::pin(self.unit_write_policy_check(
+                versions,
+                index,
+                own_row[index],
+                &evidence,
+                &overlay,
+                author,
+                candidate_tx_id,
+                &mut reads[index],
+                &mut spent,
+            ))
+            .await?
+            else {
+                return Ok(unsupported_transaction_policy_evidence());
+            };
+            if !allowed {
+                return Ok(UnitWritePolicyDecision::Denied);
+            }
+        }
+        Ok(UnitWritePolicyDecision::Allowed)
+    }
+
+    /// Whether each version's WITH CHECK policies are monotone in the rows
+    /// present (`INV-RLS-9`), decided statically per policy table and cached
+    /// per unit. A table whose insert or update check uses a non-monotone
+    /// construct, or inherits through a schema that has one, is not.
+    fn unit_write_policies_monotone(
+        &mut self,
+        versions: &[VersionRecord],
+    ) -> Result<Vec<bool>, Error> {
+        let mut by_table = BTreeMap::<(SchemaVersionId, String), bool>::new();
+        let mut monotone = Vec::with_capacity(versions.len());
+        for version in versions {
+            let key = (version.schema_version(), version.table().to_owned());
+            if let Some(known) = by_table.get(&key) {
+                monotone.push(*known);
+                continue;
+            }
+            let (policy_schema, table, _) = self.policy_projection_for_version_record(version)?;
+            let checks = [
+                table.write_policies.insert_check.as_ref(),
+                table.write_policies.update_check.as_ref(),
+            ];
+            let mut known = checks
+                .iter()
+                .flatten()
+                .all(|policy| write_policy_query_is_monotone(policy));
+            if known && checks.iter().flatten().any(|policy| query_inherits(policy)) {
+                // An inherited clause evaluates another table's policy; accept
+                // it as monotone only when every policy of the schema is.
+                known = self
+                    .policy_schema_for_monotonicity(policy_schema)
+                    .is_some_and(|schema| {
+                        schema.tables.iter().all(|table| {
+                            table
+                                .read_policy
+                                .iter()
+                                .chain(table.write_policies.iter().map(|(_, policy)| policy))
+                                .all(write_policy_query_is_monotone)
+                        })
+                    });
+            }
+            by_table.insert(key, known);
+            monotone.push(known);
+        }
+        Ok(monotone)
+    }
+
+    fn policy_schema_for_monotonicity(&self, schema: SchemaVersionId) -> Option<&JazzSchema> {
+        if schema == self.catalogue.active_schema.schema {
+            Some(&self.catalogue.active_schema.compiled)
+        } else if schema == self.catalogue.local_schema_version_id {
+            Some(&self.catalogue.schema)
+        } else {
+            self.catalogue
+                .catalogue_schemas
+                .get(&schema)
+                .map(|entry| &entry.schema)
+        }
+    }
+
+    /// Check one write of a unit against a round's shared overlay, leaving
+    /// its own row out by lookup and recording the tables its policy reads.
+    /// Returns `None` once the unit's evidence budget is spent.
+    #[allow(clippy::too_many_arguments)]
+    async fn unit_write_policy_check(
+        &mut self,
+        versions: &[VersionRecord],
+        index: usize,
+        own_row: Option<usize>,
+        evidence: &CandidateUnitEvidence,
+        overlay: &TransactionWriteOverlay,
+        author: AuthorSubject,
+        candidate_tx_id: TxId,
+        reads: &mut BTreeSet<(SchemaVersionId, String)>,
+        spent: &mut usize,
+    ) -> Result<Option<bool>, Error> {
+        if *spent > MAX_TRANSACTION_POLICY_EVIDENCE_ROWS {
+            return Ok(None);
+        }
+        let version = &versions[index];
+        let recorder = Arc::new(Mutex::new(BTreeSet::new()));
+        let mut overlay = overlay.recording(Arc::clone(&recorder));
+        if let Some(own) = own_row {
+            let row = &evidence.rows[own];
+            overlay = overlay.excluding(row.policy_schema, &row.policy_table, row.row_uuid);
+        }
+        #[cfg(any(test, feature = "testing"))]
+        WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(count.get() + 1));
+        let allowed = Box::pin(self.write_policy_allows_version_record_for_view(
+            version,
+            author,
+            None,
+            Some(candidate_tx_id),
+            versions,
+            &overlay,
+        ))
+        .await?;
+        *reads = std::mem::take(
+            &mut *recorder
+                .lock()
+                .map_err(|_| Error::InvalidStoredValue("transaction overlay reads poisoned"))?,
+        );
+        *spent += overlay.rows_in(reads);
+        Ok(Some(allowed))
+    }
+
+    /// Prepare the main-branch rows of a candidate unit as evidence for its
+    /// other writes. A unit that writes one row has nothing to overlay. A row
+    /// the unit deletes contributes nothing, so committed state shows it as
+    /// committed (and a row the unit both inserts and deletes not at all).
+    async fn candidate_unit_evidence(
+        &mut self,
+        versions: &[VersionRecord],
+        author: AuthorSubject,
+        candidate_tx_id: TxId,
+    ) -> Result<CandidateUnitEvidence, Error> {
+        if author == AuthorSubject::SYSTEM {
+            return Ok(CandidateUnitEvidence::default());
+        }
+        let mut by_row = BTreeMap::<(String, RowUuid), Vec<&VersionRecord>>::new();
+        for version in versions {
+            // Branch-local writes are evaluated in their own branch view,
+            // which this overlay does not model.
+            if !version.branch_key().values.is_empty() {
+                continue;
+            }
+            by_row
+                .entry((version.table().to_owned(), version.row_uuid()))
+                .or_default()
+                .push(version);
+        }
+        if by_row.len() < 2 {
+            return Ok(CandidateUnitEvidence::default());
+        }
+        let mut rows = Vec::with_capacity(by_row.len());
+        for ((authored_table, row_uuid), row_versions) in by_row {
+            let deleted = row_versions
+                .iter()
+                .any(|version| version.deletion() == Some(DeletionEvent::Deleted));
+            let content = row_versions
+                .iter()
+                .copied()
+                .find(|version| version.deletion().is_none());
+            if deleted {
+                continue;
+            }
+            let subject = content.unwrap_or(row_versions[0]);
+            let (policy_schema, table, cells) =
+                self.policy_projection_for_version_record(subject)?;
+            let (after, before) = {
+                let previous = self
+                    .policy_previous_content_subject_row(
+                        policy_schema,
+                        &table,
+                        subject,
+                        Some(candidate_tx_id),
+                    )
+                    .await?;
+                match content {
+                    Some(content) => {
+                        let mut after_cells = previous
+                            .as_ref()
+                            .map(|previous| current_row_cells(&table, previous))
+                            .unwrap_or_default();
+                        after_cells.extend(cells);
+                        let provenance = match &previous {
+                            Some(previous) => {
+                                let previous =
+                                    previous.provenance()?.unwrap_or_else(unresolved_provenance);
+                                RowProvenance {
+                                    created_by: previous.created_by,
+                                    created_at: previous.created_at,
+                                    updated_by: content.updated_by(),
+                                    updated_at: content.updated_at_ms(),
+                                }
+                            }
+                            None => version_provenance(content),
+                        };
+                        let after = current_row_from_cells_with_explicit_provenance(
+                            &table,
+                            row_uuid,
+                            &after_cells,
+                            provenance,
+                            None,
+                        )?;
+                        (Some(after), previous)
+                    }
+                    // A restore brings back the row's current content, which
+                    // committed state still reports as deleted.
+                    None => (previous, None),
+                }
+            };
+            rows.push(CandidateEvidenceRow {
+                authored_table,
+                row_uuid,
+                policy_schema,
+                policy_table: table.name.clone(),
+                after,
+                before,
+            });
+        }
+        Ok(CandidateUnitEvidence { rows })
     }
 
     /// A session update/upsert of an existing row also requires that the fate
@@ -257,6 +914,7 @@ where
         exact_view: Option<&JazzSchema>,
         candidate_tx_id: Option<TxId>,
         candidate_versions: &[VersionRecord],
+        transaction_overlay: &TransactionWriteOverlay,
     ) -> Result<bool, Error> {
         if author == AuthorSubject::SYSTEM {
             return Ok(true);
@@ -312,16 +970,16 @@ where
                 .collect();
             let provenance = current.provenance()?.unwrap_or_else(unresolved_provenance);
             return self
-                .write_policy_query_allows_candidate_with_provenance_for_schema(
+                .write_policy_query_allows_candidate_over_transaction(
                     policy_schema_version,
                     &table,
                     &policy,
-                    crate::schema::PolicySlot::DeleteUsing,
                     current.row_uuid(),
                     &current_cells,
                     author,
                     false,
                     provenance,
+                    &transaction_overlay.committed_view(),
                 )
                 .await;
         }
@@ -358,16 +1016,16 @@ where
             let previous_provenance = previous.provenance()?.unwrap_or_else(unresolved_provenance);
             if let Some(policy) = table.write_policies.update_using.clone() {
                 if !self
-                    .write_policy_query_allows_candidate_with_provenance_for_schema(
+                    .write_policy_query_allows_candidate_over_transaction(
                         policy_schema_version,
                         &table,
                         &policy,
-                        crate::schema::PolicySlot::UpdateUsing,
                         previous.row_uuid(),
                         &previous_cells,
                         author,
                         false,
                         previous_provenance,
+                        &transaction_overlay.committed_view(),
                     )
                     .await?
                 {
@@ -390,33 +1048,35 @@ where
                 updated_by: version.updated_by(),
                 updated_at: version.updated_at_ms(),
             };
+            // WITH CHECK judges the row the transaction leaves behind, so its
+            // evidence includes the transaction's other writes (INV-RLS-9).
             return self
-                .write_policy_query_allows_candidate_with_provenance_for_schema(
+                .write_policy_query_allows_candidate_over_transaction(
                     policy_schema_version,
                     &table,
                     &policy,
-                    crate::schema::PolicySlot::UpdateWithCheck,
                     version.row_uuid(),
                     &effective_cells,
                     author,
                     false,
                     update_check_provenance,
+                    transaction_overlay,
                 )
                 .await;
         }
         let Some(policy) = table.write_policies.insert_check.clone() else {
             return Ok(false);
         };
-        self.write_policy_query_allows_candidate_with_provenance_for_schema(
+        self.write_policy_query_allows_candidate_over_transaction(
             policy_schema_version,
             &table,
             &policy,
-            crate::schema::PolicySlot::InsertWithCheck,
             version.row_uuid(),
             &cells,
             author,
             true,
             version_provenance(version),
+            transaction_overlay,
         )
         .await
     }
@@ -477,6 +1137,7 @@ where
             Some(exact_view),
             None,
             &[],
+            &TransactionWriteOverlay::default(),
         )
         .await
     }
