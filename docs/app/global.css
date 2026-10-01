@@ -156,10 +156,33 @@ h6 {
    the 1400px layout width their sections centre within. */
 .site-page-shell {
   --fd-layout-width: 1400px;
+  /* The sticky top nav's height, including its bottom border, for content
+     that sticks below it. */
+  --site-nav-height: 65px;
+}
+/* Below the drawer breakpoint the bar holds only icon buttons. */
+@media (max-width: 767px) {
+  .site-page-shell {
+    --site-nav-height: 61px;
+  }
 }
 .site-page-shell .astryx-app-shell,
 .site-page-shell .astryx-app-shell-header {
   background-color: var(--color-background-body);
+}
+/* Without a sidebar the bar spans the same centred width as the content and
+   footer, so the logo lines up with the text's left edge and the last icon
+   with its right edge. The heading's and icon buttons' own insets are pulled
+   back so the glyphs themselves sit on those lines. */
+.site-page-shell .astryx-top-nav {
+  max-width: var(--fd-layout-width);
+  margin-inline: auto;
+}
+.site-page-shell .astryx-top-nav-heading {
+  margin-inline-start: -8px;
+}
+.site-page-shell .site-nav-end {
+  margin-inline-end: -6px;
 }
 
 /* Callout bodies written in MDX use the Banner's own description style
@@ -185,7 +208,8 @@ h6 {
 
 /* Homepage diagrams (components/home/diagrams.tsx), in the style of the
    Jazz print material: square boxes, mono labels, thin wires with open
-   arrowheads. Blue = local, green = global. Sizes are SVG user units. */
+   arrowheads. Blue = local, mint = global, periwinkle = in flight. Sizes
+   are SVG user units. */
 .home-diagram {
   font-family: var(--font-family-code);
 }
@@ -195,8 +219,11 @@ h6 {
 .home-diagram .dg-stroke-blue {
   stroke: var(--color-jazz-blue);
 }
-.home-diagram .dg-stroke-green {
-  stroke: var(--color-jazz-green);
+.home-diagram .dg-stroke-mint {
+  stroke: var(--color-jazz-mint);
+}
+.home-diagram .dg-stroke-periwinkle {
+  stroke: var(--color-jazz-periwinkle);
 }
 .home-diagram .dg-stroke-muted {
   stroke: var(--color-text-secondary);
@@ -207,8 +234,11 @@ h6 {
 .home-diagram .dg-fill-blue {
   fill: var(--color-jazz-blue);
 }
-.home-diagram .dg-fill-green {
-  fill: var(--color-jazz-green);
+.home-diagram .dg-fill-mint {
+  fill: var(--color-jazz-mint);
+}
+.home-diagram .dg-fill-periwinkle {
+  fill: var(--color-jazz-periwinkle);
 }
 .home-diagram .dg-fill-muted {
   fill: var(--color-text-secondary);
@@ -312,6 +342,64 @@ h6 {
   border-top: 1px solid var(--color-border);
   padding-block: var(--spacing-12) calc(var(--spacing-12) * 1.5);
 }
+/* Hero pattern (a live stipple canvas, see components/brand/stipple-presets.ts),
+   pinned to the hero's top-right corner. Tune these in devtools on
+   `.home-hero`: --pattern-width (the canvas width; its height follows the
+   pattern's 1.1 aspect ratio), --pattern-top / --pattern-right (offsets from
+   that corner), --pattern-opacity. Dots and ribs keep a fixed on-screen size
+   whatever the canvas size, so wider screens show more of them:
+   --pattern-dot-radius, --pattern-dot-spacing, and --pattern-rib-unit (each
+   rib is its pattern width, 0.2 across or 0.12 down, times this). */
+.home-hero {
+  --pattern-width: 100%;
+  --pattern-dot-radius: 1.1px;
+  --pattern-dot-spacing: 2.5px;
+  --pattern-rib-unit: 450px;
+  --pattern-top: 0px;
+  --pattern-right: 0px;
+  --pattern-opacity: 1;
+  --pattern-fade: 0.5;
+  position: relative;
+  overflow: clip;
+  isolation: isolate;
+}
+@media (max-width: 639px) {
+  .home-hero {
+    --pattern-width: 190%;
+    --pattern-rib-unit: 320px;
+  }
+}
+.home-hero-pattern {
+  position: absolute;
+  z-index: -1;
+  top: var(--pattern-top);
+  right: var(--pattern-right);
+  width: var(--pattern-width);
+  aspect-ratio: 1.1;
+  max-width: none;
+  opacity: var(--pattern-opacity);
+  transition: opacity 600ms ease-out;
+  pointer-events: none;
+  user-select: none;
+}
+/* A wash of the page background over the pattern, strongest behind the
+   intro paragraph at the bottom left, so the text stays readable. Tune
+   --pattern-fade (its strongest opacity) on `.home-hero`. */
+.home-hero-fade {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(
+    to top right,
+    color-mix(in srgb, var(--color-background-body) calc(var(--pattern-fade) * 100%), transparent),
+    transparent 60%
+  );
+}
+/* Fades in once the canvas has drawn. */
+.home-hero-pattern:not([data-drawn]) {
+  opacity: 0;
+}
 .home-anchor {
   scroll-margin-top: 5rem;
 }
@@ -407,9 +495,6 @@ h6 {
 }
 .home-statement {
   max-width: 56rem;
-}
-.home-statement-muted {
-  color: var(--color-text-secondary);
 }
 .home-code-grid {
   display: grid;
@@ -508,21 +593,131 @@ h6 {
    full-width row above its values: narrow enough for phones without sideways
    scrolling. Sticky needs the page as its scroller, so neither the frame nor
    the table's own scroll wrapper may scroll; clip keeps the rounded corners. */
+/* Pricing table. Below 900px: no outer card; each topic ("Setup",
+   "Topology", ...) sits on the page above a rounded three-column box of
+   values, and the sticky header is a box of its own. From 900px: the topics
+   move into a left column on the page, and the values form one ordinary
+   table with a single rounded outline. */
 .home-table {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-container);
-  overflow: clip;
-  background-color: var(--color-background-card);
+  --home-table-radius: var(--radius-container);
+  --home-table-line: 1px solid var(--color-border);
 }
 .home-table .astryx-table-scroll-wrapper,
 .home-table [data-scroll-content] {
   overflow: visible;
 }
+.home-table table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.home-table th,
+.home-table td {
+  border-bottom: 0;
+}
 .home-table thead th {
   position: sticky;
-  top: 0;
+  top: var(--site-nav-height);
   z-index: 1;
+}
+.home-table thead th:not(.home-table-topic-cell),
+.home-table .home-table-values td:not(.home-table-topic-cell) {
   background-color: var(--color-background-card);
+}
+.home-table-topic-cell {
+  display: none;
+}
+/* Equal-height call-to-action buttons: the cells stretch to the row and
+   the buttons fill them. */
+.home-table .home-table-actions td {
+  height: 1px;
+  padding-block-start: var(--spacing-4);
+}
+.home-table .home-table-actions .astryx-button {
+  height: 100%;
+}
+@media (max-width: 899px) {
+  .home-table thead th:not(.home-table-topic-cell),
+  .home-table .home-table-values td:not(.home-table-topic-cell) {
+    border-block: var(--home-table-line);
+  }
+  .home-table thead th:nth-child(2),
+  .home-table .home-table-values td:nth-child(2) {
+    border-inline-start: var(--home-table-line);
+    border-start-start-radius: var(--home-table-radius);
+    border-end-start-radius: var(--home-table-radius);
+  }
+  .home-table thead th:last-child,
+  .home-table .home-table-values td:last-child {
+    border-inline-end: var(--home-table-line);
+    border-start-end-radius: var(--home-table-radius);
+    border-end-end-radius: var(--home-table-radius);
+  }
+  .home-table .home-table-topic td {
+    padding-block: var(--spacing-5) var(--spacing-2);
+  }
+}
+/* Phones: the table runs edge to edge so the three columns get the room,
+   and the boxes lose their side borders and rounding at the screen edge. */
+@media (max-width: 639px) {
+  .home-table {
+    --home-table-radius: 0;
+    margin-inline: calc(-1 * var(--spacing-4));
+  }
+  .home-table thead th:nth-child(2),
+  .home-table .home-table-values td:nth-child(2) {
+    border-inline-start: 0;
+  }
+  .home-table thead th:last-child,
+  .home-table .home-table-values td:last-child {
+    border-inline-end: 0;
+  }
+}
+@media (min-width: 900px) {
+  .home-table {
+    max-width: calc(900px - 2 * var(--spacing-4));
+  }
+  .home-table .home-table-topic {
+    display: none;
+  }
+  /* Astryx caps every cell at max-width: 0 (for truncation), so the topic
+     column gets an explicit width, sized for its longest label. */
+  .home-table .home-table-topic-cell {
+    display: table-cell;
+    width: 8.5rem;
+    min-width: 8.5rem;
+    max-width: none;
+    padding-inline-end: var(--spacing-6);
+  }
+  /* The empty corner above the topics covers them as the header sticks. */
+  .home-table thead .home-table-topic-cell {
+    background-color: var(--color-background-body);
+  }
+  .home-table thead th:not(.home-table-topic-cell) {
+    border-block: var(--home-table-line);
+  }
+  .home-table .home-table-values td:not(.home-table-topic-cell) {
+    border-bottom: var(--home-table-line);
+  }
+  .home-table thead th:nth-child(2),
+  .home-table .home-table-values td:nth-child(2) {
+    border-inline-start: var(--home-table-line);
+  }
+  .home-table thead th:last-child,
+  .home-table .home-table-values td:last-child {
+    border-inline-end: var(--home-table-line);
+  }
+  .home-table thead th:nth-child(2) {
+    border-start-start-radius: var(--home-table-radius);
+  }
+  .home-table thead th:last-child {
+    border-start-end-radius: var(--home-table-radius);
+  }
+  .home-table .home-table-values:nth-last-child(2) td:nth-child(2) {
+    border-end-start-radius: var(--home-table-radius);
+  }
+  .home-table .home-table-values:nth-last-child(2) td:last-child {
+    border-end-end-radius: var(--home-table-radius);
+  }
 }
 /* Narrow columns: hyphenate long words instead of splitting them anywhere,
    and let the call-to-action labels wrap instead of being cut off. */
