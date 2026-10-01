@@ -1,4 +1,13 @@
 import { formatTime } from "../perf-timeline/model.ts";
+import bandBookWalkthrough from "../../scripts/example-videos/walkthroughs/band-book.storyboard.ts";
+import bandChatWalkthrough from "../../scripts/example-videos/walkthroughs/band-chat.storyboard.ts";
+import bigLabelWalkthrough from "../../scripts/example-videos/walkthroughs/big-label.storyboard.ts";
+import epicDropWalkthrough from "../../scripts/example-videos/walkthroughs/epic-drop.storyboard.ts";
+import jamazonWalkthrough from "../../scripts/example-videos/walkthroughs/jamazon.storyboard.ts";
+import posterShopWalkthrough from "../../scripts/example-videos/walkthroughs/poster-shop.storyboard.ts";
+import stagePlanWalkthrough from "../../scripts/example-videos/walkthroughs/stage-plan.storyboard.ts";
+import wequencerWalkthrough from "../../scripts/example-videos/walkthroughs/wequencer.storyboard.ts";
+import worldTourWalkthrough from "../../scripts/example-videos/walkthroughs/world-tour.storyboard.ts";
 
 /** Looks up another benchmark's headline seconds, for metrics that compare two cases. */
 export type Lookup = (benchmarkName: string) => number | null;
@@ -19,10 +28,11 @@ export type HeroMetric = {
 export type HeroVideo = {
   /**
    * An H.264 MP4 under docs/public, at most MAX_BYTES (scripts/example-videos/encode.mjs).
-   * Written by `node scripts/example-videos/<id>.mjs` (see walkthrough.mjs).
+   * Rendered by `pnpm render:walkthroughs <id>` from scripts/example-videos/walkthroughs/.
    */
   src: string;
   poster: string;
+  /** The storyboard's `summary`, so it always describes what the video shows. */
   caption: string;
 };
 
@@ -78,8 +88,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/band-chat.mp4",
       poster: "/examples/videos/band-chat.jpg",
-      caption:
-        "A guest asks to join a room and the creator admits them; the room and its history appear in his list, replies arrive live, and a message he sends with the Wi-Fi off arrives once it's back.",
+      caption: bandChatWalkthrough.summary,
     },
     metrics: [
       {
@@ -132,8 +141,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/stage-plan.mp4",
       poster: "/examples/videos/stage-plan.jpg",
-      caption:
-        "A crew chief and a crew member in two browsers: the invite link, card moves and task comments arriving live, edits made with the Wi-Fi off syncing once it's back, and a live checklist filter.",
+      caption: stagePlanWalkthrough.summary,
     },
     metrics: [
       {
@@ -181,8 +189,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/band-book.mp4",
       poster: "/examples/videos/band-book.jpg",
-      caption:
-        'A bandmate shares one song with a "Can edit" link; the guest sees only that song and its subpage, typing shows up in both copies live, and edits made while his Wi-Fi is off merge once it’s back.',
+      caption: bandBookWalkthrough.summary,
     },
     metrics: [
       {
@@ -219,8 +226,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/world-tour.mp4",
       poster: "/examples/videos/world-tour.jpg",
-      caption:
-        "The tour manager sees every stop while a fan with the public link sees only the confirmed ones; a stop the manager confirms appears on the fan's globe live, and one confirmed with the Wi-Fi off arrives once it's back.",
+      caption: worldTourWalkthrough.summary,
     },
     metrics: [
       {
@@ -250,8 +256,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/wequencer.mp4",
       poster: "/examples/videos/wequencer.jpg",
-      caption:
-        "Two bandmates in one session: it appears in the second one's list live, then pattern edits, Play and tempo follow on both screens, and steps added while he's offline arrive when his Wi-Fi is back.",
+      caption: wequencerWalkthrough.summary,
     },
     metrics: [
       {
@@ -293,8 +298,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/poster-shop.mp4",
       poster: "/examples/videos/poster-shop.jpg",
-      caption:
-        "A second editor joins by invite link; her cursor and edits arrive live, edits she makes with the Wi-Fi off sync once it's back, then a named checkpoint.",
+      caption: posterShopWalkthrough.summary,
     },
     metrics: [
       {
@@ -371,8 +375,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/epic-drop.mp4",
       poster: "/examples/videos/epic-drop.jpg",
-      caption:
-        'Uploads and previews in a shared folder; a second account joins by "Can edit" link, his upload appears in the open folder live, and a rename made while he’s offline reaches him once his Wi-Fi is back.',
+      caption: epicDropWalkthrough.summary,
     },
     metrics: [
       {
@@ -410,8 +413,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/jamazon.mp4",
       poster: "/examples/videos/jamazon.jpg",
-      caption:
-        "A live catalogue search, an item added on the laptop appearing in the cart on her phone, an edit made on the phone with the Wi-Fi off, then checkout and the order's status updating live on both screens.",
+      caption: jamazonWalkthrough.summary,
     },
     metrics: [],
     plannedMetrics:
@@ -502,8 +504,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/big-label.mp4",
       poster: "/examples/videos/big-label.jpg",
-      caption:
-        "An admin adds a viewer by email; the label appears in the viewer's menu live, read-only, a new artist shows up in the viewer's filtered search without a reload, and a rename reaches him once his Wi-Fi is back.",
+      caption: bigLabelWalkthrough.summary,
     },
     metrics: [
       {
