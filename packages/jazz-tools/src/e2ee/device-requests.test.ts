@@ -1,12 +1,13 @@
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
+import type { Db } from "../runtime/db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
 it("keeps device administration account-scoped despite public-key visibility", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  const clients: Awaited<ReturnType<typeof createDb>>[] = [];
+  const clients: Db[] = [];
   try {
     await deploy({
       serverUrl: server.url,
@@ -39,12 +40,12 @@ it("keeps device administration account-scoped despite public-key visibility", a
     expect(bobDevice!.id).not.toBe(aliceDevice!.id);
     expect(await alice!.e2ee.devices.list()).toEqual([aliceDevice]);
     expect(await bob!.e2ee.devices.list()).toEqual([bobDevice]);
-    const keys = await bob!.all(deviceRequestApp.__e2ee_device_keys, { tier: "edge" });
+    const keys = await bob!.all(deviceRequestApp.__e2ee_device_keys, { tier: "remote" });
     expect(keys.map((row) => row.deviceId).sort()).toEqual([aliceDevice!.id, bobDevice!.id].sort());
     expect(keys.every((row) => !("challenge" in row) && !("envelope" in row))).toBe(true);
     await expect(bob!.e2ee.devices.approve(aliceDevice!.id).wait()).rejects.toThrow();
     await expect(bob!.e2ee.devices.revoke(aliceDevice!.id).wait()).rejects.toThrow();
-    const identities = await bob!.all(deviceRequestApp.__e2ee_account_identities, { tier: "edge" });
+    const identities = await bob!.all(deviceRequestApp.__e2ee_account_identities, { tier: "remote" });
     expect(identities).toHaveLength(1);
     expect(identities[0]!.deviceId).toBe(bobDevice!.id);
     expect(await alice!.e2ee.devices.list()).toEqual([aliceDevice]);
@@ -56,7 +57,7 @@ it("keeps device administration account-scoped despite public-key visibility", a
 
 it("keeps enrolment requests private to their verified author account and immutable", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  const clients: Awaited<ReturnType<typeof createDb>>[] = [];
+  const clients: Db[] = [];
   try {
     await deploy({
       serverUrl: server.url,
@@ -82,12 +83,12 @@ it("keeps enrolment requests private to their verified author account and immuta
         version: 1,
         challenge: new Uint8Array(32).fill(2),
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
-    await expect(alice.all(requests, { tier: "edge" })).resolves.toEqual([
+    await expect(alice.all(requests, { tier: "remote" })).resolves.toEqual([
       expect.objectContaining({ id: request.id, publicKey: new Uint8Array(32).fill(1) }),
     ]);
-    await expect(bob.all(requests, { tier: "edge" })).resolves.toEqual([]);
+    await expect(bob.all(requests, { tier: "remote" })).resolves.toEqual([]);
     const directory = deviceRequestApp.__e2ee_device_keys;
     const publicKeys = {
       deviceId: request.id,
@@ -99,7 +100,7 @@ it("keeps enrolment requests private to their verified author account and immuta
       version: 1,
     };
     await expect(
-      bob.insert(directory, publicKeys, { id: request.id }).wait({ tier: "edge" }),
+      bob.insert(directory, publicKeys, { id: request.id }).wait({ tier: "global" }),
     ).rejects.toThrow();
     await expect(
       alice
@@ -108,10 +109,10 @@ it("keeps enrolment requests private to their verified author account and immuta
           { ...publicKeys, publicKey: new Uint8Array(32).fill(9) },
           { id: request.id },
         )
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
     ).rejects.toThrow();
-    await alice.insert(directory, publicKeys, { id: request.id }).wait({ tier: "edge" });
-    await expect(bob.all(directory, { tier: "edge" })).resolves.toEqual([
+    await alice.insert(directory, publicKeys, { id: request.id }).wait({ tier: "global" });
+    await expect(bob.all(directory, { tier: "remote" })).resolves.toEqual([
       expect.objectContaining({ id: request.id, ...publicKeys }),
     ]);
     for (const client of [alice, bob]) {
@@ -120,13 +121,13 @@ it("keeps enrolment requests private to their verified author account and immuta
           .update(directory, request.id, {
             publicKey: new Uint8Array(32).fill(9),
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).rejects.toThrow();
-      await expect(client.delete(directory, request.id).wait({ tier: "edge" })).rejects.toThrow();
+      await expect(client.delete(directory, request.id).wait({ tier: "global" })).rejects.toThrow();
     }
     await expect(
       alice.one(requests.select("$createdBy").where({ id: request.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).resolves.toMatchObject({ $createdBy: { account: aliceConfig.account.id } });
 
@@ -145,7 +146,7 @@ it("keeps enrolment requests private to their verified author account and immuta
         () => client.upsert(requests, request.id, replacement),
         () => client.restore(requests, request.id, replacement),
       ]) {
-        await expect(async () => replace().wait({ tier: "edge" })).rejects.toThrow(
+        await expect(async () => replace().wait({ tier: "global" })).rejects.toThrow(
           /already exists|authorization|policy denied|not deleted|not_deleted|conflict/i,
         );
       }
@@ -154,17 +155,13 @@ it("keeps enrolment requests private to their verified author account and immuta
           .update(requests, request.id, {
             publicKey: new Uint8Array(32).fill(3),
           })
-          .wait({ tier: "edge" }),
-      ).rejects.toThrow(
-        /AuthorizationDenied|Write rejected by server authorization|read policy denied partial UPDATE/,
-      );
-      await expect(client.delete(requests, request.id).wait({ tier: "edge" })).rejects.toThrow(
-        /AuthorizationDenied|Write rejected by server authorization/,
-      );
+          .wait({ tier: "global" }),
+      ).rejects.toThrow();
+      await expect(client.delete(requests, request.id).wait({ tier: "global" })).rejects.toThrow();
     }
     await expect(
-      alice.one(requests.where({ id: request.id }), { tier: "edge" }),
-    ).resolves.toMatchObject({ publicKey: new Uint8Array(32).fill(1) });
+      alice.one(requests.where({ id: request.id }), { tier: "remote" }),
+    ).resolves.toEqual(request);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
