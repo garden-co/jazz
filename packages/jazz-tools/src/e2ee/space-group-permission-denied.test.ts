@@ -87,7 +87,7 @@ it("keeps a space in maintenance when Jazz denies recipient-group rotation", asy
     const target = { scope: app.projects, identifier: project.id };
     expect(await recipient.e2ee.explain(target)).toEqual({ state: "ready" });
     const root = await creator.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "edge",
+      tier: "remote",
     });
 
     // The departing account can record its departure but cannot receive or
@@ -99,25 +99,25 @@ it("keeps a space in maintenance when Jazz denies recipient-group rotation", asy
     });
     expect(
       await creator.all(app.__e2ee_group_successors.where({ groupId: group.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual([]);
     expect(
       await creator.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual([]);
 
-    const before = await creator.all(app.__e2ee_space_deliveries, { tier: "edge" });
+    const before = await creator.all(app.__e2ee_space_deliveries, { tier: "remote" });
     // Loading may attempt maintenance, but denied group rotation cannot publish
     // a space successor or report that the stale space is ready.
     expect(await creator.e2ee.explain(target)).toEqual({
       state: "maintenance-required",
       reason: "group-epoch-stale",
     });
-    expect(await creator.all(app.__e2ee_group_successors, { tier: "edge" })).toEqual([]);
-    expect(await creator.all(app.__e2ee_space_successors, { tier: "edge" })).toEqual([]);
-    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "edge" })).toEqual(before);
+    expect(await creator.all(app.__e2ee_group_successors, { tier: "remote" })).toEqual([]);
+    expect(await creator.all(app.__e2ee_space_successors, { tier: "remote" })).toEqual([]);
+    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual(before);
     expect(await recipient.e2ee.explain(target)).toEqual({
       state: "refused",
       reason: "not-a-space-recipient",

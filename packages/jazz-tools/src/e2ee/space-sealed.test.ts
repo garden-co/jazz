@@ -69,7 +69,7 @@ it("seals an empty space and ignores a later signed creator regrant", async () =
     const target = { scope: app.projects, identifier: project.id };
     expect(await owner.e2ee.explain(target)).toEqual({ state: "ready" });
     const root = (await owner.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "edge",
+      tier: "remote",
     }))!;
     await owner.e2ee.spaces.revoke(app.projects, project.id, account.account.id).wait();
     expect(await owner.e2ee.explain(target)).toEqual({ state: "refused", reason: "space-sealed" });
@@ -78,10 +78,10 @@ it("seals an empty space and ignores a later signed creator regrant", async () =
       owner.e2ee.spaces.grant(app.projects, project.id, account.account.id).wait(),
     ).rejects.toThrow();
     expect(
-      await owner.all(app.__e2ee_space_grants.where({ spaceId: root.id }), { tier: "edge" }),
+      await owner.all(app.__e2ee_space_grants.where({ spaceId: root.id }), { tier: "remote" }),
     ).toHaveLength(2);
     expect(
-      await owner.all(app.__e2ee_space_successors.where({ spaceId: root.id }), { tier: "edge" }),
+      await owner.all(app.__e2ee_space_successors.where({ spaceId: root.id }), { tier: "remote" }),
     ).toEqual([]);
 
     const stored = JSON.parse(saved!).devices[0];
@@ -112,14 +112,14 @@ it("seals an empty space and ignores a later signed creator regrant", async () =
       .insert(app.__e2ee_space_grants, { ...values, signature }, { id })
       .wait({ tier: "global" });
     expect(
-      await owner.all(app.__e2ee_space_grants.where({ spaceId: root.id }), { tier: "edge" }),
+      await owner.all(app.__e2ee_space_grants.where({ spaceId: root.id }), { tier: "remote" }),
     ).toHaveLength(3);
     expect(await owner.e2ee.explain(target)).toEqual({ state: "refused", reason: "space-sealed" });
     expect(
-      await owner.all(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "edge" }),
+      await owner.all(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "remote" }),
     ).toHaveLength(1);
     expect(
-      await owner.all(app.__e2ee_space_successors.where({ spaceId: root.id }), { tier: "edge" }),
+      await owner.all(app.__e2ee_space_successors.where({ spaceId: root.id }), { tier: "remote" }),
     ).toEqual([]);
   } finally {
     signingKey?.fill(0);
