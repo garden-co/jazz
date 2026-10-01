@@ -5218,6 +5218,175 @@ async fn stage_todo<S: OrderedKvStorage + ReopenableStorage + 'static>(
     .unwrap()
 }
 
+/// Alice's live owner reclaims a consumed upload when Bob's foreign Db, or
+/// another schema view on Alice's runtime, rejects finish, stage, or abort.
+/// Cleanup must not depend on TTL or on closing the owner. Reopening only
+/// checks that the already-serviced cleanup and chunk release were durable.
+///
+/// alice ──push durable chunks──► upload ──consume on wrong owner/schema──► Schema
+///   └──ordinary live ticks──► pending eviction ──reopen / reclaim──► no bytes
+#[test]
+fn streaming_wrong_owner_consumption_releases_durable_pending_uploads() {
+    block_on(async {
+        let schema = doctest_support::schema();
+        let dir = tempfile::tempdir().unwrap();
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xf1; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        // TestRocksOpen admits the maintained node codec profile; Db::open
+        // erases its concrete carrier rather than returning Db<TestStorage>.
+        let alice = Db::open(DbConfig {
+            schema: schema.clone(),
+            storage: RocksDbStorage::open(dir.path(), &refs).unwrap(),
+            identity: identity.clone(),
+            id_source: None,
+        })
+        .await
+        .unwrap();
+        let authority = open_core(0xf2, AuthorSubject::SYSTEM, &schema);
+        let (up, down) = duplex();
+        let upstream = alice.connect_upstream(up).await;
+        let peer = authority.accept_subscriber_with_trust(
+            down,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::TrustedBackend,
+        );
+        for _ in 0..32 {
+            alice.tick().await.unwrap();
+            peer.lock().await.tick().await.unwrap();
+        }
+        alice.set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            max_age_ms: u64::MAX,
+            ..Default::default()
+        });
+        let bob = doctest_support::open_todos_db().await.unwrap();
+        // Use the existing public schema-view seam, not a fabricated schema
+        // identifier or a second runtime masquerading as Alice's owner.
+        let other_schema = alice.register_schema_view(JazzSchema::empty()).await.unwrap();
+        assert_ne!(schema.version_id(), other_schema.schema.version_id());
+        let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+        // Exceed the frozen maximum leaf size so push emits durable nodes
+        // rather than leaving all bytes in the preparation's unfinished tail.
+        let payload = vec![b'a'; 2 * groove::large_values::V1_FASTCDC_LEAF_MAX_BYTES];
+        let mut nodes = BTreeSet::new();
+        for (owner_name, consumer) in [("foreign runtime", &bob), ("other schema", &other_schema)] {
+            for operation in ["finish", "stage", "abort"] {
+                let mut upload = alice
+                    .begin_streaming_value_upload("todos", &cells, "title")
+                    .unwrap();
+                alice.push_streaming_value_upload(&mut upload, &payload).await.unwrap();
+                // Pending-journal retention is itself a storage contract:
+                // unpublished bytes have no visible-row observation surface.
+                assert_eq!(
+                    alice.node.node.lock().await.pending_upload_count_for_test().await.unwrap(),
+                    1,
+                    "{owner_name}/{operation}: push must establish the pending journal"
+                );
+                let pending = alice.node.node.lock().await.pending_uploads_for_test().await.unwrap();
+                nodes.extend(pending.into_iter().flat_map(|upload| upload.chunks));
+                let error = match operation {
+                    "finish" => match consumer.finish_streaming_value_upload(
+                        upload,
+                        StreamingMutationKind::Insert,
+                        "todos",
+                        row(0xf1),
+                        cells.clone(),
+                        "title",
+                        WriteIdentity::Database,
+                        None,
+                        None,
+                        None,
+                    ).await {
+                        Ok(_) => panic!("wrong-owner finish must reject"),
+                        Err(error) => error,
+                    },
+                    "stage" => match consumer.stage_streaming_value_upload(
+                        upload,
+                        StreamingMutationKind::Insert,
+                        "todos",
+                        row(0xf1),
+                        cells.clone(),
+                        "title",
+                        WriteIdentity::Database,
+                        None,
+                        None,
+                        None,
+                    ).await {
+                        Ok(_) => panic!("wrong-owner stage must reject"),
+                        Err(error) => error,
+                    },
+                    "abort" => consumer.abort_streaming_value_upload(upload).await.unwrap_err(),
+                    _ => unreachable!(),
+                };
+                assert_eq!(error.code, ErrorCode::Schema, "{owner_name}/{operation}");
+                // Service the originating live owner, never the consuming Db.
+                // No expiry pass or wall-clock advancement is involved.
+                for _ in 0..16 {
+                    alice.tick().await.unwrap();
+                }
+                assert_eq!(
+                    alice.node.node.lock().await.pending_upload_count_for_test().await.unwrap(),
+                    0,
+                    "{owner_name}/{operation}: consumed upload leaked its pending journal"
+                );
+                assert_eq!(
+                    alice.node.node.lock().await.staged_large_value_count_for_test().await.unwrap(),
+                    0,
+                    "{owner_name}/{operation}: rejection must not promote a staged root"
+                );
+            }
+        }
+        assert!(streamed_todo(&alice, row(0xf1)).await.unwrap().is_none());
+        assert!(streamed_todo(&bob, row(0xf1)).await.unwrap().is_none());
+        drop(other_schema);
+        alice.detach_connection_async(&upstream).await.unwrap();
+        drop(upstream);
+        alice.close().await.unwrap();
+        drop(alice);
+        drop(peer);
+        drop(authority);
+
+        // Lower-level storage evidence is required here: visible-row absence
+        // cannot distinguish prompt cleanup from permanently retained pending
+        // journals or upload chunks. Reopen the normal admitted node, then
+        // cross Groove's existing storage inspection/reclamation seam. Do not
+        // decode or pin the private reference-count record encoding.
+        let database = crate::node::NodeState::new_client(
+            identity.node,
+            schema,
+            RocksDbStorage::open(dir.path(), &refs).unwrap(),
+            false,
+        ).await.unwrap().into_database();
+        assert!(database.pending_large_value_uploads().await.unwrap().is_empty());
+        assert!(database.staged_large_values().await.unwrap().is_empty());
+        let first = nodes.first().expect("the pushed payload must have a durable chunk identity");
+        database.local_chunk_reader().get(first.locator, first.object_hash).await.unwrap();
+        let reader = database.local_chunk_reader();
+        for node in &nodes {
+            reader.get(node.locator, node.object_hash).await.unwrap();
+        }
+        assert_eq!(
+            database.reclaim_orphaned_large_value_chunks(usize::MAX).await.unwrap(),
+            nodes.len(),
+            "every unpublished chunk must be released without TTL"
+        );
+        for node in &nodes {
+            assert_eq!(
+                reader.get(node.locator, node.object_hash).await,
+                Err(groove::chunks::ChunkStorageError::Unavailable),
+                "ordinary reclamation must remove the durable upload bytes"
+            );
+        }
+        assert!(
+            database.large_value_metadata_entries_for_compatibility().await.unwrap().is_empty(),
+            "no pending journal, staged root, node retainer, or reclaim entry may remain"
+        );
+    });
+}
+
 /// Alice stages bytes without a visible row, then publishes the file and its
 /// companion row in one exclusive commit. Reusing the capability is rejected.
 #[test]
