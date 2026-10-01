@@ -3439,13 +3439,23 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-server")]
+    struct FailNextFlushAdmissionGuard {
+        inner: Box<dyn jazz::groove::storage::StorageAdmissionGuard>,
+        fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(feature = "embedded-server")]
     mod fail_next_flush_storage {
-        use super::FailNextFlushStorage;
+        use super::{FailNextFlushAdmissionGuard, FailNextFlushStorage};
         use jazz::groove::storage::{
-            Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest,
-            StorageFuture, StorageScan, Value,
+            BoxedStorage, Error, OrderedKvStorage, OwnedWriteOperation, ReadOnlyStorage,
+            ReopenableStorage, ScanRequest, StorageAdmission, StorageAdmissionGuard, StorageFuture,
+            StorageScan, Value,
         };
         impl OrderedKvStorage for FailNextFlushStorage {
+            fn admission(&self) -> Result<StorageAdmission, Error> {
+                self.inner.admission()
+            }
             fn get(
                 &self,
                 cf: String,
@@ -3520,10 +3530,63 @@ mod tests {
                 })
             }
         }
+        impl StorageAdmissionGuard for FailNextFlushAdmissionGuard {
+            fn read_only(&self) -> ReadOnlyStorage<'_> {
+                self.inner.read_only()
+            }
+
+            fn complete(self: Box<Self>) -> StorageFuture<'static, Result<BoxedStorage, Error>> {
+                let Self { inner, fail } = *self;
+                Box::pin(async move {
+                    let inner = inner.complete().await?;
+                    Ok(BoxedStorage::new(FailNextFlushStorage { inner, fail }))
+                })
+            }
+        }
     }
 
     #[cfg(feature = "embedded-server")]
     impl jazz::groove::storage::StorageFactory for FailNextAccountFlushFactory {
+        fn open_staged(
+            &self,
+            path: std::path::PathBuf,
+            column_families: Vec<String>,
+            source: jazz::groove::storage::StorageOpenSpec,
+            target: jazz::groove::storage::StorageOpenSpec,
+        ) -> jazz::groove::storage::StorageFuture<
+            '_,
+            Result<jazz::groove::storage::StagedStorageOpen, jazz::groove::storage::Error>,
+        > {
+            use jazz::groove::storage::{BoxedStorage, StagedStorageOpen};
+
+            if !path.ends_with("accounts.rocksdb") {
+                return self
+                    .inner
+                    .open_staged(path, column_families, source, target);
+            }
+            let fail = self.fail_next_account_flush.clone();
+            Box::pin(async move {
+                let stage = self
+                    .inner
+                    .open_staged(path, column_families, source, target)
+                    .await?;
+                Ok(match stage {
+                    StagedStorageOpen::Ready(inner) => {
+                        StagedStorageOpen::Ready(BoxedStorage::new(FailNextFlushStorage {
+                            inner,
+                            fail,
+                        }))
+                    }
+                    StagedStorageOpen::Guard(inner) => {
+                        StagedStorageOpen::Guard(Box::new(FailNextFlushAdmissionGuard {
+                            inner,
+                            fail,
+                        }))
+                    }
+                })
+            })
+        }
+
         fn open(
             &self,
             path: std::path::PathBuf,

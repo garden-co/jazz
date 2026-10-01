@@ -1001,7 +1001,6 @@ fn expected_maintained_activity_count(activity_events: usize) -> usize {
         .count()
 }
 
-
 #[cfg(test)]
 mod resume_tests {
     use super::*;

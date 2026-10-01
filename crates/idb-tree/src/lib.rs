@@ -744,7 +744,7 @@ impl<S: PageStore> TreeCore<S> {
         let options = options.validate()?;
         let metadata = store.load_metadata().await.map_err(Error::Store)?;
         let metadata = metadata.unwrap_or_else(|| Metadata::empty(options.page_size));
-        let mut tree = Self {
+        let tree = Self {
             store,
             options,
             durable_root: metadata.root_page_id,

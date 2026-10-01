@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 mod common;
 
+use duplex_transport::duplex;
 use groove::storage::BoxedStorage;
 use jazz::db::{
     ClientRelayScope, Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts,
@@ -30,7 +31,6 @@ use jazz::tools::{
     ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, TransactionId,
 };
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
-use duplex_transport::duplex;
 
 /// Mirror the production browser-worker upstream: the client side has already
 /// been admitted to forward one scope binding, and the authority side installs

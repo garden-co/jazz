@@ -187,7 +187,6 @@ fn candidate_exists_accepts_authorized_parent_child_exclusive_create() {
     });
 }
 
-
 #[cfg(feature = "testing")]
 mod proof_graph {
     use super::*;

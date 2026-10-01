@@ -5121,7 +5121,7 @@ struct ConnectedClient {
     next_foreground_handle: u64,
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
-    _upstream: Rc<LocalMutex<PeerConnection<MemoryStorage>>>,
+    _upstream: Rc<LocalMutex<PeerConnection<BoxedStorage>>>,
     _served: Option<Rc<LocalMutex<PeerConnection<BoxedStorage>>>>,
 }
 
@@ -5561,7 +5561,6 @@ struct RelayWorker {
     pending_foreground_wakes: PendingForegroundWakes,
     foreground_wake_generations: BTreeMap<u64, Arc<AtomicU64>>,
     owner_wake_queued: Arc<AtomicBool>,
-    owner_commands: Weak<mpsc::SyncSender<RelayCommand>>,
     _upstream: Rc<LocalMutex<PeerConnection>>,
     upstream_attached: bool,
     socket_generation: u64,
