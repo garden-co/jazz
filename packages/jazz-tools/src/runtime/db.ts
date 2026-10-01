@@ -3441,7 +3441,7 @@ export class Db {
   async streamingTransaction<TResult>(
     callback: (plan: StreamingWritePlan) => TResult | Promise<TResult>,
   ): Promise<ExclusiveWriteResult<Awaited<TResult>>> {
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     type Declaration = {
       table: TableProxy<any, any>;
       id: string;
@@ -3689,7 +3689,7 @@ export class Db {
           entry.operation === "insert"
             ? normalizeInsertOptions(entry.table._schema, entry.table._table, entry.options)
             : normalizeUpdateOptions(entry.table._schema, entry.table._table, entry.options),
-          context?.session,
+          context?.writeSession,
           context?.attribution,
           entry.id,
         );
@@ -3763,9 +3763,7 @@ export class Db {
       await prepareGroup(0);
       for (const entry of streams)
         if (!entry.staged) await stage(entry, entry.stream!.source, entry.values);
-      const transaction = context
-        ? this.withRuntimeOperationContext(context, () => this.beginExclusiveTransaction())
-        : this.beginExclusiveTransaction();
+      const transaction = this.createTransaction("exclusive", context);
       const seeds = new Map<WasmSchema, Map<string, InitialSpaceSeed>>();
       for (const group of groups) {
         if (!group.plan!.initialSeed) continue;

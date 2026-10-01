@@ -5176,7 +5176,6 @@ mod dynamic_schema_view_tests {
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
-            initialization_seals: Rc::default(),
         };
         wasm_bindgen_futures::JsFuture::from(binding.close())
             .await
