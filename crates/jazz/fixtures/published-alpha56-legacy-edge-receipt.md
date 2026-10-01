@@ -20,11 +20,12 @@ Edge server acknowledged a write that Core never saw:
   fate tag 1, durability tag 3 (Global), `global_time` present.
 
 This root uses the DAG history layout. The linear row-history format
-(`jazz.history-version-current.v4`, `groove.durable-index.v2`) does not read
+(`jazz.history-version-current.v4`, `groove.durable-index.v2`,
+`jazz.author-alias.v1`) does not read
 it: the test
 `published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_records`
 checks both records byte-for-byte in the physical store, asserts that opening
-with the node profile fails with `UnsupportedStorageCodecs` naming the two
+with the node profile fails with `UnsupportedStorageCodecs` naming the three
 missing families, and checks that both records and every column family are
 unchanged afterwards. An unsynced Edge write in such a root is therefore not
 replayed by current code; the client must sync it with the release that wrote

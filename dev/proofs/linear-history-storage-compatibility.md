@@ -8,8 +8,9 @@ before it decodes or mutates any record, on native roots and in the browser
 alike, with a typed error that names the missing codec families.
 
 #3673 (author aliases) is stacked on this change and adds one more node codec
-family, `jazz.author-alias.v1`. Where it matters, this document says what
-changes with #3673.
+family, `jazz.author-alias.v1`. This copy of the document is on the #3673
+branch, so that family is required: every row-holding root declares it, and
+every refusal below names it among the `missing` families.
 
 Run the refusal proofs with:
 
@@ -38,8 +39,8 @@ merge.
   `node_storage_codec_profile()`
   (`crates/jazz/layers/protocol/src/storage_codec_profile.rs`), which is the
   epoch-1 base plus `JAZZ_NODE_STORAGE_CODECS`:
-  `groove.durable-index.v2` and `jazz.history-version-current.v4` (#3673 adds
-  `jazz.author-alias.v1`). The storage epoch stays 1. Roots with no row
+  `groove.durable-index.v2`, `jazz.author-alias.v1` (#3673) and
+  `jazz.history-version-current.v4`. The storage epoch stays 1. Roots with no row
   history (server account registry, catalogue-entry store) keep
   `epoch_1_storage_codec_profile()` and are unaffected.
 
@@ -79,18 +80,19 @@ Adapter-level receipts are in `crates/jazz/tests/storage_format_refusal.rs`
 in `crates/jazz/layers/node/src/node/tests/native_storage_corpus.rs` (the
 `node::tests::harness::` tests below).
 
-| Root written by                                                                                    | `missing`                                                    | `unknown`                                                | Receipt                                                                                                                                                                                                   |
-| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| alpha.54 RocksDB (published)                                                                       | `groove.durable-index.v2`, `jazz.history-version-current.v4` | none                                                     | `published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error` (refusal is stable on retry); `published_alpha54_native_corpus_is_refused_with_the_typed_codec_error` (no record or family changes) |
-| alpha.56 RocksDB with an unsynced edge-accepted write (previously opened and failed on first read) | same                                                         | none                                                     | `published_alpha56_rocksdb_root_is_refused_with_a_typed_format_error`; `published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_records`                                                   |
-| pre-linear current SQLite and RocksDB corpora (`crates/jazz/fixtures/pre-linear-native-jazz*`)     | same                                                         | none                                                     | `pre_linear_native_corpora_are_refused_before_any_mutation` (SQLite file byte-identical afterwards)                                                                                                       |
-| older epoch-1 settlement SQLite corpus                                                             | same                                                         | `jazz.result-member-key.v1`, `jazz.result-row-source.v1` | same test; `retired_result_codec_profiles_reject_historical_native_roots`                                                                                                                                 |
-| linear history before the compact index (alpha.59 index layout)                                    | `groove.durable-index.v2`                                    | none                                                     | `linear_history_root_without_the_durable_index_family_is_refused`                                                                                                                                         |
-| unreleased history v2 / v3 roots                                                                   | the current families                                         | `jazz.history-version-current.v2` or `.v3`               | `storage_codec_profile.rs`, `node_profile_refuses_history_v2_and_v3_roots`                                                                                                                                |
+| Root written by                                                                                    | `missing`                                                                            | `unknown`                                                | Receipt                                                                                                                                                                                                   |
+| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| alpha.54 RocksDB (published)                                                                       | `groove.durable-index.v2`, `jazz.author-alias.v1`, `jazz.history-version-current.v4` | none                                                     | `published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error` (refusal is stable on retry); `published_alpha54_native_corpus_is_refused_with_the_typed_codec_error` (no record or family changes) |
+| alpha.56 RocksDB with an unsynced edge-accepted write (previously opened and failed on first read) | same                                                                                 | none                                                     | `published_alpha56_rocksdb_root_is_refused_with_a_typed_format_error`; `published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_records`                                                   |
+| pre-linear current SQLite and RocksDB corpora (`crates/jazz/fixtures/pre-linear-native-jazz*`)     | same                                                                                 | none                                                     | `pre_linear_native_corpora_are_refused_before_any_mutation` (SQLite file byte-identical afterwards)                                                                                                       |
+| older epoch-1 settlement SQLite corpus                                                             | same                                                                                 | `jazz.result-member-key.v1`, `jazz.result-row-source.v1` | same test; `retired_result_codec_profiles_reject_historical_native_roots`                                                                                                                                 |
+| linear history before the compact index (alpha.59 index layout)                                    | `groove.durable-index.v2`                                                            | none                                                     | `linear_history_root_without_the_durable_index_family_is_refused`                                                                                                                                         |
+| linear history before author aliases (the #3281 layout)                                            | `jazz.author-alias.v1`                                                               | none                                                     | `pre_alias_linear_history_root_is_refused_with_a_typed_format_error`                                                                                                                                      |
+| unreleased history v2 / v3 roots                                                                   | the current families                                                                 | `jazz.history-version-current.v2` or `.v3`               | `storage_codec_profile.rs`, `node_profile_refuses_history_v2_and_v3_roots`                                                                                                                                |
 
-With #3673, `jazz.author-alias.v1` joins every `missing` list above, and a
-linear-history root written before author aliases is refused with only that
-family missing (#3673's `pre_alias_linear_history_root_is_refused_with_a_typed_format_error`).
+`jazz.author-alias.v1` is in every `missing` list above because no root
+written before #3673 declares it. A linear-history root written by #3281
+without author aliases is refused with only that family missing.
 The manifest bytes of the node profile are pinned in
 `storage_codec_profile.rs`
 (`node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots`).
@@ -116,7 +118,7 @@ it still hold:
 
 ```text
 Missing or invalid IndexedDB storage epoch manifest: unsupported storage format:
-this epoch-1 root lacks codec families ["groove.durable-index.v2","jazz.history-version-current.v4"]
+this epoch-1 root lacks codec families ["groove.durable-index.v2","jazz.author-alias.v1","jazz.history-version-current.v4"]
 required by this build and declares [] that this build does not read
 ```
 

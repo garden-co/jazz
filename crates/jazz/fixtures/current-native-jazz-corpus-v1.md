@@ -21,8 +21,9 @@ using `mtime=0`, then base64-encode it. Update the artifact digests in
 `native_storage_corpus.rs` and run
 `committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`.
 
-The logical pack has 33 entries in the linear row-history layout
-(`jazz.history-version-current.v4`, `groove.durable-index.v2`). The DAG-era
+The logical pack has 34 entries in the linear row-history layout with row
+author aliases (`jazz.history-version-current.v4`, `groove.durable-index.v2`,
+`jazz.author-alias.v1`). The DAG-era
 families `jazz_deletion_history`, `jazz_global_changes`, `jazz_merge_heads`,
 `jazz_pending_edges` and the `*_register*` families no longer exist; per-tx
 touched rows live in `jazz_tx_touched_rows`.
@@ -31,6 +32,7 @@ touched rows live in `jazz_tx_touched_rows`.
 | ----------------------------------- | ------: |
 | `__groove_large_values`             |       3 |
 | `jazz_authority_policy_bindings`    |       1 |
+| `jazz_authors`                      |       1 |
 | `jazz_catalogue`                    |       8 |
 | `jazz_catalogue_pointer`            |       2 |
 | `jazz_known_state_facts`            |       0 |
@@ -55,11 +57,12 @@ is a fresh random id per catch-up. The receipt pins its key, record version and
 settled seq, and replaces only that 16-byte nonce with a fixed placeholder, so
 both adapters and repeated producer runs agree.
 
-Row metadata and transaction provenance use the non-null native author record
+Row metadata and transaction provenance store a 4-byte node-local alias into
+`jazz_authors`, whose one record holds the non-null native author record
 `{ account: UUID, identity: { issuer: String, subject: String } }`. SYSTEM authors
 use the reserved nil account UUID, `urn:jazz:system` issuer, and originating node
 UUID as subject. This stored attribution does not grant the internal SYSTEM
-permission capability. The author interner remains memory-only.
+permission capability.
 
 The RocksDB archive retains internal column family
 `__groove_storage_internal_v1` and profile marker `raw-v1`. ResultKey V1 has a
@@ -67,7 +70,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `c7ef2c5376e00ee6c75ce8b2eeb17e07f31436f86debbf74b7f8325384c7b18b` |
-| SQLite payload      | `76476acc4fb1c946d273e58c9f3d53f583d4b423b43c995411d7ff74873b5acb` |
-| gzip SQLite archive | `d70b5ab8bbc09c451849a781e164c0e05b7cdb4c96b3f2d4c8c0817864a92401` |
-| RocksDB archive     | `cc87271a4d3bc0aadf3729513ab0fbd838b05293615c50360faa1b742725d887` |
+| logical pack        | `431a5fe1b69fbc796bd5ef8a7fbd257d78ddf5aded8f4c5de9fdb8f29cab0a87` |
+| SQLite payload      | `8f852a8a4f064cb28240eb8dad6b4b2221d424272fd9981152d126e02e45263c` |
+| gzip SQLite archive | `a2ada226fd83cd49395466f7b896e9febe20bb597c506d1fd2c1a64a6904f4d3` |
+| RocksDB archive     | `67733266dc23d0835e6f29203909d08f0f0c9e9f31f3be77172faa40c08946b4` |

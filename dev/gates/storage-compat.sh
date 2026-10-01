@@ -33,8 +33,9 @@ dev/t --exact node::tests::harness::published_alpha56_legacy_edge_receipt_is_ref
 dev/t --exact node::tests::harness::retired_result_codec_profiles_reject_historical_native_roots
 # The same refusals through the public adapter entry points with the node
 # profile, including the pre-linear current corpora and a root that predates
-# the compact durable index.
+# the compact durable index or the row-author alias family.
 dev/t --test integration --exact storage_format_refusal::published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error
 dev/t --test integration --exact storage_format_refusal::published_alpha56_rocksdb_root_is_refused_with_a_typed_format_error
 dev/t --test integration --exact storage_format_refusal::pre_linear_native_corpora_are_refused_before_any_mutation
 dev/t --test integration --exact storage_format_refusal::linear_history_root_without_the_durable_index_family_is_refused
+dev/t --test integration --exact storage_format_refusal::pre_alias_linear_history_root_is_refused_with_a_typed_format_error

@@ -6,7 +6,8 @@ workspace Jazz code. The production NAPI persistent API uses RocksDB; it does
 not expose SQLite. The existing source-produced SQLite corpus remains separate.
 This small release receipt pins two historical text versions in the DAG
 history layout. Current code (linear row history,
-`jazz.history-version-current.v4` and `groove.durable-index.v2`) refuses it at
+`jazz.history-version-current.v4`, `groove.durable-index.v2` and
+`jazz.author-alias.v1`) refuses it at
 open with the typed `UnsupportedStorageCodecs` error and leaves every record
 unchanged (`published_alpha54_native_corpus_is_refused_with_the_typed_codec_error`).
 
