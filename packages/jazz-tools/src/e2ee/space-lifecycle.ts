@@ -164,7 +164,7 @@ export class Spaces {
       this.signer,
     );
     try {
-      const roots = await this.db.all(this.tables.__e2ee_spaces, { tier: "edge" });
+      const roots = await this.db.all(this.tables.__e2ee_spaces, { tier: "global" });
       const paths: SpaceRecoveryPath[] = [];
       for (const observed of roots) {
         await this.warm(observed);
@@ -173,7 +173,7 @@ export class Spaces {
           recipientAccountId: this.accountId,
           recoveryRootId: material.rootId,
         });
-        await this.db.all(query, { tier: "edge" });
+        await this.db.all(query, { tier: "global" });
         const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
           const own = await readPublicMembershipHistory(tx, this.accountId, this.tables);
           return {
@@ -288,7 +288,7 @@ export class Spaces {
 
   /** Backfill existing memberships before reporting recovery material as usable. */
   async protectRecovery(material: string): Promise<void> {
-    const roots = await this.db.all(this.tables.__e2ee_spaces, { tier: "edge" });
+    const roots = await this.db.all(this.tables.__e2ee_spaces, { tier: "global" });
     const required: string[] = [];
     for (const observed of roots) {
       await this.warm(observed);
@@ -317,7 +317,7 @@ export class Spaces {
     let device: LocalDevice | undefined;
     try {
       device = await this.requireDevice().load();
-      const roots = await this.db.all(this.tables.__e2ee_spaces, { tier: "edge" });
+      const roots = await this.db.all(this.tables.__e2ee_spaces, { tier: "global" });
       if (required.some((id) => !roots.some((root) => root.id === id)))
         throw new Error("Recovery space is unavailable");
       for (const observed of roots) {
@@ -327,7 +327,7 @@ export class Spaces {
           recipientAccountId: this.accountId,
           recoveryRootId: material.rootId,
         });
-        await this.db.all(query, { tier: "edge" });
+        await this.db.all(query, { tier: "global" });
         const read = await exclusiveE2eeTransaction(this.db, async (tx) => ({
           snapshot: await this.readSnapshot(tx, observed, observed.id),
           recovery: await tx.allSettledForE2ee(query),
@@ -383,7 +383,7 @@ export class Spaces {
       throw new Error("Invalid E2EE space recipient");
     const address = await this.address(scope, identifier);
     const roots = this.tables.__e2ee_spaces.where(address);
-    const observed = await this.db.one(roots, { tier: "edge" });
+    const observed = await this.db.one(roots, { tier: "global" });
     if (observed) {
       await this.changeRecipient(address, observed, recipientId, "add");
       await this.explain(scope, identifier);
@@ -394,7 +394,7 @@ export class Spaces {
       new TypedTableQueryBuilder(scope._table, scope._schema)
         .where({ id: identifier })
         .select("id"),
-      { tier: "edge" },
+      { tier: "global" },
     );
     await this.warmInitialRecipients([recipientId]);
     const device = await this.requireDevice().load();
@@ -579,7 +579,7 @@ export class Spaces {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(recipientId))
       throw new Error("Invalid E2EE space recipient");
     const address = await this.address(scope, identifier);
-    const root = await this.db.one(this.tables.__e2ee_spaces.where(address), { tier: "edge" });
+    const root = await this.db.one(this.tables.__e2ee_spaces.where(address), { tier: "global" });
     if (!root) throw new Error("E2EE space not found");
     await this.changeRecipient(address, root, recipientId, "remove");
     for (let attempt = 0; ; attempt++) {
@@ -674,13 +674,13 @@ export class Spaces {
   private async warm(observed: SpaceRoot, extraAccounts: string[] = []): Promise<void> {
     const [grants, successors] = await Promise.all([
       this.db.all(this.tables.__e2ee_space_grants.where({ spaceId: observed.id }), {
-        tier: "edge",
+        tier: "global",
       }),
       this.db.all(this.tables.__e2ee_space_successors.where({ spaceId: observed.id }), {
-        tier: "edge",
+        tier: "global",
       }),
       this.db.all(this.tables.__e2ee_space_deliveries.where({ spaceId: observed.id }), {
-        tier: "edge",
+        tier: "global",
       }),
     ]);
     if (extraAccounts.length > 0 || grants.some((row) => row.recipientKind === "group"))
@@ -1194,7 +1194,7 @@ export class Spaces {
         scopeId: address.scopeId,
         identifier: address.identifier,
       }),
-      { tier: "edge" },
+      { tier: "global" },
     );
     if (!observed) return { state: "unavailable", reason: "space-not-found" };
     await this.warm(observed);
