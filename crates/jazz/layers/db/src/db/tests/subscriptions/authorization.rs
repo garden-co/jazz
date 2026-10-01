@@ -468,6 +468,7 @@ fn compound_exists_rel_test_policy_with_secondary(evidence_right_column: &str) -
 #[test]
 fn permission_advice_hydrates_same_shape_update_policy_clauses_independently() {
     let author = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let resource = row(0xa9);
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -478,9 +479,20 @@ fn permission_advice_hydrates_same_shape_update_policy_clauses_independently() {
                             .with_select(PublicPolicyExpr::True)
                             .with_update(
                                 Some(compound_exists_rel_test_policy_with_secondary("right_key")),
-                                compound_exists_rel_test_policy_with_secondary(
-                                    "alternate_right_key",
-                                ),
+                                PublicPolicyExpr::And(vec![
+                                    compound_exists_rel_test_policy_with_secondary(
+                                        "alternate_right_key",
+                                    ),
+                                    PublicPolicyExpr::Cmp {
+                                        column: "id".to_owned(),
+                                        op: PublicCmpOp::Eq,
+                                        value: crate::model::public_schema::PolicyValue::Literal(
+                                            PublicValue::Uuid(PublicObjectId::from_uuid(
+                                                resource.0,
+                                            )),
+                                        ),
+                                    },
+                                ]),
                             ),
                     ),
             )
@@ -502,7 +514,6 @@ fn permission_advice_hydrates_same_shape_update_policy_clauses_independently() {
             ),
     );
     let server = open_core(0xa8, AuthorSubject::SYSTEM, &schema);
-    let resource = row(0xa9);
     server
         .insert_with_id(
             "resources",
@@ -558,6 +569,8 @@ fn permission_advice_hydrates_same_shape_update_policy_clauses_independently() {
         )
         .unwrap();
 
+    // USING is implicitly row-seeded; CHECK includes the same immutable row
+    // predicate explicitly so these provenance-distinct slots really collide.
     let action = PermissionAdviceAction::Update {
         table: "resources".to_owned(),
         row: resource,
@@ -3435,4 +3448,182 @@ fn recursive_reachable_scoped_receiver_settles_once_on_small_frontier() {
         vec![row(0xc1), row(0xc2)],
         "a worker relay must forward one scoped closure, not repeatedly reopen it"
     );
+}
+
+/// Alice's immutable role selects one compound OR policy for advice.
+/// The backend delegates each role snapshot independently: an incomplete editor
+/// witness denies, a reviewer witness allows, and a later complete editor
+/// witness allows without misaligning the surviving branch's provenance.
+///
+/// ```text
+/// alice(role) ──backend──► authority ──compound support──► Allowed / Denied
+/// ```
+#[test]
+fn permission_advice_prunes_role_alternatives_with_compound_provenance() {
+    let branch = |role: &str, evidence_column: &str| {
+        PublicPolicyExpr::And(vec![
+            PublicPolicyExpr::SessionCmp {
+                path: vec!["claims".to_owned(), "role".to_owned()],
+                op: PublicCmpOp::Eq,
+                value: PublicValue::Text(role.to_owned()),
+            },
+            compound_exists_rel_test_policy_with_secondary(evidence_column),
+        ])
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_update(
+                                None,
+                                PublicPolicyExpr::Or(vec![
+                                    branch("editor", "right_key"),
+                                    branch("reviewer", "alternate_right_key"),
+                                ]),
+                            ),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text)
+                    .column("alternate_right_key", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let authority = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let backend = open_db(0xbe, AuthorSubject::SYSTEM, &schema);
+    let resource = authority
+        .insert(
+            "resources",
+            BTreeMap::from([("label".to_owned(), Value::String("resource".to_owned()))]),
+        )
+        .unwrap()
+        .row_uuid();
+    // Update advice operates on a cached pre-state, as in the existing
+    // same-shape update-clause regression. This isolates support compilation.
+    backend
+        .seed_settled_mergeable_for_bootstrap(
+            "resources",
+            resource,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([("label".to_owned(), Value::String("resource".to_owned()))]),
+        )
+        .unwrap();
+    for (table, cells) in [
+        (
+            "left_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+            ]),
+        ),
+        (
+            "right_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+            ]),
+        ),
+        (
+            "evidence",
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                (
+                    "right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("right".to_owned()),
+                ),
+            ]),
+        ),
+    ] {
+        let row_id = authority.insert(table, cells.clone()).unwrap().row_uuid();
+        backend
+            .seed_settled_mergeable_for_bootstrap(table, row_id, AuthorSubject::SYSTEM, cells)
+            .unwrap();
+    }
+    let (backend_transport, authority_transport) = duplex_with_admitted_session_context(
+        AuthorSubject::SYSTEM,
+        NodeUuid::from_bytes([0xbe; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = block_on(backend.connect_upstream(backend_transport));
+    let _subscriber = authority.server.accept_subscriber_with_claims_and_trust(
+        authority_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
+    let ask = |role: &str| {
+        let mut claims = test_provider_claims(alice);
+        claims.insert(
+            crate::query::provider_claim_key("role"),
+            Value::String(role.to_owned()),
+        );
+        let mut advice = pin!(backend.request_permission_advice_with_delegated_session(
+            PermissionAdviceAction::Update {
+                table: "resources".to_owned(),
+                row: resource,
+                patch: BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("candidate".to_owned())
+                )]),
+            },
+            crate::protocol::DelegatedSessionBinding {
+                identity: alice,
+                claims
+            },
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        for _ in 0..32 {
+            backend.tick().unwrap();
+            authority.tick().unwrap();
+            backend.tick().unwrap();
+            if let Poll::Ready(advice) = advice.as_mut().poll(&mut cx) {
+                return advice;
+            }
+        }
+        panic!("role-bound advice did not finish after 32 owner turns");
+    };
+    assert_eq!(ask("editor"), PermissionAdvice::Denied);
+    assert_eq!(ask("reviewer"), PermissionAdvice::Allowed);
+    assert_eq!(ask("visitor"), PermissionAdvice::Denied);
+    let cells = BTreeMap::from([
+        ("left_key".to_owned(), Value::String("left".to_owned())),
+        ("right_key".to_owned(), Value::String("right".to_owned())),
+        (
+            "alternate_right_key".to_owned(),
+            Value::String("not-right".to_owned()),
+        ),
+    ]);
+    let witness = authority
+        .insert("evidence", cells.clone())
+        .unwrap()
+        .row_uuid();
+    backend
+        .seed_settled_mergeable_for_bootstrap("evidence", witness, AuthorSubject::SYSTEM, cells)
+        .unwrap();
+    assert_eq!(ask("editor"), PermissionAdvice::Allowed);
 }

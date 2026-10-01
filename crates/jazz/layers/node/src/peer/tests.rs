@@ -1365,6 +1365,47 @@ fn terminal_exists_rel_support_schema(evidence_right_column: &str) -> JazzSchema
             .table(
                 PublicTableSchemaBuilder::new("left_facts")
                     .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text)
+                    .column("alternate_right_key", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    )
+}
+
+fn terminal_claimed_exists_rel_support_schema(
+    evidence_right_column: &str,
+) -> JazzSchema {
+    let policy = PublicPolicyExpr::and(vec![
+        terminal_exists_rel_policy_with_secondary(evidence_right_column),
+        public_session_eq("owner", &["claims", "sub"]),
+    ]);
+    public_peer_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_update(None, policy),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
                     .column("left_key", PublicColumnType::Text),
             )
             .table(
@@ -1381,6 +1422,405 @@ fn terminal_exists_rel_support_schema(evidence_right_column: &str) -> JazzSchema
     )
 }
 
+/// Terminal authorization support stays within the per-peer retention bound.
+/// A policy claim changes the real binding while preserving the support shape,
+/// so eviction must retire actual maintained subscriptions rather than merely
+/// hiding stale identities.
+#[test]
+fn terminal_authorization_support_retention_is_bounded_by_actual_subscriptions() {
+    let schema = public_peer_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("resources")
+                .column("owner", PublicColumnType::Uuid)
+                .column("label", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_update(None, public_session_eq("owner", &["claims", "sub"])),
+                ),
+        ),
+    );
+    let writer = AuthorSubject::for_test_bytes([0x91; 16]);
+    let (_dir, mut node_state) = open_node_with_schema(node(0x92), schema);
+    let resource = row(0x93);
+    let seed = node_state
+        .commit_mergeable_settled(
+            MergeableCommit::new("resources", resource, 1)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([
+                    ("owner".to_owned(), Value::Uuid(writer.test_uuid())),
+                    ("label".to_owned(), Value::String("before".to_owned())),
+                ])),
+        )
+        .unwrap();
+    accept_global(&mut node_state, seed, 1);
+    let (_, unit) = node_state
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("resources", resource, 2)
+                .made_by(writer)
+                .cells(BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("after".to_owned()),
+                )])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("candidate write must return a CommitUnit");
+    };
+    accept_global(&mut node_state, tx.tx_id, 2);
+    let mut peer = PeerState::client_link(writer);
+    let claim_for = |index: u16| {
+        let mut bytes = [0; 16];
+        bytes[..2].copy_from_slice(&index.to_le_bytes());
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(AuthorSubject::for_test_bytes(bytes).test_uuid()),
+        )])
+    };
+    let mut prove = |peer: &mut PeerState, index| {
+        let claims = claim_for(index);
+        let mut scoped_node = node_state.scoped_active_session_claims(writer, claims.clone());
+        crate::local_executor::block_on(peer.prove_terminal_commit_support(
+            &mut scoped_node,
+            writer,
+            &claims,
+            &versions,
+            tx.tx_id,
+        ))
+        .unwrap();
+        *peer
+            .publication_states
+            .iter()
+            .find(|(_, state)| {
+                state.policy_binding.as_ref().is_some_and(|(identity, bound)| {
+                    *identity == writer && bound == &claims
+                })
+            })
+            .map(|(subscription, _)| subscription)
+            .expect("claim-bound terminal support installs an actual subscription")
+    };
+    let mut retained = Vec::with_capacity(257);
+    for index in 0..256u16 {
+        retained.push(prove(&mut peer, index));
+        assert!(
+            peer.maintained_subscription_count() <= 256,
+            "the terminal support receiver set must remain count-bounded"
+        );
+    }
+
+    let oldest = retained[0];
+    let next_oldest = retained[1];
+    assert_eq!(oldest.shape_id, next_oldest.shape_id);
+    assert_ne!(oldest.binding_id, next_oldest.binding_id);
+    assert_eq!(
+        prove(&mut peer, 0),
+        oldest,
+        "using the oldest claim-bound scope makes its actual key most recent"
+    );
+    let newest = prove(&mut peer, 256);
+    retained.push(newest);
+
+    assert_eq!(newest.shape_id, oldest.shape_id);
+    assert_ne!(newest.binding_id, oldest.binding_id);
+    assert_eq!(peer.maintained_subscription_count(), 256);
+    assert!(
+        peer.publication_states
+            .get(&oldest)
+            .is_some_and(|state| state.maintained_subscription_view.is_some()),
+        "the touched actual SubscriptionKey survives eviction"
+    );
+    assert!(
+        peer.publication_states
+            .get(&next_oldest)
+            .is_none_or(|state| state.maintained_subscription_view.is_none()),
+        "the untouched least-recently-used subscription is retired node-aware"
+    );
+    drop(prove);
+    assert_eq!(
+        node_state.registered_query_binding_count_for_test(),
+        256,
+        "LRU eviction unregisters the least-recently-used Node/Groove query",
+    );
+}
+
+#[test]
+fn terminal_support_provenance_alias_survives_lru_eviction() {
+    fn prove_support(
+        node_state: &mut NodeState,
+        peer: &mut PeerState,
+        writer: AuthorSubject,
+        claims: &BTreeMap<String, Value>,
+        action: &crate::protocol::PermissionAdviceAction,
+        versions: &[VersionRecord],
+        candidate_tx_id: TxId,
+    ) -> (crate::protocol::AuthorizationSupportScopeKey, SubscriptionKey) {
+        let scope = node_state
+            .authorization_support_scope_for_session(writer, Some(claims), action)
+            .unwrap();
+        assert_eq!(scope.subscriptions.len(), 1);
+        let support_identity = (scope.key.clone(), scope.subscriptions[0].identity());
+        let policy_binding = (writer, claims.clone());
+        let mut scoped_node = node_state.scoped_active_session_claims(writer, claims.clone());
+        crate::local_executor::block_on(peer.prove_terminal_commit_support(
+            &mut scoped_node,
+            writer,
+            claims,
+            versions,
+            candidate_tx_id,
+        ))
+        .unwrap();
+        let subscription = *peer
+            .publication_states
+            .iter()
+            .find(|(_, state)| {
+                state.authorization_support_identity.as_ref() == Some(&support_identity)
+                    && state.policy_binding.as_ref() == Some(&policy_binding)
+            })
+            .map(|(subscription, _)| subscription)
+            .expect("claim-bound terminal support retains its concrete key");
+        (scope.key, subscription)
+    }
+
+    let original_schema = terminal_claimed_exists_rel_support_schema("right_key");
+    let updated_schema = terminal_claimed_exists_rel_support_schema("alternate_right_key");
+    assert_eq!(original_schema.version_id(), updated_schema.version_id());
+    let updated_provenance = updated_schema
+        .policy_provenance
+        .get(&(
+            "resources".to_owned(),
+            crate::schema::PolicySlot::UpdateWithCheck,
+        ))
+        .cloned()
+        .expect("updated policy carries compound ExistsRel provenance");
+    let writer = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let claim_for = |index: u16| {
+        let mut bytes = [0; 16];
+        bytes[..2].copy_from_slice(&index.to_le_bytes());
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(AuthorSubject::for_test_bytes(bytes).test_uuid()),
+        )])
+    };
+    let claims = claim_for(0);
+    let owner = AuthorSubject::for_test_bytes([0; 16]).test_uuid();
+    let (_dir, mut node_state) = open_node_with_schema(node(0xc2), original_schema);
+    let resource = row(0xc3);
+    let seed_commits = [
+        (
+            "resources",
+            resource,
+            BTreeMap::from([
+                ("label".to_owned(), Value::String("resource".to_owned())),
+                ("owner".to_owned(), Value::Uuid(owner)),
+            ]),
+        ),
+        (
+            "left_facts",
+            row(0xc4),
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+            ]),
+        ),
+        (
+            "right_facts",
+            row(0xc5),
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+            ]),
+        ),
+        (
+            "evidence",
+            row(0xc6),
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                (
+                    "right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("right".to_owned()),
+                ),
+            ]),
+        ),
+    ];
+    for (index, (table, row_uuid, cells)) in seed_commits.into_iter().enumerate() {
+        let tx_id = node_state
+            .commit_mergeable_settled(
+                MergeableCommit::new(table, row_uuid, 1_000 + index as u64)
+                    .made_by(AuthorSubject::SYSTEM)
+                    .cells(cells),
+            )
+            .unwrap();
+        accept_global(&mut node_state, tx_id, index as u64 + 1);
+    }
+    let (_, unit) = node_state
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("resources", resource, 2_000)
+                .made_by(writer)
+                .cells(BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("candidate".to_owned()),
+                )])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("candidate write must return a CommitUnit");
+    };
+    accept_global(&mut node_state, tx.tx_id, 5);
+    let action = crate::protocol::PermissionAdviceAction::Update {
+        table: "resources".to_owned(),
+        row: resource,
+        patch: BTreeMap::from([("label".to_owned(), Value::String("candidate".to_owned()))]),
+    };
+    let original_scope = node_state
+        .authorization_support_scope_for_session(writer, Some(&claims), &action)
+        .unwrap();
+    let original_shape_id = original_scope.subscriptions[0].shape.shape_id();
+    let original_binding_id = original_scope.subscriptions[0].binding.binding_id();
+    let mut peer = PeerState::client_link(writer);
+    let (original_key, original_subscription) = prove_support(
+        &mut node_state,
+        &mut peer,
+        writer,
+        &claims,
+        &action,
+        &versions,
+        tx.tx_id,
+    );
+    let original_maintained_id = peer.publication_states[&original_subscription]
+        .maintained_subscription_view
+        .as_ref()
+        .unwrap()
+        .subscription
+        .id();
+
+    node_state.mutate_current_schema_for_testing(|compiled| {
+        compiled.policy_provenance.insert(
+            (
+                "resources".to_owned(),
+                crate::schema::PolicySlot::UpdateWithCheck,
+            ),
+            updated_provenance,
+        );
+    });
+    let updated_scope = node_state
+        .authorization_support_scope_for_session(writer, Some(&claims), &action)
+        .unwrap();
+    assert_eq!(updated_scope.subscriptions[0].shape.shape_id(), original_shape_id);
+    assert_eq!(
+        updated_scope.subscriptions[0].binding.binding_id(),
+        original_binding_id,
+        "provenance-only identity change preserves the concrete binding",
+    );
+    assert_ne!(updated_scope.key, original_key);
+    let updated_support_identity = (
+        updated_scope.key.clone(),
+        updated_scope.subscriptions[0].identity(),
+    );
+    let (updated_key, updated_subscription) = prove_support(
+        &mut node_state,
+        &mut peer,
+        writer,
+        &claims,
+        &action,
+        &versions,
+        tx.tx_id,
+    );
+    assert_eq!(updated_key, updated_scope.key);
+    assert_eq!(
+        updated_subscription, original_subscription,
+        "both provenance identities own one actual SubscriptionKey",
+    );
+    let updated_maintained_id = peer.publication_states[&updated_subscription]
+        .maintained_subscription_view
+        .as_ref()
+        .unwrap()
+        .subscription
+        .id();
+    assert_ne!(updated_maintained_id, original_maintained_id);
+
+    let mut other_subscriptions = Vec::with_capacity(256);
+    for index in 1..(crate::authorization_scope::MAX_AUTHORIZATION_SCOPES as u16 - 1) {
+        other_subscriptions.push(
+            prove_support(
+                &mut node_state,
+                &mut peer,
+                writer,
+                &claim_for(index),
+                &action,
+                &versions,
+                tx.tx_id,
+            )
+            .1,
+        );
+    }
+    let rehydrates_before_touch = peer
+        .maintained_subscription_view_metrics()
+        .rehydrate_attempts;
+    assert_eq!(
+        prove_support(
+            &mut node_state,
+            &mut peer,
+            writer,
+            &claims,
+            &action,
+            &versions,
+            tx.tx_id,
+        )
+        .1,
+        updated_subscription,
+        "the refreshed alias is still the same concrete key",
+    );
+    assert_eq!(
+        peer.maintained_subscription_view_metrics()
+            .rehydrate_attempts,
+        rehydrates_before_touch,
+        "touching the refreshed alias reuses its current receiver",
+    );
+    prove_support(
+        &mut node_state,
+        &mut peer,
+        writer,
+        &claim_for(255),
+        &action,
+        &versions,
+        tx.tx_id,
+    );
+    prove_support(
+        &mut node_state,
+        &mut peer,
+        writer,
+        &claim_for(256),
+        &action,
+        &versions,
+        tx.tx_id,
+    );
+
+    let limit = crate::authorization_scope::MAX_AUTHORIZATION_SCOPES;
+    assert_eq!(peer.maintained_subscription_count(), limit);
+    assert_eq!(node_state.registered_query_binding_count_for_test(), limit);
+    assert!(
+        peer.publication_states
+            .get(&updated_subscription)
+            .is_some_and(|state| state.maintained_subscription_view.is_some()),
+        "evicting the old provenance alias cannot unsubscribe the refreshed view",
+    );
+    assert!(
+        peer.publication_states
+            .get(&other_subscriptions[0])
+            .is_none_or(|state| state.maintained_subscription_view.is_none()),
+        "the true least-recently-used other binding is retired",
+    );
+    assert_eq!(
+        peer.publication_states[&updated_subscription]
+            .authorization_support_identity
+            .as_ref(),
+        Some(&updated_support_identity),
+    );
+}
 #[test]
 fn terminal_support_rehydrates_after_provenance_only_policy_change() {
     let original_schema = terminal_exists_rel_support_schema("right_key");
@@ -1464,6 +1904,7 @@ fn terminal_support_rehydrates_after_provenance_only_policy_change() {
         panic!("candidate write must return a CommitUnit");
     };
     accept_global(&mut node_state, tx.tx_id, 5);
+    node_state.record_authoritative_settled_through(GlobalTime(5));
 
     let action = crate::protocol::PermissionAdviceAction::Update {
         table: "resources".to_owned(),
@@ -1502,6 +1943,63 @@ fn terminal_support_rehydrates_after_provenance_only_policy_change() {
             .expect("terminal support receiver is retained")
     };
     let original_maintained_id = maintained_id(&peer);
+    let original_subscription = *peer
+        .publication_states
+        .iter()
+        .find(|(subscription, state)| {
+            subscription.shape_id == support_shape_id
+                && state.policy_binding.as_ref() == Some(&policy_binding)
+        })
+        .map(|(subscription, _)| subscription)
+        .expect("terminal support subscription is retained");
+    // Advance the authoritative cut without a peer tick. Reuse must not
+    // credit the retained support closure until it reflects this cut.
+    let changed_support_row = row(0xb9);
+    let support_tx = node_state
+        .commit_mergeable_settled(
+            MergeableCommit::new("evidence", changed_support_row, 3_000)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([
+                    ("left_key".to_owned(), Value::String("left".to_owned())),
+                    ("right_key".to_owned(), Value::String("right".to_owned())),
+                    (
+                        "alternate_right_key".to_owned(),
+                        Value::String("right".to_owned()),
+                    ),
+                ])),
+        )
+        .unwrap();
+    accept_global(&mut node_state, support_tx, 6);
+    node_state.record_authoritative_settled_through(GlobalTime(6));
+    let live_scope_rows = node_state
+        .query_rows_at(
+            &original_scope.subscriptions[0].shape,
+            &original_scope.subscriptions[0].binding,
+            node_state.committed_global_time(),
+        )
+        .unwrap();
+    assert!(
+        live_scope_rows.iter().any(|row| row.row_uuid() == resource),
+        "the current policy query sees the newly committed compound witness",
+    );
+    {
+        let mut scoped_node = node_state.scoped_active_session_claims(writer, claims.clone());
+        crate::local_executor::block_on(peer.prove_terminal_commit_support(
+            &mut scoped_node,
+            writer,
+            &claims,
+            &versions,
+            tx.tx_id,
+        ))
+        .unwrap();
+    }
+    assert_eq!(
+        peer.inspect_maintained_subscription_view_footprint(original_subscription)
+            .expect("the terminal support view is retained")
+            .result_rows,
+        1,
+        "the terminal support view includes the resource after its compound witness commits",
+    );
     let original_rehydrates = peer
         .maintained_subscription_view_metrics()
         .rehydrate_attempts;
@@ -1573,6 +2071,22 @@ fn terminal_support_rehydrates_after_provenance_only_policy_change() {
         maintained_id(&peer),
         original_maintained_id,
         "updated support provenance installs a fresh maintained receiver",
+    );
+    let current_support_identity = (
+        updated_scope.key,
+        updated_scope.subscriptions[0].identity(),
+    );
+    assert_eq!(
+        peer.publication_states
+            .get(&original_subscription)
+            .and_then(|state| state.authorization_support_identity.as_ref()),
+        Some(&current_support_identity),
+        "provenance-only replacement updates the same actual SubscriptionKey"
+    );
+    assert_eq!(
+        peer.maintained_subscription_count(),
+        1,
+        "replacing provenance does not retain an aliased second view"
     );
 }
 
@@ -6844,5 +7358,158 @@ fn maintained_publication_bundle_failure_retains_source_journal() {
             .supporting_rows()
             .cloned()
             .collect::<BTreeSet<_>>()
+    );
+}
+
+/// Alice's terminal write selects one role-bound compound policy alternative.
+/// This peer seam is required because a direct Session write bypasses terminal
+/// support compilation. A partial witness denies editor, the alternate witness
+/// allows reviewer, and completing editor's witness authorizes that same unit.
+///
+/// ```text
+/// alice(role) ──CommitUnit──► terminal support ──role branch + witness──► decision
+/// ```
+#[test]
+fn terminal_compound_policy_prunes_role_alternatives_with_their_provenance() {
+    let role_branch = |role: &str, evidence_column: &str| {
+        PublicPolicyExpr::and(vec![
+            PublicPolicyExpr::SessionCmp {
+                path: vec!["claims".to_owned(), "role".to_owned()],
+                op: crate::model::public_schema::CmpOp::Eq,
+                value: crate::model::public_schema::Value::Text(role.to_owned()),
+            },
+            terminal_exists_rel_policy_with_secondary(evidence_column),
+        ])
+    };
+    let schema = public_peer_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_update(
+                                None,
+                                PublicPolicyExpr::Or(vec![
+                                    role_branch("editor", "right_key"),
+                                    role_branch("reviewer", "alternate_right_key"),
+                                ]),
+                            ),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text)
+                    .column("alternate_right_key", PublicColumnType::Text),
+            ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let resource = row(0xd2);
+    let (_dir, mut state) = open_node_with_schema(node(0xd3), schema);
+    for (index, (table, row_id, cells)) in [
+        (
+            "resources",
+            resource,
+            BTreeMap::from([("label".to_owned(), Value::String("resource".to_owned()))]),
+        ),
+        (
+            "left_facts",
+            row(0xd4),
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+            ]),
+        ),
+        (
+            "right_facts",
+            row(0xd5),
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+            ]),
+        ),
+        (
+            "evidence",
+            row(0xd6),
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                ("right_key".to_owned(), Value::String("not-right".to_owned())),
+                ("alternate_right_key".to_owned(), Value::String("right".to_owned())),
+            ]),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let tx = state
+            .commit_mergeable_settled(
+                MergeableCommit::new(table, row_id, 1_000 + index as u64)
+                    .made_by(AuthorSubject::SYSTEM)
+                    .cells(cells),
+            )
+            .unwrap();
+        accept_global(&mut state, tx, index as u64 + 1);
+    }
+    let (_, unit) = state
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("resources", resource, 2_000)
+                .made_by(alice)
+                .cells(BTreeMap::from([("label".to_owned(), Value::String("candidate".to_owned()))])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("candidate must carry a terminal CommitUnit");
+    };
+    accept_global(&mut state, tx.tx_id, 5);
+    state.record_authoritative_settled_through(GlobalTime(5));
+    let mut peer = PeerState::client_link(alice);
+    for (role, expected) in [("editor", false), ("reviewer", true), ("visitor", false)] {
+        let claims = BTreeMap::from([(
+            crate::query::provider_claim_key("role"),
+            Value::String(role.to_owned()),
+        )]);
+        let authorized = peer
+            .prove_terminal_commit_authorization(&mut state, alice, claims, &versions, tx.tx_id)
+            .expect("claim pruning must keep policy provenance aligned");
+        assert_eq!(authorized, expected, "terminal decision for {role}");
+    }
+    let witness = state
+        .commit_mergeable_settled(
+            MergeableCommit::new("evidence", row(0xd7), 3_000)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([
+                    ("left_key".to_owned(), Value::String("left".to_owned())),
+                    ("right_key".to_owned(), Value::String("right".to_owned())),
+                    ("alternate_right_key".to_owned(), Value::String("not-right".to_owned())),
+                ])),
+        )
+        .unwrap();
+    accept_global(&mut state, witness, 6);
+    state.record_authoritative_settled_through(GlobalTime(6));
+    assert!(
+        peer.prove_terminal_commit_authorization(
+            &mut state,
+            alice,
+            BTreeMap::from([(
+                crate::query::provider_claim_key("role"),
+                Value::String("editor".to_owned()),
+            )]),
+            &versions,
+            tx.tx_id,
+        )
+        .expect("the editor's complete witness compiles and evaluates"),
+        "the editor's complete same-witness branch authorizes the terminal unit"
     );
 }
