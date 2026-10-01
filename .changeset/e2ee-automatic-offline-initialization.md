@@ -26,8 +26,9 @@ reopen against a fresh database; pending and unpromoted journal entries still
 require their original owner's exact transaction evidence.
 
 Transfer application wait ownership before deferred transaction submission can
-deliver a rejection callback. Waited failures remain on their returned handles;
-unwaited failures retain their once-only fallback notification.
+deliver a rejection callback. Exclusive handles retain the original transaction
+promise when registering their waits. Waited failures remain on their returned
+handles; unwaited failures retain their once-only fallback notification.
 
 Preserve checked point-snapshot observations after the core layer split.
 Initialisation propagates storage and required transaction-audit field decoding
