@@ -405,8 +405,8 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
         );
     }
     // Restoring access must clear the exact reader's denial, without requiring
-    // a new client or discarding its local cache.
-    let start = log.len();
+    // a new client or discarding the Edge's shared cache.
+    let mut start = log.len();
     let tx = bob.begin_transaction().unwrap().transaction_id();
     let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
     staged
@@ -420,7 +420,26 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
             ],
         )
         .unwrap();
+    jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     if let Some(grant) = grant {
+        jazz_testkit::collect_stream_deltas(&mut remote, &mut log, Duration::from_millis(250))
+            .await;
+        assert!(
+            !has_added_id(&log[start..], task),
+            "the still-revoked grant must continue withholding the task"
+        );
+        assert!(
+            !local_rows(&alice, Query::from("tasks"))
+                .await
+                .iter()
+                .any(|(id, values)| {
+                    *id == task && values.contains(&Value::Text("readmitted".into()))
+                }),
+            "the still-revoked grant must withhold the task successor from the local cache"
+        );
+        start = log.len();
+        let tx = bob.begin_transaction().unwrap().transaction_id();
+        let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
         staged
             .update(
                 "grants",
@@ -428,8 +447,9 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
                 vec![("owner".into(), Value::Text("alice".into()))],
             )
             .unwrap();
+        jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     }
-    jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+
     wait_for_subscription_update(
         &mut remote,
         &mut log,
