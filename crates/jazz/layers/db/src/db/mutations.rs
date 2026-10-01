@@ -1934,7 +1934,8 @@ where
         self.ensure_mutation_operation_admitted()?;
         self.check_streaming_upload_owner(&upload)?;
         upload.preparation.take();
-        if self.node
+        if self
+            .node
             .node
             .lock()
             .await

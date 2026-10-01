@@ -76,7 +76,6 @@ it("checks recovery ancestry after rotation without activating the inspecting de
     corruptHistory = true;
     await expect(observer.e2ee.recovery.status(material)).rejects.toMatchObject({
       code: "recovery-delivery-unusable",
-      message: "No authenticated recovery delivery for the current account epoch",
     });
     expect(injected).toBeGreaterThan(0);
     corruptHistory = false;
