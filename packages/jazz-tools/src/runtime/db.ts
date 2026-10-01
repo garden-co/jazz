@@ -2989,8 +2989,8 @@ export class Db {
     write: (tx: Transaction) => T,
     initialiseMissingSpace = false,
   ): WriteResult<T> {
-    const tx = this.createTransaction(kind);
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
+    const tx = this.createTransaction(kind, context);
     if (initialiseMissingSpace && kind === "mergeable") standaloneWriteRetries.set(tx, null);
     let value: T;
     try {
@@ -3016,8 +3016,7 @@ export class Db {
               throw new Error(
                 "Encrypted branch first-use is unsupported; initialise the space with a root-target write first",
               );
-            const begin = () => this.createTransaction("exclusive");
-            const exclusive = context ? this.withRuntimeOperationContext(context, begin) : begin();
+            const exclusive = this.createTransaction("exclusive", context);
             return (await runInTransaction(exclusive, () => retry.prepare(exclusive), client)).txId;
           }),
         client,
@@ -3680,9 +3679,11 @@ export class Db {
     return client.requestDeletePermissionAdvice(table._table, id, context?.writeSession);
   }
 
-  private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
+  private createTransaction<TKind extends TransactionKind>(
+    kind: TKind,
+    context = this.getAccessContext(),
+  ): Transaction<TKind> {
     this.assertOpen();
-    const context = this.getAccessContext();
     const configuredSchema = e2eeSchemaForDb(this);
     const ownerClient =
       this.getCurrentClient() ?? (configuredSchema ? this.getClient(configuredSchema) : null);
