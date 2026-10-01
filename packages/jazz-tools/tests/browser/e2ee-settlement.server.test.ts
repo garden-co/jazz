@@ -35,7 +35,7 @@ it("preserves authority transaction positions through browser snapshot coverage"
     await earlier.wait({ tier: "global" });
     const later = alice.insert(app.proposals, { value: "later" });
     await later.wait({ tier: "global" });
-    const ordinary = await bob.all(app.proposals, { tier: "edge" });
+    const ordinary = await bob.all(app.proposals, { tier: "remote" });
     const read = await bob.exclusiveTransaction((tx) => tx.allSettledForE2ee(app.proposals));
     const { rows, settlements } = await read.wait({ tier: "global" });
     expect(rows).toEqual(ordinary);

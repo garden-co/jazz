@@ -74,15 +74,15 @@ it.each([false, true])(
       if (reject) {
         await expect(handle.wait({ tier: "global" })).rejects.toThrow("Scope preparation rejected");
         await tx.rollback();
-        expect(await observer.all(app.projects, { tier: "edge" })).toEqual([]);
-        expect(await observer.all(app.notes, { tier: "edge" })).toEqual([]);
+        expect(await observer.all(app.projects, { tier: "remote" })).toEqual([]);
+        expect(await observer.all(app.notes, { tier: "remote" })).toEqual([]);
         return;
       }
       await handle.wait({ tier: "global" });
-      expect(await observer.all(app.projects, { tier: "edge" })).toMatchObject([
+      expect(await observer.all(app.projects, { tier: "remote" })).toMatchObject([
         { id: project.id, title: "Atomic scope" },
       ]);
-      expect(await observer.all(app.notes, { tier: "edge" })).toMatchObject([
+      expect(await observer.all(app.notes, { tier: "remote" })).toMatchObject([
         { projectId: project.id, scope: await observer.tableIdentity(app.projects) },
       ]);
     } finally {
