@@ -1,5 +1,5 @@
 ---
-"jazz-tools": minor
+"jazz-tools": patch
 ---
 
 Add explicitly configured scoped spaces, atomic account/group initial recipients,
