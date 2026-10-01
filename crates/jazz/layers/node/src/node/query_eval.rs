@@ -1692,6 +1692,7 @@ where
                 &binding_claim_params,
             )?;
         }
+
         let root_has_read_policy = self
             .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .read_policy
