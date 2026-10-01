@@ -139,7 +139,7 @@ it.each([
       if (scenario.endsWith("history-race")) {
         const root = await pending.one(
           app.__e2ee_account_roots.where({ accountId: account.account.id }),
-          { tier: "edge" },
+          { tier: "remote" },
         );
         const retainedDevice = JSON.parse((await retained.read())!).devices[0];
         const addition = {
@@ -161,7 +161,7 @@ it.each([
         }
         beforeOpen = async () => {
           const groupRoot = await pending.one(app.__e2ee_groups.where({ id: group.id }), {
-            tier: "edge",
+            tier: "remote",
           });
           if ((groupRoot !== null) !== (scenario === "delivery-history-race")) return;
           beforeOpen = undefined;
@@ -179,7 +179,7 @@ it.each([
       )
         beforeSeal = async () => {
           const root = await pending.one(app.__e2ee_groups.where({ id: group.id }), {
-            tier: "edge",
+            tier: "remote",
           });
           expect(root).toBeDefined();
           const delivery = {
@@ -227,12 +227,12 @@ it.each([
       if (scenario.startsWith("resume")) {
         await expect(group.wait()).rejects.toThrow("delivery interrupted");
         const original = await pending.one(app.__e2ee_groups.where({ id: group.id }), {
-          tier: "edge",
+          tier: "remote",
         });
         expect(original).not.toBeNull();
         const interruptedDeliveries = await pending.all(
           app.__e2ee_group_deliveries.where({ groupId: group.id }),
-          { tier: "edge" },
+          { tier: "remote" },
         );
         if (scenario === "resume-signed-malformed") expect(interruptedDeliveries).toHaveLength(1);
         else expect(interruptedDeliveries).toEqual([]);
@@ -276,7 +276,7 @@ it.each([
           else await expect(reopened.e2ee.explain({ groupId: group.id })).rejects.toThrow();
           expect(
             await pending.all(app.__e2ee_group_deliveries.where({ groupId: group.id }), {
-              tier: "edge",
+              tier: "remote",
             }),
           ).toEqual([]);
           expect(JSON.parse((await retained.read())!).stagedGroupKeysV1).toHaveLength(1);
@@ -290,7 +290,7 @@ it.each([
         });
         expect(await second.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "ready" });
         expect(
-          await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "edge" }),
+          await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
         ).toEqual(original);
         expect(JSON.parse((await retained.read())!).stagedGroupKeysV1).toEqual([]);
         // With the staged secret removed, readiness must come from a usable
@@ -310,12 +310,12 @@ it.each([
         expect((outcome.error as Error).message).toMatch(/incomplete|conflict/i);
         expect(
           await pending.all(app.__e2ee_group_deliveries.where({ groupId: group.id }), {
-            tier: "edge",
+            tier: "remote",
           }),
         ).toEqual([]);
         if (scenario === "root-history-race")
           expect(
-            await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "edge" }),
+            await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
           ).toBeNull();
         return;
       }
@@ -323,12 +323,12 @@ it.each([
         await expect(group.wait()).rejects.toThrow(/signature/i);
         expect(
           await pending.all(app.__e2ee_group_deliveries.where({ groupId: group.id }), {
-            tier: "edge",
+            tier: "remote",
           }),
         ).toEqual([]);
         if (scenario === "root-signature")
           expect(
-            await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "edge" }),
+            await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
           ).toBeNull();
         faultAt = 0;
         const retry = first.e2ee.groups.create();

@@ -65,11 +65,11 @@ it("rejects pre-enrolment authors and recipients without poisoning unrelated gro
     const other = mallory.db.e2ee.groups.create();
     await other.wait();
     const root = (await mallory.db.one(app.__e2ee_groups.where({ id: other.id }), {
-      tier: "edge",
+      tier: "remote",
     }))!;
     expect(
       await mallory.db.all(app.__e2ee_account_roots.where({ accountId: future.account.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual([]);
     // Ordinary account ownership admits this proposal before E2EE enrolment.
@@ -131,7 +131,7 @@ it("rejects pre-enrolment authors and recipients without poisoning unrelated gro
           groupId: other.id,
           recipientAccountId: future.account.id,
         }),
-        { tier: "edge" },
+        { tier: "remote" },
       ),
     ).toEqual([]);
   } finally {

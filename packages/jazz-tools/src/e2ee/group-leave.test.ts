@@ -69,7 +69,7 @@ it("lets an account leave under self-removal policy without receiving the replac
     expect(await recipient.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
     const before = await recipient.all(
       app.__e2ee_group_deliveries.where({ groupId: group.id, recipientAccountId: bob.account.id }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     expect(before).toHaveLength(1);
     await expect(recipient.e2ee.groups.remove(group.id, alice.account.id).wait()).rejects.toThrow();
@@ -78,11 +78,11 @@ it("lets an account leave under self-removal policy without receiving the replac
     await leaving.wait();
     expect(await recipient.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "refused" });
     expect(
-      await owner.all(app.__e2ee_group_successors.where({ groupId: group.id }), { tier: "edge" }),
+      await owner.all(app.__e2ee_group_successors.where({ groupId: group.id }), { tier: "remote" }),
     ).toEqual([]);
     expect(await owner.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
     const successors = await owner.all(app.__e2ee_group_successors.where({ groupId: group.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     expect(successors).toHaveLength(1);
     expect(successors[0]!.epochId).not.toBe(before[0]!.epochId);
@@ -92,7 +92,7 @@ it("lets an account leave under self-removal policy without receiving the replac
           groupId: group.id,
           recipientAccountId: bob.account.id,
         }),
-        { tier: "edge" },
+        { tier: "remote" },
       ),
     ).toEqual(before);
   } finally {

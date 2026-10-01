@@ -50,9 +50,9 @@ it("seals a group after its last account leaves instead of restoring its old lin
     });
     const group = db.e2ee.groups.create();
     await group.wait();
-    const roots = await db.all(app.__e2ee_groups.where({ id: group.id }), { tier: "edge" });
+    const roots = await db.all(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" });
     const deliveries = await db.all(app.__e2ee_group_deliveries.where({ groupId: group.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     await db.e2ee.groups.leave(group.id).wait();
     expect(await db.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "refused" });
@@ -63,14 +63,14 @@ it("seals a group after its last account leaves instead of restoring its old lin
       state: "refused",
       reason: "group-sealed",
     });
-    expect(await db.all(app.__e2ee_groups.where({ id: group.id }), { tier: "edge" })).toEqual(
+    expect(await db.all(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" })).toEqual(
       roots,
     );
     expect(
-      await db.all(app.__e2ee_group_deliveries.where({ groupId: group.id }), { tier: "edge" }),
+      await db.all(app.__e2ee_group_deliveries.where({ groupId: group.id }), { tier: "remote" }),
     ).toEqual(deliveries);
     expect(
-      await db.all(app.__e2ee_group_successors.where({ groupId: group.id }), { tier: "edge" }),
+      await db.all(app.__e2ee_group_successors.where({ groupId: group.id }), { tier: "remote" }),
     ).toEqual([]);
     const fresh = db.e2ee.groups.create();
     await fresh.wait();
