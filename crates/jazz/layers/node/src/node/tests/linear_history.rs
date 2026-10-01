@@ -915,3 +915,339 @@ fn merge_column_write_over_a_row_of_another_schema_is_refused() {
         BTreeMap::from([(target, counter_cells(1, "base"))])
     );
 }
+
+/// A Core with `base` as its schema and `evolved` published as a descendant
+/// through `ops` on the `counters` table.
+fn core_with_descendant_schema(
+    base: JazzSchema,
+    evolved: JazzSchema,
+    ops: Vec<LensOp>,
+) -> (tempfile::TempDir, NodeState) {
+    let evolved_version = SchemaVersion::new(evolved);
+    let (core_dir, mut core) = open_node_with_schema(node(9), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved_version.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_version.id,
+            vec![TableLens {
+                source_table: "counters".to_owned(),
+                target_table: "counters".to_owned(),
+                ops,
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    (core_dir, core)
+}
+
+fn add_notes_lens() -> Vec<LensOp> {
+    vec![LensOp::AddColumn {
+        column: "notes".to_owned(),
+        default: v(""),
+    }]
+}
+
+fn assert_accepted(fate: &SyncMessage) {
+    assert!(
+        matches!(
+            fate,
+            SyncMessage::FateUpdate {
+                fate: Fate::Accepted,
+                ..
+            }
+        ),
+        "expected Accepted, got {fate:?}"
+    );
+}
+
+/// INV-HIST-10 across schema versions: a plain-column write made under a
+/// descendant schema must not carry its stale snapshot of a merge column over
+/// ops Core already accepted. Across layouts the row is whole-row
+/// last-writer-wins (#3899), and bob's patch holds the counter he saw as an
+/// absolute value; Core keeps the counter's settled value instead.
+///
+/// ```text
+/// base  (v1) ──count=1──────────► core   count=1
+/// alice (v1) ──count +5─────────► core   count=6
+/// bob   (v2) ──notes="bob" (saw count=1)──► core   count=6, notes="bob"
+/// ```
+#[test]
+fn plain_column_write_across_schemas_keeps_accepted_counter_ops() {
+    let base = counter_schema();
+    let evolved = counter_schema_with_notes();
+    let (_core_dir, mut core) =
+        core_with_descendant_schema(base.clone(), evolved.clone(), add_notes_lens());
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(1), base.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(2), base);
+    let (_bob_dir, mut bob) = open_node_with_schema(node(3), evolved);
+    let target = row(0x72);
+
+    commit_mergeable_global(
+        &mut base_writer,
+        &mut core,
+        MergeableCommit::new("counters", target, 10).cells(counter_cells(1, "base")),
+    );
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 15).cells(counter_cells(6, "base")),
+        )
+        .unwrap();
+    assert_accepted(&core_fate(&mut core, alice_unit));
+    assert_eq!(
+        rows_at(&mut core, "counters", DurabilityTier::Global)[&target].get("count"),
+        Some(&Value::I32(6))
+    );
+
+    // bob saw the row at count=1 and edits only `notes`: his patch carries
+    // the rest of his snapshot, the counter as the absolute value 1.
+    let (_bob_tx, bob_unit) = bob
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 20)
+                .cells(BTreeMap::from([
+                    ("count".to_owned(), Value::I32(1)),
+                    ("title".to_owned(), v("base")),
+                    ("notes".to_owned(), v("bob")),
+                ]))
+                .authored_columns(BTreeSet::from(["notes".to_owned()])),
+        )
+        .unwrap();
+    assert_accepted(&core_fate(&mut core, bob_unit));
+
+    assert_eq!(
+        rows_at(&mut core, "counters", DurabilityTier::Global),
+        BTreeMap::from([(target, counter_cells(6, "base"))]),
+        "alice's accepted +5 must survive bob's cross-schema plain write"
+    );
+}
+
+/// `tagged` rows under v1: a g-set column and a title.
+fn gset_schema(with_notes: bool) -> JazzSchema {
+    let mut columns = vec![
+        ColumnSchema::new("tags", ColumnType::Array(Box::new(ColumnType::String))),
+        ColumnSchema::new("title", ColumnType::String),
+    ];
+    if with_notes {
+        columns.push(ColumnSchema::new("notes", ColumnType::String));
+    }
+    JazzSchema::new_with_branch_columns([TableSchema::new("counters", columns)
+        .with_column_merge_strategy("tags", MergeStrategy::GSet)])
+}
+
+fn tags(values: &[&str]) -> Value {
+    Value::Array(values.iter().map(|value| v(*value)).collect())
+}
+
+/// The g-set form of `plain_column_write_across_schemas_keeps_accepted_counter_ops`:
+/// alice's accepted addition survives bob's cross-schema plain write made
+/// over a snapshot without it.
+#[test]
+fn plain_column_write_across_schemas_keeps_accepted_gset_additions() {
+    let base = gset_schema(false);
+    let evolved = gset_schema(true);
+    let (_core_dir, mut core) =
+        core_with_descendant_schema(base.clone(), evolved.clone(), add_notes_lens());
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(1), base.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(2), base);
+    let (_bob_dir, mut bob) = open_node_with_schema(node(3), evolved);
+    let target = row(0x73);
+
+    commit_mergeable_global(
+        &mut base_writer,
+        &mut core,
+        MergeableCommit::new("counters", target, 10).cells(BTreeMap::from([
+            ("tags".to_owned(), tags(&["a"])),
+            ("title".to_owned(), v("base")),
+        ])),
+    );
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 15)
+                .cells(BTreeMap::from([("tags".to_owned(), tags(&["a", "b"]))]))
+                .authored_columns(BTreeSet::from(["tags".to_owned()])),
+        )
+        .unwrap();
+    assert_accepted(&core_fate(&mut core, alice_unit));
+
+    let (_bob_tx, bob_unit) = bob
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 20)
+                .cells(BTreeMap::from([
+                    ("tags".to_owned(), tags(&["a"])),
+                    ("title".to_owned(), v("base")),
+                    ("notes".to_owned(), v("bob")),
+                ]))
+                .authored_columns(BTreeSet::from(["notes".to_owned()])),
+        )
+        .unwrap();
+    assert_accepted(&core_fate(&mut core, bob_unit));
+
+    assert_eq!(
+        rows_at(&mut core, "counters", DurabilityTier::Global)[&target].get("tags"),
+        Some(&tags(&["a", "b"])),
+        "alice's accepted addition must survive bob's cross-schema plain write"
+    );
+}
+
+/// A cross-schema plain write whose schema maps the merge column to another
+/// name cannot carry the settled value without guessing: Core refuses it
+/// with the explicit not-supported-yet reason, and the row keeps its counter.
+#[test]
+fn plain_column_write_across_schemas_with_a_renamed_merge_column_is_refused() {
+    let base = counter_schema();
+    let evolved = {
+        let source = [(
+            PublicTableName::new("counters"),
+            PublicTableSchema::new(PublicRowDescriptor::new(vec![
+                PublicColumnDescriptor::new("total", PublicColumnType::Integer)
+                    .merge_strategy(PublicColumnMergeStrategy::Counter),
+                PublicColumnDescriptor::new("title", PublicColumnType::Text),
+                PublicColumnDescriptor::new("notes", PublicColumnType::Text),
+            ])),
+        )]
+        .into_iter()
+        .collect::<PublicSchema>();
+        compile_public_test_schema(&source)
+    };
+    let mut ops = vec![LensOp::RenameColumn {
+        from: "count".to_owned(),
+        to: "total".to_owned(),
+    }];
+    ops.extend(add_notes_lens());
+    let (_core_dir, mut core) = core_with_descendant_schema(base.clone(), evolved.clone(), ops);
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(1), base);
+    let (_bob_dir, mut bob) = open_node_with_schema(node(3), evolved);
+    let target = row(0x74);
+
+    commit_mergeable_global(
+        &mut base_writer,
+        &mut core,
+        MergeableCommit::new("counters", target, 10).cells(counter_cells(6, "base")),
+    );
+    let (_bob_tx, bob_unit) = bob
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 20)
+                .cells(BTreeMap::from([
+                    ("total".to_owned(), Value::I32(1)),
+                    ("title".to_owned(), v("base")),
+                    ("notes".to_owned(), v("bob")),
+                ]))
+                .authored_columns(BTreeSet::from(["notes".to_owned()])),
+        )
+        .unwrap();
+    let fate = core_fate(&mut core, bob_unit);
+    let SyncMessage::FateUpdate {
+        fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
+        ..
+    } = &fate
+    else {
+        panic!("Core must refuse the write, got {fate:?}");
+    };
+    assert!(reason.contains("not supported yet (#3899)"), "{reason}");
+    assert_eq!(
+        rows_at(&mut core, "counters", DurabilityTier::Global),
+        BTreeMap::from([(target, counter_cells(6, "base"))])
+    );
+}
+
+/// A counter op that would take the column outside its type's range is
+/// rejected at Core with an explicit reason instead of wrapping. From 1 on a
+/// `U64` counter two concurrent -1s: the first settles to 0, the second is
+/// rejected and the counter stays 0.
+#[test]
+fn unsigned_counter_op_below_zero_is_rejected_at_core() {
+    let schema = unsigned_counter_schema();
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(1), schema.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(2), schema.clone());
+    let (_bob_dir, mut bob) = open_node_with_schema(node(3), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let target = row(0x75);
+
+    commit_mergeable_global(
+        &mut base_writer,
+        &mut core,
+        MergeableCommit::new("counters", target, 10).cells(unsigned_counter_cells(1, "base")),
+    );
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+    sync_table_rows_to(&mut core, &mut bob, "counters");
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 20)
+                .cells(unsigned_counter_cells(0, "alice")),
+        )
+        .unwrap();
+    let (_bob_tx, bob_unit) = bob
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 21).cells(unsigned_counter_cells(0, "bob")),
+        )
+        .unwrap();
+
+    assert_accepted(&core_fate(&mut core, alice_unit));
+    let fate = core_fate(&mut core, bob_unit);
+    let SyncMessage::FateUpdate {
+        fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
+        ..
+    } = &fate
+    else {
+        panic!("Core must reject a counter op that leaves the range, got {fate:?}");
+    };
+    assert!(reason.contains("out of range"), "{reason}");
+    assert_eq!(
+        rows_at(&mut core, "counters", DurabilityTier::Global),
+        BTreeMap::from([(target, unsigned_counter_cells(0, "alice"))])
+    );
+}
+
+/// The signed form: from `i32::MAX - 1` two concurrent +1s on an `INTEGER`
+/// counter. The first settles to `i32::MAX`; the second is rejected.
+#[test]
+fn signed_counter_op_past_its_maximum_is_rejected_at_core() {
+    let schema = counter_schema();
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(1), schema.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(2), schema.clone());
+    let (_bob_dir, mut bob) = open_node_with_schema(node(3), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let target = row(0x76);
+
+    commit_mergeable_global(
+        &mut base_writer,
+        &mut core,
+        MergeableCommit::new("counters", target, 10)
+            .cells(counter_cells(i32::MAX - 1, "base")),
+    );
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+    sync_table_rows_to(&mut core, &mut bob, "counters");
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 20).cells(counter_cells(i32::MAX, "alice")),
+        )
+        .unwrap();
+    let (_bob_tx, bob_unit) = bob
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 21).cells(counter_cells(i32::MAX, "bob")),
+        )
+        .unwrap();
+
+    assert_accepted(&core_fate(&mut core, alice_unit));
+    let fate = core_fate(&mut core, bob_unit);
+    assert!(
+        matches!(
+            &fate,
+            SyncMessage::FateUpdate {
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
+                ..
+            } if reason.contains("out of range")
+        ),
+        "Core must reject a counter op past i32::MAX, got {fate:?}"
+    );
+    assert_eq!(
+        rows_at(&mut core, "counters", DurabilityTier::Global),
+        BTreeMap::from([(target, counter_cells(i32::MAX, "alice"))])
+    );
+}

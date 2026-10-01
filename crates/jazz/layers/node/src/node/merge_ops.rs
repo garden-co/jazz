@@ -20,28 +20,72 @@ pub(in crate::node) fn counter_to_i128(value: &Value) -> Result<i128, Error> {
     }
 }
 
-/// A counter value in the column's integer type, modulo 2^width.
-///
-/// Counter ops are deltas carried in the column's own type, so they are
-/// taken modulo 2^width: a decrement of an unsigned counter, or a signed
-/// jump wider than the type, is exact for the one write that makes it, and
-/// adding it back to the base the write saw yields exactly the written
-/// value. Core adds concurrent ops the same way, so they commute
-/// (`INV-HIST-15`); a sum that leaves the column's range wraps.
-fn counter_wrapping(column_type: &ValueType, value: i128) -> Result<Value, Error> {
-    // `as` from i128 keeps the low bits: the two's-complement residue.
+/// The bit width and value range of a counter column's integer type.
+fn counter_range(column_type: &ValueType) -> Result<(u32, i128, i128), Error> {
     match column_type {
-        ValueType::U8 => Ok(Value::U8(value as u8)),
-        ValueType::U16 => Ok(Value::U16(value as u16)),
-        ValueType::U32 => Ok(Value::U32(value as u32)),
-        ValueType::U64 => Ok(Value::U64(value as u64)),
-        ValueType::I32 => Ok(Value::I32(value as i32)),
-        ValueType::I64 => Ok(Value::I64(value as i64)),
-        ValueType::Nullable(inner) => counter_wrapping(inner, value),
+        ValueType::U8 => Ok((8, 0, i128::from(u8::MAX))),
+        ValueType::U16 => Ok((16, 0, i128::from(u16::MAX))),
+        ValueType::U32 => Ok((32, 0, i128::from(u32::MAX))),
+        ValueType::U64 => Ok((64, 0, i128::from(u64::MAX))),
+        ValueType::I32 => Ok((32, i128::from(i32::MIN), i128::from(i32::MAX))),
+        ValueType::I64 => Ok((64, i128::from(i64::MIN), i128::from(i64::MAX))),
+        ValueType::Nullable(inner) => counter_range(inner),
         _ => Err(Error::InvalidStoredValue(
             "counter strategy requires integer column",
         )),
     }
+}
+
+/// A counter op: a delta carried in the column's own integer type as its
+/// two's-complement residue modulo 2^width. Deltas range over the signed
+/// values of that width, so a decrement of an unsigned counter travels
+/// exactly; a single write whose change does not fit is refused when it is
+/// made (`split_merge_ops`).
+fn counter_op(column_type: &ValueType, delta: i128) -> Result<Value, Error> {
+    // `as` from i128 keeps the low bits: the two's-complement residue.
+    match column_type {
+        ValueType::U8 => Ok(Value::U8(delta as u8)),
+        ValueType::U16 => Ok(Value::U16(delta as u16)),
+        ValueType::U32 => Ok(Value::U32(delta as u32)),
+        ValueType::U64 => Ok(Value::U64(delta as u64)),
+        ValueType::I32 => Ok(Value::I32(delta as i32)),
+        ValueType::I64 => Ok(Value::I64(delta as i64)),
+        ValueType::Nullable(inner) => counter_op(inner, delta),
+        _ => Err(Error::InvalidStoredValue(
+            "counter strategy requires integer column",
+        )),
+    }
+}
+
+/// The signed delta a counter op carries: its residue read in the signed
+/// range of the column's width.
+pub(in crate::node) fn counter_op_delta(
+    column_type: &ValueType,
+    op: &Value,
+) -> Result<i128, Error> {
+    let (width, _, _) = counter_range(column_type)?;
+    let residue = counter_to_i128(op)?;
+    let half = 1_i128 << (width - 1);
+    Ok(if residue >= half {
+        residue - (1_i128 << width)
+    } else {
+        residue
+    })
+}
+
+/// A counter's value after one op, or `None` when the sum leaves the
+/// column's range. Core rejects such a write at settle rather than wrap.
+pub(in crate::node) fn counter_after_op(
+    column_type: &ValueType,
+    previous: &Value,
+    op: &Value,
+) -> Result<Option<Value>, Error> {
+    let (_, min, max) = counter_range(column_type)?;
+    let sum = counter_to_i128(previous)? + counter_op_delta(column_type, op)?;
+    if sum < min || sum > max {
+        return Ok(None);
+    }
+    counter_op(column_type, sum).map(Some)
 }
 
 fn gset_elements(
@@ -128,10 +172,17 @@ pub(in crate::node) fn split_merge_ops(
             MergeStrategy::Counter => {
                 let delta = counter_to_i128(&written)?
                     - base_value.map(counter_to_i128).transpose()?.unwrap_or(0);
-                cells.insert(
-                    column.name.clone(),
-                    counter_wrapping(&column.column_type, delta)?,
-                );
+                // Over an image, the change must fit the signed range of
+                // the column's width so Core reads the op back exactly. A
+                // write over no image carries its value itself.
+                let (width, _, _) = counter_range(&column.column_type)?;
+                let half = 1_i128 << (width - 1);
+                if base_value.is_some() && (delta < -half || delta >= half) {
+                    return Err(Error::InvalidMergeableCommit(
+                        "counter change in one write must fit the signed range of the column's width",
+                    ));
+                }
+                cells.insert(column.name.clone(), counter_op(&column.column_type, delta)?);
             }
             MergeStrategy::GSet => {
                 image.insert(
@@ -149,7 +200,9 @@ pub(in crate::node) fn split_merge_ops(
     Ok(image)
 }
 
-/// Apply a patch's merge-column op onto the previous image's value.
+/// Apply an accepted patch's merge-column op onto the previous image's
+/// value. Core rejects a counter op that would leave the column's range
+/// before it accepts the write, so an accepted op that does is an error.
 pub(in crate::node) fn apply_merge_op(
     strategy: MergeStrategy,
     column_type: &ValueType,
@@ -157,12 +210,34 @@ pub(in crate::node) fn apply_merge_op(
     op: &Value,
 ) -> Result<Value, Error> {
     match strategy {
-        MergeStrategy::Counter => counter_wrapping(
-            column_type,
-            counter_to_i128(previous)? + counter_to_i128(op)?,
+        MergeStrategy::Counter => counter_after_op(column_type, previous, op)?.ok_or(
+            Error::InvalidStoredValue("accepted counter op leaves the column's range"),
         ),
         MergeStrategy::GSet => gset_union(column_type, Some(previous), Some(op)),
         MergeStrategy::Lww => Ok(op.clone()),
+    }
+}
+
+/// Apply a still-pending patch's merge-column op onto a local base. A
+/// counter op that would leave the column's range there will be rejected by
+/// Core, so the local view keeps the base value.
+pub(in crate::node) fn apply_pending_merge_op(
+    strategy: MergeStrategy,
+    column_type: &ValueType,
+    previous: &Value,
+    op: &Value,
+) -> Result<Value, Error> {
+    match strategy {
+        MergeStrategy::Counter => Ok(counter_after_op(column_type, previous, op)?
+            .unwrap_or_else(|| counter_value_without_null(previous))),
+        _ => apply_merge_op(strategy, column_type, previous, op),
+    }
+}
+
+fn counter_value_without_null(value: &Value) -> Value {
+    match value {
+        Value::Nullable(Some(inner)) => counter_value_without_null(inner),
+        other => other.clone(),
     }
 }
 
@@ -170,16 +245,17 @@ pub(in crate::node) fn apply_merge_op(
 mod tests {
     use super::*;
 
-    /// A counter op is exact for any single write, whatever its sign or size:
-    /// an unsigned decrement, and a signed jump across the whole type.
+    /// A counter op is exact for any single write whose change fits the
+    /// signed range of the column's width: an unsigned decrement included.
     #[test]
     fn counter_op_restores_the_written_value_over_its_base() {
         for (column_type, base, written) in [
-            (ValueType::U8, Value::U8(200), Value::U8(1)),
+            (ValueType::U8, Value::U8(100), Value::U8(1)),
+            (ValueType::U8, Value::U8(1), Value::U8(128)),
             (ValueType::U64, Value::U64(10), Value::U64(7)),
-            (ValueType::I32, Value::I32(i32::MIN), Value::I32(i32::MAX)),
+            (ValueType::I32, Value::I32(-5), Value::I32(i32::MAX - 5)),
         ] {
-            let delta = counter_wrapping(
+            let delta = counter_op(
                 &column_type,
                 counter_to_i128(&written).unwrap() - counter_to_i128(&base).unwrap(),
             )
@@ -190,5 +266,48 @@ mod tests {
                 "{column_type:?}"
             );
         }
+    }
+
+    /// A sum that leaves the column's range is not wrapped: settle sees it
+    /// as out of range, below zero for an unsigned counter and past the
+    /// maximum for a signed one.
+    #[test]
+    fn counter_op_out_of_the_column_range_does_not_wrap() {
+        for (column_type, base, delta) in [
+            (ValueType::U64, Value::U64(0), -1),
+            (ValueType::U8, Value::U8(250), 10),
+            (ValueType::I32, Value::I32(i32::MAX), 1),
+            (ValueType::I64, Value::I64(i64::MIN), -1),
+        ] {
+            let op = counter_op(&column_type, delta).unwrap();
+            assert_eq!(
+                counter_after_op(&column_type, &base, &op).unwrap(),
+                None,
+                "{column_type:?}"
+            );
+            assert!(apply_merge_op(MergeStrategy::Counter, &column_type, &base, &op).is_err());
+        }
+    }
+
+    /// A single write whose change does not fit the signed range of the
+    /// column's width cannot be carried as an unambiguous op and is refused
+    /// when it is made.
+    #[test]
+    fn counter_change_wider_than_half_the_type_is_refused_when_written() {
+        let table = TableSchema::new(
+            "counters",
+            [groove::schema::ColumnSchema::new(
+                "count",
+                groove::schema::ColumnType::U8,
+            )],
+        )
+        .with_column_merge_strategy("count", MergeStrategy::Counter);
+        let authored = BTreeSet::from(["count".to_owned()]);
+        let base = BTreeMap::from([("count".to_owned(), Value::U8(200))]);
+        let mut cells = BTreeMap::from([("count".to_owned(), Value::U8(1))]);
+        assert!(matches!(
+            split_merge_ops(&table, &authored, &base, &mut cells),
+            Err(Error::InvalidMergeableCommit(_))
+        ));
     }
 }

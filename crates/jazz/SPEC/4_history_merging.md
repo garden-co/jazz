@@ -16,7 +16,7 @@ Invariant digest:
 - `INV-HIST-6`: A merge version MUST dominate all of its parent heads and become the current content winner when present and accepted.
 - `INV-HIST-8`: For a plain (`MergeStrategy::Lww`) column, Core MUST merge each accepted write into the row's post-image column by column: the write sets a column it authored iff its stamp (`min(tx_time ms, seq ms)`) is `>=` the column's stored stamp, a tie going to the later seq. Concurrent writes to different columns of one row therefore all survive, and on a shared column the higher stamp wins whatever order Core sequences them in.
 - `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
-- `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly.
+- `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly. Core MUST reject a write whose delta would take the counter outside its column type's range rather than wrap, and a write that does not author a merge column MUST NOT replace that column's accepted ops with the writer's snapshot, also across schema versions.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
@@ -105,10 +105,19 @@ row image it was made over, and Core adds each accepted delta to the current
 value (`INV-HIST-10`). Concurrent increments therefore converge to the exact
 total: from a base of `10`, a concurrent `+3` and `+5` merge to `18`, not to a
 single last-writer value. The delta is carried in the column's own integer
-type modulo 2^width, and Core adds it modulo 2^width, so a decrement of an
-unsigned counter, or a signed change wider than the type, travels exactly and
-restores the written value over its base; a concurrent sum that leaves the
-column's range wraps. A redelivered commit unit is the same transaction
+type as its two's-complement residue modulo 2^width and read back as a signed
+delta of that width, so a decrement of an unsigned counter travels exactly. A
+write made over an image whose change does not fit that signed range (more
+than half the type's span in one step) is refused when it is made with an
+`InvalidMergeableCommit` error. Core never wraps: when adding an op to the
+row's current value would take the column outside its type's range (below `0`
+or above the maximum for an unsigned type, outside `MIN..=MAX` for a signed
+one), Core rejects that write with a `MalformedCommit` reason naming the
+counter and the out-of-range sum, and the counter keeps its value. From `1` on
+a `U64` counter, two concurrent `-1`s settle the first to `0` and reject the
+second. Which of two such concurrent writes is rejected depends on the order
+Core sequences them; accepted ops still commute (`INV-HIST-15`). A redelivered
+commit unit is the same transaction
 and is not applied again, so a retried increment counts once (`INV-EDGE-16`).
 
 _Further invariants._ `INV-HIST-15` — for writes with distinct stamps the
@@ -262,6 +271,19 @@ slot. Merge-column ops cannot apply across layouts that way, so Core rejects a
 write that authors a merge column under a schema version other than the one
 the row's current image is stored under, with a `MalformedCommit` reason
 saying this is not supported yet ([#3899](https://github.com/garden-co/jazz/issues/3899)).
+A cross-layout write that leaves a merge column alone still carries the
+writer's snapshot of it as an absolute value, which may predate ops Core has
+accepted since; when such a write wins, each merge column it did not author
+takes the row's settled value from the current image instead
+(`INV-HIST-10`). That value carries over when the current image's schema has
+a column of the same name, type and merge strategy that the lens path between
+the two versions leaves alone; a column the current image's schema lacks, and
+that no lens op renames or copies into, takes the lens default, since no op
+can have touched it under that layout. For any other mapping (a renamed or
+copied merge column, or one whose type or strategy changed) Core rejects the
+write with the same not-supported-yet `MalformedCommit` reason rather than
+guess. A merge column the winning write's schema does not have at all is not
+carried into its image, like a plain column of that kind.
 The pending local overlay is not stamped and always wins locally.
 
 **Durable layout.** Stamps are stored as hidden constant-width groove `U48`
