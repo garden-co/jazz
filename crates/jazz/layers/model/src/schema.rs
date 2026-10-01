@@ -2018,11 +2018,14 @@ mod tests {
         let table = schema.tables[0].history_storage_table();
         let primary_key = table.primary_key.as_ref().unwrap();
 
-        assert_eq!(primary_key.columns.len(), 4);
+        // Keyed by seq so "the row at seq S" and "the row's writes after S"
+        // are prefix and range reads (SPEC 4 §4.6, "Durable layout").
+        assert_eq!(primary_key.columns.len(), 5);
         assert_eq!(primary_key.columns[0].column, "branch_key");
         assert_eq!(primary_key.columns[1].column, "row_uuid");
-        assert_eq!(primary_key.columns[2].column, "tx_time");
-        assert_eq!(primary_key.columns[3].column, "tx_node_id");
+        assert_eq!(primary_key.columns[2].column, "seq");
+        assert_eq!(primary_key.columns[3].column, "tx_time");
+        assert_eq!(primary_key.columns[4].column, "tx_node_id");
         assert!(
             table
                 .columns
