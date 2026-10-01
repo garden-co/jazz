@@ -1,17 +1,10 @@
 import "server-only";
 import { app } from "@/schema";
 import permissions from "@/permissions";
-import type { JazzClient } from "jazz-tools/backend";
-import { createRequire as createRequireFromModule } from "node:module";
+import { createJazzSession, type JazzClient } from "jazz-tools/backend";
 import { appOrigin } from "./app-origin";
 import { jazzAppId, jazzEnv, jazzServerUrl } from "./jazz-env";
 import { serverSecret } from "./server-secret";
-
-const createRequire =
-  process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazzSession } = createRequire(import.meta.url)(
-  "jazz-tools/backend",
-) as typeof import("jazz-tools/backend");
 
 type BackendSession = Awaited<ReturnType<typeof createJazzSession>>;
 
