@@ -59,7 +59,7 @@ it.each(["app", "slice"] as const)(
           },
         },
       });
-      const acceptedIdentity = await db.one(app.__e2ee_account_identities, { tier: "edge" });
+      const acceptedIdentity = await db.one(app.__e2ee_account_identities, { tier: "remote" });
       expect(acceptedIdentity).toMatchObject({
         id: account.account.id,
         deviceId: expect.any(String),
