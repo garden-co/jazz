@@ -167,6 +167,13 @@ where
         // it is the row as of this write's seq.
         let mut merged = incoming.record.to_values()?;
         let previous_values = same_layout.then(|| previous.record.to_values()).transpose()?;
+        // Stored images spell enum cells with the lineage's physical tags; an
+        // uploaded write spells them with its schema version's authored
+        // tags. Comparisons above read stored images only. A cell carried
+        // from the current image into an uploaded write is re-tagged to the
+        // write's spelling, and lost cells are stored in the authored one.
+        let logical = super::codec::history_record_descriptor(table_schema);
+        let incoming_authored = *incoming_descriptor == logical;
         let counter_signs = incoming.counter_signs()?;
         let mut lost = Vec::new();
         let cell_value = |value: Option<Value>| Value::Nullable(value.map(Box::new));
@@ -177,7 +184,7 @@ where
                 if !applies(DELETION_COLUMN_ID, &deletion_type) {
                     lost.push((
                         DELETION_COLUMN_ID.0,
-                        incoming_descriptor.fields()[field].value_type.clone(),
+                        logical.fields()[field].value_type.clone(),
                         merged[field].clone(),
                     ));
                     merged[field] = cell_value(carried(DELETION_COLUMN_ID, &deletion_type).flatten());
@@ -210,20 +217,41 @@ where
                 let id = *mapping
                     .get(&column.name)
                     .ok_or(Error::InvalidStoredValue("incoming column physical mapping missing"))?;
-                if authors(&column.name) {
-                    if !applies(id, &column.column_type) {
-                        lost.push((
-                            id.0,
-                            incoming_descriptor.fields()[field].value_type.clone(),
-                            merged[field].clone(),
-                        ));
-                        merged[field] = cell_value(carried(id, &column.column_type).flatten());
+                let keep = if authors(&column.name) {
+                    if applies(id, &column.column_type) {
+                        None
+                    } else {
+                        let own = if incoming_authored {
+                            merged[field].clone()
+                        } else {
+                            self.physical_cell_to_authored(
+                                schema_version,
+                                &table_schema.name,
+                                index,
+                                merged[field].clone(),
+                            )?
+                        };
+                        lost.push((id.0, logical.fields()[field].value_type.clone(), own));
+                        Some(carried(id, &column.column_type).flatten())
                     }
-                } else if let Some(value) = carried(id, &column.column_type) {
+                } else {
                     // Unauthored cells keep the row's value where its image
                     // carries the column, and the writer's snapshot
                     // otherwise.
-                    merged[field] = cell_value(value);
+                    carried(id, &column.column_type)
+                };
+                if let Some(value) = keep {
+                    let value = cell_value(value);
+                    merged[field] = if incoming_authored {
+                        self.physical_cell_to_authored(
+                            schema_version,
+                            &table_schema.name,
+                            index,
+                            value,
+                        )?
+                    } else {
+                        value
+                    };
                 }
                 continue;
             }

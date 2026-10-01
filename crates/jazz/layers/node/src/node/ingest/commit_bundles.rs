@@ -503,6 +503,23 @@ where
         )? {
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
+        // A write chained on its writer's pending predecessor waits for that
+        // predecessor's fate: an ordering race (it may arrive later, or be
+        // held here as a relayed or recovered Pending) is not a refusal.
+        if self
+            .park_commit_unit_awaiting_predecessor(
+                &tx,
+                &versions,
+                now_ms,
+                CommitUnitParkMode {
+                    ingest_context,
+                    ..CommitUnitParkMode::default()
+                },
+            )
+            .await?
+        {
+            return Ok(PublicationOutcome::settled(Vec::new()));
+        }
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
         // Validate untrusted metadata before a missing ordinary history parent
         // can park the unit. Otherwise malformed provenance would leave an

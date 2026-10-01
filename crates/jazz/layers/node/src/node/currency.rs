@@ -503,42 +503,63 @@ where
             .await
     }
 
+    /// The row's local winner in history: its newest pending write when it
+    /// has one, and otherwise its newest accepted write. History is keyed by
+    /// seq with pending writes at seq 0, so pending writes sort first in the
+    /// row's key range and the last key there is the newest accepted write,
+    /// never a pending one: the pending range is read first.
     pub(super) async fn query_winner_from_pk_in_branch(
         &mut self,
         table: &str,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
     ) -> Result<Option<VersionRow>, Error> {
-        let mut winner = None;
+        // (pending, seq, version): a pending write beats an accepted one, a
+        // later seq beats an earlier one, then the newer transaction wins.
+        let mut winner: Option<(bool, GlobalTime, VersionRow)> = None;
         for storage_table in self.version_storage_sources(table)? {
-            let prefix = vec![
+            let row_prefix = vec![
                 Value::Bytes(branch_key.canonical_bytes()),
                 Value::Uuid(row_uuid.0),
             ];
-            let Some(raw) = self
-                .database
-                .primary_key_last_raw(&storage_table, &prefix)
-                .await?
-                .map(|raw| raw.owned_record())
-            else {
+            let mut pending_prefix = row_prefix.clone();
+            pending_prefix.push(Value::U64(0));
+            let mut found = None;
+            for (pending, prefix) in [(true, &pending_prefix), (false, &row_prefix)] {
+                if let Some(raw) = self
+                    .database
+                    .primary_key_last_raw(&storage_table, prefix)
+                    .await?
+                    .map(|raw| raw.owned_record())
+                {
+                    found = Some((pending, raw));
+                    break;
+                }
+            }
+            let Some((pending, raw)) = found else {
                 continue;
             };
             let candidate = self
                 .decode_stored_history_record(None, table, &storage_table, raw)
                 .await?;
-            let candidate_tx = self.version_tx_id(&candidate)?;
-            if winner.as_ref().is_none_or(|existing: &VersionRow| {
-                candidate.tx_time().sort_key(candidate_tx.node)
-                    > existing.tx_time().sort_key(
-                        self.version_tx_id(existing)
-                            .expect("valid version tx id")
-                            .node,
-                    )
-            }) {
-                winner = Some(candidate);
+            let seq = candidate.seq()?;
+            let replace = match winner.as_ref() {
+                None => true,
+                Some((existing_pending, existing_seq, existing)) => {
+                    let candidate_key = candidate
+                        .tx_time()
+                        .sort_key(self.version_tx_id(&candidate)?.node);
+                    let existing_key = existing
+                        .tx_time()
+                        .sort_key(self.version_tx_id(existing)?.node);
+                    (pending, seq, candidate_key) > (*existing_pending, *existing_seq, existing_key)
+                }
+            };
+            if replace {
+                winner = Some((pending, seq, candidate));
             }
         }
-        Ok(winner)
+        Ok(winner.map(|(_, _, version)| version))
     }
 
     #[cfg(test)]

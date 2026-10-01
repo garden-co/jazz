@@ -357,10 +357,6 @@ where
                 self.query_local_winner_in_branch(&table_schema.name, &branch_key, commit.row_uuid)
                     .await?
             };
-            let previous_local_current_identity = previous_local_current
-                .as_ref()
-                .map(|overlay| self.version_tx_id(overlay))
-                .transpose()?;
             let previous_current = match previous_local_current {
                 Some(previous) => Some(previous),
                 None if !known_fresh_row => {
@@ -379,15 +375,19 @@ where
                 .unwrap_or((commit.made_by, provenance_at));
             // The image this write is made over (SPEC 4 §4.6, "Base of a
             // write"): the settled image's seq, and this node's own newest
-            // pending write to the row when the overlay holds one. An insert,
-            // and a write over no image of the row, have no base.
+            // pending write to the row, also when a foreign pending write
+            // (one this node relays) is newer in the overlay. An insert, and
+            // a write over no image of the row, have no base.
             let mut base = crate::protocol::RowBase::default();
             if previous_current.is_some() {
-                if let Some(overlay) = previous_local_current_identity {
-                    if overlay.node == self.node_uuid {
-                        base.pending = Some(overlay);
-                    }
-                }
+                base.pending = self
+                    .newest_own_pending_write_in_batch(
+                        &batch,
+                        &table_schema.name,
+                        &branch_key,
+                        commit.row_uuid,
+                    )
+                    .await?;
                 base.seq = self
                     .global_current_seq_in_batch(
                         &batch,

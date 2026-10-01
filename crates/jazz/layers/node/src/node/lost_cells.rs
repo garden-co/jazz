@@ -15,7 +15,9 @@
 //! (`DELETION_COLUMN_ID` is `_deletion`); on the wire they are slots of the
 //! authored table (`0` is `_deletion`, `i + 1` the `i`-th user column), since
 //! physical ids never cross the wire. Values are encoded with the cell types
-//! of the record's own schema version in both carriers.
+//! of the record's own schema version in both carriers, and enum cells carry
+//! that version's authored tags in both, never the lineage's physical tags
+//! (the ancestor rebuild re-tags them before comparing with stored images).
 
 use super::Error;
 use groove::records::{RecordDescriptor, Value, ValueType};

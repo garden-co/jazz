@@ -89,7 +89,9 @@ where
             .ok_or(Error::InvalidStoredValue("lost cells schema version alias missing"))?;
         let table = self.table_in_schema_ref(version.table(), schema_version)?;
         let mapping = self.lost_cells_mapping(schema_version, version.table())?;
-        let descriptor = version.record.descriptor();
+        // Stored lost cells use the record's own authored spelling, which is
+        // also the wire's.
+        let descriptor = super::codec::history_record_descriptor(table);
         super::lost_cells::rekey(&stored, |id| {
             let slot = if PhysicalColumnId(id) == DELETION_COLUMN_ID {
                 0
@@ -137,6 +139,83 @@ where
             };
             Ok((id.0, lost_cell_type(&descriptor, slot)?))
         })
+    }
+
+    /// The physical spelling of user cell `column` of `table` under
+    /// `schema_version`: its authored enum tags re-tagged into the lineage's
+    /// physical registry, exactly as a history write stores them. A cell
+    /// without an enum boundary is returned unchanged. Ancestor comparisons
+    /// read stored cells in this spelling (SPEC 4 §4.6).
+    pub(in crate::node) fn authored_cell_to_physical(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        column: usize,
+        value: Value,
+    ) -> Result<Value, Error> {
+        let plan =
+            self.prepared_physical_write_plan(schema_version, table, PhysicalWriteTarget::History)?;
+        let Some(index) = plan.write_fields.iter().position(
+            |field| matches!(field, PhysicalWriteField::Enum { column: enum_column, .. } if *enum_column == column),
+        ) else {
+            return Ok(value);
+        };
+        match (value, &plan.physical_descriptor.fields()[index].value_type) {
+            (Value::Nullable(Some(inner)), records::ValueType::Nullable(physical)) => {
+                Ok(Value::Nullable(Some(Box::new(remap_nested_enum_value(
+                    *inner,
+                    &plan.source_table.columns[column].column_type,
+                    physical,
+                    &plan.enum_remaps[column],
+                    "root",
+                )?))))
+            }
+            (value, _) => Ok(value),
+        }
+    }
+
+    /// The authored spelling of a physical user cell: the inverse of
+    /// [`Self::authored_cell_to_physical`], for the record's own schema
+    /// version. Lost cells are stored in this spelling.
+    pub(in crate::node) fn physical_cell_to_authored(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        column: usize,
+        value: Value,
+    ) -> Result<Value, Error> {
+        let plan =
+            self.prepared_physical_write_plan(schema_version, table, PhysicalWriteTarget::History)?;
+        let Some(index) = plan.write_fields.iter().position(
+            |field| matches!(field, PhysicalWriteField::Enum { column: enum_column, .. } if *enum_column == column),
+        ) else {
+            return Ok(value);
+        };
+        let physical_type = plan.physical_descriptor.fields()[index].value_type.clone();
+        let authored_type = plan.source_table.columns[column].column_type.clone();
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(table))
+            .ok_or(Error::InvalidStoredValue("enum cell physical table mapping missing"))?;
+        let column_id = *mapping
+            .columns
+            .get(&plan.source_table.columns[column].name)
+            .ok_or(Error::InvalidStoredValue("enum cell physical column mapping missing"))?;
+        let remaps = self.physical_to_authored_enum_remaps(mapping, column_id)?;
+        match (value, physical_type) {
+            (Value::Nullable(Some(inner)), records::ValueType::Nullable(physical)) => {
+                Ok(Value::Nullable(Some(Box::new(remap_nested_enum_value(
+                    *inner,
+                    &physical,
+                    &authored_type,
+                    &remaps,
+                    "root",
+                )?))))
+            }
+            (value, _) => Ok(value),
+        }
     }
 
     fn lost_cells_mapping(

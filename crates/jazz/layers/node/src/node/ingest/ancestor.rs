@@ -69,6 +69,13 @@ where
                 row_uuid.0
             )
         };
+        if base.seq == Some(GlobalTime(0)) {
+            // Seq 0 is where history keeps writes without an accepted fate;
+            // no accepted image is at it.
+            return Ok(Err(not_supported(
+                "base seq 0 names no accepted write".to_owned(),
+            )));
+        }
         if let Some(seq) = base.seq
             && current_seq.is_none_or(|current| seq > current)
         {
@@ -83,6 +90,14 @@ where
                     "its pending predecessor was written by another node".to_owned(),
                 )));
             }
+            if pending.time >= writer.time {
+                return Ok(Err(not_supported(
+                    "its pending predecessor is not older than the write".to_owned(),
+                )));
+            }
+            // An unknown or still pending predecessor is parked before
+            // resolution (`park_commit_unit_awaiting_predecessor`); reaching
+            // either here means no fate will come.
             match self.query_transaction(pending).await? {
                 None => {
                     return Ok(Err(not_supported(
@@ -164,20 +179,31 @@ where
                 .await?;
             let mut chain = Vec::new();
             let mut concurrent = false;
+            let mut chain_lost = false;
             for raw in raws {
                 let record = raw.record();
                 let tx_time = TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?);
                 let tx_node = NodeAlias(record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?);
                 if Some(tx_node) == writer_alias && tx_time <= pending.time {
+                    let lost = record
+                        .descriptor()
+                        .field_index(crate::schema::LOST_CELLS_FIELD)
+                        .ok_or(Error::InvalidStoredValue("history record lacks lost_cells"))?;
+                    match record.get_idx(lost)? {
+                        Value::Bytes(bytes) => chain_lost |= !bytes.is_empty(),
+                        _ => return Err(Error::InvalidStoredValue("history lost_cells must be bytes")),
+                    }
                     chain.push(raw.owned_record());
                 } else {
                     concurrent = true;
                 }
             }
-            if !concurrent && fast_paths_enabled() {
-                // Fast path: every write since the root is the writer's own,
-                // so the current image is the ancestor wherever the root or
-                // a chained write holds a cell.
+            if !concurrent && !chain_lost && fast_paths_enabled() {
+                // Fast path: every write since the root is the writer's own
+                // and none of them lost a cell, so the current image is the
+                // ancestor wherever the root or a chained write holds a cell.
+                // A chained write that lost a cell put its own value, not
+                // the current one, into the ancestor (INV-HIST-21).
                 return Ok(Ok(WriteAncestor::AllApply));
             }
             // Newest first: the last chained write to author a cell holds
@@ -217,6 +243,43 @@ where
         Ok(Ok(WriteAncestor::Cells(ancestor)))
     }
 
+    /// This node's newest write to the row that has no fate yet, as a
+    /// writer's base names it (SPEC 4 §4.6, "Base of a write"). History keeps
+    /// such writes at seq 0; foreign pending writes this node holds (as a
+    /// relay) are skipped.
+    pub(in crate::node) async fn newest_own_pending_write_in_batch(
+        &mut self,
+        batch: &DatabaseBatch,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        let Some(own_alias) = self.self_node_alias else {
+            return Ok(None);
+        };
+        let prefix = [
+            Value::Bytes(branch_key.canonical_bytes()),
+            Value::Uuid(row_uuid.0),
+            Value::U64(0),
+        ];
+        let mut newest: Option<TxTime> = None;
+        for history_table in self.version_storage_sources(table)? {
+            for raw in self
+                .database
+                .primary_key_scan_raw_in_batch(batch, &history_table, &prefix)
+                .await?
+            {
+                let record = raw.record();
+                if NodeAlias(record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?) != own_alias {
+                    continue;
+                }
+                let time = TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?);
+                newest = newest.max(Some(time));
+            }
+        }
+        Ok(newest.map(|time| TxId::new(time, self.node_uuid)))
+    }
+
     /// Every plain cell and `_deletion` of a row image.
     pub(super) fn image_physical_cells(&self, image: &VersionRow) -> Result<PhysicalCells, Error> {
         self.physical_cells(image, None, &BTreeMap::new())
@@ -224,41 +287,64 @@ where
 
     /// The cells a write authored, as its writer wrote them: its history
     /// post-image restricted to its `authored_columns`, with its lost cells
-    /// overriding (`INV-HIST-21`).
+    /// overriding (`INV-HIST-21`). Lost cells are stored with the record's
+    /// authored enum tags; they are re-tagged to the physical registry the
+    /// record's own cells use before they are compared with any image.
     pub(super) fn own_patch_physical_cells(
-        &self,
+        &mut self,
         version: &VersionRow,
     ) -> Result<PhysicalCells, Error> {
         let authored = version.authored_column_ids()?;
-        let descriptor = version.record.descriptor();
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("history schema version alias must exist"))?;
         let (table, mapping) = self.version_table_and_mapping(version)?;
-        let lost = super::lost_cells::decode(&version.lost_cells_raw()?, |id| {
-            let field = if PhysicalColumnId(id) == DELETION_COLUMN_ID {
-                HistoryRowRecord::FIELD__DELETION_IDX
-            } else {
-                let name = mapping
-                    .iter()
-                    .find_map(|(name, column)| (column.0 == id).then_some(name))
-                    .ok_or(Error::InvalidStoredValue("lost cell column id is unmapped"))?;
-                HistoryRowRecord::USER_CELLS
-                    + table
-                        .columns
-                        .iter()
-                        .position(|column| &column.name == name)
-                        .ok_or(Error::InvalidStoredValue("lost cell column missing"))?
+        let table = table.clone();
+        let mapping = mapping.clone();
+        let logical = super::codec::history_record_descriptor(&table);
+        let column_of = |id: u64| -> Result<Option<usize>, Error> {
+            if PhysicalColumnId(id) == DELETION_COLUMN_ID {
+                return Ok(None);
+            }
+            let name = mapping
+                .iter()
+                .find_map(|(name, column)| (column.0 == id).then_some(name))
+                .ok_or(Error::InvalidStoredValue("lost cell column id is unmapped"))?;
+            table
+                .columns
+                .iter()
+                .position(|column| &column.name == name)
+                .map(Some)
+                .ok_or(Error::InvalidStoredValue("lost cell column missing"))
+        };
+        let decoded = super::lost_cells::decode(&version.lost_cells_raw()?, |id| {
+            let field = match column_of(id)? {
+                None => HistoryRowRecord::FIELD__DELETION_IDX,
+                Some(index) => HistoryRowRecord::USER_CELLS + index,
             };
-            Ok(descriptor.fields()[field].value_type.clone())
-        })?
-        .into_iter()
-        .map(|(id, value)| Ok((PhysicalColumnId(id), nullable_value(value)?)))
-        .collect::<Result<BTreeMap<_, _>, Error>>()?;
-        self.physical_cells(version, Some(authored.unwrap_or_else(|| {
-            mapping
-                .values()
-                .copied()
-                .chain(std::iter::once(DELETION_COLUMN_ID))
-                .collect()
-        })), &lost)
+            Ok(logical.fields()[field].value_type.clone())
+        })?;
+        let mut lost = BTreeMap::new();
+        for (id, value) in decoded {
+            let value = match column_of(id)? {
+                None => value,
+                Some(index) => {
+                    self.authored_cell_to_physical(schema_version, &table.name, index, value)?
+                }
+            };
+            lost.insert(PhysicalColumnId(id), nullable_value(value)?);
+        }
+        self.physical_cells(
+            version,
+            Some(authored.unwrap_or_else(|| {
+                mapping
+                    .values()
+                    .copied()
+                    .chain(std::iter::once(DELETION_COLUMN_ID))
+                    .collect()
+            })),
+            &lost,
+        )
     }
 
     fn version_table_and_mapping(

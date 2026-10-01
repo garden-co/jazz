@@ -822,6 +822,68 @@ where
         Ok(true)
     }
 
+    /// Park a commit unit at the fate authority while the pending
+    /// predecessor its base names has no fate here (SPEC 4 §4.6, "Ancestor
+    /// at Core"): Core resolves the write's ancestor only once it knows
+    /// whether that predecessor is in history. The unit re-enters authority
+    /// ingest when the predecessor's fate is stored. A base whose
+    /// predecessor can never be resolved (another node's transaction, or one
+    /// not older than the write) is not parked; ancestor resolution refuses
+    /// it.
+    pub(super) async fn park_commit_unit_awaiting_predecessor(
+        &mut self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+        now_ms: u64,
+        mode: CommitUnitParkMode,
+    ) -> Result<bool, Error> {
+        if !self.commit_unit_awaits_predecessor(tx, versions).await? {
+            return Ok(false);
+        }
+        if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
+            if existing.tx != *tx || existing.versions != versions {
+                return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
+            return Ok(true);
+        }
+        self.sync_metrics.parked_orphans += 1;
+        self.parking.parked_commit_units.insert(
+            tx.tx_id,
+            ParkedCommitUnit {
+                tx: tx.clone(),
+                versions: versions.to_vec(),
+                now_ms,
+                ingest_context: mode.ingest_context,
+                ingress_role: mode.ingress_role,
+            },
+        );
+        Ok(true)
+    }
+
+    /// Whether a version of the unit names a pending predecessor of its own
+    /// writer, older than it, that has no fate here yet.
+    pub(super) async fn commit_unit_awaits_predecessor(
+        &mut self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+    ) -> Result<bool, Error> {
+        for version in versions {
+            let Some(predecessor) = version.base().pending else {
+                continue;
+            };
+            if predecessor.node != tx.tx_id.node || predecessor.time >= tx.tx_id.time {
+                continue;
+            }
+            match self.query_transaction(predecessor).await? {
+                None => return Ok(true),
+                Some(stored) if matches!(stored.fate, Fate::Pending) => return Ok(true),
+                Some(_) => {}
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) async fn drain_parked_commit_units(
         &mut self,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
@@ -835,15 +897,16 @@ where
                 .parked_commit_units
                 .iter()
                 .filter(|(_, unit)| unit.ingress_role != ParkedIngressRole::Relay)
-                .map(|(tx_id, unit)| (*tx_id, unit.versions.clone()))
+                .map(|(tx_id, unit)| (*tx_id, unit.tx.clone(), unit.versions.clone()))
                 .collect::<Vec<_>>();
             let mut ready = Vec::new();
-            for (tx_id, versions) in parked {
+            for (tx_id, tx, versions) in parked {
                 if versions.iter().all(|version| {
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) {
+                }) && !self.commit_unit_awaits_predecessor(&tx, &versions).await?
+                {
                     ready.push(tx_id);
                 }
             }

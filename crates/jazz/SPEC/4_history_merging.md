@@ -23,7 +23,7 @@ Invariant digest:
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
 - `INV-HIST-15`: Core's post-image MUST be a deterministic function of the accepted writes in seq order and of each write's base: no wall clock, writer clock or other node-local state enters a merged value. Concurrent writes to different cells give the same post-image in any seq order, merge-strategy ops commute, and when two concurrent writes change one plain cell the one Core sequences first keeps it.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
-- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be a transaction of the writer's own node whose fate Core holds. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another ancestor.
+- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another ancestor. A write whose predecessor has no fate at Core yet MUST wait, without a fate, until that fate is stored, and is then resolved.
 - `INV-HIST-21`: A write's own patch MUST be recoverable from its history record (the post-image restricted to `authored_columns`, overridden by `lost_cells`), and the ancestor of a chained write MUST be built from those patches, never from Core's post-images of the writer's earlier writes.
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6), so it overrides every value it observed whatever its clock. Core orders writes by its own seq, never by writer clocks, and does not reject a write because the writer's clock is behind.
@@ -250,10 +250,11 @@ sets) keep applying their ops in seq order (§4.3).
 
 - `seq` — the seq (`GlobalTime`) of the settled image of the row the writer's
   node held when it made the write (its global-current image), or none;
-- `pending` — the `TxId` of the writer's own previous pending write to the
-  same row whose patch the writer's image included (the transaction that
-  produced the node's pending overlay of the row, when that transaction is
-  the node's own), or none.
+- `pending` — the `TxId` of the writer's own newest write to the same row
+  that has no fate on its node yet, whose patch the writer's image included,
+  or none. It is the node's own write even when the newest write in its
+  pending overlay is a foreign one the node relays: Core's chain is the
+  writer's own writes, and a foreign write's patch is never part of it.
 
 So a write made over a settled image is `{seq: S}`; a write made over the
 node's own pending write `P`, itself resting on the settled image at `S`, is
@@ -300,11 +301,15 @@ base has no seq, which happens only for chains rooted at the row's insert or
 at a blind write) — never a scan beyond the row.
 
 Core resolves the base exactly or refuses the write with a `MalformedCommit`
-reason saying the base is not supported yet (`INV-HIST-20`): when `S` names no
-accepted history record of the row (for example a seq above the row's current
-seq, or a root Core does not hold), when `P`'s node is not `N`, and when Core
-holds no fate for `P` or `P` is still pending at Core. Core never guesses an
-ancestor. Uploads carry no lost cells; a nonempty `lost_cells` on an upload is
+reason saying the base is not supported yet (`INV-HIST-20`): when `S` is `0`
+or names no accepted history record of the row (for example a seq above the
+row's current seq, or a seq of another row's write), when `P`'s node is not
+`N`, and when `P` is not older than `W`. A predecessor Core holds no fate for
+yet (it has not arrived, or Core holds it as a relayed or recovered Pending
+unit) is an ordering race, not a refusal: Core parks `W`, with no fate, like
+a unit whose schema has not arrived, and ingests it again once `P`'s fate is
+stored; the parking is in memory, and a writer resends its pending writes on
+reconnect. Core never guesses an ancestor. Uploads carry no lost cells; a nonempty `lost_cells` on an upload is
 malformed.
 
 **Merge rule (Core only).** For each plain cell `c` the write authored, and
@@ -329,9 +334,11 @@ value its writer had not seen (`INV-HIST-8`, `INV-HIST-15`).
 
 **Fast path.** When `W` has no `P` and `S` equals the row's current seq, the
 ancestor is the current image and every authored cell applies without reading
-history. When every accepted write of the row after `S` is a chain write, the
-current image is the ancestor on every cell the chain or the root holds, so
-again every authored cell applies; Core detects this from the same history
+history. When every accepted write of the row after `S` is a chain write and
+no chain write lost a cell, the current image is the ancestor on every cell
+the chain or the root holds, so again every authored cell applies (a chain
+write that lost a cell contributes its own value, which differs from the
+current one, so it takes the full rule); Core detects this from the same history
 range read and skips the root read and patch application. Both give exactly
 the result of the full rule.
 
@@ -431,7 +438,10 @@ increasing varint keys, then one groove record whose `n` fields are the keyed
 cells as nullable values of their column types, in key order. In storage the
 keys are node-local physical column ids (`u64::MAX` is `_deletion`, as in
 `authored_columns`) and the values are encoded for the record's own schema
-version. The record of a write that lost nothing has empty `lost_cells`, so
+version, enum cells with that version's authored tags (as on the wire), not
+the lineage's physical tags the record's other cells use. A lost enum cell is
+re-tagged to the physical registry before the ancestor rebuild compares it
+with a stored image. The record of a write that lost nothing has empty `lost_cells`, so
 the merge costs four small fields per history record in the common case.
 
 History is keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`: "the row
