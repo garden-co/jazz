@@ -479,3 +479,217 @@ it("refuses malformed or future account inventories without replacing retained s
     expect(update).not.toHaveBeenCalled();
   }
 });
+
+// Persisted candidate corpus, not output from the current account writer.
+const candidateFounderInventory =
+  '{"format":"jazz-account-selection-v2","roots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","jazz-auth-v1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"],"selected":1,"generatedHere":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"founders":[{"root":"jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","scope":"test/notes","deviceId":"device-original","epochId":"epoch-original","closed":false},{"root":"jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","scope":"test/tasks","deviceId":"device-reserved","epochId":null,"closed":false},{"root":"jazz-auth-v1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE","scope":"test/notes","deviceId":"device-retired","epochId":null,"closed":true}]}';
+
+it("preserves candidate-v2 founder ownership through selection, stale-manager logout and reopen", async () => {
+  const corpus = JSON.parse(candidateFounderInventory);
+  let value = candidateFounderInventory;
+  const options = {
+    appId: "test",
+    registry,
+    mintToken: mintRootToken,
+    store: {
+      async read() {
+        return value;
+      },
+      async update(transform: (current: string | null) => string) {
+        value = transform(value);
+      },
+    },
+  };
+  const manager = await prepareAccountManager(options);
+  const imported = manager.getLoggedIn()!;
+  expect(exportLocalFirstSecret(imported)).toBe(corpus.roots[1]);
+  await expect(accountGeneratedHere(imported)).resolves.toBe(false);
+  await expect(accountToken(imported, registry)).resolves.toBe(mintRootToken(corpus.roots[1]));
+  const stale = await prepareAccountManager(options);
+  const staleHandle = stale.getLoggedIn()!;
+
+  const generated = manager.restoreLocalFirst(corpus.roots[0]);
+  await expect(accountGeneratedHere(generated)).resolves.toBe(true);
+  await expect(accountToken(generated, registry)).resolves.toBe(mintRootToken(corpus.roots[0]));
+  await settleAccountSelection(manager);
+  expect(JSON.parse(value)).toMatchObject({
+    roots: corpus.roots,
+    selected: 0,
+    generatedHere: corpus.generatedHere,
+    founders: corpus.founders,
+    founderEligibleRoots: corpus.generatedHere,
+  });
+
+  stale.logout();
+  await settleAccountSelection(stale);
+  expect(() => exportLocalFirstSecret(staleHandle)).toThrow(/recovery_unavailable/);
+  await expect(accountToken(staleHandle, registry)).rejects.toMatchObject({
+    code: "invalid_account_handle",
+  });
+  expect(JSON.parse(value)).toMatchObject({
+    roots: corpus.roots,
+    selected: null,
+    generatedHere: corpus.generatedHere,
+    founders: corpus.founders,
+    founderEligibleRoots: corpus.generatedHere,
+  });
+  // Logging out one manager must not revoke another manager's live handles.
+  await expect(accountToken(generated, registry)).resolves.toBe(mintRootToken(corpus.roots[0]));
+  manager.logout();
+  await settleAccountSelection(manager);
+  for (const handle of [imported, generated]) {
+    expect(() => exportLocalFirstSecret(handle)).toThrow(/recovery_unavailable/);
+    await expect(accountToken(handle, registry)).rejects.toMatchObject({
+      code: "invalid_account_handle",
+    });
+    await expect(accountGeneratedHere(handle)).rejects.toMatchObject({
+      code: "invalid_account_handle",
+    });
+  }
+
+  const loggedOut = await prepareAccountManager(options);
+  expect(loggedOut.getLoggedIn()).toBeUndefined();
+  const restored = loggedOut.restoreLocalFirst(corpus.roots[1]);
+  await expect(accountGeneratedHere(restored)).resolves.toBe(false);
+  await accountToken(restored, registry);
+  const reopened = await prepareAccountManager(options);
+  expect(exportLocalFirstSecret(reopened.getLoggedIn()!)).toBe(corpus.roots[1]);
+  await expect(accountToken(reopened.getLoggedIn()!, registry)).resolves.toBe(
+    mintRootToken(corpus.roots[1]),
+  );
+  expect(JSON.parse(value)).toMatchObject({
+    roots: corpus.roots,
+    selected: 1,
+    generatedHere: corpus.generatedHere,
+    founders: corpus.founders,
+    founderEligibleRoots: corpus.generatedHere,
+  });
+});
+
+it.each([
+  {
+    name: "ordinary-v2",
+    inventory:
+      '{"format":"jazz-account-selection-v2","roots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"selected":0,"generatedHere":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}',
+    eligible: [],
+  },
+  {
+    name: "candidate-v2 with empty founders",
+    inventory:
+      '{"format":"jazz-account-selection-v2","roots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"selected":0,"generatedHere":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"founders":[]}',
+    eligible: ["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
+  },
+])("preserves the founder migration distinction for $name", async ({ inventory, eligible }) => {
+  const secret = "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  let value = inventory;
+  const options = {
+    appId: "test",
+    registry,
+    mintToken: mintRootToken,
+    store: {
+      async read() {
+        return value;
+      },
+      async update(transform: (current: string | null) => string) {
+        value = transform(value);
+      },
+    },
+  };
+  const manager = await prepareAccountManager(options);
+  const selected = manager.getLoggedIn()!;
+  expect(exportLocalFirstSecret(selected)).toBe(secret);
+  await expect(accountGeneratedHere(selected)).resolves.toBe(true);
+  await expect(accountToken(selected, registry)).resolves.toBe(mintRootToken(secret));
+  manager.logout();
+  await settleAccountSelection(manager);
+  expect(JSON.parse(value)).toMatchObject({
+    roots: [secret],
+    selected: null,
+    generatedHere: [secret],
+    founders: [],
+    founderEligibleRoots: eligible,
+  });
+  const reopened = await prepareAccountManager(options);
+  expect(reopened.getLoggedIn()).toBeUndefined();
+  const restored = reopened.restoreLocalFirst(secret);
+  await expect(accountGeneratedHere(restored)).resolves.toBe(true);
+  await expect(accountToken(restored, registry)).resolves.toBe(mintRootToken(secret));
+  expect(JSON.parse(value)).toMatchObject({ selected: 0, founderEligibleRoots: eligible });
+});
+
+it("opens valid v3 founder inventory without changing selection or credential provenance", async () => {
+  let value =
+    '{"format":"jazz-account-selection-v3","roots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","jazz-auth-v1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"],"selected":1,"generatedHere":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"founderEligibleRoots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"founders":[{"root":"jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","scope":"test/notes","deviceId":"device-original","epochId":"epoch-original","closed":false}]}';
+  const corpus = JSON.parse(value);
+  const options = {
+    appId: "test",
+    registry,
+    mintToken: mintRootToken,
+    store: {
+      async read() {
+        return value;
+      },
+      async update(transform: (current: string | null) => string) {
+        value = transform(value);
+      },
+    },
+  };
+  const manager = await prepareAccountManager(options);
+  const imported = manager.getLoggedIn()!;
+  expect(exportLocalFirstSecret(imported)).toBe(corpus.roots[1]);
+  await expect(accountGeneratedHere(imported)).resolves.toBe(false);
+  await expect(accountToken(imported, registry)).resolves.toBe(mintRootToken(corpus.roots[1]));
+  const generated = manager.restoreLocalFirst(corpus.roots[0]);
+  await expect(accountGeneratedHere(generated)).resolves.toBe(true);
+  await accountToken(generated, registry);
+  const reopened = await prepareAccountManager(options);
+  expect(exportLocalFirstSecret(reopened.getLoggedIn()!)).toBe(corpus.roots[0]);
+  await expect(accountToken(reopened.getLoggedIn()!, registry)).resolves.toBe(
+    mintRootToken(corpus.roots[0]),
+  );
+  expect(JSON.parse(value)).toEqual({ ...corpus, selected: 0 });
+});
+
+it.each([
+  { name: "null ownership list", change: { founders: null } },
+  { name: "non-array ownership list", change: { founders: {} } },
+  { name: "null claim", claim: null },
+  {
+    name: "unretained root",
+    claim: { root: "jazz-auth-v1:AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI" },
+  },
+  { name: "empty scope", claim: { scope: "" } },
+  { name: "missing device", claim: { deviceId: undefined } },
+  { name: "empty device", claim: { deviceId: "" } },
+  { name: "missing epoch", claim: { epochId: undefined } },
+  { name: "empty bound epoch", claim: { epochId: "" } },
+  { name: "non-string epoch", claim: { epochId: 1 } },
+  { name: "non-boolean closure", claim: { closed: "false" } },
+  { name: "competing claims for one root and scope", duplicate: true },
+])(
+  "rejects malformed candidate-v2 founders: $name without writing retained secrets",
+  async (invalid) => {
+    const corpus = JSON.parse(candidateFounderInventory);
+    if ("change" in invalid) Object.assign(corpus, invalid.change);
+    else if ("duplicate" in invalid)
+      corpus.founders.push({ ...corpus.founders[0], deviceId: "device-competing" });
+    else
+      corpus.founders[0] =
+        invalid.claim === null ? null : { ...corpus.founders[0], ...invalid.claim };
+    const value = JSON.stringify(corpus);
+    let retained = value;
+    const update = vi.fn(async (transform: (current: string | null) => string) => {
+      retained = transform(retained);
+    });
+    await expect(
+      prepareAccountManager({
+        appId: "test",
+        registry,
+        mintToken: mintRootToken,
+        store: { read: async () => retained, update },
+      }),
+    ).rejects.toThrow();
+    expect(update).not.toHaveBeenCalled();
+    expect(retained).toBe(value);
+  },
+);
