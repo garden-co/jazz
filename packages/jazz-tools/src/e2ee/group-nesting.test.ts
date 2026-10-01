@@ -80,7 +80,7 @@ it("inherits child-group access, preserves an alternate path, and rotates after 
         groupId: parent.id,
         recipientAccountId: bobId,
       }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     expect(deliveries.length).toBeGreaterThan(0);
     await owner.e2ee.groups.add(parent.id, bobId).wait();
@@ -92,18 +92,18 @@ it("inherits child-group access, preserves an alternate path, and rotates after 
         groupId: parent.id,
         recipientAccountId: bobId,
       }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     const epochsBefore = await owner.all(
       app.__e2ee_group_successors.where({ groupId: parent.id }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     const childEpochs = await owner.all(app.__e2ee_group_successors.where({ groupId: child.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     expect(childEpochs).toHaveLength(1);
     const edge = (
-      await owner.all(app.__e2ee_group_membership.where({ groupId: parent.id }), { tier: "edge" })
+      await owner.all(app.__e2ee_group_membership.where({ groupId: parent.id }), { tier: "remote" })
     ).find((row) => row.memberKind === "group")!;
     // IDs are unique within a table, not across tables. Even an invalid raw
     // candidate must remain distinct from the child root in the signed revision.
@@ -130,10 +130,12 @@ it("inherits child-group access, preserves an alternate path, and rotates after 
       state: "refused",
     });
     expect(
-      await owner.all(app.__e2ee_group_successors.where({ groupId: parent.id }), { tier: "edge" }),
+      await owner.all(app.__e2ee_group_successors.where({ groupId: parent.id }), {
+        tier: "remote",
+      }),
     ).toHaveLength(epochsBefore.length + 1);
     const epochsAfter = await owner.all(app.__e2ee_group_successors.where({ groupId: parent.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     const successor = epochsAfter.find(
       (row) => !epochsBefore.some((prior) => prior.id === row.id),
@@ -148,7 +150,7 @@ it("inherits child-group access, preserves an alternate path, and rotates after 
           groupId: parent.id,
           recipientAccountId: bobId,
         }),
-        { tier: "edge" },
+        { tier: "remote" },
       ),
     ).toEqual(before);
   } finally {
