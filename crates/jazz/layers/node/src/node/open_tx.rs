@@ -2306,6 +2306,23 @@ where
             })
     }
 
+    async fn snapshot_covers_checked(
+        &mut self,
+        tx_id: TxId,
+        snapshot: &Snapshot,
+    ) -> Result<bool, Error> {
+        let stored = self
+            .query_transaction(tx_id)
+            .await?
+            .ok_or(Error::InvalidStoredValue(
+                "snapshot version has no transaction audit",
+            ))?;
+        Ok(stored
+            .global_time
+            .is_some_and(|global_time| global_time <= snapshot.global_base)
+            || (tx_id.node == snapshot.owner && tx_id.time <= snapshot.local_base)
+            || snapshot.dots.contains(&tx_id))
+    }
 
     pub(super) async fn snapshot_row_in_schema(
         &mut self,
@@ -2315,23 +2332,23 @@ where
         snapshot: &Snapshot,
     ) -> Result<SnapshotRow, Error> {
         let content = self
-            .snapshot_layer_winner(
+            .snapshot_layer_winner_checked(
                 schema_version,
                 table,
                 row_uuid,
                 VersionLayer::Content,
                 snapshot,
             )
-            .await;
+            .await?;
         let deletion = self
-            .snapshot_layer_winner(
+            .snapshot_layer_winner_checked(
                 schema_version,
                 table,
                 row_uuid,
                 VersionLayer::Deletion,
                 snapshot,
             )
-            .await;
+            .await?;
         self.snapshot_row_from_winners(schema_version, table, content, deletion)
     }
 
@@ -2496,6 +2513,30 @@ where
         }
         current_version_index(&versions, &candidate_indices, layer, &self.node_aliases)
             .map(|idx| versions[idx].clone())
+    }
+
+    async fn snapshot_layer_winner_checked(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        snapshot: &Snapshot,
+    ) -> Result<Option<VersionRow>, Error> {
+        let versions = self
+            .query_versions_in_schema(schema_version, table, Some(row_uuid))
+            .await?;
+        let mut candidate_indices = Vec::new();
+        for (idx, version) in versions.iter().enumerate() {
+            let tx_id = self.version_tx_id(version)?;
+            if version.layer() == layer && self.snapshot_covers_checked(tx_id, snapshot).await? {
+                candidate_indices.push(idx);
+            }
+        }
+        Ok(
+            current_version_index(&versions, &candidate_indices, layer, &self.node_aliases)
+                .map(|idx| versions[idx].clone()),
+        )
     }
 
     pub(super) async fn snapshot_content_witness(
