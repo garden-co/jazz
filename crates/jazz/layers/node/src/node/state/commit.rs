@@ -432,7 +432,7 @@ where
             }
             // Merge columns travel as ops over the image this write saw; the
             // local overlay shows the resulting image.
-            let image_cells = merge_ops::split_merge_ops(
+            let (image_cells, counter_signs) = merge_ops::split_merge_ops(
                 &table_schema,
                 &authored_columns,
                 &base_cells,
@@ -451,7 +451,7 @@ where
                 )?
                 .logical_descriptor,
             );
-            let row_version = |cells| {
+            let row_version = |cells, counter_signs| {
                 VersionRow::from_parts_with_schema_version(
                     &table_schema,
                     VersionRowParts {
@@ -471,14 +471,18 @@ where
                         // A local patch is unstamped: Core stamps the
                         // columns it authors when it merges the write.
                         col_stamps: Vec::new(),
+                        counter_signs,
                     },
                     (write_schema_version != self.catalogue.local_schema_version_id)
                         .then_some(write_schema_version),
                     history_descriptor.clone(),
                 )
             };
-            let overlay = image_cells.map(&row_version).transpose()?;
-            let stored = row_version(cells)?;
+            // The overlay is the local image: it carries no ops, so no signs.
+            let overlay = image_cells
+                .map(|cells| row_version(cells, Vec::new()))
+                .transpose()?;
+            let stored = row_version(cells, counter_signs)?;
             let (history_table, groove_record) =
                 self.version_storage_write_binding(&stored, tx.made_by, &mut batch)?;
             batch.insert_raw(

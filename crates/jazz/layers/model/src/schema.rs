@@ -1071,6 +1071,9 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
+        // Sign bits of a pending patch's counter ops, one per counter column
+        // in schema order (SPEC 4, "Counter ops"). Empty on a settled image.
+        columns.push(column(COUNTER_SIGNS_FIELD, GrooveColumnType::Bytes));
         columns.extend(self.column_stamp_columns());
 
         GrooveTableSchema::new(name, columns).with_primary_key(PrimaryKey::composite([
@@ -1361,6 +1364,12 @@ fn tx_id_column() -> GrooveColumnType {
 /// Name prefix of the hidden per-column LWW stamp fields of a row state.
 #[doc(hidden)]
 pub const STAMP_FIELD_PREFIX: &str = "_ts_";
+
+/// History field carrying the sign bits of a patch's counter ops: bit `i`
+/// (least significant first) belongs to the table's `i`-th counter column in
+/// schema order. Empty when no op is negative, and on every settled image.
+#[doc(hidden)]
+pub const COUNTER_SIGNS_FIELD: &str = "counter_signs";
 
 /// Name of the hidden stamp field of the row-state cell field `cell_field`:
 /// `_ts__app_<column>` for a logical user cell, `_ts__app_<id>` for a

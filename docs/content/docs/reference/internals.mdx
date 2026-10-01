@@ -169,6 +169,11 @@ Counter merges are useful for things like:
 - Any other counter where you care about preserving every increment rather than which device
   wrote last.
 
+A counter never wraps around. If applying an update would take the column past its type's range
+(for example two devices each subtract `1` from a counter at the type's minimum, or each add `1` at
+its maximum), the server applies the first and rejects the second with an explicit
+"out of range" rejection, and the counter keeps the value it had.
+
 <Callout type="warn">
   `merge("counter")` is only valid on **non-nullable integer or bigint columns**. Calling it on a
   string, a nullable integer (`s.int().optional()`), a nullable bigint (`s.bigint().optional()`), or

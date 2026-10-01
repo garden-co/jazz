@@ -58,8 +58,11 @@ where
             if authors(DELETION_COLUMN_NAME) {
                 stamps.set(slots.deletion(), stamp);
             }
+            // Over no image, each counter cell's low bits are the written
+            // value itself (a delta from zero): the image keeps the cells.
             let mut values = incoming.record.to_values()?;
             stamps.write_values(&mut values, &incoming_descriptor)?;
+            crate::node::merge_ops::clear_counter_signs(&mut values, &incoming_descriptor);
             return incoming.with_record_values(values).map(Some);
         };
         let previous_tx = self.version_tx_id(&previous)?;
@@ -83,7 +86,26 @@ where
                 return Ok(None);
             }
             let mut values = incoming.record.to_values()?;
+            // A merge column the write did not author holds the writer's
+            // snapshot, not an op: it takes the row's settled value, so ops
+            // Core accepted since that snapshot survive (`INV-HIST-10`).
+            let carried = self
+                .cross_schema_settled_merge_cells(
+                    schema_version,
+                    table_schema,
+                    authored.as_ref(),
+                    &previous,
+                )?
+                .map_err(|_| {
+                    Error::InvalidStoredValue(
+                        "accepted cross-schema write cannot carry a merge column's settled value",
+                    )
+                })?;
+            for (field, value) in carried {
+                values[field] = value;
+            }
             ColumnStamps::uniform(&slots, stamp).write_values(&mut values, &incoming_descriptor)?;
+            crate::node::merge_ops::clear_counter_signs(&mut values, &incoming_descriptor);
             return incoming.with_record_values(values).map(Some);
         }
         let mut stamps = previous
@@ -103,6 +125,7 @@ where
         // value from the previous image.
         let mut merged = incoming.record.to_values()?;
         let previous_values = previous.record.to_values()?;
+        let counter_signs = incoming.counter_signs()?;
         let keep = |merged: &mut Vec<Value>, index: usize| {
             merged[index] = previous_values[index].clone();
         };
@@ -129,6 +152,11 @@ where
                                 &column.column_type,
                                 &previous_values[field],
                                 &merged[field],
+                                crate::node::merge_ops::counter_sign(
+                                    table_schema,
+                                    &counter_signs,
+                                    index,
+                                ),
                             )?,
                         )))
                     } else {
@@ -148,17 +176,26 @@ where
             keep(&mut merged, index);
         }
         stamps.write_values(&mut merged, &incoming_descriptor)?;
+        crate::node::merge_ops::clear_counter_signs(&mut merged, &incoming_descriptor);
         incoming.with_record_values(merged).map(Some)
     }
 
-    /// The authority refuses a merge-column write over a row whose current
-    /// image is stored under another schema version. Across layouts the row
-    /// is still whole-row last-writer-wins (`merged_global_post_image`), so
-    /// the write's op (a counter delta, a g-set's added elements) would be
-    /// stored as the column's value when the write wins, and dropped when it
-    /// loses. Applying ops across layouts needs Core's current row in one
-    /// physical layout (#3899); until then the write is refused explicitly.
-    pub(super) async fn cross_schema_merge_op_rejection(
+    /// The authority refuses a write it cannot merge into the row without
+    /// losing or inventing merge-column state:
+    ///
+    /// - A merge-column write over a row whose current image is stored under
+    ///   another schema version. Across layouts the row is still whole-row
+    ///   last-writer-wins (`merged_global_post_image`), so the write's op (a
+    ///   counter delta, a g-set's added elements) would be stored as the
+    ///   column's value when the write wins, and dropped when it loses.
+    ///   Applying ops across layouts needs Core's current row in one
+    ///   physical layout (#3899).
+    /// - A write across schema versions that leaves a merge column alone
+    ///   when that column's settled value cannot be carried into the write's
+    ///   layout unambiguously (`cross_schema_settled_merge_cells`).
+    /// - A counter op that would take the column outside its type's range
+    ///   over the row's current value. The op is not wrapped.
+    pub(super) async fn merge_op_rejection(
         &mut self,
         versions: &[VersionRecord],
     ) -> Result<Option<RejectionReason>, Error> {
@@ -167,12 +204,14 @@ where
             let schema_version = version.schema_version();
             let table_schema = self.table_in_schema(version.table(), schema_version)?;
             let authored = version.authored_columns();
-            let Some(column) = table_schema.columns.iter().find(|column| {
+            let authors =
+                |name: &str| authored.is_none_or(|columns| columns.contains(name));
+            let is_merge = |column: &ColumnSchema| {
                 table_schema.merge_strategy(&column.name) != crate::schema::MergeStrategy::Lww
-                    && authored.is_none_or(|columns| columns.contains(&column.name))
-            }) else {
-                continue;
             };
+            if !table_schema.columns.iter().any(is_merge) {
+                continue;
+            }
             let Some((current, _)) = self
                 .query_global_winner_with_seq_in_batch(
                     &batch,
@@ -185,15 +224,159 @@ where
             else {
                 continue;
             };
-            if self.schema_version_for_alias(current.schema_version_alias()) != Some(schema_version) {
-                return Ok(Some(RejectionReason::MalformedCommit(format!(
-                    "merge column '{}.{}' is written under a different schema version than the row's current image; merge-column writes across schema versions are not supported yet (#3899)",
+            let not_supported = |column: &str| {
+                RejectionReason::MalformedCommit(format!(
+                    "merge column '{}.{column}' cannot be merged with the row's current image, which is stored under a different schema version; merge-column writes across schema versions are not supported yet (#3899)",
                     version.table(),
-                    column.name,
-                ))));
+                ))
+            };
+            if self.schema_version_for_alias(current.schema_version_alias()) != Some(schema_version) {
+                if let Some(column) = table_schema
+                    .columns
+                    .iter()
+                    .find(|column| is_merge(column) && authors(&column.name))
+                {
+                    return Ok(Some(not_supported(&column.name)));
+                }
+                if let Err(column) = self.cross_schema_settled_merge_cells(
+                    schema_version,
+                    &table_schema,
+                    authored,
+                    &current,
+                )? {
+                    return Ok(Some(not_supported(&column)));
+                }
+                continue;
+            }
+            for (index, column) in table_schema.columns.iter().enumerate() {
+                if table_schema.merge_strategy(&column.name) != crate::schema::MergeStrategy::Counter
+                    || !authors(&column.name)
+                {
+                    continue;
+                }
+                let Some(op) = version.optional_cell_at(index) else {
+                    continue;
+                };
+                let negative = crate::node::merge_ops::counter_sign(
+                    &table_schema,
+                    version.counter_signs(),
+                    index,
+                );
+                let previous = current
+                    .cell(&table_schema, &column.name)?
+                    .unwrap_or(Value::Nullable(None));
+                if crate::node::merge_ops::counter_after_op(
+                    &column.column_type,
+                    &previous,
+                    &op,
+                    negative,
+                )?
+                .is_none()
+                {
+                    return Ok(Some(RejectionReason::MalformedCommit(format!(
+                        "counter '{}.{}' would be out of range for its {:?} column: {} {:+} leaves the type's range, so the write is rejected rather than wrapped",
+                        version.table(),
+                        column.name,
+                        column.column_type,
+                        crate::node::merge_ops::counter_to_i128(&previous)?,
+                        crate::node::merge_ops::counter_op_delta(
+                            &column.column_type,
+                            &op,
+                            negative,
+                        )?,
+                    ))));
+                }
             }
         }
         Ok(None)
+    }
+
+    /// The row's settled values of the merge columns a write across schema
+    /// versions did not author, as `(history field, value)` in the write's
+    /// layout. The write's own cells there are the writer's snapshot, which
+    /// may predate ops Core has accepted since; whole-row last-writer-wins
+    /// would silently replace them.
+    ///
+    /// A column carries the current image's value when the image's schema
+    /// has a column of the same name, type and merge strategy that the lens
+    /// path between the two versions leaves alone; a column the image's
+    /// schema lacks, and that no lens renames or copies into, carries the
+    /// lens default (no op can have touched it under the image's layout).
+    /// Any other mapping is `Err(column)`: the value cannot be carried
+    /// without guessing, and the authority refuses the write.
+    fn cross_schema_settled_merge_cells(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table_schema: &TableSchema,
+        authored: Option<&BTreeSet<String>>,
+        previous: &VersionRow,
+    ) -> Result<Result<Vec<(usize, Value)>, String>, Error> {
+        let unauthored = table_schema
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| {
+                table_schema.merge_strategy(&column.name) != crate::schema::MergeStrategy::Lww
+                    && authored.is_some_and(|columns| !columns.contains(&column.name))
+            })
+            .collect::<Vec<_>>();
+        let Some((_, first)) = unauthored.first() else {
+            return Ok(Ok(Vec::new()));
+        };
+        let Some(previous_schema) = self.schema_version_for_alias(previous.schema_version_alias())
+        else {
+            return Ok(Err(first.name.clone()));
+        };
+        let previous_table = self.table_in_schema(previous.table(), previous_schema)?;
+        let Some(path) =
+            self.compiled_lens_path(previous_schema, schema_version, previous.table())?
+        else {
+            return Ok(Err(first.name.clone()));
+        };
+        if path.target_table != table_schema.name {
+            return Ok(Err(first.name.clone()));
+        }
+        let previous_cells = previous.cells(&previous_table)?;
+        let mut translated = previous_cells.clone();
+        apply_compiled_lens_path(&path, &mut translated);
+        let mut carried = Vec::with_capacity(unauthored.len());
+        for (index, column) in unauthored {
+            let name = column.name.as_str();
+            let mut touched = false;
+            let mut mapped_from_another_column = false;
+            for op in &path.ops {
+                match op {
+                    CompiledLensOp::Rename { from, to } | CompiledLensOp::Copy { from, to } => {
+                        if from == name || to == name {
+                            touched = true;
+                            mapped_from_another_column = true;
+                        }
+                    }
+                    CompiledLensOp::Add { column, .. } | CompiledLensOp::Drop { column } => {
+                        touched |= column == name;
+                    }
+                }
+            }
+            let same_column = previous_table.columns.iter().find(|candidate| candidate.name == name);
+            let value = match same_column {
+                Some(previous_column)
+                    if !touched
+                        && previous_column.column_type == column.column_type
+                        && previous_table.merge_strategy(name)
+                            == table_schema.merge_strategy(name) =>
+                {
+                    previous_cells.get(name)
+                }
+                None if !mapped_from_another_column => translated.get(name),
+                _ => return Ok(Err(column.name.clone())),
+            };
+            // History cells are stored nullable.
+            carried.push((
+                HistoryRowRecord::USER_CELLS + index,
+                Value::Nullable(value.cloned().map(Box::new)),
+            ));
+        }
+        Ok(Ok(carried))
     }
 
     pub(super) async fn global_current_seq_in_batch(
@@ -799,22 +982,28 @@ where
         let authors = |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
         let mut folded = patch.record.to_values()?;
         let base_values = base.record.to_values()?;
+        let counter_signs = patch.counter_signs()?;
         if !authors(DELETION_COLUMN_NAME) {
             folded[HistoryRowRecord::FIELD__DELETION_IDX] =
                 base_values[HistoryRowRecord::FIELD__DELETION_IDX].clone();
         }
-        for (index, column) in table_schema.columns.iter().enumerate() {
-            let index = HistoryRowRecord::USER_CELLS + index;
+        for (position, column) in table_schema.columns.iter().enumerate() {
+            let index = HistoryRowRecord::USER_CELLS + position;
             let strategy = table_schema.merge_strategy(&column.name);
             folded[index] = match (authors(&column.name), strategy) {
                 (false, _) => base_values[index].clone(),
                 (true, crate::schema::MergeStrategy::Lww) => continue,
                 (true, strategy) => Value::Nullable(Some(Box::new(
-                    crate::node::merge_ops::apply_merge_op(
+                    crate::node::merge_ops::apply_pending_merge_op(
                         strategy,
                         &column.column_type,
                         &base_values[index],
                         &folded[index],
+                        crate::node::merge_ops::counter_sign(
+                            table_schema,
+                            &counter_signs,
+                            position,
+                        ),
                     )?,
                 ))),
             };
@@ -825,6 +1014,8 @@ where
         ] {
             folded[index] = base_values[index].clone();
         }
+        let descriptor = patch.record.descriptor();
+        crate::node::merge_ops::clear_counter_signs(&mut folded, &descriptor);
         patch.with_record_values(folded)
     }
 

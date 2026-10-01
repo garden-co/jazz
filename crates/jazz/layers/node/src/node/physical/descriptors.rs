@@ -1293,7 +1293,7 @@ fn physical_history_field_names_for_case(
         mapping,
         present,
         HistoryRowRecord::PREFIX_FIELD_NAMES,
-        &["authored_columns"],
+        &["authored_columns", crate::schema::COUNTER_SIGNS_FIELD],
         true,
         "physical history column mapping missing",
     )

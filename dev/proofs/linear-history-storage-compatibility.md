@@ -1,7 +1,13 @@
 # Linear history storage and wire compatibility (#3281)
 
+> **Upgrading requires wiping every Core root: a full server data reset.**
+> The new build refuses an alpha.59 (or earlier) Core, relay or client store
+> and there is no converter, so Core and relays must start from an empty
+> root and every client resyncs from it. Data that exists only in the old
+> stores is not carried over. See [What users must do](#what-users-must-do).
+
 Comparison: main `eb772f48d` (alpha.59 formats) against the #3281 branch,
-checked at `1ba574b09`. These revisions are **not storage compatible and not
+checked at `8635b5ad8`. These revisions are **not storage compatible and not
 wire compatible**. There is **no migration, dual read or downgrade path**.
 Old stores must be deleted by the user or app; the new build refuses them
 before it decodes or mutates any record, on native roots and in the browser
@@ -133,7 +139,12 @@ published alpha.54 browser corpus and the pre-linear browser corpus
 (`packages/jazz-tools/fixtures/pre-linear-browser-jazz-corpus.json`, real
 producer output from before this change) are both opened through the public
 WasmDb path. Both opens are refused with the typed error above, and no raw
-record changes.
+record changes. The same file pins a corpus in the new layout
+(`packages/jazz-tools/fixtures/current-browser-jazz-corpus.json`, producer
+output from this build). It opens through public WasmDb, reads back its
+branches and large values offline, leaves every raw record unchanged across
+read-only opens, keeps the foreground-node lease lifecycle intact, and accepts
+an append from the current writer.
 
 ## What users must do
 

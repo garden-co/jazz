@@ -156,7 +156,8 @@ is decoded; a v3 envelope on a v4 link is rejected by its version field. The v4
 baseline, frozen fresh rather than appended to v3, is:
 
 - the `JVRR` row blob is version `2` (no `parents`; `_deletion` cell), and
-  `VersionRecord` ends with `col_stamps` (SPEC 4 §4.6 "Wire layout");
+  `VersionRecord` ends with `col_stamps` (SPEC 4 §4.6 "Wire layout") then
+  `counter_signs` (SPEC 4 §4.3);
 - `SyncMessage` tags 15 (`FetchRowVersions`) and 16 (`RowVersionPayloads`) are
   retired and reserved: rows are resent whole, never fetched per version;
 - `KnownStateDeclaration` tag 2 (`ExactVersionSet`) is retired and reserved;
