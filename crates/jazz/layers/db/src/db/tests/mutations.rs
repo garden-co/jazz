@@ -5179,9 +5179,8 @@ async fn streamed_todo<S: OrderedKvStorage + ReopenableStorage + 'static>(
     db: &Db<S>,
     row: RowUuid,
 ) -> Result<Option<CurrentRow>, Error> {
-    let query = db.prepare_query(
-        &Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row.0)))),
-    )?;
+    let query =
+        db.prepare_query(&Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row.0)))))?;
     let mut rows = db.all(&query, ReadOpts::default()).await?;
     db.hydrate_rows_for_binding(&mut rows).await?;
     Ok(rows.pop())
@@ -5265,7 +5264,10 @@ fn streaming_wrong_owner_consumption_releases_durable_pending_uploads() {
         let bob = doctest_support::open_todos_db().await.unwrap();
         // Use the existing public schema-view seam, not a fabricated schema
         // identifier or a second runtime masquerading as Alice's owner.
-        let other_schema = alice.register_schema_view(JazzSchema::empty()).await.unwrap();
+        let other_schema = alice
+            .register_schema_view(JazzSchema::empty())
+            .await
+            .unwrap();
         assert_ne!(schema.version_id(), other_schema.schema.version_id());
         let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
         // Exceed the frozen maximum leaf size so push emits durable nodes
@@ -5277,48 +5279,74 @@ fn streaming_wrong_owner_consumption_releases_durable_pending_uploads() {
                 let mut upload = alice
                     .begin_streaming_value_upload("todos", &cells, "title")
                     .unwrap();
-                alice.push_streaming_value_upload(&mut upload, &payload).await.unwrap();
+                alice
+                    .push_streaming_value_upload(&mut upload, &payload)
+                    .await
+                    .unwrap();
                 // Pending-journal retention is itself a storage contract:
                 // unpublished bytes have no visible-row observation surface.
                 assert_eq!(
-                    alice.node.node.lock().await.pending_upload_count_for_test().await.unwrap(),
+                    alice
+                        .node
+                        .node
+                        .lock()
+                        .await
+                        .pending_upload_count_for_test()
+                        .await
+                        .unwrap(),
                     1,
                     "{owner_name}/{operation}: push must establish the pending journal"
                 );
-                let pending = alice.node.node.lock().await.pending_uploads_for_test().await.unwrap();
+                let pending = alice
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .pending_uploads_for_test()
+                    .await
+                    .unwrap();
                 nodes.extend(pending.into_iter().flat_map(|upload| upload.chunks));
                 let error = match operation {
-                    "finish" => match consumer.finish_streaming_value_upload(
-                        upload,
-                        StreamingMutationKind::Insert,
-                        "todos",
-                        row(0xf1),
-                        cells.clone(),
-                        "title",
-                        WriteIdentity::Database,
-                        None,
-                        None,
-                        None,
-                    ).await {
+                    "finish" => match consumer
+                        .finish_streaming_value_upload(
+                            upload,
+                            StreamingMutationKind::Insert,
+                            "todos",
+                            row(0xf1),
+                            cells.clone(),
+                            "title",
+                            WriteIdentity::Database,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
                         Ok(_) => panic!("wrong-owner finish must reject"),
                         Err(error) => error,
                     },
-                    "stage" => match consumer.stage_streaming_value_upload(
-                        upload,
-                        StreamingMutationKind::Insert,
-                        "todos",
-                        row(0xf1),
-                        cells.clone(),
-                        "title",
-                        WriteIdentity::Database,
-                        None,
-                        None,
-                        None,
-                    ).await {
+                    "stage" => match consumer
+                        .stage_streaming_value_upload(
+                            upload,
+                            StreamingMutationKind::Insert,
+                            "todos",
+                            row(0xf1),
+                            cells.clone(),
+                            "title",
+                            WriteIdentity::Database,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
                         Ok(_) => panic!("wrong-owner stage must reject"),
                         Err(error) => error,
                     },
-                    "abort" => consumer.abort_streaming_value_upload(upload).await.unwrap_err(),
+                    "abort" => consumer
+                        .abort_streaming_value_upload(upload)
+                        .await
+                        .unwrap_err(),
                     _ => unreachable!(),
                 };
                 assert_eq!(error.code, ErrorCode::Schema, "{owner_name}/{operation}");
@@ -5328,12 +5356,26 @@ fn streaming_wrong_owner_consumption_releases_durable_pending_uploads() {
                     alice.tick().await.unwrap();
                 }
                 assert_eq!(
-                    alice.node.node.lock().await.pending_upload_count_for_test().await.unwrap(),
+                    alice
+                        .node
+                        .node
+                        .lock()
+                        .await
+                        .pending_upload_count_for_test()
+                        .await
+                        .unwrap(),
                     0,
                     "{owner_name}/{operation}: consumed upload leaked its pending journal"
                 );
                 assert_eq!(
-                    alice.node.node.lock().await.staged_large_value_count_for_test().await.unwrap(),
+                    alice
+                        .node
+                        .node
+                        .lock()
+                        .await
+                        .staged_large_value_count_for_test()
+                        .await
+                        .unwrap(),
                     0,
                     "{owner_name}/{operation}: rejection must not promote a staged root"
                 );
@@ -5359,17 +5401,35 @@ fn streaming_wrong_owner_consumption_releases_durable_pending_uploads() {
             schema,
             RocksDbStorage::open(dir.path(), &refs).unwrap(),
             false,
-        ).await.unwrap().into_database();
-        assert!(database.pending_large_value_uploads().await.unwrap().is_empty());
+        )
+        .await
+        .unwrap()
+        .into_database();
+        assert!(
+            database
+                .pending_large_value_uploads()
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(database.staged_large_values().await.unwrap().is_empty());
-        let first = nodes.first().expect("the pushed payload must have a durable chunk identity");
-        database.local_chunk_reader().get(first.locator, first.object_hash).await.unwrap();
+        let first = nodes
+            .first()
+            .expect("the pushed payload must have a durable chunk identity");
+        database
+            .local_chunk_reader()
+            .get(first.locator, first.object_hash)
+            .await
+            .unwrap();
         let reader = database.local_chunk_reader();
         for node in &nodes {
             reader.get(node.locator, node.object_hash).await.unwrap();
         }
         assert_eq!(
-            database.reclaim_orphaned_large_value_chunks(usize::MAX).await.unwrap(),
+            database
+                .reclaim_orphaned_large_value_chunks(usize::MAX)
+                .await
+                .unwrap(),
             nodes.len(),
             "every unpublished chunk must be released without TTL"
         );
@@ -5381,7 +5441,11 @@ fn streaming_wrong_owner_consumption_releases_durable_pending_uploads() {
             );
         }
         assert!(
-            database.large_value_metadata_entries_for_compatibility().await.unwrap().is_empty(),
+            database
+                .large_value_metadata_entries_for_compatibility()
+                .await
+                .unwrap()
+                .is_empty(),
             "no pending journal, staged root, node retainer, or reclaim entry may remain"
         );
     });
@@ -5624,12 +5688,7 @@ fn staged_streaming_attaches_atomically_and_only_once() {
         let db = doctest_support::open_todos_db().await.unwrap();
         let text = "streamed-".repeat(32_768);
         let mut staged = stage_todo(&db, row(0xd1), text.as_bytes(), WriteIdentity::Database).await;
-        assert!(
-            streamed_todo(&db, row(0xd1))
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(streamed_todo(&db, row(0xd1)).await.unwrap().is_none());
         let tx = OpenTransactionId::new();
         db.begin_exclusive(tx).await.unwrap();
         db.exclusive_tx_ref(tx)
@@ -5651,25 +5710,14 @@ fn staged_streaming_attaches_atomically_and_only_once() {
                 .await
                 .is_err()
         );
-        assert!(
-            streamed_todo(&db, row(0xd1))
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(streamed_todo(&db, row(0xd1)).await.unwrap().is_none());
         db.commit_exclusive_handle(tx).await.unwrap();
-        let file = streamed_todo(&db, row(0xd1))
-            .await
-            .unwrap()
-            .unwrap();
+        let file = streamed_todo(&db, row(0xd1)).await.unwrap().unwrap();
         assert_eq!(
             file.cell(&db.schema.tables[0], "title"),
             Some(Value::String(text))
         );
-        let companion = streamed_todo(&db, row(0xd2))
-            .await
-            .unwrap()
-            .unwrap();
+        let companion = streamed_todo(&db, row(0xd2)).await.unwrap().unwrap();
         assert_eq!(
             companion.cell(&db.schema.tables[0], "title"),
             Some(Value::String("companion".into()))
@@ -5719,12 +5767,7 @@ fn staged_streaming_rejects_foreign_runtime_identity_and_mergeable_transaction()
                 .is_err()
         );
         alice.abandon_transaction_handle(mergeable).unwrap();
-        assert!(
-            streamed_todo(&alice, row(0xd3))
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(streamed_todo(&alice, row(0xd3)).await.unwrap().is_none());
     });
 }
 
@@ -5741,12 +5784,7 @@ fn staged_streaming_rollback_drop_and_overwrite_release_claims() {
             .await
             .unwrap();
         db.abandon_transaction_handle(tx).unwrap();
-        assert!(
-            streamed_todo(&db, row(0xd4))
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(streamed_todo(&db, row(0xd4)).await.unwrap().is_none());
         let dropped = stage_todo(&db, row(0xd5), b"dropped", WriteIdentity::Database).await;
         drop(dropped);
         let tx = OpenTransactionId::new();
@@ -5783,10 +5821,7 @@ fn staged_streaming_rollback_drop_and_overwrite_release_claims() {
                 break;
             }
         }
-        let value = streamed_todo(&db, row(0xd6))
-            .await
-            .unwrap()
-            .unwrap();
+        let value = streamed_todo(&db, row(0xd6)).await.unwrap().unwrap();
         assert_eq!(
             value.cell(&db.schema.tables[0], "title"),
             Some(Value::String("replacement".into()))
@@ -5928,18 +5963,8 @@ fn staged_streaming_rejection_retains_payload_across_reopen_and_retry() {
             db.write_state(committed).unwrap().fate,
             Fate::Rejected(RejectionReason::ExclusiveConflict)
         ));
-        assert!(
-            streamed_todo(&db, row(0xd7))
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            streamed_todo(&db, row(0xd9))
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(streamed_todo(&db, row(0xd7)).await.unwrap().is_none());
+        assert!(streamed_todo(&db, row(0xd9)).await.unwrap().is_none());
         // Rejected payloads have no public Db read surface; these assertions
         // cross the existing node retry-store interface, not staging internals.
         let retained = db
@@ -6130,16 +6155,8 @@ fn staged_streaming_policy_denial_retains_bytes_without_accepted_rows() {
         Fate::Rejected(RejectionReason::AuthorizationDenied)
     ));
     assert!(server.read(&server.table("todos")).unwrap().is_empty());
-    assert!(
-        block_on(streamed_todo(&db, row(0xe3)))
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        block_on(streamed_todo(&db, row(0xe4)))
-            .unwrap()
-            .is_none()
-    );
+    assert!(block_on(streamed_todo(&db, row(0xe3))).unwrap().is_none());
+    assert!(block_on(streamed_todo(&db, row(0xe4))).unwrap().is_none());
     // The rejected store is intentionally outside ordinary readable history.
     let retained = block_on(db.node.node.lock())
         .rejected_transaction(committed)
@@ -6192,10 +6209,7 @@ fn staged_streaming_empty_stream_only_row_publishes() {
             .await
             .unwrap();
         db.commit_exclusive_handle(tx).await.unwrap();
-        let value = streamed_todo(&db, row(0xe5))
-            .await
-            .unwrap()
-            .unwrap();
+        let value = streamed_todo(&db, row(0xe5)).await.unwrap().unwrap();
         assert_eq!(
             value.cell(&db.schema.tables[0], "title"),
             Some(Value::String(String::new()))
