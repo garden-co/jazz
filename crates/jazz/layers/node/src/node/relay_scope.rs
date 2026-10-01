@@ -66,6 +66,11 @@ impl ClientRelayScope {
             .is_none_or(|admitted| admitted == session)
     }
 
+    #[doc(hidden)]
+    pub fn admits_bound_session(&self, session: AuthorSubject) -> bool {
+        self.admitted_session == Some(session)
+    }
+
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn test_unbound_storage_owner(owner: String) -> Self {
