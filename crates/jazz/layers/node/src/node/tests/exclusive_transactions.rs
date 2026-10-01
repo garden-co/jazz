@@ -2070,7 +2070,7 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
         reader
             .initialization_transaction_status(tx_id, version_bundles[0].tx.made_by)
             .unwrap(),
-        crate::db::InitializationTransactionStatus::Incomplete,
+        crate::node::InitializationTransactionStatus::Incomplete,
     );
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
