@@ -435,7 +435,8 @@ mod proof_graph {
                     (2, cells(1, false, true, "room")),
                 ],
             ] {
-                let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
+                let fixture =
+                    Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
                 fixture.check(&rows, false).await;
             }
         });
@@ -998,7 +999,10 @@ mod proof_graph {
         for (table, id) in [("unmarked", 1), ("parents", 2), ("children", 3)] {
             for db in [&fixture.alice, &fixture.authority] {
                 assert!(
-                    db.local_current_row(table, row(id)).await.unwrap().is_none(),
+                    db.local_current_row(table, row(id))
+                        .await
+                        .unwrap()
+                        .is_none(),
                     "unaccepted policy evidence must reject the whole unit"
                 );
             }
@@ -1076,7 +1080,10 @@ mod proof_graph {
                 )
                 .await
                 .unwrap();
-            assert_eq!(fixture.settle(support.mergeable_tx_id()).await, Fate::Accepted);
+            assert_eq!(
+                fixture.settle(support.mergeable_tx_id()).await,
+                Fate::Accepted
+            );
             let open = crate::db::OpenTransactionId::new();
             fixture.alice.begin_exclusive(open).await.unwrap();
             let tx = fixture.alice.exclusive_tx_ref(open);
@@ -1088,20 +1095,43 @@ mod proof_graph {
             )
             .await
             .unwrap();
-            tx.upsert("nodes", row(1), cells(10, false, true, "new"), Default::default())
-                .await
-                .unwrap();
+            tx.upsert(
+                "nodes",
+                row(1),
+                cells(10, false, true, "new"),
+                Default::default(),
+            )
+            .await
+            .unwrap();
             let committed = fixture.alice.commit_exclusive_handle(open).await.unwrap();
             assert_eq!(
                 fixture.settle(committed).await,
                 Fate::Rejected(RejectionReason::AuthorizationDenied),
             );
             for db in [&fixture.alice, &fixture.authority] {
-                assert!(db.local_current_row("nodes", row(1)).await.unwrap().is_none());
-                let support = db.local_current_row("support", row(10)).await.unwrap().unwrap();
-                let schema = db.catalogue_schema(db.current_write_schema().unwrap().schema).unwrap();
-                let table = schema.tables().iter().find(|table| table.name == "support").unwrap();
-                assert_eq!(support.cell(table, "role"), Some(Value::String("admin".to_owned())));
+                assert!(
+                    db.local_current_row("nodes", row(1))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                let support = db
+                    .local_current_row("support", row(10))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let schema = db
+                    .catalogue_schema(db.current_write_schema().unwrap().schema)
+                    .unwrap();
+                let table = schema
+                    .tables()
+                    .iter()
+                    .find(|table| table.name == "support")
+                    .unwrap();
+                assert_eq!(
+                    support.cell(table, "role"),
+                    Some(Value::String("admin".to_owned()))
+                );
             }
         });
     }
@@ -1130,7 +1160,10 @@ mod proof_graph {
                             PublicTablePolicies::new()
                                 .with_select(PublicPolicyExpr::True)
                                 .with_insert(PublicPolicyExpr::or(vec![
-                                    PublicPolicyExpr::eq_literal("seed", PublicValue::Boolean(true)),
+                                    PublicPolicyExpr::eq_literal(
+                                        "seed",
+                                        PublicValue::Boolean(true),
+                                    ),
                                     PublicPolicyExpr::exists_including_created(
                                         "support",
                                         support_condition.clone(),

@@ -418,18 +418,28 @@ where
         let mut created = if author == AuthorSubject::SYSTEM {
             None
         } else {
-            match self.prepare_authorized_created_evidence(tx, versions, author).await {
+            match self
+                .prepare_authorized_created_evidence(tx, versions, author)
+                .await
+            {
                 Ok(evidence) => evidence,
                 Err(Error::QueryCapability(_)) => return Ok(UnitWritePolicyDecision::Denied),
                 Err(error) => return Err(error),
             }
         };
-        let evidence =
-            Box::pin(self.candidate_unit_evidence(versions, author, tx.tx_id)).await?;
+        let evidence = Box::pin(self.candidate_unit_evidence(versions, author, tx.tx_id)).await?;
         let mut post_state = None;
-        let decision = match self.ground_commit_unit_write_policies(
-            versions, author, tx.tx_id, &evidence, created.as_mut(), &mut post_state,
-        ).await {
+        let decision = match self
+            .ground_commit_unit_write_policies(
+                versions,
+                author,
+                tx.tx_id,
+                &evidence,
+                created.as_mut(),
+                &mut post_state,
+            )
+            .await
+        {
             Ok(decision) => decision,
             Err(Error::QueryCapability(_)) if created.is_some() => {
                 return Ok(UnitWritePolicyDecision::Denied);
@@ -440,7 +450,10 @@ where
             return Ok(decision);
         }
         if let Some(created) = created.as_mut()
-            && evidence.rows.iter().any(CandidateEvidenceRow::replaces_committed)
+            && evidence
+                .rows
+                .iter()
+                .any(CandidateEvidenceRow::replaces_committed)
         {
             let overlay = match post_state {
                 Some(overlay) => overlay,
@@ -450,7 +463,10 @@ where
                     TransactionWriteOverlay::from_tables(Arc::new(tables))
                 }
             };
-            match self.revalidate_authorized_created_evidence(created, author, &overlay).await {
+            match self
+                .revalidate_authorized_created_evidence(created, author, &overlay)
+                .await
+            {
                 Ok(true) => {}
                 Ok(false) | Err(Error::QueryCapability(_)) => {
                     return Ok(UnitWritePolicyDecision::Denied);
@@ -785,28 +801,44 @@ where
                 false
             } else {
                 let selection = &created.selected[index];
-                let policy = selection.table.write_policies.insert_check.as_ref()
+                let policy = selection
+                    .table
+                    .write_policies
+                    .insert_check
+                    .as_ref()
                     .expect("selected marked insert policy");
-                self.charge_candidate_policy(
-                    selection.schema, policy, true, &mut created.budget,
-                )?;
+                self.charge_candidate_policy(selection.schema, policy, true, &mut created.budget)?;
                 let mut sources = BTreeMap::new();
                 for (source, rows) in &created.sources[index] {
                     created.budget.charge(rows.len())?;
-                    let rows = rows.iter().filter_map(|(dependency, row)| {
-                        own_rows[*dependency].is_some_and(|own| grounded[own])
-                            .then(|| row.clone())
-                    }).collect::<Vec<_>>();
+                    let rows = rows
+                        .iter()
+                        .filter_map(|(dependency, row)| {
+                            own_rows[*dependency]
+                                .is_some_and(|own| grounded[own])
+                                .then(|| row.clone())
+                        })
+                        .collect::<Vec<_>>();
                     if !rows.is_empty() {
                         sources.insert(source.clone(), rows);
                     }
                 }
-                match self.policy_query_allows_candidate_with_provenance_for_schema(
-                    selection.schema, &selection.table, policy, selection.row,
-                    &selection.cells, author, true, selection.provenance,
-                    super::query_engine::PolicyDecisionRole::Write,
-                    Some(sources), &overlay.accepted_updates(),
-                ).await {
+                match self
+                    .policy_query_allows_candidate_with_provenance_for_schema(
+                        selection.schema,
+                        &selection.table,
+                        policy,
+                        selection.row,
+                        &selection.cells,
+                        author,
+                        true,
+                        selection.provenance,
+                        super::query_engine::PolicyDecisionRole::Write,
+                        Some(sources),
+                        &overlay.accepted_updates(),
+                    )
+                    .await
+                {
                     Ok(allowed) => allowed,
                     Err(Error::QueryCapability(_)) => false,
                     Err(error) => return Err(error),
@@ -814,8 +846,14 @@ where
             }
         } else {
             Box::pin(self.write_policy_allows_version_record_for_view(
-                version, author, None, Some(candidate_tx_id), versions, &overlay,
-            )).await?
+                version,
+                author,
+                None,
+                Some(candidate_tx_id),
+                versions,
+                &overlay,
+            ))
+            .await?
         };
         *reads = std::mem::take(
             &mut *recorder
