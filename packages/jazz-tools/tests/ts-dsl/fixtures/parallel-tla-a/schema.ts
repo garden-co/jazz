@@ -1,4 +1,4 @@
-import { col, table } from "jazz-tools";
+import { schema as s, table } from "jazz-tools";
 
 type TlaBarrier = {
   registered: Set<string>;
@@ -22,7 +22,7 @@ if (!barrier) {
 }
 
 table("parallel_a", {
-  value: col.string(),
+  value: s.string(),
 });
 barrier.registered.add("a");
 if (barrier.registered.size === 2) barrier.resolve();
