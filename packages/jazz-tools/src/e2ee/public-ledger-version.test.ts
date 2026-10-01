@@ -84,7 +84,7 @@ it("refuses an unversioned account rather than treating a backfilled root as com
         })
         .wait({ tier: "global" }),
     ).rejects.toThrow();
-    expect(await observer.all(app.__e2ee_account_identities, { tier: "edge" })).toEqual([]);
+    expect(await observer.all(app.__e2ee_account_identities, { tier: "remote" })).toEqual([]);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

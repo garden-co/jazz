@@ -35,20 +35,20 @@ it("publishes the first accepted device binding without exposing private account
     const [first] = await alice.e2ee.devices.list();
     const bob = await createDb(await localAccountConfig(server.appId, server.url));
     clients.push(bob);
-    const roots = await bob.all(app.__e2ee_account_roots, { tier: "edge" });
+    const roots = await bob.all(app.__e2ee_account_roots, { tier: "remote" });
     expect(roots).toHaveLength(1);
     expect(roots[0]).toMatchObject({ accountId: config.account.id, deviceId: first!.id });
     expect(roots[0]).not.toHaveProperty("envelope");
     expect(roots[0]).not.toHaveProperty("verification");
     expect(roots[0]).not.toHaveProperty("challenge");
-    expect(await bob.all(app.__e2ee_account_identities, { tier: "edge" })).toEqual([]);
+    expect(await bob.all(app.__e2ee_account_identities, { tier: "remote" })).toEqual([]);
     const pending = await createDb({ ...config, e2ee: { store: store() } });
     clients.push(pending);
     const second = (await pending.e2ee.devices.list()).find(
       (device) => device.state === "pending",
     )!;
     expect(second).toBeDefined();
-    expect(await bob.all(app.__e2ee_account_roots, { tier: "edge" })).toEqual(roots);
+    expect(await bob.all(app.__e2ee_account_roots, { tier: "remote" })).toEqual(roots);
     const root = roots[0]!;
     await expect(
       pending
