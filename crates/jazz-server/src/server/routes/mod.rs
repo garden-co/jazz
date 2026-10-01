@@ -1937,7 +1937,9 @@ mod tests {
     fn persistent_dynamic_builder(dir: &std::path::Path, name: &str) -> ServerBuilder {
         ServerBuilder::new(AppId::from_name(name))
             .with_auth_config(test_auth_config())
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage_factory(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: dir.to_path_buf(),
             })
