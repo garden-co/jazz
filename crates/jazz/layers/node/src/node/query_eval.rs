@@ -3526,8 +3526,14 @@ where
         // through Groove's prepare/bind boundary just like ordinary serving
         // reads; executing the lowered graph directly leaves its binding
         // source unprepared and fails instead of representing a denied read.
+        // CurrentRows materialization needs the root lifecycle bit even though
+        // the application terminal omits it. Claim routes remain filter inputs,
+        // not columns in this transient row carrier.
+        let mut materialization_fields = current_row_fields(&table);
+        materialization_fields.push("__jazz_deleted".to_owned());
+        let graph = lowered_materialization_app_rows_graph(&program)?;
         let plan = self
-            .prepared_query_plan_from_program(&program, shape, binding)
+            .prepared_materialization_plan_from_program(&program, graph, materialization_fields)
             .await?;
         let policy = self.query_program_policy_context(identity);
         let deltas = match plan {
