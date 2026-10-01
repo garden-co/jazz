@@ -79,9 +79,9 @@ it.each(["material", "protected", "external"])(
       expect(localStorage.getItem(keys[1]!)).toBeNull();
       const pending = (await second.e2ee.devices.list()).find((row) => row.state === "pending")!;
       if (mode === "external") {
-        await expect(second.e2ee.recovery.use().wait()).rejects.toThrow(
-          /local_first_recovery_unavailable/,
-        );
+        await expect(second.e2ee.recovery.use().wait()).rejects.toMatchObject({
+          code: "local_first_recovery_unavailable",
+        });
         expect(await second.e2ee.devices.list()).toContainEqual(
           expect.objectContaining({ id: pending.id, state: "pending" }),
         );
