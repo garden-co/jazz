@@ -305,3 +305,108 @@ fn inherited_referencing_policy_lowers_nested_compound_exists_rel() {
         vec![resource]
     );
 }
+
+#[test]
+fn empty_in_normalization_keeps_compound_branch_provenance() {
+    use crate::model::public_schema::{CmpOp, PolicyValue, Value as PublicValue};
+
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new().with_select(PublicPolicyExpr::Or(vec![
+                            PublicPolicyExpr::And(vec![
+                                compound_exists_rel_test_policy_with_secondary("right_key"),
+                                PublicPolicyExpr::Not(Box::new(PublicPolicyExpr::Not(Box::new(
+                                    PublicPolicyExpr::InList {
+                                        column: "label".to_owned(),
+                                        values: Vec::new(),
+                                    },
+                                )))),
+                            ]),
+                            PublicPolicyExpr::And(vec![
+                                compound_exists_rel_test_policy_with_secondary(
+                                    "alternate_right_key",
+                                ),
+                                PublicPolicyExpr::Cmp {
+                                    column: "label".to_owned(),
+                                    op: CmpOp::Eq,
+                                    value: PolicyValue::Literal(PublicValue::Text(
+                                        "allowed".to_owned(),
+                                    )),
+                                },
+                            ]),
+                        ])),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text)
+                    .column("alternate_right_key", PublicColumnType::Text),
+            ),
+    );
+    let reader = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let db = open_db(0xa6, AuthorSubject::SYSTEM, &schema);
+    let resource = row(0xa7);
+    db.insert(
+        "resources",
+        BTreeMap::from([("label".to_owned(), Value::String("allowed".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(resource),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "left_facts",
+        BTreeMap::from([
+            ("resource_id".to_owned(), Value::Uuid(resource.0)),
+            ("left_key".to_owned(), Value::String("left".to_owned())),
+        ]),
+        Default::default(),
+    )
+    .unwrap();
+    db.insert(
+        "right_facts",
+        BTreeMap::from([
+            ("resource_id".to_owned(), Value::Uuid(resource.0)),
+            ("right_key".to_owned(), Value::String("right".to_owned())),
+        ]),
+        Default::default(),
+    )
+    .unwrap();
+    db.insert(
+        "evidence",
+        BTreeMap::from([
+            ("left_key".to_owned(), Value::String("left".to_owned())),
+            ("right_key".to_owned(), Value::String("right".to_owned())),
+            (
+                "alternate_right_key".to_owned(),
+                Value::String("not-right".to_owned()),
+            ),
+        ]),
+        Default::default(),
+    )
+    .unwrap();
+
+    let prepared = db.prepare_query(&Query::from("resources")).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), reader)).unwrap();
+    assert!(
+        opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty(),
+        "the only satisfiable boolean branch requires alternate_right_key, not right_key"
+    );
+}

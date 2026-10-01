@@ -6312,4 +6312,72 @@ mod tests {
         assert_eq!(seed.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
         assert_eq!(seed.team_column, "team");
     }
+    fn compound_exists_rel_schema_with_secondary_column(secondary_column: &str) -> Schema {
+        let column = |scope: &str, column: &str| RelColumnRef {
+            scope: Some(scope.to_owned()),
+            column: column.to_owned(),
+        };
+        let equality = |left: (&str, &str), right: (&str, &str)| RelJoinCondition {
+            left: column(left.0, left.1),
+            right: column(right.0, right.1),
+        };
+        let policy = PolicyExpr::ExistsRel {
+            rel: PublicRelExpr::Filter {
+                input: Box::new(PublicRelExpr::Join {
+                    left: Box::new(PublicRelExpr::TableScan {
+                        table: "left_facts".into(),
+                        alias: Some("left_fact".to_owned()),
+                    }),
+                    right: Box::new(PublicRelExpr::TableScan {
+                        table: "right_facts".into(),
+                        alias: Some("right_fact".to_owned()),
+                    }),
+                    on: vec![
+                        equality(("left_fact", "resource_id"), ("right_fact", "resource_id")),
+                        equality(("left_fact", "left_key"), ("right_fact", secondary_column)),
+                    ],
+                    join_kind: RelJoinKind::Inner,
+                }),
+                predicate: RelPredicateExpr::Cmp {
+                    left: column("left_fact", "resource_id"),
+                    op: RelPredicateCmpOp::Eq,
+                    right: RelValueRef::RowId(RelRowIdRef::Outer),
+                },
+            },
+        };
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("resources")
+                    .policies(TablePolicies::new().with_select(policy)),
+            )
+            .table(
+                TableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", ColumnType::Text),
+            )
+            .table(
+                TableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("numeric_key", ColumnType::Integer),
+            )
+            .build()
+    }
+
+    #[test]
+    fn rejects_unknown_secondary_exists_rel_on_column() {
+        let schema = compound_exists_rel_schema_with_secondary_column("missing_key");
+        let error = convert_public_schema(&schema)
+            .expect_err("an unknown secondary relation column must fail schema conversion");
+        let message = error.to_string();
+        assert!(message.contains("right_facts.missing_key"), "{message}");
+        assert!(message.contains("unknown column"), "{message}");
+    }
+
+    #[test]
+    fn rejects_incompatible_secondary_exists_rel_on_column_types() {
+        let schema = compound_exists_rel_schema_with_secondary_column("numeric_key");
+        let error = convert_public_schema(&schema)
+            .expect_err("incompatible secondary equality columns must fail schema conversion");
+        assert!(error.to_string().contains("incompatible types"), "{error}");
+    }
 }
