@@ -75,7 +75,7 @@ it("revokes a space recipient and delivers the accepted successor only to remain
     expect(await removed.e2ee.explain(target)).toEqual({ state: "ready" });
     expect(await remaining.e2ee.explain(target)).toEqual({ state: "ready" });
     const root = await creator.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     const revoke = creator.e2ee.spaces.revoke(app.projects, project.id, bob.account.id);
     expect(revoke).not.toBeInstanceOf(Promise);
@@ -84,14 +84,14 @@ it("revokes a space recipient and delivers the accepted successor only to remain
     expect(await creator.e2ee.explain(target)).toEqual({ state: "ready" });
     expect(await remaining.e2ee.explain(target)).toEqual({ state: "ready" });
     const successors = await creator.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     expect(successors).toHaveLength(1);
     expect(successors[0]!.predecessor).toBe(root!.epochId);
     expect(successors[0]!.epochId).not.toBe(root!.epochId);
     const deliveries = await creator.all(
       app.__e2ee_space_deliveries.where({ spaceId: root!.id, epochId: successors[0]!.epochId }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     expect(deliveries.map((row) => row.recipientDeviceId).sort()).toEqual(
       [first!.id, request.id].sort(),

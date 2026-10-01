@@ -80,9 +80,9 @@ it("inspects, recovers and reopens a space without a live browser key holder", a
     const target = { scope: app.projects, identifier: project.id };
     expect(await first.e2ee.explain(target)).toEqual({ state: "ready" });
     const { material } = await first.e2ee.recovery.create().wait();
-    const requests = await first.all(app.__e2ee_device_requests, { tier: "edge" });
-    const deliveries = await first.all(app.__e2ee_space_recovery_deliveries, { tier: "edge" });
-    const [root] = await first.all(app.__e2ee_spaces, { tier: "edge" });
+    const requests = await first.all(app.__e2ee_device_requests, { tier: "remote" });
+    const deliveries = await first.all(app.__e2ee_space_recovery_deliveries, { tier: "remote" });
+    const [root] = await first.all(app.__e2ee_spaces, { tier: "remote" });
     expect(root).toBeDefined();
     await first.shutdown();
     localStorage.removeItem(keys[0]!);
@@ -102,8 +102,8 @@ it("inspects, recovers and reopens a space without a live browser key holder", a
       ],
     });
     expect(localStorage.getItem(keys[1]!)).toBeNull();
-    expect(await replacement.all(app.__e2ee_device_requests, { tier: "edge" })).toEqual(requests);
-    expect(await replacement.all(app.__e2ee_space_recovery_deliveries, { tier: "edge" })).toEqual(
+    expect(await replacement.all(app.__e2ee_device_requests, { tier: "remote" })).toEqual(requests);
+    expect(await replacement.all(app.__e2ee_space_recovery_deliveries, { tier: "remote" })).toEqual(
       deliveries,
     );
     const pending = (await replacement.e2ee.devices.list()).find((row) => row.state === "pending");
@@ -116,11 +116,11 @@ it("inspects, recovers and reopens a space without a live browser key holder", a
     expect(await replacement.e2ee.explain(target)).toEqual({ state: "ready" });
     const normalDeliveries = () =>
       app.__e2ee_space_deliveries.where({ recipientDeviceId: pending!.id });
-    expect(await replacement.all(normalDeliveries(), { tier: "edge" })).toEqual([]);
+    expect(await replacement.all(normalDeliveries(), { tier: "remote" })).toEqual([]);
     await replacement.shutdown();
     const reopened = await open(keys[1]!);
     expect(await reopened.e2ee.explain(target)).toEqual({ state: "ready" });
-    expect(await reopened.all(normalDeliveries(), { tier: "edge" })).toEqual([]);
+    expect(await reopened.all(normalDeliveries(), { tier: "remote" })).toEqual([]);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     for (const key of keys) localStorage.removeItem(key);

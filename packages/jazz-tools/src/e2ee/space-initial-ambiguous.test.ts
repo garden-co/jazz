@@ -84,7 +84,7 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
     const identity = await recipient.one(
       app.__e2ee_account_identities.where({ id: bob.account.id }),
       {
-        tier: "edge",
+        tier: "remote",
       },
     );
     const keys = await createBrowserKeyEnvelope();
@@ -129,12 +129,12 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
     }
     expect(
       await creator.one(app.__e2ee_groups.where({ id: bob.account.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).not.toBeNull();
     expect(
       await creator.one(app.__e2ee_account_roots.where({ accountId: bob.account.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).not.toBeNull();
     const project = await creator
@@ -145,11 +145,11 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
     ).rejects.toThrow("Ambiguous E2EE space recipient ID");
     expect(
       await creator.all(app.__e2ee_spaces.where({ identifier: project.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual([]);
-    expect(await creator.all(app.__e2ee_space_grants, { tier: "edge" })).toEqual([]);
-    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "edge" })).toEqual([]);
+    expect(await creator.all(app.__e2ee_space_grants, { tier: "remote" })).toEqual([]);
+    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual([]);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

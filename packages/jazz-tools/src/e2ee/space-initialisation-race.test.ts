@@ -100,7 +100,7 @@ it.each([false, true])(
       const project = await clients[0]!
         .insert(app.projects, { title: "Contended scope" })
         .wait({ tier: "global" });
-      await clients[1]!.one(app.projects.where({ id: project.id }), { tier: "edge" });
+      await clients[1]!.one(app.projects.where({ id: project.id }), { tier: "remote" });
       armed = true;
       const pending = clients.map((db, i) => {
         if (!queued)
@@ -150,7 +150,7 @@ it.each([false, true])(
       const winner = clients[winnerIndex]!;
       const loser = clients[loserIndex]!;
       const target = { scope: app.projects, identifier: project.id };
-      const roots = await winner.all(app.__e2ee_spaces, { tier: "edge" });
+      const roots = await winner.all(app.__e2ee_spaces, { tier: "remote" });
       expect(roots).toHaveLength(1);
       if (queued) {
         expect(new Set(proposedEpochs).size).toBe(2);
@@ -166,7 +166,7 @@ it.each([false, true])(
         expect(notes[0]!.epochId).not.toBe(proposedEpochs[loserIndex]);
         expect(notes[0]!.payload).not.toEqual(new Uint8Array([winnerIndex + 1]));
       }
-      const grants = await winner.all(app.__e2ee_space_grants, { tier: "edge" });
+      const grants = await winner.all(app.__e2ee_space_grants, { tier: "remote" });
       expect(grants).toHaveLength(1);
       expect(grants[0]).toMatchObject({
         id: roots[0]!.initialGrantId,
@@ -181,7 +181,7 @@ it.each([false, true])(
           app.__e2ee_space_deliveries.where({
             recipientAccountId: accounts[loserIndex]!.account.id,
           }),
-          { tier: "edge" },
+          { tier: "remote" },
         ),
       ).toEqual([]);
 
@@ -190,8 +190,8 @@ it.each([false, true])(
         .wait();
       expect(await winner.e2ee.explain(target)).toEqual({ state: "ready" });
       expect(await loser.e2ee.explain(target)).toEqual({ state: "ready" });
-      expect(await winner.all(app.__e2ee_spaces, { tier: "edge" })).toEqual(roots);
-      expect(await winner.all(app.__e2ee_space_grants, { tier: "edge" })).toHaveLength(2);
+      expect(await winner.all(app.__e2ee_spaces, { tier: "remote" })).toEqual(roots);
+      expect(await winner.all(app.__e2ee_space_grants, { tier: "remote" })).toHaveLength(2);
     } finally {
       resume.resolve();
       await Promise.all(clients.map((client) => client.shutdown()));

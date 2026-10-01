@@ -89,13 +89,13 @@ it("initialises a space for a group without implicitly granting its creator", as
     });
     expect(await recipient.e2ee.explain(target)).toEqual({ state: "ready" });
     const root = await creator.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     const groupRoot = await creator.one(app.__e2ee_groups.where({ id: group.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     const grants = await creator.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     expect(grants).toHaveLength(1);
     expect(grants[0]).toMatchObject({
@@ -108,7 +108,7 @@ it("initialises a space for a group without implicitly granting its creator", as
       app.__e2ee_space_deliveries.where({
         spaceId: root!.id,
       }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]!.recipientAccountId).toBe(bob.account.id);
@@ -129,7 +129,7 @@ it("initialises a space for a group without implicitly granting its creator", as
     ).rejects.toThrow();
     expect(
       await creator.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toHaveLength(1);
   } finally {

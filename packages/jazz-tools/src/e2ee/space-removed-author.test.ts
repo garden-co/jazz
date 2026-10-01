@@ -97,7 +97,7 @@ it("ignores a removed account's validly signed successor despite retained old ke
     const target = { scope: app.projects, identifier: project.id };
     expect(await removed.e2ee.explain(target)).toEqual({ state: "ready" });
     const root = (await owner.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "edge",
+      tier: "remote",
     }))!;
     const delivery = (
       await removed.all(
@@ -105,7 +105,7 @@ it("ignores a removed account's validly signed successor despite retained old ke
           spaceId: root.id,
           recipientDeviceId: bobDevice!.id,
         }),
-        { tier: "edge" },
+        { tier: "remote" },
       )
     )[0]!;
     // The adversary owns their host key store. Only the public context string is taken from Alice's store.
@@ -137,9 +137,9 @@ it("ignores a removed account's validly signed successor despite retained old ke
     ).rejects.toThrow("fixture: pause successor creation");
     expect(failNextWrap).toBe(false);
     const query = app.__e2ee_space_successors.where({ spaceId: root.id });
-    expect(await owner.all(query, { tier: "edge" })).toEqual([]);
+    expect(await owner.all(query, { tier: "remote" })).toEqual([]);
     const grants = await owner.all(app.__e2ee_space_grants.where({ spaceId: root.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     expect(
       grants.filter((row) => row.operation === "remove" && row.recipientId === bob.account.id),
@@ -150,11 +150,11 @@ it("ignores a removed account's validly signed successor despite retained old ke
     ).toMatchObject({ state: "active" });
     const aliceRoot = (await owner.one(
       app.__e2ee_account_roots.where({ accountId: alice.account.id }),
-      { tier: "edge" },
+      { tier: "remote" },
     ))!;
     const bobRoot = (await removed.one(
       app.__e2ee_account_roots.where({ accountId: bob.account.id }),
-      { tier: "edge" },
+      { tier: "remote" },
     ))!;
     const nextKey = crypto.getRandomValues(new Uint8Array(32));
     secrets.push(nextKey);
@@ -215,10 +215,10 @@ it("ignores a removed account's validly signed successor despite retained old ke
     await removed
       .insert(app.__e2ee_space_successors, { ...values, signature }, { id })
       .wait({ tier: "global" });
-    expect(await owner.all(query, { tier: "edge" })).toHaveLength(1);
+    expect(await owner.all(query, { tier: "remote" })).toHaveLength(1);
     expect(await owner.e2ee.explain(target)).toEqual({ state: "ready" });
     expect(await removed.e2ee.explain(target)).toMatchObject({ state: "refused" });
-    const candidates = await owner.all(query, { tier: "edge" });
+    const candidates = await owner.all(query, { tier: "remote" });
     expect(candidates).toHaveLength(2);
     const accepted = candidates.find((row) => row.id !== id)!;
     // The attack was not rejected because it named a stale predecessor or wrong membership/revision.
@@ -227,7 +227,7 @@ it("ignores a removed account's validly signed successor despite retained old ke
     expect(accepted.revision).toEqual(record.revision);
     expect(accepted.authorAccountId).toBe(alice.account.id);
     const deliveries = await owner.all(app.__e2ee_space_deliveries.where({ spaceId: root.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     expect(deliveries.filter((row) => row.epochId === record.epochId)).toEqual([]);
     const replacement = deliveries.filter((row) => row.epochId === accepted.epochId);

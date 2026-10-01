@@ -76,7 +76,7 @@ it("initialises a scoped space explicitly and delivers its key to approved devic
     // Loading by an authorised holder performs any required key delivery.
     expect(await creator.e2ee.explain(target)).toEqual({ state: "ready" });
     expect(await second.e2ee.explain(target)).toEqual({ state: "ready" });
-    expect(await creator.all(app.projects, { tier: "edge" })).toMatchObject([
+    expect(await creator.all(app.projects, { tier: "remote" })).toMatchObject([
       { id: project.id, title: "Scoped data" },
     ]);
 

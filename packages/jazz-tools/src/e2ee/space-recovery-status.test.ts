@@ -102,12 +102,12 @@ it("inspects required space recovery paths without enrolment, repair or key rete
     // Ordinary policy allows administration; Bob does not yet hold this space's key.
     await bob.e2ee.spaces.grant(app.projects, project.id, bobAccount.account.id).wait();
     const root = await alice.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     expect(root).not.toBeNull();
     const observer = await open(bobAccount, true);
-    const requests = await bob.all(app.__e2ee_device_requests, { tier: "edge" });
-    const deliveries = await bob.all(app.__e2ee_space_recovery_deliveries, { tier: "edge" });
+    const requests = await bob.all(app.__e2ee_device_requests, { tier: "remote" });
+    const deliveries = await bob.all(app.__e2ee_space_recovery_deliveries, { tier: "remote" });
     const missing = await observer.db.e2ee.recovery.status(material);
     expect(missing.account.validation).toBe("validated");
     expect(missing).toMatchObject({
@@ -126,10 +126,10 @@ it("inspects required space recovery paths without enrolment, repair or key rete
       },
     });
     expect(observer.saved()).toBeNull();
-    expect(await bob.all(app.__e2ee_space_recovery_deliveries, { tier: "edge" })).toEqual(
+    expect(await bob.all(app.__e2ee_space_recovery_deliveries, { tier: "remote" })).toEqual(
       deliveries,
     );
-    expect(await bob.all(app.__e2ee_device_requests, { tier: "edge" })).toEqual(requests);
+    expect(await bob.all(app.__e2ee_device_requests, { tier: "remote" })).toEqual(requests);
     const target = { scope: app.projects, identifier: project.id };
     expect(await alice.e2ee.explain(target)).toEqual({ state: "ready" });
     const ready = await observer.db.e2ee.recovery.status(material);
@@ -163,14 +163,14 @@ it("inspects required space recovery paths without enrolment, repair or key rete
     corrupt = false;
     // Alice removes herself, so cannot rotate the space on behalf of remaining Bob.
     await alice.e2ee.spaces.revoke(app.projects, project.id, aliceAccount.account.id).wait();
-    const successors = await bob.all(app.__e2ee_space_successors, { tier: "edge" });
+    const successors = await bob.all(app.__e2ee_space_successors, { tier: "remote" });
     expect(await observer.db.e2ee.recovery.status(material)).toMatchObject({
       spaces: {
         validation: "checked",
         paths: [{ spaceId: root!.id, validation: "unavailable", reason: "maintenance-required" }],
       },
     });
-    expect(await bob.all(app.__e2ee_space_successors, { tier: "edge" })).toEqual(successors);
+    expect(await bob.all(app.__e2ee_space_successors, { tier: "remote" })).toEqual(successors);
     expect(await bob.e2ee.explain(target)).toEqual({ state: "ready" });
     const rotated = await observer.db.e2ee.recovery.status(material);
     expect(rotated).toMatchObject({
@@ -196,7 +196,7 @@ it("inspects required space recovery paths without enrolment, repair or key rete
       spaces: { validation: "checked", paths: [] },
     });
     expect(observer.saved()).toBeNull();
-    expect(await bob.all(app.__e2ee_device_requests, { tier: "edge" })).toEqual(requests);
+    expect(await bob.all(app.__e2ee_device_requests, { tier: "remote" })).toEqual(requests);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

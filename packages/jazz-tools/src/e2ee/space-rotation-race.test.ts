@@ -95,12 +95,12 @@ it("accepts one competing rotation and distributes only its epoch to remaining a
     const target = { scope: app.projects, identifier: project.id };
     for (const client of clients)
       expect(await client.e2ee.explain(target)).toEqual({ state: "ready" });
-    const [root] = await owner.all(app.__e2ee_spaces, { tier: "edge" });
+    const [root] = await owner.all(app.__e2ee_spaces, { tier: "remote" });
     expect(root).toBeDefined();
     // The departing account can record its removal under this fixture's policy,
     // but cannot produce a successor; neither remaining holder has loaded it yet.
     await removed.e2ee.spaces.revoke(app.projects, project.id, accounts[2]!.account.id).wait();
-    expect(await owner.all(app.__e2ee_space_successors, { tier: "edge" })).toEqual([]);
+    expect(await owner.all(app.__e2ee_space_successors, { tier: "remote" })).toEqual([]);
     const remaining = clients.slice(0, 2);
     armed = true;
     const pending = remaining.map((client) => client.e2ee.explain(target));
@@ -120,15 +120,15 @@ it("accepts one competing rotation and distributes only its epoch to remaining a
     const rejected = outcomes.find((result) => result.status === "rejected");
     if (rejected?.status !== "rejected") throw new Error("Missing rejected rotation");
     expect(rejected.reason).toMatchObject({ code: "exclusive_conflict" });
-    const successors = await owner.all(app.__e2ee_space_successors, { tier: "edge" });
+    const successors = await owner.all(app.__e2ee_space_successors, { tier: "remote" });
     expect(successors).toHaveLength(1);
     expect(successors[0]).toMatchObject({ spaceId: root!.id, predecessor: root!.epochId });
     expect(successors[0]!.epochId).not.toBe(root!.epochId);
     for (const client of remaining)
       expect(await client.e2ee.explain(target)).toEqual({ state: "ready" });
     expect(await removed.e2ee.explain(target)).toMatchObject({ state: "refused" });
-    expect(await owner.all(app.__e2ee_space_successors, { tier: "edge" })).toEqual(successors);
-    const deliveries = await owner.all(app.__e2ee_space_deliveries, { tier: "edge" });
+    expect(await owner.all(app.__e2ee_space_successors, { tier: "remote" })).toEqual(successors);
+    const deliveries = await owner.all(app.__e2ee_space_deliveries, { tier: "remote" });
     const current = deliveries.filter((row) => row.epochId === successors[0]!.epochId);
     expect(current.map((row) => row.recipientAccountId).sort()).toEqual(
       accounts
