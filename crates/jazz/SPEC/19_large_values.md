@@ -288,8 +288,10 @@ Resident publication defers cancellation without changing storage. The live
 owner retains cleanup debt and services one deferred claim per tick without
 scheduling a retry loop. Close drains admitted cleanup and returns retryable
 failure if publication still blocks retirement, leaving storage open for a
-normal tick and subsequent close. Uploads hold only a weak runtime reference;
-there is no cleanup guarantee after that owner closes or becomes unavailable.
+normal tick and subsequent close. Native and WASM owner bindings preserve those
+tick/retry routes only for deferred upload cleanup, without reopening mutation
+admission; physical storage-close errors remain terminal. Uploads hold only a weak
+runtime reference; cleanup is not guaranteed after that owner closes or disappears.
 
 Retries must preserve the original exclusive evidence, never convert the upload
 to a mergeable write or refresh away stale dependencies. The existing durable
