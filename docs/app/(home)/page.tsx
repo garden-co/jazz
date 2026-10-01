@@ -27,6 +27,7 @@ import { CodeWindow } from "@/components/home/code-window";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
 import { CreateJazzCommand } from "@/components/home/create-jazz-command";
 import { FrameworkLogos } from "@/components/home/framework-logos";
+import { WalkthroughVideo } from "@/components/showcase/walkthrough-video";
 import { pricingMeters } from "@/lib/home-pricing";
 import { adopterQuotes } from "@/lib/home-quotes";
 import { blogSource } from "@/lib/source";
@@ -418,22 +419,20 @@ export default function HomePage() {
             <Figure
               className="home-video-figure"
               number={2}
-              caption="The todo example on two devices, recorded from the running app."
+              caption="StagePlan on two devices, recorded from the running app."
               after={
                 <AppLink href="/examples" className="home-video-link font-medium">
                   More examples and benchmarks →
                 </AppLink>
               }
             >
-              <video
+              <WalkthroughVideo
                 className="home-video"
-                src="/examples/videos/todo-two-devices.mp4"
-                poster="/examples/videos/todo-two-devices.jpg"
-                autoPlay
-                muted
-                loop
-                playsInline
-                aria-label="Two browser windows running the todo example. A todo added or checked off in one appears in the other."
+                src="/examples/videos/stage-plan-two-devices.mp4"
+                poster="/examples/videos/stage-plan-two-devices.jpg"
+                width={1280}
+                height={926}
+                aria-label="Two laptops running the StagePlan example, a crew chief and a crew member on the same show board. A task added or a card moved on one appears on the other, and a comment shows up live in the task the other has open. Edits made with the laptop's Wi-Fi turned off arrive when it is turned back on."
               />
             </Figure>
           </div>
