@@ -84,7 +84,7 @@ it("shares a space only after an authorised account grant, excluding pending dev
     expect(await unapproved.e2ee.explain(target)).toMatchObject({ state: "refused" });
     expect(
       await creator.all(app.__e2ee_space_deliveries.where({ recipientDeviceId: pending!.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual([]);
   } finally {
