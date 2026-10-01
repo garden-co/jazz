@@ -609,6 +609,7 @@ test("bootstrap rejects a symlinked work directory without changing its target",
       "bootstrap must not change the symlink target's mode",
     );
     assert.equal(fs.readFileSync(sentinel, "utf8"), "do not touch");
+    assert.deepEqual(fs.readdirSync(target), ["existing"]);
     assert.doesNotMatch(fs.readFileSync(fixture.trace, "utf8"), /^svc:/m);
   } finally {
     fixture.cleanup();
