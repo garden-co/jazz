@@ -3701,9 +3701,6 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
-    const remoteIfPossibleOffline =
-      options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline();
-    if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const equality = encryptedSchemas.has(query._schema)
       ? await prepareEqualityQuery(this, query, builderJson)
       : undefined;
@@ -4257,12 +4254,7 @@ export class Db {
         terminalizeSubscription(replacement, error);
         return;
       }
-      startNativeSubscription(replacement, {
-        ...queryOptions,
-        ...(options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline()
-          ? { tier: "local" as const }
-          : {}),
-      });
+      startNativeSubscription(replacement, queryOptions);
     };
     const unsubscribe = () => {
       if (unsubscribed) return;
