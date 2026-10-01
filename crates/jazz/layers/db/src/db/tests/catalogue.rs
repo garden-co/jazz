@@ -1014,12 +1014,20 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         "active schema metadata remains unchanged while a peer owner is held"
     );
 
-    let (late_transport, _late_peer_remote) = duplex();
-    let _late_peer = db
+    let (late_transport, mut late_peer_remote) = duplex();
+    let late_peer = db
         .node
         .accept_subscriber(late_transport, AuthorSubject::SYSTEM);
     drop(peer_owner);
     block_on(activation).unwrap();
+
+    late_peer.borrow_mut().tick().unwrap();
+    let Some(crate::protocol::SyncMessage::CatalogueSnapshot(snapshot)) =
+        late_peer_remote.try_recv()
+    else {
+        panic!("late peer must receive the activated permissions schema");
+    };
+    assert_eq!(snapshot.current_write_schema.schema, owner_payload.id);
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
         row(0xb2),

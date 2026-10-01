@@ -4638,6 +4638,11 @@ fn finalize_local_commit_queues_upload_before_waiting_for_node_owner() {
         db.node.outbox.borrow().contains(tx_id),
         "durable commit must enter the upload outbox before waiting for node ownership"
     );
+    drop(finalize);
+    assert!(
+        db.node.outbox.borrow().contains(tx_id),
+        "cancelling finalization must retain the durable upload marker"
+    );
 }
 
 /// Causal flow: a mergeable transaction enters the node-owned deferred queue,
@@ -5039,7 +5044,7 @@ fn client_partial_update_of_unloaded_row_is_not_observed_rather_than_read_denied
     }
 }
 /// Persistence can finish before the local transaction owner settles its
-/// publication, so cancellation or owner contention must not strand its upload.
+/// publication, so owner contention must not strand its upload.
 ///
 /// ```text
 /// insert ──persist──► owner held ──settle
