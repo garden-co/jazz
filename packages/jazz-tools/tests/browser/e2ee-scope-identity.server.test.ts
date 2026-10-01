@@ -60,7 +60,7 @@ it("resolves the same scope without permission to read its rows", async () => {
     const identity = await clients[0]!.tableIdentity(app.projects);
     expect(identity).not.toBeNull();
     expect(await clients[1]!.tableIdentity(app.projects)).toBe(identity);
-    expect(await clients[0]!.all(app.projects, { tier: "edge" })).toEqual([]);
+    expect(await clients[0]!.all(app.projects, { tier: "remote" })).toEqual([]);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await stopJazzServer(server.serverUrl);
