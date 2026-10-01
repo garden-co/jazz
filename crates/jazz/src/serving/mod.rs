@@ -433,7 +433,6 @@ impl ShellDb {
         }
     }
 
-
     fn apply_trusted_catalogue_snapshot(
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,

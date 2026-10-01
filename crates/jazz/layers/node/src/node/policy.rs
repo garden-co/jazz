@@ -813,11 +813,10 @@ where
                     created.budget.charge(rows.len())?;
                     let rows = rows
                         .iter()
-                        .filter_map(|(dependency, row)| {
-                            own_rows[*dependency]
-                                .is_some_and(|own| grounded[own])
-                                .then(|| row.clone())
+                        .filter(|&(dependency, _)| {
+                            own_rows[*dependency].is_some_and(|own| grounded[own])
                         })
+                        .map(|(_, row)| row.clone())
                         .collect::<Vec<_>>();
                     if !rows.is_empty() {
                         sources.insert(source.clone(), rows);

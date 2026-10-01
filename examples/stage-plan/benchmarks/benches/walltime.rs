@@ -2,11 +2,10 @@
 //! app-prefixed because the examples page matches results by exact name;
 //! `metadata.ts` documents each timed iteration. Former names: see README.
 
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::{BoxedStorage, MemoryStorage};
 use jazz_example_stage_plan_benchmark::board::crew_dashboard::FanoutFixture;
 use jazz_example_stage_plan_benchmark::board::{Fixture as BoardFixture, ResumeFixture};
 use jazz_example_stage_plan_benchmark::tasks::Fixture as TaskListFixture;
-use jazz_storage_rocksdb::RocksDbStorage;
 
 #[global_allocator]
 static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
@@ -17,7 +16,7 @@ fn main() {
 }
 
 /// Verifies exact task IDs and completion when Divan drops it, outside timing.
-struct CheckedTaskList(TaskListFixture<RocksDbStorage>);
+struct CheckedTaskList(TaskListFixture<BoxedStorage>);
 impl Drop for CheckedTaskList {
     fn drop(&mut self) {
         if !std::thread::panicking() {
@@ -65,14 +64,14 @@ fn stage_plan_reopen_1500(bencher: divan::Bencher) {
 /// Open one show's board: filter and order its tasks, bounded.
 #[divan::bench(sample_count = 10)]
 fn stage_plan_open_board(bencher: divan::Bencher<'_, '_>) {
-    let (_dir, fixture) = BoardFixture::<RocksDbStorage>::rocksdb_profile_s();
+    let (_dir, fixture) = BoardFixture::<BoxedStorage>::rocksdb_profile_s();
     bencher.bench_local(|| fixture.board_count());
 }
 
 /// Open a task's detail: its discussion and activity, two bounded reads.
 #[divan::bench(sample_count = 5)]
 fn stage_plan_open_task_detail(bencher: divan::Bencher<'_, '_>) {
-    let (_dir, fixture) = BoardFixture::<RocksDbStorage>::rocksdb_profile_s();
+    let (_dir, fixture) = BoardFixture::<BoxedStorage>::rocksdb_profile_s();
     bencher.bench_local(|| fixture.task_detail_count());
 }
 
@@ -80,7 +79,7 @@ fn stage_plan_open_task_detail(bencher: divan::Bencher<'_, '_>) {
 /// page cost should not depend on the table size (#2026).
 #[divan::bench(args = [30_000], sample_count = 1)]
 fn stage_plan_activity_page(bencher: divan::Bencher<'_, '_>, activity_events: usize) {
-    let (_dir, fixture) = BoardFixture::<RocksDbStorage>::rocksdb(3_000, 12_000, activity_events);
+    let (_dir, fixture) = BoardFixture::<BoxedStorage>::rocksdb(3_000, 12_000, activity_events);
     bencher.bench_local(|| fixture.bounded_activity_page_count());
 }
 
@@ -88,7 +87,7 @@ fn stage_plan_activity_page(bencher: divan::Bencher<'_, '_>, activity_events: us
 /// delivered to an already-hydrated subscription.
 #[divan::bench(sample_count = 10)]
 fn stage_plan_move_card_to_done(bencher: divan::Bencher<'_, '_>) {
-    let (_dir, fixture) = BoardFixture::<RocksDbStorage>::rocksdb_profile_s();
+    let (_dir, fixture) = BoardFixture::<BoxedStorage>::rocksdb_profile_s();
     let mut fixture = fixture.into_maintained_activity();
     bencher.bench_local(|| fixture.toggle_indexed_predicate());
 }
