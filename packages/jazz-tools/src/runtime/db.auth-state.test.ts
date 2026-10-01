@@ -353,6 +353,39 @@ describe("Db auth state", () => {
     }
   });
 
+  it("spaces out remints a skewed server keeps rejecting until a token lives to its refresh", () => {
+    vi.useFakeTimers();
+    try {
+      const { db, runtimeSource } = makeLocalFirstDb();
+      db.ownRefresh(true);
+      const mints = () => runtimeSource.mintLocalFirstToken.mock.calls.length;
+
+      db.failAuth("expired");
+      expect(mints()).toBe(1);
+      db.failAuth("expired");
+      expect(mints()).toBe(1);
+      vi.advanceTimersByTime(999);
+      expect(mints()).toBe(1);
+      vi.advanceTimersByTime(1);
+      expect(mints()).toBe(2);
+      db.failAuth("expired");
+      vi.advanceTimersByTime(1_999);
+      expect(mints()).toBe(2);
+      vi.advanceTimersByTime(1);
+      expect(mints()).toBe(3);
+
+      // The token survives to its scheduled refresh, so the next expiry is
+      // renewed at once again.
+      vi.advanceTimersByTime(3600 * 800);
+      expect(mints()).toBe(4);
+      db.failAuth("expired");
+      expect(mints()).toBe(5);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("leaves expiry to the caller when it supplied the local-first token", () => {
     const { db, runtimeSource } = makeLocalFirstDb();
     db.ownRefresh(false);

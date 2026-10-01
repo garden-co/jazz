@@ -15,6 +15,7 @@ import {
   parseJwtPayload,
 } from "../runtime/client-session.js";
 import { setTrustedReservedSession } from "../runtime/db-internal-session.js";
+import { AuthRenewalBackoff, authRetryDelay } from "../runtime/auth-renewal-backoff.js";
 
 /** Public clients always select an enrolled account, never an unverified principal. */
 export type AccountDbConfig = Omit<
@@ -115,9 +116,11 @@ export async function createAccountDbWithRuntimeSource(
     let refreshing = false;
     let stopped = false;
     let failedRefreshes = 0;
-    const scheduleIn = (delay: number) => {
+    const renewals = new AuthRenewalBackoff();
+    const scheduleIn = (delay: number, beforeRefresh?: () => void) => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
+        beforeRefresh?.();
         void refresh();
       }, delay);
       (timer as unknown as { unref?: () => void }).unref?.();
@@ -126,7 +129,15 @@ export async function createAccountDbWithRuntimeSource(
       const expires = parseJwtPayload(token)?.exp;
       if (typeof expires !== "number" || !Number.isFinite(expires) || expires * 1000 <= Date.now())
         return;
-      scheduleIn(Math.max(1000, Math.min(2_147_483_647, (expires * 1000 - Date.now()) * 0.8)));
+      // A token that lives to its scheduled refresh ends any renewal streak.
+      scheduleIn(Math.max(1000, Math.min(2_147_483_647, (expires * 1000 - Date.now()) * 0.8)), () =>
+        renewals.reset(),
+      );
+    };
+    const renew = () => {
+      const delay = renewals.next();
+      if (delay === 0) void refresh();
+      else scheduleIn(delay);
     };
     const refresh = async () => {
       if (refreshing || stopped) return;
@@ -140,13 +151,13 @@ export async function createAccountDbWithRuntimeSource(
         // A failed refresh must not end the refresh cycle: the current token
         // still expires, and nothing else would renew it before then.
         console.error("Account auth refresh failed", error);
-        scheduleIn(refreshRetryDelay(failedRefreshes++));
+        scheduleIn(authRetryDelay(failedRefreshes++));
       } finally {
         refreshing = false;
       }
     };
     const stopAuth = opened.onAuthChanged((state) => {
-      if (state.error === "expired" || state.error === "missing") void refresh();
+      if (state.error === "expired" || state.error === "missing") renew();
     });
     opened.onShutdown(() => {
       stopped = true;
@@ -161,11 +172,4 @@ export async function createAccountDbWithRuntimeSource(
     if (!db) await runtimeSource.shutdown();
     throw error;
   }
-}
-
-const REFRESH_RETRY_BASE_MS = 1_000;
-const REFRESH_RETRY_MAX_MS = 5 * 60_000;
-
-function refreshRetryDelay(failures: number): number {
-  return Math.min(REFRESH_RETRY_MAX_MS, REFRESH_RETRY_BASE_MS * 2 ** Math.min(failures, 20));
 }
