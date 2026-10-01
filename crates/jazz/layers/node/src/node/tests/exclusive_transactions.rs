@@ -2060,6 +2060,18 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
         .rehydrate_query(&mut core, &first_shape, &first_binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&first);
+    // Internal protocol seam: ordinary local writes cannot create partial audit
+    // records. Exact initialization status must distinguish this received view
+    // fragment from a complete replayable transaction.
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_shape_binding(&mut reader, &first_shape, &first_binding);
+    reader.apply_sync_message_settled(first.clone()).unwrap();
+    assert_eq!(
+        reader
+            .initialization_transaction_status(tx_id, version_bundles[0].tx.made_by)
+            .unwrap(),
+        crate::node::InitializationTransactionStatus::Incomplete,
+    );
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
@@ -3175,6 +3187,7 @@ fn narrowing_reverse_join(
     up: Option<crate::query::JoinVia>,
 ) -> crate::query::JoinVia {
     crate::query::JoinVia {
+        source_mode: crate::query::CandidateSourceMode::AcceptedOnly,
         table: table.to_owned(),
         on_column: on.to_owned(),
         target: if on == "id" {
@@ -3279,6 +3292,7 @@ fn narrowing_todos_titled() -> crate::query::Query {
 fn narrowed_reads_follow_a_join_chain_to_the_root() {
     let mut query = narrowing_todos_titled();
     query.joins.push(crate::query::JoinVia {
+        source_mode: crate::query::CandidateSourceMode::AcceptedOnly,
         table: "comments".to_owned(),
         on_column: "todo".to_owned(),
         target: crate::query::JoinTarget::Column,
@@ -3287,6 +3301,7 @@ fn narrowed_reads_follow_a_join_chain_to_the_root() {
         correlated_filters: Vec::new(),
         filters: vec![narrowing_body_is_hi()],
         nested_joins: vec![crate::query::JoinVia {
+            source_mode: crate::query::CandidateSourceMode::AcceptedOnly,
             table: "reactions".to_owned(),
             on_column: "comment".to_owned(),
             target: crate::query::JoinTarget::Column,
@@ -3462,6 +3477,7 @@ fn exclusive_reads_reject_a_flat_join() {
 fn exclusive_reads_reject_a_lookup_join() {
     let mut query = narrowing_todos_titled();
     query.joins.push(crate::query::JoinVia {
+        source_mode: crate::query::CandidateSourceMode::AcceptedOnly,
         table: "projects".to_owned(),
         on_column: "org".to_owned(),
         target: crate::query::JoinTarget::Column,
@@ -3487,6 +3503,7 @@ fn exclusive_reads_reject_a_lookup_join() {
 fn exclusive_reads_reject_a_reference_array_join_with_extra_keys() {
     let mut query = crate::query::Query::from("people");
     query.joins.push(crate::query::JoinVia {
+        source_mode: crate::query::CandidateSourceMode::AcceptedOnly,
         table: "todos".to_owned(),
         on_column: "assignees".to_owned(),
         target: crate::query::JoinTarget::Column,

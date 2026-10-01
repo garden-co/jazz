@@ -466,7 +466,7 @@ fn open_node_with_uuid(
 ) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
-    let storage = crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+    let storage = crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
         &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
         temp_dir.path().to_path_buf(),
         cfs,

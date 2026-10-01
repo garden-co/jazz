@@ -144,6 +144,8 @@ pub use node::oracle;
 #[cfg(feature = "runtime")]
 pub mod serving;
 pub use jazz_protocol::storage_codec_profile;
+#[cfg(test)]
+mod storage_codec_profile_tests;
 pub use jazz_types::time;
 /// Public runtime and data-model support APIs formerly provided by jazz-tools.
 // The tools API was a separate crate before consolidation and intentionally

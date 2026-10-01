@@ -82,7 +82,8 @@ fn exclusive_evidence_survives_reopen_before_and_after_settlement() {
     ))
     .unwrap()
     .unwrap();
-    super::super::codec::validate_epoch_one_transaction_record(raw.record()).unwrap();
+    super::super::exclusive_read_evidence::validate_epoch_one_transaction_record(raw.record())
+        .unwrap();
 
     // A duplicate of the same pending unit without evidence must not erase
     // the evidence this node still needs to retransmit.
