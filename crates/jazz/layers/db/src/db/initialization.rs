@@ -81,7 +81,6 @@ impl Drop for InitializationSeal {
     }
 }
 
-
 #[doc(hidden)]
 pub use crate::node::InitializationTransactionStatus;
 
@@ -342,4 +341,3 @@ pub fn validate_catalogue_capture_replacement(previous: &[u8], next: &[u8]) -> R
     crate::node::validate_catalogue_snapshot_replacement(&previous, &next)?;
     Ok(())
 }
-
