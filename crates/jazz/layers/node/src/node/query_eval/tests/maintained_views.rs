@@ -821,6 +821,8 @@ fn maintained_aggregate_order_preserves_raw_nullable_keys_and_reports_corrupt_ro
     );
 }
 
+/// Alice's recursively reachable resources agree between one-shot reads and
+/// the server's maintained subscription, then change on a grant and revoke.
 #[test]
 fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     let (_dir, mut core) = open_recursive_node();
@@ -888,11 +890,17 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     let binding = shape
         .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team1.0))]))
         .unwrap();
+    let expected_initial = core
+        .query_rows(&shape, &binding, DurabilityTier::Global)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(expected_initial, BTreeSet::from([resource1]));
     let mut peer = PeerState::new();
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let initial_rows = covered_input_rows(&initial);
-    assert!(initial_rows.contains(&resource1));
-    assert!(!initial_rows.contains(&resource2));
+    assert_eq!(initial_rows, expected_initial);
 
     commit_global_cells(
         &mut core,
