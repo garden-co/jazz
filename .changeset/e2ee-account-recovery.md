@@ -10,6 +10,7 @@ already admitted through it or erasing prior epoch keys. Validate the final
 recovery delivery verifier before publication, and sanitise material-import
 parser and private-key adapter failures without retaining their diagnostic text
 or causes.
+Read registered recovery protectors at the current global authority tier.
 
 Correctness WASM builds retain development safety checks with basic optimization.
 Bound worker and browser-package concurrency so multi-client lifecycle tests keep
