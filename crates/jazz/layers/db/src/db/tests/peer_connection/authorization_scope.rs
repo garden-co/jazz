@@ -4147,11 +4147,17 @@ fn prepared_result_projection_failure_retires_one_route_and_rearms_sibling() {
 fn negotiated_result_protocol_rejection_terminates_only_its_stream() {
     let reader = AuthorSubject::for_test_bytes([0xa1; 16]);
     let schema = build_public_db_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos")
-                .column("title", PublicColumnType::Text)
-                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
-        ),
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("notes")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
     );
     let server = open_core(0xa1, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa2, reader, &schema);
@@ -4171,6 +4177,8 @@ fn negotiated_result_protocol_rejection_terminates_only_its_stream() {
 
     let query = Query::from("todos").filter(eq(col("title"), lit("projection-target")));
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let sibling_query = Query::from("notes");
+    let mut sibling = prepared_subscribe(&client, &sibling_query, global_subscribe_opts()).unwrap();
     let drive = || {
         for _ in 0..16 {
             client.tick().unwrap();
@@ -4179,6 +4187,7 @@ fn negotiated_result_protocol_rejection_terminates_only_its_stream() {
     };
     drive();
     while subscription.try_next_event().is_some() {}
+    while sibling.try_next_event().is_some() {}
 
     crate::node::corrupt_next_current_result_schema_for_test();
     server
@@ -4209,4 +4218,22 @@ fn negotiated_result_protocol_rejection_terminates_only_its_stream() {
         futures::Stream::poll_next(std::pin::Pin::new(&mut subscription), &mut context),
         Poll::Ready(None)
     ));
+
+    let sibling_row = row(0xa4);
+    server
+        .insert_with_id(
+            "notes",
+            sibling_row,
+            BTreeMap::from([("title".to_owned(), Value::String("sibling".to_owned()))]),
+        )
+        .unwrap();
+    drive();
+    assert!(
+        matches!(
+            sibling.try_next_event(),
+            Some(SubscriptionEvent::Delta { added, .. })
+                if added.iter().any(|added| added.row.row_uuid() == sibling_row)
+        ),
+        "the healthy sibling stream remains live after the other stream closes"
+    );
 }
