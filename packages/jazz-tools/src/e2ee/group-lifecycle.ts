@@ -132,7 +132,7 @@ export class Groups {
         recipientAccountId: this.accountId,
         recoveryRootId: material.rootId,
       });
-      await Promise.all([this.warmMembership(null), this.db.all(query, { tier: "edge" })]);
+      await Promise.all([this.warmMembership(null), this.db.all(query, { tier: "global" })]);
       const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
         const own = await readPublicMembershipHistory(tx, this.accountId, this.tables);
         const [group, deliveries] = await Promise.all([
@@ -283,12 +283,12 @@ export class Groups {
           recipientAccountId: this.accountId,
           recoveryRootId: material.rootId,
         }),
-        { tier: "edge" },
+        { tier: "global" },
       );
       const ids = new Set([...required, ...candidates.map((row) => row.groupId)]);
       for (const id of ids) {
         const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), {
-          tier: "edge",
+          tier: "global",
         });
         if (!observed) throw new Error("Recovery group not available");
         await this.warmMembership(observed);
@@ -366,10 +366,10 @@ export class Groups {
     memberId: string,
     operation: "add" | "remove",
   ): Promise<void> {
-    const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "edge" });
+    const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "global" });
     if (!observed) throw new Error("E2EE group not found");
     const child = await this.db.one(this.tables.__e2ee_groups.where({ id: memberId }), {
-      tier: "edge",
+      tier: "global",
     });
     await Promise.all(
       [observed.accountId, child?.accountId ?? memberId].map((accountId) =>
@@ -500,13 +500,13 @@ export class Groups {
   }> {
     this.assertOpen();
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
-    const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "edge" });
+    const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "global" });
     if (!observed) return { state: "unavailable", reason: "group-not-found" };
     await this.warmMembership(observed);
     const device = await this.loadDevice();
     try {
       await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
-        tier: "edge",
+        tier: "global",
       });
       const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
         const state = await this.deviceStates(tx);
@@ -765,10 +765,12 @@ export class Groups {
   private async deliver(expected: GroupKey, secret: Uint8Array, device: LocalDevice) {
     const { id, epochId } = expected;
     await this.warmMembership(expected);
-    await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), { tier: "edge" });
-    await this.db.all(this.tables.__e2ee_group_repairs.where({ groupId: id }), { tier: "edge" });
+    await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
+      tier: "global",
+    });
+    await this.db.all(this.tables.__e2ee_group_repairs.where({ groupId: id }), { tier: "global" });
     await this.db.all(this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }), {
-      tier: "edge",
+      tier: "global",
     });
     const prior = await exclusiveE2eeTransaction(this.db, async (tx) => ({
       deliveries: await tx.allSettledForE2ee(
@@ -959,7 +961,7 @@ export class Groups {
   private async requestRepair(expected: GroupKey, device: LocalDevice, failed: string[]) {
     await this.warmMembership(expected);
     await this.db.all(this.tables.__e2ee_group_repairs.where({ groupId: expected.id }), {
-      tier: "edge",
+      tier: "global",
     });
     const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
       const own = await this.deviceStates(tx);
@@ -1089,9 +1091,9 @@ export class Groups {
   /** Internal key-free discovery shared with scoped-space membership. */
   async warmMembership(root: Pick<GroupRoot, "id" | "accountId"> | null) {
     const [roots, rows] = await Promise.all([
-      this.db.all(this.tables.__e2ee_groups, { tier: "edge" }),
-      this.db.all(this.tables.__e2ee_group_membership, { tier: "edge" }),
-      this.db.all(this.tables.__e2ee_group_successors, { tier: "edge" }),
+      this.db.all(this.tables.__e2ee_groups, { tier: "global" }),
+      this.db.all(this.tables.__e2ee_group_membership, { tier: "global" }),
+      this.db.all(this.tables.__e2ee_group_successors, { tier: "global" }),
     ]);
     const accounts = new Set([this.accountId]);
     if (root) accounts.add(root.accountId);
