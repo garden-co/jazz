@@ -67,7 +67,7 @@ it("retires one recovery root with an epoch rotation and preserves other authori
     };
     const ownerDevice = ownerStore.devices.find((device) => device.id === creator!.id)!;
     const deviceKey = Uint8Array.from(ownerDevice.signingPrivateKey);
-    const roots = await owner.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "edge" });
+    const roots = await owner.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" });
     // Even an invalid registration row makes a shared authority position unordered.
     const candidateRoot = {
       ...roots.find((root) => root.id === compromisedRootId)!,
@@ -85,7 +85,7 @@ it("retires one recovery root with an epoch rotation and preserves other authori
       membership: new TextEncoder().encode(JSON.stringify(initial.account.activeDeviceIds)),
       revision: new TextEncoder().encode(
         JSON.stringify(
-          (await owner.all(deviceRequestApp.__e2ee_public_device_approvals, { tier: "edge" }))
+          (await owner.all(deviceRequestApp.__e2ee_public_device_approvals, { tier: "remote" }))
             .filter((row) => row.epochId === initial.account.epochId)
             .map((row) => row.id)
             .sort(),
@@ -132,7 +132,7 @@ it("retires one recovery root with an epoch rotation and preserves other authori
     expect(before.account.activeDeviceIds).toContain(recoveryMember.id);
 
     const historicalDeliveries = await owner.all(deviceRequestApp.__e2ee_recovery_deliveries, {
-      tier: "edge",
+      tier: "remote",
     });
     expect(historicalDeliveries.some((delivery) => delivery.rootId === compromisedRootId)).toBe(
       true,
@@ -148,7 +148,7 @@ it("retires one recovery root with an epoch rotation and preserves other authori
     expect(after.account.validatedRootId).toBe(retainedRootId);
 
     const deliveries = await owner.all(deviceRequestApp.__e2ee_recovery_deliveries, {
-      tier: "edge",
+      tier: "remote",
     });
     expect(deliveries).toEqual(expect.arrayContaining(historicalDeliveries));
     expect(
@@ -256,7 +256,7 @@ it("does not accept a recovery approval at the retirement transaction position",
     const rootMaterial = JSON.parse(material) as { signingPrivateKey: number[] };
     const identity = await owner.one(
       deviceRequestApp.__e2ee_account_identities.where({ id: account.account.id }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     const ownerStore = JSON.parse((await stores[0]!.store.read())!) as {
       devices: { id: string; scope: string; signingPrivateKey: number[] }[];

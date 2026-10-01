@@ -91,7 +91,7 @@ it("inspects recovery registration without enrolling a device or claiming recove
       deviceRequestApp.__e2ee_device_approvals,
       deviceRequestApp.__e2ee_public_device_approvals,
     ])
-      expect(await observer.all<{ id: string }>(table, { tier: "edge" })).toEqual([]);
+      expect(await observer.all<{ id: string }>(table, { tier: "remote" })).toEqual([]);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

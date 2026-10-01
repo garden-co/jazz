@@ -172,13 +172,13 @@ it.each(["root", "delivery", "protector"] as const)(
 
       await expect(owner.e2ee.recovery.create().wait()).rejects.toThrow();
       expect(injected).toBe(1);
-      expect(await owner.all(app.__e2ee_recovery_roots, { tier: "edge" })).toHaveLength(
+      expect(await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).toHaveLength(
         stage === "root" ? 0 : 1,
       );
-      expect(await owner.all(app.__e2ee_recovery_deliveries, { tier: "edge" })).toHaveLength(
+      expect(await owner.all(app.__e2ee_recovery_deliveries, { tier: "remote" })).toHaveLength(
         stage === "protector" ? 1 : 0,
       );
-      expect(await owner.all(app.__e2ee_recovery_protectors, { tier: "edge" })).toEqual([]);
+      expect(await owner.all(app.__e2ee_recovery_protectors, { tier: "remote" })).toEqual([]);
     } finally {
       await Promise.all(clients.map((client) => client.shutdown()));
       await server.stop();
