@@ -157,7 +157,7 @@ a property of every Groove record, not of this family: the ordered-KV store
 owns value integrity. Cuts into fixed-width fields, and into the nested query
 and binding bytes, are structural and are rejected.
 
-The implementation is `crates/jazz/layers/node/src/node/exclusive_read_evidence.rs`.
+The implementation is `crates/jazz/layers/protocol/src/exclusive_read_evidence.rs`.
 It is written by `transaction_values_with_cardinality_scope` (`node/codec.rs`)
 and read by `stored_transaction_from_record` (`node/currency.rs`). Maintained
 view bundles (`node/views.rs`) set `base_snapshot` to `None` explicitly.

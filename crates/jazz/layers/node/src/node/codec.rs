@@ -214,32 +214,6 @@ groove::define_record! {
     }
 }
 
-/// Validate epoch-one rows before storage admission without converting their
-/// canonical modern four-slot read evidence into a different encoding.
-#[doc(hidden)]
-pub fn validate_epoch_one_transaction_record(
-    record: groove::records::BorrowedRecord<'_>,
-) -> Result<(), Error> {
-    let slots = [
-        record.get_nullable_bytes(TransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX)?,
-        record.get_nullable_bytes(TransactionRowRecord::FIELD_ROW_READ_SET_IDX)?,
-        record.get_nullable_bytes(TransactionRowRecord::FIELD_ABSENT_READ_SET_IDX)?,
-        record.get_nullable_bytes(TransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX)?,
-    ];
-    if slots.iter().any(Option::is_some)
-        && (slots.iter().any(Option::is_none)
-            || tx_kind_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?)?
-                != TxKind::Exclusive)
-    {
-        return Err(Error::InvalidStoredValue(
-            "incomplete or nonexclusive stored read evidence",
-        ));
-    }
-    super::exclusive_read_evidence::decode_evidence_slots(
-        slots[0], slots[1], slots[2], slots[3],
-    )?;
-    Ok(())
-}
 
 groove::define_record! {
 pub(super) struct ContributionMergeStorageRecord {

@@ -1864,10 +1864,11 @@ mod authorization_scope_compiler_tests {
     use crate::node::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt as _};
     use crate::protocol::TableLens;
     use crate::schema::WritePolicies;
+    use jazz_storage_rocksdb::{Durability, RocksDbStorageFactory};
 
     fn open_test_storage(path: &std::path::Path, refs: &[&str]) -> groove::storage::BoxedStorage {
-        crate::db::block_on(crate::storage_codec_profile::open_node_storage(
-            &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
+            &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
             path.to_path_buf(),
             refs.iter().map(|name| (*name).to_owned()).collect(),
         ))
@@ -1953,8 +1954,7 @@ mod authorization_scope_compiler_tests {
         let dir = tempfile::tempdir().unwrap();
         let cfs = schema.column_families();
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let storage = open_test_storage(dir.path(), &refs);
         let mut node = NodeState::new(NodeUuid::from_bytes([0x71; 16]), schema, storage).unwrap();
         let support = |node: &mut NodeState<_>, identity: AuthorSubject, role: &str| {
             node.set_test_provider_claims(

@@ -1376,13 +1376,13 @@ mod variant_case_tests {
         genesis: &JazzSchema,
     ) -> NodeState<BoxedStorage> {
         let column_families = genesis.column_families();
-        let storage = crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+        let storage = crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
             &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             path.to_path_buf(),
             column_families,
         ))
         .expect("open receipt storage");
-        crate::db::block_on(NodeState::new(node_uuid, genesis.clone(), storage))
+        crate::local_executor::block_on(NodeState::new(node_uuid, genesis.clone(), storage))
             .expect("open receipt node")
     }
 
@@ -1454,7 +1454,7 @@ mod variant_case_tests {
                 .expect("current event cell"),
         );
 
-        let queried = crate::db::block_on(node.query_rows(shape, binding, DurabilityTier::Local))
+        let queried = crate::local_executor::block_on(node.query_rows(shape, binding, DurabilityTier::Local))
             .expect("read projected query rows");
         assert_eq!(queried.len(), 1);
         assert_eq!(queried[0].row_uuid(), expected_row);
@@ -1557,7 +1557,7 @@ mod variant_case_tests {
             256
         );
         assert_wide_payload_receipt(&mut reopened, &evolved_schema, &shape, &binding, row_uuid);
-        crate::db::block_on(reopened.close()).expect("close reopened receipt storage");
+        crate::local_executor::block_on(reopened.close()).expect("close reopened receipt storage");
     }
 
     #[test]
@@ -1592,13 +1592,13 @@ mod variant_case_tests {
         drop(node);
 
         let cfs = schema.column_families();
-        let storage = crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+        let storage = crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
             &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             dir.path().to_path_buf(),
             cfs,
         ))
         .expect("reopen corrupted storage");
-        let error = match crate::db::block_on(NodeState::new(node_uuid, schema, storage)) {
+        let error = match crate::local_executor::block_on(NodeState::new(node_uuid, schema, storage)) {
             Ok(_) => panic!("forged payload provenance must fail before descriptor rebuild"),
             Err(error) => error,
         };
@@ -1637,13 +1637,13 @@ mod variant_case_tests {
         drop(node);
 
         let cfs = schema.column_families();
-        let storage = crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+        let storage = crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
             &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             dir.path().to_path_buf(),
             cfs,
         ))
         .expect("reopen corrupted storage");
-        let error = match crate::db::block_on(NodeState::new(node_uuid, schema, storage)) {
+        let error = match crate::local_executor::block_on(NodeState::new(node_uuid, schema, storage)) {
             Ok(_) => panic!("forged scalar provenance must fail before descriptor rebuild"),
             Err(error) => error,
         };
@@ -1701,7 +1701,7 @@ mod variant_case_tests {
             physical.scalar_enum_cases[&status][255].introducing_ordinal,
             255
         );
-        crate::db::block_on(reopened.close())
+        crate::local_executor::block_on(reopened.close())
             .expect("close reopened scalar lineage receipt storage");
     }
 

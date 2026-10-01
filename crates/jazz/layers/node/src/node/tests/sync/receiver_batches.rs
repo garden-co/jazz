@@ -3166,6 +3166,6 @@ fn discarded_pending_identity_accepts_redacted_exclusive_read_sets() {
     };
     bundle.tx.user_metadata_json = Some("true".to_owned());
     assert!(
-        matches!(crate::db::block_on(reader.remember_discarded_pending_view_transactions(&[conflict])), Err(Error::ConflictingCommitUnit(id)) if id == tx_id)
+        matches!(crate::local_executor::block_on(reader.remember_discarded_pending_view_transactions(&[conflict])), Err(Error::ConflictingCommitUnit(id)) if id == tx_id)
     );
 }

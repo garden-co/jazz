@@ -749,7 +749,7 @@ fn reopen_availability_node(
     schema: &JazzSchema,
 ) -> NodeState<BoxedStorage> {
     let cfs = schema.column_families();
-    let storage = crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+    let storage = crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
         &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
         dir.path().to_path_buf(),
         cfs,

@@ -55,20 +55,20 @@ fn reopening_rejects_a_colliding_durable_node_alias_before_decoding_history() {
         let mut reopened_node = open_node_at(&temp_dir, schema.clone());
         let mut batch = reopened_node.database.open_batch();
         batch.insert("jazz_nodes", vec![Value::U64(999), Value::Uuid(node(1).0)]);
-        let applied = crate::db::block_on(reopened_node.database.apply_batch(batch)).unwrap();
-        let persisted = crate::db::block_on(applied.persist());
+        let applied = crate::local_executor::block_on(reopened_node.database.apply_batch(batch)).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
         reopened_node
             .database
             .finish_persistence(persisted)
             .unwrap();
-        crate::db::block_on(reopened_node.database.close()).unwrap();
+        crate::local_executor::block_on(reopened_node.database.close()).unwrap();
     }
 
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
     assert!(matches!(
-        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        crate::local_executor::block_on(NodeState::new(node(1), schema, storage)),
         Err(Error::InvalidStoredValue(
             "node UUID has conflicting durable aliases"
         ))
@@ -112,9 +112,9 @@ fn failed_node_alias_persistence_leaves_no_resident_alias_or_dependent_history_f
     );
 
     let mut reopened =
-        crate::db::block_on(NodeState::new(node(0xd2), node_schema, storage)).unwrap();
+        crate::local_executor::block_on(NodeState::new(node(0xd2), node_schema, storage)).unwrap();
     let aliases =
-        crate::db::block_on(reopened.database.primary_key_scan_raw("jazz_nodes", &[])).unwrap();
+        crate::local_executor::block_on(reopened.database.primary_key_scan_raw("jazz_nodes", &[])).unwrap();
     assert_eq!(
         aliases.len(),
         1,
@@ -211,7 +211,7 @@ fn reopening_rejects_schema_alias_that_cannot_lower_to_a_groove_variant_tag() {
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
     assert!(matches!(
-        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        crate::local_executor::block_on(NodeState::new(node(1), schema, storage)),
         Err(Error::InvalidStoredValue(
             "physical table variant tag exhausted"
         ))
@@ -1109,15 +1109,84 @@ fn reopen_with_corrupt_contribution_coordinate(mutate: impl FnOnce(Value) -> Val
     }
 }
 
+fn mutate_stored_contribution_target(
+    value: Value,
+    mutate: impl FnOnce(OwnedRecord) -> OwnedRecord,
+) -> Value {
+    let Value::Nullable(Some(record)) = value else {
+        panic!("fixture stores contribution provenance")
+    };
+    let Value::Record(record) = *record else {
+        panic!("fixture contribution provenance is a record")
+    };
+    let merge = ContributionMergeStorageRecord::new(record);
+    let mut substitutions = merge.substitutions().unwrap();
+    let Value::Record(substitution) = substitutions.remove(0) else {
+        panic!("fixture substitution is a record")
+    };
+    let substitution = ContributionSubstitutionStorageRecord::new(substitution);
+    let mutated = ContributionSubstitutionStorageRecord::encode(
+        substitution.record().descriptor(),
+        mutate(substitution.target().unwrap()),
+        substitution.sources().unwrap(),
+    )
+    .unwrap();
+    substitutions.insert(0, Value::Record(mutated.record().clone()));
+    let mutated = ContributionMergeStorageRecord::encode(
+        merge.record().descriptor(),
+        merge.source().unwrap(),
+        merge.target().unwrap(),
+        substitutions,
+        merge.branch_view_copy_v1().unwrap(),
+        merge.branch_write_intent_v1().unwrap(),
+    )
+    .unwrap();
+    Value::Nullable(Some(Box::new(Value::Record(mutated.record().clone()))))
+}
+
 fn reopen_with_invalid_contribution_column_id(physical_column_id: u64) -> Error {
     reopen_with_corrupt_contribution_coordinate(|value| {
-        with_stored_contribution_column_id(value, physical_column_id)
+        mutate_stored_contribution_target(value, |record| {
+            let coordinate = ContributionCoordinateStorageRecord::new(record);
+            let component = coordinate.component().unwrap();
+            let tag = component.tag();
+            let payload = component.into_record();
+            let payload = ContributionColumnStorageRecord::encode(
+                payload.descriptor(),
+                physical_column_id,
+            )
+            .unwrap();
+            ContributionCoordinateStorageRecord::encode(
+                coordinate.record().descriptor(),
+                coordinate.branch_key().unwrap(),
+                coordinate.physical_table_id().unwrap(),
+                coordinate.row_uuid().unwrap(),
+                coordinate.layer().unwrap(),
+                records::EnumValue::new(tag, payload.record().clone()),
+            )
+            .unwrap()
+            .record()
+            .clone()
+        })
     })
 }
 
 fn reopen_with_invalid_contribution_table_id(physical_table_id: u64) -> Error {
     reopen_with_corrupt_contribution_coordinate(|value| {
-        with_stored_contribution_table_id(value, physical_table_id)
+        mutate_stored_contribution_target(value, |record| {
+            let coordinate = ContributionCoordinateStorageRecord::new(record);
+            ContributionCoordinateStorageRecord::encode(
+                coordinate.record().descriptor(),
+                coordinate.branch_key().unwrap(),
+                physical_table_id,
+                coordinate.row_uuid().unwrap(),
+                coordinate.layer().unwrap(),
+                coordinate.component().unwrap(),
+            )
+            .unwrap()
+            .record()
+            .clone()
+        })
     })
 }
 
@@ -1428,8 +1497,8 @@ fn mark_accepted_without_ahead_cleanup<S>(
     );
     node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
-    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-    let persisted = crate::db::block_on(applied.persist());
+    let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+    let persisted = crate::local_executor::block_on(applied.persist());
     node.database.finish_persistence(persisted).unwrap();
 }
 
@@ -1590,8 +1659,8 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
             )
             .unwrap(),
         );
-        let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-        let persisted = crate::db::block_on(applied.persist());
+        let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
         node.database.finish_persistence(persisted).unwrap();
     }
 
@@ -2698,7 +2767,7 @@ fn cached_absent_alias_does_not_hide_a_poisoned_database() {
     );
     assert_eq!(core.absent_node_alias, Some(absent.node));
     assert!(matches!(
-        crate::db::block_on(core.query_transaction(absent)),
+        crate::local_executor::block_on(core.query_transaction(absent)),
         Err(Error::Groove(groove::db::Error::DatabasePoisoned))
     ));
 }
@@ -3037,8 +3106,8 @@ fn exclusive_predicate_evidence_reopen_preserves_complete_and_legacy_absence() {
                 values[5..9].fill(Value::Nullable(None));
                 let mut batch = client.database.open_batch();
                 batch.update("jazz_transactions", values);
-                let applied = crate::db::block_on(client.database.apply_batch(batch)).unwrap();
-                let persisted = crate::db::block_on(applied.persist());
+                let applied = crate::local_executor::block_on(client.database.apply_batch(batch)).unwrap();
+                let persisted = crate::local_executor::block_on(applied.persist());
                 client.database.finish_persistence(persisted).unwrap();
             }
             client.database.close().unwrap();
