@@ -1,5 +1,5 @@
 ---
-"jazz-tools": minor
+"jazz-tools": patch
 ---
 
 Add independently generated account recovery creation/import, root registration and
