@@ -385,18 +385,26 @@ it("does not manufacture founder eligibility from legacy retained roots or faile
   await expect(accountGeneratedHere(restarted.getLoggedIn()!)).resolves.toBe(false);
 });
 
-it("writes and reopens the canonical v2 account provenance corpus", async () => {
+it.each([
+  {
+    name: "selected",
+    selected: true,
+    inventory:
+      '{"format":"jazz-account-selection-v2","roots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"selected":0,"generatedHere":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}',
+  },
+  {
+    name: "logged-out",
+    selected: false,
+    inventory:
+      '{"format":"jazz-account-selection-v2","roots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"selected":null,"generatedHere":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}',
+  },
+])("opens and retains the canonical $name v2 account provenance corpus", async (corpus) => {
   const secret = "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-  const selected =
-    '{"format":"jazz-account-selection-v2","roots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"selected":0,"generatedHere":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}';
-  const loggedOut =
-    '{"format":"jazz-account-selection-v2","roots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"selected":null,"generatedHere":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}';
-  let value: string | null = null;
+  let value = corpus.inventory;
   const options = {
     appId: "test",
     registry,
-    mintToken,
-    generateSecret: () => secret,
+    mintToken: mintRootToken,
     store: {
       async read() {
         return value;
@@ -406,16 +414,28 @@ it("writes and reopens the canonical v2 account provenance corpus", async () => 
       },
     },
   };
-  const created = await prepareAccountManager(options);
-  await expect(accountGeneratedHere(created.createLocalFirst())).resolves.toBe(true);
-  expect(value).toBe(selected);
+  const manager = await prepareAccountManager(options);
+  expect(manager.getLoggedIn() !== undefined).toBe(corpus.selected);
+  const selected = manager.getLoggedIn() ?? manager.restoreLocalFirst(secret);
+  expect(exportLocalFirstSecret(selected)).toBe(secret);
+  await expect(accountGeneratedHere(selected)).resolves.toBe(true);
+  await expect(accountToken(selected, registry)).resolves.toBe(mintRootToken(secret));
   const reopened = await prepareAccountManager(options);
   expect(exportLocalFirstSecret(reopened.getLoggedIn()!)).toBe(secret);
   await expect(accountGeneratedHere(reopened.getLoggedIn()!)).resolves.toBe(true);
-  expect(value).toBe(selected);
+  expect(JSON.parse(value).roots).toEqual([secret]);
   reopened.logout();
   await settleAccountSelection(reopened);
-  expect(value).toBe(loggedOut);
+  expect(JSON.parse(value)).toMatchObject({
+    roots: [secret],
+    selected: null,
+    generatedHere: [secret],
+  });
+  const loggedOut = await prepareAccountManager(options);
+  expect(loggedOut.getLoggedIn()).toBeUndefined();
+  const restored = loggedOut.restoreLocalFirst(secret);
+  await expect(accountGeneratedHere(restored)).resolves.toBe(true);
+  await expect(accountToken(restored, registry)).resolves.toBe(mintRootToken(secret));
 });
 
 it("migrates every legacy root and its selection without trusting a v1 provenance extension", async () => {

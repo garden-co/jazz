@@ -60,6 +60,12 @@ and row evaluations can diverge even at the same cut. The client MUST retain
 strict row-to-settlement validation; a coherent pair does not establish complete
 history or current authority.
 
+For mergeable encrypted writes, a verified accepted key is not hidden by a
+pending local deletion of its space root. That pending row is not revocation.
+Provisional key use and exclusive writes still require the root in their own
+transaction snapshot. Key-source provenance is supplied only by the verified
+accepted-history or original provisional-journal path.
+
 ### Initial creation and failure
 
 Atomic creation retains the coherent preparation before staging the signed root

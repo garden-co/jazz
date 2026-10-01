@@ -321,10 +321,14 @@ it.each([
       } else {
         await founder.disconnect();
         gate.unblock();
-        // A separate device wins the same account identity while this founder
-        // remains explicitly offline; package-owned permissions stay intact.
+        // An independent account store represents a remote device; sharing the
+        // original local store must not permit another automatic founder.
         const winner = await createDb({
-          ...founderAccount,
+          ...(await localAccountConfig(
+            server.appId,
+            gate.url,
+            exportLocalFirstSecret(founderAccount.account),
+          )),
           e2ee: { app, store: privateStore() },
         });
         clients.push(winner);
@@ -471,17 +475,26 @@ it.each(["a second device store", "a missing original founder journal"] as const
         });
       }
       const attemptedStore = missingJournal ? founderStore : secondStore;
-      await expect(
-        (async () => {
-          const other = await createJazzSession({
-            ...config,
-            driver: secondDriver,
-            store: accountStore,
-            e2ee: { app, store: attemptedStore },
-          });
-          sessions.push(other);
-        })(),
-      ).rejects.toMatchObject({ code: "e2ee_initialization_not_ready", retryable: true });
+      const attempt = (async () => {
+        const other = await createJazzSession({
+          ...config,
+          driver: secondDriver,
+          store: accountStore,
+          e2ee: { app, store: attemptedStore },
+        });
+        sessions.push(other);
+      })();
+      if (missingJournal) {
+        await expect(attempt).rejects.toMatchObject({
+          code: "e2ee_initialization_not_ready",
+          retryable: true,
+        });
+      } else {
+        // A different device falls back to authority-governed enrolment. The
+        // partition may fail that transport; it must not create another local
+        // founder or pretend that remote enrolment completed.
+        await expect(attempt).rejects.toThrow();
+      }
       expect(
         JSON.parse((await attemptedStore.read()) ?? "{}").initializationJournalV1 ?? [],
       ).toEqual([]);
