@@ -190,9 +190,11 @@ canonical rejection `code`/`reason` when rejected, and `durability`
 absence at the underlying schema/table/row coordinate before an ordinary insert.
 It rejects existing content, tombstones and already-staged coordinates, including
 policy-hidden rows. It does not convert INSERT into upsert or overwrite semantics.
-Checked snapshot reads propagate storage and audit-decoding failures instead of
-turning an unreadable existing version into absence. Legacy nonfallible snapshot
-observation callers retain their existing conservative exclusion rule.
+Checked snapshot reads propagate storage and required audit-field decoding
+failures instead of turning an unreadable existing version into absence.
+Coverage projects the exact transaction's global time without decoding unrelated
+payloads per row version. Legacy nonfallible snapshot observation callers retain
+their existing conservative exclusion rule.
 
 After direct-owner lease rotation, `restore_initialization_owner_pending_uploads`
 derives the admitted author and restores that author's exact pending units before
