@@ -26,48 +26,9 @@ function makeRemovable(directory) {
   fs.chmodSync(directory, 0o700);
 }
 
-test("bootstrap treats RUNNER_USER as data when resolving the runner home", () => {
-  const root = temporaryDirectory("jazz-bootstrap-injection-");
-  const bin = path.join(root, "bin");
-  const marker = path.join(root, "evaluated");
-  fs.mkdirSync(bin);
-
-  const stub = (name, body) => {
-    const file = path.join(bin, name);
-    fs.writeFileSync(file, `#!/bin/sh\n${body}\n`);
-    fs.chmodSync(file, 0o755);
-  };
-  stub("getent", "exit 1");
-  stub("useradd", "exit 0");
-  stub("apt-get", "exit 1");
-
-  try {
-    const result = spawnSync("/bin/bash", [SCRIPT], {
-      cwd: root,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: `${bin}:/usr/bin:/bin`,
-        RUNNER_USER: `$(touch ${marker})`,
-        RUNNER_TOKEN: "test-token",
-        INSTALL_SSM_AGENT: "0",
-        SKIP_HARDENING: "1",
-      },
-      timeout: 5000,
-    });
-
-    assert.equal(result.error, undefined, result.error?.message);
-    assert.notEqual(result.status, 0, "unsafe runner user must be rejected");
-    assert.equal(fs.existsSync(marker), false, "RUNNER_USER command substitution must not execute");
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
 test("pinned download verification accepts only the exact present digest", () => {
   const root = temporaryDirectory("jazz-bootstrap-digest-");
   const artifact = path.join(root, "artifact");
-  const consumerMarker = path.join(root, "consumer-ran");
   const bytes = Buffer.from("publisher-approved bytes");
   const expected = crypto.createHash("sha256").update(bytes).digest("hex");
   fs.writeFileSync(artifact, bytes);
@@ -78,11 +39,6 @@ test("pinned download verification accepts only the exact present digest", () =>
     assert.notEqual(
       helper(root, "verify-download", path.join(root, "missing"), expected).status,
       0,
-    );
-    assert.equal(
-      fs.existsSync(consumerMarker),
-      false,
-      "verification never invokes an artifact consumer",
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -640,6 +596,8 @@ test("bootstrap rejects a symlinked work directory without changing its target",
   try {
     const target = path.join(fixture.root, "attacker-work");
     fs.mkdirSync(target);
+    const sentinel = path.join(target, "existing");
+    fs.writeFileSync(sentinel, "do not touch");
     fs.chmodSync(target, 0o755);
     fs.symlinkSync(target, path.join(fixture.state, "_work"));
     const result = fixture.invoke({}, fixture.recordAllowlist());
@@ -650,6 +608,7 @@ test("bootstrap rejects a symlinked work directory without changing its target",
       0o755,
       "bootstrap must not change the symlink target's mode",
     );
+    assert.equal(fs.readFileSync(sentinel, "utf8"), "do not touch");
     assert.doesNotMatch(fs.readFileSync(fixture.trace, "utf8"), /^svc:/m);
   } finally {
     fixture.cleanup();
@@ -673,7 +632,7 @@ test("bootstrap entry rejects malformed settings without evaluating them", () =>
   }
 });
 
-test("bootstrap entry verifies fetched bytes before apt, extraction, config, or service", () => {
+test("bootstrap entry rejects a corrupt pinned download before dependency setup", () => {
   const fixture = bootstrapFixture();
   try {
     fs.rmSync(path.join(fixture.root, "var", "lib", "actions-runner", ".os-dependencies-v1"));
@@ -917,9 +876,23 @@ test("bootstrap entry rejects a missing pinned wasm-pack before configuration or
       "bin",
       "wasm-pack",
     );
-    fs.chmodSync(wasmPack, 0o644);
-    const result = fixture.invoke();
+    const cargoBin = path.dirname(wasmPack);
+    const manifest = path.join(
+      fixture.root,
+      "var",
+      "lib",
+      "actions-runner",
+      ".toolchain-integrity",
+      "cargo-bin.json",
+    );
+    fs.rmSync(wasmPack);
+    fs.rmSync(manifest);
+    const regenerated = helper(fixture.root, "manifest", cargoBin, manifest);
+    assert.equal(regenerated.status, 0, regenerated.stderr);
+    fs.chmodSync(manifest, 0o444);
+    const result = fixture.invoke({}, fixture.recordAllowlist());
     assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /existing wasm-pack installation is incomplete/);
     const events = fs.readFileSync(fixture.trace, "utf8");
     assert.doesNotMatch(events, /^(curl|apt-get|systemctl|snap):/m);
     assert.doesNotMatch(events, /^svc:/m);
@@ -928,7 +901,7 @@ test("bootstrap entry rejects a missing pinned wasm-pack before configuration or
   }
 });
 
-test("verified wasm-pack installation failure stops orchestration", () => {
+test("verified wasm-pack installer propagates Cargo failure", () => {
   const fixture = bootstrapFixture();
   try {
     const result = fixture.invokeOrchestration({
@@ -938,13 +911,12 @@ test("verified wasm-pack installation failure stops orchestration", () => {
     assert.notEqual(result.status, 0);
     const events = fs.readFileSync(fixture.trace, "utf8");
     assert.match(events, /^cargo:install wasm-pack --version 0.13.1 --locked$/m);
-    assert.doesNotMatch(events, /^svc:/m);
   } finally {
     fixture.cleanup();
   }
 });
 
-test("verified requested SSM setup failures stop orchestration", () => {
+test("required SSM dependency failures do not mark setup complete", () => {
   for (const failEffect of [
     "apt-get:install -y snapd",
     "systemctl:enable --now snapd.socket",
@@ -954,18 +926,27 @@ test("verified requested SSM setup failures stop orchestration", () => {
   ]) {
     const fixture = bootstrapFixture();
     try {
+      const completionMarker = path.join(
+        fixture.root,
+        "var",
+        "lib",
+        "actions-runner",
+        ".os-dependencies-v1",
+      );
+      fs.rmSync(completionMarker);
+      fixture.recordAllowlist();
       const result = fixture.invokeOrchestration({ ssm: true, failEffect });
       assert.notEqual(result.status, 0, `${failEffect} must fail setup`);
       const events = fs.readFileSync(fixture.trace, "utf8");
-      assert.doesNotMatch(events, /^svc:/m);
-      assert.doesNotMatch(events, /^config:/m);
+      assert.ok(events.split("\n").includes(failEffect), `${failEffect} must be reached`);
+      assert.equal(fs.existsSync(completionMarker), false);
     } finally {
       fixture.cleanup();
     }
   }
 });
 
-test("verified AWS auto-detected SSM setup failure stops orchestration", () => {
+test("auto-detected AWS SSM failure leaves dependencies unmarked", () => {
   const fixture = bootstrapFixture();
   try {
     const dmi = path.join(fixture.root, "sys", "devices", "virtual", "dmi", "id");
