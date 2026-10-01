@@ -13,3 +13,5 @@ import { schema as s, migration as m } from "jazz-tools";
 - Replace `s.defineMigration` and `s.renameTableFrom` with `m.defineMigration` and `m.renameTableFrom`.
 
 Schema and permission helpers stay under `s`. Migration behavior and serialized formats are unchanged.
+
+Rewrite existing files in `migrations/` too, including already-deployed ones: `deploy` loads the whole migration chain, and a file that still uses the old builders now fails with `Failed to load migration <file>` and a pointer to `migration as m`.

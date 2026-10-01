@@ -872,8 +872,6 @@ class DropBuilder {
 // ============================================================================
 
 export const schemaColumns = {
-  // Schema context
-
   string: () => new ScalarBuilder("TEXT") as unknown as StringColumn,
   uuid: () => new ScalarBuilder("UUID") as unknown as UuidColumn,
   boolean: () => new ScalarBuilder("BOOLEAN") as unknown as BooleanColumn,
