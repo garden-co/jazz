@@ -1,54 +1,5 @@
 use super::*;
 
-fn compound_exists_rel_test_policy_with_secondary(evidence_right_column: &str) -> PublicPolicyExpr {
-    let relation_column = |scope: &str, column: &str| PublicRelColumnRef {
-        scope: Some(scope.to_owned()),
-        column: column.to_owned(),
-    };
-    let equality = |left: (&str, &str), right: (&str, &str)| PublicRelJoinCondition {
-        left: relation_column(left.0, left.1),
-        right: relation_column(right.0, right.1),
-    };
-    PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::Join {
-                    left: Box::new(PublicRelExpr::TableScan {
-                        table: "left_facts".into(),
-                        alias: Some("left_fact".to_owned()),
-                    }),
-                    right: Box::new(PublicRelExpr::TableScan {
-                        table: "right_facts".into(),
-                        alias: Some("right_fact".to_owned()),
-                    }),
-                    on: vec![equality(
-                        ("left_fact", "resource_id"),
-                        ("right_fact", "resource_id"),
-                    )],
-                    join_kind: PublicRelJoinKind::Inner,
-                }),
-                right: Box::new(PublicRelExpr::TableScan {
-                    table: "evidence".into(),
-                    alias: Some("evidence".to_owned()),
-                }),
-                on: vec![
-                    equality(("left_fact", "left_key"), ("evidence", "left_key")),
-                    equality(
-                        ("right_fact", "right_key"),
-                        ("evidence", evidence_right_column),
-                    ),
-                ],
-                join_kind: PublicRelJoinKind::Inner,
-            }),
-            predicate: PublicRelPredicateExpr::Cmp {
-                left: relation_column("left_fact", "resource_id"),
-                op: PublicRelPredicateCmpOp::Eq,
-                right: PublicRelValueRef::RowId(PublicRelRowIdRef::Outer),
-            },
-        },
-    }
-}
-
 #[test]
 fn identical_exists_rel_joins_keep_branch_specific_equalities() {
     use crate::model::public_schema::{CmpOp, PolicyValue, Value as PublicValue};

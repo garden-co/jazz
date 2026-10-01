@@ -397,6 +397,16 @@ the protected row and its filters hold under the same identity (`INV-RLS-9`).
 Policy joins may carry additional source-row equality correlations beyond their
 primary join key; these are part of the same join and must be enforced in direct
 evaluation, one-shot reads, and maintained subscription views.
+For a compound `ExistsRel` join, all ON equalities MUST hold for one tuple of
+participating source rows; separate witnesses for separate equalities do not
+authorize the protected row.
+This remains one witness tuple when relation groups occur in policy branches or
+under inherited-policy joins; lowering MUST preserve each group's source
+occurrences and equalities together.
+Secondary `ExistsRel` ON columns MUST resolve to declared columns of their exact
+source tables, and each secondary equality's logical column types MUST be
+comparable during public-schema conversion. The primary join equality remains
+subject to the existing query-join validation contract.
 
 Read and write policies are compiled as small boolean programs over policy
 atoms. The current atoms include plain column predicates, `reachable_via`, and

@@ -316,6 +316,7 @@ where
                     policy_schema_version,
                     &table,
                     &policy,
+                    crate::schema::PolicySlot::DeleteUsing,
                     current.row_uuid(),
                     &current_cells,
                     author,
@@ -361,6 +362,7 @@ where
                         policy_schema_version,
                         &table,
                         &policy,
+                        crate::schema::PolicySlot::UpdateUsing,
                         previous.row_uuid(),
                         &previous_cells,
                         author,
@@ -393,6 +395,7 @@ where
                     policy_schema_version,
                     &table,
                     &policy,
+                    crate::schema::PolicySlot::UpdateWithCheck,
                     version.row_uuid(),
                     &effective_cells,
                     author,
@@ -408,6 +411,7 @@ where
             policy_schema_version,
             &table,
             &policy,
+            crate::schema::PolicySlot::InsertWithCheck,
             version.row_uuid(),
             &cells,
             author,
@@ -574,8 +578,13 @@ where
             // the old-row clause has nothing further to prove here.
             return Ok(table.write_policies.update_check.is_some());
         };
-        self.write_policy_query_allows_current_row(&policy, row.row_uuid(), author)
-            .await
+        self.write_policy_query_allows_current_row(
+            &policy,
+            crate::schema::PolicySlot::UpdateUsing,
+            row.row_uuid(),
+            author,
+        )
+        .await
     }
 
     #[doc(hidden)]
@@ -598,8 +607,13 @@ where
         let Some(policy) = table.write_policies.delete_using.clone() else {
             return Ok(false);
         };
-        self.write_policy_query_allows_current_row(&policy, row.row_uuid(), author)
-            .await
+        self.write_policy_query_allows_current_row(
+            &policy,
+            crate::schema::PolicySlot::DeleteUsing,
+            row.row_uuid(),
+            author,
+        )
+        .await
     }
 
     /// Whether `row_uuid` is a live local row of `table`, by point lookup of

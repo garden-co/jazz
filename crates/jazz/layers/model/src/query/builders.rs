@@ -710,4 +710,29 @@ impl Query {
     ) -> Result<ValidatedQuery, QueryError> {
         validate_query_with_schema_version(self, schema, schema_version)
     }
+    #[doc(hidden)]
+    pub fn validate_with_policy_provenance(
+        &self,
+        schema: &RuntimeSchema,
+        mut provenance: crate::schema::PolicyRelationProvenance,
+    ) -> Result<ValidatedQuery, QueryError> {
+        let query = normalize_policy_query(self, &mut provenance)?;
+        validate_query_with_policy_provenance(&query, schema, provenance)
+    }
+
+    #[doc(hidden)]
+    pub fn validate_with_policy_provenance_version(
+        &self,
+        schema: &RuntimeSchema,
+        schema_version: SchemaVersionId,
+        mut provenance: crate::schema::PolicyRelationProvenance,
+    ) -> Result<ValidatedQuery, QueryError> {
+        let query = normalize_policy_query(self, &mut provenance)?;
+        validate_query_with_policy_provenance_version(
+            &query,
+            schema,
+            schema_version,
+            provenance,
+        )
+    }
 }

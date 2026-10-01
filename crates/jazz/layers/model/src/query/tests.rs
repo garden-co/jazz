@@ -396,6 +396,29 @@ mod tests {
     }
 
     #[test]
+    fn policy_provenance_rejects_relation_queries() {
+        let mut query = Query::from("issues");
+        query.relation = Some(RelationQuery {
+            rel: RelationExpr::TableScan {
+                table: "issues".to_owned(),
+                alias: None,
+            },
+        });
+
+        let error = query
+            .validate_with_policy_provenance(
+                &schema(),
+                crate::schema::PolicyRelationProvenance::default(),
+            )
+            .expect_err("relation query provenance must fail closed");
+        assert!(matches!(
+            error,
+            QueryError::UnsupportedRelationQuery(message)
+                if message.contains("policy provenance")
+        ));
+    }
+
+    #[test]
     fn enum_match_validation_uses_selected_case_fields_not_outer_table_fields() {
         let payload =
             RecordDescriptor::new([("case_only", ValueType::String), ("shared", ValueType::I32)]);

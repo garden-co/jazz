@@ -1409,6 +1409,11 @@ fn owner_policy_does_not_materialize_unreferenced_large_scalar_candidates() {
                         schema_version,
                         &table,
                         &policy,
+                        if insert_candidate {
+                            crate::schema::PolicySlot::InsertWithCheck
+                        } else {
+                            crate::schema::PolicySlot::UpdateUsing
+                        },
                         row(1),
                         &cells,
                         author(1),
@@ -1441,6 +1446,7 @@ fn owner_policy_does_not_materialize_unreferenced_large_scalar_candidates() {
                 schema_version,
                 &table,
                 &content_policy,
+                crate::schema::PolicySlot::InsertWithCheck,
                 row(1),
                 &cells,
                 author(1),
@@ -1550,6 +1556,11 @@ fn nullable_json_policy_candidates_preserve_logical_wrappers() {
                             schema_version,
                             &table,
                             &policy,
+                            if insert_candidate {
+                                crate::schema::PolicySlot::InsertWithCheck
+                            } else {
+                                crate::schema::PolicySlot::UpdateUsing
+                            },
                             row(1),
                             &cells,
                             author(1),

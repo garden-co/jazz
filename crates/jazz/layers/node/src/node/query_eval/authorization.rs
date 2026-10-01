@@ -8,6 +8,31 @@
 use super::*;
 use crate::query::{col, eq, lit};
 
+fn validate_policy_query(
+    query: &JazzQuery,
+    schema: &crate::schema::JazzSchema,
+    schema_version: Option<SchemaVersionId>,
+    table: &str,
+    slot: crate::schema::PolicySlot,
+) -> Result<ValidatedQuery, Error> {
+    let provenance = schema
+        .runtime()
+        .policy_provenance
+        .get(&(table.to_owned(), slot))
+        .cloned();
+    match (schema_version, provenance) {
+        (Some(version), Some(provenance)) => query
+            .validate_with_policy_provenance_version(schema.runtime(), version, provenance)
+            .map_err(Error::from),
+        (None, Some(provenance)) => query
+            .validate_with_policy_provenance(schema.runtime(), provenance)
+            .map_err(Error::from),
+        (Some(version), None) => query
+            .validate_with_schema_version(schema.runtime(), version)
+            .map_err(Error::from),
+        (None, None) => query.validate(schema).map_err(Error::from),
+    }
+}
 /// Test-only rendezvous at the cancellation-sensitive proof-stack boundary.
 #[cfg(test)]
 struct PolicyProofCompilationPause;
@@ -68,6 +93,7 @@ fn empty_policy_filtered_current_source_graph(
 #[cfg_attr(not(test), allow(dead_code))]
 fn compile_permission_scope_policy(
     mut query: JazzQuery,
+    provenance: Option<crate::schema::PolicyRelationProvenance>,
     claims: Option<&BTreeMap<String, Value>>,
     claim_values: &BTreeMap<String, Value>,
     schema: &RuntimeSchema,
@@ -107,7 +133,10 @@ fn compile_permission_scope_policy(
         .collect();
     let mut values = BTreeMap::new();
     bind_scope_claim_operands(&mut query, claim_values, &mut values);
-    let shape = query.validate_runtime(schema)?;
+    let shape = match provenance {
+        Some(provenance) => query.validate_with_policy_provenance(schema, provenance)?,
+        None => query.validate_runtime(schema)?,
+    };
     coerce_binding_values_for_shape(&shape, &mut values);
     let binding = shape.bind(values)?;
     Ok((shape, binding))
@@ -135,21 +164,31 @@ fn authorization_scope_action(
 fn authorization_policy_queries(
     table: &crate::schema::TableSchema,
     operation: AuthorizationScopeOperation,
-) -> Vec<JazzQuery> {
+) -> Vec<(crate::schema::PolicySlot, JazzQuery)> {
     match operation {
-        // No dependency data can prove an absent read grant. Admission still
-        // evaluates the constant-false read policy; no support scope is needed.
         AuthorizationScopeOperation::Read if table.read_policy.is_none() => Vec::new(),
-        AuthorizationScopeOperation::Read => vec![authorization_query_from_read_policy(table)],
+        AuthorizationScopeOperation::Read => vec![(
+            crate::schema::PolicySlot::SelectUsing,
+            authorization_query_from_read_policy(table),
+        )],
         AuthorizationScopeOperation::Insert => table
             .write_policies
             .insert_check
             .clone()
+            .map(|policy| (crate::schema::PolicySlot::InsertWithCheck, policy))
             .into_iter()
             .collect(),
         AuthorizationScopeOperation::Update => [
-            table.write_policies.update_using.clone(),
-            table.write_policies.update_check.clone(),
+            table
+                .write_policies
+                .update_using
+                .clone()
+                .map(|policy| (crate::schema::PolicySlot::UpdateUsing, policy)),
+            table
+                .write_policies
+                .update_check
+                .clone()
+                .map(|policy| (crate::schema::PolicySlot::UpdateWithCheck, policy)),
         ]
         .into_iter()
         .flatten()
@@ -158,6 +197,7 @@ fn authorization_policy_queries(
             .write_policies
             .delete_using
             .clone()
+            .map(|policy| (crate::schema::PolicySlot::DeleteUsing, policy))
             .into_iter()
             .collect(),
     }
@@ -217,8 +257,13 @@ where
         let policy = policy
             .clone()
             .filter(eq(col("id"), lit(Value::Uuid(row_uuid.0))));
-        let policy_shape =
-            policy.validate_with_schema_version(&policy_schema, policy_schema_version)?;
+        let policy_shape = validate_policy_query(
+            &policy,
+            &policy_schema,
+            Some(policy_schema_version),
+            &policy.table,
+            crate::schema::PolicySlot::SelectUsing,
+        )?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
@@ -441,10 +486,12 @@ where
     pub(in crate::node) async fn write_policy_query_allows_current_row(
         &mut self,
         policy: &crate::query::Query,
+        slot: crate::schema::PolicySlot,
         row_uuid: RowUuid,
         identity: AuthorSubject,
     ) -> Result<bool, Error> {
-        let policy_shape = policy.validate(&self.catalogue.schema)?;
+        let policy_shape =
+            validate_policy_query(policy, &self.catalogue.schema, None, &policy.table, slot)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
@@ -524,6 +571,7 @@ where
         &mut self,
         table: &TableSchema,
         policy: &crate::query::Query,
+        slot: crate::schema::PolicySlot,
         row_uuid: RowUuid,
         cells: &BTreeMap<String, Value>,
         identity: AuthorSubject,
@@ -564,6 +612,7 @@ where
             policy_schema_version,
             table,
             policy,
+            slot,
             row_uuid,
             cells,
             identity,
@@ -577,6 +626,7 @@ where
         policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         policy: &crate::query::Query,
+        slot: crate::schema::PolicySlot,
         row_uuid: RowUuid,
         cells: &BTreeMap<String, Value>,
         identity: AuthorSubject,
@@ -586,6 +636,7 @@ where
             policy_schema_version,
             table,
             policy,
+            slot,
             row_uuid,
             cells,
             identity,
@@ -610,6 +661,7 @@ where
         policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         policy: &crate::query::Query,
+        slot: crate::schema::PolicySlot,
         row_uuid: RowUuid,
         cells: &BTreeMap<String, Value>,
         identity: AuthorSubject,
@@ -620,6 +672,7 @@ where
             policy_schema_version,
             table,
             policy,
+            Some(slot),
             row_uuid,
             cells,
             identity,
@@ -644,6 +697,7 @@ where
             policy_schema_version,
             table,
             policy,
+            Some(crate::schema::PolicySlot::SelectUsing),
             row_uuid,
             cells,
             identity,
@@ -660,6 +714,7 @@ where
         policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         policy: &crate::query::Query,
+        slot: Option<crate::schema::PolicySlot>,
         row_uuid: RowUuid,
         cells: &BTreeMap<String, Value>,
         identity: AuthorSubject,
@@ -694,9 +749,17 @@ where
                 .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
                 .schema
         };
-        let policy_shape = policy
-            .clone()
-            .validate_with_schema_version(policy_schema, policy_schema_version)?;
+        let policy_shape = if let Some(slot) = slot {
+            validate_policy_query(
+                &policy,
+                policy_schema,
+                Some(policy_schema_version),
+                &table.name,
+                slot,
+            )?
+        } else {
+            policy.validate_with_schema_version(policy_schema, policy_schema_version)?
+        };
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
@@ -1053,7 +1116,17 @@ where
                 "historical policy source filters do not support include policies",
             ));
         }
-        let policy_shape = query.validate(policy_schema)?;
+        let policy_shape = if identity == AuthorSubject::SYSTEM {
+            query.validate(policy_schema)?
+        } else {
+            validate_policy_query(
+                &query,
+                policy_schema,
+                None,
+                table_name,
+                crate::schema::PolicySlot::SelectUsing,
+            )?
+        };
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
@@ -1159,8 +1232,32 @@ where
         binding_claim_params: BTreeMap<String, ProgramClaimParam>,
         include_deleted_root: bool,
     ) -> Result<QueryProgramRequest, Error> {
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if policy_schema_version == self.catalogue.local_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&policy_schema_version)
+                .ok_or(Error::InvalidStoredValue(
+                    "policy schema version is unknown",
+                ))?
+                .schema
+        };
+        let provenance = policy_schema.policy_provenance.get(&(
+            table_name.to_owned(),
+            crate::schema::PolicySlot::SelectUsing,
+        ));
+        let provenance_bytes = provenance
+            .map(postcard::to_allocvec)
+            .transpose()
+            .map_err(|_| Error::InvalidStoredValue("policy provenance serialization failed"))?
+            .unwrap_or_default();
         let cache_key = ReadPolicyAuthorizationRequestCacheKey {
             policy_schema_version,
+            policy_provenance_digest: *blake3::hash(&provenance_bytes).as_bytes(),
             table_name: table_name.to_owned(),
             identity,
             param_binding_mode: param_binding_mode.cache_key(),
@@ -1180,20 +1277,6 @@ where
         {
             return Ok(request.clone());
         }
-        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if policy_schema_version == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue(
-                    "policy schema version is unknown",
-                ))?
-                .schema
-        };
         let table = policy_schema
             .tables
             .iter()
@@ -1241,7 +1324,17 @@ where
             &mut policy_binding_values,
             &binding_claim_params,
         )?;
-        let policy_shape = query.validate(policy_schema)?;
+        let policy_shape = if identity == AuthorSubject::SYSTEM {
+            query.validate(policy_schema)?
+        } else {
+            validate_policy_query(
+                &query,
+                policy_schema,
+                None,
+                table_name,
+                crate::schema::PolicySlot::SelectUsing,
+            )?
+        };
         coerce_binding_values_for_shape(&policy_shape, &mut policy_binding_values);
         let policy_binding = policy_shape.bind(policy_binding_values.clone())?;
         let policy_shape = bind_query_params_with_mode(
@@ -1478,16 +1571,29 @@ where
         let options = RegisterShapeOptions::default();
         let subscriptions = policies
             .iter()
-            .map(|policy| {
+            .map(|(slot, policy)| {
+                let provenance = policy_schema
+                    .policy_provenance
+                    .get(&(table_name.to_owned(), *slot))
+                    .cloned();
                 compile_permission_scope_policy(
                     policy.clone(),
+                    provenance,
                     claims,
                     &claim_values,
                     policy_schema,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let policy_bytes = postcard::to_allocvec(&(operation, &policies))
+        let policy_provenance = policies
+            .iter()
+            .map(|(slot, _)| {
+                policy_schema
+                    .policy_provenance
+                    .get(&(table_name.to_owned(), *slot))
+            })
+            .collect::<Vec<_>>();
+        let policy_bytes = postcard::to_allocvec(&(operation, &policies, policy_provenance))
             .map_err(|_| Error::InvalidStoredValue("authorization policy serialization failed"))?;
         let claim_bytes = postcard::to_allocvec(&claim_values)
             .map_err(|_| Error::InvalidStoredValue("authorization claims serialization failed"))?;
@@ -1574,22 +1680,37 @@ mod authorization_scope_compiler_tests {
         let table = table();
         assert_eq!(
             authorization_policy_queries(&table, AuthorizationScopeOperation::Read),
-            vec![authorization_query_from_read_policy(&table)]
+            vec![(
+                crate::schema::PolicySlot::SelectUsing,
+                authorization_query_from_read_policy(&table)
+            )]
         );
         assert_eq!(
             authorization_policy_queries(&table, AuthorizationScopeOperation::Insert),
-            vec![JazzQuery::from("insert_support")]
+            vec![(
+                crate::schema::PolicySlot::InsertWithCheck,
+                JazzQuery::from("insert_support")
+            )]
         );
         assert_eq!(
             authorization_policy_queries(&table, AuthorizationScopeOperation::Update),
             vec![
-                JazzQuery::from("old_support"),
-                JazzQuery::from("new_support")
+                (
+                    crate::schema::PolicySlot::UpdateUsing,
+                    JazzQuery::from("old_support")
+                ),
+                (
+                    crate::schema::PolicySlot::UpdateWithCheck,
+                    JazzQuery::from("new_support")
+                )
             ]
         );
         assert_eq!(
             authorization_policy_queries(&table, AuthorizationScopeOperation::Delete),
-            vec![JazzQuery::from("delete_support")]
+            vec![(
+                crate::schema::PolicySlot::DeleteUsing,
+                JazzQuery::from("delete_support")
+            )]
         );
     }
 
