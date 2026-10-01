@@ -354,16 +354,6 @@ mod views;
 #[doc(hidden)]
 pub use open_tx::StagedTransactionCell;
 pub use open_tx::{TransactionBranchRowState, TransactionInsertTargetState};
-#[doc(hidden)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum InitializationTransactionStatus {
-    NotObserved,
-    Incomplete,
-    Complete {
-        fate: Fate,
-        durability: DurabilityTier,
-    },
-}
 pub use query_engine::{
     CurrentRowBindingRole, CurrentRowPublicationField, CurrentRowResultVisibility,
 };

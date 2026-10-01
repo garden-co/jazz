@@ -2286,6 +2286,7 @@ enum LocalReplayFrame {
 async fn plan_local_replay_commit_units<S>(
     node: &mut NodeState<S>,
     roots: &BTreeSet<TxId>,
+    pending_transaction_ids: &BTreeSet<TxId>,
     retained_replay_units: &BTreeMap<TxId, SyncMessage>,
 ) -> Result<
     (
@@ -2428,8 +2429,13 @@ where
     let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
     let mut roots = pending_set.clone();
     roots.extend(retained_replay_roots);
-    let (statuses, blocked_units, replay_units) =
-        plan_local_replay_commit_units(&mut node_state, &roots, &retained_replay_units).await?;
+    let (statuses, blocked_units, replay_units) = plan_local_replay_commit_units(
+        &mut node_state,
+        &roots,
+        &pending_set,
+        &retained_replay_units,
+    )
+    .await?;
     drop(node_state);
 
     let mut outbox_units = outbox
