@@ -299,7 +299,14 @@ function bootstrapFixture() {
   );
   fs.writeFileSync(
     path.join(pkg, "svc.sh"),
-    `#!/bin/sh\nprintf 'svc:%s\\nsvc-cwd:%s\\n' "$*" "$PWD" >> "$TRACE"\n[ "\${FAIL_SERVICE:-}" != "\${1:-}" ]\n`,
+    `#!/bin/sh
+printf 'svc:%s\\nsvc-cwd:%s\\n' "$*" "$PWD" >> "$TRACE"
+if [ "\${1:-}" = stop ] && [ "\${TAMPER_RUSTUP_ON_STOP:-}" = 1 ]; then
+  printf '#!/bin/sh\\nprintf executed > "%s"\\n' "$TOOLCHAIN_EXECUTED_MARKER" > "$BOOTSTRAP_TEST_ROOT/home/$RUNNER_USER/.cargo/bin/rustup"
+  chmod 0755 "$BOOTSTRAP_TEST_ROOT/home/$RUNNER_USER/.cargo/bin/rustup"
+fi
+[ "\${FAIL_SERVICE:-}" != "\${1:-}" ]
+`,
     { mode: 0o755 },
   );
   fs.writeFileSync(path.join(pkg, "bin", "Runner.Listener"), "pinned runner fixture");
@@ -726,6 +733,46 @@ test("bootstrap entry reuses complete pinned state offline without changing its 
     assert.doesNotMatch(events, /^(curl|apt-get):/m);
     assert.match(events, /^svc:start$/m);
     assert.equal(fs.readFileSync(manifestPath, "utf8"), manifestBefore);
+  } finally {
+    fixture.cleanup();
+  }
+});
+test("bootstrap stops the runner and rechecks tool manifests before execution", () => {
+  const fixture = bootstrapFixture();
+  try {
+    const marker = path.join(fixture.root, "rustup-executed-after-stop");
+    const result = fixture.invoke(
+      { TAMPER_RUSTUP_ON_STOP: "1", TOOLCHAIN_EXECUTED_MARKER: marker },
+      fixture.recordAllowlist(),
+    );
+    assert.notEqual(result.status, 0, "post-stop toolchain tampering must fail closed");
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.match(events, /^svc:stop$/m, "an existing runner is quiesced before tool checks");
+    assert.equal(
+      fs.existsSync(marker),
+      false,
+      "modified Rustup is not executed after service stop",
+    );
+    assert.doesNotMatch(events, /^runuser:.*\/\.cargo\/bin\/rustup/m);
+    assert.doesNotMatch(
+      events,
+      /^svc:start$/m,
+      "failed post-stop verification keeps service stopped",
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap fails closed when the existing runner service cannot stop", () => {
+  const fixture = bootstrapFixture();
+  try {
+    const result = fixture.invoke({ FAIL_SERVICE: "stop" });
+    assert.notEqual(result.status, 0, "service stop failure aborts bootstrap");
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.match(events, /^svc:stop$/m);
+    assert.doesNotMatch(events, /^runuser:.*\/\.cargo\/bin\/rustup/m);
+    assert.doesNotMatch(events, /^svc:start$/m);
   } finally {
     fixture.cleanup();
   }
