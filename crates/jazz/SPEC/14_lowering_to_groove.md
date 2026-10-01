@@ -219,6 +219,11 @@ shapes named `jazz-query:<shape_id>`, are cached by
 cache key because the same semantic shape can be prepared with different
 claim- or caller-supplied binding columns after policy augmentation.
 
+Every prepared Binding `ValueSource` MUST use the final descriptor source name,
+after policy-specific claim removal and source-authority namespacing. System
+plans carry no policy claims; authenticated session scopes remain isolated, and
+client-local and trusted-serving plans do not share their binding source.
+
 Prepared CurrentRows materialization projects canonical current-row fields plus
 the required named `__jazz_deleted` lifecycle marker. The application terminal
 projection is not a substitute for this internal carrier: it may omit the

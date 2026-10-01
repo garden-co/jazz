@@ -1692,16 +1692,7 @@ where
                 &binding_claim_params,
             )?;
         }
-        // Prepared binding-source names are runtime identities. Claim values
-        // normally route independent bindings through one shape, but equal
-        // author identities may hold distinct authenticated sessions. Give
-        // their claim scopes separate source identities so a later session
-        // cannot replace an already-maintained sibling binding.
-        let source_shape = source_shape.map(|source_shape| {
-            self.active_session_claim_scope_key(identity)
-                .map(|scope| format!("{source_shape}:session:{scope}"))
-                .unwrap_or(source_shape)
-        });
+
         let root_has_read_policy = self
             .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .read_policy
