@@ -257,16 +257,34 @@ so a write made after observing a value is stamped at least as high as that
 value and wins the tie by its later seq. The row's identity alone is not enough
 for this: it is the write at the row's seq, not necessarily its newest stamp.
 
-A node that settled its own write locally (merging it when its fate arrived,
-possibly over a base that misses seqs it has not received) replaces that
-provisional image with the authority's post-image at the same seq when it
-arrives; only a newer seq keeps a stored row.
+**Only Core derives post-images.** A `FateUpdate` carries the fate and seq,
+not Core's post-image; Core's post-image reaches other nodes in view updates
+for the rows they subscribe to. An originator that receives the accepted fate
+of its own write may settle it locally by merging it over the image it holds
+(possibly a base that misses seqs it has not received), but that image is
+only a prediction of Core's, and it replaces it with the authority's
+post-image at the same seq when that arrives; only a newer seq keeps a stored
+row. The originator never re-derives what Core has settled, and makes no
+prediction (keeping its stored image, and failing nothing) when
+
+- it already holds Core's image at a later seq: Core applies writes in seq
+  order, so that image already counts the write, and merging it again would
+  apply its merge ops twice and move the row back to an older seq;
+- the prediction cannot be made over its stale image: a merge column's
+  settled value cannot be carried across schema versions (below), or a
+  counter op leaves its type's range over the stale value. Core accepted the
+  write over its own image, so this is the local image's staleness, not a
+  reason to fail the fate (which would wedge fate ingest).
+
+In both cases the write shows locally once Core's post-image for the row
+arrives. Only Core, which mints seqs in order and refuses such writes before
+minting one, treats either case as an error.
 
 **Apply rule.** A write sets a plain column (or `_deletion`) it authored iff
 its stamp is `>=` the column's stored stamp, and then stores its stamp for that
-column. On a tie the later seq wins: a write applied in seq order wins ties
-against the stored row, while a node that applies an older seq after a newer
-one (a late fate) lets the stored row keep ties. The rule is a per-column max
+column. On a tie the later seq wins: writes apply in seq order, so the incoming
+write wins ties against the stored row (a late fate below the stored row's
+seq is not merged at all, above). The rule is a per-column max
 with a seq tie-break, so replaying the same accepted writes in seq order yields
 the same post-image and stamps on every node. The first
 image of a row stamps the columns its write authored and stores `0` for the
@@ -290,8 +308,17 @@ that no lens op renames or copies into, takes the lens default, since no op
 can have touched it under that layout. For any other mapping (a renamed or
 copied merge column, or one whose type or strategy changed) Core rejects the
 write with the same not-supported-yet `MalformedCommit` reason rather than
-guess. A merge column the winning write's schema does not have at all is not
-carried into its image, like a plain column of that kind.
+guess. Core also refuses, with the same reason, a cross-layout write whose
+schema would not carry a merge column of the current image: one the write's
+table lacks, or has under another type or strategy, or that the lens path
+renames, copies, adds or drops. Its image would replace the row without that
+column, and the next write under the image's schema would rebuild it from the
+lens default, silently losing every op Core had accepted on it (v2 adds a
+counter `likes`; a v1 write over a v2 image with `likes = 5` would leave a
+later v2 write reading `likes = 0`). The refusal holds whatever the stored
+value, including one equal to the lens default, and also when the write's own
+table has no merge column at all. It applies on every path that mints a seq:
+a foreign commit unit and Core's own mergeable or exclusive commit.
 The pending local overlay is not stamped and always wins locally.
 
 **Durable layout.** Stamps are stored as hidden constant-width groove `U48`

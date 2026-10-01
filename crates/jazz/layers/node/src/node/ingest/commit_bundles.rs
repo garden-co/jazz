@@ -195,12 +195,16 @@ where
         let global_time = self
             .clock
             .allocate_global_time(tx_id.time.physical_ms())?;
-        self.apply_fate_update(
+        // This node mints the seq, so it derives the row's post-image.
+        self.minting_global_time = true;
+        let applied = self.apply_fate_update(
             tx_id,
             Fate::Accepted,
             Some(global_time),
             Some(DurabilityTier::Global),
-        ).await?;
+        ).await;
+        self.minting_global_time = false;
+        applied?;
         // Core merged the writes into each row's post-image per column;
         // nothing further is minted.
         Ok(PublicationOutcome::settled(()))
@@ -259,12 +263,16 @@ where
         let global_time = self
             .clock
             .allocate_global_time(tx_id.time.physical_ms())?;
-        self.apply_fate_update(
+        // This node mints the seq, so it derives the row's post-image.
+        self.minting_global_time = true;
+        let applied = self.apply_fate_update(
             tx_id,
             Fate::Accepted,
             Some(global_time),
             Some(DurabilityTier::Global),
-        ).await?;
+        ).await;
+        self.minting_global_time = false;
+        applied?;
         Ok(PublicationOutcome::settled(Fate::Accepted))
     }
 

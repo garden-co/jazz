@@ -1294,3 +1294,283 @@ fn counter_write_wider_than_half_the_type_applies_its_exact_delta_at_core() {
         BTreeMap::from([(target, counter_cells(i32::MIN + 5, "alice"))])
     );
 }
+
+/// `posts` under v1 (`title`, `notes`) or v2 (`title`, `notes` and a
+/// `likes` counter), as the `counters` table.
+fn likes_schema(with_likes: bool) -> JazzSchema {
+    let mut columns = vec![
+        PublicColumnDescriptor::new("title", PublicColumnType::Text),
+        PublicColumnDescriptor::new("notes", PublicColumnType::Text),
+    ];
+    if with_likes {
+        columns.push(
+            PublicColumnDescriptor::new("likes", PublicColumnType::Integer)
+                .merge_strategy(PublicColumnMergeStrategy::Counter),
+        );
+    }
+    let source = [(
+        PublicTableName::new("counters"),
+        PublicTableSchema::new(PublicRowDescriptor::new(columns)),
+    )]
+    .into_iter()
+    .collect::<PublicSchema>();
+    compile_public_test_schema(&source)
+}
+
+/// A Core on v1 with v2 (adds the `likes` counter, lens default 0)
+/// published, and bob on v2, whose +5 on `likes` Core has accepted: the
+/// row's image is stored under v2 with likes=5.
+fn core_with_accepted_likes(
+    target: RowUuid,
+) -> (
+    tempfile::TempDir,
+    NodeState,
+    tempfile::TempDir,
+    NodeState,
+) {
+    let (core_dir, mut core) = core_with_descendant_schema(
+        likes_schema(false),
+        likes_schema(true),
+        vec![LensOp::AddColumn {
+            column: "likes".to_owned(),
+            default: Value::I32(0),
+        }],
+    );
+    let (bob_dir, mut bob) = open_node_with_schema(node(2), likes_schema(true));
+    commit_mergeable_global(
+        &mut bob,
+        &mut core,
+        MergeableCommit::new("counters", target, 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("t")),
+            ("notes".to_owned(), v("")),
+            ("likes".to_owned(), Value::I32(5)),
+        ])),
+    );
+    (core_dir, core, bob_dir, bob)
+}
+
+/// Core's row as a v2 reader sees it.
+fn likes_row_at_core(core: &mut NodeState, target: RowUuid) -> BTreeMap<String, Value> {
+    core.current_rows_for_schema(
+        "counters",
+        likes_schema(true).version_id(),
+        DurabilityTier::Global,
+    )
+    .resolve()
+    .unwrap()
+    .into_iter()
+    .map(current_row_pair)
+    .find(|(row_uuid, _)| *row_uuid == target)
+    .expect("Core holds the row")
+    .1
+}
+
+fn assert_refused_across_schemas(fate: &Fate) {
+    let Fate::Rejected(RejectionReason::MalformedCommit(reason)) = fate else {
+        panic!("Core must refuse the older-schema write, got {fate:?}");
+    };
+    assert!(reason.contains("not supported yet (#3899)"), "{reason}");
+}
+
+/// After the refusal, bob's next v2 write (notes only) leaves his accepted
+/// +5 in place.
+fn assert_bob_keeps_likes(core: &mut NodeState, bob: &mut NodeState, target: RowUuid) {
+    let (_bob_tx, bob_unit) = bob
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 40)
+                .cells(BTreeMap::from([("notes".to_owned(), v("bob"))]))
+                .authored_columns(BTreeSet::from(["notes".to_owned()])),
+        )
+        .unwrap();
+    let fate = core_fate(core, bob_unit);
+    assert_accepted(&fate);
+    bob.apply_sync_message_settled(fate).unwrap();
+    let row = likes_row_at_core(core, target);
+    assert_eq!(row.get("likes"), Some(&Value::I32(5)), "{row:?}");
+    assert_eq!(row.get("title"), Some(&v("t")), "{row:?}");
+    assert_eq!(row.get("notes"), Some(&v("bob")), "{row:?}");
+}
+
+/// INV-HIST-10: a write under an older schema that lacks a merge column the
+/// row's current image holds would win the row whole and drop the column;
+/// the next newer-schema write would then take the lens default (0) and
+/// silently lose bob's accepted +5. Core refuses the older write instead.
+///
+/// ```text
+/// bob   (v2) ──likes=5───────► core   image v2, likes=5
+/// alice (v1) ──title="alice"─► core ──✗ Rejected("… not supported yet (#3899)")
+/// bob   (v2) ──notes="bob"───► core   likes=5
+/// ```
+#[test]
+fn older_schema_write_without_a_merge_column_is_refused_for_a_foreign_unit() {
+    let target = row(0x78);
+    let (_core_dir, mut core, _bob_dir, mut bob) = core_with_accepted_likes(target);
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), likes_schema(false));
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 20)
+                .cells(BTreeMap::from([("title".to_owned(), v("alice"))]))
+                .authored_columns(BTreeSet::from(["title".to_owned()])),
+        )
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = core_fate(&mut core, alice_unit) else {
+        unreachable!()
+    };
+    assert_refused_across_schemas(&fate);
+    assert_bob_keeps_likes(&mut core, &mut bob, target);
+}
+
+/// The same refusal when Core itself writes under the older schema and
+/// self-finalizes the mergeable commit.
+#[test]
+fn older_schema_write_without_a_merge_column_is_refused_for_a_local_mergeable_commit() {
+    let target = row(0x79);
+    let (_core_dir, mut core, _bob_dir, mut bob) = core_with_accepted_likes(target);
+    let tx_id = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("counters", target, 20)
+                .cells(BTreeMap::from([("title".to_owned(), v("core"))]))
+                .authored_columns(BTreeSet::from(["title".to_owned()])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
+    let fate = core.query_transaction(tx_id).resolve().unwrap().unwrap().fate;
+    assert_refused_across_schemas(&fate);
+    assert_bob_keeps_likes(&mut core, &mut bob, target);
+}
+
+/// The same refusal for Core's own exclusive commit under the older schema.
+#[test]
+fn older_schema_write_without_a_merge_column_is_refused_for_a_local_exclusive_commit() {
+    let target = row(0x7a);
+    let (_core_dir, mut core, _bob_dir, mut bob) = core_with_accepted_likes(target);
+    let open = OpenTransactionId::new();
+    core.open_exclusive(open).unwrap();
+    core.tx_write(
+        open,
+        "counters",
+        target,
+        BTreeMap::from([("title".to_owned(), v("core"))]),
+        None,
+    )
+    .unwrap();
+    let (_, unit) = core
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 20)
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("an exclusive commit yields a commit unit");
+    };
+    let outcome =
+        crate::local_executor::block_on(core.finalize_local_exclusive_commit(tx, versions))
+            .unwrap();
+    let fate = crate::local_executor::block_on(core.persist_and_settle_outcome(outcome)).unwrap();
+    assert_refused_across_schemas(&fate);
+    assert_bob_keeps_likes(&mut core, &mut bob, target);
+}
+
+/// An originator settles its own accepted write when the fate arrives by
+/// merging it over the image it holds, which may miss seqs it has not
+/// received. Core accepted alice's +(MAX-2) over -5, but alice's image is
+/// still at count 5, where the op would leave `i32`'s range. That local
+/// merge is only a prediction of Core's post-image: alice must not fail the
+/// fate over it. She keeps Core's settled image and takes Core's post-image
+/// at her seq when it arrives.
+///
+/// ```text
+/// w     ──count=0──► core (seq 1)        alice sees 0
+/// alice ──count=MAX-2 (op +MAX-2), held
+/// w     ──count=5──► core (seq 2)        alice sees 5
+/// w     ──count=-5─► core (seq 3)        alice does not see it
+/// alice's unit ────► core (seq 4)        count=MAX-7, Accepted
+/// ```
+#[test]
+fn originator_accepted_fate_over_a_stale_image_out_of_range_does_not_fail() {
+    let schema = counter_schema();
+    let (_w_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(2), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let target = row(0x7b);
+    let count = |count: i32, ms: u64| {
+        MergeableCommit::new("counters", target, ms)
+            .cells(BTreeMap::from([("count".to_owned(), Value::I32(count))]))
+            .authored_columns(BTreeSet::from(["count".to_owned()]))
+    };
+
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("counters", target, 10).cells(counter_cells(0, "base")),
+    );
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit_settled(count(i32::MAX - 2, 15))
+        .unwrap();
+    commit_mergeable_global(&mut writer, &mut core, count(5, 20));
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+    commit_mergeable_global(&mut writer, &mut core, count(-5, 30));
+
+    let fate = core_fate(&mut core, alice_unit);
+    assert_accepted(&fate);
+    alice
+        .apply_sync_message_settled(fate)
+        .expect("an originator must not fail its accepted fate over a stale local image");
+
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+    assert_eq!(
+        rows_at(&mut alice, "counters", DurabilityTier::Global)[&target].get("count"),
+        Some(&Value::I32(i32::MAX - 7))
+    );
+}
+
+/// An originator whose fate arrives after it already holds a newer Core
+/// image of the row must not apply its op again: Core applies writes in seq
+/// order, so its image at a later seq already counts alice's +5.
+///
+/// ```text
+/// w     ──count=0──► core (seq 1)        alice sees 0
+/// alice ──count=5 (op +5)──► core (seq 2)  count=5, fate held
+/// w     ──count=1 (op +1)──► core (seq 3)  count=6, alice sees it
+/// alice applies her fate (seq 2): count stays 6
+/// ```
+#[test]
+fn originator_late_accepted_fate_does_not_count_its_op_twice() {
+    let schema = counter_schema();
+    let (_w_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(2), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let target = row(0x7c);
+
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("counters", target, 10).cells(counter_cells(0, "base")),
+    );
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 15)
+                .cells(BTreeMap::from([("count".to_owned(), Value::I32(5))]))
+                .authored_columns(BTreeSet::from(["count".to_owned()])),
+        )
+        .unwrap();
+    let fate = core_fate(&mut core, alice_unit);
+    assert_accepted(&fate);
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("counters", target, 20)
+            .cells(BTreeMap::from([("count".to_owned(), Value::I32(1))]))
+            .authored_columns(BTreeSet::from(["count".to_owned()])),
+    );
+    assert_eq!(
+        rows_at(&mut core, "counters", DurabilityTier::Global)[&target].get("count"),
+        Some(&Value::I32(6))
+    );
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+
+    alice.apply_sync_message_settled(fate).unwrap();
+    assert_eq!(
+        rows_at(&mut alice, "counters", DurabilityTier::Global)[&target].get("count"),
+        Some(&Value::I32(6))
+    );
+}

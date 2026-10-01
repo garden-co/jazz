@@ -369,6 +369,7 @@ where
                             &stored,
                             tx.tx_id,
                             global_time,
+                            true,
                         )
                         .await?
                     {

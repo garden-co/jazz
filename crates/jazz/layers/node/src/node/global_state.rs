@@ -258,7 +258,9 @@ where
     }
 
     /// Apply this accepted transaction's writes to global current, merging
-    /// each into the row's post-image per column.
+    /// each into the row's post-image per column. Only a node that minted
+    /// `global_time` derives the post-image; any other node predicts it at
+    /// most (`merged_global_post_image`).
     pub(super) async fn global_current_updates_for_versions(
         &mut self,
         batch: &DatabaseBatch,
@@ -282,6 +284,7 @@ where
                     version,
                     tx_id,
                     global_time,
+                    self.minting_global_time,
                 )
                 .await?
             {
