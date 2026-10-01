@@ -76,17 +76,57 @@ jobs:
           tool: cargo-zigbuild@0.20.1
 
       - name: Build CLI binary
-        run: cargo zigbuild -p jazz-cli --bin jazz-tools --features otel --release --target ${{ matrix.target }}
+        run: cargo zigbuild -p jazz-cli --bin jazz-tools --features otel --profile release-server --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
+          mkdir -p dist debug-symbols
+          # The release-server profile keeps line tables for Jazz's crates.
+          # npm ships the binary without them; the unstripped copy (same GNU
+          # build ID) is kept as a separate artifact for offline symbolization
+          # of heap and CPU profiles.
+          cp target/${{ matrix.target }}/release-server/jazz-tools debug-symbols/${{ matrix.output }}
+          zig objcopy --strip-debug debug-symbols/${{ matrix.output }} dist/${{ matrix.output }}
+          ls -l debug-symbols/${{ matrix.output }} dist/${{ matrix.output }}
+
+      - name: Check heap profiling in the shipped binary
+        if: matrix.arch == 'x64'
+        run: |
+          set -euo pipefail
+          # Sample every allocation so startup allocations are always present.
+          JAZZ_HEAP_PROFILE_SAMPLE_BYTES=1 ./dist/${{ matrix.output }} server 00000000-0000-0000-0000-000000000001 \
+            --in-memory --port 1625 --admin-secret heap-check \
+            --diagnostics-listen 127.0.0.1:6060 --diagnostics-token heap-scrape \
+            > server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; cat server.log' EXIT
+          for _ in $(seq 1 50); do
+            curl --silent --fail http://127.0.0.1:1625/health > /dev/null && break
+            sleep 0.2
+          done
+          curl --silent --show-error --fail --output public.pb.gz \
+            --header 'X-Jazz-Admin-Secret: heap-check' \
+            http://127.0.0.1:1625/debug/pprof/heap
+          curl --silent --show-error --fail --output diagnostics.pb.gz \
+            --header 'Authorization: Bearer heap-scrape' \
+            http://127.0.0.1:6060/debug/pprof/heap
+          for profile in public.pb.gz diagnostics.pb.gz; do
+            # Function names come from the stripped binary's symbol table.
+            gzip --decompress --stdout "$profile" > profile.pb
+            grep --quiet --text 'jazz_server' profile.pb
+          done
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.output }}
           path: dist/${{ matrix.output }}
+          if-no-files-found: error
+
+      # Named outside the `jazz-tools-*` pattern the package job downloads.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: debug-symbols-${{ matrix.output }}
+          path: debug-symbols/${{ matrix.output }}
           if-no-files-found: error
 
   build-macos:

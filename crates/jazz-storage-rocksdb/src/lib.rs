@@ -12,7 +12,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle, DBCompressionType,
@@ -40,6 +40,10 @@ impl<T> RocksResultExt<T> for Result<T, rocksdb::Error> {
         })
     }
 }
+
+mod memory;
+
+pub use memory::{RocksDbMemoryUsage, process_memory_usage};
 
 const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 // Keep desktop reopen recovery debt bounded by allowing RocksDB to flush
@@ -91,7 +95,12 @@ pub struct RocksDbStorage {
     /// its epoch manifest, so a column-family reopen must present it again.
     codec_profile: StorageCodecProfile,
     column_families: BTreeSet<String>,
-    db: DB,
+    /// Reports this store's memory to [`process_memory_usage`] while open.
+    /// Declared before `db` so that it drops first: once it has left the
+    /// registry, `db` holds the only reference and the database closes with
+    /// the store.
+    _memory_registration: memory::Registration,
+    db: Arc<DB>,
     write_options: WriteOptions,
     mutation_gate: Mutex<()>,
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
@@ -372,6 +381,7 @@ impl RocksDbStorage {
             );
             db.write_opt(&batch, &write_options).storage()?;
         }
+        let db = Arc::new(db);
         Ok(Self {
             path,
             durability,
@@ -380,6 +390,7 @@ impl RocksDbStorage {
                 .into_iter()
                 .filter(|name| name != ROCKSDB_INTERNAL_CF)
                 .collect(),
+            _memory_registration: memory::Registration::new(&db, &block_cache),
             db,
             write_options,
             mutation_gate: Mutex::new(()),

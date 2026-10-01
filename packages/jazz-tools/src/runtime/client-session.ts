@@ -2,6 +2,7 @@ import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { PublicSession, Session } from "./context.js";
 import { attachPublicSessionClaims, isUsableSubject, withCanonicalUser } from "./author-id.js";
+import { getTrustedReservedSession } from "./db-internal-session.js";
 
 export interface ClientSessionInput {
   /** @internal Assignment supplied by a validated account handle. */
@@ -296,20 +297,23 @@ export function resolveJwtSession(jwtToken: string): PublicSession | null {
  * Resolves the JWT bearer token to a session, or returns no session.
  */
 export function resolveClientSessionStateSync(config: ClientSessionInput): ClientSessionState {
+  // Configs carry the trusted session in a side table so it never becomes
+  // public configuration; inline inputs are accepted for transport payloads.
+  const trustedReservedSession = config.trustedReservedSession ?? getTrustedReservedSession(config);
   if (
     config.jwtToken &&
-    config.trustedReservedSession &&
+    trustedReservedSession &&
     isTrustedReservedSession(
-      config.trustedReservedSession,
-      trustedReservedSessionToken(config.trustedReservedSession),
+      trustedReservedSession,
+      trustedReservedSessionToken(trustedReservedSession),
     )
   ) {
     const internalSession = config.accountId
       ? markTrustedReservedSession({
-          ...config.trustedReservedSession,
+          ...trustedReservedSession,
           account_id: config.accountId,
         })
-      : config.trustedReservedSession;
+      : trustedReservedSession;
     return {
       transport: "bearer",
       session: withCanonicalUser(internalSession),
