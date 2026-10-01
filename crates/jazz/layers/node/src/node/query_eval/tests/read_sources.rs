@@ -164,6 +164,8 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
         bounded_deletion_register: None,
         count_access_path_metrics: true,
         current_projection_targets: BTreeMap::new(),
+        policy_subplan: false,
+        transaction_overlay: TransactionWriteOverlay::default(),
     };
 
     assert!(resolver.needs_projected_current_source("users"));

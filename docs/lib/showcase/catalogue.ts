@@ -17,7 +17,10 @@ export type HeroMetric = {
 };
 
 export type HeroVideo = {
-  /** Written by `pnpm --filter docs capture:example-videos`. */
+  /**
+   * An H.264 MP4 under docs/public, at most MAX_BYTES (scripts/example-videos/encode.mjs).
+   * Written by `pnpm --filter docs capture:example-videos` or encoded from a walkthrough recording.
+   */
   src: string;
   poster: string;
   caption: string;
@@ -32,6 +35,12 @@ export type HeroExample = {
   highlights: string[];
   /** Repository-relative source directories. */
   sources: { label: string; path: string }[];
+  /**
+   * Repository-relative directory of the example's benchmark suite. Every
+   * benchmark whose metadata source lies under it is listed with the example
+   * (the metric cards first, then the rest in a table).
+   */
+  benchmarks?: string;
   video: HeroVideo | null;
   /** What the placeholder should promise until a capture exists. */
   plannedVideo?: string;
@@ -40,104 +49,22 @@ export type HeroExample = {
   plannedMetrics?: string;
 };
 
-// Interpretations get the /5 estimate, so every time and rate they print
-// carries the page's "*" marker. Ratios need none: the divisor cancels out.
-const t = (seconds: number) => `${formatTime(seconds)}*`;
+// Interpretations are given the /5 estimate like every displayed time.
+// Ratios need none: the divisor cancels out.
+const t = (seconds: number) => formatTime(seconds);
 const rate = (count: number, seconds: number) =>
-  `${Math.round(count / seconds).toLocaleString("en-US")}*`;
+  Math.round(count / seconds).toLocaleString("en-US");
 const each = (count: number, seconds: number) => t(seconds / count);
 // A 60 Hz frame. Only used to phrase a result that is already below it.
 const frame = 1 / 60;
 
 export const heroExamples: HeroExample[] = [
   {
-    id: "todo",
-    title: "Todos",
-    tagline: "Local-first basics: instant writes, live queries, shared across devices.",
-    description:
-      "A React todo list with anonymous local-first identity and IndexedDB persistence. Every write lands locally first and syncs in the background; every device subscribed to the list sees it immediately. Row-level permissions let anyone read every todo, while only its owner may change or delete it.",
-    highlights: [
-      "Two devices add todos and see each other's changes live",
-      "Checking off your own todo syncs instantly",
-      "Trying to change someone else's todo is refused by the permission policy",
-      "Live filters are just queries: typing narrows the list as you type",
-    ],
-    sources: [
-      { label: "React app", path: "examples/todo-client-localfirst-react" },
-      { label: "Benchmarks", path: "examples/todo-client-localfirst-ts/benchmarks" },
-    ],
-    video: {
-      src: "/examples/videos/todo-two-devices.mp4",
-      poster: "/examples/videos/todo-two-devices.jpg",
-      caption:
-        "Two independent browser profiles (separate storage and identities) syncing through a local Jazz server. Recorded automatically with Playwright from the example app.",
-    },
-    metrics: [
-      {
-        benchmark: "sequential_insert_1350_rocksdb",
-        label: "Add a todo",
-        per: { count: 1350, unit: "insert" },
-        interpret: (s) =>
-          `Each insert is its own durable transaction, persisted and delivered back to the live list${s / 1350 < frame ? " well inside one 60 fps frame" : ""}. Averaged over 1,350 inserts in a row (${t(s)} total).`,
-      },
-      {
-        benchmark: "sequential_update_1350_rocksdb",
-        label: "Check off a todo",
-        per: { count: 1350, unit: "update" },
-        interpret: (s) =>
-          `Each check-off is its own transaction, persisted and delivered back to the live list. Averaged over 1,350 updates in a row (${t(s)} total).`,
-      },
-      {
-        benchmark: "batch_update_1350_rocksdb",
-        label: "Bulk edit 1,350 todos",
-        interpret: (s) =>
-          `Changing 1,350 rows in one transaction takes ${t(s)}, about ${rate(1350, s)} rows per second.`,
-      },
-      {
-        benchmark: "reopen_1500_rocksdb",
-        label: "Reopen with 1,500 todos",
-        interpret: (s) =>
-          `Opening the app again and showing all 1,500 stored todos takes ${t(s)}, including the fixed cost of opening storage.`,
-      },
-    ],
-  },
-  {
-    id: "chat",
-    title: "Chat",
-    tagline: "Rooms, invites, reactions and shared drawing canvases, synced live.",
-    description:
-      "A React chat app with public rooms and private chats joined by invite code, emoji reactions and collaborative drawing canvases attached to a chat. Every message, reaction and stroke is a local write that Jazz replicates in the background; row-level policies in the schema decide who can read and change what, so components carry no auth logic.",
-    highlights: [
-      "Messages and reactions appear on every member's screen as they're sent",
-      "Join a private chat with its invite code",
-      "Draw together on a canvas attached to the chat",
-    ],
-    sources: [{ label: "React app", path: "examples/chat-react" }],
-    video: null,
-    plannedVideo:
-      "Walkthrough capture is planned: two people chatting, reacting and drawing together.",
-    metrics: [
-      {
-        benchmark: "chat_open_chat[10000]",
-        label: "Open a chat",
-        interpret: (s) =>
-          `A member opens a private chat and sees its newest 21 messages, with their senders, in ${t(s)}, with 10,000 messages in the app. Today this grows with the chat's whole history, not just the page.`,
-      },
-      {
-        benchmark: "chat_send_100[10000]",
-        label: "Send a message",
-        per: { count: 100, unit: "message" },
-        interpret: (s) =>
-          `Each message is checked against the chat's insert policy, accepted and shown at the top of the open chat before the next one is sent. Averaged over 100 messages (${t(s)} total).`,
-      },
-    ],
-  },
-  {
     id: "band-chat",
     title: "BandChat",
     tagline: "Private rooms with membership boundaries, attachments and fast resume.",
     description:
-      "A Next.js app with Better Auth sign-in, where a room's creator admits or removes members and only members can read or post. Messages carry inline attachments and are created local-first. Its benchmark covers the reads a chat does constantly: a room's timeline page, unread rooms by recent activity, one author's history, and resuming a caught-up client.",
+      "A Next.js app with Better Auth sign-in, where a room's creator admits or removes members and only members can read or post. Messages carry inline attachments and are created local-first. Its benchmarks cover what a chat does constantly: opening a private room through its membership policy, sending messages, scrolling back, unread rooms by recent activity, a new message while many rooms are open, and resuming a caught-up client.",
     highlights: [
       "Create a room and admit a bandmate",
       "Send a message with an inline attachment",
@@ -147,9 +74,27 @@ export const heroExamples: HeroExample[] = [
       { label: "Next.js app", path: "examples/band-chat/apps/nextjs-betterauth" },
       { label: "Benchmarks", path: "examples/band-chat/benchmarks" },
     ],
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: two bandmates in a private room.",
+    benchmarks: "examples/band-chat/benchmarks",
+    video: {
+      src: "/examples/videos/band-chat.mp4",
+      poster: "/examples/videos/band-chat.jpg",
+      caption:
+        "A guest asks to join a room, the creator admits them, history appears, and after removal the guest's offline send is rejected.",
+    },
     metrics: [
+      {
+        benchmark: "band_chat_open_room[10000]",
+        label: "Open a room",
+        interpret: (s) =>
+          `A member opens a private room and sees its newest 21 messages, with their senders, in ${t(s)}, with 10,000 messages in the app. Today this grows with the room's whole history, not just the page.`,
+      },
+      {
+        benchmark: "band_chat_send_100[10000]",
+        label: "Send a message",
+        per: { count: 100, unit: "message" },
+        interpret: (s) =>
+          `Each message is checked against the room's insert policy, accepted and shown at the top of the open room before the next one is sent. Averaged over 100 messages (${t(s)} total).`,
+      },
       {
         benchmark: "band_chat_timeline_second_page[4096]",
         label: "Scroll back in a room",
@@ -168,6 +113,98 @@ export const heroExamples: HeroExample[] = [
     ],
   },
   {
+    id: "stage-plan",
+    title: "StagePlan",
+    tagline: "A stage crew's task board: shows, departments, live lists and permissions.",
+    description:
+      "A crew prepares shows together: each show has a board of stage-prep tasks with discussion and an activity log, and every crew member's dashboard mounts dozens of live department lists at once. Every write lands locally first and syncs in the background. Crews only see their own shows, enforced by inherited row-level permissions, and tasks can be archived and restored.",
+    highlights: [
+      "Two crew members add and check off tasks and see each other's changes live",
+      "Moving a card to Done updates every open filtered view",
+      "A dashboard mounts dozens of live department lists at once",
+      "Another crew's shows are invisible, enforced by inherited permissions",
+    ],
+    sources: [
+      { label: "App", path: "examples/stage-plan" },
+      { label: "Benchmarks", path: "examples/stage-plan/benchmarks" },
+    ],
+    benchmarks: "examples/stage-plan/benchmarks",
+    video: {
+      src: "/examples/videos/stage-plan.mp4",
+      poster: "/examples/videos/stage-plan.jpg",
+      caption:
+        "A crew chief and a crew member in two browsers: the invite link, card moves on each other's board, and edits made with Sync off arriving once it's back on.",
+    },
+    metrics: [
+      {
+        benchmark: "stage_plan_add_task_1350",
+        label: "Add a task",
+        per: { count: 1350, unit: "task" },
+        interpret: (s) =>
+          `Each task is its own durable transaction, persisted and delivered back to the live list${s / 1350 < frame ? " well inside one 60 fps frame" : ""}. Averaged over 1,350 additions in a row (${t(s)} total).`,
+      },
+      {
+        benchmark: "stage_plan_open_board",
+        label: "Open a show's board",
+        interpret: (s) => `Filtering and ordering a show's tasks from 3,000 on disk takes ${t(s)}.`,
+      },
+      {
+        benchmark: "stage_plan_move_card_to_done",
+        label: "Move a card to Done",
+        interpret: (s) =>
+          `Changing a task's status so it leaves one live filtered view and enters another, until the view has the change, takes ${t(s)}.`,
+      },
+      {
+        benchmark: "stage_plan_crew_dashboard[(600, 60)]",
+        label: "Crew dashboard with 60 live lists",
+        interpret: (s) =>
+          `Opening one overview plus 60 permissioned department lists until all have settled takes ${t(s)}, about ${each(61, s)} per subscription.`,
+      },
+    ],
+  },
+  {
+    id: "band-book",
+    title: "BandBook",
+    tagline: "A Notion-style workspace with pages and issues, scoped by row-level policies.",
+    description:
+      "A band's shared notebook: members write pages, track issues, and belong to workspaces. A member may read their own pages plus those of every workspace they were admitted to. Its benchmarks load the newest 50 pages of a 100,000-page notebook under an explicit allow-all policy, an owner-only policy and the own-or-workspace policy, so the difference is the price of authorization.",
+    highlights: [
+      "Show my pages, newest first",
+      "Show my workspace's pages and issues",
+      "Keep the page list live as pages change",
+    ],
+    sources: [
+      { label: "App", path: "examples/band-book" },
+      { label: "Benchmarks", path: "examples/band-book/benchmarks" },
+    ],
+    benchmarks: "examples/band-book/benchmarks",
+    video: {
+      src: "/examples/videos/band-book.mp4",
+      poster: "/examples/videos/band-book.jpg",
+      caption:
+        'A bandmate shares one song with a "Can edit" link; the guest sees only that song and its subpage, and typing shows up in both copies live.',
+    },
+    metrics: [
+      {
+        benchmark: "band_book_workspace_pages[100000]",
+        label: "Workspace pages, with policy",
+        interpret: (s, lookup) => {
+          const free = lookup("band_book_workspace_pages_unrestricted[100000]");
+          const overhead = free
+            ? ` The same list under an allow-all policy takes ${t(free)}, so authorization adds ${Math.round((s / free - 1) * 100)}%.`
+            : "";
+          return `The newest 50 of a workspace's pages load in ${t(s)} from 100,000 pages.${overhead}`;
+        },
+      },
+      {
+        benchmark: "band_book_workspace_pages_live[100000]",
+        label: "Live workspace page list",
+        interpret: (s) =>
+          `Subscribing to the same permissioned list and receiving its first result takes ${t(s)}.`,
+      },
+    ],
+  },
+  {
     id: "world-tour",
     title: "World Tour",
     tagline: "Tour management on a live globe: dates, venues and a public calendar.",
@@ -178,9 +215,13 @@ export const heroExamples: HeroExample[] = [
       "Members see every date; the public calendar shows confirmed dates only",
     ],
     sources: [{ label: "Vue app and benchmarks", path: "examples/world-tour" }],
-    video: null,
-    plannedVideo:
-      "Walkthrough capture is planned: planning a tour stop and checking the public calendar.",
+    benchmarks: "examples/world-tour/benchmarks",
+    video: {
+      src: "/examples/videos/world-tour.mp4",
+      poster: "/examples/videos/world-tour.jpg",
+      caption:
+        "The tour manager sees all 12 stops while a fan with the public link sees only the confirmed ones; a stop the manager confirms appears on the fan's globe live.",
+    },
     metrics: [
       {
         benchmark: "world_tour_public_calendar_window[4096]",
@@ -205,8 +246,13 @@ export const heroExamples: HeroExample[] = [
       { label: "Next.js app", path: "examples/wequencer/apps/next-betterauth" },
       { label: "Benchmarks", path: "examples/wequencer/benchmarks" },
     ],
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: two bandmates editing one pattern.",
+    benchmarks: "examples/wequencer/benchmarks",
+    video: {
+      src: "/examples/videos/wequencer.mp4",
+      poster: "/examples/videos/wequencer.jpg",
+      caption:
+        "Two bandmates in one session: pattern edits, Play, tempo and mutes follow on both screens.",
+    },
     metrics: [
       {
         benchmark: "wequencer_open_pattern",
@@ -219,6 +265,12 @@ export const heroExamples: HeroExample[] = [
         label: "Toggle a pad",
         interpret: (s) =>
           `Flipping one pad on a live grid, until that track's subscription delivers the change, takes ${t(s)}. Syncing it to bandmates isn't included.`,
+      },
+      {
+        benchmark: "wequencer_open_pattern_views[100]",
+        label: "100 bandmates open their patterns",
+        interpret: (s) =>
+          `100 pattern views of the same query shape, each bound to a different pattern, open and hydrate in ${t(s)}, about ${each(100, s)} per view.`,
       },
     ],
   },
@@ -237,8 +289,13 @@ export const heroExamples: HeroExample[] = [
       { label: "Next.js app", path: "examples/poster-shop/apps/nextjs-betterauth" },
       { label: "Benchmarks", path: "examples/poster-shop/benchmarks" },
     ],
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: two editors designing one poster.",
+    benchmarks: "examples/poster-shop/benchmarks",
+    video: {
+      src: "/examples/videos/poster-shop.mp4",
+      poster: "/examples/videos/poster-shop.jpg",
+      caption:
+        "A second editor joins by invite link; her cursor and edits arrive live, then an image upload, a checkpoint and a reload with everything kept.",
+    },
     metrics: [
       {
         benchmark: "poster_shop_open_canvas[4096]",
@@ -275,6 +332,7 @@ export const heroExamples: HeroExample[] = [
       { label: "Next.js app", path: "examples/record-player/apps/next-betterauth" },
       { label: "Benchmarks", path: "examples/record-player/benchmarks" },
     ],
+    benchmarks: "examples/record-player/benchmarks",
     video: null,
     plannedVideo: "Walkthrough capture is planned: browsing albums and sharing a playlist.",
     metrics: [
@@ -285,16 +343,16 @@ export const heroExamples: HeroExample[] = [
           `Opening CoverFlow (a 20-album shelf plus the focused album's tracks) from a 4,096-track library takes ${t(s)}, without loading any audio.`,
       },
       {
-        benchmark: "record_player_open_playlist[4096]",
-        label: "Open a long playlist",
-        interpret: (s) =>
-          `Opening the visible 16 entries of a 4,096-track playlist, in playlist order, takes ${t(s)}.`,
-      },
-      {
         benchmark: "record_player_add_to_playlist[4096]",
         label: "Add a track",
         interpret: (s) =>
-          `Inserting a track into the visible part of that live playlist, until the window delivers it, takes ${t(s)}.`,
+          `Inserting a track into the visible part of a live 4,096-track playlist, until the window delivers it, takes ${t(s)}.`,
+      },
+      {
+        benchmark: "record_player_scrub_track_64mb",
+        label: "Scrub a track",
+        interpret: (s) =>
+          `Reading 64 KiB from the middle of a 64 MiB track, as the player does when you drag the playhead, takes ${t(s)}. Today this grows with the whole track's size.`,
       },
     ],
   },
@@ -309,14 +367,19 @@ export const heroExamples: HeroExample[] = [
       "Browse a folder without downloading its files",
     ],
     sources: [{ label: "App and benchmarks", path: "examples/epic-drop" }],
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: uploading and browsing files.",
+    benchmarks: "examples/epic-drop/benchmarks",
+    video: {
+      src: "/examples/videos/epic-drop.mp4",
+      poster: "/examples/videos/epic-drop.jpg",
+      caption:
+        'Uploads and previews in a shared folder; a second account joins by "Can edit" link, and uploads and renames sync both ways.',
+    },
     metrics: [
       {
-        benchmark: "epic_drop_upload_4mb",
-        label: "Upload a 4 MiB file",
+        benchmark: "epic_drop_upload_64mb",
+        label: "Upload a 64 MiB file",
         interpret: (s) =>
-          `Streaming a 4 MiB file into a folder until it is stored locally takes ${t(s)}, about ${rate(4, s)} MiB per second.`,
+          `Streaming a 64 MiB file into a folder until it is stored locally takes ${t(s)}, about ${rate(64, s)} MiB per second.`,
       },
       {
         benchmark: "epic_drop_folder_listing_100_files",
@@ -325,12 +388,34 @@ export const heroExamples: HeroExample[] = [
           `Listing a folder of 100 files by name, with each file's type and size, takes ${t(s)}. Today this still grows with the size of the files, not just their number.`,
       },
       {
-        benchmark: "epic_drop_seek_64mb",
-        label: "Seek in a large file",
+        benchmark: "epic_drop_download_4mb",
+        label: "Download a 4 MiB file",
         interpret: (s) =>
-          `Reading 64 KiB from the middle of a 64 MiB file, as a media player does when you scrub, takes ${t(s)}. Today this grows with the whole file's size.`,
+          `Reading a whole 4 MiB file back from storage takes ${t(s)}, about ${rate(4, s)} MiB per second.`,
       },
     ],
+  },
+  {
+    id: "jamazon",
+    title: "Jamazon",
+    tagline: "An instrument storefront: catalogue, search, cart and checkout.",
+    description:
+      "The shop front of the Jamazon instrument store: browse and search a large catalogue, keep a cart that follows you across devices, and check out against live stock. It shares its data with the Jamazon Warehouse operations console.",
+    highlights: [
+      "Browse and search the catalogue",
+      "A cart that follows you across devices",
+      "Check out against live stock levels",
+    ],
+    sources: [{ label: "App", path: "examples/jamazon" }],
+    video: {
+      src: "/examples/videos/jamazon.mp4",
+      poster: "/examples/videos/jamazon.jpg",
+      caption:
+        "A guest cart carried into a new account, a quantity change arriving from a second device, an offline edit, then checkout and the order's timeline updating live.",
+    },
+    metrics: [],
+    plannedMetrics:
+      "Storefront benchmarks (catalogue browsing and search, cart sync) will be added here once they measure an area no other example owns. Checkout is measured by Jamazon Warehouse.",
   },
   {
     id: "jamazon-warehouse",
@@ -343,6 +428,7 @@ export const heroExamples: HeroExample[] = [
       "Watch stock levels update live on the console",
     ],
     sources: [{ label: "App and benchmarks", path: "examples/jamazon-warehouse" }],
+    benchmarks: "examples/jamazon-warehouse/benchmarks",
     video: null,
     plannedVideo: "Walkthrough capture is planned: checkout and the live stock console.",
     metrics: [
@@ -375,6 +461,7 @@ export const heroExamples: HeroExample[] = [
       { label: "TypeScript app", path: "examples/music-agent/apps/ts-localfirst" },
       { label: "Benchmarks", path: "examples/music-agent/benchmarks" },
     ],
+    benchmarks: "examples/music-agent/benchmarks",
     video: null,
     plannedVideo: "Walkthrough capture is planned: one agent conversation with a tool call.",
     metrics: [
@@ -400,41 +487,6 @@ export const heroExamples: HeroExample[] = [
     ],
   },
   {
-    id: "task-board",
-    title: "Team task board",
-    tagline: "A permissioned project tracker with boards, task details, comments and activity.",
-    description:
-      "The W1 workload models a team project tracker: users, projects, 3,000 tasks, 12,000 comments and 9,000 activity rows, with team-inherited read permissions. Its benchmarks time the reads a real board UI makes, and a dashboard that opens one overview plus many independently mounted lists at once.",
-    highlights: [
-      "Open a project board and a task's detail view",
-      "A dashboard mounts dozens of live lists at once",
-      "Another team's tasks are invisible, enforced by inherited permissions",
-    ],
-    sources: [{ label: "Workload and benchmarks", path: "examples/benchmarks/w1" }],
-    video: null,
-    plannedVideo:
-      "A board UI for this workload does not exist yet. The walkthrough follows once it does.",
-    metrics: [
-      {
-        benchmark: "query_board_profile_s_rocksdb",
-        label: "Open a project board",
-        interpret: (s) =>
-          `Filtering and ordering a project's tasks from 3,000 on disk takes ${t(s)}.`,
-      },
-      {
-        benchmark: "query_task_detail_profile_s_rocksdb",
-        label: "Open a task",
-        interpret: (s) => `Loading a task's detail view (two queries) takes ${t(s)}.`,
-      },
-      {
-        benchmark: "subscription_fanout_memory[(600, 60)]",
-        label: "Dashboard with 60 live lists",
-        interpret: (s) =>
-          `Opening one overview plus 60 permissioned board lists until all have settled takes ${t(s)}, about ${each(61, s)} per subscription.`,
-      },
-    ],
-  },
-  {
     id: "big-label",
     title: "BigLabel",
     tagline: "A multi-tenant record-label SaaS: organizations, teams, roles, artists and releases.",
@@ -446,8 +498,13 @@ export const heroExamples: HeroExample[] = [
       "Import a catalogue of releases in bulk",
     ],
     sources: [{ label: "App and benchmarks", path: "examples/big-label" }],
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: sign-in, team setup and a bulk release import.",
+    benchmarks: "examples/big-label/benchmarks",
+    video: {
+      src: "/examples/videos/big-label.mp4",
+      poster: "/examples/videos/big-label.jpg",
+      caption:
+        "An admin adds a viewer by email; the label appears in the viewer's menu live, read-only, and a new artist shows up without a reload.",
+    },
     metrics: [
       {
         benchmark: "big_label_label_load[4096]",
@@ -456,82 +513,175 @@ export const heroExamples: HeroExample[] = [
           `A label page loads all 512 of its releases, newest first, in ${t(s)}, out of 4,096 releases across 8 labels.`,
       },
       {
-        benchmark: "ingest_walltime_10k",
-        label: "Import 10,000 releases",
+        benchmark: "big_label_releases_live_view_100k",
+        label: "Live view in a huge table",
         interpret: (s) =>
-          `Ten batches of 1,000 releases are inserted in ${t(s)}, about ${rate(10000, s)} rows per second.`,
+          `A label's live view of its newest 50 releases opens in ${t(s)} from a table holding 100,000 releases of every tenant, following the label index instead of scanning the table.`,
       },
       {
         benchmark: "ingest_walltime_100k",
         label: "Import 100,000 releases",
-        interpret: (s, lookup) => {
-          const small = lookup("ingest_walltime_10k");
-          const scaling = small
-            ? ` (${(s / small).toFixed(1)}× the 10k import for 10× the rows)`
-            : "";
-          return `A hundred batches of 1,000 take ${t(s)}${scaling}.`;
-        },
-      },
-    ],
-  },
-  {
-    id: "permissioned-resources",
-    title: "Permissioned resources",
-    tagline: "A deep-permission resource catalogue synced onto a fresh device.",
-    description:
-      "A synthetic catalogue with deeply inherited access rules, shaped like a real adopter's fixture. The benchmark brings a brand-new device from empty to a fully settled, permission-filtered view through a device-local persistence relay, with every row authorized by the server.",
-    highlights: [
-      "A fresh device signs in and syncs its visible slice",
-      "Access is inherited through parent resources",
-      "The view settles once every subscription is complete",
-    ],
-    sources: [{ label: "Workload and benchmarks", path: "examples/permissioned-resources" }],
-    video: null,
-    plannedVideo: "This example has no UI yet, so there is nothing to record.",
-    metrics: [
-      {
-        benchmark: "first_sync_local_relay_27518_rocksdb",
-        label: "First sync, 27,518 rows",
         interpret: (s) =>
-          `A new device goes from empty to a settled view of 27,518 authorized rows across 39 subscriptions in ${t(s)}, about ${rate(27518, s)} rows per second.`,
-      },
-    ],
-  },
-  {
-    id: "policy-documents",
-    title: "Policy-scoped documents",
-    tagline: "What row-level security costs: the same page of documents with and without a policy.",
-    description:
-      "100,000 documents owned by 100 people in 25 organizations. A user may read their own documents and those of organizations they were admitted to. The benchmarks load the first page of 50 documents with the policy and with an explicit allow-all policy, so the difference is the price of authorization.",
-    highlights: [
-      "Show my documents, newest first",
-      "Show my organization's documents",
-      "Keep the page live as documents change",
-    ],
-    sources: [{ label: "Workload and benchmarks", path: "examples/policy-scoped-documents" }],
-    video: null,
-    plannedVideo: "This example has no UI yet, so there is nothing to record.",
-    metrics: [
-      {
-        benchmark: "owner_or_org_policy_org_page50[100000]",
-        label: "Organization page, with policy",
-        interpret: (s, lookup) => {
-          const free = lookup("policy_free_org_page50[100000]");
-          const overhead = free
-            ? ` The same page without a policy takes ${t(free)}, so authorization adds ${Math.round((s / free - 1) * 100)}%.`
-            : "";
-          return `The first 50 of an organization's documents load in ${t(s)}.${overhead}`;
-        },
-      },
-      {
-        benchmark: "subscribe_owner_or_org_policy_org_page50[100000]",
-        label: "Live organization page",
-        interpret: (s) =>
-          `Subscribing to the same permissioned page and receiving its first result takes ${t(s)}.`,
+          `A hundred batches of 1,000 releases are inserted in ${t(s)}, about ${rate(100000, s)} rows per second.`,
       },
     ],
   },
 ];
+
+/** "More benchmarks": the areas no hero example owns. */
+export type BenchmarkSection = {
+  id: string;
+  title: string;
+  description: string;
+  /** Repository-relative directories whose metadata sources belong here. */
+  sources: string[];
+  /**
+   * Benchmarks without metadata (the engine benches) listed here, by CodSpeed
+   * benchmark id: one bench name repeats once per scenario module, so a name
+   * alone does not identify a row.
+   */
+  benchmarks?: readonly EngineBenchmark[];
+};
+
+/** One engine row: a CodSpeed benchmark id and the scenario that tells it apart. */
+export type EngineBenchmark = {
+  /** CodSpeed's benchmark id, stable for the URI below. */
+  id: string;
+  /** CodSpeed name, shared by every scenario of the same bench. */
+  name: string;
+  scenario: string;
+  /** CodSpeed URI: `crates/groove/benches/<bench>.rs::<scenario module>::<name>`. */
+  uri: string;
+};
+
+const scenarioLabels: Record<string, string> = {
+  author_posts: "Author posts",
+  feed: "Feed",
+  feed_top20: "Top-20 feed",
+  tasks: "Tasks",
+};
+
+function engineBenchmark(id: string, bench: string, module: string, name: string): EngineBenchmark {
+  return {
+    id,
+    name,
+    scenario: scenarioLabels[module],
+    uri: `crates/groove/benches/${bench}.rs::${module}::${name}`,
+  };
+}
+
+/**
+ * The Groove cases CodSpeed measures on every merge, and only those: the IVM
+ * engines at the measured size. Smaller sizes and the reference engines run
+ * in the nightly CodSpeed run (`GROOVE_BENCH_SWEEP=1`); they are not listed,
+ * so a size that stops being measured is not shown with a frozen number.
+ */
+export const engineBenchmarks: readonly EngineBenchmark[] = [
+  engineBenchmark(
+    "6ab494d0ad9a6239bfdd8982",
+    "pull_vs_snapshot",
+    "author_posts",
+    "prepared_warm[5000]",
+  ),
+  engineBenchmark("6ab494d0ad9a6239bfdd8992", "pull_vs_snapshot", "feed", "prepared_warm[5000]"),
+  engineBenchmark(
+    "6ab494d0ad9a6239bfdd898a",
+    "pull_vs_snapshot",
+    "feed_top20",
+    "prepared_warm[5000]",
+  ),
+  engineBenchmark(
+    "6ab494d0ad9a6239bfdd8980",
+    "pull_vs_snapshot",
+    "author_posts",
+    "prepared_cold[5000]",
+  ),
+  engineBenchmark("6ab494d0ad9a6239bfdd8990", "pull_vs_snapshot", "feed", "prepared_cold[5000]"),
+  engineBenchmark(
+    "6ab494d0ad9a6239bfdd8988",
+    "pull_vs_snapshot",
+    "feed_top20",
+    "prepared_cold[5000]",
+  ),
+  engineBenchmark("6ab4a076ad9a6239bfddd0c7", "steady_state", "feed", "ivm[100]"),
+  engineBenchmark("6ab4a076ad9a6239bfddd0bd", "steady_state", "feed_top20", "ivm[100]"),
+  engineBenchmark("6ab4a076ad9a6239bfddd0d1", "steady_state", "tasks", "ivm[100]"),
+];
+
+export const moreBenchmarkSections: BenchmarkSection[] = [
+  {
+    id: "adopter-workloads",
+    title: "Anonymized adopter workloads",
+    description:
+      "Synthetic fixtures shaped like real adopters' schemas and data, with invented names and values. Permissioned resources brings a brand-new device from empty to a fully settled, permission-filtered view of a deep-permission resource catalogue through a device-local persistence relay, with every row authorized by the server.",
+    sources: ["examples/permissioned-resources/"],
+  },
+  {
+    id: "engine",
+    title: "Engine",
+    description:
+      "What no product owns: Groove's incremental view maintenance measured directly, for one-shot reads through prepared shapes (author posts, feed and top-20 feed) and for keeping 100 live subscriptions current as writes arrive (feed, top-20 feed and tasks). The reference engines they are compared against (SQLite re-query, hand-written pull plans, snapshot re-runs) and the smaller sizes run in the nightly CodSpeed run, not on every merge.",
+    sources: ["crates/"],
+    benchmarks: engineBenchmarks,
+  },
+];
+
+/**
+ * Where the examples page lists a benchmark with metadata: the id of the hero
+ * example whose suite holds its metadata source, the id of a "More benchmarks"
+ * section, or null for a result no current suite produces (a retired name
+ * still in the CodSpeed history). Engine rows have no metadata and are listed
+ * by id instead (`BenchmarkSection.benchmarks`).
+ */
+export function placeBenchmark(source: string | undefined): string | null {
+  if (!source) return null;
+  const hero = heroExamples.find(
+    (example) => example.benchmarks && source.startsWith(`${example.benchmarks}/`),
+  );
+  if (hero) return hero.id;
+  const section = moreBenchmarkSections.find((candidate) =>
+    candidate.sources.some((prefix) => source.startsWith(prefix)),
+  );
+  return section?.id ?? null;
+}
+
+/** A row of a benchmark table: a benchmark and, for engine rows, its scenario. */
+export type Placed<E> = E & { scenario?: string };
+
+/**
+ * Every current benchmark that is not a metric card, grouped by the hero
+ * example or "More benchmarks" section that lists it, sorted by name (then
+ * scenario). `byName` holds the newest result per name for benchmarks with
+ * metadata; engine rows come from `byId`, one per catalogued id. Retired
+ * names and unmeasured engine sizes are left out.
+ */
+export function groupBenchmarks<E extends { bench: { id: string; name: string } }>(
+  byName: ReadonlyMap<string, E>,
+  byId: ReadonlyMap<string, E>,
+  sourceOf: (name: string) => string | undefined,
+): Map<string, Placed<E>[]> {
+  const grouped = new Map<string, Placed<E>[]>();
+  const add = (place: string, entry: Placed<E>) =>
+    grouped.set(place, [...(grouped.get(place) ?? []), entry]);
+  for (const [name, entry] of byName) {
+    if (heroBenchmarkNames.has(name)) continue;
+    const place = placeBenchmark(sourceOf(name));
+    if (place) add(place, entry);
+  }
+  for (const section of moreBenchmarkSections) {
+    for (const row of section.benchmarks ?? []) {
+      const entry = byId.get(row.id);
+      if (entry) add(section.id, { ...entry, scenario: row.scenario });
+    }
+  }
+  for (const entries of grouped.values())
+    entries.sort(
+      (a, b) =>
+        a.bench.name.localeCompare(b.bench.name) ||
+        (a.scenario ?? "").localeCompare(b.scenario ?? ""),
+    );
+  return grouped;
+}
 
 export const heroBenchmarkNames = new Set(
   heroExamples.flatMap((example) => example.metrics.map((metric) => metric.benchmark)),

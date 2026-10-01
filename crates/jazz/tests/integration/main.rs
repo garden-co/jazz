@@ -49,6 +49,9 @@ mod deferred_local_persistence;
 mod dynamic_schema_views;
 #[path = "../error_code_strings.rs"]
 mod error_code_strings;
+#[cfg(feature = "runtime")]
+#[path = "../exclusive_snapshot_coverage.rs"]
+mod exclusive_snapshot_coverage;
 #[path = "../fate_regressions.rs"]
 mod fate_regressions;
 #[cfg(feature = "testing")]
@@ -62,6 +65,8 @@ mod large_value_append;
 mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]
 mod large_value_streaming_create;
+#[path = "../large_value_subscription_scaling.rs"]
+mod large_value_subscription_scaling;
 #[path = "../large_value_tx_update.rs"]
 mod large_value_tx_update;
 #[cfg(feature = "testing")]
@@ -93,6 +98,8 @@ mod structured_result_tree;
 #[cfg(feature = "testing")]
 #[path = "../threaded_client_relay.rs"]
 mod threaded_client_relay;
+#[path = "../uuid_page_probe.rs"]
+mod uuid_page_probe;
 #[path = "../warm_reopen_differential.rs"]
 mod warm_reopen_differential;
 #[path = "../wire_fixtures.rs"]

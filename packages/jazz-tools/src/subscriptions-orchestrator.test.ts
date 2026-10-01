@@ -31,6 +31,7 @@ type SubscribeCall = {
 
 type UnitHarness = {
   manager: SubscriptionsOrchestrator;
+  setSession: (session: Session | null) => void;
   makeEntry: () => {
     key: string;
     entry: CacheEntryHandle<Todo>;
@@ -78,6 +79,7 @@ function createUnitHarness(
   initialSession?: Session | null,
 ): UnitHarness {
   const calls: SubscribeCall[] = [];
+  let currentSession = initialSession;
   const all = vi.fn(async () => []);
   let throwOnSubscribe: Error | null = null;
   let nextReadiness: Promise<void> | null = null;
@@ -89,7 +91,6 @@ function createUnitHarness(
       query: QueryBuilder<T>,
       callbacks: DbDeltaSubscriptionCallbacks<T>,
       options?: QueryOptions,
-      session?: Session,
     ): SubscriptionHandle;
   } = {
     all,
@@ -97,7 +98,6 @@ function createUnitHarness(
       query: QueryBuilder<T>,
       callbacks: DbDeltaSubscriptionCallbacks<T>,
       options?: QueryOptions,
-      session?: Session,
     ): SubscriptionHandle {
       if (throwOnSubscribe) {
         throw throwOnSubscribe;
@@ -112,7 +112,7 @@ function createUnitHarness(
         onError: callbacks.onError,
         query: query as QueryBuilder<any>,
         options,
-        session,
+        session: currentSession ?? undefined,
         unsubscribe,
       });
       if (errorOnSubscribe) {
@@ -126,6 +126,11 @@ function createUnitHarness(
 
   return {
     manager,
+    setSession(session) {
+      // The source updates its identity before notifying subscription observers.
+      currentSession = session;
+      manager.setSession(session);
+    },
     makeEntry() {
       const key = manager.makeQueryKey(makeQuery());
       const entry = manager.getCacheEntry<Todo>(key);
@@ -981,7 +986,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(harness.calls).toHaveLength(1);
       expect(harness.calls[0]?.session).toEqual(initialSession);
 
-      harness.manager.setSession(nextSession);
+      harness.setSession(nextSession);
 
       expect(harness.calls).toHaveLength(2);
       expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledTimes(1);
@@ -1005,7 +1010,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
 
       expect(harness.calls).toHaveLength(1);
 
-      harness.manager.setSession({
+      harness.setSession({
         user_id: "alice",
         claims: { role: "reader" },
         issuer: "https://issuer.example",
@@ -1123,7 +1128,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(entry.status).toBe("fulfilled");
       onfulfilled.mockClear();
 
-      harness.manager.setSession(sessionB);
+      harness.setSession(sessionB);
 
       expect(entry.status).toBe("pending");
       expect(onReset).toHaveBeenCalledTimes(1);

@@ -1,7 +1,7 @@
 import type { BenchmarkMetadata } from "../../../dev/benchmarks/metadata/types.ts";
 
-export const bigLabelBenchmarks: BenchmarkMetadata[] = [10000, 100000].map((count) => ({
-  name: `ingest_walltime_${count === 10000 ? "10k" : "100k"}`,
+export const bigLabelBenchmarks: BenchmarkMetadata[] = [100000].map((count) => ({
+  name: "ingest_walltime_100k",
   title: `BigLabel import · ${count.toLocaleString("en-US")} releases`,
   description:
     "Construct and insert record-label release rows in transactions of 1,000 rows, referencing pre-seeded labels and artists.",
@@ -18,12 +18,8 @@ export const bigLabelBenchmarks: BenchmarkMetadata[] = [10000, 100000].map((coun
 }));
 
 const loads = "examples/big-label/benchmarks/benches/loads.rs";
-for (const [kind, noun, share] of [
-  ["label", "label", 8],
-  ["artist", "artist", 32],
-  ["catalog", "catalogue", 4],
-] as const) {
-  for (const releases of [512, 4096]) {
+for (const [kind, noun, share] of [["label", "label", 8]] as const) {
+  for (const releases of [4096]) {
     bigLabelBenchmarks.push({
       name: `big_label_${kind}_load[${releases}]`,
       title: `BigLabel · open a ${noun}'s releases`,
@@ -41,7 +37,7 @@ for (const [kind, noun, share] of [
     });
   }
 }
-for (const batch of [1, 10, 100, 1000]) {
+for (const batch of [1, 100, 1000]) {
   bigLabelBenchmarks.push({
     name: `big_label_ingest_batch_amortization[${batch}]`,
     title: `BigLabel import · 1,000 releases in batches of ${batch.toLocaleString("en-US")}`,
@@ -55,6 +51,51 @@ for (const batch of [1, 10, 100, 1000]) {
       count: 1000,
       unit: "rows inserted/s",
       explanation: `1,000 release rows per import, in ${(1000 / batch).toLocaleString("en-US")} transactions.`,
+    },
+    source: loads,
+  });
+}
+bigLabelBenchmarks.push({
+  name: "big_label_releases_live_view_100k",
+  title: "BigLabel · open a label's live release view",
+  description:
+    "Open one maintained subscription on a label's newest 50 published releases and consume its initial result, from a persisted table holding every tenant's releases. Hydration must follow the label index: logical read counters are asserted outside timing.",
+  fixture:
+    "100,000 releases in one table: 100 belong to the viewed label, the rest to other tenants. Reopened from RocksDB after seeding; LIMIT 50.",
+  storage: "RocksDB, reopened after seeding",
+  includes: [
+    "Subscription creation and initial result consumption",
+    "Row digest and logical read-counter collection",
+  ],
+  excludes: [
+    "Seeding, reopening and query preparation",
+    "Validation pass and deferred subscription retirement",
+  ],
+  work: {
+    count: 1,
+    unit: "hydrations/s",
+    explanation:
+      "One initial live-view hydration per iteration. The 100k table size is NOT the processed-row count.",
+  },
+  source: loads,
+});
+for (const desks of [4, 6]) {
+  const branches = 2 ** desks;
+  bigLabelBenchmarks.push({
+    name: `big_label_sign_off_first_edit[${desks}]`,
+    title: `BigLabel · first release-plan edit under a ${branches}-branch sign-off policy`,
+    description: `Compile and hydrate the update authorization-support view a fresh authority needs for a session's first release-plan edit. The update policy requires a lead or a deputy grant on each of ${desks} sign-off desks (correlated exists checks), so it normalizes to ${branches} branches of ${desks} joins each.`,
+    fixture: `One release-plan table and ${desks * 2} empty grant tables; a fresh in-memory node per sample.`,
+    storage: "In-memory Jazz node",
+    includes: [
+      "Update authorization-support scope compilation",
+      "Hydration of every support subscription",
+    ],
+    excludes: ["Schema compilation and node opening", "Grant rows (tables are empty)"],
+    work: {
+      count: 1,
+      unit: "first edits/s",
+      explanation: `One support scope (${branches} policy branches) compiled and hydrated per iteration.`,
     },
     source: loads,
   });

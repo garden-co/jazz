@@ -24,7 +24,7 @@ where
             .await
     }
 
-    async fn lock_for_transaction_operation(
+    pub(super) async fn lock_for_transaction_operation(
         &self,
         open_tx_id: OpenTransactionId,
     ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
@@ -52,10 +52,32 @@ where
         }
     }
 
-    async fn transaction_is_exclusive(&self, id: OpenTransactionId) -> Result<bool, Error> {
+    pub(super) async fn transaction_is_exclusive(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<bool, Error> {
         self.lock_for_transaction_operation(id)
             .await?
             .transaction_is_exclusive(id)
+            .map_err(Into::into)
+    }
+
+    /// The queries an exclusive read of `prepared` in `id` hydrates for the
+    /// sources it reads beyond its root: each source's narrowed read. Fails
+    /// when a source has none.
+    pub(super) async fn exclusive_source_hydration_queries(
+        &self,
+        id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+    ) -> Result<Vec<Query>, Error> {
+        self.lock_for_transaction_operation(id)
+            .await?
+            .exclusive_source_hydration_queries(
+                prepared.shape(),
+                prepared.binding(),
+                include_deleted,
+            )
             .map_err(Into::into)
     }
 
@@ -797,12 +819,14 @@ where
     /// Abandon an owned open transaction handle.
     pub fn abandon_transaction_handle(&self, open_tx_id: OpenTransactionId) -> Result<(), Error> {
         self.node.mark_transaction_abandoned(open_tx_id);
-        let result = self
-            .node
-            .node
-            .borrow_mut()
-            .abandon_tx(open_tx_id)
-            .map_err(Into::into);
+        let mut node = self.node.node.borrow_mut();
+        let result = node.abandon_tx(open_tx_id).map_err(Into::into);
+        // Eviction is async: the next tick releases this transaction's
+        // staged large-value roots.
+        if node.has_released_large_values() {
+            self.node.schedule_tick(TickUrgency::Immediate);
+        }
+        drop(node);
         self.node.clear_transaction_abandonment(open_tx_id);
         result
     }
@@ -813,13 +837,14 @@ where
     pub fn enqueue_abandon_transaction_handle(&self, open_tx_id: OpenTransactionId) {
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_cleanup(Box::pin(async move {
-            let mut node = db.node.node.lock().await;
-            let result = match node.abandon_tx(open_tx_id) {
-                Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
-                Err(error) => Err(error.into()),
-            };
+            let abandoned = db.node.node.lock().await.abandon_tx(open_tx_id);
             db.node.retire_queued_transaction_error(open_tx_id);
-            result
+            match abandoned {
+                Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+            db.node.evict_released_large_values().await;
+            Ok(())
         }));
     }
 
@@ -999,6 +1024,37 @@ where
                         .update(&table, row, patch, options)
                         .await
                 }
+            }),
+        )
+    }
+
+    /// Queue typed partial large-value descriptors (the `applyDiffs` DSL)
+    /// behind earlier operations of an open transaction. See
+    /// [`Self::stage_transaction_large_value_update`].
+    #[doc(hidden)]
+    pub fn enqueue_transaction_large_value_update(
+        &self,
+        id: OpenTransactionId,
+        table: String,
+        row: RowUuid,
+        patch: RowCells,
+        mutations: Vec<LargeValueUpdate>,
+        updated_at_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(updated_at_ms)?;
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                db.stage_transaction_large_value_update(
+                    id,
+                    &table,
+                    row,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
+                .await
             }),
         )
     }
@@ -1434,10 +1490,31 @@ where
         operation: &str,
         allow_absent: bool,
     ) -> Result<Option<RowCells>, Error> {
+        // Exclusive transactions are the only callers that may skip the kind
+        // check: the subject lookup rejects a mergeable id.
+        self.lock_for_transaction_operation(tx_id)
+            .await?
+            .exclusive_transaction_permission_subject(tx_id)?;
+        self.transaction_target_for_write(tx_id, table, row, operation, allow_absent)
+            .await
+    }
+
+    /// Read the storage-form row a transaction write builds on, as the
+    /// transaction sees it (its snapshot plus its own staged writes), after
+    /// proving the transaction's permission subject may read it. The read is
+    /// recorded like any other transaction point read.
+    pub(super) async fn transaction_target_for_write(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        operation: &str,
+        allow_absent: bool,
+    ) -> Result<Option<RowCells>, Error> {
         let identity = self
             .lock_for_transaction_operation(tx_id)
             .await?
-            .exclusive_transaction_permission_subject(tx_id)?;
+            .transaction_permission_subject(tx_id)?;
         let read_policy = self.table_schema(table)?.read_policy.clone();
         // This authoritative point read distinguishes a hidden target from a
         // genuinely absent one and records the exact snapshot/absence read for

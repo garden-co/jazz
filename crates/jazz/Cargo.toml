@@ -82,7 +82,6 @@ hex = "0.4"
 rand = "0.8"
 rustc-hash.workspace = true
 serde_bytes = "0.11"
-jsonschema = { version = "0.42", default-features = false }
 internment = "0.8"
 smallvec = { version = "1.11", features = ["serde"] }
 stacker = "0.1"
@@ -162,6 +161,11 @@ harness = false
 
 [[bench]]
 name = "selective_global_hydration"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
+name = "exclusive_join_narrowing"
 harness = false
 required-features = ["testing"]
 

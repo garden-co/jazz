@@ -69,6 +69,7 @@ vi.mock("jazz-tools/react", () => ({
   }) => <div data-jazz-account={client.account.id}>{children}</div>,
   useDb: () => ({ insert: vi.fn() }),
   useAll: () => ({ data: [] }),
+  useSession: () => ({ user: { account: "00000000-0000-4000-8000-000000000001" } }),
 }));
 
 import { RecordPlayerClient } from "../../app/record-player-client";
@@ -131,7 +132,7 @@ describe("RecordPlayer Better Auth bridge", () => {
         null,
       "expected the authenticated Jazz provider to mount",
     );
-    expect(container.querySelector("button")?.textContent).toBe("Create playlist");
+    expect(container.querySelector("[data-testid='record-player']")).not.toBeNull();
   });
 
   it("keeps Jazz and its query surface unmounted until Better Auth supplies a token", async () => {
@@ -167,7 +168,7 @@ describe("RecordPlayer Better Auth bridge", () => {
         null,
       "expected Jazz to mount after token acquisition",
     );
-    expect(container.querySelector("button")?.textContent).toBe("Create playlist");
+    expect(container.querySelector("[data-testid='record-player']")).not.toBeNull();
   });
 
   it("does not mount the Jazz query surface before Better Auth has a session", async () => {

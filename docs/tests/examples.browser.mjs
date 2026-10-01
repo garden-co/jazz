@@ -2,6 +2,21 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { chromium } from "playwright";
+import { formatTime } from "../lib/perf-timeline/model.ts";
+import { heroExamples, moreBenchmarkSections } from "../lib/showcase/catalogue.ts";
+
+// Follow the catalogue rather than hardcoding one example: the first hero and
+// its first per-operation metric card, and two engine rows under "More
+// benchmarks" that share a name but not a scenario.
+const hero = heroExamples.find((example) => example.metrics.some((metric) => metric.per));
+const metric = hero.metrics.find((candidate) => candidate.per);
+const perCount = metric.per.count;
+const estimate = (seconds) => formatTime(seconds / 5);
+const perOperation = (seconds) => estimate(seconds / perCount);
+const engine = moreBenchmarkSections.find((section) => section.benchmarks);
+const [engineA, engineB] = engine.benchmarks.filter(
+  (row, _, rows) => rows.filter((other) => other.name === row.name).length > 1,
+);
 
 // Exercise the built examples page against a deterministic /api/timeline
 // fixture. No token or live CodSpeed/GitHub access is needed.
@@ -62,7 +77,7 @@ try {
     benchmarks: [
       {
         id: "insert",
-        name: "sequential_insert_1350_rocksdb",
+        name: metric.benchmark,
         points: [
           point("released", 1, 4, { includedInRelease: "v2.0.0-alpha.1" }),
           point("released", 2, 2, { release: "v2.0.0-alpha.2" }),
@@ -70,7 +85,12 @@ try {
           point("open", 4, 0.001),
         ],
       },
-      { id: "other", name: "other_benchmark", points: [point("main", 2, 0.5)] },
+      { id: engineA.id, name: engineA.name, points: [point("main", 2, 0.5)] },
+      { id: engineB.id, name: engineB.name, points: [point("main", 2, 0.75)] },
+      // A size CodSpeed no longer measures on every merge is not listed.
+      { id: "retired-size", name: "prepared_cold[500]", points: [point("main", 2, 0.125)] },
+      // A retired name still in CodSpeed history is not listed.
+      { id: "retired", name: "retired_benchmark", points: [point("main", 2, 0.25)] },
     ],
   };
   let fail = false;
@@ -95,31 +115,47 @@ try {
   // The top nav lays out its links after hydration.
   await page.locator('a[href="/examples"]').first().waitFor({ state: "attached" });
 
-  // Newest released number, per insert, with the /5 estimate: 2 s / 5 / 1350.
-  const card = page.locator("#todo .metric-card").first();
-  await card.locator(".metric-headline").filter({ hasText: "0.296 ms*" }).waitFor();
-  assert.match(await card.innerText(), /per insert/);
+  // Newest released number, per operation, with the /5 estimate: 2 s / 5 / count.
+  const card = page.locator(`#${hero.id} .metric-card`).first();
+  await card
+    .locator(".metric-headline")
+    .filter({ hasText: perOperation(2) })
+    .waitFor();
+  assert.ok((await card.innerText()).includes(`per ${metric.per.unit}`));
   assert.match(await card.innerText(), /Released in v2\.0\.0-alpha\.2/);
   assert.match(await card.innerText(), /−50%/);
 
   // History card: one row per release plus the unreleased main number.
-  const tooltip = page.getByRole("dialog", { name: "History of Add a todo" });
+  const tooltip = page.getByRole("dialog", { name: `History of ${metric.label}` });
   assert.equal(await tooltip.isVisible(), false);
   await card.hover();
   await tooltip.waitFor({ state: "visible" });
   const history = await tooltip.innerText();
   assert.match(history, /v2\.0\.0-alpha\.1/);
-  assert.match(history, /0\.593 ms\*/);
+  assert.ok(history.includes(perOperation(4)));
   assert.match(history, /Unreleased main/);
-  assert.match(history, /Measured on the CodSpeed runner: 1\.48 ms/);
-  // Open-PR experiments never feed a card or its history (0.001 s / 5 / 1350).
-  assert.doesNotMatch(`${await card.innerText()} ${history}`, /0\.000148 ms/);
+  assert.ok(
+    history.includes(
+      `Measurement on the de-noised CodSpeed environment (about 5x slower than a normal CPU): ${formatTime(2 / perCount)}`,
+    ),
+  );
+  // Open-PR experiments never feed a card or its history.
+  assert.ok(!`${await card.innerText()} ${history}`.includes(formatTime(0.001 / 5 / perCount)));
 
-  // Every other benchmark is listed, attributed to main when unreleased.
-  const misc = await page.locator("#benchmarks").innerText();
-  assert.match(misc, /other_benchmark/);
-  assert.match(misc, /100 ms\*/);
-  assert.equal(await page.locator("#todo video").count(), 1);
+  // Engine results are listed under More benchmarks by id, one row per
+  // scenario, attributed to main when unreleased; retired names and sizes are
+  // not.
+  const more = await page.locator("#benchmarks").innerText();
+  const engineSection = await page.locator(`#${engine.id}`).innerText();
+  for (const [row, median] of [
+    [engineA, 0.5],
+    [engineB, 0.75],
+  ]) {
+    assert.ok(engineSection.includes(row.scenario), row.uri);
+    assert.ok(engineSection.includes(estimate(median)), row.uri);
+  }
+  assert.doesNotMatch(more, /retired_benchmark|prepared_cold\[500\]/);
+  assert.equal(await page.locator(`#${hero.id} video`).count(), hero.video ? 1 : 0);
 
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -134,7 +170,7 @@ try {
 
   assert.deepEqual(errors, []);
   console.log(
-    "Examples page receipt: redirect, released per-operation card, estimate, history popover, open-PR exclusion, misc list, mobile overflow and outage notice passed.",
+    "Examples page receipt: redirect, released per-operation card, estimate, history popover, open-PR exclusion, More benchmarks sections, mobile overflow and outage notice passed.",
   );
 } finally {
   await browser?.close();

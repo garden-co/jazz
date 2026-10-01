@@ -1027,6 +1027,166 @@ where
         self.finish_published_write(row, result?).await
     }
 
+    /// Stage typed partial large-value descriptors inside an open
+    /// transaction (#2087).
+    ///
+    /// Coordinates are relative to the value the transaction reads: its
+    /// snapshot overlaid with its own staged writes, so a splice sees earlier
+    /// splices and ordinary updates from the same transaction. The target is
+    /// read like any transaction point read, so an exclusive transaction also
+    /// conflicts if the row changes before commit.
+    ///
+    /// Each descriptor stages only the Groove nodes it touches, exactly as the
+    /// root-context update does, and the transaction keeps the staged root as
+    /// engine-private provenance until commit publishes it with the rest of
+    /// the transaction. Nothing becomes visible outside the transaction, and
+    /// the published row version is the same one-version-per-row write an
+    /// equivalent whole-value update would produce.
+    pub(super) async fn stage_transaction_large_value_update(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        mutations: Vec<LargeValueUpdate>,
+        updated_at_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        let exclusive = self.transaction_is_exclusive(tx_id).await?;
+        let target = self
+            .transaction_target_for_write(tx_id, table, row, "UPDATE", false)
+            .await?
+            .expect("a required transaction write target is present");
+        let mut authored = patch;
+        let mut staged = BTreeMap::<String, groove::large_values::StagedLargeValue>::new();
+        let result = async {
+            let mut touched = BTreeSet::new();
+            for mutation in mutations {
+                let column = match &mutation {
+                    LargeValueUpdate::Splice { column, .. }
+                    | LargeValueUpdate::JsonSet { column, .. } => column.clone(),
+                };
+                if !touched.insert(column.clone()) {
+                    return Err(Error::new(
+                        ErrorCode::Query,
+                        "a large-value field may have one descriptor per update",
+                    ));
+                }
+                if authored.contains_key(&column) {
+                    return Err(Error::new(
+                        ErrorCode::Query,
+                        "a large-value field cannot be both patched and partially updated",
+                    ));
+                }
+                let current = target.get(&column).cloned().ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Schema,
+                        format!("unknown column {table}.{column}"),
+                    )
+                })?;
+                let (column_kind, _) = self.large_value_column_kind(table, &column)?;
+                let (mut next, column_staged, obsolete) = match mutation {
+                    LargeValueUpdate::Splice {
+                        within, splices, ..
+                    } => {
+                        self.apply_large_value_splices(current, column_kind, &within, &splices)
+                            .await?
+                    }
+                    LargeValueUpdate::JsonSet { edits, .. } => {
+                        self.apply_large_value_json_set(current, column_kind, &edits)
+                            .await?
+                    }
+                };
+                self.evict_staged_large_values(obsolete).await;
+                // An inline result that outgrew the inline limit is lowered
+                // now rather than at commit, so a later splice in this
+                // transaction stays local to the chunks it touches.
+                let column_staged = match column_staged {
+                    Some(column_staged) => Some(column_staged),
+                    None => {
+                        let semantic_kind = self
+                            .table_schema(table)?
+                            .columns
+                            .iter()
+                            .find(|candidate| candidate.name == column)
+                            .map(|candidate| candidate.large_value_kind)
+                            .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge);
+                        self.node
+                            .lock_for_large_value_staging()
+                            .await?
+                            .prepare_and_stage_large_scalar(&mut next, semantic_kind)
+                            .await?
+                    }
+                };
+                if let Some(column_staged) = column_staged {
+                    staged.insert(column.clone(), column_staged);
+                } else if target.get(&column) == Some(&next) {
+                    // An empty splice list or an identical JSON value changes
+                    // nothing; leave the column unauthored.
+                    continue;
+                }
+                authored.insert(column, next);
+            }
+            if authored.is_empty() {
+                return Ok(());
+            }
+            if exclusive {
+                let mut cells = target.clone();
+                cells.extend(authored);
+                self.lock_for_transaction_operation(tx_id)
+                    .await?
+                    .tx_write_in_schema_with_staged_large_values(
+                        tx_id,
+                        self.schema_version_id,
+                        table,
+                        row,
+                        cells,
+                        None,
+                        Some(now_ms),
+                        staged.clone(),
+                    )
+                    .await?;
+            } else {
+                self.lock_for_transaction_operation(tx_id)
+                    .await?
+                    .tx_patch_mergeable_with_staged_large_values(
+                        tx_id,
+                        self.schema_version_id,
+                        table,
+                        row,
+                        authored,
+                        Some(now_ms),
+                        BranchSelector::default(),
+                        false,
+                        staged.clone(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            // The transaction never took ownership of these roots.
+            self.evict_staged_large_values(staged.into_values().map(|value| value.id))
+                .await;
+        }
+        result
+    }
+
+    async fn evict_staged_large_values(
+        &self,
+        ids: impl IntoIterator<Item = groove::large_values::StagedLargeValueId>,
+    ) {
+        // Settle earlier local publications first: while one is resident,
+        // Groove defers eviction and the root would wait for the staging TTL.
+        let Ok(node) = self.node.lock_for_large_value_staging().await else {
+            return;
+        };
+        for id in ids {
+            let _ = node.evict_staged_large_value(id).await;
+        }
+    }
+
     async fn apply_large_value_splices(
         &self,
         value: Value,
@@ -3474,15 +3634,15 @@ where
         Ok((content_parents, deletion_parents))
     }
 
-    /// Why a client-local UPDATE found no preimage. A row this replica never
-    /// received cannot be staged against, and saying so discloses nothing the
-    /// replica does not already hold. A resident row that the client query
-    /// still hides stays a read denial.
-    async fn client_update_target_missing(
-        &self,
-        table: &str,
-        row: RowUuid,
-    ) -> Result<Error, Error> {
+    /// Why an UPDATE found no preimage. A row this replica never received
+    /// cannot be staged against, and saying so discloses nothing the replica
+    /// does not already hold: its answer is the same whether or not the row
+    /// exists elsewhere. Local residency is already observable to the same
+    /// caller through explicit-id insert and upsert, so this adds no oracle.
+    /// A resident row that the caller's read query still hides stays a read
+    /// denial. This holds for client-local writes and for trusted-serving
+    /// session writes alike (#3661).
+    async fn update_target_missing(&self, table: &str, row: RowUuid) -> Result<Error, Error> {
         Ok(if self.local_current_row(table, row).await?.is_none() {
             update_target_not_loaded("UPDATE", table, row)
         } else {
@@ -3588,7 +3748,7 @@ where
             .local_row_for_client_identity(table, row, identity)
             .await?
         else {
-            return Err(self.client_update_target_missing(table, row).await?);
+            return Err(self.update_target_missing(table, row).await?);
         };
         let tx_id = self
             .node
@@ -3616,10 +3776,12 @@ where
         identity: AuthorSubject,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row).await?;
-        let existing = self
+        let Some(existing) = self
             .local_row_for_trusted_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
+        else {
+            return Err(self.update_target_missing(table, row).await?);
+        };
         let tx_id = self
             .node
             .node
@@ -3685,7 +3847,7 @@ where
             .local_row_for_client_identity(table, row, identity)
             .await?
         else {
-            return Err(self.client_update_target_missing(table, row).await?);
+            return Err(self.update_target_missing(table, row).await?);
         };
         let (mut cells, parent) = {
             let mut node = self.node.node.lock().await;
@@ -3710,7 +3872,7 @@ where
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
         self.ensure_row_not_deleted(table, row).await?;
         if self.authorize_read_for_identity(table, row, identity)? != PermissionAdvice::Allowed {
-            return Err(read_for_write_denied("UPDATE", table));
+            return Err(self.update_target_missing(table, row).await?);
         }
         let authored_columns = patch.keys().cloned().collect();
         // A complete replacement still requires read permission, proved by
@@ -3742,7 +3904,7 @@ where
             let (cells, parent) = node
                 .current_physical_cells_and_winner_in_schema(self.schema_version_id, table, row)
                 .await?
-                .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+                .ok_or_else(|| update_target_not_loaded("partial UPDATE", table, row))?;
             (cells, Some(parent))
         };
         cells.extend(patch);

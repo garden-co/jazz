@@ -489,6 +489,49 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
+  it("retries a first connection that fails before negotiation, as a client opened offline", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+        // The first attempt fails at the network layer before any server hello.
+        if (sockets.length === 1) queueMicrotask(() => this.emitServerClose());
+      }
+    } as unknown as typeof WebSocket;
+    const transports: FakeTransport[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              const transport = new FakeTransport([]);
+              transports.push(transport);
+              return transport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    await runtime.waitForUpstreamServerConnection();
+    expect(sockets[1]!.closed).toBe(false);
+    expect(transports.at(-1)!.closed).toBe(false);
+    expect(terminal).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+
   it("turns a pump failure during a parked read into a transport error, not an unhandled rejection", async () => {
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     const pumpFailure = new Error("core tick failed");
@@ -546,54 +589,63 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
-  it("reconnects after a negotiated Core reports its account registry temporarily unavailable", async () => {
-    const sockets: FakeWebSocket[] = [];
-    globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
-        sockets.push(this);
-      }
-    } as unknown as typeof WebSocket;
-    const transports: FakeTransport[] = [];
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            connectUpstream: () => {
-              const transport = new FakeTransport([]);
-              transports.push(transport);
-              return transport;
-            },
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-    const terminal = vi.fn();
-    runtime.onServerTransportError(terminal);
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await runtime.waitForUpstreamServerConnection();
-    const error = new PostcardWriter();
-    error.u64(2); // WireFrame::Error
-    error.u64(6); // NotReady
-    error.u64(3); // Later
-    error.string("account registry unavailable");
-    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([error.finish()]));
-    await vi.waitFor(() => expect(sockets).toHaveLength(2));
-    await runtime.waitForUpstreamServerConnection();
-    expect(sockets).toHaveLength(2);
-    expect(transports).toHaveLength(2);
-    expect(transports[0]!.closed).toBe(true);
-    expect(terminal).not.toHaveBeenCalled();
-    await runtime.close();
-  });
+  it.each([
+    { code: 6, name: "not_ready", message: "account registry unavailable" },
+    { code: 4, name: "backpressure", message: "wire frame queue backpressure" },
+  ])(
+    "reconnects after a negotiated Core ends the link with a retry-later $name error",
+    async ({ code, message }) => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+      } as unknown as typeof WebSocket;
+      const transports: FakeTransport[] = [];
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              connectUpstream: () => {
+                const transport = new FakeTransport([]);
+                transports.push(transport);
+                return transport;
+              },
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const error = new PostcardWriter();
+      error.u64(2); // WireFrame::Error
+      error.u64(code);
+      error.u64(3); // Later
+      error.string(message);
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([error.finish()]));
+      // The server closes the socket once the error frame has been delivered.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      sockets[0]!.emitServerClose();
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      await runtime.waitForUpstreamServerConnection();
+      expect(sockets).toHaveLength(2);
+      expect(transports).toHaveLength(2);
+      expect(transports[0]!.closed).toBe(true);
+      expect(terminal).not.toHaveBeenCalled();
+      await runtime.close();
+    },
+  );
 
   it.each(["disconnect", "close"] as const)(
     "cancels an established-network retry on %s",

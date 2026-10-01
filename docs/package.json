@@ -13,11 +13,11 @@
     "postinstall": "fumadocs-mdx",
     "test:perf-timeline": "node --experimental-strip-types --test lib/perf-timeline/*.test.ts lib/showcase/*.test.ts ../dev/benchmarks/metadata/metadata.test.ts",
     "capture:example-videos": "node scripts/example-videos/todo-two-devices.mjs",
-    "test:examples:e2e": "node tests/examples.browser.mjs"
+    "test:examples:e2e": "node --experimental-strip-types tests/examples.browser.mjs"
   },
   "dependencies": {
     "@astryxdesign/core": "0.6.3",
-    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
+    "@garden-co/design": "github:garden-co/design#874faa2af84e97fb77d41c6bf7da646e8e145ee0",
     "@vercel/analytics": "^2.0.1",
     "feed": "^5.2.1",
     "fumadocs-core": "16.6.2",

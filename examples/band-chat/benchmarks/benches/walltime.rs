@@ -1,6 +1,9 @@
 //! BandChat wall-clock suite, measured on CodSpeed's macro runner. Names are
 //! app-prefixed because the examples page matches results by exact name.
 
+use jazz_example_band_chat_benchmark::announcements::AnnouncementsFixture;
+use jazz_example_band_chat_benchmark::live_rooms::LiveRoomsFixture;
+use jazz_example_band_chat_benchmark::membership_room::{OpenFixture, SendFixture};
 use jazz_example_band_chat_benchmark::{FastResumeFixture, Fixture};
 
 #[global_allocator]
@@ -11,27 +14,23 @@ fn main() {
     divan::main();
 }
 
-#[divan::bench(args = [1024, 4096])]
+/// Scroll back in a busy room: the second 25-message page (offset read).
+#[divan::bench(args = [4096])]
 fn band_chat_timeline_second_page(bencher: divan::Bencher<'_, '_>, message_count: usize) {
     let fixture = Fixture::new(message_count);
     bencher.bench_local(|| divan::black_box(fixture.timeline_page_count()));
 }
 
-#[divan::bench(args = [1024, 4096])]
+/// A member's rooms with unread messages, most recently active first.
+#[divan::bench(args = [4096])]
 fn band_chat_unread_recent_rooms(bencher: divan::Bencher<'_, '_>, message_count: usize) {
     let fixture = Fixture::new(message_count);
     bencher.bench_local(|| divan::black_box(fixture.unread_room_count()));
 }
 
-#[divan::bench(args = [1024, 4096])]
-fn band_chat_author_history(bencher: divan::Bencher<'_, '_>, message_count: usize) {
-    let fixture = Fixture::new(message_count);
-    bencher.bench_local(|| divan::black_box(fixture.author_history_count()));
-}
-
 /// Measure the remaining manifest cost for thesis #2136. A fresh usage cannot
 /// infer its input closure from a cursor; known row bodies remain deduplicated.
-#[divan::bench(args = [100, 1_000, 10_000])]
+#[divan::bench(args = [100, 10_000])]
 fn band_chat_caught_up_fast_resume(bencher: divan::Bencher<'_, '_>, message_count: usize) {
     let mut fixture = FastResumeFixture::new(message_count);
     bencher.bench_local(|| {
@@ -42,4 +41,50 @@ fn band_chat_caught_up_fast_resume(bencher: divan::Bencher<'_, '_>, message_coun
         );
         divan::black_box(receipt)
     });
+}
+
+/// A member opens a private room: the newest 21 messages with their senders,
+/// through the membership read policy, until the first published result.
+#[divan::bench(args = [10_000], sample_count = 20, sample_size = 1)]
+fn band_chat_open_room(bencher: divan::Bencher<'_, '_>, messages: usize) {
+    bencher
+        .with_inputs(|| OpenFixture::new(messages))
+        .bench_local_refs(|fixture| fixture.open_chat());
+}
+
+/// A member sends 100 messages into an open room; each passes the membership
+/// and own-profile insert policy and reaches the open room's page.
+#[divan::bench(args = [10_000], sample_count = 20, sample_size = 1)]
+fn band_chat_send_100(bencher: divan::Bencher<'_, '_>, messages: usize) {
+    bencher
+        .with_inputs(|| SendFixture::new(messages))
+        .bench_local_refs(|fixture| fixture.send_messages(100));
+}
+
+const ROOMS_OPEN: usize = 100;
+
+/// One new message while 100 members each keep a different room open (one
+/// query shape, 100 bindings); only the busy room's view changes. Fixture
+/// setup and teardown are outside the timing (`skip_ext_time`).
+#[divan::bench(args = [ROOMS_OPEN], sample_count = 3, skip_ext_time)]
+fn band_chat_new_message_rooms_open(bencher: divan::Bencher<'_, '_>, rooms: usize) {
+    bencher
+        .with_inputs(|| LiveRoomsFixture::seeded(rooms).open_all())
+        .bench_local_values(|open| open.new_message());
+}
+
+/// Posts per iteration of `band_chat_post_announcements`. Each post's update
+/// of the open full-history view scales with the room (#2086), so 10 posts
+/// keep the case inside the workload's macro-runner budget.
+const ANNOUNCEMENTS_POSTED: usize = 10;
+
+/// The band's admin posts 10 announcements into the announcements room they
+/// have open. Reading needs a `member` or `admin` role claim and posting an
+/// `admin` one (session-claim-gated policies); the open view is the room's
+/// whole history, unbounded, so every post updates a 10,000-message view.
+#[divan::bench(args = [10_000], sample_count = 10, sample_size = 1)]
+fn band_chat_post_announcements(bencher: divan::Bencher<'_, '_>, messages: usize) {
+    bencher
+        .with_inputs(|| AnnouncementsFixture::new(messages))
+        .bench_local_refs(|fixture| fixture.post_announcements(ANNOUNCEMENTS_POSTED));
 }

@@ -189,6 +189,7 @@ export class SubscriptionsOrchestrator {
   // Memoised fulfilled states for seeded keys read via peekState before their
   // entry exists; keeps the snapshot identity stable for useSyncExternalStore.
   private readonly seededStates = new Map<string, UseAllState<any>>();
+  // Only tracks changes that invalidate cached results; Db owns read identity.
   private session?: Session | null;
 
   constructor(
@@ -462,7 +463,6 @@ export class SubscriptionsOrchestrator {
           onError: reject,
         },
         entry.options,
-        this.session ?? undefined,
       );
       entry.unsubscribe = subscription;
       if (subscription.ready) {
