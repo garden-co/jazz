@@ -13,3 +13,7 @@ are enabled by this layer.
 
 Prepared transaction operations enforce the same schema restrictions as ordinary
 transactions, preventing writes and typed reads through a different schema.
+
+Catalogue coverage uses the current global tier. The legacy `edge` write-wait
+alias resolves to global acceptance; omitted exclusive waits retain their
+existing local-without-upstream behaviour.

@@ -2389,11 +2389,11 @@ export class Db {
     const initialOfflineState = this.connection.initialExplicitOfflineState();
     if (initialOfflineState) await initialOfflineState;
     const offline = this.connection.isExplicitlyOffline();
-    await this.ensureReady(offline ? "local" : "edge");
+    await this.ensureReady(offline ? "local" : "global");
     // Cover the catalogue without rows and outside the preparation queue.
     // Offline identities are observations, not accepted encryption membership.
     if (!offline)
-      await client.query(JSON.stringify({ table: table._table, limit: 0 }), { tier: "edge" });
+      await client.query(JSON.stringify({ table: table._table, limit: 0 }), { tier: "global" });
     const identity = await runtime.tableIdentity(table._table);
     this.assertOpen();
     if (!offline && identity) {
