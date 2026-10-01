@@ -238,7 +238,13 @@ export async function retainLocalAcceptedHistory<T>(
 ): Promise<void> {
   const bundle = await observeE2eeHistory(db, (reader) => capture(reader, read));
   await validate(bundle.result);
-  await persist(db, key, bundle.reads);
+  stores.get(db)?.assertOpen();
+  try {
+    await persist(db, key, bundle.reads);
+  } catch {
+    // Cache durability is not acceptance authority; keep the verified bundle.
+  }
+  stores.get(db)?.assertOpen();
   retain(db, key, bundle);
 }
 
@@ -248,7 +254,6 @@ export async function readAcceptedHistory<T>(
   key: string,
   read: (reader: E2eeHistoryReader, initialRecipients?: string[]) => Promise<T>,
   localOnly = false,
-  requirePersistence = false,
 ): Promise<T> {
   const entries = histories.get(db) ?? new Map<string, Retained>();
   histories.set(db, entries);
@@ -317,13 +322,14 @@ export async function prepareAcceptedHistory<T, P>(
 }
 
 async function retainAcceptedBundle(db: Db, key: string, bundle: Retained): Promise<void> {
+  stores.get(db)?.assertOpen();
   try {
     await persist(db, key, bundle.reads);
-  } catch (error) {
-    if (requirePersistence) throw error;
+  } catch {
     // History is already verified. Optional persistence must not fail this read;
     // offline reuse still checks the retained bundle against accepted history.
   }
+  stores.get(db)?.assertOpen();
   retain(db, key, bundle);
 }
 

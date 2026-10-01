@@ -20,12 +20,24 @@ export interface BackendAccountHost {
   admitBackend(auth: BackendAuth): Promise<{ nodeId: string }>;
 }
 
+/** @internal Durable first-device ownership, not accepted account membership. */
+export interface FounderOwnership {
+  reserve(
+    scope: string,
+    deviceId: string,
+    retainedEpochId?: string,
+  ): Promise<Readonly<{ epochId: string | null }> | undefined>;
+  bind(scope: string, deviceId: string, epochId: string): Promise<void>;
+  close(scope: string, deviceId: string, retainedEpochId?: string): Promise<boolean>;
+}
+
 interface HandleCredentials {
   registry: string;
   auth?: JWTAuth;
   backend?: Readonly<BackendAuth & { nodeId: string }>;
   localFirstSecret?: string;
   generatedHere?: () => Promise<boolean>;
+  founderOwnership?: (assertValid: () => void) => FounderOwnership;
   invalidated: Set<() => void>;
 }
 const credentials = new WeakMap<AccountHandle, HandleCredentials>();
@@ -38,6 +50,7 @@ export interface LocalFirstAccountFactory {
     auth: JWTAuth;
     secret?: string;
     generatedHere?: () => Promise<boolean>;
+    founderOwnership?: (assertValid: () => void) => FounderOwnership;
   };
   restore?(secret: string): {
     accountId: string;
@@ -45,6 +58,7 @@ export interface LocalFirstAccountFactory {
     auth: JWTAuth;
     secret?: string;
     generatedHere?: () => Promise<boolean>;
+    founderOwnership?: (assertValid: () => void) => FounderOwnership;
   };
 }
 
@@ -100,6 +114,7 @@ function mintHandle(
   auth: JWTAuth,
   localFirstSecret?: string,
   generatedHere?: () => Promise<boolean>,
+  founderOwnership?: (assertValid: () => void) => FounderOwnership,
 ): AccountHandle {
   const handle = new EnrolledAccount(id, identity) as AccountHandle;
   credentials.set(handle, {
@@ -107,6 +122,7 @@ function mintHandle(
     auth,
     localFirstSecret,
     generatedHere,
+    founderOwnership,
     invalidated: new Set(),
   });
   return handle;
@@ -119,6 +135,15 @@ export async function accountGeneratedHere(handle: AccountHandle): Promise<boole
   const generated = (await material.generatedHere?.()) ?? false;
   if (credentials.get(handle) !== material) throw new AccountAuthError("account_logged_out");
   return generated;
+}
+
+/** @internal The adapter checks this handle at every store transform and await. */
+export function accountFounderOwnership(handle: AccountHandle): FounderOwnership | undefined {
+  const material = credentials.get(handle);
+  if (!material) throw new AccountAuthError("invalid_account_handle");
+  return material.founderOwnership?.(() => {
+    if (credentials.get(handle) !== material) throw new AccountAuthError("account_logged_out");
+  });
 }
 
 /** Export a local signing root for passphrase/passkey backup. Never store it in UI snapshots. */
@@ -245,6 +270,7 @@ export function createAccountManagerWithRuntime(options: {
             local.auth,
             local.secret,
             local.generatedHere,
+            local.founderOwnership,
           ),
         );
       },
@@ -260,6 +286,7 @@ export function createAccountManagerWithRuntime(options: {
             local.auth,
             secret,
             local.generatedHere,
+            local.founderOwnership,
           ),
         );
       },
@@ -325,6 +352,7 @@ export function createAccountManagerWithRuntime(options: {
             restored.auth,
             options.restoredLocalFirstSecret,
             restored.generatedHere,
+            restored.founderOwnership,
           ),
         )
       : undefined,

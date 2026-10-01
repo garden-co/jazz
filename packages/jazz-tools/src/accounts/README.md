@@ -82,20 +82,29 @@ The shared helper merges retained roots inside that transaction, so a stale
 manager cannot erase another manager's offline key. Selection follows the
 last successful operation; external provider credentials are never persisted.
 
-New local-first roots retain private **generated-here provenance** in the same
-atomic write as the root. Reopening that store preserves it; restoring an
-imported secret or loading a legacy selection does not create it. This is local
-eligibility to propose an initial encrypted identity, not accepted membership.
-The versioned `jazz-account-selection-v2` inventory retains that provenance with
-the secret roots and selection. Legacy v1 inventories migrate without founder
-provenance; older v1-only writers refuse the v2 envelope rather than dropping it.
+New local-first roots retain private **generated-here provenance** and
+first-founder eligibility in the same atomic write as the root. The versioned
+`jazz-account-selection-v3` inventory preserves roots, selection and provenance,
+and adds first-device claims scoped to the account root and application.
+Managers sharing one atomic `AccountStore` cannot create competing automatic
+offline founders. Logout invalidates the handle, not the durable claim.
+
+Ordinary v1/v2 inventories remain readable and keep their roots and selection.
+Migration preserves v2 generation provenance but does not infer original-device
+ownership from it: these roots require online readiness for a new founder.
+Candidate v2 inventories with a valid `founders` field retain their claims and
+eligibility, including an empty claim list. Older writers refuse v3 rather than
+discarding ownership. Independent stores still rely on Global authority.
 
 With an authenticated application catalogue cached by the runtime host, a
-generated-here account can open an encrypted database and create its first
-spaces offline without a separate initialisation call. Its device, account epoch,
-space roots and explicit grants remain provisional until authority acceptance.
-The SDK journals sealed envelopes and reserved transaction identities before
-publication; it does not copy message or image payloads into the key store.
+newly eligible account can open an encrypted database and create its first
+spaces offline without a separate initialisation call. Its original device
+reserves ownership, durably journals the proposal, then binds the exact epoch
+before publication. A missing or altered bound journal cannot be replaced;
+the matching original journal can resume even through an imported account store.
+These claims are not accepted membership. Device, account epoch, space roots and
+explicit grants remain provisional until authority acceptance. The SDK journals
+sealed envelopes and reserved transaction identities, not message or image payloads.
 An explicit self grant is required for ordinary local reads and later writes:
 possession of the author's sealed envelope alone is not membership.
 

@@ -2,7 +2,7 @@ import { sha1 } from "@noble/hashes/legacy.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { parseJwtPayload } from "../runtime/client-session.js";
-import type { LocalFirstAccountFactory } from "./enrollment.js";
+import type { FounderOwnership, LocalFirstAccountFactory } from "./enrollment.js";
 
 const encoder = new TextEncoder();
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -40,6 +40,11 @@ export function localFirstFactory(options: {
   generateSecret?(): string;
   isSecretRetained?(secret: string): Promise<boolean>;
   isGeneratedHere?(secret: string): Promise<boolean>;
+  founderOwnership?(
+    secret: string,
+    assertValid: () => void,
+    retained: Promise<void>,
+  ): FounderOwnership;
 }): LocalFirstAccountFactory {
   const restore = (secret: string, generatedHere = false) => {
     parseAuthSecret(secret);
@@ -70,6 +75,9 @@ export function localFirstFactory(options: {
         await retained;
         return options.isGeneratedHere ? options.isGeneratedHere(secret) : generatedHere;
       },
+      founderOwnership: options.founderOwnership
+        ? (assertValid: () => void) => options.founderOwnership!(secret, assertValid, retained)
+        : undefined,
     };
   };
   return {
