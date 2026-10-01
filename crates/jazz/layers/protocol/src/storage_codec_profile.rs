@@ -118,4 +118,3 @@ pub async fn preflight_epoch_one_node_storage(storage: ReadOnlyStorage<'_>) -> R
     }
     Ok(())
 }
-
