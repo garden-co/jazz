@@ -432,12 +432,12 @@ describe("dev catalogue push behavior", () => {
     await writeFile(
       join(migrationsDir, `20260318-rename-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`),
       `
-import { schema as s } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
+import { schema as s, migration as m } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
 
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     users: {
-      email_address: s.renameFrom("email"),
+      email_address: m.renameFrom("email"),
     },
   },
   fromHash: ${JSON.stringify(fromHash.slice(0, 12))},
@@ -620,12 +620,12 @@ export default s.defineMigration({
       await writeFile(
         join(migrationsDir, `20260318-rename-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`),
         `
-import { schema as s } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
+import { schema as s, migration as m } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
 
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     users: {
-      email_address: s.renameFrom("email"),
+      email_address: m.renameFrom("email"),
     },
   },
   fromHash: ${JSON.stringify(embeddedFromHash)},
@@ -720,12 +720,12 @@ export default s.defineMigration({
     await writeFile(
       join(migrationsDir, `20260318-rename-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`),
       `
-import { schema as s } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
+import { schema as s, migration as m } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
 
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     users: {
-      email_address: s.renameFrom("email"),
+      email_address: m.renameFrom("email"),
     },
   },
   fromHash: ${JSON.stringify(fromHash.slice(0, 12))},
