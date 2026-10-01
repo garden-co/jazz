@@ -462,6 +462,56 @@ pub(super) fn duplex_with_admitted_session_context_and_client_outbound_tap(
     )
 }
 
+/// Admitted in-memory transports with a tap on authority-to-client messages.
+/// Tests inspect the shared queue before the client consumes the proof sequence.
+pub(super) fn duplex_with_admitted_session_context_and_server_outbound_tap(
+    identity: AuthorSubject,
+    client_node: NodeUuid,
+    client_epoch: u64,
+    server_node: NodeUuid,
+    server_epoch: u64,
+) -> (
+    Box<dyn Transport>,
+    Box<dyn Transport>,
+    Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
+) {
+    use std::collections::VecDeque;
+    let client_to_server = Rc::new(RefCell::new(VecDeque::new()));
+    let server_to_client = Rc::new(RefCell::new(VecDeque::new()));
+    let features = crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS;
+    let client = ConnectionSessionContext {
+        local: crate::wire::WireAuthorityEndpoint {
+            node: client_node,
+            epoch: client_epoch,
+        },
+        remote: Some(crate::wire::WireAuthorityEndpoint {
+            node: server_node,
+            epoch: server_epoch,
+        }),
+        link_identity: identity,
+        negotiated_features: features,
+    };
+    let server = ConnectionSessionContext {
+        local: client.remote.unwrap(),
+        remote: Some(client.local),
+        link_identity: identity,
+        negotiated_features: features,
+    };
+    (
+        Box::new(DuplexTransport {
+            outbound: Rc::clone(&client_to_server),
+            inbound: Rc::clone(&server_to_client),
+            session_context: Some(client),
+        }),
+        Box::new(DuplexTransport {
+            outbound: Rc::clone(&server_to_client),
+            inbound: client_to_server,
+            session_context: Some(server),
+        }),
+        server_to_client,
+    )
+}
+
 pub(super) fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);

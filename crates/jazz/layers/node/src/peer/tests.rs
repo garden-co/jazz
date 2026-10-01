@@ -19,6 +19,10 @@ use crate::time::{GlobalTime, TxTime};
 use crate::model::transaction::OpenTransactionId;
 use crate::model::public_schema::{
     ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
+    RelColumnRef as PublicRelColumnRef, RelExpr as PublicRelExpr,
+    RelJoinCondition as PublicRelJoinCondition, RelJoinKind as PublicRelJoinKind,
+    RelPredicateCmpOp as PublicRelPredicateCmpOp, RelPredicateExpr as PublicRelPredicateExpr,
+    RelValueRef as PublicRelValueRef, RowIdRef as PublicRelRowIdRef,
     SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
     TableSchemaBuilder as PublicTableSchemaBuilder,
 };
@@ -1292,6 +1296,273 @@ fn session_seed_write_policy_schema() -> JazzSchema {
                     .fk_column("parent", "teams"),
             ),
     )
+}
+
+fn terminal_exists_rel_policy_with_secondary(
+    evidence_right_column: &str,
+) -> PublicPolicyExpr {
+    let relation_column = |scope: &str, column: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: column.to_owned(),
+    };
+    let equality = |left: (&str, &str), right: (&str, &str)| PublicRelJoinCondition {
+        left: relation_column(left.0, left.1),
+        right: relation_column(right.0, right.1),
+    };
+    PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::Join {
+                    left: Box::new(PublicRelExpr::TableScan {
+                        table: "left_facts".into(),
+                        alias: Some("left_fact".to_owned()),
+                    }),
+                    right: Box::new(PublicRelExpr::TableScan {
+                        table: "right_facts".into(),
+                        alias: Some("right_fact".to_owned()),
+                    }),
+                    on: vec![equality(
+                        ("left_fact", "resource_id"),
+                        ("right_fact", "resource_id"),
+                    )],
+                    join_kind: PublicRelJoinKind::Inner,
+                }),
+                right: Box::new(PublicRelExpr::TableScan {
+                    table: "evidence".into(),
+                    alias: Some("evidence".to_owned()),
+                }),
+                on: vec![
+                    equality(("left_fact", "left_key"), ("evidence", "left_key")),
+                    equality(
+                        ("right_fact", "right_key"),
+                        ("evidence", evidence_right_column),
+                    ),
+                ],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: PublicRelPredicateExpr::Cmp {
+                left: relation_column("left_fact", "resource_id"),
+                op: PublicRelPredicateCmpOp::Eq,
+                right: PublicRelValueRef::RowId(PublicRelRowIdRef::Outer),
+            },
+        },
+    }
+}
+
+fn terminal_exists_rel_support_schema(evidence_right_column: &str) -> JazzSchema {
+    public_peer_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_update(
+                                None,
+                                terminal_exists_rel_policy_with_secondary(evidence_right_column),
+                            ),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text)
+                    .column("alternate_right_key", PublicColumnType::Text),
+            ),
+    )
+}
+
+#[test]
+fn terminal_support_rehydrates_after_provenance_only_policy_change() {
+    let original_schema = terminal_exists_rel_support_schema("right_key");
+    let updated_schema = terminal_exists_rel_support_schema("alternate_right_key");
+    assert_eq!(
+        original_schema.version_id(),
+        updated_schema.version_id(),
+        "the policy provenance change leaves public schema identity unchanged",
+    );
+    let updated_provenance = updated_schema
+        .policy_provenance
+        .get(&(
+            "resources".to_owned(),
+            crate::schema::PolicySlot::UpdateWithCheck,
+        ))
+        .cloned()
+        .expect("updated policy carries compound ExistsRel provenance");
+    let writer = AuthorSubject::for_test_bytes([0xb3; 16]);
+    let claims = BTreeMap::new();
+    let resource = row(0xb4);
+    let (_dir, mut node_state) =
+        open_node_with_schema(node(0xb5), original_schema.clone());
+    let seed_commits = [
+        (
+            "resources",
+            resource,
+            BTreeMap::from([(
+                "label".to_owned(),
+                Value::String("resource".to_owned()),
+            )]),
+        ),
+        (
+            "left_facts",
+            row(0xb6),
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+            ]),
+        ),
+        (
+            "right_facts",
+            row(0xb7),
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+            ]),
+        ),
+        (
+            "evidence",
+            row(0xb8),
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                ("right_key".to_owned(), Value::String("not-right".to_owned())),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("right".to_owned()),
+                ),
+            ]),
+        ),
+    ];
+    for (index, (table, row_uuid, cells)) in seed_commits.into_iter().enumerate() {
+        let tx_id = node_state
+            .commit_mergeable_settled(
+                MergeableCommit::new(table, row_uuid, 1_000 + index as u64)
+                    .made_by(AuthorSubject::SYSTEM)
+                    .cells(cells),
+            )
+            .unwrap();
+        accept_global(&mut node_state, tx_id, index as u64 + 1);
+    }
+    let (_, unit) = node_state
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("resources", resource, 2_000)
+                .made_by(writer)
+                .cells(BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("candidate".to_owned()),
+                )])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("candidate write must return a CommitUnit");
+    };
+    accept_global(&mut node_state, tx.tx_id, 5);
+
+    let action = crate::protocol::PermissionAdviceAction::Update {
+        table: "resources".to_owned(),
+        row: resource,
+        patch: BTreeMap::from([(
+            "label".to_owned(),
+            Value::String("candidate".to_owned()),
+        )]),
+    };
+    let original_scope = node_state
+        .authorization_support_scope_for_session(writer, Some(&claims), &action)
+        .unwrap();
+    assert_eq!(original_scope.subscriptions.len(), 1);
+    let support_shape_id = original_scope.subscriptions[0].0.shape_id();
+    let support_binding_id = original_scope.subscriptions[0].1.binding_id();
+    let mut peer = PeerState::client_link(writer);
+    crate::local_executor::block_on(peer.prove_terminal_commit_support(
+        &mut node_state,
+        writer,
+        claims.clone(),
+        &versions,
+        tx.tx_id,
+    ))
+    .unwrap();
+
+    let policy_binding = (writer, claims.clone());
+    let maintained_id = |peer: &PeerState| {
+        peer.publication_states
+            .iter()
+            .find(|(subscription, state)| {
+                subscription.shape_id == support_shape_id
+                    && state.policy_binding.as_ref() == Some(&policy_binding)
+            })
+            .and_then(|(_, state)| state.maintained_subscription_view.as_ref())
+            .map(|view| view.subscription.id())
+            .expect("terminal support receiver is retained")
+    };
+    let original_maintained_id = maintained_id(&peer);
+    let original_rehydrates = peer
+        .maintained_subscription_view_metrics()
+        .rehydrate_attempts;
+
+    node_state.mutate_current_schema_for_testing(|compiled| {
+        compiled.policy_provenance.insert(
+            (
+                "resources".to_owned(),
+                crate::schema::PolicySlot::UpdateWithCheck,
+            ),
+            updated_provenance,
+        );
+    });
+    let updated_scope = node_state
+        .authorization_support_scope_for_session(writer, Some(&claims), &action)
+        .unwrap();
+    assert_eq!(
+        updated_scope.subscriptions[0].0.shape_id(),
+        support_shape_id,
+        "the changed private equality preserves ShapeId",
+    );
+    assert_eq!(
+        updated_scope.subscriptions[0].1.binding_id(),
+        support_binding_id,
+        "the changed private equality preserves BindingId",
+    );
+    assert_ne!(updated_scope.key, original_scope.key);
+    let updated_rows = node_state
+        .query_rows_at(
+            &updated_scope.subscriptions[0].0,
+            &updated_scope.subscriptions[0].1,
+            GlobalTime(5),
+        )
+        .unwrap();
+    assert!(
+        updated_rows.iter().any(|row| row.row_uuid() == resource),
+        "the updated support query includes its matching witness",
+    );
+    crate::local_executor::block_on(peer.prove_terminal_commit_support(
+        &mut node_state,
+        writer,
+        claims,
+        &versions,
+        tx.tx_id,
+    ))
+    .unwrap();
+    assert!(
+        peer.maintained_subscription_view_metrics()
+            .rehydrate_attempts
+            > original_rehydrates,
+        "provenance-only policy changes cannot reuse the old terminal receiver",
+    );
+    assert_ne!(
+        maintained_id(&peer),
+        original_maintained_id,
+        "updated support provenance installs a fresh maintained receiver",
+    );
+
 }
 
 #[test]

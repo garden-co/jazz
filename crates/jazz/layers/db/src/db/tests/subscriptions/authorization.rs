@@ -466,6 +466,194 @@ fn compound_exists_rel_test_policy_with_secondary(evidence_right_column: &str) -
 }
 
 #[test]
+fn permission_advice_hydrates_same_shape_update_policy_clauses_independently() {
+    let author = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_update(
+                                Some(compound_exists_rel_test_policy_with_secondary("right_key")),
+                                compound_exists_rel_test_policy_with_secondary(
+                                    "alternate_right_key",
+                                ),
+                            ),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text)
+                    .column("alternate_right_key", PublicColumnType::Text),
+            ),
+    );
+    let server = open_core(0xa8, AuthorSubject::SYSTEM, &schema);
+    let resource = row(0xa9);
+    server
+        .insert_with_id(
+            "resources",
+            resource,
+            BTreeMap::from([("label".to_owned(), Value::String("before".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert(
+            "left_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert(
+            "right_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert(
+            "evidence",
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert(
+            "evidence",
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                (
+                    "right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("right".to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+
+    let action = PermissionAdviceAction::Update {
+        table: "resources".to_owned(),
+        row: resource,
+        patch: BTreeMap::from([("label".to_owned(), Value::String("after".to_owned()))]),
+    };
+    let support_scope = server
+        .node()
+        .borrow()
+        .authorization_support_scope(author, &action)
+        .unwrap();
+    assert_eq!(support_scope.subscriptions.len(), 2);
+    assert_eq!(
+        support_scope.subscriptions[0].0.shape_id(),
+        support_scope.subscriptions[1].0.shape_id(),
+        "USING and CHECK deliberately share the public shape identity",
+    );
+    assert_eq!(
+        support_scope.subscriptions[0].1.binding_id(),
+        support_scope.subscriptions[1].1.binding_id(),
+        "USING and CHECK deliberately share the public binding identity",
+    );
+    assert_ne!(
+        support_scope.subscriptions[0].0.policy_provenance(),
+        support_scope.subscriptions[1].0.policy_provenance(),
+        "each slot carries a different private compound ExistsRel equality",
+    );
+
+    let client = open_db(0xa7, author, &schema);
+    let (client_transport, server_transport, server_outbound) =
+        duplex_with_admitted_session_context_and_server_outbound_tap(
+            author,
+            NodeUuid::from_bytes([0xa7; 16]),
+            1,
+            NodeUuid::from_bytes([0xa8; 16]),
+            1,
+        );
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let advice = client.request_permission_advice(action);
+
+    client.tick().unwrap();
+    for _ in 0..16 {
+        server.tick().unwrap();
+        if server_outbound.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+            )
+        }) {
+            break;
+        }
+    }
+    {
+        let messages = server_outbound.borrow();
+        let views = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(position, message)| match message {
+                SyncMessage::AuthorizationScopeView {
+                    clause_index,
+                    clause_count,
+                    ..
+                } => Some((position, *clause_index, *clause_count)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            views
+                .iter()
+                .map(|(_, index, count)| (*index, *count))
+                .collect::<Vec<_>>(),
+            vec![(0, 2), (1, 2)],
+            "both provenance-distinct clauses must be served",
+        );
+        let receipt_position = messages
+            .iter()
+            .position(|message| {
+                matches!(
+                    message,
+                    SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+                )
+            })
+            .expect("complete support hydration emits an aggregate receipt");
+        assert!(
+            views
+                .iter()
+                .all(|(position, _, _)| *position < receipt_position),
+            "the aggregate receipt follows both support views",
+        );
+    }
+
+    client.tick().unwrap();
+    assert_eq!(block_on(advice), PermissionAdvice::Allowed);
+}
+
+#[test]
 fn compound_exists_rel_annotation_change_rebuilds_retained_read() {
     let reader = AuthorSubject::for_test_bytes([0x9d; 16]);
     let schema_with = |evidence_right_column| {
