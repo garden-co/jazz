@@ -1277,7 +1277,7 @@ fn recursive_array_claims_preserve_identity_and_nullable_carriers() {
                                 PublicPolicyExpr::Or(vec![
                                     PublicPolicyExpr::eq_literal(
                                         "isPublic",
-                                        crate::tools::Value::Boolean(true),
+                                        crate::model::public_schema::Value::Boolean(true),
                                     ),
                                     public_claim_eq("joinCode", "join_code"),
                                 ]),
@@ -1407,7 +1407,7 @@ fn recursive_array_claims_preserve_identity_and_nullable_carriers() {
         };
         node.set_test_provider_claims(first, claims(&[alice], None));
         node.set_test_provider_claims(second, claims(&[bob], None));
-        let visible = |node: &mut NodeState<RocksDbStorage>, identity| {
+        let visible = |node: &mut NodeState<BoxedStorage>, identity| {
             let mut rows = node
                 .query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)
                 .unwrap()

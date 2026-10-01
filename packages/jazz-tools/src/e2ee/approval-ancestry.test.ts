@@ -58,7 +58,7 @@ it("rejects descendants when an intermediate delivery cannot be authenticated", 
     const secondId = (await second.e2ee.devices.list()).find((d) => d.id !== creator!.id)!.id;
     await first.e2ee.devices.approve(secondId).wait();
     const [intermediate] = await first.all(deviceRequestApp.__e2ee_device_deliveries, {
-      tier: "edge",
+      tier: "remote",
     });
     const third = await open();
     const thirdId = (await third.e2ee.devices.list()).find(
