@@ -1,6 +1,6 @@
 ---
-"jazz-tools": minor
-"jazz-napi": minor
+"jazz-tools": patch
+"jazz-napi": patch
 "jazz-rn": patch
 ---
 
