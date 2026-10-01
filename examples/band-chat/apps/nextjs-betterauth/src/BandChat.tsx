@@ -11,6 +11,7 @@ import { NewRoomDialog } from "./components/NewRoomDialog";
 import { ProfileDialog, ProfileSetup } from "./components/ProfileDialog";
 import { RoomNav, type RoomSummary } from "./components/RoomNav";
 import { RoomView } from "./components/RoomView";
+import { UnsentMessagesProvider, UnsentNotices } from "./components/UnsentNotices";
 import { ProfileDirectoryProvider } from "./lib/profiles";
 import { memoryStore, ParamStoreProvider, useSearchParam } from "./lib/url-state";
 
@@ -68,7 +69,9 @@ function Workspace({ author, ...props }: BandChatProps & { author: string }) {
     return <ProfileSetup author={author} defaultDisplayName={props.defaultDisplayName} />;
   return (
     <ProfileDirectoryProvider me={profile}>
-      <Rooms author={author} profile={profile} {...props} />
+      <UnsentMessagesProvider>
+        <Rooms author={author} profile={profile} {...props} />
+      </UnsentMessagesProvider>
     </ProfileDirectoryProvider>
   );
 }
@@ -167,6 +170,9 @@ function Rooms({
           />
         }
       >
+        <UnsentNotices
+          isMember={(roomId) => summaries.some((summary) => summary.room.id === roomId)}
+        />
         {main}
       </AppShell>
       <NewRoomDialog

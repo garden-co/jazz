@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test:permissions": "vitest run tests/permissions.test.ts tests/single-transaction.test.ts",
     "test:config": "vitest run tests/config.test.ts",
-    "test:composer": "vitest run tests/write-rejection.test.ts",
+    "test:composer": "vitest run tests/write-rejection.test.ts tests/unsent-messages.test.ts",
     "test:browser": "node ../../../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "test:selection": "node --test tests/test-selection.test.mjs",
