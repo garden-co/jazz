@@ -32,6 +32,9 @@ an ambiguous promotion acknowledgement or cancellation before publication.
 Successful publication or staged-capability transfer hands off ownership once.
 Resident publications defer cleanup without a retry loop; owner ticks service
 the retained claim, and close stays retryable without retiring storage until
-admitted cleanup completes. Uploads do not keep their runtime alive or promise
-cleanup after it is closed or unavailable.
+admitted cleanup completes. Native and WASM bindings retain tick and close-retry
+routes for that deferred result while keeping mutation admission closed and
+preserving the primary core error code alongside secondary cleanup diagnostics.
+Physical storage-close errors remain terminal. Uploads do not keep their runtime
+alive or promise cleanup after it is closed or unavailable.
 Foreground codec coverage is not a claim of React Native E2EE qualification.

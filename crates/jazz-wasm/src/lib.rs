@@ -800,9 +800,9 @@ impl WasmWrite {
 
 #[wasm_bindgen]
 pub struct WasmDb {
-    // The runtime leaves this slot synchronously at close admission.  The
-    // close future owns the removed handle, while every later binding call
-    // observes `None` and fails before touching native state.
+    // Close owns the removed runtime until terminal completion. Only deferred
+    // upload cleanup restores it for tick/retry; core mutation admission stays
+    // closed throughout that retryable state.
     inner: Rc<RefCell<Option<WasmDbInner>>>,
     owns_runtime: bool,
     non_durable_client: Rc<Cell<bool>>,
@@ -2857,31 +2857,31 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = close)]
     pub fn close(&self) -> js_sys::Promise {
-        // A close failure still consumes the binding. Retrying a partially
-        // failed storage close would re-enter an indeterminate runtime; this
-        // matches the previous eager Closed transition and keeps physical
-        // close exactly once.
+        // A physical storage-close failure remains terminal. Only a deferred
+        // upload claim leaves storage open and permits owner tick/close retry.
         let Some(inner) = self.inner.borrow_mut().take() else {
             return js_sys::Promise::resolve(&JsValue::from_bool(false));
         };
+        let binding_inner = Rc::clone(&self.inner);
         let owns_runtime = self.owns_runtime;
         future_to_promise(async move {
             if !owns_runtime {
                 return Ok(JsValue::from_bool(!matches!(inner, WasmDbInner::Closed)));
             }
-            let closed = match inner {
-                WasmDbInner::Memory(db) => {
-                    db.close().await.map_err(to_js_error)?;
-                    true
-                }
+            let db = match &inner {
+                WasmDbInner::Memory(db) => db,
                 #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => {
-                    db.close().await.map_err(to_js_error)?;
-                    true
-                }
-                WasmDbInner::Closed => false,
+                WasmDbInner::Browser(db) => db,
+                WasmDbInner::Closed => return Ok(JsValue::from_bool(false)),
             };
-            Ok(JsValue::from_bool(closed))
+            let result = db.close().await;
+            if result.as_ref().is_err_and(|error| {
+                error.code == ErrorCode::WriteRejected && db.close_has_deferred_upload_cleanup()
+            }) {
+                *binding_inner.borrow_mut() = Some(inner);
+            }
+            result.map_err(to_js_error)?;
+            Ok(JsValue::from_bool(true))
         })
     }
 }
