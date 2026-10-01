@@ -5573,13 +5573,17 @@ mod tests {
                 author_admissions: NativeAuthorAdmissions::default(), initialization_seals: Rc::default(),
             };
             match binding.close() {
-                Err(_) => {}
+                Err(error) => assert_eq!(error.status.as_ref(), "write_rejected"),
                 Ok(Either::A(_)) => panic!("unresolved cleanup must reject close"),
                 Ok(Either::B(pending)) => {
                     let mut rejected = false;
                     for _ in 0..512 {
                         match pending.poll() {
-                            Err(_) => { rejected = true; break; }
+                            Err(error) => {
+                                assert_eq!(error.status.as_ref(), "write_rejected");
+                                rejected = true;
+                                break;
+                            }
                             Ok(Some(_)) => panic!("unresolved cleanup must reject close"),
                             Ok(None) => {}
                         }
