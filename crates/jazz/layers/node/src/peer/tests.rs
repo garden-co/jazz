@@ -1552,6 +1552,18 @@ fn terminal_support_rehydrates_after_provenance_only_policy_change() {
         .unwrap();
     }
     assert!(
+        crate::local_executor::block_on(peer.prove_terminal_commit_authorization(
+            &mut node_state,
+            writer,
+            claims.clone(),
+            &versions,
+            tx.tx_id,
+        ))
+        .expect("the full-unit evaluator handles the refreshed compound policy"),
+        "the refreshed compound ExistsRel policy authorizes the complete candidate",
+    );
+
+    assert!(
         peer.maintained_subscription_view_metrics()
             .rehydrate_attempts
             > original_rehydrates,
