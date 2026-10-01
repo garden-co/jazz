@@ -18,7 +18,7 @@ where
             return if self.query_transaction(tx.tx_id).await?.is_some() {
                 Err(Error::ConflictingCommitUnit(tx.tx_id))
             } else {
-                Err(error)
+                Err(error.into())
             };
         }
         Ok(())

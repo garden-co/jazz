@@ -48,7 +48,7 @@ impl TestRocksOpen for RocksDbStorage {
         path: impl AsRef<Path>,
         column_families: &[&str],
     ) -> Result<Self, groove::storage::Error> {
-        crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+        crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
             &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             path.as_ref().to_path_buf(),
             column_families

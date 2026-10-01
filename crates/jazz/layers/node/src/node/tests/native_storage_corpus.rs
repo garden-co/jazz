@@ -21,7 +21,7 @@ fn open_native_corpus_storage(
     migrated_from_epoch_one: bool,
 ) -> YieldingStorage<BoxedStorage> {
     use groove::storage::{StorageAdmission, StorageOpenSpec};
-    let storage = crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+    let storage = crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
         factory,
         path.to_path_buf(),
         families,
@@ -2465,7 +2465,7 @@ fn published_alpha54_native_corpus_reopens_and_accepts_current_writes() {
         }
     };
     let mut reopened =
-        crate::db::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
+        crate::local_executor::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
     check(&mut reopened);
     reopened
         .commit_mergeable_settled(MergeableCommit::new("notes", row(44), 102).cells(
@@ -2474,7 +2474,7 @@ fn published_alpha54_native_corpus_reopens_and_accepts_current_writes() {
         .unwrap();
     drop(reopened);
     let mut reopened =
-        crate::db::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
+        crate::local_executor::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
     check(&mut reopened);
     assert!(
         reopened

@@ -147,7 +147,8 @@ impl JazzSchema {
         }
     }
 
-    pub(crate) fn may_have_authorized_created_insert_sources(&self) -> bool {
+    #[doc(hidden)]
+    pub fn may_have_authorized_created_insert_sources(&self) -> bool {
         self.has_authorized_created_insert_sources
     }
 

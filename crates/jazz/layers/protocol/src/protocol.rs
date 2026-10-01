@@ -4328,6 +4328,42 @@ impl PhysicalIdentityManifest {
         Ok(())
     }
 
+    /// Check coordinate-preserving genesis rotation without accepting a UUID
+    /// that belonged to a different entity in the previous manifest.
+    #[doc(hidden)]
+    pub fn validate_genesis_rebind(
+        previous: &Self,
+        next: &Self,
+        genesis: &JazzSchema,
+    ) -> Result<(), &'static str> {
+        previous.validate_for_schema(genesis)?;
+        next.validate_for_schema(genesis)?;
+        if previous == next {
+            return Ok(());
+        }
+        let reserved = previous.all_identity_uuids();
+        let check = |old, new| {
+            if old != new && reserved.contains(&new) {
+                Err("genesis identity rebind overlaps existing identities")
+            } else {
+                Ok(())
+            }
+        };
+        for (name, table) in &previous.tables {
+            let target = &next.tables[name];
+            check(table.id.0, target.id.0)?;
+            for (name, column) in &table.columns {
+                let target = &target.columns[name];
+                check(column.id.0, target.id.0)?;
+                for (path, variants) in &column.enum_variants {
+                    for (old, new) in variants.iter().zip(&target.enum_variants[path]) {
+                        check(old.0, new.0)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     fn evolve(
         &self,
         source: &JazzSchema,
