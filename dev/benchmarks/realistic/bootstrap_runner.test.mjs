@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const SCRIPT = path.resolve(new URL("./bootstrap_runner.sh", import.meta.url).pathname);
 const HELPER = path.resolve(new URL("./bootstrap_runner_helper.py", import.meta.url).pathname);
@@ -229,7 +229,67 @@ t.close()`;
   }
 });
 
-function bootstrapFixture() {
+function serviceUnitName(url, runnerName) {
+  const canonicalUrl = url.replace(/\/$/, "").toLowerCase();
+  const digest = crypto.createHash("sha256").update(`${canonicalUrl}\0${runnerName}`).digest("hex");
+  return `jazz-benchmark-runner-${digest}.service`;
+}
+
+function serviceUnitContents({ user, pkg, runnerName = "fixture-runner" }) {
+  return `[Unit]
+Description=Jazz benchmark runner ${runnerName}
+
+[Service]
+User=${user}
+WorkingDirectory=${pkg}
+ExecStart=${pkg}/runsvc.sh
+
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+
+[Install]
+WantedBy=multi-user.target
+`;
+}
+
+function commandTrace(name) {
+  return `trace_name=${name}
+trace_args=""
+trace_separator=""
+trace_redact_next=0
+for trace_arg do
+  if [ "$trace_name" = runuser ]; then
+    case "$trace_arg" in */config.sh) trace_name=runuser-config ;; esac
+  fi
+  if [ "$trace_redact_next" = 1 ]; then
+    trace_arg="[redacted]"
+    trace_redact_next=0
+  else
+    case "$trace_arg" in
+      --token) printf '%s-token-argv-present\\n' "$trace_name" >> "$TRACE"; trace_redact_next=1 ;;
+      ACTIONS_RUNNER_INPUT_TOKEN=*|*fixture-token*)
+        printf '%s-token-argv-present\\n' "$trace_name" >> "$TRACE"
+        trace_arg="[redacted]"
+        ;;
+    esac
+  fi
+  trace_args="$trace_args$trace_separator$trace_arg"
+  trace_separator=" "
+done
+printf '%s:%s\\n' '${name}' "$trace_args" >> "$TRACE"
+if [ "$trace_name" != config ] && [ "\${FIXTURE_CONFIG_CHILD:-}" = 1 ]; then
+  trace_name="$trace_name-config-child"
+fi
+if [ "\${ACTIONS_RUNNER_INPUT_TOKEN+x}" = x ]; then
+  printf '%s-token-present\\n' "$trace_name" >> "$TRACE"
+fi`;
+}
+
+function bootstrapFixture({
+  rawPackage = true,
+  runnerUrl = "https://github.com/garden-co/jazz2",
+  runnerName = "fixture-runner",
+} = {}) {
   assert.notEqual(process.getuid(), 0, "sandboxed bootstrap tests must run unprivileged");
   const root = temporaryDirectory("jazz-bootstrap-entry-");
   assert.deepEqual(
@@ -239,9 +299,23 @@ function bootstrapFixture() {
   );
   const trace = path.join(root, "trace.log");
   const runner = os.userInfo().username;
+  const runnerUid = process.getuid();
+  const runnerGid = process.getgid();
   const home = path.join(root, "home", runner);
   const state = path.join(root, "var", "lib", "actions-runner", runner);
   const pkg = path.join(root, "opt", "actions-runner", "2.337.0");
+  const unitDir = path.join(root, "etc", "systemd", "system");
+  const unitName = serviceUnitName(runnerUrl, runnerName);
+  const unitFile = path.join(unitDir, unitName);
+  const cgroup = path.join(root, "sys", "fs", "cgroup", "system.slice", unitName);
+  const activeState = path.join(root, "systemd-active");
+  fs.mkdirSync(unitDir, { recursive: true });
+  fs.mkdirSync(cgroup, { recursive: true });
+  fs.writeFileSync(path.join(cgroup, "cgroup.events"), "populated 0\nfrozen 0\n");
+  fs.writeFileSync(activeState, "active\n");
+  fs.writeFileSync(unitFile, serviceUnitContents({ user: runner, pkg, runnerName }), {
+    mode: 0o644,
+  });
   fs.mkdirSync(path.join(home, ".cargo", "bin"), { recursive: true });
   fs.mkdirSync(path.join(root, "var", "tmp"), { recursive: true });
   fs.mkdirSync(path.join(root, "dev"), { recursive: true });
@@ -250,41 +324,66 @@ function bootstrapFixture() {
   fs.mkdirSync(path.join(pkg, "bin"), { recursive: true });
   fs.writeFileSync(
     path.join(pkg, "config.sh"),
-    `#!/bin/sh\nprintf 'config:%s\\nconfig-cwd:%s\\n' "$*" "$PWD" >> "$TRACE"\nif [ "\${ALLOW_CONFIG:-}" = 1 ]; then printf '{"agentName":"fixture-runner","serverUrl":"https://github.com/garden-co/jazz2","workFolder":"_work"}\\n' > "$BOOTSTRAP_FIXTURE_STATE/.runner"; printf 'fixture credentials\\n' > "$BOOTSTRAP_FIXTURE_STATE/.credentials"; exit 0; fi\nexit 91\n`,
-    { mode: 0o755 },
-  );
-  fs.writeFileSync(
-    path.join(pkg, "svc.sh"),
     `#!/bin/sh
-printf 'svc:%s\\nsvc-cwd:%s\\n' "$*" "$PWD" >> "$TRACE"
-if [ "\${1:-}" = stop ] && [ "\${TAMPER_RUSTUP_ON_STOP:-}" = 1 ]; then
-  printf '#!/bin/sh\\nprintf executed > "%s"\\n' "$TOOLCHAIN_EXECUTED_MARKER" > "$BOOTSTRAP_TEST_ROOT/home/$RUNNER_USER/.cargo/bin/rustup"
-  chmod 0755 "$BOOTSTRAP_TEST_ROOT/home/$RUNNER_USER/.cargo/bin/rustup"
+${commandTrace("config")}
+export FIXTURE_CONFIG_CHILD=1
+printf 'config-cwd:%s\\n' "$PWD" >> "$TRACE"
+if [ "\${ALLOW_CONFIG:-}" = 1 ]; then
+  printf '{"agentName":"%s","serverUrl":"%s","workFolder":"_work"}\\n' "$RUNNER_NAME" "$RUNNER_URL" > "$BOOTSTRAP_FIXTURE_STATE/.runner"
+  printf 'fixture credentials\\n' > "$BOOTSTRAP_FIXTURE_STATE/.credentials"
+  if [ "\${GENERATE_SVC:-}" = 1 ]; then
+    printf 'config-package-mode:%s\\n' "$(stat -c %a "$PWD")" >> "$TRACE"
+    printf '#!/bin/sh\\nprintf executed > "%s"\\n' "$GENERATED_SVC_EXECUTED" > "$PWD/svc.sh"
+    chmod 0755 "$PWD/svc.sh"
+  fi
+  if [ "\${FAIL_CONFIG_AFTER_SVC:-}" = 1 ]; then exit 91; fi
+  if [ "\${INTERRUPT_CONFIG:-}" = 1 ] || [ "\${CONFIG_HANDOFF:-}" = 1 ]; then
+    if [ -n "\${CONFIG_PROCESS_PID_FILE:-}" ]; then
+      printf '%s\\n' "$$" > "$CONFIG_PROCESS_PID_FILE"
+    fi
+    printf 'config-blocked\\n' > "$CONFIG_BLOCKED_MARKER"
+    if [ "\${INTERRUPT_CONFIG:-}" = 1 ]; then kill -TERM "$(cat "$BOOTSTRAP_PID_FILE")"; fi
+    while [ ! -f "$CONFIG_RELEASE_MARKER" ]; do sleep 0.01; done
+    printf 'config-after-signal\\n' > "$CONFIG_AFTER_SIGNAL_MARKER"
+    if [ -n "\${CONFIG_AFTER_SIGNAL_STATE:-}" ]; then
+      printf 'written after cancellation\\n' > "$CONFIG_AFTER_SIGNAL_STATE"
+    fi
+  fi
+  exit 0
 fi
-[ "\${FAIL_SERVICE:-}" != "\${1:-}" ]
+exit 91
 `,
     { mode: 0o755 },
   );
+  if (!rawPackage) {
+    fs.writeFileSync(
+      path.join(pkg, "svc.sh"),
+      `#!/bin/sh
+printf 'svc:%s\\nsvc-cwd:%s\\n' "$*" "$PWD" >> "$TRACE"
+`,
+      { mode: 0o755 },
+    );
+  }
   fs.writeFileSync(path.join(pkg, "bin", "Runner.Listener"), "pinned runner fixture");
+  fs.writeFileSync(path.join(pkg, "runsvc.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
     path.join(state, ".runner"),
     JSON.stringify({
-      agentName: "fixture-runner",
-      serverUrl: "https://github.com/garden-co/jazz2",
+      agentName: runnerName,
+      serverUrl: runnerUrl,
       workFolder: "_work",
     }),
   );
   fs.writeFileSync(path.join(state, ".credentials"), "fixture credentials");
-  fs.writeFileSync(path.join(state, ".service"), "fixture service");
-  for (const file of [".runner", ".credentials", ".service"]) {
+  for (const file of [".runner", ".credentials"]) {
     fs.chmodSync(path.join(state, file), 0o600);
   }
   fs.chmodSync(state, 0o2700);
   for (const item of [
     ".runner",
     ".credentials",
+    ...(rawPackage ? [] : [".service"]),
     ".credentials_rsaparams",
-    ".service",
     ".env",
     ".path",
     "_work",
@@ -296,8 +395,9 @@ fi
   fs.chmodSync(path.join(pkg, "bin"), 0o555);
   for (const file of [
     path.join(pkg, "config.sh"),
-    path.join(pkg, "svc.sh"),
+    ...(rawPackage ? [] : [path.join(pkg, "svc.sh")]),
     path.join(pkg, "bin", "Runner.Listener"),
+    path.join(pkg, "runsvc.sh"),
   ]) {
     fs.chmodSync(file, 0o555);
   }
@@ -380,15 +480,24 @@ fi
 
   const bin = temporaryDirectory("jazz-bootstrap-stubs-");
   const logger = (name, body) => {
-    fs.writeFileSync(
-      path.join(bin, name),
-      `#!/bin/sh\nprintf '%s\\n' '${name}:'"$*" >> "$TRACE"\n${body}\n`,
-      { mode: 0o755 },
-    );
+    fs.writeFileSync(path.join(bin, name), `#!/bin/sh\n${commandTrace(name)}\n${body}\n`, {
+      mode: 0o755,
+    });
   };
   logger(
     "getent",
-    `case "$*" in "passwd $RUNNER_USER") printf '%s:x:1000:1000::%s:/bin/bash\\n' "$RUNNER_USER" "$BOOTSTRAP_TEST_ROOT/home/$RUNNER_USER" ;; *) exit 90 ;; esac`,
+    `case "$*" in "passwd $RUNNER_USER") printf '%s:x:%s:%s::%s:/bin/bash\\n' "$RUNNER_USER" "\${FIXTURE_UID:-${runnerUid}}" "\${FIXTURE_GID:-${runnerGid}}" "$BOOTSTRAP_TEST_ROOT/home/$RUNNER_USER" ;; *) exit 90 ;; esac`,
+  );
+  fs.writeFileSync(
+    path.join(bin, "id"),
+    `#!/bin/sh
+case "$1:$2" in
+  -u:$RUNNER_USER) printf '%s\\n' "\${FIXTURE_UID:-${runnerUid}}" ;;
+  -g:$RUNNER_USER) printf '%s\\n' "\${FIXTURE_GID:-${runnerGid}}" ;;
+  *) exec /usr/bin/id "$@" ;;
+esac
+`,
+    { mode: 0o755 },
   );
   logger("useradd", "exit 90");
   logger(
@@ -405,7 +514,87 @@ fi
   );
   logger(
     "systemctl",
-    'case "$*" in "enable --now snapd.socket"|"enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service"|"is-active --quiet snap.amazon-ssm-agent.amazon-ssm-agent.service") ;; *) exit 90 ;; esac; [ "\${FAIL_EFFECT:-}" != "systemctl:$*" ]',
+    `case "$1" in
+  list-units|list-unit-files)
+    for unit in "$SYSTEMD_UNIT_DIR"/*.service; do [ -f "$unit" ] && basename "$unit"; done
+    exit 0
+    ;;
+  show)
+    shift
+    unit=""
+    properties=""
+    value_only=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --property=*) properties="\${1#*=}" ;;
+        --property) shift; properties="$1" ;;
+        --value) value_only=1 ;;
+        --*) ;;
+        *) unit="$1" ;;
+      esac
+      shift
+    done
+    [ -n "$unit" ] && [ -f "$SYSTEMD_UNIT_DIR/$unit" ] || exit 1
+    old_ifs="$IFS"; IFS=,
+    for property in $properties; do
+      case "$property" in
+        User|WorkingDirectory|KillSignal)
+          result="$(awk -F= -v key="$property" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$SYSTEMD_UNIT_DIR/$unit")"
+          ;;
+        ExecStart)
+          executable="$(awk -F= '$1 == "ExecStart" { print substr($0, index($0, "=") + 1); exit }' "$SYSTEMD_UNIT_DIR/$unit")"
+          if [ -n "$executable" ]; then
+            result="{ path=\${executable} ; argv[]=\${executable} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
+          else
+            result=""
+          fi
+          ;;
+        ExecStartPre|ExecStartPost|ExecStop|ExecStopPost)
+          if [ "$property" = "\${SYSTEMD_LOADED_HOOK:-}" ]; then
+            result="{ path=/bin/false ; argv[]=/bin/false ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
+          else
+            result=""
+          fi
+          ;;
+        KillMode)
+          result="$(awk -F= -v key="$property" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$SYSTEMD_UNIT_DIR/$unit")"
+          [ -n "$result" ] || result=control-group
+          ;;
+        TimeoutStopUSec)
+          timeout="$(awk -F= '$1 == "TimeoutStopSec" { print $2; exit }' "$SYSTEMD_UNIT_DIR/$unit")"
+          case "$timeout" in 5min) result=300000000 ;; *) result= ;; esac
+          ;;
+        ControlGroup) result="/system.slice/$unit" ;;
+        ActiveState|SubState) result="$(cat "$SYSTEMD_ACTIVE_STATE")" ;;
+        *) result= ;;
+      esac
+      if [ "$value_only" = 1 ]; then printf '%s\\n' "$result"; else printf '%s=%s\\n' "$property" "$result"; fi
+    done
+    IFS="$old_ifs"
+    ;;
+  is-active)
+    [ "$(cat "$SYSTEMD_ACTIVE_STATE")" = active ]
+    ;;
+  stop)
+    [ "\${SYSTEMCTL_FAIL:-}" != stop ] || exit 1
+    printf 'inactive\\n' > "$SYSTEMD_ACTIVE_STATE"
+    if [ "\${TAMPER_RUSTUP_ON_STOP:-}" = 1 ]; then
+      mkdir -p "$BOOTSTRAP_TEST_ROOT/home/$RUNNER_USER/.cargo/bin"
+      printf '#!/bin/sh\\nprintf executed > "%s"\\n' "$TOOLCHAIN_EXECUTED_MARKER" > "$BOOTSTRAP_TEST_ROOT/home/$RUNNER_USER/.cargo/bin/rustup"
+      chmod 0755 "$BOOTSTRAP_TEST_ROOT/home/$RUNNER_USER/.cargo/bin/rustup"
+    fi
+    ;;
+  start)
+    [ "\${SYSTEMCTL_FAIL:-}" != start ] || exit 1
+    printf 'active\\n' > "$SYSTEMD_ACTIVE_STATE"
+    ;;
+  disable)
+    [ "\${SYSTEMCTL_FAIL:-}" != disable ] || exit 1
+    ;;
+  daemon-reload|enable|reset-failed|show-environment) ;;
+  *) exit 90 ;;
+esac
+[ "\${FAIL_EFFECT:-}" != "systemctl:$*" ]`,
   );
   logger(
     "snap",
@@ -442,14 +631,62 @@ fi
         BOOTSTRAP_TEST_ROOT: root,
         RUNNER_USER: runner,
         BOOTSTRAP_FIXTURE_STATE: state,
-        RUNNER_NAME: "fixture-runner",
-        RUNNER_URL: "https://github.com/garden-co/jazz2",
+        SYSTEMD_ACTIVE_STATE: activeState,
+        SYSTEMD_UNIT_DIR: unitDir,
+        CGROUP_ROOT: path.join(root, "sys", "fs", "cgroup"),
+        GENERATED_SVC_EXECUTED: path.join(root, "generated-svc-executed"),
+        CONFIG_BLOCKED_MARKER: path.join(root, "config-blocked"),
+        CONFIG_RELEASE_MARKER: path.join(root, "config-release"),
+        RUNNER_NAME: runnerName,
+        RUNNER_URL: runnerUrl,
         RUNNER_TOKEN: "fixture-token",
         INSTALL_SSM_AGENT: "0",
         SKIP_HARDENING: "1",
         ...overrides,
       },
     });
+  };
+  const invokeAsync = (overrides = {}, allowlist = entries) => {
+    assert.deepEqual(
+      fs.readdirSync(root, { recursive: true }).sort(),
+      allowlist,
+      "fixture remains within its recorded allowlist before execution",
+    );
+    const child = spawn("/bin/bash", [SCRIPT], {
+      cwd: root,
+      env: {
+        ...process.env,
+        PATH: `${bin}:/usr/bin:/bin`,
+        TRACE: trace,
+        BOOTSTRAP_TEST_MODE: "1",
+        BOOTSTRAP_TEST_ROOT: root,
+        RUNNER_USER: runner,
+        BOOTSTRAP_FIXTURE_STATE: state,
+        SYSTEMD_ACTIVE_STATE: activeState,
+        SYSTEMD_UNIT_DIR: unitDir,
+        CGROUP_ROOT: path.join(root, "sys", "fs", "cgroup"),
+        GENERATED_SVC_EXECUTED: path.join(root, "generated-svc-executed"),
+        CONFIG_BLOCKED_MARKER: path.join(root, "config-blocked"),
+        CONFIG_RELEASE_MARKER: path.join(root, "config-release"),
+        CONFIG_AFTER_SIGNAL_MARKER: path.join(root, "config-after-signal"),
+        RUNNER_NAME: runnerName,
+        RUNNER_URL: runnerUrl,
+        RUNNER_TOKEN: "fixture-token",
+        INSTALL_SSM_AGENT: "0",
+        SKIP_HARDENING: "1",
+        ...overrides,
+      },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    const completion = new Promise((resolve) => {
+      child.once("close", (status, signal) => resolve({ status, signal, stdout, stderr }));
+    });
+    return { child, completion };
   };
   const recordAllowlist = () => {
     entries = fs.readdirSync(root, { recursive: true }).sort();
@@ -500,8 +737,14 @@ fi
     trace,
     pkg,
     state,
+    unitDir,
+    unitFile,
+    unitName,
+    cgroup,
+    activeState,
     node: path.join(node, "node"),
     invoke,
+    invokeAsync,
     invokeOrchestration,
     recordAllowlist,
     cleanup: () => {
@@ -511,6 +754,202 @@ fi
     },
   };
 }
+
+test("bootstrap rejects an unterminated final ExecStop hook before mutation or tool execution", () => {
+  const fixture = bootstrapFixture();
+  try {
+    const candidate = `[Unit]
+Description=Jazz benchmark runner fixture-runner
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+User=${os.userInfo().username}
+WorkingDirectory=${fixture.pkg}
+ExecStart=${fixture.pkg}/runsvc.sh
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+ExecStop=/bin/false`;
+    fs.writeFileSync(fixture.unitFile, candidate);
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.doesNotMatch(events, /^systemctl:(disable|stop|enable|start|daemon-reload) /m);
+    assert.doesNotMatch(events, /^(config|svc|curl|apt-get|snap|corepack|cargo):/m);
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo|config\.sh)/m);
+    assert.equal(fs.existsSync(path.join(fixture.root, "node-executed")), false);
+    assert.equal(fs.readFileSync(fixture.activeState, "utf8"), "active\n");
+    assert.equal(fs.readFileSync(fixture.unitFile, "utf8"), candidate);
+    assert.notEqual(result.status, 0, "a final unterminated hook is still part of the unit");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+for (const hook of ["ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost"]) {
+  test(`bootstrap rejects manager-loaded ${hook} absent from disk before mutation`, () => {
+    const fixture = bootstrapFixture();
+    try {
+      const unitBefore = fs.readFileSync(fixture.unitFile, "utf8");
+      const result = fixture.invoke({ SYSTEMD_LOADED_HOOK: hook });
+      const events = fs.readFileSync(fixture.trace, "utf8");
+      assert.doesNotMatch(events, /^systemctl:(disable|stop|enable|start|daemon-reload) /m);
+      assert.doesNotMatch(events, /^(config|svc|curl|apt-get|snap|corepack|cargo):/m);
+      assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo|config\.sh)/m);
+      assert.equal(fs.existsSync(path.join(fixture.root, "node-executed")), false);
+      assert.equal(fs.readFileSync(fixture.activeState, "utf8"), "active\n");
+      assert.equal(fs.readFileSync(fixture.unitFile, "utf8"), unitBefore);
+      assert.notEqual(result.status, 0, `loaded ${hook} must not be hidden by a clean disk file`);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+}
+
+test("bootstrap reaps config on TERM during launch PID handoff before sealing the package", async () => {
+  const fixture = bootstrapFixture({ rawPackage: true });
+  const bashEnv = path.join(fixture.root, "handoff-env.sh");
+  const groupPidFile = path.join(fixture.root, "config-group.pid");
+  const configPidFile = path.join(fixture.root, "config-process.pid");
+  const signalMarker = path.join(fixture.root, "handoff-signalled");
+  const releaseMarker = path.join(fixture.root, "config-release");
+  const afterSignalMarker = path.join(fixture.root, "config-after-signal");
+  const afterSignalState = path.join(fixture.state, "after-signal");
+  fs.rmSync(path.join(fixture.state, ".runner"));
+  fs.rmSync(path.join(fixture.state, ".credentials"));
+  fs.writeFileSync(
+    bashEnv,
+    `handoff_bootstrap_pid=$BASHPID
+handoff_before_pid_capture() {
+  [[ "$BASHPID" == "$handoff_bootstrap_pid" && "$BASH_COMMAND" == 'runner_config_pid=$!' ]] || return 0
+  trap - DEBUG
+  printf '%s\\n' "$!" > "$CONFIG_GROUP_PID_FILE"
+  for (( handoff_attempt=0; handoff_attempt<500; handoff_attempt++ )); do
+    if [[ -f "$CONFIG_BLOCKED_MARKER" ]]; then
+      printf 'TERM at PID capture\\n' > "$HANDOFF_SIGNAL_MARKER"
+      kill -TERM "$BASHPID"
+      return 0
+    fi
+    sleep 0.01
+  done
+  exit 94
+}
+trap handoff_before_pid_capture DEBUG
+`,
+  );
+  let execution;
+  let completed = false;
+  let deadline;
+  try {
+    execution = fixture.invokeAsync(
+      {
+        ALLOW_CONFIG: "1",
+        GENERATE_SVC: "1",
+        CONFIG_HANDOFF: "1",
+        BASH_ENV: bashEnv,
+        CONFIG_GROUP_PID_FILE: groupPidFile,
+        CONFIG_PROCESS_PID_FILE: configPidFile,
+        HANDOFF_SIGNAL_MARKER: signalMarker,
+        CONFIG_AFTER_SIGNAL_MARKER: afterSignalMarker,
+        CONFIG_AFTER_SIGNAL_STATE: afterSignalState,
+      },
+      fixture.recordAllowlist(),
+    );
+    const completion = execution.completion.then((result) => {
+      completed = true;
+      return result;
+    });
+    const result = await Promise.race([
+      completion,
+      new Promise((resolve) => {
+        deadline = setTimeout(() => resolve(null), 8000);
+      }),
+    ]);
+    clearTimeout(deadline);
+    assert.equal(fs.existsSync(signalMarker), true, "TERM is delivered before the PID assignment");
+    assert.ok(result, "bootstrap cancels the blocked config without waiting for a release");
+    assert.equal(result.status, 143, "the deferred TERM retains its cancellation exit status");
+    assert.equal(result.signal, null, "bootstrap handles TERM rather than dying without cleanup");
+    fs.writeFileSync(releaseMarker, "continue\n");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(
+      fs.existsSync(afterSignalState),
+      false,
+      "a surviving config must not write mutable state after cancellation and sealing",
+    );
+    assert.equal(fs.existsSync(afterSignalMarker), false, "config cannot continue after TERM");
+    for (const pidFile of [configPidFile, groupPidFile]) {
+      const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
+      assert.ok(Number.isSafeInteger(pid) && pid > 1);
+      assert.throws(
+        () => process.kill(pid, 0),
+        { code: "ESRCH" },
+        "config and its captured group leader have terminated and been reaped",
+      );
+    }
+    assert.equal(fs.statSync(fixture.pkg).uid, process.getuid());
+    assert.equal(fs.statSync(fixture.pkg).mode & 0o7777, 0o555);
+    assert.equal(fs.existsSync(path.join(fixture.pkg, "svc.sh")), false);
+    assert.equal(fs.existsSync(path.join(fixture.root, "generated-svc-executed")), false);
+    assert.doesNotMatch(fs.readFileSync(fixture.trace, "utf8"), /^systemctl:start /m);
+  } finally {
+    clearTimeout(deadline);
+    // A failing implementation can leave the untracked process group behind.
+    if (fs.existsSync(groupPidFile)) {
+      const pid = Number(fs.readFileSync(groupPidFile, "utf8").trim());
+      if (Number.isSafeInteger(pid) && pid > 1) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch (error) {
+          if (error.code !== "ESRCH") throw error;
+        }
+      }
+    }
+    if (execution && !completed) {
+      execution.child.kill("SIGKILL");
+      await execution.completion;
+    }
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap confines the registration token to config children even on failure cleanup", () => {
+  const fixture = bootstrapFixture({ rawPackage: true });
+  try {
+    fs.rmSync(path.join(fixture.state, ".runner"));
+    fs.rmSync(path.join(fixture.state, ".credentials"));
+    const result = fixture.invoke(
+      { ALLOW_CONFIG: "1", GENERATE_SVC: "1", FAIL_CONFIG_AFTER_SVC: "1" },
+      fixture.recordAllowlist(),
+    );
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.notEqual(result.status, 0, "config's deliberate failure exercises exit cleanup");
+    assert.ok(events.split("\n").includes(`chmod:1770 ${fixture.pkg}`), "setup opens the package");
+    assert.ok(
+      events.split("\n").includes(`chmod:0555 ${fixture.pkg}`),
+      "cleanup seals the package",
+    );
+    assert.match(events, /^config-token-present$/m, "config receives the registration token");
+    assert.doesNotMatch(
+      events,
+      /-token-argv-present|fixture-token/,
+      "no child receives token argv",
+    );
+    const tokenChildren = events.split("\n").filter((event) => event.endsWith("-token-present"));
+    assert.ok(tokenChildren.includes("runuser-config-token-present"));
+    for (const event of tokenChildren) {
+      assert.match(
+        event,
+        /^(?:config|runuser-config|[a-z-]+-config-child)-token-present$/,
+        "only config's process group inherits the token, not setup or cleanup",
+      );
+    }
+    assert.equal(fs.statSync(fixture.pkg).mode & 0o7777, 0o555);
+    assert.equal(fs.existsSync(path.join(fixture.pkg, "svc.sh")), false);
+  } finally {
+    fixture.cleanup();
+  }
+});
 test("bootstrap rejects a modified Node executable before invoking it", () => {
   const fixture = bootstrapFixture();
   try {
@@ -573,19 +1012,19 @@ test("bootstrap rejects symlinked or writable runner parents before service exec
   }
 });
 
-test("bootstrap runs runner configuration and service commands from the package directory", () => {
+test("bootstrap runs runner configuration and installs the root-managed service from the package directory", () => {
   const fixture = bootstrapFixture();
   try {
-    for (const file of [".runner", ".credentials", ".service"])
-      fs.rmSync(path.join(fixture.state, file));
+    for (const file of [".runner", ".credentials"]) fs.rmSync(path.join(fixture.state, file));
     const result = fixture.invoke({ ALLOW_CONFIG: "1" }, fixture.recordAllowlist());
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
     assert.ok(fs.existsSync(fixture.trace), `${result.stderr}\n${result.stdout}`);
     const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.match(events, /^config-token-present$/m);
+    assert.doesNotMatch(events, /--token|fixture-token/);
     assert.ok(events.split("\n").includes(`config-cwd:${fixture.pkg}`));
-    assert.ok(events.split("\n").includes(`svc-cwd:${fixture.pkg}`));
-    assert.ok(events.split("\n").includes(`svc:install ${os.userInfo().username}`));
-    assert.match(events, /^svc:start$/m);
+    assert.match(events, /^systemctl:start /m);
+    assert.doesNotMatch(events, /^svc:/m);
   } finally {
     fixture.cleanup();
   }
@@ -641,7 +1080,9 @@ test("bootstrap entry rejects a corrupt pinned download before dependency setup"
     assert.notEqual(result.status, 0);
     const events = fs.readFileSync(fixture.trace, "utf8");
     assert.match(events, /^curl:/m);
-    assert.doesNotMatch(events, /^(apt-get|systemctl|snap):/m);
+    assert.doesNotMatch(events, /^(apt-get|snap):/m);
+    assert.match(events, /^systemctl:stop /m);
+    assert.doesNotMatch(events, /^systemctl:(enable|start) /m);
     assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo|config\.sh)/m);
     assert.equal(fs.existsSync(path.join(fixture.pkg, ".bootstrap-manifest")), true);
     assert.doesNotMatch(events, /svc:/);
@@ -658,7 +1099,9 @@ test("bootstrap entry fails closed when a pinned download is missing", () => {
     assert.notEqual(result.status, 0);
     const events = fs.readFileSync(fixture.trace, "utf8");
     assert.match(events, /^curl:/m);
-    assert.doesNotMatch(events, /^(apt-get|systemctl|snap):/m);
+    assert.doesNotMatch(events, /^(apt-get|snap):/m);
+    assert.match(events, /^systemctl:stop /m);
+    assert.doesNotMatch(events, /^systemctl:(enable|start) /m);
     assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo|config\.sh)/m);
     assert.doesNotMatch(events, /^(config|svc):/m);
   } finally {
@@ -682,7 +1125,7 @@ test("bootstrap entry rejects invalid existing runner state before config or ser
   }
 });
 
-test("bootstrap entry reuses complete pinned state offline without changing its manifest", () => {
+test("bootstrap reuses complete pinned state and starts the root-managed runner unit", () => {
   const fixture = bootstrapFixture();
   try {
     const manifestPath = path.join(fixture.pkg, ".bootstrap-manifest");
@@ -691,15 +1134,57 @@ test("bootstrap entry reuses complete pinned state offline without changing its 
     assert.equal(result.status, 0, result.stderr);
     const events = fs.readFileSync(fixture.trace, "utf8");
     assert.doesNotMatch(events, /^(curl|apt-get):/m);
-    assert.match(events, /^svc:start$/m);
+    assert.match(events, /^systemctl:start /m);
+    const disableIndex = events.indexOf(`systemctl:disable ${fixture.unitName}`);
+    const stopIndex = events.indexOf(`systemctl:stop ${fixture.unitName}`);
+    const enableIndex = events.indexOf(`systemctl:enable ${fixture.unitName}`);
+    const startIndex = events.indexOf(`systemctl:start ${fixture.unitName}`);
+    assert.ok(disableIndex >= 0 && disableIndex < stopIndex);
+    assert.ok(stopIndex < enableIndex && enableIndex < startIndex);
     assert.equal(fs.readFileSync(manifestPath, "utf8"), manifestBefore);
+    assert.equal(fs.existsSync(path.join(fixture.state, ".service")), false);
   } finally {
     fixture.cleanup();
   }
 });
-test("bootstrap stops the runner and rechecks tool manifests before execution", () => {
+test("bootstrap reuses the canonical unit for a differently cased repository URL", () => {
   const fixture = bootstrapFixture();
   try {
+    const result = fixture.invoke(
+      { RUNNER_URL: "https://github.com/Garden-Co/Jazz2/" },
+      fixture.recordAllowlist(),
+    );
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.ok(
+      events.split("\n").includes(`systemctl:start ${fixture.unitName}`),
+      "repository casing and a trailing slash retain the canonical unit identity",
+    );
+    assert.doesNotMatch(events, /^runuser:.*config\.sh/m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap repairs a missing manager unit for complete current runner state", () => {
+  const fixture = bootstrapFixture();
+  try {
+    fs.rmSync(fixture.unitFile);
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    assert.equal(fs.existsSync(fixture.unitFile), true);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.match(events, /^systemctl:start /m);
+    assert.doesNotMatch(events, /^svc:/m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap stops a current unit without a .service marker before checking tools", () => {
+  const fixture = bootstrapFixture();
+  try {
+    assert.equal(fs.existsSync(path.join(fixture.state, ".service")), false);
     const marker = path.join(fixture.root, "rustup-executed-after-stop");
     const result = fixture.invoke(
       { TAMPER_RUSTUP_ON_STOP: "1", TOOLCHAIN_EXECUTED_MARKER: marker },
@@ -707,32 +1192,551 @@ test("bootstrap stops the runner and rechecks tool manifests before execution", 
     );
     assert.notEqual(result.status, 0, "post-stop toolchain tampering must fail closed");
     const events = fs.readFileSync(fixture.trace, "utf8");
-    assert.match(events, /^svc:stop$/m, "an existing runner is quiesced before tool checks");
-    assert.equal(
-      fs.existsSync(marker),
-      false,
-      "modified Rustup is not executed after service stop",
-    );
+    assert.ok(events.split("\n").includes(`systemctl:stop ${fixture.unitName}`));
+    const disableIndex = events.indexOf(`systemctl:disable ${fixture.unitName}`);
+    const stopIndex = events.indexOf(`systemctl:stop ${fixture.unitName}`);
+    assert.ok(disableIndex >= 0 && disableIndex < stopIndex);
+    assert.equal(fs.existsSync(marker), false, "modified Rustup is never executed");
     assert.doesNotMatch(events, /^runuser:.*\/\.cargo\/bin\/rustup/m);
     assert.doesNotMatch(
       events,
-      /^svc:start$/m,
-      "failed post-stop verification keeps service stopped",
+      /^systemctl:start /m,
+      "failed verification does not restart the unit",
+    );
+    assert.doesNotMatch(
+      events,
+      /^systemctl:restart /m,
+      "bootstrap never aggregate-restarts the unit",
     );
   } finally {
     fixture.cleanup();
   }
 });
 
-test("bootstrap fails closed when the existing runner service cannot stop", () => {
+test("bootstrap fails closed when the existing runner unit cannot stop", () => {
   const fixture = bootstrapFixture();
   try {
-    const result = fixture.invoke({ FAIL_SERVICE: "stop" });
-    assert.notEqual(result.status, 0, "service stop failure aborts bootstrap");
+    const result = fixture.invoke({ SYSTEMCTL_FAIL: "stop" });
+    assert.match(result.stderr, /runner service stop failed/);
+    assert.notEqual(result.status, 0, "systemd stop failure aborts bootstrap");
     const events = fs.readFileSync(fixture.trace, "utf8");
-    assert.match(events, /^svc:stop$/m);
+    assert.match(events, /^systemctl:stop /m);
+    const disableIndex = events.indexOf(`systemctl:disable ${fixture.unitName}`);
+    const stopIndex = events.indexOf(`systemctl:stop ${fixture.unitName}`);
+    assert.ok(disableIndex >= 0 && disableIndex < stopIndex);
     assert.doesNotMatch(events, /^runuser:.*\/\.cargo\/bin\/rustup/m);
-    assert.doesNotMatch(events, /^svc:start$/m);
+    assert.doesNotMatch(events, /^systemctl:start /m);
+    assert.equal(fs.readFileSync(fixture.activeState, "utf8"), "active\n");
+  } finally {
+    fixture.cleanup();
+  }
+});
+test("bootstrap stops but does not inspect tools when it cannot disable the verified unit", () => {
+  const fixture = bootstrapFixture();
+  try {
+    const result = fixture.invoke({ SYSTEMCTL_FAIL: "disable" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /runner service could not be disabled/);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    const disableIndex = events.indexOf(`systemctl:disable ${fixture.unitName}`);
+    const stopIndex = events.indexOf(`systemctl:stop ${fixture.unitName}`);
+    assert.ok(disableIndex >= 0 && disableIndex < stopIndex);
+    assert.equal(fs.readFileSync(fixture.activeState, "utf8"), "inactive\n");
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+    assert.doesNotMatch(events, /^systemctl:start /m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap rejects a still-populated runner cgroup before persistent tools", () => {
+  const fixture = bootstrapFixture();
+  try {
+    fs.writeFileSync(path.join(fixture.cgroup, "cgroup.events"), "populated 1\nfrozen 0\n");
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.match(result.stderr, /runner cgroup is not empty/);
+    assert.notEqual(result.status, 0, "inactive systemd state does not prove an empty cgroup");
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.match(events, /^systemctl:stop /m);
+    assert.equal(fs.readFileSync(fixture.activeState, "utf8"), "inactive\n");
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+    assert.doesNotMatch(events, /^systemctl:start /m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap rejects a path-matching unit name for another runner registration", () => {
+  const fixture = bootstrapFixture();
+  try {
+    fs.rmSync(fixture.unitFile);
+    const otherUnit = path.join(
+      fixture.unitDir,
+      serviceUnitName("https://github.com/garden-co/jazz2", "some-other-runner"),
+    );
+    fs.writeFileSync(
+      path.join(fixture.state, ".runner"),
+      JSON.stringify({
+        agentName: "fixture-runner",
+        serverUrl: "https://github.com/garden-co/jazz2",
+        workFolder: "_work",
+      }),
+    );
+    fs.writeFileSync(
+      otherUnit,
+      serviceUnitContents({
+        user: os.userInfo().username,
+        pkg: fixture.pkg,
+        runnerName: "some-other-runner",
+      }),
+      { mode: 0o644 },
+    );
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.notEqual(
+      result.status,
+      0,
+      "root-owned unit identity must agree with requested registration",
+    );
+    assert.match(result.stderr, /runner unit identity is ambiguous/);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.doesNotMatch(events, /^systemctl:stop /m);
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+    assert.equal(fs.existsSync(otherUnit), true, "unrelated unit remains untouched");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap rejects a runner account resolving to UID zero before side effects", () => {
+  const fixture = bootstrapFixture();
+  try {
+    const result = fixture.invoke({ FIXTURE_UID: "0" });
+    assert.notEqual(result.status, 0, "root cannot be selected as the runner account");
+    assert.match(result.stderr, /RUNNER_USER must resolve to a non-root UID/);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.doesNotMatch(events, /^(apt-get|curl|systemctl|snap):/m);
+    assert.doesNotMatch(events, /^runuser:/m);
+    assert.doesNotMatch(events, /^(config|svc):/m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap creates a Jazz-managed unit after configuring an archive without svc.sh", () => {
+  const fixture = bootstrapFixture({ rawPackage: true });
+  try {
+    fs.rmSync(path.join(fixture.state, ".runner"));
+    fs.rmSync(path.join(fixture.state, ".credentials"));
+    fs.rmSync(fixture.unitFile);
+    const result = fixture.invoke(
+      { ALLOW_CONFIG: "1", GENERATE_SVC: "1" },
+      fixture.recordAllowlist(),
+    );
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.match(events, /^config-package-mode:1770$/m);
+    assert.match(events, /^systemctl:start /m);
+    assert.doesNotMatch(events, /^svc:/m);
+    assert.equal(fs.existsSync(path.join(fixture.root, "generated-svc-executed")), false);
+    assert.equal(fs.existsSync(path.join(fixture.pkg, "svc.sh")), false);
+    assert.equal(fs.existsSync(fixture.unitFile), true, "expected root-managed unit is installed");
+    assert.equal(fs.statSync(fixture.unitFile).mode & 0o777, 0o644);
+    const unit = fs.readFileSync(fixture.unitFile, "utf8");
+    assert.ok(unit.split("\n").includes(`User=${os.userInfo().username}`));
+    assert.ok(unit.split("\n").includes(`WorkingDirectory=${fixture.pkg}`));
+    assert.ok(unit.split("\n").includes(`ExecStart=${fixture.pkg}/runsvc.sh`));
+    assert.doesNotMatch(unit, /^KillMode=/m, "the Jazz unit uses systemd's control-group default");
+  } finally {
+    fixture.cleanup();
+  }
+});
+test("bootstrap stops a blocked config process and seals the runner package on signal", async () => {
+  const fixture = bootstrapFixture({ rawPackage: true });
+  const bootstrapPidFile = path.join(fixture.root, "bootstrap.pid");
+  const blockedMarker = path.join(fixture.root, "config-blocked");
+  const releaseMarker = path.join(fixture.root, "config-release");
+  const afterSignalMarker = path.join(fixture.root, "config-after-signal");
+  const bashEnv = path.join(fixture.root, "bootstrap-env.sh");
+  fs.rmSync(path.join(fixture.state, ".runner"));
+  fs.rmSync(path.join(fixture.state, ".credentials"));
+  fs.writeFileSync(
+    bashEnv,
+    'if [ ! -e "$BOOTSTRAP_PID_FILE" ]; then printf "%s\\n" "$BASHPID" > "$BOOTSTRAP_PID_FILE"; fi\n',
+  );
+  let execution;
+  let completed = false;
+  let completion;
+  try {
+    execution = fixture.invokeAsync(
+      {
+        ALLOW_CONFIG: "1",
+        GENERATE_SVC: "1",
+        INTERRUPT_CONFIG: "1",
+        BASH_ENV: bashEnv,
+        BOOTSTRAP_PID_FILE: bootstrapPidFile,
+        CONFIG_AFTER_SIGNAL_MARKER: afterSignalMarker,
+      },
+      fixture.recordAllowlist(),
+    );
+    completion = execution.completion.then((result) => {
+      completed = true;
+      return result;
+    });
+    let configBlocked = false;
+    for (let attempt = 0; attempt < 500; attempt++) {
+      if (fs.existsSync(blockedMarker)) {
+        configBlocked = true;
+        break;
+      }
+      if (execution.child.exitCode !== null || execution.child.signalCode !== null) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(configBlocked, "config reaches its deliberate blocked state");
+    const earlyExit = await Promise.race([
+      completion.then((result) => ({ result })),
+      new Promise((resolve) => setTimeout(() => resolve(null), 1000)),
+    ]);
+    if (!earlyExit) fs.writeFileSync(releaseMarker, "continue\n");
+    const result = earlyExit?.result ?? (await completion);
+    fs.writeFileSync(releaseMarker, "continue\n");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(
+      fs.existsSync(afterSignalMarker),
+      false,
+      "terminated config cannot write after the package is sealed",
+    );
+    assert.ok(earlyExit, "bootstrap promptly terminates the blocked config process group");
+    assert.notEqual(result.status, 0, "the interrupted bootstrap fails");
+    assert.equal(fs.existsSync(bootstrapPidFile), true);
+    assert.equal(fs.statSync(fixture.pkg).uid, process.getuid());
+    assert.equal(fs.statSync(fixture.pkg).mode & 0o777, 0o555);
+    assert.equal(fs.existsSync(path.join(fixture.pkg, "svc.sh")), false);
+    assert.doesNotMatch(fs.readFileSync(fixture.trace, "utf8"), /^systemctl:start /m);
+  } finally {
+    if (execution && !completed) {
+      fs.writeFileSync(releaseMarker, "continue\n");
+      await completion;
+    }
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap removes generated svc.sh when configuration fails", () => {
+  const fixture = bootstrapFixture({ rawPackage: true });
+  try {
+    fs.rmSync(path.join(fixture.state, ".runner"));
+    fs.rmSync(path.join(fixture.state, ".credentials"));
+    const result = fixture.invoke(
+      { ALLOW_CONFIG: "1", GENERATE_SVC: "1", FAIL_CONFIG_AFTER_SVC: "1" },
+      fixture.recordAllowlist(),
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /runner configuration failed/);
+    assert.equal(fs.statSync(fixture.pkg).uid, process.getuid());
+    assert.equal(fs.statSync(fixture.pkg).mode & 0o777, 0o555);
+    assert.equal(fs.existsSync(path.join(fixture.pkg, "svc.sh")), false);
+    assert.doesNotMatch(fs.readFileSync(fixture.trace, "utf8"), /^systemctl:start /m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap rejects a Jazz unit with an explicit KillMode override before stopping", () => {
+  const fixture = bootstrapFixture();
+  try {
+    const unit = fs.readFileSync(fixture.unitFile, "utf8");
+    fs.writeFileSync(
+      fixture.unitFile,
+      unit.replace("[Service]\n", "[Service]\nKillMode=process\n"),
+      { mode: 0o644 },
+    );
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.notEqual(result.status, 0, "an overridden Jazz unit is not trusted");
+    assert.match(result.stderr, /unit/i);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.doesNotMatch(events, /^systemctl:stop /m);
+    assert.doesNotMatch(events, /^systemctl:disable /m);
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap disables a verified legacy unit before controlled reprovision", () => {
+  const fixture = bootstrapFixture({
+    rawPackage: true,
+    runnerUrl: "https://github.com/gardenco/jazz2",
+  });
+  try {
+    fs.rmSync(fixture.unitFile);
+    const legacyName = "actions.runner.gardenco-jazz2.fixture-runner.service";
+    const legacyUnitFile = path.join(fixture.unitDir, legacyName);
+    const legacyPackage = path.join(fixture.root, "home", os.userInfo().username, "actions-runner");
+    fs.mkdirSync(legacyPackage, { recursive: true });
+    fs.chmodSync(legacyPackage, 0o755);
+    fs.writeFileSync(path.join(legacyPackage, "runsvc.sh"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+    const legacyUnit = serviceUnitContents({
+      user: os.userInfo().username,
+      pkg: legacyPackage,
+    }).replace("[Service]\n", "[Service]\nKillMode=process\n");
+    fs.writeFileSync(legacyUnitFile, legacyUnit, { mode: 0o644 });
+    const legacyCgroup = path.join(fixture.root, "sys", "fs", "cgroup", "system.slice", legacyName);
+    fs.mkdirSync(legacyCgroup, { recursive: true });
+    fs.writeFileSync(path.join(legacyCgroup, "cgroup.events"), "populated 0\nfrozen 0\n");
+
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.notEqual(result.status, 0, "legacy runner state requires controlled reprovision");
+    assert.match(result.stderr, /reprovision/i);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    const disableIndex = events.indexOf(`systemctl:disable ${legacyName}`);
+    const stopIndex = events.indexOf(`systemctl:stop ${legacyName}`);
+    assert.ok(disableIndex >= 0 && disableIndex < stopIndex);
+    assert.equal(fs.readFileSync(fixture.activeState, "utf8"), "inactive\n");
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+    assert.doesNotMatch(events, /^systemctl:start /m);
+    assert.equal(fs.existsSync(legacyUnitFile), true, "bootstrap does not migrate legacy state");
+  } finally {
+    fixture.cleanup();
+  }
+});
+test("bootstrap disables a verified prior-version unit before controlled reprovision", () => {
+  const fixture = bootstrapFixture({
+    rawPackage: true,
+    runnerUrl: "https://github.com/gardenco/jazz2",
+  });
+  try {
+    fs.rmSync(fixture.unitFile);
+    const legacyName = "actions.runner.gardenco-jazz2.fixture-runner.service";
+    const legacyUnitFile = path.join(fixture.unitDir, legacyName);
+    const legacyPackage = path.join(fixture.root, "opt", "actions-runner", "2.336.0");
+    fs.mkdirSync(legacyPackage, { recursive: true });
+    fs.chmodSync(legacyPackage, 0o755);
+    fs.writeFileSync(path.join(legacyPackage, "runsvc.sh"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+    const legacyUnit = serviceUnitContents({
+      user: os.userInfo().username,
+      pkg: legacyPackage,
+    }).replace("[Service]\n", "[Service]\nKillMode=process\n");
+    fs.writeFileSync(legacyUnitFile, legacyUnit, { mode: 0o644 });
+    const legacyCgroup = path.join(fixture.root, "sys", "fs", "cgroup", "system.slice", legacyName);
+    fs.mkdirSync(legacyCgroup, { recursive: true });
+    fs.writeFileSync(path.join(legacyCgroup, "cgroup.events"), "populated 0\nfrozen 0\n");
+
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.notEqual(result.status, 0, "a prior-version runner requires controlled reprovision");
+    assert.match(result.stderr, /reprovision/i);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    const disableIndex = events.indexOf(`systemctl:disable ${legacyName}`);
+    const stopIndex = events.indexOf(`systemctl:stop ${legacyName}`);
+    assert.ok(disableIndex >= 0 && disableIndex < stopIndex);
+    assert.equal(fs.readFileSync(fixture.activeState, "utf8"), "inactive\n");
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+    assert.doesNotMatch(events, /^systemctl:start /m);
+    assert.equal(
+      fs.existsSync(legacyUnitFile),
+      true,
+      "bootstrap does not migrate prior-version state",
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+test("bootstrap disables and quiesces all verified units before controlled reprovision", () => {
+  const fixture = bootstrapFixture({
+    rawPackage: true,
+    runnerUrl: "https://github.com/gardenco/jazz2",
+  });
+  try {
+    const legacyName = "actions.runner.gardenco-jazz2.fixture-runner.service";
+    const legacyUnitFile = path.join(fixture.unitDir, legacyName);
+    const legacyPackage = path.join(fixture.root, "home", os.userInfo().username, "actions-runner");
+    fs.mkdirSync(legacyPackage, { recursive: true });
+    fs.chmodSync(legacyPackage, 0o755);
+    fs.writeFileSync(path.join(legacyPackage, "runsvc.sh"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+    const legacyUnit = serviceUnitContents({
+      user: os.userInfo().username,
+      pkg: legacyPackage,
+    }).replace("[Service]\n", "[Service]\nKillMode=process\n");
+    fs.writeFileSync(legacyUnitFile, legacyUnit, { mode: 0o644 });
+    const legacyCgroup = path.join(fixture.root, "sys", "fs", "cgroup", "system.slice", legacyName);
+    fs.mkdirSync(legacyCgroup, { recursive: true });
+    fs.writeFileSync(path.join(legacyCgroup, "cgroup.events"), "populated 0\nfrozen 0\n");
+
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /reprovision/i);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    const legacyDisable = events.indexOf(`systemctl:disable ${legacyName}`);
+    const jazzDisable = events.indexOf(`systemctl:disable ${fixture.unitName}`);
+    const legacyStop = events.indexOf(`systemctl:stop ${legacyName}`);
+    const jazzStop = events.indexOf(`systemctl:stop ${fixture.unitName}`);
+    const firstStop = Math.min(legacyStop, jazzStop);
+    assert.ok(legacyDisable >= 0 && legacyDisable < firstStop);
+    assert.ok(jazzDisable >= 0 && jazzDisable < firstStop);
+    assert.ok(legacyStop >= 0 && jazzStop >= 0);
+    assert.equal(fs.readFileSync(fixture.activeState, "utf8"), "inactive\n");
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+    assert.doesNotMatch(events, /^systemctl:start /m);
+    assert.equal(fs.existsSync(legacyUnitFile), true, "legacy credentials are not migrated");
+    assert.equal(fs.existsSync(fixture.unitFile), true, "verified units are not removed here");
+  } finally {
+    fixture.cleanup();
+  }
+});
+test("bootstrap leaves legacy services untouched when their names are ambiguous", () => {
+  for (const collision of [
+    {
+      runnerUrl: "https://github.com/foo-bar/baz",
+      runnerName: "fixture-runner",
+      legacyName: "actions.runner.foo-bar-baz.fixture-runner.service",
+      installedRunnerName: "fixture-runner",
+      alternate: "https://github.com/foo/bar-baz with runner fixture-runner",
+    },
+    {
+      runnerUrl: "https://github.com/org/foo",
+      runnerName: "bar.baz",
+      legacyName: "actions.runner.org-foo.bar.baz.service",
+      installedRunnerName: "baz",
+      alternate: "https://github.com/org/foo.bar with runner baz",
+    },
+  ]) {
+    const fixture = bootstrapFixture({
+      rawPackage: true,
+      runnerUrl: collision.runnerUrl,
+      runnerName: collision.runnerName,
+    });
+    try {
+      fs.rmSync(fixture.unitFile);
+      const legacyUnitFile = path.join(fixture.unitDir, collision.legacyName);
+      const legacyPackage = path.join(
+        fixture.root,
+        "home",
+        os.userInfo().username,
+        "actions-runner",
+      );
+      fs.mkdirSync(legacyPackage, { recursive: true });
+      fs.chmodSync(legacyPackage, 0o755);
+      fs.writeFileSync(path.join(legacyPackage, "runsvc.sh"), "#!/bin/sh\nexit 0\n", {
+        mode: 0o755,
+      });
+      const legacyUnit = serviceUnitContents({
+        user: os.userInfo().username,
+        pkg: legacyPackage,
+        runnerName: collision.installedRunnerName,
+      }).replace("[Service]\n", "[Service]\nKillMode=process\n");
+      fs.writeFileSync(legacyUnitFile, legacyUnit, { mode: 0o644 });
+      const legacyCgroup = path.join(
+        fixture.root,
+        "sys",
+        "fs",
+        "cgroup",
+        "system.slice",
+        collision.legacyName,
+      );
+      fs.mkdirSync(legacyCgroup, { recursive: true });
+      fs.writeFileSync(path.join(legacyCgroup, "cgroup.events"), "populated 0\nfrozen 0\n");
+
+      const result = fixture.invoke({}, fixture.recordAllowlist());
+      assert.notEqual(result.status, 0);
+      assert.match(
+        result.stderr,
+        /legacy runner unit identity is ambiguous/,
+        `the service name also represents ${collision.alternate}`,
+      );
+      const events = fs.readFileSync(fixture.trace, "utf8");
+      assert.doesNotMatch(
+        events,
+        new RegExp(`^systemctl:(disable|stop) ${collision.legacyName}$`, "m"),
+      );
+      assert.equal(fs.readFileSync(fixture.activeState, "utf8"), "active\n");
+      assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+      assert.equal(fs.existsSync(legacyUnitFile), true);
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test("bootstrap rejects a .service marker without a manager unit before tools", () => {
+  const fixture = bootstrapFixture();
+  try {
+    fs.rmSync(fixture.unitFile);
+    fs.writeFileSync(path.join(fixture.state, ".service"), "legacy marker\n");
+    fs.chmodSync(path.join(fixture.state, ".service"), 0o600);
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.match(result.stderr, /runner service marker has no matching manager unit/);
+    assert.notEqual(result.status, 0, "the runner-writable marker cannot establish a service");
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+    assert.doesNotMatch(events, /^systemctl:stop /m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap does not token-reconfigure an incomplete registered runner", () => {
+  const fixture = bootstrapFixture();
+  try {
+    fs.rmSync(path.join(fixture.state, ".credentials"));
+    const result = fixture.invoke(
+      { RUNNER_TOKEN: "must-not-reconfigure" },
+      fixture.recordAllowlist(),
+    );
+    assert.notEqual(result.status, 0, "incomplete registration fails closed");
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.doesNotMatch(events, /^runuser:.*config\.sh/m);
+    assert.doesNotMatch(events, /^config:/m);
+    assert.doesNotMatch(events, /^systemctl:stop /m);
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap removes a stopped managed unit after startup failure", () => {
+  const fixture = bootstrapFixture();
+  try {
+    fs.writeFileSync(fixture.activeState, "inactive\n");
+    const result = fixture.invoke({ SYSTEMCTL_FAIL: "start" });
+    assert.notEqual(result.status, 0, "a failed manager start is not bootstrap success");
+    assert.match(result.stderr, /runner service start failed/);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    const startIndex = events.indexOf(`systemctl:start ${fixture.unitName}`);
+    const stopIndex = events.lastIndexOf(`systemctl:stop ${fixture.unitName}`);
+    const disableIndex = events.lastIndexOf(`systemctl:disable ${fixture.unitName}`);
+    assert.ok(startIndex >= 0 && startIndex < stopIndex && stopIndex < disableIndex);
+    assert.equal(
+      fs.existsSync(fixture.unitFile),
+      false,
+      "proved cleanup removes the failed managed unit",
+    );
+    assert.equal(
+      fs.readFileSync(fixture.activeState, "utf8"),
+      "inactive\n",
+      "the manager adapter did not report a successful start",
+    );
+    assert.doesNotMatch(events, /^systemctl:restart /m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap rejects malformed cgroup state after stopping without running tools", () => {
+  const fixture = bootstrapFixture();
+  try {
+    fs.writeFileSync(path.join(fixture.cgroup, "cgroup.events"), "populated maybe\n");
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.notEqual(result.status, 0, "unparseable cgroup state is not proof of quiescence");
+    assert.match(result.stderr, /runner cgroup state is malformed/);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.match(events, /^systemctl:stop /m);
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+    assert.doesNotMatch(events, /^systemctl:start /m);
   } finally {
     fixture.cleanup();
   }
@@ -763,7 +1767,7 @@ test("bootstrap refuses a modified same-version Rustup before invoking it", () =
       "modified Rustup is rejected despite reporting the pinned version",
     );
     assert.equal(fs.existsSync(marker), false, "modified Rustup is never invoked");
-    assert.doesNotMatch(fs.readFileSync(fixture.trace, "utf8"), /^svc:start$/m);
+    assert.doesNotMatch(fs.readFileSync(fixture.trace, "utf8"), /^systemctl:start /m);
   } finally {
     fixture.cleanup();
   }
@@ -796,7 +1800,60 @@ test("bootstrap refuses a modified same-version wasm-pack before invoking it", (
       "modified wasm-pack is rejected despite reporting the pinned version",
     );
     assert.equal(fs.existsSync(marker), false, "modified wasm-pack is never invoked");
-    assert.doesNotMatch(fs.readFileSync(fixture.trace, "utf8"), /^svc:start$/m);
+    assert.doesNotMatch(fs.readFileSync(fixture.trace, "utf8"), /^systemctl:start /m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+test("bootstrap treats an empty Cargo bin directory as absent tool state", () => {
+  const fixture = bootstrapFixture();
+  try {
+    const cargoBin = path.join(fixture.root, "home", os.userInfo().username, ".cargo", "bin");
+    fs.rmSync(path.join(cargoBin, "rustup"));
+    fs.rmSync(path.join(cargoBin, "wasm-pack"));
+    fs.rmSync(path.join(fixture.root, "home", os.userInfo().username, ".rustup"), {
+      recursive: true,
+    });
+    fs.rmSync(path.join(fixture.root, "var", "lib", "actions-runner", ".toolchain-integrity"), {
+      recursive: true,
+    });
+    assert.deepEqual(fs.readdirSync(cargoBin), []);
+
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /download integrity check failed/);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.match(events, /^curl:/m, "empty directory proceeds to pinned tool download");
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+    assert.doesNotMatch(events, /^systemctl:start /m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+test("bootstrap rechecks newly appeared Rust state after stopping the runner", () => {
+  const fixture = bootstrapFixture();
+  try {
+    const cargoBin = path.join(fixture.root, "home", os.userInfo().username, ".cargo", "bin");
+    fs.rmSync(cargoBin, { recursive: true });
+    fs.rmSync(path.join(fixture.root, "home", os.userInfo().username, ".rustup"), {
+      recursive: true,
+    });
+    fs.rmSync(path.join(fixture.root, "var", "lib", "actions-runner", ".toolchain-integrity"), {
+      recursive: true,
+    });
+    const marker = path.join(fixture.root, "rustup-executed-after-stop");
+    const result = fixture.invoke(
+      { TAMPER_RUSTUP_ON_STOP: "1", TOOLCHAIN_EXECUTED_MARKER: marker },
+      fixture.recordAllowlist(),
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /existing Rust tool state has no protected integrity manifests/);
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.match(events, /^systemctl:stop /m);
+    assert.doesNotMatch(events, /^curl:/m);
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
+    assert.equal(fs.existsSync(marker), false);
+    assert.equal(fs.existsSync(path.join(cargoBin, "rustup")), true);
   } finally {
     fixture.cleanup();
   }
@@ -895,7 +1952,9 @@ test("bootstrap entry rejects a missing pinned wasm-pack before configuration or
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /existing wasm-pack installation is incomplete/);
     const events = fs.readFileSync(fixture.trace, "utf8");
-    assert.doesNotMatch(events, /^(curl|apt-get|systemctl|snap):/m);
+    assert.doesNotMatch(events, /^(curl|apt-get|snap):/m);
+    assert.match(events, /^systemctl:stop /m);
+    assert.doesNotMatch(events, /^systemctl:(enable|start) /m);
     assert.doesNotMatch(events, /^svc:/m);
   } finally {
     fixture.cleanup();
