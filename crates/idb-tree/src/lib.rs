@@ -1407,18 +1407,11 @@ impl<S: PageStore> TreeCore<S> {
                 page_size: self.options.page_size,
             });
         }
-        let split = byte_balanced_split(
-            entries
-                .iter()
-                .map(|(key, value)| page::leaf_entry_len(key, value)),
-            page::LEAF_BASE_LEN,
-            self.options.page_size,
-            false,
-        )
-        .ok_or(Error::PageTooLarge {
-            page_id,
-            page_size: self.options.page_size,
-        })?;
+        let split = page::leaf_split_index(entries, self.options.page_size)
+            .ok_or(Error::PageTooLarge {
+                page_id,
+                page_size: self.options.page_size,
+            })?;
         Ok(entries.split_off(split))
     }
 
