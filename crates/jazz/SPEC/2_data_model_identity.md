@@ -232,7 +232,8 @@ cross-branch-key row-UUID collisions (`INV-DATA-21`).
 The replicated wire payload for a version (`VersionRecord`) is exactly the
 replicated-immutable fields (§2.1): `row_uuid`, the provenance cells, a nullable
 `_deletion`, and nullable `user_{col}` cells, carried in the `JVRR` version-2
-row blob (SPEC 16) and followed by the record's `col_stamps` (SPEC 4 §4.6).
+row blob (SPEC 16) and followed by the record's `col_stamps` (SPEC 4 §4.6)
+and `counter_signs` (SPEC 4 §4.3).
 Wire protocol v4 removed `parents`; a version-1 blob is rejected. Receiver-local currency and
 authority-state columns are excluded (`INV-DATA-16`). Mixed-version _sync_ is
 owned by ch. 8 / ch. 10.
@@ -287,7 +288,8 @@ Core's merge, keyed `(branch_key, row_uuid, tx_time, tx_node_id)` with no
 secondary index; a global-current record per row with `global_time` (the row's seq) and
 index `by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
 `(branch_key, row_uuid)` with its `ahead_shadow` copy; `_deletion` as an
-ordinary nullable cell; and, after `authored_columns`, one hidden `U48` stamp
+ordinary nullable cell; and, after `authored_columns` (and, in history, the
+`counter_signs` bytes of a patch's counter ops, SPEC 4 §4.3), one hidden `U48` stamp
 per LWW column then `_ts__deletion` (SPEC 4 §4.6). The history images of one
 transaction are found through that transaction's `jazz_tx_touched_rows` list
 (§2.8), not through an index: fate replay, relay forwarding and

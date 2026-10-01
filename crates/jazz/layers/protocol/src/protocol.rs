@@ -960,6 +960,13 @@ pub struct VersionRecord {
     /// with at least one nonzero stamp. Encoded as a postcard byte sequence
     /// (varint length, raw bytes). See SPEC ch. 4, "Column stamps".
     col_stamps: Vec<u8>,
+    /// Sign bits of this patch's counter ops: bit `i` (least significant
+    /// first) is set when the op of the authored table's `i`-th counter
+    /// column, in schema order, is negative. Empty when no op is negative,
+    /// and always empty on a settled image; no trailing zero byte. With the
+    /// op cell's low bits it carries the exact delta of any single write.
+    /// See SPEC ch. 4, "Counter ops".
+    counter_signs: Vec<u8>,
 }
 
 /// Explicit immutable-version row encoding. Outer sync framing owns lengths
@@ -1584,6 +1591,7 @@ impl VersionRecord {
             record,
             authored_columns: None,
             col_stamps: Vec::new(),
+            counter_signs: Vec::new(),
         }
     }
 
@@ -1619,6 +1627,18 @@ impl VersionRecord {
     #[doc(hidden)]
     pub fn col_stamps(&self) -> &[u8] {
         &self.col_stamps
+    }
+
+    #[doc(hidden)]
+    pub fn with_counter_signs(mut self, counter_signs: Vec<u8>) -> Self {
+        self.counter_signs = counter_signs;
+        self
+    }
+
+    /// Counter-op sign carrier (see the `counter_signs` field).
+    #[doc(hidden)]
+    pub fn counter_signs(&self) -> &[u8] {
+        &self.counter_signs
     }
 
     /// Encode a wire record directly from typed row payload parts.
@@ -1855,6 +1875,7 @@ impl Ord for VersionRecord {
             .then_with(|| self.record.raw().cmp(other.record.raw()))
             .then_with(|| self.authored_columns.cmp(&other.authored_columns))
             .then_with(|| self.col_stamps.cmp(&other.col_stamps))
+            .then_with(|| self.counter_signs.cmp(&other.counter_signs))
     }
 }
 
@@ -6979,6 +7000,43 @@ mod tests {
 
         assert_ne!(base, authored);
         assert_ne!(base.cmp(&authored), Ordering::Equal);
+    }
+
+    /// `counter_signs` is the last field of a `VersionRecord`, after
+    /// `col_stamps`: a postcard byte string (varint length, raw bytes). An
+    /// image or a patch with no negative counter op ends in a single `0`; a
+    /// patch whose first counter op is negative ends in `[1, 0b1]`.
+    #[test]
+    fn version_record_counter_signs_follow_col_stamps_on_the_wire() {
+        let table = TableSchema::new("counters", [ColumnSchema::new("count", ColumnType::U8)]);
+        let image = VersionRecord::from_cells(
+            &table,
+            schema_id(1),
+            RowUuid::from_bytes([1; 16]),
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            &BTreeMap::from([("count".to_owned(), Value::U8(57))]),
+            None,
+        )
+        .unwrap()
+        .with_authored_columns(Some(BTreeSet::from(["count".to_owned()])));
+        let negative = image.clone().with_counter_signs(vec![0b1]);
+
+        let image_bytes = postcard::to_allocvec(&image).unwrap();
+        let negative_bytes = postcard::to_allocvec(&negative).unwrap();
+        // ... authored_columns, col_stamps (empty), counter_signs.
+        assert_eq!(&image_bytes[image_bytes.len() - 2..], &[0, 0]);
+        assert_eq!(&negative_bytes[negative_bytes.len() - 3..], &[0, 1, 0b1]);
+        assert_eq!(
+            image_bytes[..image_bytes.len() - 1],
+            negative_bytes[..negative_bytes.len() - 2]
+        );
+        let decoded: VersionRecord = postcard::from_bytes(&negative_bytes).unwrap();
+        assert_eq!(decoded.counter_signs(), &[0b1]);
+        assert_eq!(decoded, negative);
+        assert_ne!(image.cmp(&negative), Ordering::Equal);
     }
 
     fn sample_lens() -> MigrationLens {

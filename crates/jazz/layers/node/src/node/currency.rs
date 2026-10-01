@@ -406,13 +406,27 @@ where
         // same-lineage layout is a byte-for-byte image of the history row.
         // History stores `updated_by` nullable; current always has it.
         let updated_by_idx = HistoryRowRecord::FIELD_UPDATED_BY_IDX;
-        if current_descriptor.fields().len() != history_descriptor.fields().len() + 1
+        // History also carries `counter_signs` (after `authored_columns`),
+        // which current lacks: a settled image's signs are empty.
+        let Some(signs_idx) = history_descriptor.field_index(crate::schema::COUNTER_SIGNS_FIELD)
+        else {
+            return Ok(None);
+        };
+        let source_of = |index: usize| {
+            if index > signs_idx {
+                index
+            } else if index >= global_time_idx {
+                index + 1
+            } else {
+                index
+            }
+        };
+        if current_descriptor.fields().len() != history_descriptor.fields().len()
             || (0..history_descriptor.fields().len()).any(|index| {
-                let source = if index >= global_time_idx {
-                    index + 1
-                } else {
-                    index
-                };
+                if index == signs_idx {
+                    return false;
+                }
+                let source = source_of(index);
                 let history_type = &history_descriptor.fields()[index].value_type;
                 let history_type = match history_type {
                     groove::records::ValueType::Nullable(inner) if index == updated_by_idx => {
@@ -428,6 +442,14 @@ where
         let raw = history_descriptor.create_with_encoded_fields::<Error>(
             current.raw().len(),
             |index, output| {
+                if index == signs_idx {
+                    history_descriptor.encode_field_into(
+                        index,
+                        &Value::Bytes(Vec::new()),
+                        output,
+                    )?;
+                    return Ok(());
+                }
                 if index == updated_by_idx {
                     let author = current.get_idx(GlobalCurrentRowRecord::FIELD_UPDATED_BY_IDX)?;
                     history_descriptor.encode_field_into(
@@ -453,11 +475,7 @@ where
                     history_descriptor.encode_field_into(index, &Value::U64(time.0), output)?;
                     return Ok(());
                 }
-                let source = if index >= global_time_idx {
-                    index + 1
-                } else {
-                    index
-                };
+                let source = source_of(index);
                 let span = current_descriptor.field_span(current.raw(), source)?;
                 output.extend_from_slice(&current.raw()[span]);
                 Ok(())

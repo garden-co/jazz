@@ -2029,7 +2029,8 @@ impl VersionRecordFromNode for VersionRecord {
         )
         .with_branch_key(stored.branch_key().clone())
         .with_authored_columns(authored_columns)
-        .with_col_stamps(stored.col_stamps_wire()?))
+        .with_col_stamps(stored.col_stamps_wire()?)
+        .with_counter_signs(stored.counter_signs()?))
     }
 }
 
@@ -2188,6 +2189,9 @@ pub(super) struct VersionRowParts {
     /// Wire `col_stamps` carrier (SPEC 4.6): empty when every slot is `0`,
     /// as for an unstamped image.
     pub(super) col_stamps: Vec<u8>,
+    /// Sign bits of this patch's counter ops (`merge_ops::counter_signs`):
+    /// empty when none is negative, and on every settled image.
+    pub(super) counter_signs: Vec<u8>,
 }
 
 // Record layout depends on the table name (enum registry binding), the ordered
@@ -2340,7 +2344,9 @@ impl VersionRow {
         }
         let deletion = version.deletion();
         let stamp_values = super::col_stamps::wire_stamp_values(version.col_stamps(), table)?;
-        let first_stamp_field = HistoryRowRecord::USER_CELLS + table.columns.len() + 1;
+        super::merge_ops::validate_counter_signs(table, version.counter_signs())?;
+        // `authored_columns` and `counter_signs` precede the stamp fields.
+        let first_stamp_field = HistoryRowRecord::USER_CELLS + table.columns.len() + 2;
         let descriptor = history_record_descriptor(table);
         let source = version.record().borrowed();
         let source_descriptor = source.descriptor();
@@ -2405,6 +2411,9 @@ impl VersionRow {
                     }
                     i if i == HistoryRowRecord::USER_CELLS + table.columns.len() => {
                         authored_column_ids_value(authored_columns.as_ref())
+                    }
+                    i if i == HistoryRowRecord::USER_CELLS + table.columns.len() + 1 => {
+                        Value::Bytes(version.counter_signs().to_vec())
                     }
                     i => stamp_values.get(i - first_stamp_field).cloned().ok_or(
                         Error::InvalidStoredValue(
@@ -2594,6 +2603,24 @@ impl VersionRow {
         };
         let value = nullable_value(self.record.borrowed().get_idx(field)?)?;
         value.map(authored_column_ids_from_value).transpose()
+    }
+
+    /// The sign bits of this patch's counter ops (`merge_ops::counter_signs`):
+    /// empty on a settled image or a layout without the field.
+    pub(super) fn counter_signs(&self) -> Result<Vec<u8>, Error> {
+        let Some(field) = self
+            .record
+            .descriptor()
+            .field_index(crate::schema::COUNTER_SIGNS_FIELD)
+        else {
+            return Ok(Vec::new());
+        };
+        match self.record.borrowed().get_idx(field)? {
+            Value::Bytes(bytes) => Ok(bytes),
+            _ => Err(Error::InvalidStoredValue(
+                "counter_signs field must be bytes",
+            )),
+        }
     }
 
     /// The canonical wire `col_stamps` carrier of this row image (SPEC 4.6):
@@ -3792,6 +3819,7 @@ pub(super) fn history_values_from_parts(
         ));
     }
     values.push(authored_column_ids_value(version.authored_columns.as_ref()));
+    values.push(Value::Bytes(version.counter_signs.clone()));
     values.extend(super::col_stamps::wire_stamp_values(
         &version.col_stamps,
         table,
@@ -3837,6 +3865,7 @@ fn history_values_from_wire(
         values.push(Value::Nullable(value.map(Box::new)));
     }
     values.push(authored_column_ids_value(authored_columns.as_ref()));
+    values.push(Value::Bytes(version.counter_signs().to_vec()));
     values.extend(super::col_stamps::wire_stamp_values(
         version.col_stamps(),
         table,

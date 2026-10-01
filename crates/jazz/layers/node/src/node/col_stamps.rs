@@ -10,8 +10,8 @@
 //! history, global-current, ahead-current and ahead-shadow records. The stamp
 //! of the cell field `F` is named `_ts_F` (so `_ts__app_<column>` in a logical
 //! layout, `_ts__app_<physical id>` in a physical one, and `_ts__deletion`).
-//! Stamp fields follow `authored_columns` in slot order: LWW columns in schema
-//! column order, then `_deletion`. An unstamped image (a pending local patch,
+//! Stamp fields follow `authored_columns` (and, in history, `counter_signs`)
+//! in slot order: LWW columns in schema column order, then `_deletion`. An unstamped image (a pending local patch,
 //! or a payload whose stamps are unknown) stores `0` in every slot, which is
 //! exactly how a merge treats it.
 //!
@@ -284,7 +284,7 @@ mod tests {
             .columns
             .iter()
             .rev()
-            .take(4)
+            .take(5)
             .rev()
             .map(|column| (column.name.as_str(), column.column_type.clone()))
             .collect::<Vec<_>>();
@@ -292,6 +292,7 @@ mod tests {
             names,
             [
                 ("authored_columns", ColumnType::U64.array_of().nullable()),
+                (crate::schema::COUNTER_SIGNS_FIELD, ColumnType::Bytes),
                 ("_ts__app_title", ColumnType::U48),
                 ("_ts__app_done", ColumnType::U48),
                 ("_ts__deletion", ColumnType::U48),

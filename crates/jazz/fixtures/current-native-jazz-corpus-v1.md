@@ -26,6 +26,9 @@ The logical pack has 33 entries in the linear row-history layout
 families `jazz_deletion_history`, `jazz_global_changes`, `jazz_merge_heads`,
 `jazz_pending_edges` and the `*_register*` families no longer exist; per-tx
 touched rows live in `jazz_tx_touched_rows`.
+History records carry an empty `counter_signs` byte string after
+`authored_columns` (SPEC 4 §4.3), so the history bytes and every digest below
+were regenerated when that field was added.
 
 | Store                               | Entries |
 | ----------------------------------- | ------: |
@@ -67,7 +70,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `c7ef2c5376e00ee6c75ce8b2eeb17e07f31436f86debbf74b7f8325384c7b18b` |
-| SQLite payload      | `76476acc4fb1c946d273e58c9f3d53f583d4b423b43c995411d7ff74873b5acb` |
-| gzip SQLite archive | `d70b5ab8bbc09c451849a781e164c0e05b7cdb4c96b3f2d4c8c0817864a92401` |
-| RocksDB archive     | `cc87271a4d3bc0aadf3729513ab0fbd838b05293615c50360faa1b742725d887` |
+| logical pack        | `78116b383fe820a7516f8e080b70b622750ed6fe1a4dae535f2ce568dd0f9fa3` |
+| SQLite payload      | `8e90f0f963a57e5d51e6b3d1ba7e4644b0c4d3cca4b2d4610337a07d7365a80a` |
+| gzip SQLite archive | `f30086f87ce44b54957600738bbc0411bcd929e3a78136d67ddb5a2e4b92904c` |
+| RocksDB archive     | `81bb87e54e2ac336a03e1ec7596b0d9f02f0eb3b115f09f197141c135aba5b08` |

@@ -104,12 +104,20 @@ columns (`INV-HIST-9`, ch. 2). A counter write travels as its delta from the
 row image it was made over, and Core adds each accepted delta to the current
 value (`INV-HIST-10`). Concurrent increments therefore converge to the exact
 total: from a base of `10`, a concurrent `+3` and `+5` merge to `18`, not to a
-single last-writer value. The delta is carried in the column's own integer
-type as its two's-complement residue modulo 2^width and read back as a signed
-delta of that width, so a decrement of an unsigned counter travels exactly. A
-write made over an image whose change does not fit that signed range (more
-than half the type's span in one step) is refused when it is made with an
-`InvalidMergeableCommit` error. Core never wraps: when adding an op to the
+single last-writer value. The difference of two values of a `width`-bit type
+lies in `-(2^width - 1)..=2^width - 1`, so the delta is carried as its
+two's-complement value one bit wider than the column's type: the op cell holds
+its low `width` bits in the column's own integer type, and the patch's
+**counter signs** hold its sign bit. Every single write of an in-range value
+is therefore expressible, an unsigned decrement and a change across the whole
+type included (a `U8` set from `200` to `1` travels as low bits `57` with the
+sign set, i.e. `-199`, never `+57`). Counter signs are a byte string, bit `i`
+(least significant first) belonging to the `i`-th counter column of the
+version's authored table in schema order; they are empty when no op is
+negative, carry no trailing zero byte, and are always empty on a settled
+image. They travel as `VersionRecord.counter_signs` on the wire and as the
+history field `counter_signs` (between `authored_columns` and the stamp
+fields); a non-canonical value is rejected at ingest. Core never wraps: when adding an op to the
 row's current value would take the column outside its type's range (below `0`
 or above the maximum for an unsigned type, outside `MIN..=MAX` for a signed
 one), Core rejects that write with a `MalformedCommit` reason naming the
@@ -290,7 +298,8 @@ The pending local overlay is not stamped and always wins locally.
 fields (groove SPEC §2.7, `INV-STORAGE-37`: 6 bytes little-endian in the
 record's fixed-width region, no offset-table entry). The history,
 global-current, ahead-current and ahead-shadow records carry, after
-`authored_columns`, one stamp field per slot in slot order: slot `i < L` is the
+`authored_columns` (and, in history, after `counter_signs`, §4.3), one stamp
+field per slot in slot order: slot `i < L` is the
 `i`-th `Lww` user column of the image's authored table schema in schema column
 order (merge-strategy columns are skipped, not zero-filled), and slot `L` is
 `_deletion`. The stamp field of the cell field `F` is named `_ts_F`:

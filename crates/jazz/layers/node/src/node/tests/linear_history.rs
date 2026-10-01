@@ -1251,3 +1251,46 @@ fn signed_counter_op_past_its_maximum_is_rejected_at_core() {
         BTreeMap::from([(target, counter_cells(i32::MAX, "alice"))])
     );
 }
+
+/// A single write may change a counter by more than half its type's span:
+/// its op carries a sign bit beside the cell's low bits, so Core applies
+/// the exact delta over a concurrent op. From `i32::MAX - 10`, bob's +5
+/// settles first; alice's write down to `i32::MIN` (a change of
+/// `-(2^32 - 11)`, whose low bits alone read as `+11`) then lands the
+/// counter on `i32::MIN + 5`.
+#[test]
+fn counter_write_wider_than_half_the_type_applies_its_exact_delta_at_core() {
+    let schema = counter_schema();
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(1), schema.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(2), schema.clone());
+    let (_bob_dir, mut bob) = open_node_with_schema(node(3), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let target = row(0x77);
+
+    commit_mergeable_global(
+        &mut base_writer,
+        &mut core,
+        MergeableCommit::new("counters", target, 10)
+            .cells(counter_cells(i32::MAX - 10, "base")),
+    );
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+    sync_table_rows_to(&mut core, &mut bob, "counters");
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 21).cells(counter_cells(i32::MIN, "alice")),
+        )
+        .unwrap();
+    let (_bob_tx, bob_unit) = bob
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 20)
+                .cells(counter_cells(i32::MAX - 5, "bob")),
+        )
+        .unwrap();
+
+    assert_accepted(&core_fate(&mut core, bob_unit));
+    assert_accepted(&core_fate(&mut core, alice_unit));
+    assert_eq!(
+        rows_at(&mut core, "counters", DurabilityTier::Global),
+        BTreeMap::from([(target, counter_cells(i32::MIN + 5, "alice"))])
+    );
+}

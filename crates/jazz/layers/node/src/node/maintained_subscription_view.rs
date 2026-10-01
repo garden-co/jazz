@@ -3326,6 +3326,7 @@ fn decode_typed_version_witness(
         deletion,
         // Query witnesses do not project stamps: the image is unstamped.
         col_stamps: Vec::new(),
+        counter_signs: Vec::new(),
     };
     let values = history_values_from_parts(table, &parts)?;
     // Query witnesses already contain encoded nullable user cells. Copy those
@@ -4809,6 +4810,7 @@ mod tests {
                 authored_columns: Some(BTreeSet::from([PhysicalColumnId(1)])),
                 deletion: None,
                 col_stamps: Vec::new(),
+                counter_signs: Vec::new(),
             },
             None,
             None,
@@ -4834,6 +4836,7 @@ mod tests {
                 authored_columns: None,
                 deletion: Some(DeletionEvent::Deleted),
                 col_stamps: Vec::new(),
+                counter_signs: Vec::new(),
             },
             None,
             None,

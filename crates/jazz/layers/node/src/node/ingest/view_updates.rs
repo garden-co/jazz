@@ -58,8 +58,11 @@ where
             if authors(DELETION_COLUMN_NAME) {
                 stamps.set(slots.deletion(), stamp);
             }
+            // Over no image, each counter cell's low bits are the written
+            // value itself (a delta from zero): the image keeps the cells.
             let mut values = incoming.record.to_values()?;
             stamps.write_values(&mut values, &incoming_descriptor)?;
+            crate::node::merge_ops::clear_counter_signs(&mut values, &incoming_descriptor);
             return incoming.with_record_values(values).map(Some);
         };
         let previous_tx = self.version_tx_id(&previous)?;
@@ -102,6 +105,7 @@ where
                 values[field] = value;
             }
             ColumnStamps::uniform(&slots, stamp).write_values(&mut values, &incoming_descriptor)?;
+            crate::node::merge_ops::clear_counter_signs(&mut values, &incoming_descriptor);
             return incoming.with_record_values(values).map(Some);
         }
         let mut stamps = previous
@@ -121,6 +125,7 @@ where
         // value from the previous image.
         let mut merged = incoming.record.to_values()?;
         let previous_values = previous.record.to_values()?;
+        let counter_signs = incoming.counter_signs()?;
         let keep = |merged: &mut Vec<Value>, index: usize| {
             merged[index] = previous_values[index].clone();
         };
@@ -147,6 +152,11 @@ where
                                 &column.column_type,
                                 &previous_values[field],
                                 &merged[field],
+                                crate::node::merge_ops::counter_sign(
+                                    table_schema,
+                                    &counter_signs,
+                                    index,
+                                ),
                             )?,
                         )))
                     } else {
@@ -166,6 +176,7 @@ where
             keep(&mut merged, index);
         }
         stamps.write_values(&mut merged, &incoming_descriptor)?;
+        crate::node::merge_ops::clear_counter_signs(&mut merged, &incoming_descriptor);
         incoming.with_record_values(merged).map(Some)
     }
 
@@ -246,11 +257,21 @@ where
                 let Some(op) = version.optional_cell_at(index) else {
                     continue;
                 };
+                let negative = crate::node::merge_ops::counter_sign(
+                    &table_schema,
+                    version.counter_signs(),
+                    index,
+                );
                 let previous = current
                     .cell(&table_schema, &column.name)?
                     .unwrap_or(Value::Nullable(None));
-                if crate::node::merge_ops::counter_after_op(&column.column_type, &previous, &op)?
-                    .is_none()
+                if crate::node::merge_ops::counter_after_op(
+                    &column.column_type,
+                    &previous,
+                    &op,
+                    negative,
+                )?
+                .is_none()
                 {
                     return Ok(Some(RejectionReason::MalformedCommit(format!(
                         "counter '{}.{}' would be out of range for its {:?} column: {} {:+} leaves the type's range, so the write is rejected rather than wrapped",
@@ -258,7 +279,11 @@ where
                         column.name,
                         column.column_type,
                         crate::node::merge_ops::counter_to_i128(&previous)?,
-                        crate::node::merge_ops::counter_op_delta(&column.column_type, &op)?,
+                        crate::node::merge_ops::counter_op_delta(
+                            &column.column_type,
+                            &op,
+                            negative,
+                        )?,
                     ))));
                 }
             }
@@ -949,12 +974,13 @@ where
         let authors = |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
         let mut folded = patch.record.to_values()?;
         let base_values = base.record.to_values()?;
+        let counter_signs = patch.counter_signs()?;
         if !authors(DELETION_COLUMN_NAME) {
             folded[HistoryRowRecord::FIELD__DELETION_IDX] =
                 base_values[HistoryRowRecord::FIELD__DELETION_IDX].clone();
         }
-        for (index, column) in table_schema.columns.iter().enumerate() {
-            let index = HistoryRowRecord::USER_CELLS + index;
+        for (position, column) in table_schema.columns.iter().enumerate() {
+            let index = HistoryRowRecord::USER_CELLS + position;
             let strategy = table_schema.merge_strategy(&column.name);
             folded[index] = match (authors(&column.name), strategy) {
                 (false, _) => base_values[index].clone(),
@@ -965,6 +991,11 @@ where
                         &column.column_type,
                         &base_values[index],
                         &folded[index],
+                        crate::node::merge_ops::counter_sign(
+                            table_schema,
+                            &counter_signs,
+                            position,
+                        ),
                     )?,
                 ))),
             };
@@ -975,6 +1006,8 @@ where
         ] {
             folded[index] = base_values[index].clone();
         }
+        let descriptor = patch.record.descriptor();
+        crate::node::merge_ops::clear_counter_signs(&mut folded, &descriptor);
         patch.with_record_values(folded)
     }
 

@@ -378,7 +378,14 @@ where
                         _ => {}
                     }
                 }
-                let source = if current && index > GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX {
+                // A current row has `global_time` where history has none,
+                // and no `counter_signs` after `authored_columns` where
+                // history has one: its stamp fields line up with history's.
+                let current_stamps_start =
+                    GlobalCurrentRowRecord::USER_CELLS + source_table.columns.len() + 1;
+                let source = if current && index >= current_stamps_start {
+                    index
+                } else if current && index > GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX {
                     index - 1
                 } else {
                     index
