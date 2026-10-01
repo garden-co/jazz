@@ -764,6 +764,12 @@ where
             return Ok(None);
         }
         let version = &versions[index];
+        // Branch-local policy checks never borrow main-branch writes from the
+        // same unit, through either the ordinary overlay or marked sources.
+        let accepted = TransactionWriteOverlay::accepted_state();
+        let branch_local = !version.branch_key().values.is_empty();
+        let overlay = if branch_local { &accepted } else { overlay };
+        let created = if branch_local { None } else { created };
         let recorder = Arc::new(Mutex::new(BTreeSet::new()));
         let mut overlay = overlay.recording(Arc::clone(&recorder));
         if let Some(own) = own_row {
