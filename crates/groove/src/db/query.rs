@@ -340,6 +340,7 @@ impl Database {
     ) -> Result<(), Error> {
         let progress = match progress_waker {
             Some(progress_waker) => {
+                self.ivm_runtime.retain_owner_progress_waker(progress_waker);
                 std::future::poll_fn(|_| {
                     let mut progress_cx = std::task::Context::from_waker(progress_waker);
                     std::task::Poll::Ready(self.poll_progress(&mut progress_cx))
@@ -892,6 +893,10 @@ impl Database {
     /// columns. Binding appends ordinary filter/project graph nodes for each
     /// sink, so callers with one-sink needs should treat [`Database::prepare_one_sink`]
     /// and [`Database::prepare_one_sink_with_routing`] as thin convenience wrappers.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_prepare")
+    )]
     pub async fn prepare(
         &mut self,
         terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,
@@ -915,6 +920,10 @@ impl Database {
     /// Prepare a routed shape that callers with identical terminals share.
     /// The shape retires itself when its last retained binding unsubscribes;
     /// see [`crate::ivm::IvmRuntime::prepare_shared`].
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_prepare")
+    )]
     pub async fn prepare_shared(
         &mut self,
         terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,

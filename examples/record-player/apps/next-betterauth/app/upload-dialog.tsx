@@ -26,12 +26,15 @@ export function UploadDialog({
   nextOrdinal,
   onClose,
   onUploaded,
+  onAlbumReceiving = () => {},
 }: {
   isOpen: boolean;
   album?: Album;
   nextOrdinal: number;
   onClose(): void;
   onUploaded(albumId: string): void;
+  /** Called while this dialog streams tracks into an album, and again when it stops. */
+  onAlbumReceiving?(albumId: string, isReceiving: boolean): void;
 }) {
   const store = useStore();
   const [title, setTitle] = useState("");
@@ -62,6 +65,7 @@ export function UploadDialog({
   async function submit() {
     setError(undefined);
     setProgress({ label: "Preparing", sentBytes: 0, totalBytes: 1 });
+    let receivingAlbumId: string | undefined;
     try {
       // A retry after a failed upload reuses the album it already created:
       // catalogue rows cannot be deleted (see README, Known limits).
@@ -80,6 +84,8 @@ export function UploadDialog({
       const start = startOrdinal ?? (album ? nextOrdinal : 1);
       setStartOrdinal(start);
       const firstOrdinal = start + writtenCount;
+      receivingAlbumId = albumId;
+      onAlbumReceiving(albumId, true);
       await uploadTracks(
         store,
         albumId,
@@ -93,6 +99,8 @@ export function UploadDialog({
     } catch (cause) {
       setProgress(undefined);
       setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (receivingAlbumId) onAlbumReceiving(receivingAlbumId, false);
     }
   }
 

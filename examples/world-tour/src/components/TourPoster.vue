@@ -17,9 +17,9 @@
       </ol>
     </template>
     <p v-else class="text-secondary">No confirmed dates in the next three weeks.</p>
-    <div class="actions">
+    <template #actions>
       <Button variant="primary" autofocus @click="emit('dismiss')">Explore the globe</Button>
-    </div>
+    </template>
   </Dialog>
 </template>
 

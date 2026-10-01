@@ -7,6 +7,13 @@ reviewedAt: "b29b48d1a"
 A transaction groups related writes under one commit. Reads made through the transaction can see
 its staged writes, while code outside the transaction cannot see them until it commits.
 
+Permission checks follow the same rule. When the authority checks a write, its policy's `exists`
+sees the rows the transaction creates or updates, so you can create a row and the rows that depend
+on it for permissions in one transaction. A row the transaction deletes is still seen as it was
+before the transaction. Each write must also be allowed by the state the whole transaction
+leaves behind, whatever order you made the writes in. Writes from other transactions stay
+invisible until they are accepted. See [Permissions](/docs/auth/permissions#share-based-access).
+
 Jazz has two transaction types. The difference is how they handle concurrent changes:
 
 - A mergeable transaction commits locally, even when the device is offline. When it syncs, Jazz

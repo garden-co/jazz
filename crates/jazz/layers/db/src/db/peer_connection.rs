@@ -340,9 +340,9 @@ where
                 // already been checked against its server-issued one-binding
                 // capability; a multiplexed relay has passed the corresponding
                 // transport admission check for this request.
-                // Both transaction kinds need this proof. Exclusive writes
-                // also validate their read sets at terminal ingest, but that
-                // cannot replace authorization under the delegated session.
+                // Both transaction kinds need this authorization. Exclusive
+                // writes also validate their read sets at terminal ingest, but
+                // that cannot replace authorization under the delegated session.
                 let permission_subject = match ingest_context.trust {
                     CommitUnitTrust::Session => ingest_context.identity,
                     CommitUnitTrust::Relay => session_claim_binding.0,
@@ -385,30 +385,20 @@ where
                     }
                 }
                 // Only a relay's terminal ingest consumes this receipt. Every
-                // other trust evaluates the write policies itself at ingest, so
-                // it needs the support proof but not a discarded evaluation.
-                let admitted_write_authorization = {
+                // other trust evaluates the write policies itself at ingest.
+                let admitted_write_authorization = if ingest_context.trust == CommitUnitTrust::Relay
+                {
                     let mut node = node.lock().await;
-                    if ingest_context.trust == CommitUnitTrust::Relay {
-                        peer.prove_terminal_commit_authorization(
-                            &mut node,
-                            permission_subject,
-                            session_claim_binding.1,
-                            &versions,
-                            tx.tx_id,
-                        )
-                        .await?
-                    } else {
-                        peer.prove_terminal_commit_support(
-                            &mut node,
-                            permission_subject,
-                            session_claim_binding.1,
-                            &versions,
-                            tx.tx_id,
-                        )
-                        .await?;
-                        false
-                    }
+                    peer.prove_terminal_commit_authorization(
+                        &mut node,
+                        permission_subject,
+                        session_claim_binding.1,
+                        &versions,
+                        tx.tx_id,
+                    )
+                    .await?
+                } else {
+                    false
                 };
                 Ok(node
                     .lock()
@@ -1502,6 +1492,13 @@ where
         }
         self.observed_session_claim_revision.set(current_revision);
         Ok(true)
+    }
+
+    /// The structured error the remote peer sent before ending this link, if
+    /// any. An upstream owner reconnects when it
+    /// [asks to reconnect later](crate::wire::WireError::asks_reconnect_later).
+    pub fn remote_wire_error(&self) -> Option<crate::wire::WireError> {
+        self.transport.remote_wire_error()
     }
 
     /// Return the serialized byte size of the latest resume/catch-up response
@@ -2636,6 +2633,7 @@ where
                                     }
                                 }
                                 upload.started = true;
+                                outbox.borrow_mut().note_upload_progress();
                                 awaiting_large_value_uploads
                                     .insert(tx_id, upload.value_ref.clone());
                             }
@@ -2656,6 +2654,7 @@ where
                             }
                             large_value_uploads.remove(&tx_id);
                             uploaded.insert(tx_id);
+                            outbox.borrow_mut().mark_on_wire(tx_id);
                         }
                         Ok::<bool, Error>(false)
                     })
@@ -2752,6 +2751,7 @@ where
                                 match result.status {
                                     crate::protocol::ChunkUploadStatus::Need(nodes) => {
                                         if let Some(tx_id) = pending_tx {
+                                            outbox.borrow_mut().note_upload_progress();
                                             awaiting_large_value_uploads.remove(&tx_id);
                                             if let Some(upload) = large_value_uploads
                                                 .get_mut(&tx_id)
@@ -2764,6 +2764,7 @@ where
                                     }
                                     crate::protocol::ChunkUploadStatus::Staged => {
                                         if let Some(tx_id) = pending_tx {
+                                            outbox.borrow_mut().note_upload_progress();
                                             awaiting_large_value_uploads.remove(&tx_id);
                                             if let Some(uploads) =
                                                 large_value_uploads.get_mut(&tx_id)
@@ -2814,9 +2815,14 @@ where
                                             self.large_value_upload_retry_deadlines
                                                 .borrow_mut()
                                                 .remove(&tx_id);
-                                            outbox
-                                                .borrow_mut()
-                                                .retain(|pending| pending.tx_id != tx_id);
+                                            {
+                                                let mut outbox = outbox.borrow_mut();
+                                                outbox.retain(|pending| pending.tx_id != tx_id);
+                                                outbox.mark_upload_failed(
+                                                    tx_id,
+                                                    "its large value was not staged by the server",
+                                                );
+                                            }
                                             self.staged_inbound.push_front(StagedInboundMessage {
                                                 message: SyncMessage::FateUpdate {
                                                     tx_id,
@@ -5695,12 +5701,12 @@ where
                             // opening cannot overtake an already-generated publication.
                             initial_order.sort_by_key(|subscription| Some(*subscription) != retained_subscription);
                             for subscription in initial_order {
-                            let update = if let Some((pending_subscription, update)) = &group.pending_initial_update {
-                                debug_assert_eq!(*pending_subscription, subscription);
+                            let update = if let Some((pending_subscription, update)) = group.pending_initial_update.take() {
+                                debug_assert_eq!(pending_subscription, subscription);
                                 // Inbound writes may have arrived while this exact opening
                                 // waited for capacity. Publish their delta on a later turn.
                                 serve_again = true;
-                                update.clone()
+                                update
                             } else {
                             let cloning_existing = group.initialized
                                 || peer.has_maintained_subscription(group_subscription);
@@ -5960,9 +5966,6 @@ where
                                 stamp_subscriber_opening_state(&self.node, peer, &mut update).await;
                                 update
                             };
-                            // Keep the exact generated opening until the semantic transport
-                            // accepts it. Rehydrating on retry would advance its receipt.
-                            group.pending_initial_update = Some((subscription, update.clone()));
                             self.last_resume_bytes =
                                 Some(serialized_sync_message_len(&update));
                             let receipt = {
@@ -5979,19 +5982,17 @@ where
                                     )
                                 })
                             };
-                            if let Err(error) = send_prepared_subscriber_with_sync_context(
+                            if let Some(update) = try_send_prepared_subscriber_with_sync_context(
                                 &self.node,
                                 peer,
                                 self.transport.as_mut(),
                                 &self.local_fate_routes,
                                 &self.downstream_fates,
                                 update,
-                            ).await {
-                                if error.code == ErrorCode::Backpressure {
-                                    schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
-                                    return Ok(true);
-                                }
-                                return Err(error);
+                            ).await? {
+                                group.pending_initial_update = Some((subscription, update));
+                                schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                                return Ok(true);
                             }
                             group.pending_initial_update = None;
                             group.pending_initial_subscribers.remove(&subscription);
@@ -7491,33 +7492,67 @@ async fn send_with_sync_context<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
-    message: SyncMessage,
+    mut message: SyncMessage,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     send_catalogue_snapshot_if_needed(node, peer, transport).await?;
-    let mut message = message;
+    prepare_for_send(node, peer, &mut message).await?;
+    send_sync_message_chunked(transport, message)
+}
+
+/// [`send_with_sync_context`] that hands a backpressured message back to
+/// its caller (`Ok(Some(message))`) instead of dropping it, so a caller that
+/// must retry the exact message holds no copy while the send is in flight.
+async fn try_send_with_sync_context<S>(
+    node: &SharedNodeState<S>,
+    peer: &mut PeerState,
+    transport: &mut dyn Transport,
+    mut message: SyncMessage,
+) -> Result<Option<SyncMessage>, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    match send_catalogue_snapshot_if_needed(node, peer, transport).await {
+        Ok(()) => {}
+        Err(error) if error.code == ErrorCode::Backpressure => return Ok(Some(message)),
+        Err(error) => return Err(error),
+    }
+    prepare_for_send(node, peer, &mut message).await?;
+    transport.try_send(message).map_err(transport_error)
+}
+
+/// Stamp and bound an outbound message. Idempotent, so a message handed back
+/// by backpressure is prepared again unchanged on retry.
+async fn prepare_for_send<S>(
+    node: &SharedNodeState<S>,
+    peer: &PeerState,
+    message: &mut SyncMessage,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
     if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         peer_payload_inventory,
         ..
-    }) = &mut message
+    }) = message
     {
         peer_payload_inventory
             .authorization_progress
             .get_or_insert_with(|| peer.authorization_progress_for_subscription(*subscription));
     }
-    bound_view_update_inline_bodies(&mut message)?;
+    bound_view_update_inline_bodies(message)?;
     #[cfg(feature = "sync-autopsy")]
     sync_autopsy::record(format!(
         "transport send {}",
-        summarize_sync_message(&message)
+        summarize_sync_message(message)
     ));
     if crate::debug_env::covered_input_trace()
-        && let SyncMessage::ViewUpdate(payload) = &message
+        && let SyncMessage::ViewUpdate(payload) = &*message
     {
-        let relay = node.lock().await.client_relay_scope().is_some();
+        let relay = node.borrow().client_relay_scope().is_some();
         eprintln!(
             "JAZZ_COVERED_INPUT_TRACE stage=transport_send relay={} subscription={:?} pending={} rows={} carriers={}",
             relay,
@@ -7528,8 +7563,8 @@ where
         );
     }
     #[cfg(any(test, feature = "testing"))]
-    if let SyncMessage::ViewUpdate(payload) = &message {
-        let runtime_token = node.lock().await.groove_runtime_token();
+    if let SyncMessage::ViewUpdate(payload) = &*message {
+        let runtime_token = node.borrow().groove_runtime_token();
         crate::delivery_diagnostics::record(|| {
             format!(
                 "owner_view_send runtime={} subscription={:?} snapshot={} opening={}",
@@ -7540,7 +7575,7 @@ where
             )
         });
     }
-    send_sync_message_chunked(transport, message)
+    Ok(())
 }
 
 pub(super) async fn send_subscriber_with_sync_context<S>(
@@ -7582,7 +7617,7 @@ async fn stamp_subscriber_opening_state<S>(
             .subscription_authority_result_source(payload.subscription)
             .cloned();
         let source_settled = if let Some(source) = source.as_ref() {
-            node.lock().await.has_settled_authority_result(source)
+            node.borrow().has_settled_authority_result(source)
         } else {
             false
         };
@@ -7724,8 +7759,41 @@ async fn send_prepared_subscriber_with_sync_context<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    let pending_tx_ids = pending_view_update_tx_ids(&message)?;
+    send_with_sync_context(node, peer, transport, message).await?;
+    for tx_id in pending_tx_ids {
+        register_local_fate_observer(local_fate_routes, tx_id, downstream_fates);
+    }
+    Ok(())
+}
+
+/// [`send_prepared_subscriber_with_sync_context`] that hands a backpressured
+/// message back (`Ok(Some(message))`) for its caller to retain and retry.
+async fn try_send_prepared_subscriber_with_sync_context<S>(
+    node: &SharedNodeState<S>,
+    peer: &mut PeerState,
+    transport: &mut dyn Transport,
+    local_fate_routes: &LocalFateRoutes,
+    downstream_fates: &PendingDownstreamFates,
+    message: SyncMessage,
+) -> Result<Option<SyncMessage>, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let pending_tx_ids = pending_view_update_tx_ids(&message)?;
+    let rejected = try_send_with_sync_context(node, peer, transport, message).await?;
+    if rejected.is_none() {
+        for tx_id in pending_tx_ids {
+            register_local_fate_observer(local_fate_routes, tx_id, downstream_fates);
+        }
+    }
+    Ok(rejected)
+}
+
+/// Pending transactions a view update ships, whose fates its receiver waits on.
+fn pending_view_update_tx_ids(message: &SyncMessage) -> Result<BTreeSet<TxId>, Error> {
     let mut pending_tx_ids = BTreeSet::new();
-    if let SyncMessage::ViewUpdate(payload) = &message {
+    if let SyncMessage::ViewUpdate(payload) = message {
         for carrier in &payload.version_carriers {
             for bundle in carrier
                 .bundle_refs()
@@ -7737,12 +7805,7 @@ where
             }
         }
     }
-
-    send_with_sync_context(node, peer, transport, message).await?;
-    for tx_id in pending_tx_ids {
-        register_local_fate_observer(local_fate_routes, tx_id, downstream_fates);
-    }
-    Ok(())
+    Ok(pending_tx_ids)
 }
 
 /// Whether `message` is a terminal fate for `tx_id` that no upstream can
@@ -7895,7 +7958,7 @@ where
 /// Send an authority catalogue snapshot exactly once per peer fingerprint.
 /// Trusted relay links have no application subscription during bootstrap, so
 /// catalogue propagation must not depend on a later ViewUpdate or fate.
-async fn send_catalogue_snapshot_if_needed<S>(
+pub(super) async fn send_catalogue_snapshot_if_needed<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -7903,7 +7966,7 @@ async fn send_catalogue_snapshot_if_needed<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let snapshot = node.lock().await.catalogue_snapshot()?;
+    let snapshot = node.borrow().catalogue_snapshot()?;
     let catalogue_fingerprint = *blake3::hash(
         &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
     )

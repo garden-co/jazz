@@ -2270,6 +2270,64 @@ impl NapiDb {
         Ok(())
     }
 
+    /// Binding-only entrypoint for typed partial-value updates staged inside
+    /// an open transaction. The transaction's bound identity authors them.
+    #[napi(js_name = "updateLargeValuesInTransaction")]
+    pub fn update_large_values_in_transaction(
+        &self,
+        open_transaction_id: String,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        mutations: JsonValue,
+        updated_at_ms: Option<f64>,
+    ) -> js::Result<()> {
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
+            .map_err(napi::Error::from_reason)?;
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let mutations: Vec<CoreLargeValueUpdate> =
+            serde_json::from_value(mutations).map_err(|error| {
+                napi::Error::from_reason(format!(
+                    "invalid partial-value update descriptor: {error}"
+                ))
+            })?;
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                db.enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
+                .map_err(napi_error)?;
+                db.drive_queued_mutation_once();
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                db.enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
+                .map_err(napi_error)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Binding-only entrypoint for typed partial-value updates. The public
     /// TypeScript API validates column-kind-specific descriptors before they
     /// reach this encoded boundary.
@@ -3076,7 +3134,10 @@ impl NapiDb {
                     let requires_coverage = non_durable_client
                         || (opts.tier >= jazz::tx::DurabilityTier::Global
                             && opts.propagation == CorePropagation::Full);
-                    let coverage_deadline = Instant::now() + Duration::from_secs(15);
+                    // The coverage budget runs from the first wait on the
+                    // server. A Global read that first waits for its own
+                    // preceding writes to go out has not asked yet (#3839).
+                    let coverage_started = std::cell::Cell::new(None::<Instant>);
                     let result = db
                         .all_serialized_query(
                             &query,
@@ -3085,7 +3146,14 @@ impl NapiDb {
                             admission,
                             author,
                             !synchronous && requires_coverage,
-                            || Instant::now() >= coverage_deadline,
+                            || {
+                                let started = coverage_started.get().unwrap_or_else(|| {
+                                    let now = Instant::now();
+                                    coverage_started.set(Some(now));
+                                    now
+                                });
+                                started.elapsed() >= Duration::from_secs(15)
+                            },
                             move |attachment| release_db.detach_query(attachment),
                         )
                         .await

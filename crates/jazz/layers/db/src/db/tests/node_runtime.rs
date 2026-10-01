@@ -5298,3 +5298,184 @@ fn probe_3378_opening_snapshot_serve_cost() {
         }
     }
 }
+
+/// How an exclusive transaction that was in flight at a restart is replayed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InFlightExclusiveReplay {
+    /// Nothing changes while alice is offline; Core must accept the replay.
+    Unchanged,
+    /// bob changes the row alice read; Core must reject the replay.
+    ConcurrentUpdate,
+    /// The audit row is rewritten as a build without persisted read evidence
+    /// wrote it (slots 5-8 null); Core must keep rejecting it.
+    WithoutPersistedEvidence,
+}
+
+/// alice commits an exclusive read-modify-write while offline, then the
+/// process restarts before the unit reaches Core. The reopened outbox rebuilds
+/// the unit from storage and replays it:
+///
+/// ```
+/// alice ──read todo──► exclusive tx ──commit (offline)──► outbox
+///   │                                                      │
+///   └── close / reopen ──connect──► Core ◄── replay unit ───┘
+///                                    │
+///        bob ──update todo──(ConcurrentUpdate only)──►┘
+/// ```
+///
+/// Only the evidence-free rewrite is internal: no current API writes the
+/// pre-evidence row format.
+fn assert_in_flight_exclusive_replays_after_restart(case: InFlightExclusiveReplay) {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xa8; 16]);
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xc8; 16]),
+        author: alice,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let open = || {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            RocksDbStorage::open(dir.path(), &refs).unwrap(),
+            identity,
+        )))
+        .unwrap()
+    };
+    let core = open_core(0xd8, AuthorSubject::SYSTEM, &schema);
+    let todo = row(0xe8);
+    let settle = |client: &Db, tx_id: TxId| {
+        let result = Rc::new(RefCell::new(None));
+        let observed = result.clone();
+        client.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |outcome| {
+            *observed.borrow_mut() = Some(outcome)
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while result.borrow().is_none() && std::time::Instant::now() < deadline {
+            client.tick().unwrap();
+            core.tick().unwrap();
+            client.tick().unwrap();
+            std::thread::yield_now();
+        }
+        result
+            .borrow_mut()
+            .take()
+            .expect("write must settle at Core")
+    };
+
+    let client = open();
+    {
+        let (up, down) = duplex();
+        let _upstream = block_on(client.connect_upstream(up));
+        let _subscriber = core.accept_subscriber(down, alice);
+        let seeded = client
+            .insert(
+                "todos",
+                cells("draft", false, alice),
+                InsertOptions {
+                    row_id: Some(todo),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .mergeable_tx_id();
+        assert_eq!(settle(&client, seeded).unwrap(), seeded);
+    }
+
+    // Offline: the exclusive commit stays pending in the outbox.
+    let exclusive = client.exclusive_tx().unwrap();
+    let seen = exclusive.read("todos", todo).unwrap().unwrap();
+    assert_eq!(seen.get("title"), Some(&Value::String("draft".to_owned())));
+    assert_eq!(exclusive.all("todos").unwrap().len(), 1);
+    exclusive
+        .update(
+            "todos",
+            todo,
+            BTreeMap::from([("title".to_owned(), Value::String("final".to_owned()))]),
+            UpdateOptions::default(),
+        )
+        .unwrap();
+    let tx_id = exclusive.commit().unwrap();
+    assert_eq!(client.write_state(tx_id).unwrap().fate, Fate::Pending);
+    if case == InFlightExclusiveReplay::WithoutPersistedEvidence {
+        block_on(
+            client
+                .node
+                .node
+                .borrow_mut()
+                .persist_without_exclusive_read_evidence_for_test(tx_id),
+        );
+    }
+    block_on(client.close()).unwrap();
+    drop(client);
+
+    if case == InFlightExclusiveReplay::ConcurrentUpdate {
+        core.update(
+            "todos",
+            todo,
+            BTreeMap::from([("title".to_owned(), Value::String("bob".to_owned()))]),
+        )
+        .unwrap();
+    }
+
+    let client = open();
+    assert_eq!(client.write_state(tx_id).unwrap().fate, Fate::Pending);
+    let (up, down) = duplex();
+    let _upstream = block_on(client.connect_upstream(up));
+    let _subscriber = core.accept_subscriber(down, alice);
+    let outcome = settle(&client, tx_id);
+    let title = |rows: Vec<CurrentRow>| rows[0].cell(&schema.tables[0], "title");
+    match case {
+        InFlightExclusiveReplay::Unchanged => {
+            assert_eq!(outcome.unwrap(), tx_id);
+            assert_eq!(client.write_state(tx_id).unwrap().fate, Fate::Accepted);
+            assert_eq!(
+                title(core.read(&Query::from("todos")).unwrap()),
+                Some(Value::String("final".to_owned()))
+            );
+        }
+        InFlightExclusiveReplay::ConcurrentUpdate
+        | InFlightExclusiveReplay::WithoutPersistedEvidence => {
+            assert_eq!(outcome.unwrap_err().code, ErrorCode::WriteRejected);
+            assert_eq!(
+                client.write_state(tx_id).unwrap().fate,
+                Fate::Rejected(RejectionReason::ExclusiveConflict)
+            );
+            let expected = if case == InFlightExclusiveReplay::ConcurrentUpdate {
+                "bob"
+            } else {
+                "draft"
+            };
+            assert_eq!(
+                title(core.read(&Query::from("todos")).unwrap()),
+                Some(Value::String(expected.to_owned()))
+            );
+        }
+    }
+    block_on(client.close()).unwrap();
+}
+
+/// garden-co/jazz#3663: an exclusive transaction in flight at a restart
+/// replays with its persisted read evidence and is accepted, not rejected as
+/// a false `exclusive_conflict`.
+#[test]
+fn exclusive_transaction_in_flight_at_restart_replays_without_false_conflict() {
+    assert_in_flight_exclusive_replays_after_restart(InFlightExclusiveReplay::Unchanged);
+}
+
+/// Persisted evidence is the original read proof, so a row that changed
+/// while alice was offline still makes the replayed transaction conflict.
+#[test]
+fn exclusive_transaction_replayed_after_restart_still_rejects_a_real_conflict() {
+    assert_in_flight_exclusive_replays_after_restart(InFlightExclusiveReplay::ConcurrentUpdate);
+}
+
+/// Rows written before `jazz.exclusive-read-evidence.v1` hold no evidence;
+/// Core cannot validate them and keeps rejecting them rather than guessing.
+#[test]
+fn exclusive_transaction_without_persisted_evidence_is_still_rejected_on_replay() {
+    assert_in_flight_exclusive_replays_after_restart(
+        InFlightExclusiveReplay::WithoutPersistedEvidence,
+    );
+}
