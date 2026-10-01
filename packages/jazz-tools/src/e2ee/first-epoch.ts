@@ -97,7 +97,7 @@ export async function firstAccountEpoch(
       // The insert policy validates against the already accepted private identity.
       // This projection never selects or replaces that identity.
       const roots = app.__e2ee_account_roots;
-      if (!(await db.one(roots.where({ accountId }), { tier: "edge" }))) {
+      if (!(await db.one(roots.where({ accountId }), { tier: "global" }))) {
         assertOpen();
         // Concurrent publications may duplicate the same policy-checked binding.
         await db
@@ -132,7 +132,7 @@ export async function firstAccountEpoch(
         (error.code !== "transaction_conflict" && error.code !== "permission_denied")
       )
         throw error;
-      if (!(await db.one(identities.where({ id: accountId }), { tier: "edge" }))) throw error;
+      if (!(await db.one(identities.where({ id: accountId }), { tier: "global" }))) throw error;
       // Re-read the winner after a competing initialiser is accepted. Never
       // replace an existing identity, even if this device cannot open its key.
     }
