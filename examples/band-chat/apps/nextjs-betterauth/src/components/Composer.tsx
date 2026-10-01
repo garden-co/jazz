@@ -14,6 +14,7 @@ import {
 import { app } from "../../schema";
 import { attachmentAccept, attachmentProblem, formatBytes, isImageType } from "../lib/attachments";
 import { useObjectUrl } from "../lib/use-object-url";
+import { writeRejectionReason } from "../lib/write-rejection";
 
 interface PendingFile {
   key: string;
@@ -51,8 +52,33 @@ export function Composer({
     setFiles((current) => [...current, ...accepted]);
   }
 
-  // The draft and pending files are cleared only once they are written, so a
-  // failed send keeps what the person typed and any files not yet sent.
+  // A send commits locally first, so it works offline and clears the draft
+  // at once. The server can still reject it later, for example if a policy
+  // denies it, so each write also waits for the global tier. Only a rejection
+  // means the write won't sync: any other failure, such as the database
+  // shutting down on a room switch or tab close, leaves it committed locally.
+  function onRejected(
+    handle: { wait(options: { tier: "global" }): Promise<unknown> },
+    report: (reason: string) => void,
+  ) {
+    handle.wait({ tier: "global" }).catch((cause: unknown) => {
+      const reason = writeRejectionReason(cause);
+      if (reason === undefined) console.warn("Could not confirm a write with the server", cause);
+      else report(reason);
+    });
+  }
+
+  // A rejected message says so, and its text comes back if the draft is empty.
+  function reportUnsent(body: string) {
+    return (reason: string) => {
+      setError(`Message not sent: ${reason}`);
+      if (body) setText((current) => (current ? current : body));
+    };
+  }
+
+  // The draft and pending files are cleared only once they are written
+  // locally, so a send that fails here keeps what the person typed and any
+  // files not yet sent.
   async function send(value: string) {
     const body = value.trim();
     if ((!body && files.length === 0) || isSending) return;
@@ -64,17 +90,18 @@ export function Composer({
       if (outgoing.length === 0) {
         // The message and the room's new activity commit together. Members
         // may record activity on the room; the policy keeps its name fixed.
-        await db.transaction((tx) => {
+        const committed = await db.transaction((tx) => {
           tx.insert(app.messages, { ...base, text: body });
           tx.update(app.rooms, roomId, { lastActivityAt: new Date() });
         });
+        onRejected(committed, reportUnsent(body));
         setText("");
         return;
       }
       // Each file becomes its own message; the text rides on the first one.
       // Bytes stream into the row instead of being copied through memory.
       for (const [index, { key, file }] of outgoing.entries()) {
-        await db.insertStreaming(app.messages, {
+        const inserted = await db.insertStreaming(app.messages, {
           ...base,
           text: index === 0 ? body : "",
           attachmentName: file.name,
@@ -82,10 +109,15 @@ export function Composer({
           attachmentSize: file.size,
           attachment: file.stream(),
         });
+        onRejected(inserted, reportUnsent(index === 0 ? body : ""));
         if (index === 0) setText("");
         setFiles((current) => current.filter((item) => item.key !== key));
       }
-      db.update(app.rooms, roomId, { lastActivityAt: new Date() });
+      // The messages are already sent. A rejected activity update only leaves
+      // the room lower in the list, so it is logged, not shown.
+      onRejected(db.update(app.rooms, roomId, { lastActivityAt: new Date() }), (reason) =>
+        console.warn(`Room activity not updated: ${reason}`),
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {

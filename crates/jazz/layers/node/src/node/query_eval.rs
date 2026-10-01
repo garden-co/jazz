@@ -254,6 +254,7 @@ use read_sources::*;
 pub(in crate::node) use read_sources::{TransactionOverlayTable, TransactionWriteOverlay};
 
 mod normalization;
+mod policy_factoring;
 
 use normalization::*;
 
