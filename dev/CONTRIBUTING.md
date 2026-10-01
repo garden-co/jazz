@@ -116,6 +116,15 @@ The Nextest `jazz` profile reports a test slow after 60 seconds and terminates
 it one minute later. Hash partitions are deterministic and do not overlap for a
 fixed test inventory; keep the shard count identical across all CI shards.
 
+### TypeScript consumer execution
+
+Run `pnpm build:correctness-artifacts`, then `pnpm test:typescript-consumers`.
+The CI TypeScript partition prepares source-admitted NAPI/WASM artifacts and runs
+the complete bounded consumer suites and browser storage-compatibility corpus.
+The exhaustive Rust workspace target check remains in the lint partition.
+The TypeScript job's 90-minute outer allowance does not change individual test
+deadlines, consumer concurrency or the requirement to report every failing test.
+
 ### Snapshot testing with insta in rust
 
 Sync integration tests use [insta](https://insta.rs) for inline snapshot assertions. Snapshots live directly in the test source as `@"..."` strings — no separate `.snap` files.
