@@ -572,9 +572,9 @@ impl<S: OrderedKvStorage> NodeState<S> {
                     budget.charge(entries.len())?;
                     let rows = entries
                         .iter()
-                        .filter_map(|(dependency, row)| {
-                            authorized_candidate_evidence[*dependency]
-                                .then(|| (candidates[*dependency].version_index, row.clone()))
+                        .filter(|&(dependency, _)| authorized_candidate_evidence[*dependency])
+                        .map(|(dependency, row)| {
+                            (candidates[*dependency].version_index, row.clone())
                         })
                         .collect::<Vec<_>>();
                     if !rows.is_empty() {
@@ -653,7 +653,8 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 evidence.budget.charge(rows.len())?;
                 let rows = rows
                     .iter()
-                    .filter_map(|(dependency, row)| qualified[*dependency].then(|| row.clone()))
+                    .filter(|&(dependency, _)| qualified[*dependency])
+                    .map(|(_, row)| row.clone())
                     .collect::<Vec<_>>();
                 if !rows.is_empty() {
                     sources.insert(source.clone(), rows);

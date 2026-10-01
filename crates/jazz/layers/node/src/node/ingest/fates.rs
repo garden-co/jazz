@@ -325,23 +325,27 @@ where
         let mut visible_layer_memo =
             BTreeMap::<(PhysicalTableId, RowUuid, VersionLayer), Option<TxId>>::new();
         for read in row_reads {
-            let current = self.visible_global_row_tx_id_now_memoized(
-                read_schemas[read.table.as_str()],
-                &read.table,
-                read.row_uuid,
-                &mut visible_row_memo,
-            ).await;
+            let current = self
+                .visible_global_row_tx_id_now_memoized(
+                    read_schemas[read.table.as_str()],
+                    &read.table,
+                    read.row_uuid,
+                    &mut visible_row_memo,
+                )
+                .await;
             if current != Some(read.version) {
                 return Ok(false);
             }
         }
         for absent in absent_reads {
-            let current = self.visible_global_row_tx_id_now_memoized(
-                read_schemas[absent.table.as_str()],
-                &absent.table,
-                absent.row_uuid,
-                &mut visible_row_memo,
-            ).await;
+            let current = self
+                .visible_global_row_tx_id_now_memoized(
+                    read_schemas[absent.table.as_str()],
+                    &absent.table,
+                    absent.row_uuid,
+                    &mut visible_row_memo,
+                )
+                .await;
             if current.is_some() {
                 return Ok(false);
             }
@@ -689,9 +693,11 @@ where
         versions: &[VersionRecord],
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<bool, Error> {
-        Ok(Box::pin(self.commit_unit_write_policy_rejection(tx, versions, ingest_context))
-            .await?
-            .is_none())
+        Ok(
+            Box::pin(self.commit_unit_write_policy_rejection(tx, versions, ingest_context))
+                .await?
+                .is_none(),
+        )
     }
 
     /// The rejection a commit unit's write policies call for, if any:
@@ -719,14 +725,18 @@ where
                     // topology-owned admission path; it cannot borrow SYSTEM
                     // or the transport identity here.
                     CommitUnitTrust::Relay => {
-                        if !self.active_session_claims.as_ref().is_some_and(
-                            |(identity, _)| *identity == context.identity,
-                        ) {
+                        if self
+                            .active_session_claims
+                            .as_ref()
+                            .is_none_or(|(identity, _)| *identity != context.identity)
+                        {
                             return Ok(Some(RejectionReason::AuthorizationDenied));
                         }
                         context.identity
                     }
-                    CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => tx.permission_subject.unwrap_or(tx.made_by),
+                    CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
+                        tx.permission_subject.unwrap_or(tx.made_by)
+                    }
                     CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
                 }
             }
@@ -850,15 +860,13 @@ where
             }
         }
         Ok(
-            match Box::pin(self.commit_unit_write_policies_allow(
-                versions,
-                permission_subject,
-                tx,
-            ))
-            .await?
+            match Box::pin(self.commit_unit_write_policies_allow(versions, permission_subject, tx))
+                .await?
             {
                 crate::node::policy::UnitWritePolicyDecision::Allowed => None,
-                crate::node::policy::UnitWritePolicyDecision::Denied => Some(RejectionReason::AuthorizationDenied),
+                crate::node::policy::UnitWritePolicyDecision::Denied => {
+                    Some(RejectionReason::AuthorizationDenied)
+                }
                 crate::node::policy::UnitWritePolicyDecision::Unsupported(reason) => {
                     Some(RejectionReason::MalformedCommit(reason))
                 }

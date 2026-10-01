@@ -41,7 +41,7 @@ use jazz::wire::{
 };
 use tempfile::TempDir;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db<BoxedStorage>;
 type RocksBenchDb = Db<BoxedStorage>;
 
 fn author() -> AuthorSubject {
