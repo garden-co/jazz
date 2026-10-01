@@ -1622,6 +1622,7 @@ export class Db {
   private readonly authStateStore;
   private connection: ConnectionManager;
   private _localFirstSecret: string | null = null;
+  private localFirstRefreshOwned = false;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private readonly shutdownAbort = new AbortController();
@@ -1763,6 +1764,7 @@ export class Db {
   /** @internal Store the seed used for local-first auth and optionally schedule token refresh. */
   initLocalFirstAuth(seed: string, ttlSeconds: number, refresh = true): void {
     this._localFirstSecret = seed;
+    this.localFirstRefreshOwned = refresh;
     if (refresh) {
       this.scheduleLocalFirstRefresh(ttlSeconds);
     }
@@ -1814,6 +1816,9 @@ export class Db {
 
   protected markUnauthenticated(reason: AuthFailureReason): void {
     this.authStateStore.markUnauthenticated(reason);
+    // A self-minted local-first token can always be reminted, so expiry is
+    // recoverable: renew now and let the auth update reconnect.
+    if (reason === "expired" && this.localFirstRefreshOwned) this.refreshLocalFirstToken();
   }
 
   private publishAuthStateWithInternalSession(

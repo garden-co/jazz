@@ -277,6 +277,93 @@ describe("Db auth state", () => {
     );
   });
 
+  function makeLocalFirstDb() {
+    const initialToken = makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", version: 0 });
+    const initialSession = internalSessionFromVerifiedReservedJwtPayload(
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice" },
+      "local-first",
+    )!;
+    let version = 0;
+    const runtimeClient = {
+      updateTrustedAuthToken: vi.fn(),
+      onMutationError: vi.fn(),
+    };
+    const runtimeSource = new (class extends TestRuntimeSource {
+      override mintLocalFirstToken = vi.fn(() =>
+        makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", version: ++version }),
+      );
+    })(runtimeClient as any);
+    const db = new (class extends Db {
+      constructor() {
+        super(
+          withTrustedSession({ appId: "test-app", jwtToken: initialToken }, initialSession),
+          runtimeSource,
+        );
+      }
+
+      ownRefresh(owned: boolean): void {
+        this.initLocalFirstAuth("alice-secret", 3600, owned);
+      }
+
+      refreshForTest(): void {
+        (this as unknown as { refreshLocalFirstToken(): void }).refreshLocalFirstToken();
+      }
+
+      failAuth(reason: "expired" | "invalid"): void {
+        this.markUnauthenticated(reason);
+      }
+
+      touchClient(): void {
+        this.getClient({ auth_state_touch: { columns: [] } });
+      }
+    })();
+    db.touchClient();
+    return { db, runtimeClient, runtimeSource };
+  }
+
+  it("keeps the trusted local-first identity across repeated refreshes", () => {
+    const { db, runtimeClient } = makeLocalFirstDb();
+    db.ownRefresh(false);
+
+    for (let refresh = 1; refresh <= 3; refresh++) {
+      db.refreshForTest();
+      expect(getDbInternalSession(db)).toMatchObject({
+        issuer: LOCAL_FIRST_JWT_ISSUER,
+        user_id: "alice",
+      });
+      expect(jwtClaimVersion(db.getConfig().jwtToken)).toBe(refresh);
+    }
+    expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledTimes(3);
+  });
+
+  it("remints a self-minted local-first token when the server reports it expired", () => {
+    vi.useFakeTimers();
+    try {
+      const { db, runtimeClient } = makeLocalFirstDb();
+      db.ownRefresh(true);
+
+      db.failAuth("expired");
+
+      expect(db.getAuthState().error).toBeUndefined();
+      expect(jwtClaimVersion(db.getConfig().jwtToken)).toBe(1);
+      expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledOnce();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves expiry to the caller when it supplied the local-first token", () => {
+    const { db, runtimeSource } = makeLocalFirstDb();
+    db.ownRefresh(false);
+
+    db.failAuth("expired");
+    db.failAuth("invalid");
+
+    expect(db.getAuthState().error).toBe("invalid");
+    expect(runtimeSource.mintLocalFirstToken).not.toHaveBeenCalled();
+  });
+
   it("returns the initial cookie auth state", () => {
     const { db } = makeDbWithCookieSession({
       user_id: "alice",

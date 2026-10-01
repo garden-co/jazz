@@ -114,26 +114,33 @@ export async function createAccountDbWithRuntimeSource(
     let timer: ReturnType<typeof setTimeout> | undefined;
     let refreshing = false;
     let stopped = false;
-    const schedule = (token: string) => {
+    let failedRefreshes = 0;
+    const scheduleIn = (delay: number) => {
       if (timer) clearTimeout(timer);
-      const expires = parseJwtPayload(token)?.exp;
-      if (typeof expires !== "number" || !Number.isFinite(expires) || expires * 1000 <= Date.now())
-        return;
-      const delay = Math.max(1000, Math.min(2_147_483_647, (expires * 1000 - Date.now()) * 0.8));
       timer = setTimeout(() => {
         void refresh();
       }, delay);
       (timer as unknown as { unref?: () => void }).unref?.();
+    };
+    const schedule = (token: string) => {
+      const expires = parseJwtPayload(token)?.exp;
+      if (typeof expires !== "number" || !Number.isFinite(expires) || expires * 1000 <= Date.now())
+        return;
+      scheduleIn(Math.max(1000, Math.min(2_147_483_647, (expires * 1000 - Date.now()) * 0.8)));
     };
     const refresh = async () => {
       if (refreshing || stopped) return;
       refreshing = true;
       try {
         const token = await opened.refreshAccountAuth(account);
+        failedRefreshes = 0;
         if (!stopped) schedule(token);
-      } catch {
-        // Db publishes the failure to its auth state; retry on the next
-        // explicit reconnect/auth failure rather than spinning on bad tokens.
+      } catch (error) {
+        if (stopped) return;
+        // A failed refresh must not end the refresh cycle: the current token
+        // still expires, and nothing else would renew it before then.
+        console.error("Account auth refresh failed", error);
+        scheduleIn(refreshRetryDelay(failedRefreshes++));
       } finally {
         refreshing = false;
       }
@@ -154,4 +161,11 @@ export async function createAccountDbWithRuntimeSource(
     if (!db) await runtimeSource.shutdown();
     throw error;
   }
+}
+
+const REFRESH_RETRY_BASE_MS = 1_000;
+const REFRESH_RETRY_MAX_MS = 5 * 60_000;
+
+function refreshRetryDelay(failures: number): number {
+  return Math.min(REFRESH_RETRY_MAX_MS, REFRESH_RETRY_BASE_MS * 2 ** Math.min(failures, 20));
 }
