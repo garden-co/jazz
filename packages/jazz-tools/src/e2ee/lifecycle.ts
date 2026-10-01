@@ -190,7 +190,7 @@ export class E2ee {
       const cipher =
         this.config.crypto?.cellCipher ??
         (await (await import("./browser.js")).createBrowserCellCipher());
-      const rows = await this.db.all(this.app.__e2ee_recovery_protectors, { tier: "edge" });
+      const rows = await this.db.all(this.app.__e2ee_recovery_protectors, { tier: "global" });
       let failure: unknown = new E2eeRecoveryError("recovery-protector-missing");
       for (const row of rows) {
         this.assertOpen();
