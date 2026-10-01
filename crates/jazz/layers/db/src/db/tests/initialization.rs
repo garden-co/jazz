@@ -1,13 +1,18 @@
 //! Binding-facing private initialization capability regressions.
 
 use super::*;
-use crate::tools::test_support::AllowAll;
 
 fn initialization_schema() -> JazzSchema {
     build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
-                .allow_all()
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                )
                 .column("title", PublicColumnType::Text),
         ),
     )
@@ -17,7 +22,7 @@ fn initialization_owner(
     storage: groove::storage::TestStorage,
     author: AuthorSubject,
     node: u8,
-) -> Db<groove::storage::TestStorage> {
+) -> Db {
     block_on(Box::pin(Db::open(DbConfig::new(
         initialization_schema(),
         storage,
@@ -34,10 +39,7 @@ fn initialization_storage() -> groove::storage::TestStorage {
     groove::storage::TestStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
-async fn stage_initialization(
-    db: &Db<groove::storage::TestStorage>,
-    row: RowUuid,
-) -> OpenTransactionId {
+async fn stage_initialization(db: &Db, row: RowUuid) -> OpenTransactionId {
     let open = OpenTransactionId::new();
     db.begin_exclusive(open).await.unwrap();
     db.prepare_initialization_insert(open, "todos", row)
@@ -218,7 +220,7 @@ fn initialization_absence_propagates_storage_failure() {
     );
 }
 
-fn authenticated_initialization_owner(authority_node: u8) -> Db<groove::storage::TestStorage> {
+fn authenticated_initialization_owner(authority_node: u8) -> Db {
     let schema = initialization_schema();
     let author = AuthorSubject::for_test_bytes([0xe9; 16]);
     let db = initialization_owner(initialization_storage(), author, 0xe9);
@@ -422,7 +424,13 @@ fn initialization_cache_replacement_preserves_immutable_lineage_receipts() {
     let evolved = SchemaVersion::new(build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
-                .allow_all()
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                )
                 .column("title", PublicColumnType::Text)
                 .column("body", PublicColumnType::Text),
         ),
@@ -603,7 +611,7 @@ fn initialization_status_preserves_terminal_rejection_after_payload_removal() {
             tx_id: id.0,
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: Some(DurabilityTier::Global),
         })
         .unwrap();
     for _ in 0..16 {
@@ -613,7 +621,7 @@ fn initialization_status_preserves_terminal_rejection_after_payload_removal() {
         block_on(db.initialization_transaction_status(&[id])).unwrap(),
         vec![InitializationTransactionStatus::Complete {
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
-            durability: DurabilityTier::Edge,
+            durability: DurabilityTier::Global,
         }],
     );
     let query = db.prepare_query(&db.table("todos")).unwrap();
@@ -719,11 +727,7 @@ fn initialization_stale_cache_validates_without_rewinding_existing_catalogue() {
     );
 }
 
-async fn stage_initialization_update(
-    db: &Db<groove::storage::TestStorage>,
-    target: RowUuid,
-    title: &str,
-) -> TxId {
+async fn stage_initialization_update(db: &Db, target: RowUuid, title: &str) -> TxId {
     let open = OpenTransactionId::new();
     db.begin_exclusive(open).await.unwrap();
     db.exclusive_tx_ref(open)
@@ -772,7 +776,7 @@ fn initialization_owner_replays_pending_child_after_global_parent_eviction_and_l
         db.node
             .node
             .borrow_mut()
-            .evict_cold(&crate::peer::PeerEvictionPins::default()),
+            .evict_cold(),
     )
     .unwrap();
     let SyncMessage::CommitUnit { versions, .. } =
