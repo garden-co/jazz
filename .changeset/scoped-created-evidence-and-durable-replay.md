@@ -37,6 +37,10 @@ relays cannot borrow transport identities, transaction hints, or cached claims.
 Parked authority uploads retain that original binding, reject conflicting
 resend claims, and restore the caller's claim scope after adjudication.
 
+Keep prepared binding graph inputs aligned with their final policy-adjusted
+descriptor. System recursive subscriptions agree with one-shot reads, and
+client-local namespacing preserves independently authenticated session scopes.
+
 Remove the Rust `CommitUnitIngestContext.admitted_write_authorization` field and
 the obsolete terminal preproof helpers. Downstream Rust context literals must
 omit that field; wire and storage encodings are unchanged.
