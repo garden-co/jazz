@@ -772,13 +772,7 @@ fn initialization_owner_replays_pending_child_after_global_parent_eviction_and_l
         "after evicted parent",
     ));
     let original = block_on(db.node.node.borrow_mut().commit_unit_for(child)).unwrap();
-    block_on(
-        db.node
-            .node
-            .borrow_mut()
-            .evict_cold(),
-    )
-    .unwrap();
+    block_on(db.node.node.borrow_mut().evict_cold()).unwrap();
     let SyncMessage::CommitUnit { versions, .. } =
         block_on(db.node.node.borrow_mut().commit_unit_for(parent)).unwrap()
     else {

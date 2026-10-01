@@ -6987,4 +6987,4 @@ fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
 mod tests;
 
 #[cfg(test)]
-use crate::{protocol::VersionRecord, tx::Transaction};
+use crate::tx::Transaction;
