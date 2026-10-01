@@ -7552,7 +7552,7 @@ where
     if crate::debug_env::covered_input_trace()
         && let SyncMessage::ViewUpdate(payload) = &*message
     {
-        let relay = node.borrow().client_relay_scope().is_some();
+        let relay = node.lock().await.client_relay_scope().is_some();
         eprintln!(
             "JAZZ_COVERED_INPUT_TRACE stage=transport_send relay={} subscription={:?} pending={} rows={} carriers={}",
             relay,
@@ -7564,7 +7564,7 @@ where
     }
     #[cfg(any(test, feature = "testing"))]
     if let SyncMessage::ViewUpdate(payload) = &*message {
-        let runtime_token = node.borrow().groove_runtime_token();
+        let runtime_token = node.lock().await.groove_runtime_token();
         crate::delivery_diagnostics::record(|| {
             format!(
                 "owner_view_send runtime={} subscription={:?} snapshot={} opening={}",
@@ -7617,7 +7617,7 @@ async fn stamp_subscriber_opening_state<S>(
             .subscription_authority_result_source(payload.subscription)
             .cloned();
         let source_settled = if let Some(source) = source.as_ref() {
-            node.borrow().has_settled_authority_result(source)
+            node.lock().await.has_settled_authority_result(source)
         } else {
             false
         };
@@ -7966,7 +7966,7 @@ pub(super) async fn send_catalogue_snapshot_if_needed<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let snapshot = node.borrow().catalogue_snapshot()?;
+    let snapshot = node.lock().await.catalogue_snapshot()?;
     let catalogue_fingerprint = *blake3::hash(
         &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
     )
