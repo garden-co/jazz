@@ -1117,9 +1117,15 @@ mod tests {
                 assert!(futures::poll!(write.as_mut()).is_pending());
                 drop(write);
                 drop(storage);
-                assert!(!release.is_canceled(), "a surviving handle must retain the job");
+                assert!(
+                    !release.is_canceled(),
+                    "a surviving handle must retain the job"
+                );
                 drop(retained);
-                assert!(release.is_canceled(), "the last handle must release the job");
+                assert!(
+                    release.is_canceled(),
+                    "the last handle must release the job"
+                );
                 let storage = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
 
                 let (key, new): (&[u8], Option<&[u8]>) = if lands_anyway {
