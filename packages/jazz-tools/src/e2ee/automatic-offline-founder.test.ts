@@ -1,5 +1,10 @@
 import { expect, it, vi } from "vitest";
 import { connect, createServer, type Socket } from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createJazzSession, type JazzClient } from "../backend/create-jazz-session.js";
+import type { JazzSession } from "../session/state.js";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -19,6 +24,23 @@ const app = s.defineApp({
   uploads: s
     .table({ projectId: s.uuid(), bytes: s.bytes() }, { project: s.rel("projects", "projectId") })
     .encrypted({ space: "projectId", columns: ["bytes"] }),
+});
+const founderPermissions = definePermissions(app, ({ policy, session }) => {
+  policy.projects.allowRead.always();
+  policy.plaintext.allowRead.always();
+  policy.plaintext.allowInsert.always();
+  policy.projects.allowInsert.always();
+  policy.notes.allowRead.always();
+  policy.notes.allowInsert.always();
+  policy.notes.allowUpdate.always();
+  policy.uploads.allowRead.always();
+  policy.uploads.allowInsert.always();
+  policy.__e2ee_spaces.allowRead.always();
+  policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+  policy.__e2ee_space_grants.allowRead.always();
+  policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
+  policy.__e2ee_space_deliveries.allowRead.always();
+  policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
 });
 function privateStore(): AccountStore {
   let value: string | null = null;
@@ -77,7 +99,6 @@ it.each([
   "provisional-update",
   "rejected-founder",
   "plaintext-transaction",
-  "imported-root-resumes-exact-founder-journal",
   "missing-pending-owner",
   "device-only-missing-owner",
   "device-only-unpromoted-owner",
@@ -90,23 +111,7 @@ it.each([
     try {
       const warmAccount = await localAccountConfig(server.appId, gate.url);
       let founderAccount = await localAccountConfig(server.appId, gate.url);
-      const permissions = definePermissions(app, ({ policy, session }) => {
-        policy.projects.allowRead.always();
-        policy.plaintext.allowRead.always();
-        policy.plaintext.allowInsert.always();
-        policy.projects.allowInsert.always();
-        policy.notes.allowRead.always();
-        policy.notes.allowInsert.always();
-        policy.notes.allowUpdate.always();
-        policy.uploads.allowRead.always();
-        policy.uploads.allowInsert.always();
-        policy.__e2ee_spaces.allowRead.always();
-        policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
-        policy.__e2ee_space_grants.allowRead.always();
-        policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
-        policy.__e2ee_space_deliveries.allowRead.always();
-        policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
-      });
+      const permissions = founderPermissions;
       await deploy({
         serverUrl: server.url,
         appId: server.appId,
@@ -279,23 +284,6 @@ it.each([
       });
       expect(root?.accountId).toBe(founderAccount.account.id);
 
-      if (scenario === "imported-root-resumes-exact-founder-journal") {
-        const secret = exportLocalFirstSecret(founderAccount.account);
-        await founder.shutdown();
-        clients.pop();
-        founderAccount = await localAccountConfig(server.appId, gate.url, secret);
-        expect(await accountGeneratedHere(founderAccount.account)).toBe(false);
-        founder = await createDb({
-          ...founderAccount,
-          e2ee: { app, store },
-        });
-        clients.push(founder);
-        expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(
-          note,
-        );
-        return;
-      }
-
       if (scenario === "provisional-update") {
         await founder
           .update(app.notes, note.id, { body: "Updated without replay" })
@@ -367,6 +355,97 @@ it.each([
   },
   60_000,
 );
+
+it("resumes the exact pending founder journal after importing into the same durable root", async () => {
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const gate = await transportGate(server.url);
+  const directory = await mkdtemp(join(tmpdir(), "jazz-imported-founder-"));
+  const store = privateStore();
+  const config = {
+    appId: server.appId,
+    app,
+    permissions: founderPermissions,
+    serverUrl: gate.url,
+    env: "test",
+    driver: { type: "persistent" as const, dataPath: join(directory, "database") },
+    e2ee: { app, store },
+  };
+  let owner: JazzSession<JazzClient> | undefined;
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions: founderPermissions,
+    });
+    // The catalogue is shared by this scoped persistent root, not by a live Db.
+    owner = await createJazzSession({
+      ...config,
+      initial: "local-first",
+      store: privateStore(),
+      e2ee: { app, store: privateStore() },
+    });
+    await owner
+      .getSnapshot()
+      .client!.db.insert(app.projects, { title: "Authenticated catalogue warm-up" })
+      .wait({ tier: "global" });
+    await owner.close();
+    owner = undefined;
+    gate.block();
+
+    owner = await createJazzSession({
+      ...config,
+      initial: "local-first",
+      store: privateStore(),
+    });
+    const { account, client } = owner.getSnapshot();
+    expect(await accountGeneratedHere(account!)).toBe(true);
+    const founder = client!.db;
+    const tx = founder.beginExclusiveTransaction();
+    const project = tx.insert(app.projects, { title: "Pending founder space" });
+    const note = tx.insert(app.notes, {
+      projectId: project.id,
+      body: "Original offline message",
+    });
+    await tx.commit().wait({ tier: "local" });
+    expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+    const root = await founder.one(app.__e2ee_spaces.where({ identifier: project.id }), {
+      tier: "local",
+    });
+    expect(root?.accountId).toBe(account!.id);
+    const journal = JSON.parse((await store.read())!).initializationJournalV1;
+    expect(
+      journal.find((entry: { proposal: string }) => JSON.parse(entry.proposal).kind === "founder"),
+    ).toMatchObject({ local: true, outcome: "pending" });
+    const secret = exportLocalFirstSecret(account!);
+    await owner.close();
+    owner = undefined;
+
+    // A fresh account store proves imported provenance; only the durable root
+    // and separate E2EE store retain the original owner-bound transactions.
+    owner = await createJazzSession({ ...config, store: privateStore() });
+    expect(owner.getSnapshot().status).toBe("signed-out");
+    await owner.restoreLocalFirst(secret);
+    const restored = owner.getSnapshot();
+    expect(restored.account!.id).toBe(account!.id);
+    expect(await accountGeneratedHere(restored.account!)).toBe(false);
+    const reopened = restored.client!.db;
+    expect(await reopened.one(app.projects.where({ id: project.id }), { tier: "local" })).toEqual(
+      project,
+    );
+    expect(await reopened.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+    expect(
+      await reopened.one(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "local" }),
+    ).toEqual(root);
+    expect(JSON.parse((await store.read())!).initializationJournalV1).toEqual(journal);
+  } finally {
+    await owner?.close();
+    await gate.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 60_000);
 
 it("never turns a provisional author's sealed envelope into recipient membership", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
