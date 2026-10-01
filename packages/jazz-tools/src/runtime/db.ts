@@ -3882,7 +3882,7 @@ export class Db {
       );
     const wasmQuery = encryptedEquality ? builderJson : translateQuery(builderJson, planningSchema);
 
-    const transformSubscriptionRow = createRowTransformer<Record<string, unknown>>(
+    const decodeRow = createRowTransformer<Record<string, unknown>>(
       outputSchema,
       outputTable,
       outputIncludes,
@@ -3890,12 +3890,13 @@ export class Db {
       query._columnTransformsByTable,
       false,
     );
-    const transform = (row: WasmRow): T =>
+    const finishRow = (row: Record<string, unknown>): T =>
       applyColumnTransforms(
-        applyPartialValueSelections(transformSubscriptionRow(row), builtQuery.partialSelect),
+        applyPartialValueSelections(row, builtQuery.partialSelect),
         outputTransforms,
         outputRelationNames,
       ) as T;
+    const transform = (row: WasmRow): T => finishRow(decodeRow(row));
     const encrypted =
       encryptedEquality || hasEncryptedResults(query._schema, outputTable, outputIncludes);
     let pendingDecryption = Promise.resolve();
