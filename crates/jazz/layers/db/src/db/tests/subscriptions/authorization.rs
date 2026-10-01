@@ -1,6 +1,8 @@
 //! Claim-bound, seeded, inherited-policy, and identity-isolation subscriptions.
 
 use super::*;
+#[path = "authorization_compound.rs"]
+mod authorization_compound;
 
 struct TrustedBackendRelayTransport {
     inner: Box<dyn crate::db::Transport>,
