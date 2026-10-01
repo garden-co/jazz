@@ -204,7 +204,8 @@ export const ciPartitions = Object.freeze({
     // An exact, named historical-storage receipt rather than an incidental
     // member of the broad browser suite: a green TypeScript partition must mean
     // current code handled the pinned real-browser corpora as designed (opens
-    // what it supports, refuses pre-linear roots with a typed error).
+    // and appends to the current linear-history corpus, refuses pre-linear
+    // roots with a typed error).
     command("browser storage compatibility corpus", "pnpm", [
       "--dir",
       "packages/jazz-tools",

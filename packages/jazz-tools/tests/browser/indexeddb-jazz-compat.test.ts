@@ -12,6 +12,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?raw";
 import publishedAlpha54Corpus from "../../fixtures/published-alpha54-browser-jazz-corpus.json?raw";
+import currentCorpus from "../../fixtures/current-browser-jazz-corpus.json?raw";
 import preLinearCorpus from "../../fixtures/pre-linear-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
 import { createAccountManager, ReadTier, schema as s, type DbConfig } from "../../src/index.js";
@@ -263,6 +264,222 @@ describe("browser Jazz storage compatibility corpus", () => {
     await jazzStorageCorpusBrowserCommands().writeBrowserStorageCorpus(candidate);
   }, 90_000);
 
+  // `current-browser-jazz-corpus.json` is real output of the producer test
+  // above in the linear row-history layout. Regenerate it only for a storage
+  // format change: run this file with JAZZ_BROWSER_CORPUS_OUT set to a new
+  // path and check in the exported candidate.
+  it("opens the pinned catalogue/history/branch/large-value corpus through public WasmDb", async () => {
+    pinnedCorpusPhase = "pinned-test:start";
+    receipt(pinnedCorpusPhase);
+    const rawBeforeReadOnlyInspection = JSON.parse(currentCorpus) as Record<string, string>;
+    const owner = JSON.parse(
+      rawManifest(rawBeforeReadOnlyInspection).find(
+        ([key]) => key === INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
+      )![1] as string,
+    );
+    expect(owner).toMatchObject({
+      version: 1,
+      appId: "ba96582c-7167-5f52-ba63-3ebefe1c2b96",
+      env: "dev",
+      auth: { kind: "account" },
+    });
+    const registry = new URL(owner.auth.registry);
+    const registrySuffix = `/apps/${owner.appId}/accounts`;
+    expect(registry.pathname.endsWith(registrySuffix)).toBe(true);
+    const serverBase = new URL(registry);
+    serverBase.pathname = registry.pathname.slice(0, -registrySuffix.length);
+    expect(accountRegistryUrl(serverBase.href, owner.appId)).toBe(owner.auth.registry);
+    // Registry authority is part of the stored owner. Reopen under the exact
+    // producer authority, even though that test server no longer exists. A
+    // newly allocated test-server port is a different account namespace.
+    const accounts = await createAccountManager({
+      appId: owner.appId,
+      serverUrl: serverBase.href,
+    });
+    const dbName = "browser-storage-compat-historical-root-v1";
+    const secret = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+    const account = accounts.restoreLocalFirst(secret);
+    expect(account.id).toBe(owner.auth.account);
+    // Omit serverUrl on the context: every pinned read and append is local,
+    // including the first open, so upstream cannot repair a missing page.
+    const config: DbConfig = {
+      appId: owner.appId,
+      account,
+      driver: { type: "persistent", dbName },
+    };
+    // Prepare the real key-bound account before creating a context. Provision
+    // once through the public path to identify its account-scoped physical root
+    // before installing the pinned receipt.
+    const bootstrap = await pinnedPhase("bootstrap-open", () =>
+      openPersistentDb(config, "pinned-bootstrap"),
+    );
+    const physicalDbName = await pinnedPhase("physical-root", () => trackPhysicalDatabase(dbName));
+    await pinnedPhase("bootstrap-shutdown", () => shutdownTrackedDb(bootstrap, "pinned-bootstrap"));
+    openDbs.splice(openDbs.indexOf(bootstrap), 1);
+    await pinnedPhase("bootstrap-settle", () => sleep(100));
+    await pinnedPhase("install-pinned-records", () =>
+      installRawRecords(physicalDbName, rawBeforeReadOnlyInspection),
+    );
+    expect(await pinnedPhase("read-installed-records", () => rawRecords(physicalDbName))).toEqual(
+      rawBeforeReadOnlyInspection,
+    );
+
+    let db = await pinnedPhase("readonly-open", () => openPersistentDb(config, "pinned-readonly"));
+    // The persistent replica lives in the worker. Use the public local-first
+    // read across that hop. With no serverUrl, the worker cannot contact Core.
+    // Inspector LocalOnly reads only the foreground's in-memory rows.
+    const rawWhileReopened = await pinnedPhase("read-open-records", () =>
+      rawRecords(physicalDbName),
+    );
+    // Reopen must materialize the durable local replica without depending on
+    // a fresh remote-coverage round trip. The earlier global read proves the
+    // synced fixture; this is specifically the offline persistence boundary.
+    const reopenedMain = await pinnedPhase("readonly-main-query", () =>
+      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
+    );
+    const reopenedDraft = await pinnedPhase("readonly-draft-query", () =>
+      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
+    );
+    expect(reopenedMain).toHaveLength(1);
+    expect(reopenedDraft).toHaveLength(1);
+    expect(reopenedMain).toMatchObject({
+      0: { branch: "main", title: "current title", body: "large value ".repeat(20_000) },
+    });
+    expect(reopenedDraft).toMatchObject({
+      0: { branch: "draft", title: "draft override", body: "large value ".repeat(20_000) },
+    });
+    await pinnedPhase("readonly-shutdown", () => shutdownTrackedDb(db, "pinned-readonly"));
+    openDbs.splice(openDbs.indexOf(db), 1);
+    await pinnedPhase("readonly-settle", () => sleep(100));
+    const rawAfterReadOnlyInspection = await pinnedPhase("read-post-readonly-records", () =>
+      rawRecords(physicalDbName),
+    );
+    expectForegroundLeaseLifecycle(
+      rawBeforeReadOnlyInspection,
+      rawWhileReopened,
+      rawAfterReadOnlyInspection,
+    );
+    // The corpus is already in this build's layout, so a read-only open has no
+    // upgrade to perform: every page, metadata record and manifest entry must
+    // come back byte-identical, apart from the opaque lease token checked above.
+    expect(normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection)).toEqual(
+      normalizeRuntimeLeaseRecords(rawBeforeReadOnlyInspection),
+    );
+
+    // A second read-only open must also preserve the complete raw receipt,
+    // not merely decoded query rows.
+    db = await pinnedPhase("second-readonly-open", () =>
+      openPersistentDb(config, "pinned-second-readonly"),
+    );
+    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" })).toEqual(
+      reopenedMain,
+    );
+    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" })).toEqual(
+      reopenedDraft,
+    );
+    await pinnedPhase("second-readonly-shutdown", () =>
+      shutdownTrackedDb(db, "pinned-second-readonly"),
+    );
+    openDbs.splice(openDbs.indexOf(db), 1);
+    await pinnedPhase("second-readonly-settle", () => sleep(100));
+    expect(normalizeRuntimeLeaseRecords(await rawRecords(physicalDbName))).toEqual(
+      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection),
+    );
+
+    // This planted high-water regression must remain visible through the raw
+    // receipt. In particular, normalization may hide a fresh opaque lease
+    // token, but never a node identity, retired set, or HLC floor.
+    const plantedLeaseRegression = corruptReusableLeaseHighWater(rawAfterReadOnlyInspection);
+    expect(normalizeRuntimeLeaseRecords(plantedLeaseRegression)).not.toEqual(
+      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection),
+    );
+
+    // Append with today's writer only after the historical read-only/raw-byte
+    // receipt above. Both generations must survive a fresh public open of
+    // this same authenticated principal root.
+    db = await pinnedPhase("writer-open", () => openPersistentDb(config, "pinned-writer"));
+    const historicalProjects = await pinnedPhase("writer-projects-query", () =>
+      db.all(app.projects, { tier: ReadTier.LocalFirst }),
+    );
+    const currentBody = "current writer large value ".repeat(12_000);
+    const currentWrite = await pinnedPhase("writer-transaction", () =>
+      db.transaction((tx) => {
+        const project = tx.insert(app.projects, { name: "current writer project" });
+        const document = tx.insert(
+          app.documents,
+          {
+            branch: "main",
+            title: "current writer document",
+            projectId: project.id,
+            body: currentBody,
+          },
+          { branch: "main" },
+        );
+        return { project, document };
+      }),
+    );
+    await pinnedPhase("writer-local-settlement", () =>
+      withTimeout(
+        currentWrite.wait({ tier: "local" }),
+        10_000,
+        "current corpus write did not settle locally",
+      ),
+    );
+    await pinnedPhase("writer-shutdown", () => shutdownTrackedDb(db, "pinned-writer"));
+    openDbs.splice(openDbs.indexOf(db), 1);
+    await pinnedPhase("writer-settle", () => sleep(100));
+    const rawAfterCurrentWrite = await pinnedPhase("read-post-writer-records", () =>
+      rawRecords(physicalDbName),
+    );
+    expect(rawAfterCurrentWrite[INDEXEDDB_BTREE_PAGES_STORE]).not.toEqual(
+      rawAfterReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE],
+    );
+
+    // Network isolation makes this a persistence receipt: the server cannot
+    // repair lost current pages before the post-reopen assertions.
+    await pinnedPhase("block-network", () => blockJazzServerNetwork(registry.origin));
+    try {
+      db = await pinnedPhase("offline-open", () => openPersistentDb(config, "pinned-offline"));
+      expect(await pinnedPhase("offline-physical-root", () => trackPhysicalDatabase(dbName))).toBe(
+        physicalDbName,
+      );
+      const mixedMain = await pinnedPhase("offline-main-query", () =>
+        db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
+      );
+      const mixedDraft = await pinnedPhase("offline-draft-query", () =>
+        db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
+      );
+      const mixedProjects = await pinnedPhase("offline-projects-query", () =>
+        db.all(app.projects, { tier: ReadTier.LocalFirst }),
+      );
+      expect(mixedMain).toHaveLength(2);
+      expect(mixedMain).toEqual(expect.arrayContaining(reopenedMain));
+      expect(mixedMain).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            title: "current writer document",
+            branch: "main",
+            body: currentBody,
+          }),
+        ]),
+      );
+      expect(mixedDraft).toEqual(reopenedDraft);
+      expect(mixedProjects).toHaveLength(historicalProjects.length + 1);
+      expect(mixedProjects).toEqual(expect.arrayContaining(historicalProjects));
+      const currentProject = mixedProjects.find(
+        (project) => project.name === "current writer project",
+      );
+      expect(currentProject).toBeDefined();
+      expect(
+        mixedMain.find((document) => document.title === "current writer document")?.projectId,
+      ).toBe(currentProject!.id);
+    } finally {
+      await pinnedPhase("unblock-network", () => unblockJazzServerNetwork(registry.origin));
+    }
+    pinnedCorpusPhase = "pinned-test:complete";
+    receipt(pinnedCorpusPhase);
+  }, 90_000);
+
   // The linear row-history format does not read DAG-layout roots. The browser
   // corpus pinned before that change is real producer output for this exact
   // principal; opening it through the public path must be refused with the
@@ -480,6 +697,39 @@ async function rawRecords(name: string): Promise<Record<string, string>> {
   return records;
 }
 
+/**
+ * A clean foreground shutdown returns its node lease to the durable owner;
+ * reopening claims it again. Only the opaque random lease token is expected
+ * to change. Node identity, HLC high-water, and retired-node history remain
+ * part of the durable compatibility surface.
+ */
+function normalizeRuntimeLeaseRecords(records: Record<string, string>): Record<string, string> {
+  const manifest = rawManifest(records);
+  return {
+    ...records,
+    [INDEXEDDB_STORAGE_MANIFEST_STORE]: JSON.stringify(
+      manifest.map(([key, value]) =>
+        key === "foreground-node-leases-v1"
+          ? [key, normalizeForegroundNodeLeasePool(value)]
+          : [key, value],
+      ),
+    ),
+  };
+}
+
+type RawForegroundNodeLease = {
+  leaseId: string;
+  node: unknown;
+  confirmedTxTime: string;
+};
+
+type RawForegroundNodeLeasePool = {
+  format: string;
+  active: RawForegroundNodeLease[];
+  reusable: RawForegroundNodeLease[];
+  retired: unknown[];
+};
+
 function rawManifest(records: Record<string, string>): [string, unknown][] {
   const manifest = JSON.parse(records[INDEXEDDB_STORAGE_MANIFEST_STORE] ?? "[]") as unknown;
   if (!Array.isArray(manifest) || !manifest.every(isRawManifestEntry)) {
@@ -490,6 +740,88 @@ function rawManifest(records: Record<string, string>): [string, unknown][] {
 
 function isRawManifestEntry(value: unknown): value is [string, unknown] {
   return Array.isArray(value) && value.length === 2 && typeof value[0] === "string";
+}
+
+function foregroundNodeLeasePool(records: Record<string, string>): RawForegroundNodeLeasePool {
+  const entry = rawManifest(records).find(([key]) => key === "foreground-node-leases-v1");
+  if (!entry || !isRawForegroundNodeLeasePool(entry[1])) {
+    throw new Error("expected a valid raw foreground-node lease pool");
+  }
+  return entry[1];
+}
+
+function isRawForegroundNodeLeasePool(value: unknown): value is RawForegroundNodeLeasePool {
+  if (!value || typeof value !== "object") return false;
+  const pool = value as Partial<RawForegroundNodeLeasePool>;
+  return (
+    typeof pool.format === "string" &&
+    Array.isArray(pool.active) &&
+    Array.isArray(pool.reusable) &&
+    Array.isArray(pool.retired) &&
+    [...pool.active, ...pool.reusable].every(isRawForegroundNodeLease)
+  );
+}
+
+function isRawForegroundNodeLease(value: unknown): value is RawForegroundNodeLease {
+  if (!value || typeof value !== "object") return false;
+  const lease = value as Partial<RawForegroundNodeLease>;
+  return (
+    typeof lease.leaseId === "string" &&
+    typeof lease.confirmedTxTime === "string" &&
+    lease.node !== undefined
+  );
+}
+
+function normalizeForegroundNodeLeasePool(value: unknown): RawForegroundNodeLeasePool {
+  if (!isRawForegroundNodeLeasePool(value)) {
+    throw new Error("expected a valid raw foreground-node lease pool");
+  }
+  const normalizeLease = ({ leaseId: _leaseId, ...lease }: RawForegroundNodeLease) => ({
+    ...lease,
+    leaseId: "<opaque-random-lease-id>",
+  });
+  return {
+    ...value,
+    active: value.active.map(normalizeLease),
+    reusable: value.reusable.map(normalizeLease),
+  };
+}
+
+function expectForegroundLeaseLifecycle(
+  beforeRecords: Record<string, string>,
+  activeRecords: Record<string, string>,
+  afterRecords: Record<string, string>,
+): void {
+  const before = foregroundNodeLeasePool(beforeRecords);
+  const active = foregroundNodeLeasePool(activeRecords);
+  const after = foregroundNodeLeasePool(afterRecords);
+  expect(before.active).toEqual([]);
+  expect(before.reusable).toHaveLength(1);
+  expect(active.active).toHaveLength(1);
+  expect(active.reusable).toEqual([]);
+  expect(active.active[0]!.leaseId).not.toBe(before.reusable[0]!.leaseId);
+  expect(active.active[0]!.node).toEqual(before.reusable[0]!.node);
+  expect(active.active[0]!.confirmedTxTime).toBe(before.reusable[0]!.confirmedTxTime);
+  expect(active.retired).toEqual(before.retired);
+
+  expect(after.active).toEqual([]);
+  expect(after.reusable).toHaveLength(1);
+  expect(after.reusable[0]!.leaseId).toBe(active.active[0]!.leaseId);
+  expect(after.reusable[0]!.node).toEqual(active.active[0]!.node);
+  expect(after.reusable[0]!.confirmedTxTime).toBe(active.active[0]!.confirmedTxTime);
+  expect(after.retired).toEqual(active.retired);
+}
+
+function corruptReusableLeaseHighWater(records: Record<string, string>): Record<string, string> {
+  const corrupted = { ...records };
+  const manifest = rawManifest(corrupted);
+  const entry = manifest.find(([key]) => key === "foreground-node-leases-v1");
+  if (!entry || !isRawForegroundNodeLeasePool(entry[1]) || entry[1].reusable.length !== 1) {
+    throw new Error("expected one reusable foreground-node lease to corrupt");
+  }
+  entry[1].reusable[0]!.confirmedTxTime = "0";
+  corrupted[INDEXEDDB_STORAGE_MANIFEST_STORE] = JSON.stringify(manifest);
+  return corrupted;
 }
 
 async function replaceManifest(name: string, manifest: unknown): Promise<void> {

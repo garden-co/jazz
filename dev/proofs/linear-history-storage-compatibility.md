@@ -137,7 +137,12 @@ published alpha.54 browser corpus and the pre-linear browser corpus
 (`packages/jazz-tools/fixtures/pre-linear-browser-jazz-corpus.json`, real
 producer output from before this change) are both opened through the public
 WasmDb path. Both opens are refused with the typed error above, and no raw
-record changes.
+record changes. The same file pins a corpus in the new layout
+(`packages/jazz-tools/fixtures/current-browser-jazz-corpus.json`, producer
+output from this build). It opens through public WasmDb, reads back its
+branches and large values offline, leaves every raw record unchanged across
+read-only opens, keeps the foreground-node lease lifecycle intact, and accepts
+an append from the current writer.
 
 ## What users must do
 
