@@ -5326,6 +5326,7 @@ mod dynamic_schema_view_tests {
             .unwrap();
         drop(abandoned);
         let binding = WasmDb {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&owner))))),
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
