@@ -10,6 +10,10 @@ transaction. Preserve ordinary policy behavior, authenticated authorship, exact
 absence checks and atomic rejection. Bound the proof and reject unseeded cycles;
 a pending local row is not automatically authorized evidence.
 
+Keep branch-local write policies on accepted state only. Neither grounded
+main-branch writes nor explicitly marked creation sources in the same commit
+unit can authorize a branch-local write.
+
 Retain the original exclusive snapshot, point reads, absent reads and predicate
 reads using the existing four-slot `jazz.exclusive-read-evidence.v1` encoding.
 Transactions replay after restart with their original identity and observations,
