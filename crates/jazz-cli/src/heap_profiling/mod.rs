@@ -31,17 +31,29 @@ use symbols::ExecutableSymbols;
 /// Environment variable overriding the mean bytes allocated between samples.
 pub const SAMPLE_INTERVAL_ENV: &str = "JAZZ_HEAP_PROFILE_SAMPLE_BYTES";
 
-/// Apply the sampling configuration and return the profile dumper for the
-/// server. Only meaningful when [`SamplingAllocator`] is the global
-/// allocator.
-pub fn activate() -> HeapProfileDump {
+/// Value of [`SAMPLE_INTERVAL_ENV`] that [`configure`] could not use.
+static INVALID_SAMPLE_INTERVAL: OnceLock<String> = OnceLock::new();
+
+/// Apply [`SAMPLE_INTERVAL_ENV`]. Call it at the start of `main`, before any
+/// other thread starts: threads already running keep their current interval
+/// until their next sample.
+pub fn configure() {
     if let Ok(bytes) = std::env::var(SAMPLE_INTERVAL_ENV) {
         match bytes.parse::<u64>() {
             Ok(bytes) if bytes > 0 => set_sample_interval(bytes),
-            _ => tracing::warn!(
-                "Ignoring {SAMPLE_INTERVAL_ENV}={bytes}: expected a positive byte count"
-            ),
+            _ => {
+                let _ = INVALID_SAMPLE_INTERVAL.set(bytes);
+            }
         }
+    }
+}
+
+/// Report the sampling configuration and return the profile dumper for the
+/// server. Only meaningful when [`SamplingAllocator`] is the global
+/// allocator and [`configure`] ran first.
+pub fn activate() -> HeapProfileDump {
+    if let Some(bytes) = INVALID_SAMPLE_INTERVAL.get() {
+        tracing::warn!("Ignoring {SAMPLE_INTERVAL_ENV}={bytes}: expected a positive byte count");
     }
     tracing::info!(
         "Heap profiling active, sampling every ~{} bytes allocated",

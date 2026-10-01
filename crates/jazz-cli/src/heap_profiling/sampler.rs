@@ -42,10 +42,13 @@ pub fn sample_interval() -> u64 {
     SAMPLE_INTERVAL.load(Ordering::Relaxed)
 }
 
-/// Change the mean bytes allocated between samples. Each thread picks it up
-/// from its next sample on.
+/// Change the mean bytes allocated between samples. The calling thread and
+/// threads that start later use it right away; other running threads pick
+/// it up from their next sample on, so set it before spawning threads.
 pub fn set_sample_interval(bytes: u64) {
-    SAMPLE_INTERVAL.store(bytes.max(1), Ordering::Relaxed);
+    let mean = bytes.max(1);
+    SAMPLE_INTERVAL.store(mean, Ordering::Relaxed);
+    COUNTDOWN.set(next_interval(mean));
 }
 
 thread_local! {

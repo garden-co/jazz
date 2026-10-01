@@ -216,8 +216,19 @@ enum CreateResource {
     },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Before the runtime starts its worker threads, so that every thread
+    // samples at the configured rate from its first allocation.
+    #[cfg(heap_profiling)]
+    jazz_cli::heap_profiling::configure();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to start the async runtime")
+        .block_on(run())
+}
+
+async fn run() {
     // Initialize tracing with layered subscriber
     init_tracing();
 
