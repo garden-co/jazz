@@ -64,6 +64,7 @@ export async function firstAccountEpoch(
   device: LocalDevice,
   keys: KeyEnvelope,
   assertOpen: () => void,
+  mayCreate: boolean,
   app: DeviceTables = deviceRequestApp,
 ): Promise<string> {
   const identities = app.__e2ee_account_identities;
@@ -72,32 +73,42 @@ export async function firstAccountEpoch(
   for (let attempt = 0; ; attempt++) {
     assertOpen();
     try {
-      const proposal = await exclusiveE2eeTransaction(db, async (tx) => {
-        const existing = await tx.one(identities.where({ id: accountId }), { tier: "local" });
-        assertOpen();
-        if (existing) return existing;
-        const epochId = crypto.randomUUID();
-        const secret = runtimeRandomBytes(32);
-        try {
-          const envelope = await keys.seal(device.publicKey, context(epochId, device.id), secret);
-          const verification = await keys.wrap(
-            secret,
-            context(epochId, "", "verification"),
-            new Uint8Array(32),
-          );
-          assertOpen();
-          return tx.insert(
-            identities,
-            { deviceId: device.id, epochId, envelope, verification, ledgerVersion: 1 },
-            { id: accountId },
-          );
-        } finally {
-          secret.fill(0);
-        }
-      });
-      // Even an existing identity is validated by a read-only exclusive commit:
-      // local/optimistic observations alone must not select the active device.
-      const accepted = await proposal.wait({ tier: "global" });
+      const proposal = mayCreate
+        ? await exclusiveE2eeTransaction(db, async (tx) => {
+            const existing = await tx.one(identities.where({ id: accountId }), { tier: "local" });
+            assertOpen();
+            if (existing) return existing;
+            const epochId = crypto.randomUUID();
+            const secret = runtimeRandomBytes(32);
+            try {
+              const envelope = await keys.seal(
+                device.publicKey,
+                context(epochId, device.id),
+                secret,
+              );
+              const verification = await keys.wrap(
+                secret,
+                context(epochId, "", "verification"),
+                new Uint8Array(32),
+              );
+              assertOpen();
+              return tx.insert(
+                identities,
+                { deviceId: device.id, epochId, envelope, verification, ledgerVersion: 1 },
+                { id: accountId },
+              );
+            } finally {
+              secret.fill(0);
+            }
+          })
+        : undefined;
+      // Local founder denial cannot create a replacement identity. Enrollment
+      // may still consume the original identity once Global has accepted it.
+      const accepted = proposal
+        ? await proposal.wait({ tier: "global" })
+        : await db.one(identities.where({ id: accountId }), { tier: "global" });
+      if (!accepted)
+        throw new E2eeInitializationNotReady("The original founder has not been accepted");
       assertOpen();
       if (accepted.ledgerVersion !== 1)
         throw new Error("E2EE account requires public ledger migration");
@@ -157,16 +168,23 @@ export async function provisionalFirstAccountEpoch(
   app: DeviceTables,
   journal: InitializationJournal,
   assertOpen: () => void,
+  bindOwnership: (epochId: string) => Promise<void>,
 ) {
   return journal.withFounderPublication(async () => {
     if (!(await db.tableIdentity(app.__e2ee_account_identities)))
       throw new E2eeInitializationNotReady("An authenticated application catalogue is required");
     const previous = await journal.founder();
     if (previous) {
-      if (previous.id !== accountId) throw new Error("Founder account mismatch");
-      if (previous.deviceId !== device.id) throw new Error("Founder device mismatch");
+      if (previous.id !== accountId || previous.deviceId !== device.id)
+        throw new E2eeInitializationNotReady(
+          "The retained founder does not match this account device",
+        );
       const entry = (await journal.entries()).find((entry) => entry.proposal.kind === "founder")!;
-      if (entry.local) return previous;
+      if (entry.local) {
+        await bindOwnership(previous.epochId);
+        assertOpen();
+        return previous;
+      }
       if (entry.reservation)
         throw new E2eeInitializationNotReady("The original founder is not yet locally durable");
     }
@@ -205,6 +223,9 @@ export async function provisionalFirstAccountEpoch(
         secret.fill(0);
       }
     }
+    assertOpen();
+    await bindOwnership(proposal.epochId);
+    assertOpen();
     const transaction = beginDbTransactionAfter(db, async () => {});
     try {
       await prepareDbTransaction(transaction, async (tx) => {

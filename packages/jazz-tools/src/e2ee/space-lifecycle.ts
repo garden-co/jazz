@@ -652,7 +652,6 @@ export class Spaces {
       );
       // deliver revalidates the exact epoch and eligibility in its own authority transaction.
       await this.deliver(expected, state.root, secret, device);
-      await this.readAcceptedSnapshot(expected, expected.id, false, true);
       this.assertOpen();
       // Delivery adds accepted metadata after the preparation snapshot.
       // Retain that coherent state before callers can immediately go offline.
@@ -1820,7 +1819,11 @@ export class Spaces {
   async withKeys<T, Init>(
     scope: TableProxy<T, Init>,
     identifier: string,
-    use: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<void>,
+    use: (
+      secret: Uint8Array,
+      root: Readonly<SpaceRoot>,
+      source: "accepted" | "provisional",
+    ) => Promise<void>,
     includeHistory = false,
     prepareOnline?: () => Promise<void>,
     forWrite = false,
@@ -1885,7 +1888,7 @@ export class Spaces {
         );
         await this.confirm(root, secret);
         this.assertOpen();
-        await use(secret, root);
+        await use(secret, root, "provisional");
         return { state: "ready" };
       } finally {
         secret?.fill(0);
@@ -1896,7 +1899,7 @@ export class Spaces {
     let used = false;
     const localUse = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
       used = true;
-      await use(secret, root);
+      await use(secret, root, "accepted");
     };
     try {
       const address = await this.address(scope, identifier, true);
@@ -1926,7 +1929,7 @@ export class Spaces {
     // Online reconciliation must discover it before returning that refusal.
     await prepareOnline?.();
     const onlineAddress = await this.address(scope, identifier);
-    const state = await this.explainAddress(onlineAddress, use, includeHistory);
+    const state = await this.explainAddress(onlineAddress, localUse, includeHistory);
     if (state.state === "ready") this.reconcileInBackground(onlineAddress);
     return state;
   }
@@ -2131,12 +2134,7 @@ export class Spaces {
     }
   }
 
-  private async readAcceptedSnapshot(
-    address: Address,
-    id: string,
-    localOnly = false,
-    requirePersistence = false,
-  ) {
+  private async readAcceptedSnapshot(address: Address, id: string, localOnly = false) {
     for (let attempt = 0; ; attempt++) {
       try {
         return await readAcceptedHistory(
@@ -2144,7 +2142,6 @@ export class Spaces {
           JSON.stringify(["space", address.scopeId, address.identifier]),
           (tx, initialRecipients) => this.readSnapshot(tx, address, id, initialRecipients),
           localOnly,
-          requirePersistence,
         );
       } catch (error) {
         const conflict =

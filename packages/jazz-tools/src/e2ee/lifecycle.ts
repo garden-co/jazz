@@ -7,6 +7,7 @@ import {
   accountRegistry,
   exportLocalFirstSecret,
   accountGeneratedHere,
+  accountFounderOwnership,
 } from "../accounts/enrollment.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import { openRecoveryMaterial, protectRecoveryMaterial } from "./recovery-protection.js";
@@ -872,6 +873,7 @@ export class E2ee {
       (await (await import("./browser.js")).createBrowserDeviceSigner());
     encodeEnvelope(signer.mechanism, new Uint8Array());
     const generatedHere = await accountGeneratedHere(this.account);
+    const ownership = accountFounderOwnership(this.account);
     const device = await (retainedOnly && !generatedHere ? retainedLocalDevice : localDevice)(
       this.config.store,
       this.scope,
@@ -883,13 +885,44 @@ export class E2ee {
     try {
       this.assertOpen();
       const requests = this.app.__e2ee_device_requests;
+      let retained = await this.journal.founder();
+      this.assertOpen();
+      if (retained && (retained.id !== this.account.id || retained.deviceId !== device.id))
+        throw new E2eeInitializationNotReady(
+          "The retained founder does not match this account device",
+        );
+      let retainedEpochId = retained?.epochId;
+      let ownsFounder = false;
+      if (retained || (retainedOnly && generatedHere && encryptedSchemas.has(requests._schema))) {
+        const claim = await ownership?.reserve(this.scope, device.id, retainedEpochId);
+        this.assertOpen();
+        ownsFounder = claim !== undefined;
+        if (claim && claim.epochId !== null) {
+          // A shared context may have bound the original proposal since the
+          // first journal read. Only that exact durable journal may resume.
+          retained = await this.journal.founder();
+          this.assertOpen();
+          retainedEpochId = retained?.epochId;
+          if (
+            !retained ||
+            retained.id !== this.account.id ||
+            retained.deviceId !== device.id ||
+            retainedEpochId !== claim.epochId
+          )
+            throw new E2eeInitializationNotReady(
+              "The original founder journal is missing or changed",
+            );
+        }
+        if (retained && !ownsFounder)
+          throw new E2eeInitializationNotReady("The retained founder belongs to another device");
+      }
       // Once online preparation starts, complete it or reject so it can retry.
       // A later disconnect must not cache skipped enrolment as successful.
       if (retainedOnly) {
-        const known = await this.journal.founder();
+        const known = retained;
         // Existing journals are account-scoped and survive schema changes.
         // Only a new encrypted application founder may bypass online enrollment.
-        if (known || (generatedHere && encryptedSchemas.has(requests._schema))) {
+        if (known || ownsFounder) {
           if (!(await this.db.tableIdentity(this.app.__e2ee_account_identities)))
             throw new E2eeInitializationNotReady(
               "An authenticated application catalogue is required",
@@ -898,6 +931,7 @@ export class E2ee {
             this.app.__e2ee_account_identities.includeDeleted().where({ id: this.account.id }),
             { tier: "local" },
           );
+          this.assertOpen();
           if (known || !identity) {
             const founder = await provisionalFirstAccountEpoch(
               this.db,
@@ -909,11 +943,17 @@ export class E2ee {
               this.app,
               this.journal,
               () => this.assertOpen(),
+              (epochId) => ownership!.bind(this.scope, device.id, epochId),
             );
+            this.assertOpen();
             const entry = (await this.journal.entries()).find(
               (entry) => entry.proposal.kind === "founder",
             );
+            this.assertOpen();
             this.provisional = entry?.outcome === "pending" ? founder : undefined;
+          } else {
+            await ownership!.close(this.scope, device.id, retainedEpochId);
+            this.assertOpen();
           }
         }
       }
@@ -977,6 +1017,8 @@ export class E2ee {
           }
         }
         this.assertOpen();
+        const mayCreate = (await ownership?.close(this.scope, device.id, retainedEpochId)) ?? true;
+        this.assertOpen();
         await firstAccountEpoch(
           this.db,
           this.account.id,
@@ -984,8 +1026,10 @@ export class E2ee {
           device,
           envelope,
           () => this.assertOpen(),
+          mayCreate,
           this.app,
         );
+        this.assertOpen();
       }
       // Reconnection enrols without adding another responder or key owner.
       if (!this.approval) {
