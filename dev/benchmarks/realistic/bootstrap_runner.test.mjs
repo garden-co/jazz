@@ -167,7 +167,7 @@ test("archive extraction rejects traversal and refuses a nonempty staging direct
   }
 });
 
-test("archive extraction accepts one trailing slash on directories only", () => {
+test("archive extraction accepts conventional directories and rejects file trailing slashes", () => {
   const root = temporaryDirectory("jazz-bootstrap-directory-slash-");
   const archive = path.join(root, "directory.tar.gz");
   const staging = path.join(root, "staging");
@@ -438,7 +438,7 @@ function bootstrapFixture() {
   );
   logger(
     "runuser",
-    'while [ "$#" -gt 0 ] && [ "$1" != env ]; do shift; done; [ "$#" -gt 0 ] || exit 90; shift; tool=""; for arg do case "$arg" in *=*) ;; *) tool="$arg"; break ;; esac; done; case "$tool" in rustup|wasm-pack|cargo|python3|*/config.sh) exec /usr/bin/env "$@" ;; *) exit 90 ;; esac',
+    'while [ "$#" -gt 0 ] && [ "$1" != env ]; do shift; done; [ "$#" -gt 0 ] || exit 90; shift; tool=""; for arg do case "$arg" in *=*) ;; *) tool="$arg"; break ;; esac; done; case "$tool" in rustup|wasm-pack|cargo|python3|*/.cargo/bin/rustup|*/.cargo/bin/wasm-pack|*/config.sh) exec /usr/bin/env "$@" ;; *) exit 90 ;; esac',
   );
   logger(
     "systemctl",

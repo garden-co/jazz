@@ -59,6 +59,16 @@ validate_root_manifest() {
   [[ "${owner}" == "${owner_uid}" ]] || fail 'integrity manifest has an unexpected owner'
   (( (8#${mode} & 0222) == 0 )) || fail 'integrity manifest is writable'
 }
+
+seal_toolchain_manifest() {
+  local directory="$1" manifest="$2" staged="${2}.new"
+  [[ -d "${directory}" && ! -L "${directory}" ]] || fail 'installed Rust tool state is incomplete'
+  [[ ! -e "${manifest}" && ! -L "${manifest}" && ! -e "${staged}" && ! -L "${staged}" ]] || fail 'toolchain integrity manifest already exists'
+  python3 "${HELPER}" manifest "${directory}" "${staged}" || fail 'could not seal installed Rust tool state'
+  chown "${INSTALL_OWNER}:${INSTALL_OWNER}" "${staged}"
+  chmod 0444 "${staged}"
+  mv -- "${staged}" "${manifest}"
+}
 validate_runtime_state() {
   local path item metadata owner group mode runner_gid
   runner_gid="$(id -g "${INSTALL_OWNER}")"
@@ -124,6 +134,44 @@ IFS=: read -r account_name _ _ _ _ runner_home _ <<< "${account}"
 [[ "${account_name}" == "${RUNNER_USER}" && "${runner_home}" == /* && "${runner_home}" != *$'\n'* ]] || fail 'runner account has an invalid home directory'
 runner_uid="$(id -u "${RUNNER_USER}")"
 
+
+cargo_bin="${runner_home}/.cargo/bin"
+rustup_home="${runner_home}/.rustup"
+rustup_bin="${cargo_bin}/rustup"
+wasm_pack_bin="${cargo_bin}/wasm-pack"
+toolchain_integrity_dir="${RUNNER_ROOT}/.toolchain-integrity"
+cargo_bin_manifest="${toolchain_integrity_dir}/cargo-bin.json"
+rustup_home_manifest="${toolchain_integrity_dir}/rustup-home.json"
+toolchain_state_present=0
+toolchain_state_verified=0
+for managed_directory in "${cargo_bin}" "${rustup_home}"; do
+  [[ ! -L "${managed_directory}" ]] || fail 'existing Rust tool state directory is unsafe'
+  [[ ! -e "${managed_directory}" || -d "${managed_directory}" ]] || fail 'existing Rust tool state is incomplete'
+done
+if [[ -e "${rustup_home}" || -e "${rustup_bin}" || -L "${rustup_bin}" || -e "${wasm_pack_bin}" || -L "${wasm_pack_bin}" ]]; then
+  toolchain_state_present=1
+fi
+if [[ -d "${cargo_bin}" ]] && [[ -n "$(find "${cargo_bin}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  toolchain_state_present=1
+fi
+if [[ -e "${toolchain_integrity_dir}" || -L "${toolchain_integrity_dir}" ]]; then
+  validate_trusted_directory "${toolchain_integrity_dir}"
+  [[ "${toolchain_state_present}" == 1 ]] || fail 'toolchain integrity manifests exist without installed state'
+  [[ -d "${cargo_bin}" && -x "${rustup_bin}" && -d "${rustup_home}" ]] || fail 'existing Rust tool state is incomplete'
+  [[ -f "${cargo_bin_manifest}" && ! -L "${cargo_bin_manifest}" ]] || fail 'Rust tool binary manifest is missing or unsafe'
+  [[ -f "${rustup_home_manifest}" && ! -L "${rustup_home_manifest}" ]] || fail 'Rust toolchain manifest is missing or unsafe'
+  validate_root_manifest "${cargo_bin_manifest}"
+  validate_root_manifest "${rustup_home_manifest}"
+  python3 "${HELPER}" verify "${cargo_bin}" "${cargo_bin_manifest}" || fail 'existing Rust tool binaries are partial or modified'
+  python3 "${HELPER}" verify "${rustup_home}" "${rustup_home_manifest}" || fail 'existing Rust toolchain is partial or modified'
+  toolchain_state_verified=1
+elif [[ "${toolchain_state_present}" == 1 ]]; then
+  fail 'existing Rust tool state has no protected integrity manifests'
+fi
+
+if [[ "${toolchain_state_verified}" == 1 && "${INSTALL_WASM_PACK}" == 1 && ! -x "${wasm_pack_bin}" ]]; then
+  fail 'existing wasm-pack installation is incomplete'
+fi
 install_ssm="$(resolve_install_ssm "${INSTALL_SSM_AGENT}" "${SYS_VENDOR}" "${SYS_PRODUCT}")" || fail 'INSTALL_SSM_AGENT is invalid'
 # Existing configured runners do not need a second registration token.
 runner_state="${RUNNER_ROOT}/${RUNNER_USER}"
@@ -170,18 +218,18 @@ if [[ -e "${NODE_ROOT}" || -L "${NODE_ROOT}" ]]; then
 fi
 
 offline_ready=0
-if [[ -f "${os_deps_marker}" && -x "${NODE_ROOT}/bin/node" && -x "${runner_home}/.cargo/bin/rustup" && -d "${runner_package}" ]]; then
+if [[ -f "${os_deps_marker}" && -x "${NODE_ROOT}/bin/node" && "${toolchain_state_verified}" == 1 && -d "${runner_package}" ]]; then
   [[ "$("${NODE_ROOT}/bin/node" --version)" == "v${NODE_VERSION}" ]] || fail 'existing Node installation is not the pinned version'
-  rustup_list="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${runner_home}/.cargo/bin:${PATH}" rustup toolchain list)"
+  rustup_list="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${cargo_bin}:${PATH}" "${rustup_bin}" toolchain list)"
   rust_toolchain_found=0
   while IFS= read -r toolchain; do
     case "${toolchain}" in "${RUST_VERSION}"|"${RUST_VERSION}-"*) rust_toolchain_found=1 ;; esac
   done <<< "${rustup_list}"
   [[ "${rust_toolchain_found}" == 1 ]] || fail 'existing Rust toolchain is not the pinned version'
-  installed_targets="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${runner_home}/.cargo/bin:${PATH}" rustup target list --installed --toolchain "${RUST_VERSION}")"
+  installed_targets="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${cargo_bin}:${PATH}" "${rustup_bin}" target list --installed --toolchain "${RUST_VERSION}")"
   [[ "${installed_targets}" == *wasm32-unknown-unknown* ]] || fail 'existing Rust wasm target is missing'
   if [[ "${INSTALL_WASM_PACK}" == 1 ]]; then
-    wasm_pack_version="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${runner_home}/.cargo/bin:${PATH}" wasm-pack --version)"
+    wasm_pack_version="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${cargo_bin}:${PATH}" "${wasm_pack_bin}" --version)"
     [[ "${wasm_pack_version}" == "wasm-pack ${WASM_PACK_VERSION}" ]] || fail 'existing wasm-pack is not the pinned version'
   fi
   if [[ "${install_ssm:-0}" == 1 ]] && ! systemctl is-active --quiet snap.amazon-ssm-agent.amazon-ssm-agent.service; then
@@ -274,15 +322,20 @@ for item in .runner .credentials .credentials_rsaparams .service .env .path _wor
 done
 runuser -u "${RUNNER_USER}" -- env python3 "${HELPER}" prepare-state "${runner_state}" "${runner_uid}" "$(id -g "${INSTALL_OWNER}")" "${owner_uid}" || fail 'runner runtime state directories are unsafe'
 
-if [[ "${offline_ready}" != 1 ]]; then
+if [[ "${toolchain_state_verified}" != 1 ]]; then
   # Rustup is consumed only after its publisher-pinned digest passed.
   chmod 0700 "${rustup_file}"
   chown "${RUNNER_USER}" "${rustup_file}"
-  runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${runner_home}/.cargo/bin:${PATH}" "${rustup_file}" -y --no-modify-path --default-toolchain "${RUST_VERSION}" --profile minimal
-  runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${runner_home}/.cargo/bin:${PATH}" rustup target add wasm32-unknown-unknown --toolchain "${RUST_VERSION}"
+  runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${cargo_bin}:${PATH}" "${rustup_file}" -y --no-modify-path --default-toolchain "${RUST_VERSION}" --profile minimal
+  runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${cargo_bin}:${PATH}" "${rustup_bin}" target add wasm32-unknown-unknown --toolchain "${RUST_VERSION}"
   if [[ "${INSTALL_WASM_PACK}" == 1 ]]; then
-    install_verified_wasm_pack "${RUNNER_USER}" "${runner_home}" "${runner_home}/.cargo/bin:${PATH}" "${WASM_PACK_VERSION}"
+    install_verified_wasm_pack "${RUNNER_USER}" "${runner_home}" "${cargo_bin}:${PATH}" "${WASM_PACK_VERSION}"
   fi
+
+  install -d -o "${INSTALL_OWNER}" -g "${INSTALL_OWNER}" -m 0755 "${toolchain_integrity_dir}"
+  validate_trusted_directory "${toolchain_integrity_dir}"
+  seal_toolchain_manifest "${cargo_bin}" "${cargo_bin_manifest}"
+  seal_toolchain_manifest "${rustup_home}" "${rustup_home_manifest}"
 fi
 
 if [[ ! -f "${runner_state}/.runner" ]]; then

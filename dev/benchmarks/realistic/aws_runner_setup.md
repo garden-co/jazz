@@ -31,7 +31,17 @@ Tag all created resources so they are easy to distinguish from Pulumi-managed in
 
 The bootstrap pins Rust `1.93.1`, Node `24.13.0` (official Node.js tarball SHA-256 `6223aad1a81f9d1e7b682c59d12e2de233f7b4c37475cd40d1c89c42b737ffa8`), and Actions Runner `2.337.0` (SHA-256 `70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613`). Rust is bootstrapped with rustup-init `1.28.2` (SHA-256 `20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c`); wasm-pack is pinned to `0.13.1`. Each downloaded binary archive is checked against its fixed digest before execution or extraction. Keep these pins and publisher hashes in sync with reviewed upstream releases; the script intentionally does not select `latest`.
 
-Bootstrap fails closed: a failed hash check, required tool install, requested SSM install/enable, runner configuration, or service action stops setup before runner configuration/service activation. Existing runner packages are accepted only when the root-owned per-file manifest matches every installed package file; missing, partial, or modified state is rejected rather than upgraded or overwritten. A complete pinned installation can be rerun without downloading tool archives. Registration tokens are passed as opaque data and are suppressed from failure diagnostics.
+Bootstrap fails closed: a failed hash check, required tool install, requested SSM
+install/enable, runner configuration, or service action stops setup before runner
+configuration/service activation. Root-owned manifests cover the Node tree and
+the runner package's immutable entries (runtime links are excluded). Rust tool
+binaries in `.cargo/bin` and the Rustup-managed `.rustup` tree are sealed with
+root-owned manifests under `/var/lib/actions-runner/.toolchain-integrity`;
+bootstrap verifies both before executing persistent Rustup or wasm-pack. Missing,
+partial, unmanifested, or modified state is rejected rather than upgraded or
+overwritten. Mutable Cargo registry/cache data is outside these manifests.
+
+The private on-disk manifest is canonical JSON format 1. Its exact bytes are pinned by `bootstrap_runner_manifest_v1.json`; the verifier fails closed on unknown formats. An incompatible manifest change requires a format-version bump, corresponding verifier support, and a revised byte fixture. A complete pinned installation can be rerun without downloading tool archives. Registration tokens are passed as opaque data and are suppressed from failure diagnostics.
 
 `INSTALL_SSM_AGENT=1` requests installation through Ubuntu's signed apt/snap repositories and is required to succeed. `INSTALL_SSM_AGENT=auto` (the default) installs it on detected AWS hardware and otherwise skips it; use `0` to disable it explicitly. Apt and snap repository trust remains the operating system's signed repository configuration.
 
