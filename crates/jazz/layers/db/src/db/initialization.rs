@@ -2,6 +2,7 @@
 //! never public committed identities or permission to choose a commit identity.
 
 use super::*;
+use crate::wire::encode_sync_message;
 
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
