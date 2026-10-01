@@ -4371,6 +4371,22 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(forward_subscription_rejection(
+            &tx,
+            SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::QueryValidation,
+            },
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SubscriptionStreamItem::Rejected {
+                reason: SubscriptionRejectReason::ServerFailure {
+                    code: SubscriptionServerFailureCode::QueryValidation,
+                }
+            })
+        ));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
         assert!(!forward_subscription_rejection(
             &tx,
             SubscribeRejectReason::ServerFailure {
