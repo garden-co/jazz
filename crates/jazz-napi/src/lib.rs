@@ -5597,7 +5597,6 @@ mod tests {
                 streaming: lifecycle,
                 trusted_backend: false,
                 author_admissions: NativeAuthorAdmissions::default(),
-                initialization_seals: Rc::default(),
             };
             match binding.close() {
                 Err(error) => assert_eq!(error.status.as_ref(), "write_rejected"),
