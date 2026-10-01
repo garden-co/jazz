@@ -119,15 +119,25 @@ try {
   await card(a, "Soundcheck with the band", "doing").waitFor();
   await stage.caption("…and Mia's board follows", 2000);
 
-  // Live query: Mia's open task shows only that task's comments, and they update live.
+  // A filtered live query: Mia's open task shows only that task's comments.
+  // (StagePlan's other filter, on the checklist, only ever sees its owner's
+  // items, so a second person can't add to it.) Cole first comments on another
+  // task, which stays out of Mia's view, then on hers, which shows up at once.
   await stage.caption("Mia opens soundcheck: a live query for just its comments");
   await click(a, card(a, "Soundcheck with the band"), { after: 300 });
   await a.getByPlaceholder("Add a comment for the crew").waitFor();
+  await click(b, card(b, "Tape down the cable runs"), { after: 300 });
+  await stage.caption("Cole comments on a different task: not in Mia's query");
+  await comment(b, "Gaffer tape is in the van");
+  await sleep(1400);
+  if (await a.getByText("Gaffer tape is in the van").count())
+    throw new Error("A comment on another task showed up in Mia's soundcheck view");
+  await closeDialog(b);
   await click(b, card(b, "Soundcheck with the band"), { after: 300 });
-  await stage.caption("Cole comments on that task…");
+  await stage.caption("Then on soundcheck: it matches…");
   await comment(b, "Drums are miked");
   await a.getByText("Drums are miked").waitFor();
-  await stage.caption("…and it shows up in Mia's open task immediately", 2600);
+  await stage.caption("…so it shows up in Mia's open task immediately", 2600);
   await closeDialog(b);
   await closeDialog(a);
 
