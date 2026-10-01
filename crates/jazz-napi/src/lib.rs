@@ -3989,7 +3989,8 @@ impl NapiDb {
                 } else {
                     lifecycle.drain_cleanups().await;
                     (
-                        lifecycle.take_cleanup_error()
+                        lifecycle
+                            .take_cleanup_error()
                             .map_or(Ok(()), |error| Err(napi::Error::from_reason(error))),
                         false,
                     )
@@ -3998,7 +3999,10 @@ impl NapiDb {
                 lifecycle.drain_cleanups().await;
                 let cleanup_error = lifecycle.take_cleanup_error_for_view(view_id);
                 lifecycle.views.borrow_mut().remove(&view_id);
-                (cleanup_error.map_or(Ok(()), |error| Err(napi::Error::from_reason(error))), false)
+                (
+                    cleanup_error.map_or(Ok(()), |error| Err(napi::Error::from_reason(error))),
+                    false,
+                )
             };
             let stored = result
                 .as_ref()
@@ -5522,42 +5526,78 @@ mod tests {
         assert!(other.cause.is_none());
     }
 
-
     #[test]
     fn deferred_upload_close_preserves_native_tick_and_retry() {
-        use crate::{CoreDb, CoreDbConfig, CoreDbIdentity, CoreMemoryStorage, CoreNodeUuid,
-            CoreAuthorSubject, CoreRowUuid, CoreValue};
+        use crate::{
+            CoreAuthorSubject, CoreDb, CoreDbConfig, CoreDbIdentity, CoreMemoryStorage,
+            CoreNodeUuid, CoreRowUuid, CoreValue,
+        };
         use napi::bindgen_prelude::Either;
 
         core_block_on(async {
-            let source = SchemaBuilder::new().table(
-                TableSchema::builder("files")
-                    .column("body", ColumnType::Text),
-            ).build();
+            let source = SchemaBuilder::new()
+                .table(TableSchema::builder("files").column("body", ColumnType::Text))
+                .build();
             let schema = jazz::schema::JazzSchema::new(&source).unwrap();
             let families = schema.column_families();
-            let owner = Rc::new(CoreDb::open(CoreDbConfig::new(
-                schema,
-                CoreMemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()).unwrap(),
-                CoreDbIdentity { node: CoreNodeUuid::from_bytes([0xf6; 16]), author: CoreAuthorSubject::SYSTEM },
-            )).await.unwrap());
-            let mut abandoned = owner.begin_streaming_value_upload("files", &BTreeMap::new(), "body").unwrap();
-            owner.push_streaming_value_upload(&mut abandoned, b"abandoned").await.unwrap();
-            let mut published = owner.begin_streaming_value_upload("files", &BTreeMap::new(), "body").unwrap();
-            owner.push_streaming_value_upload(&mut published, b"published").await.unwrap();
+            let owner = Rc::new(
+                CoreDb::open(CoreDbConfig::new(
+                    schema,
+                    CoreMemoryStorage::new(
+                        &families.iter().map(String::as_str).collect::<Vec<_>>(),
+                    )
+                    .unwrap(),
+                    CoreDbIdentity {
+                        node: CoreNodeUuid::from_bytes([0xf6; 16]),
+                        author: CoreAuthorSubject::SYSTEM,
+                    },
+                ))
+                .await
+                .unwrap(),
+            );
+            let mut abandoned = owner
+                .begin_streaming_value_upload("files", &BTreeMap::new(), "body")
+                .unwrap();
+            owner
+                .push_streaming_value_upload(&mut abandoned, b"abandoned")
+                .await
+                .unwrap();
+            let mut published = owner
+                .begin_streaming_value_upload("files", &BTreeMap::new(), "body")
+                .unwrap();
+            owner
+                .push_streaming_value_upload(&mut published, b"published")
+                .await
+                .unwrap();
             owner.set_deferred_local_persistence(true);
-            let write = owner.finish_streaming_value_upload(
-                published, jazz::db::StreamingMutationKind::Insert, "files",
-                CoreRowUuid::from_bytes([0xf6; 16]), BTreeMap::new(), "body",
-                jazz::db::WriteIdentity::Database, None, None, None,
-            ).await.unwrap();
+            let write = owner
+                .finish_streaming_value_upload(
+                    published,
+                    jazz::db::StreamingMutationKind::Insert,
+                    "files",
+                    CoreRowUuid::from_bytes([0xf6; 16]),
+                    BTreeMap::new(),
+                    "body",
+                    jazz::db::WriteIdentity::Database,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
             let lifecycle = StreamingOwnerLifecycle::new();
             lifecycle.enqueue_cleanup(0, NapiDbInnerStorage::Memory(Rc::clone(&owner)), abandoned);
             let binding = NapiDb {
-                inner: Rc::new(std::cell::RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(&owner))))),
-                owns_runtime: true, non_durable_client: Rc::new(Cell::new(false)), view_id: 0,
-                streaming: lifecycle, trusted_backend: false,
-                author_admissions: NativeAuthorAdmissions::default(), initialization_seals: Rc::default(),
+                inner: Rc::new(std::cell::RefCell::new(Some(NapiDbInnerStorage::Memory(
+                    Rc::clone(&owner),
+                )))),
+                owns_runtime: true,
+                non_durable_client: Rc::new(Cell::new(false)),
+                view_id: 0,
+                streaming: lifecycle,
+                trusted_backend: false,
+                author_admissions: NativeAuthorAdmissions::default(),
+                initialization_seals: Rc::default(),
             };
             match binding.close() {
                 Err(error) => assert_eq!(error.status.as_ref(), "write_rejected"),
@@ -5579,17 +5619,40 @@ mod tests {
                 }
             }
             for _ in 0..16 {
-                binding.tick().expect("deferred close must retain a native tick route");
+                binding
+                    .tick()
+                    .expect("deferred close must retain a native tick route");
             }
-            assert_eq!(owner.write_state(write.mergeable_tx_id()).unwrap().durability, DurabilityTier::Local);
-            assert!(owner.insert("files", BTreeMap::from([("body".to_owned(), CoreValue::String("late".to_owned()))]),
-                Default::default()).await.is_err(), "close must not reopen mutation admission");
-            match binding.close().expect("settled cleanup permits close retry") {
+            assert_eq!(
+                owner
+                    .write_state(write.mergeable_tx_id())
+                    .unwrap()
+                    .durability,
+                DurabilityTier::Local
+            );
+            assert!(
+                owner
+                    .insert(
+                        "files",
+                        BTreeMap::from([("body".to_owned(), CoreValue::String("late".to_owned()))]),
+                        Default::default()
+                    )
+                    .await
+                    .is_err(),
+                "close must not reopen mutation admission"
+            );
+            match binding
+                .close()
+                .expect("settled cleanup permits close retry")
+            {
                 Either::A(_) => {}
                 Either::B(pending) => {
                     let mut complete = false;
                     for _ in 0..512 {
-                        if pending.poll().unwrap().is_some() { complete = true; break; }
+                        if pending.poll().unwrap().is_some() {
+                            complete = true;
+                            break;
+                        }
                     }
                     assert!(complete, "close retry completes after publication settles");
                 }
