@@ -62,7 +62,7 @@ it.each(["mismatched", "oversized"])(
       await expect(db.e2ee.devices.list()).rejects.toThrow();
       expect(persisted).toBeNull();
       expect(generatedPrivateKey!.every((byte) => byte === 0)).toBe(true);
-      expect(await db.all(deviceRequestApp.__e2ee_device_requests, { tier: "edge" })).toEqual([]);
+      expect(await db.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" })).toEqual([]);
       faulty = false;
       expect(await db.e2ee.devices.list()).toEqual([expect.objectContaining({ state: "active" })]);
     } finally {

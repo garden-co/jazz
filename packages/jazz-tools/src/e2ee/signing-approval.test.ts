@@ -59,9 +59,9 @@ it.each(["recipient", "approver"])(
       )!;
       corrupt = true;
       await expect(first.e2ee.devices.approve(pending.id).wait()).rejects.toThrow(/sign|proof/i);
-      expect(await first.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "edge" })).toEqual(
-        [],
-      );
+      expect(
+        await first.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "remote" }),
+      ).toEqual([]);
       corrupt = false;
       await first.e2ee.devices.approve(pending.id).wait();
       expect(await second.e2ee.devices.list()).toContainEqual(

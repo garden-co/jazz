@@ -47,10 +47,10 @@ it.each([false, true])(
             deliveries++;
             if (forgeDelivery) {
               const grants = await second.all(deviceRequestApp.__e2ee_device_approvals, {
-                tier: "edge",
+                tier: "remote",
               });
               const sent = await second.all(deviceRequestApp.__e2ee_device_deliveries, {
-                tier: "edge",
+                tier: "remote",
               });
               const grant = grants.find(
                 (item) => !sent.some((delivery) => delivery.id === item.id),
@@ -109,7 +109,7 @@ it.each([false, true])(
         shared = await open(secondStore);
         await shared.e2ee.devices.list();
         const identity = await first.one(deviceRequestApp.__e2ee_account_identities, {
-          tier: "edge",
+          tier: "remote",
         });
         const forged = await second
           .insert(deviceRequestApp.__e2ee_device_challenges, {

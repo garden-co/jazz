@@ -48,7 +48,7 @@ it.each([false, true])(
       const note = db.insert(app.notes, { body: "Application policy still applies" });
       const row = await note.wait({ tier: "global" });
       expect(await db.e2ee.devices.list()).toEqual([expect.objectContaining({ state: "active" })]);
-      expect(await db.all(app.notes, { tier: "edge" })).toEqual([
+      expect(await db.all(app.notes, { tier: "remote" })).toEqual([
         expect.objectContaining({ body: "Application policy still applies" }),
       ]);
       await expect(db.delete(app.notes, row.id).wait({ tier: "global" })).rejects.toThrow(
