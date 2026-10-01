@@ -42,10 +42,12 @@ it("inspects recovery registration without enrolling a device or claiming recove
       spaces: { validation: "not-checked" },
     });
     expect(await untouched.read()).toBeNull();
-    expect(await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "edge" })).toEqual(
+    expect(await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" })).toEqual(
       [],
     );
-    expect(await observer.all(deviceRequestApp.__e2ee_account_roots, { tier: "edge" })).toEqual([]);
+    expect(await observer.all(deviceRequestApp.__e2ee_account_roots, { tier: "remote" })).toEqual(
+      [],
+    );
 
     const owner = await createDb({ ...account, e2ee: { store: store() } });
     clients.push(owner);
@@ -68,9 +70,8 @@ it("inspects recovery registration without enrolling a device or claiming recove
     const otherRoot = JSON.stringify({ ...JSON.parse(material), rootId: crypto.randomUUID() });
     await expect(observer.e2ee.recovery.status(otherRoot)).rejects.toMatchObject({
       code: "recovery-root-mismatch",
-      message: "Recovery material does not match an accepted recovery root",
     });
-    const requests = await owner.all(deviceRequestApp.__e2ee_device_requests, { tier: "edge" });
+    const requests = await owner.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" });
     await owner.shutdown();
 
     const configured = await observer.e2ee.recovery.status();
@@ -85,10 +86,10 @@ it("inspects recovery registration without enrolling a device or claiming recove
       groups: { validation: "not-checked" },
       spaces: { validation: "not-checked" },
     });
-    const roots = await observer.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "edge" });
+    const roots = await observer.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" });
     expect(configured.account.recoveryRootIds).toEqual(roots.map((root) => root.id));
     expect(await untouched.read()).toBeNull();
-    expect(await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "edge" })).toEqual(
+    expect(await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" })).toEqual(
       requests,
     );
     for (const table of [

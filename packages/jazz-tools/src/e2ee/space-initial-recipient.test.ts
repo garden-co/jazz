@@ -107,11 +107,11 @@ it.each([false, true])(
       });
       expect(await recipient.e2ee.explain(target)).toEqual({ state: "ready" });
       const root = await creator.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-        tier: "edge",
+        tier: "remote",
       });
       expect(root!.accountId).toBe(alice.account.id);
       const grants = await creator.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), {
-        tier: "edge",
+        tier: "remote",
       });
       expect(grants).toHaveLength(1);
       expect(grants[0]!.id).toBe(root!.initialGrantId);
@@ -120,7 +120,7 @@ it.each([false, true])(
         app.__e2ee_space_deliveries.where({
           spaceId: root!.id,
         }),
-        { tier: "edge" },
+        { tier: "remote" },
       );
       expect(initialDeliveries).toHaveLength(1);
       expect(initialDeliveries[0]!.recipientAccountId).toBe(bob.account.id);
@@ -136,7 +136,7 @@ it.each([false, true])(
         app.__e2ee_space_successors.where({
           spaceId: root!.id,
         }),
-        { tier: "edge" },
+        { tier: "remote" },
       );
       expect(successors).toHaveLength(1);
       const replacementDeliveries = await recipient.all(
@@ -144,7 +144,7 @@ it.each([false, true])(
           spaceId: root!.id,
           epochId: successors[0]!.epochId,
         }),
-        { tier: "edge" },
+        { tier: "remote" },
       );
       expect(replacementDeliveries).toHaveLength(1);
       expect(replacementDeliveries[0]!.recipientAccountId).toBe(bob.account.id);

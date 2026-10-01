@@ -43,7 +43,7 @@ it("does not let an unapproved device permanently occupy the successor slot", as
     const pendingId = (await pending.e2ee.devices.list()).find((d) => d.id !== creator!.id)!.id;
     const identity = await pending.one(
       deviceRequestApp.__e2ee_account_identities.where({ id: account.account.id }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     await pending
       .insert(

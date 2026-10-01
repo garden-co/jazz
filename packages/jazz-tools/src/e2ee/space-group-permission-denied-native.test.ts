@@ -100,15 +100,15 @@ it("native Node keeps a space in maintenance when Jazz denies recipient-group ro
     const target = { scope: app.projects, identifier: project.id };
     expect(await recipient.e2ee.explain(target)).toEqual({ state: "ready" });
     await recipient.e2ee.groups.leave(group.id).wait();
-    const before = await creator.all(app.__e2ee_space_deliveries, { tier: "edge" });
+    const before = await creator.all(app.__e2ee_space_deliveries, { tier: "remote" });
 
     expect(await creator.e2ee.explain(target)).toEqual({
       state: "maintenance-required",
       reason: "group-epoch-stale",
     });
-    expect(await creator.all(app.__e2ee_group_successors, { tier: "edge" })).toEqual([]);
-    expect(await creator.all(app.__e2ee_space_successors, { tier: "edge" })).toEqual([]);
-    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "edge" })).toEqual(before);
+    expect(await creator.all(app.__e2ee_group_successors, { tier: "remote" })).toEqual([]);
+    expect(await creator.all(app.__e2ee_space_successors, { tier: "remote" })).toEqual([]);
+    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual(before);
     expect(await recipient.e2ee.explain(target)).toEqual({
       state: "refused",
       reason: "not-a-space-recipient",

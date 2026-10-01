@@ -72,7 +72,7 @@ it("does not omit an undelivered inherited group from recovery protection and la
           groupId: parent.id,
           recipientAccountId: bobAccount.account.id,
         }),
-        { tier: "edge" },
+        { tier: "remote" },
       ),
     ).toEqual([]);
     expect(await bob.e2ee.explain({ groupId: parent.id })).toMatchObject({ state: "unavailable" });
@@ -88,11 +88,11 @@ it("does not omit an undelivered inherited group from recovery protection and la
     const { material } = await bob.e2ee.recovery.create().wait();
     const roots = await bob.all(
       app.__e2ee_recovery_roots.where({ accountId: bobAccount.account.id }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     const protectedGroups = await bob.all(
       app.__e2ee_group_recovery_deliveries.where({ recipientAccountId: bobAccount.account.id }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     expect(roots.length).toBeGreaterThan(0);
     expect(new Set(protectedGroups.map((row) => row.groupId))).toEqual(

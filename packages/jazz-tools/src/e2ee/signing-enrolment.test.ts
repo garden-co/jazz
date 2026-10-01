@@ -51,7 +51,9 @@ it("checks signing keys before storage and binds the retained signing identity t
     await expect(first.e2ee.devices.list()).rejects.toThrow();
     expect(persisted).toBeNull();
     expect(generated?.every((byte) => byte === 0)).toBe(true);
-    expect(await first.all(deviceRequestApp.__e2ee_device_requests, { tier: "edge" })).toEqual([]);
+    expect(await first.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" })).toEqual(
+      [],
+    );
     faulty = false;
     const devices = await first.e2ee.devices.list();
     expect(devices).toEqual([expect.objectContaining({ state: "active" })]);

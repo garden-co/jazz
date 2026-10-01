@@ -37,7 +37,7 @@ it("preserves recovery after revoking the device that registered the root", asyn
     const first = await open();
     const [creator] = await first.e2ee.devices.list();
     const { material } = await first.e2ee.recovery.create().wait();
-    const roots = await first.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "edge" });
+    const roots = await first.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" });
     expect(roots).toHaveLength(1);
     const second = await open();
     const other = (await second.e2ee.devices.list()).find((row) => row.id !== creator!.id)!;
@@ -57,7 +57,7 @@ it("preserves recovery after revoking the device that registered the root", asyn
     expect(await third.e2ee.devices.list()).toContainEqual(
       expect.objectContaining({ id: creator!.id, state: "revoked" }),
     );
-    expect(await third.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "edge" })).toEqual(
+    expect(await third.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" })).toEqual(
       roots,
     );
     await third.e2ee.devices.revoke(other.id).wait();
@@ -75,7 +75,7 @@ it("preserves recovery after revoking the device that registered the root", asyn
         expect.objectContaining({ id: other.id, state: "revoked" }),
       ]),
     );
-    expect(await fourth.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "edge" })).toEqual(
+    expect(await fourth.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" })).toEqual(
       roots,
     );
   } finally {

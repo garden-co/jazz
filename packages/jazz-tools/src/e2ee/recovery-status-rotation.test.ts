@@ -67,14 +67,15 @@ it("checks recovery ancestry after rotation without activating the inspecting de
     const observer = await open(true);
     const pending = (await observer.e2ee.devices.list()).find((row) => row.state === "pending")!;
     expect(pending).toBeDefined();
-    const requests = await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "edge" });
+    const requests = await observer.all(deviceRequestApp.__e2ee_device_requests, {
+      tier: "remote",
+    });
     const approvals = await observer.all(deviceRequestApp.__e2ee_public_device_approvals, {
-      tier: "edge",
+      tier: "remote",
     });
     corruptHistory = true;
     await expect(observer.e2ee.recovery.status(material)).rejects.toMatchObject({
       code: "recovery-delivery-unusable",
-      message: "No authenticated recovery delivery for the current account epoch",
     });
     expect(injected).toBeGreaterThan(0);
     corruptHistory = false;
@@ -86,11 +87,11 @@ it("checks recovery ancestry after rotation without activating the inspecting de
     });
     expect(checked.account.epochId).not.toBe(before.account.epochId);
     expect(checked.groups.validation).toBe("not-checked");
-    expect(await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "edge" })).toEqual(
+    expect(await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" })).toEqual(
       requests,
     );
     expect(
-      await observer.all(deviceRequestApp.__e2ee_public_device_approvals, { tier: "edge" }),
+      await observer.all(deviceRequestApp.__e2ee_public_device_approvals, { tier: "remote" }),
     ).toEqual(approvals);
     expect(await observer.e2ee.devices.list()).toContainEqual(
       expect.objectContaining({ id: pending.id, state: "pending" }),

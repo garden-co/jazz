@@ -85,37 +85,37 @@ it("makes topology readable outside group membership without granting administra
     await owner.db.insert(app.notes, { text: "private" }).wait({ tier: "global" });
     await owner.db.e2ee.groups.add(group.id, outsider.id).wait();
     await owner.db.e2ee.groups.remove(group.id, outsider.id).wait();
-    const roots = await owner.db.all(app.__e2ee_groups.where({ id: group.id }), { tier: "edge" });
+    const roots = await owner.db.all(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" });
     const members = await owner.db.all(app.__e2ee_group_membership.where({ groupId: group.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     const epochs = await owner.db.all(app.__e2ee_group_successors.where({ groupId: group.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     expect(roots).toHaveLength(1);
     expect(members).toHaveLength(2);
     expect(epochs).toHaveLength(1);
     expect(
-      await outsider.db.all(app.__e2ee_groups.where({ id: group.id }), { tier: "edge" }),
+      await outsider.db.all(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
     ).toEqual(roots);
     expect(
       await outsider.db.all(app.__e2ee_group_membership.where({ groupId: group.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual(members);
     expect(
       await outsider.db.all(app.__e2ee_group_successors.where({ groupId: group.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual(epochs);
-    expect(await outsider.db.all(app.notes, { tier: "edge" })).toEqual([]);
+    expect(await outsider.db.all(app.notes, { tier: "remote" })).toEqual([]);
     expect(await outsider.db.e2ee.explain({ groupId: group.id })).toMatchObject({
       state: "refused",
     });
     await expect(outsider.db.e2ee.groups.add(group.id, outsider.id).wait()).rejects.toThrow();
     expect(
       await owner.db.all(app.__e2ee_group_membership.where({ groupId: group.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual(members);
   } finally {

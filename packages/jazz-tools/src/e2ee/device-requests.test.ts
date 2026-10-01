@@ -45,7 +45,9 @@ it("keeps device administration account-scoped despite public-key visibility", a
     expect(keys.every((row) => !("challenge" in row) && !("envelope" in row))).toBe(true);
     await expect(bob!.e2ee.devices.approve(aliceDevice!.id).wait()).rejects.toThrow();
     await expect(bob!.e2ee.devices.revoke(aliceDevice!.id).wait()).rejects.toThrow();
-    const identities = await bob!.all(deviceRequestApp.__e2ee_account_identities, { tier: "remote" });
+    const identities = await bob!.all(deviceRequestApp.__e2ee_account_identities, {
+      tier: "remote",
+    });
     expect(identities).toHaveLength(1);
     expect(identities[0]!.deviceId).toBe(bobDevice!.id);
     expect(await alice!.e2ee.devices.list()).toEqual([aliceDevice]);

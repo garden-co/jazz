@@ -915,11 +915,11 @@ it("keeps prepared claim domains complete across private and public policy reads
     const owner = await createDb(await localAccountConfig(server.appId, server.url));
     clients.push(owner);
     const deviceId = randomUUID();
-    expect(await owner.one(app.requests.where({ id: deviceId }), { tier: "edge" })).toBeNull();
+    expect(await owner.one(app.requests.where({ id: deviceId }), { tier: "remote" })).toBeNull();
     const request = await owner
       .insert(app.requests, { publicKey: Uint8Array.of(1, 2, 3) }, { id: deviceId })
       .wait({ tier: "global" });
-    expect(await owner.one(app.published_keys.where({ deviceId }), { tier: "edge" })).toBeNull();
+    expect(await owner.one(app.published_keys.where({ deviceId }), { tier: "remote" })).toBeNull();
     const published = await owner
       .insert(app.published_keys, {
         deviceId,
@@ -928,11 +928,11 @@ it("keeps prepared claim domains complete across private and public policy reads
       .wait({ tier: "global" });
     const observer = await createDb(await localAccountConfig(server.appId, server.url));
     clients.push(observer);
-    expect(await observer.all(app.requests, { tier: "edge" })).toEqual([]);
-    expect(await observer.all(app.published_keys, { tier: "edge" })).toEqual([
+    expect(await observer.all(app.requests, { tier: "remote" })).toEqual([]);
+    expect(await observer.all(app.published_keys, { tier: "remote" })).toEqual([
       expect.objectContaining({ id: published.id, deviceId, publicKey: request.publicKey }),
     ]);
-    expect(await owner.all(app.requests, { tier: "edge" })).toEqual([
+    expect(await owner.all(app.requests, { tier: "remote" })).toEqual([
       expect.objectContaining({ id: request.id }),
     ]);
   } finally {

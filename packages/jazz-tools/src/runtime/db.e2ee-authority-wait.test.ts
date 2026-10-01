@@ -24,7 +24,7 @@ it("confirms exclusive writes at the global authority and preserves callback res
       }),
     });
     db = await createDb(await localAccountConfig(server.appId, server.url));
-    await db.all(app.epochs, { tier: "edge" });
+    await db.all(app.epochs, { tier: "remote" });
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.epochs, { generation: 1 });
     await expect(tx.commit().wait({ tier: "global" })).resolves.toBeUndefined();
@@ -35,7 +35,7 @@ it("confirms exclusive writes at the global authority and preserves callback res
     await expect(result.mapValue((row) => row.generation).wait({ tier: "global" })).resolves.toBe(
       2,
     );
-    await expect(db.all(app.epochs, { tier: "edge" })).resolves.toHaveLength(2);
+    await expect(db.all(app.epochs, { tier: "remote" })).resolves.toHaveLength(2);
   } finally {
     await db?.shutdown();
     await server.stop();

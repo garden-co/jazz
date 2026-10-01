@@ -126,8 +126,8 @@ it("inspects inherited recovery coverage without repairing or staging group keys
     // Bob may administer this edge through ordinary policy, but has no parent key to share.
     await bob.e2ee.groups.add(parent.id, child.id).wait();
     const observer = await open(bobAccount, true);
-    const requests = await bob.all(app.__e2ee_device_requests, { tier: "edge" });
-    const deliveries = await bob.all(app.__e2ee_group_recovery_deliveries, { tier: "edge" });
+    const requests = await bob.all(app.__e2ee_device_requests, { tier: "remote" });
+    const deliveries = await bob.all(app.__e2ee_group_recovery_deliveries, { tier: "remote" });
     const missing = await observer.db.e2ee.recovery.status(material);
     expect(missing.account.validation).toBe("validated");
     expect(missing.groups).toMatchObject({
@@ -144,10 +144,10 @@ it("inspects inherited recovery coverage without repairing or staging group keys
     if (missing.groups.validation !== "checked") throw new Error("Group coverage was not checked");
     expect(missing.groups.paths).toHaveLength(2);
     expect(observer.saved()).toBeNull();
-    expect(await bob.all(app.__e2ee_group_recovery_deliveries, { tier: "edge" })).toEqual(
+    expect(await bob.all(app.__e2ee_group_recovery_deliveries, { tier: "remote" })).toEqual(
       deliveries,
     );
-    expect(await bob.all(app.__e2ee_device_requests, { tier: "edge" })).toEqual(requests);
+    expect(await bob.all(app.__e2ee_device_requests, { tier: "remote" })).toEqual(requests);
     await alice.e2ee.explain({ groupId: parent.id });
     const ready = await observer.db.e2ee.recovery.status(material);
     if (ready.groups.validation !== "checked") throw new Error("Group coverage was not checked");
@@ -224,7 +224,7 @@ it("inspects inherited recovery coverage without repairing or staging group keys
     expect(removed.groups.paths).toHaveLength(1);
     expect(removed.groups.paths[0]).toMatchObject({ groupId: child.id, validation: "validated" });
     expect(observer.saved()).toBeNull();
-    expect(await bob.all(app.__e2ee_device_requests, { tier: "edge" })).toEqual(requests);
+    expect(await bob.all(app.__e2ee_device_requests, { tier: "remote" })).toEqual(requests);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

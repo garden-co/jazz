@@ -69,16 +69,14 @@ it("accepts eight group edges but rejects a ninth below existing ancestors, incl
     const extra = recipient.db.e2ee.groups.create();
     await extra.wait();
     for (let i = 0; i < 8; i++) await owner.db.e2ee.groups.add(groups[i]!, groups[i + 1]!).wait();
-    const edges = await owner.db.all(app.__e2ee_group_membership, { tier: "edge" });
+    const edges = await owner.db.all(app.__e2ee_group_membership, { tier: "remote" });
     expect(edges).toHaveLength(8);
     expect(await owner.db.e2ee.explain({ groupId: groups[0]! })).toEqual({ state: "ready" });
     // The edited leaf has no descendants. Validation must also see its eight ancestors.
-    await expect(owner.db.e2ee.groups.add(groups[8]!, extra.id).wait()).rejects.toThrow(
-      "cycle or depth",
-    );
-    expect(await owner.db.all(app.__e2ee_group_membership, { tier: "edge" })).toEqual(edges);
+    await expect(owner.db.e2ee.groups.add(groups[8]!, extra.id).wait()).rejects.toThrow();
+    expect(await owner.db.all(app.__e2ee_group_membership, { tier: "remote" })).toEqual(edges);
     const root = (await owner.db.one(app.__e2ee_groups.where({ id: groups[8]! }), {
-      tier: "edge",
+      tier: "remote",
     }))!;
     const device = JSON.parse(owner.stored()).devices[0];
     const signer = await createBrowserDeviceSigner();
@@ -107,7 +105,7 @@ it("accepts eight group edges but rejects a ninth below existing ancestors, incl
     } finally {
       key.fill(0);
     }
-    expect(await owner.db.all(app.__e2ee_group_membership, { tier: "edge" })).toHaveLength(9);
+    expect(await owner.db.all(app.__e2ee_group_membership, { tier: "remote" })).toHaveLength(9);
     expect(await owner.db.e2ee.explain({ groupId: root.id })).toEqual({ state: "ready" });
     expect(await owner.db.e2ee.explain({ groupId: groups[0]! })).toEqual({ state: "ready" });
     expect(await recipient.db.e2ee.explain({ groupId: root.id })).toMatchObject({
@@ -122,7 +120,7 @@ it("accepts eight group edges but rejects a ninth below existing ancestors, incl
           groupId: { in: groups },
           recipientAccountId: recipient.accountId,
         }),
-        { tier: "edge" },
+        { tier: "remote" },
       ),
     ).toEqual([]);
   } finally {

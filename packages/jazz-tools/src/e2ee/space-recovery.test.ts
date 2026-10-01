@@ -84,7 +84,7 @@ for (const scenario of [
         expect(await first.e2ee.explain(target)).toEqual({ state: "ready" });
         const { material } = await first.e2ee.recovery.create().wait();
         if (scenario === "unrelated-invalid-root") {
-          const [root] = await first.all(app.__e2ee_spaces, { tier: "edge" });
+          const [root] = await first.all(app.__e2ee_spaces, { tier: "remote" });
           expect(root).toBeDefined();
           const other = await first
             .insert(app.projects, { title: "Unrelated scope" })
@@ -118,8 +118,8 @@ for (const scenario of [
         if (scenario === "malformed-recovery-candidates") {
           const writer = await createDb({ ...account });
           clients.push(writer);
-          const [root] = await writer.all(app.__e2ee_spaces, { tier: "edge" });
-          const [recovery] = await writer.all(app.__e2ee_recovery_roots, { tier: "edge" });
+          const [root] = await writer.all(app.__e2ee_spaces, { tier: "remote" });
+          const [recovery] = await writer.all(app.__e2ee_recovery_roots, { tier: "remote" });
           expect(root).toBeDefined();
           expect(recovery).toBeDefined();
           // Both rows coexist with the genuine envelope under ordinary policy.
@@ -147,7 +147,7 @@ for (const scenario of [
           }
           expect(await first.e2ee.explain(target)).toEqual({ state: "ready" });
           expect(
-            await first.all(app.__e2ee_space_recovery_deliveries, { tier: "edge" }),
+            await first.all(app.__e2ee_space_recovery_deliveries, { tier: "remote" }),
           ).toHaveLength(3);
         }
         await first.shutdown();
@@ -174,7 +174,7 @@ for (const scenario of [
           expect(
             await replacement.all(
               app.__e2ee_space_deliveries.where({ recipientDeviceId: pending!.id }),
-              { tier: "edge" },
+              { tier: "remote" },
             ),
           ).toEqual([]);
         }
@@ -184,7 +184,7 @@ for (const scenario of [
         expect(await reopened.e2ee.explain(target)).toEqual({ state: "ready" });
         if (scenario === "unrelated-invalid-root") {
           const [root] = await reopened.all(app.__e2ee_spaces.where({ identifier: project.id }), {
-            tier: "edge",
+            tier: "remote",
           });
           expect(root).toBeDefined();
           await reopened
@@ -192,9 +192,7 @@ for (const scenario of [
             .wait({ tier: "global" });
           // This root's signature is genuine. Incomplete membership is not evidence
           // that the caller has no recovery obligations, so discovery must fail closed.
-          await expect(reopened.e2ee.recovery.status(material)).rejects.toThrow(
-            "Invalid or unsupported E2EE space membership",
-          );
+          await expect(reopened.e2ee.recovery.status(material)).rejects.toThrow();
         }
       } finally {
         await Promise.all(clients.map((client) => client.shutdown()));

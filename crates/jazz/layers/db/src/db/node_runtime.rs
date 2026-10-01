@@ -709,7 +709,9 @@ where
                     Err(error) => {
                         deferred.borrow_mut().insert(id);
                         let error = Error::from(error);
-                        pending_error.borrow_mut().get_or_insert_with(|| error.clone());
+                        pending_error
+                            .borrow_mut()
+                            .get_or_insert_with(|| error.clone());
                         Err(error)
                     }
                 }

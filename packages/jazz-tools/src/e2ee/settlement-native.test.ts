@@ -43,7 +43,7 @@ it("reads authority-ordered WASM proposals through the native Node binding", asy
     await first.wait({ tier: "global" });
     const second = writer.insert(app.proposals, { value: "second" });
     await second.wait({ tier: "global" });
-    const ordinary = await reader.all(app.proposals, { tier: "edge" });
+    const ordinary = await reader.all(app.proposals, { tier: "remote" });
     expect(ordinary).toHaveLength(2);
     const read = await reader.exclusiveTransaction((tx) => tx.allSettledForE2ee(app.proposals));
     const snapshot = await read.wait({ tier: "global" });

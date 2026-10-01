@@ -102,11 +102,11 @@ it.each([
         clients.push(writer);
         beforeRecoverySeal = async () => {
           const root = await writer.one(app.__e2ee_groups.where({ id: group.id }), {
-            tier: "edge",
+            tier: "remote",
           });
           const recovery = await writer.all(
             app.__e2ee_recovery_roots.where({ accountId: account.account.id }),
-            { tier: "edge" },
+            { tier: "remote" },
           );
           expect(recovery).toHaveLength(1);
           // A UUID v1 is a valid Jazz row ID but is invalid in the E2EE v1 transcript.
@@ -183,7 +183,7 @@ it.each([
         expect(
           await second.all(
             app.__e2ee_group_deliveries.where({ groupId: group.id, recipientDeviceId: pending.id }),
-            { tier: "edge" },
+            { tier: "remote" },
           ),
         ).toEqual([]);
         if (additional) {
@@ -193,7 +193,7 @@ it.each([
                 groupId: additional.id,
                 recipientDeviceId: pending.id,
               }),
-              { tier: "edge" },
+              { tier: "remote" },
             ),
           ).toEqual([]);
         }

@@ -3097,7 +3097,6 @@ export class Db {
     );
   }
 
-
   private handleMutationError(event: MutationErrorEvent): void {
     if (this.mutationErrorListeners.size === 0) {
       console.error("Unhandled Jazz mutation error", event);
@@ -4207,14 +4206,7 @@ export class Db {
       return withTransactionAdmission(
         ownerClient,
         prerequisite,
-        () =>
-          new Transaction(
-            kind,
-            (schema) => this.getClient(schema),
-            context,
-            ownerClient,
-            e2ee,
-          ),
+        () => new Transaction(kind, (schema) => this.getClient(schema), context, ownerClient, e2ee),
       );
     return new Transaction(
       kind,
@@ -4344,11 +4336,7 @@ export class Db {
       await this.ensureReady(readinessTier(effectiveTier));
       const rows =
         context || usesRelationTraversal
-          ? await client.queryInternal(
-              wasmQuery,
-              queryOptions,
-              context?.readSession,
-            )
+          ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
           : await client.queryInternal(wasmQuery, queryOptions);
       if (equality && !(await equality.isCurrent())) {
         // Bound work under continuous rotation; never present incomplete history as exhaustion.

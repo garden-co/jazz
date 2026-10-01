@@ -136,7 +136,7 @@ it.each([
         corruptWrapColumn = "verification";
         await expect(owner.e2ee.groups.create().wait()).rejects.toThrow();
         expect(corruptWrapColumn).toBeUndefined();
-        expect(await owner.all(app.__e2ee_groups, { tier: "edge" })).toEqual([]);
+        expect(await owner.all(app.__e2ee_groups, { tier: "remote" })).toEqual([]);
       }
       const { id } = await owner.e2ee.groups.create().wait();
       if (scenario === "creation-invalid-verification") {
@@ -147,7 +147,7 @@ it.each([
       expect(
         await recipient.all(
           app.__e2ee_group_deliveries.where({ recipientAccountId: bob.account.id }),
-          { tier: "edge" },
+          { tier: "remote" },
         ),
       ).toEqual([]);
       corruptNextEnvelope = scenario === "repair";
@@ -156,12 +156,12 @@ it.each([
         expect(corruptNextEnvelope).toBe(false);
         const delivered = await recipient.all(
           app.__e2ee_group_deliveries.where({ groupId: id, recipientAccountId: bob.account.id }),
-          { tier: "edge" },
+          { tier: "remote" },
         );
         expect(delivered).toHaveLength(1);
         const accountRoot = await recipient.one(
           app.__e2ee_account_roots.where({ accountId: bob.account.id }),
-          { tier: "edge" },
+          { tier: "remote" },
         );
         // Ordinary account policy is not proof that the requesting device signed.
         await recipient
@@ -179,14 +179,14 @@ it.each([
         expect(
           await recipient.all(
             app.__e2ee_group_deliveries.where({ groupId: id, recipientAccountId: bob.account.id }),
-            { tier: "edge" },
+            { tier: "remote" },
           ),
         ).toHaveLength(1);
         await expect(recipient.e2ee.explain({ groupId: id })).rejects.toThrow();
         const requests = app.__e2ee_group_repairs.where({ groupId: id });
-        expect(await recipient.all(requests, { tier: "edge" })).toHaveLength(2);
+        expect(await recipient.all(requests, { tier: "remote" })).toHaveLength(2);
         await expect(recipient.e2ee.explain({ groupId: id })).rejects.toThrow();
-        expect(await recipient.all(requests, { tier: "edge" })).toHaveLength(2);
+        expect(await recipient.all(requests, { tier: "remote" })).toHaveLength(2);
         // A capable member loading the group repairs the recipient's unusable
         // delivery without changing membership or requiring a new public method.
         expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
@@ -195,7 +195,7 @@ it.each([
       expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
       if (scenario.startsWith("removal")) {
         const before = await owner.all(app.__e2ee_group_deliveries.where({ groupId: id }), {
-          tier: "edge",
+          tier: "remote",
         });
         const originalEpoch = before[0]!.epochId;
         corruptWrapColumn =
@@ -210,7 +210,7 @@ it.each([
           await expect(removal.wait()).rejects.toThrow();
           expect(corruptWrapColumn).toBeUndefined();
           expect(
-            await owner.all(app.__e2ee_group_successors.where({ groupId: id }), { tier: "edge" }),
+            await owner.all(app.__e2ee_group_successors.where({ groupId: id }), { tier: "remote" }),
           ).toEqual([]);
           // The removal remains accepted, but a faulty crypto adapter must not
           // publish an unusable epoch. Loading retries with fresh valid crypto.
@@ -220,7 +220,7 @@ it.each([
         expect(await recipient.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
         expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
         const after = await owner.all(app.__e2ee_group_deliveries.where({ groupId: id }), {
-          tier: "edge",
+          tier: "remote",
         });
         expect(after.filter((row) => row.recipientAccountId === bob.account.id)).toEqual(
           before.filter((row) => row.recipientAccountId === bob.account.id),
@@ -232,10 +232,10 @@ it.each([
         ).toBe(true);
         if (scenario === "removal-forged-successor") {
           const successors = app.__e2ee_group_successors.where({ groupId: id });
-          const accepted = (await owner.all(successors, { tier: "edge" }))[0]!;
+          const accepted = (await owner.all(successors, { tier: "remote" }))[0]!;
           const bobRoot = await recipient.one(
             app.__e2ee_account_roots.where({ accountId: bob.account.id }),
-            { tier: "edge" },
+            { tier: "remote" },
           );
           const bobDevice = JSON.parse(stores.get(bob.account.id)!()!).devices[0];
           const scope = JSON.parse(stores.get(alice.account.id)!()!).devices[0].scope;
@@ -273,11 +273,11 @@ it.each([
           expect(
             (await recipient.e2ee.devices.list()).find((device) => device.id === bobRoot!.deviceId),
           ).toMatchObject({ state: "active" });
-          expect(await owner.all(successors, { tier: "edge" })).toHaveLength(2);
+          expect(await owner.all(successors, { tier: "remote" })).toHaveLength(2);
           expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
           expect(await recipient.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
           expect(
-            await owner.all(app.__e2ee_group_deliveries.where({ groupId: id }), { tier: "edge" }),
+            await owner.all(app.__e2ee_group_deliveries.where({ groupId: id }), { tier: "remote" }),
           ).toEqual(after);
         }
       }

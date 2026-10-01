@@ -1545,8 +1545,7 @@ impl Database {
         {
             let upload = decode_pending_large_value_upload_at_key(&key, &encoded)?;
             self.release_pending_large_value_upload(key, upload).await?;
-        } else if let Some(staged) =
-            completed_large_value_upload_receipt(&self.storage, id).await?
+        } else if let Some(staged) = completed_large_value_upload_receipt(&self.storage, id).await?
         {
             self.evict_staged_large_value_locked(staged.id).await?;
         }

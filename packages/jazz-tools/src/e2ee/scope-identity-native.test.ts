@@ -44,8 +44,8 @@ it("resolves the same accepted scope through WASM and native Node clients", asyn
       account: owner.getSnapshot().account!,
       driver: { type: "memory" },
     });
-    await wasm.all(app.projects, { tier: "edge" });
-    await native.all(app.projects, { tier: "edge" });
+    await wasm.all(app.projects, { tier: "remote" });
+    await native.all(app.projects, { tier: "remote" });
     const expected = await wasm.tableIdentity(app.projects);
     expect(expected).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
@@ -104,8 +104,8 @@ it("preserves accepted scope identities across a server-published table rename",
       await localAccountConfig(server.appId, server.url),
       bobSource,
     );
-    await alice.all(oldApp.projects, { tier: "edge" });
-    await bob.all(oldApp.projects, { tier: "edge" });
+    await alice.all(oldApp.projects, { tier: "remote" });
+    await bob.all(oldApp.projects, { tier: "remote" });
     const aliceOwner = aliceSource.client.getRuntime();
     const bobOwner = bobSource.client.getRuntime();
     if (

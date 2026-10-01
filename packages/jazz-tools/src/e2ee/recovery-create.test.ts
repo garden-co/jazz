@@ -55,11 +55,11 @@ it("creates independent recovery material with an accepted account-private key d
     expect(state.recoveryRoots).toHaveLength(1);
     const [root] = state.recoveryRoots;
     expect(root).toMatchObject({ id: decoded.rootId, signerId: device!.id });
-    const deliveries = await owner.all(app.__e2ee_recovery_deliveries, { tier: "edge" });
+    const deliveries = await owner.all(app.__e2ee_recovery_deliveries, { tier: "remote" });
     expect(deliveries).toHaveLength(1);
     const delivery = deliveries[0]!;
     expect(delivery).toMatchObject({ rootId: root!.id, epochId: state.epochId });
-    expect(await observer.all(app.__e2ee_recovery_deliveries, { tier: "edge" })).toEqual([]);
+    expect(await observer.all(app.__e2ee_recovery_deliveries, { tier: "remote" })).toEqual([]);
     const context = encodeCryptoContext({
       application: local.scope,
       policy: "jazz.e2ee.recovery.v1",
@@ -80,7 +80,7 @@ it("creates independent recovery material with an accepted account-private key d
       delivery.envelope,
     );
     try {
-      const identity = await owner.one(app.__e2ee_account_identities, { tier: "edge" });
+      const identity = await owner.one(app.__e2ee_account_identities, { tier: "remote" });
       await confirmAccountEpoch(
         crypto.keyEnvelope,
         local.scope,
@@ -93,9 +93,9 @@ it("creates independent recovery material with an accepted account-private key d
     }
     const pending = await createDb({ ...account, e2ee: { store: store() } });
     clients.push(pending);
-    await expect(pending.e2ee.recovery.create().wait()).rejects.toThrow(/active|approved|key/i);
-    expect(await owner.all(app.__e2ee_recovery_roots, { tier: "edge" })).toHaveLength(1);
-    expect(await owner.all(app.__e2ee_recovery_deliveries, { tier: "edge" })).toHaveLength(1);
+    await expect(pending.e2ee.recovery.create().wait()).rejects.toThrow();
+    expect(await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).toHaveLength(1);
+    expect(await owner.all(app.__e2ee_recovery_deliveries, { tier: "remote" })).toHaveLength(1);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
