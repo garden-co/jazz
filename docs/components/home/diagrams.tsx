@@ -275,7 +275,10 @@ export function StackDiagram() {
   const coreBottom = coreY + coreH;
   const peerY = 180;
   const firstX = peers[0].x + w / 2;
-  const entryGap = 76;
+  // The last entry sits 54px in from the cloud's right edge; the rest share
+  // the span evenly.
+  const lastEntryX = coreX + coreW - 54;
+  const entryGap = (lastEntryX - firstX) / (peers.length - 1);
   const turnGap = (peerY - coreBottom) / peers.length;
   const wires: Point[][] = peers.map((peer, index) => {
     const entryX = firstX + index * entryGap;
