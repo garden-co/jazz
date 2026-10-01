@@ -23,7 +23,6 @@ import {
   getBenchmarkMetadata,
   displayedTime,
   estimatedSeconds,
-  ESTIMATE_DIVISOR,
   formatThroughput,
 } from "@/lib/perf-timeline/presentation";
 import {
@@ -436,12 +435,11 @@ export function Showcase() {
     <div className="mx-auto w-full max-w-[1120px] px-4 pb-24 pt-10 sm:px-8">
       <VStack gap={10}>
         <VStack as="header" gap={4} className="max-w-3xl">
-          <Heading level={1}>Real apps, measured on every merge</Heading>
+          <Heading level={1}>Jazz examples and real-world benchmarks</Heading>
           <Text as="p" type="large" color="secondary" display="block">
-            Each example lives in the Jazz repository, most of them as working apps. The numbers
-            under it come from benchmarks of that same workload, run on CodSpeed as changes merge to
-            main. We show the latest released numbers; hover any of them for how they changed across
-            releases.
+            We&apos;ve created a variety of example apps that are simple enough to read in code or
+            show your agent for inspiration, but close enough to real apps to demonstrate Jazz
+            performance under real-world load patterns.
           </Text>
           {error && <Banner status="error" title={error} />}
           {data && !released && (
@@ -457,12 +455,6 @@ export function Showcase() {
               description={data.warnings.join(" ")}
             />
           )}
-          <Text as="p" type="supporting" display="block">
-            * Estimated times: CodSpeed wallclock medians divided by {ESTIMATE_DIVISOR}, a rough
-            allowance for a typical modern machine being faster than the shared CI runner. This is
-            illustrative, not a measured prediction for your hardware; every history card also shows
-            the measured runner time.
-          </Text>
         </VStack>
         {heroExamples.map((example) => (
           <VStack key={example.id} gap={10}>
