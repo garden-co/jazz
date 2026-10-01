@@ -899,7 +899,16 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     assert_eq!(expected_initial, BTreeSet::from([resource1]));
     let mut peer = PeerState::new();
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let initial_rows = covered_input_rows(&initial);
+    let SyncMessage::ViewUpdate(payload) = &initial else {
+        panic!("expected ViewUpdate");
+    };
+    let initial_rows = payload
+        .supporting_rows
+        .added_rows()
+        .iter()
+        .filter(|row| row.version_table.as_str() == "resources")
+        .map(|row| row.row)
+        .collect::<BTreeSet<_>>();
     assert_eq!(initial_rows, expected_initial);
 
     commit_global_cells(
