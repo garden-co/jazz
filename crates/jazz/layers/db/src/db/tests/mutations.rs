@@ -5387,6 +5387,117 @@ fn streaming_wrong_owner_consumption_releases_durable_pending_uploads() {
     });
 }
 
+/// Alice's origin owner must reclaim an unpublished promoted receipt when the
+/// atomic pending-to-staged write commits but its acknowledgement is lost.
+/// alice upload -> durable promotion / lost ack -> origin ticks -> no retainers
+/// Receipt inspection is necessary: unpublished bytes have no row-read surface.
+#[test]
+fn streaming_promotion_ack_loss_releases_the_original_upload_receipt() {
+    block_on(async {
+        let schema = doctest_support::schema();
+        let families = schema.column_families();
+        let (storage, control) = groove::storage::TestStorage::controlled(
+            &families.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let alice = Db::open(DbConfig::new(
+            schema,
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xf3; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .await
+        .unwrap();
+        alice.set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            max_age_ms: u64::MAX,
+            ..Default::default()
+        });
+        let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+        let mut upload = alice
+            .begin_streaming_value_upload("todos", &cells, "title")
+            .unwrap();
+        alice
+            .push_streaming_value_upload(&mut upload, b"unpublished receipt")
+            .await
+            .unwrap();
+        // Target the irreversible receipt transition, not an incidental batch
+        // number. This lower-level fault seam must commit before reporting loss.
+        control.lose_write_many_acknowledgement_matching(|operations| {
+            operations.iter().any(|operation| {
+                matches!(
+                    operation,
+                    groove::storage::OwnedWriteOperation::Set { cf, key, .. }
+                        if cf == groove::db::LARGE_VALUE_METADATA_CF
+                            && key.starts_with(b"staged/")
+                )
+            })
+        });
+        let error = match alice
+            .stage_streaming_value_upload(
+                upload,
+                StreamingMutationKind::Insert,
+                "todos",
+                row(0xf3),
+                cells,
+                "title",
+                WriteIdentity::Database,
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("the committed promotion must report its lost acknowledgement"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("acknowledgement loss"),
+            "{error}"
+        );
+        assert_eq!(
+            alice
+                .node
+                .node
+                .lock()
+                .await
+                .pending_upload_count_for_test()
+                .await
+                .unwrap(),
+            0,
+            "promotion committed and consumed its original pending journal",
+        );
+        assert_eq!(
+            alice
+                .node
+                .node
+                .lock()
+                .await
+                .staged_large_value_count_for_test()
+                .await
+                .unwrap(),
+            1,
+            "the fault must occur after a durable receipt exists",
+        );
+        for _ in 0..16 {
+            alice.tick().await.unwrap();
+        }
+        assert_eq!(
+            alice
+                .node
+                .node
+                .lock()
+                .await
+                .staged_large_value_count_for_test()
+                .await
+                .unwrap(),
+            0,
+            "the live origin must retire the promoted receipt, not only its absent pending key",
+        );
+        assert!(streamed_todo(&alice, row(0xf3)).await.unwrap().is_none());
+    });
+}
+
 /// Alice stages bytes without a visible row, then publishes the file and its
 /// companion row in one exclusive commit. Reusing the capability is rejected.
 #[test]

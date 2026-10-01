@@ -187,6 +187,7 @@ struct ControlState {
     failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
     definitely_uncommitted_failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
     lost_write_many_acknowledgements: usize,
+    lost_write_many_acknowledgement_condition: Option<Box<dyn Fn(&[OwnedWriteOperation]) -> bool>>,
 }
 
 impl ControlState {
@@ -214,6 +215,7 @@ impl Default for ControlState {
             failures: BTreeMap::new(),
             definitely_uncommitted_failures: BTreeMap::new(),
             lost_write_many_acknowledgements: 0,
+            lost_write_many_acknowledgement_condition: None,
         }
     }
 }
@@ -254,6 +256,17 @@ impl TestStorageControl {
     /// Let the next batch commit, then lose its acknowledgement.
     pub fn lose_next_write_many_acknowledgement(&self) {
         self.state.borrow_mut().lost_write_many_acknowledgements += 1;
+    }
+
+    /// Commit the next matching batch, then lose its acknowledgement.
+    /// The predicate selects a storage transition without counting batches.
+    pub fn lose_write_many_acknowledgement_matching(
+        &self,
+        condition: impl Fn(&[OwnedWriteOperation]) -> bool + 'static,
+    ) {
+        self.state
+            .borrow_mut()
+            .lost_write_many_acknowledgement_condition = Some(Box::new(condition));
     }
 
     /// Keep only the most recent poll's waker for each pending suspension
@@ -346,8 +359,16 @@ impl TestStorageControl {
             .and_then(VecDeque::pop_front)
     }
 
-    fn take_lost_write_many_acknowledgement(&self) -> bool {
+    fn take_lost_write_many_acknowledgement(&self, operations: &[OwnedWriteOperation]) -> bool {
         let mut state = self.state.borrow_mut();
+        if state
+            .lost_write_many_acknowledgement_condition
+            .as_ref()
+            .is_some_and(|condition| condition(operations))
+        {
+            state.lost_write_many_acknowledgement_condition.take();
+            return true;
+        }
         if state.lost_write_many_acknowledgements == 0 {
             false
         } else {
@@ -683,6 +704,9 @@ where
         Box::pin(async move {
             self.control.before(TestStorageOperation::WriteMany).await?;
             self.inner.write_many(operations.clone()).await?;
+            let acknowledgement_lost = self
+                .control
+                .take_lost_write_many_acknowledgement(&operations);
             let mut resident = self.resident.borrow_mut();
             for operation in operations {
                 match operation {
@@ -694,7 +718,14 @@ where
                     }
                 }
             }
-            Ok(())
+            if acknowledgement_lost {
+                Err(Error::Backend {
+                    backend: "test",
+                    message: "injected acknowledgement loss after write_many commit".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
         })
     }
 
@@ -714,6 +745,9 @@ where
             }
             match self.inner.write_many_outcome(operations.clone()).await {
                 WriteManyOutcome::Committed => {
+                    let acknowledgement_lost = self
+                        .control
+                        .take_lost_write_many_acknowledgement(&operations);
                     let mut resident = self.resident.borrow_mut();
                     for operation in operations {
                         match operation {
@@ -725,7 +759,7 @@ where
                             }
                         }
                     }
-                    if self.control.take_lost_write_many_acknowledgement() {
+                    if acknowledgement_lost {
                         WriteManyOutcome::PossiblyCommitted(Error::Backend {
                             backend: "test",
                             message: "injected acknowledgement loss after write_many commit"
