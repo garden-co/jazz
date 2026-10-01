@@ -11,7 +11,7 @@ import { heroExamples, moreBenchmarkSections } from "../lib/showcase/catalogue.t
 const hero = heroExamples.find((example) => example.metrics.some((metric) => metric.per));
 const metric = hero.metrics.find((candidate) => candidate.per);
 const perCount = metric.per.count;
-const estimate = (seconds) => `${formatTime(seconds / 5)}*`;
+const estimate = (seconds) => formatTime(seconds / 5);
 const perOperation = (seconds) => estimate(seconds / perCount);
 const engine = moreBenchmarkSections.find((section) => section.benchmarks);
 const [engineA, engineB] = engine.benchmarks.filter(
@@ -134,7 +134,11 @@ try {
   assert.match(history, /v2\.0\.0-alpha\.1/);
   assert.ok(history.includes(perOperation(4)));
   assert.match(history, /Unreleased main/);
-  assert.ok(history.includes(`Measured on the CodSpeed runner: ${formatTime(2 / perCount)}`));
+  assert.ok(
+    history.includes(
+      `Measurement on the de-noised CodSpeed environment (about 5x slower than a normal CPU): ${formatTime(2 / perCount)}`,
+    ),
+  );
   // Open-PR experiments never feed a card or its history.
   assert.ok(!`${await card.innerText()} ${history}`.includes(formatTime(0.001 / 5 / perCount)));
 
