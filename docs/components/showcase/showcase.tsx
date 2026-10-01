@@ -17,6 +17,7 @@ import {
   TableRow,
 } from "@astryxdesign/core/Table";
 import { Heading, Text } from "@astryxdesign/core/Text";
+import { WalkthroughVideo } from "./walkthrough-video";
 import { fetchTimeline } from "@/lib/perf-timeline/client";
 import type { Benchmark, Timeline } from "@/lib/perf-timeline/model";
 import {
@@ -188,15 +189,13 @@ function Video({ example }: { example: HeroExample }) {
     );
   return (
     <VStack as="figure" gap={1}>
-      <video
-        className="aspect-video w-full rounded-(--radius-container) border border-(--color-border) bg-(--color-background-inverted) object-contain"
+      <WalkthroughVideo
+        className="h-auto w-full rounded-(--radius-container) border border-(--color-border) bg-black"
         src={example.video.src}
         poster={example.video.poster}
+        width={1280}
+        height={892}
         controls
-        muted
-        loop
-        playsInline
-        preload="metadata"
       />
       <figcaption>
         <Text type="supporting" display="block">
