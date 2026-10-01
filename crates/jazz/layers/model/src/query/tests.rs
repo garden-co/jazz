@@ -496,12 +496,18 @@ mod tests {
     /// model-level test pins the static/dynamic boundary before policy binding.
     #[test]
     fn contains_unknown_needle_claim_remains_dynamic() {
-        let validated = Query::from("issues")
-            .filter(contains(col("title"), claim("unknown_needle")))
-            .validate_runtime(&schema())
-            .unwrap();
+        let query = Query::from("issues").filter(contains(col("title"), claim("unknown_needle")));
+        let validated = query.clone().validate_runtime(&schema()).unwrap();
 
-        assert!(validated.params().is_empty());
+        assert_eq!(
+            validated.query(),
+            &query,
+            "the validated AST must retain the dynamic claim operand",
+        );
+        assert!(
+            validated.params().is_empty(),
+            "the claim must not become a user query binding"
+        );
     }
 
     /// Alice's provider claim can be the `contains` haystack; validation leaves
@@ -509,12 +515,19 @@ mod tests {
     /// model-level test pins the static/dynamic boundary before policy binding.
     #[test]
     fn contains_unknown_haystack_claim_remains_dynamic() {
-        let validated = Query::from("issues")
-            .filter(contains(claim("unknown_haystack"), lit("needle")))
-            .validate_runtime(&schema())
-            .unwrap();
+        let query =
+            Query::from("issues").filter(contains(claim("unknown_haystack"), lit("needle")));
+        let validated = query.clone().validate_runtime(&schema()).unwrap();
 
-        assert!(validated.params().is_empty());
+        assert_eq!(
+            validated.query(),
+            &query,
+            "the validated AST must retain the dynamic claim operand",
+        );
+        assert!(
+            validated.params().is_empty(),
+            "the claim must not become a user query binding"
+        );
     }
 
     /// Bob's mismatched needle receives expected and actual types with
