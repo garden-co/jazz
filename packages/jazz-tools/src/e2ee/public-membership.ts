@@ -41,11 +41,11 @@ export async function prefetchPublicMembershipHistory(
   const successorsQuery = tables.__e2ee_public_account_successors.where({ accountId });
   const recoveryQuery = tables.__e2ee_recovery_roots.where({ accountId });
   await Promise.all([
-    db.all(rootsQuery, { tier: "edge" }),
-    db.all(keysQuery, { tier: "edge" }),
-    db.all(approvalsQuery, { tier: "edge" }),
-    db.all(successorsQuery, { tier: "edge" }),
-    db.all(recoveryQuery, { tier: "edge" }),
+    db.all(rootsQuery, { tier: "global" }),
+    db.all(keysQuery, { tier: "global" }),
+    db.all(approvalsQuery, { tier: "global" }),
+    db.all(successorsQuery, { tier: "global" }),
+    db.all(recoveryQuery, { tier: "global" }),
   ]);
 }
 

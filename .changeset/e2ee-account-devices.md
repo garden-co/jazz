@@ -12,3 +12,5 @@ Expose the managed device-request schema and permissions for application schema 
 Propagate operational signing-adapter failures rather than reporting them as unavailable
 device delivery. Complete prepared policy claim domains and preserve recursive binding
 carriers, and fix release-build hydration of shared recursive query graphs.
+Device lifecycle reads and waits use the current global tier for authoritative
+acceptance, preserving the meaning of the retired edge-tier calls.

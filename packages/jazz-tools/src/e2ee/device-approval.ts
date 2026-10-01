@@ -92,7 +92,7 @@ export class DeviceApproval {
           this.backgroundError = error;
         },
       },
-      { tier: "edge" },
+      { tier: "global" },
     );
     db.onShutdown(() => {
       this.lifetime.abort();
@@ -189,36 +189,30 @@ export class DeviceApproval {
       try {
         this.assertOpen();
         await Promise.all([
-          this.db.all(this.tables.__e2ee_account_successors, { tier: "edge" }),
-          this.db.all(this.tables.__e2ee_account_identities, { tier: "edge" }),
-          this.db.all(this.tables.__e2ee_device_requests, { tier: "edge" }),
-          this.db.all(this.tables.__e2ee_device_challenges, { tier: "edge" }),
-          this.db.all(this.tables.__e2ee_device_proofs, { tier: "edge" }),
-          this.db.all(this.tables.__e2ee_device_approvals, { tier: "edge" }),
-          this.db.all(this.tables.__e2ee_device_deliveries, { tier: "edge" }),
+          this.db.all(this.tables.__e2ee_account_successors, { tier: "global" }),
+          this.db.all(this.tables.__e2ee_account_identities, { tier: "global" }),
+          this.db.all(this.tables.__e2ee_device_requests, { tier: "global" }),
+          this.db.all(this.tables.__e2ee_device_challenges, { tier: "global" }),
+          this.db.all(this.tables.__e2ee_device_proofs, { tier: "global" }),
+          this.db.all(this.tables.__e2ee_device_approvals, { tier: "global" }),
+          this.db.all(this.tables.__e2ee_device_deliveries, { tier: "global" }),
           this.db.all(this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }), {
-            tier: "edge",
+            tier: "global",
           }),
           this.db.all(this.tables.__e2ee_account_roots.where({ accountId: this.accountId }), {
-            tier: "edge",
+            tier: "global",
           }),
           this.db.all(
             this.tables.__e2ee_device_keys.where({ "$createdBy.account": this.accountId }),
-            {
-              tier: "edge",
-            },
+            { tier: "global" },
           ),
           this.db.all(
             this.tables.__e2ee_public_device_approvals.where({ accountId: this.accountId }),
-            {
-              tier: "edge",
-            },
+            { tier: "global" },
           ),
           this.db.all(
             this.tables.__e2ee_public_account_successors.where({ accountId: this.accountId }),
-            {
-              tier: "edge",
-            },
+            { tier: "global" },
           ),
         ]);
         const read = await exclusiveE2eeTransaction(this.db, (tx) => this.readSnapshot(tx));
@@ -797,7 +791,7 @@ export class DeviceApproval {
             },
             onError: finish,
           },
-          { tier: "edge" },
+          { tier: "global" },
         );
         if (finished) stop();
       } catch (error) {
