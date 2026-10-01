@@ -2306,6 +2306,22 @@ impl VersionRow {
         })
     }
 
+    /// Count one cold-path conversion that produced or consumed this version.
+    #[cfg(feature = "cold-settle-attribution")]
+    pub(super) fn record_conversion(&self, site: &'static str, bytes: usize) {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (
+            self.table(),
+            self.row_uuid(),
+            self.branch_key(),
+            self.tx_time(),
+            self.tx_node_alias(),
+        )
+            .hash(&mut hasher);
+        groove::cold_settle_attribution::conversions::record(site, hasher.finish(), bytes);
+    }
+
     pub(super) fn from_parts_with_schema_version(
         table: &TableSchema,
         parts: VersionRowParts,
@@ -2434,11 +2450,14 @@ impl VersionRow {
                 "borrowed wire ingest changed storage bytes"
             );
         }
-        Ok(Self {
+        let row = Self {
             table: groove::Intern::new(version.table().to_owned()),
             branch_key: version.branch_key().clone(),
             record: OwnedRecord::new(raw, descriptor),
-        })
+        };
+        #[cfg(feature = "cold-settle-attribution")]
+        row.record_conversion("wire_to_version_row", row.record.raw().len());
+        Ok(row)
     }
 
     pub(super) fn table(&self) -> &str {
@@ -3469,6 +3488,14 @@ pub(super) fn transaction_values_with_cardinality_scope(
     view_scoped_cardinality: bool,
     contribution_merge: Value,
 ) -> Result<Vec<Value>, Error> {
+    // Slots 5-8: `jazz.exclusive-read-evidence.v1` while an exclusive fate is
+    // pending, null otherwise (SPEC 2 §2.8).
+    let [
+        base_snapshot,
+        row_read_set,
+        absent_read_set,
+        predicate_read_set,
+    ] = super::exclusive_read_evidence::evidence_slot_values(tx, matches!(fate, Fate::Pending))?;
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
         Value::U64(node_alias.0),
@@ -3478,10 +3505,10 @@ pub(super) fn transaction_values_with_cardinality_scope(
         }),
         Value::U32(tx.n_total_writes),
         Value::U32(made_by.0),
-        Value::Nullable(None),
-        Value::Nullable(None),
-        Value::Nullable(None),
-        Value::Nullable(None),
+        base_snapshot,
+        row_read_set,
+        absent_read_set,
+        predicate_read_set,
         Value::Nullable(
             tx.user_metadata_json
                 .clone()

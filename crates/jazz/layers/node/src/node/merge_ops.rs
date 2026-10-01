@@ -20,19 +20,24 @@ pub(in crate::node) fn counter_to_i128(value: &Value) -> Result<i128, Error> {
     }
 }
 
-pub(in crate::node) fn counter_from_i128(
-    column_type: &ValueType,
-    value: i128,
-) -> Result<Value, Error> {
-    let out_of_range = |_| Error::InvalidStoredValue("counter value out of range");
+/// A counter value in the column's integer type, modulo 2^width.
+///
+/// Counter ops are deltas carried in the column's own type, so they are
+/// taken modulo 2^width: a decrement of an unsigned counter, or a signed
+/// jump wider than the type, is exact for the one write that makes it, and
+/// adding it back to the base the write saw yields exactly the written
+/// value. Core adds concurrent ops the same way, so they commute
+/// (`INV-HIST-15`); a sum that leaves the column's range wraps.
+fn counter_wrapping(column_type: &ValueType, value: i128) -> Result<Value, Error> {
+    // `as` from i128 keeps the low bits: the two's-complement residue.
     match column_type {
-        ValueType::U8 => u8::try_from(value).map(Value::U8).map_err(out_of_range),
-        ValueType::U16 => u16::try_from(value).map(Value::U16).map_err(out_of_range),
-        ValueType::U32 => u32::try_from(value).map(Value::U32).map_err(out_of_range),
-        ValueType::U64 => u64::try_from(value).map(Value::U64).map_err(out_of_range),
-        ValueType::I32 => i32::try_from(value).map(Value::I32).map_err(out_of_range),
-        ValueType::I64 => i64::try_from(value).map(Value::I64).map_err(out_of_range),
-        ValueType::Nullable(inner) => counter_from_i128(inner, value),
+        ValueType::U8 => Ok(Value::U8(value as u8)),
+        ValueType::U16 => Ok(Value::U16(value as u16)),
+        ValueType::U32 => Ok(Value::U32(value as u32)),
+        ValueType::U64 => Ok(Value::U64(value as u64)),
+        ValueType::I32 => Ok(Value::I32(value as i32)),
+        ValueType::I64 => Ok(Value::I64(value as i64)),
+        ValueType::Nullable(inner) => counter_wrapping(inner, value),
         _ => Err(Error::InvalidStoredValue(
             "counter strategy requires integer column",
         )),
@@ -125,7 +130,7 @@ pub(in crate::node) fn split_merge_ops(
                     - base_value.map(counter_to_i128).transpose()?.unwrap_or(0);
                 cells.insert(
                     column.name.clone(),
-                    counter_from_i128(&column.column_type, delta)?,
+                    counter_wrapping(&column.column_type, delta)?,
                 );
             }
             MergeStrategy::GSet => {
@@ -152,11 +157,38 @@ pub(in crate::node) fn apply_merge_op(
     op: &Value,
 ) -> Result<Value, Error> {
     match strategy {
-        MergeStrategy::Counter => counter_from_i128(
+        MergeStrategy::Counter => counter_wrapping(
             column_type,
             counter_to_i128(previous)? + counter_to_i128(op)?,
         ),
         MergeStrategy::GSet => gset_union(column_type, Some(previous), Some(op)),
         MergeStrategy::Lww => Ok(op.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A counter op is exact for any single write, whatever its sign or size:
+    /// an unsigned decrement, and a signed jump across the whole type.
+    #[test]
+    fn counter_op_restores_the_written_value_over_its_base() {
+        for (column_type, base, written) in [
+            (ValueType::U8, Value::U8(200), Value::U8(1)),
+            (ValueType::U64, Value::U64(10), Value::U64(7)),
+            (ValueType::I32, Value::I32(i32::MIN), Value::I32(i32::MAX)),
+        ] {
+            let delta = counter_wrapping(
+                &column_type,
+                counter_to_i128(&written).unwrap() - counter_to_i128(&base).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                apply_merge_op(MergeStrategy::Counter, &column_type, &base, &delta).unwrap(),
+                written,
+                "{column_type:?}"
+            );
+        }
     }
 }

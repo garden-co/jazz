@@ -1,6 +1,6 @@
 //! Per-row durable storage bytes on RocksDB.
 //!
-//! Measurement harness, not a regression gate: it is `#[ignore]`d and only
+//! Measurement harness, not a regression gate: it is ignored by default and only
 //! prints a table. Run it with
 //!
 //! ```text
@@ -243,7 +243,7 @@ fn report(label: &str, groups: &BTreeMap<String, Group>) {
 }
 
 #[test]
-#[ignore = "measurement harness; run with --ignored --nocapture"]
+#[ignore = "#1787: manual storage measurement receipt; run with --ignored --nocapture"]
 fn storage_per_row_bytes() {
     let root = tempfile::tempdir().expect("temporary directory");
     let core_path = root.path().join("core");

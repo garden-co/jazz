@@ -551,6 +551,8 @@ impl IvmRuntime {
             project,
             raw_projection,
         };
+        // Neither outcome replaces a case, so no retained result is stale; see
+        // `register_variant_projection_target_case`.
         match projection.cases.entry(variant_tag) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(case);
@@ -564,7 +566,6 @@ impl IvmRuntime {
                 });
             }
         }
-        self.invalidate_table_inputs(table);
         Ok(())
     }
 
@@ -749,10 +750,16 @@ impl IvmRuntime {
         } else {
             VariantProjectionCase::Ignore { source }
         };
-        let changed = match projection.cases.entry(variant_tag) {
+        // Only replacing a case can make a retained result stale. Every reader
+        // of a projection fails on a row whose tag has no case, so no result
+        // that exists was computed from one: adding a case for a new tag (in
+        // particular the first case of a new target) leaves them all valid.
+        // Invalidating the whole table here dropped every hydration memo over
+        // it each time a query registered its own projection target (#3797).
+        let replaced = match projection.cases.entry(variant_tag) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(case);
-                true
+                false
             }
             std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => false,
             std::collections::hash_map::Entry::Occupied(mut entry)
@@ -777,7 +784,7 @@ impl IvmRuntime {
                 });
             }
         };
-        if changed {
+        if replaced {
             self.invalidate_table_inputs(table);
         }
         Ok(())

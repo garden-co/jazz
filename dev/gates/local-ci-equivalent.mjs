@@ -111,6 +111,20 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    // Cold-load phase attribution is opt-in and off in every other build, so
+    // without this its cfg'd spans and counters would rot unnoticed.
+    command("cold-settle attribution compile", "cargo", [
+      "check",
+      "-p",
+      "jazz-sim",
+      "-p",
+      "jazz-example-permissioned-resources-benchmark",
+      "--lib",
+      "--bins",
+      "--tests",
+      "--features",
+      "cold-settle-attribution",
+    ]),
   ]),
   "rust-workspace": Object.freeze([
     command("workspace Rust tests", "node", [
@@ -189,7 +203,8 @@ export const ciPartitions = Object.freeze({
     }),
     // An exact, named historical-storage receipt rather than an incidental
     // member of the broad browser suite: a green TypeScript partition must mean
-    // current code opened the pinned real-browser corpus.
+    // current code handled the pinned real-browser corpora as designed (opens
+    // what it supports, refuses pre-linear roots with a typed error).
     command("browser storage compatibility corpus", "pnpm", [
       "--dir",
       "packages/jazz-tools",

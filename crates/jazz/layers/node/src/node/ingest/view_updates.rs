@@ -151,6 +151,51 @@ where
         incoming.with_record_values(merged).map(Some)
     }
 
+    /// The authority refuses a merge-column write over a row whose current
+    /// image is stored under another schema version. Across layouts the row
+    /// is still whole-row last-writer-wins (`merged_global_post_image`), so
+    /// the write's op (a counter delta, a g-set's added elements) would be
+    /// stored as the column's value when the write wins, and dropped when it
+    /// loses. Applying ops across layouts needs Core's current row in one
+    /// physical layout (#3899); until then the write is refused explicitly.
+    pub(super) async fn cross_schema_merge_op_rejection(
+        &mut self,
+        versions: &[VersionRecord],
+    ) -> Result<Option<RejectionReason>, Error> {
+        let batch = self.database.open_batch();
+        for version in versions {
+            let schema_version = version.schema_version();
+            let table_schema = self.table_in_schema(version.table(), schema_version)?;
+            let authored = version.authored_columns();
+            let Some(column) = table_schema.columns.iter().find(|column| {
+                table_schema.merge_strategy(&column.name) != crate::schema::MergeStrategy::Lww
+                    && authored.is_none_or(|columns| columns.contains(&column.name))
+            }) else {
+                continue;
+            };
+            let Some((current, _)) = self
+                .query_global_winner_with_seq_in_batch(
+                    &batch,
+                    schema_version,
+                    version.table(),
+                    version.branch_key(),
+                    version.row_uuid(),
+                )
+                .await?
+            else {
+                continue;
+            };
+            if self.schema_version_for_alias(current.schema_version_alias()) != Some(schema_version) {
+                return Ok(Some(RejectionReason::MalformedCommit(format!(
+                    "merge column '{}.{}' is written under a different schema version than the row's current image; merge-column writes across schema versions are not supported yet (#3899)",
+                    version.table(),
+                    column.name,
+                ))));
+            }
+        }
+        Ok(None)
+    }
+
     pub(super) async fn global_current_seq_in_batch(
         &mut self,
         batch: &DatabaseBatch,

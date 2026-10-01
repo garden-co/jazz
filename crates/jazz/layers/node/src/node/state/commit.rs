@@ -653,7 +653,10 @@ where
         published: PublishedTransaction,
     ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
-        let persistence = published.persist().await;
+        let persistence = self
+            .database
+            .persist_with_progress(&published.persistence)
+            .await;
         self.settle_published_transaction(tx_id, persistence)?;
         Ok(tx_id)
     }
@@ -669,7 +672,10 @@ where
         let (value, mut publications, mut work) = outcome.into_parts();
         loop {
             for publication in publications {
-                let persistence = publication.persist().await;
+                let persistence = self
+                    .database
+                    .persist_with_progress(&publication.persistence)
+                    .await;
                 self.settle_published_transaction(publication.tx_id(), persistence)?;
             }
             let Some(message) = work.pop_front() else {

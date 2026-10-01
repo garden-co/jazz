@@ -985,12 +985,45 @@ function assertStorageManifest(value: unknown): asserts value is IndexedDbStorag
     manifest.pageFormatMagic !== INDEXEDDB_STORAGE_MANIFEST.pageFormatMagic ||
     manifest.pageFormatVersion !== INDEXEDDB_STORAGE_MANIFEST.pageFormatVersion ||
     !Array.isArray(manifest.requiredCodecIds) ||
-    manifest.requiredCodecIds.length !== INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds.length ||
-    manifest.requiredCodecIds.some(
-      (codec, index) => codec !== INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds[index],
-    )
+    !manifest.requiredCodecIds.every((codec: unknown) => typeof codec === "string")
   ) {
     throw new Error("Missing or invalid IndexedDB storage epoch manifest");
+  }
+  const found: readonly string[] = manifest.requiredCodecIds;
+  const expected: readonly string[] = INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds;
+  if (found.length !== expected.length || found.some((codec, index) => codec !== expected[index])) {
+    throw new UnsupportedStorageCodecsError(
+      expected.filter((codec) => !found.includes(codec)),
+      found.filter((codec) => !expected.includes(codec)),
+    );
+  }
+}
+
+/**
+ * A well-formed epoch manifest whose codec-family inventory differs from the
+ * one this build reads. Codec IDs carry their format version (`name.vN`), so
+ * `missing` names the formats this build requires and the root lacks, and
+ * `unknown` names the formats the root was written with that this build does
+ * not read. Raised before any page is decoded; the root is left untouched.
+ *
+ * This mirrors Groove's `Error::UnsupportedStorageCodecs`. The message keeps
+ * the generic manifest-rejection prefix so existing matches on it still hold.
+ */
+export class UnsupportedStorageCodecsError extends Error {
+  override readonly name = "UnsupportedStorageCodecsError";
+  /** Stable code; it survives the browser worker relay, unlike the class. */
+  readonly code = "unsupported_storage_codecs";
+  readonly missing: readonly string[];
+  readonly unknown: readonly string[];
+
+  constructor(missing: readonly string[], unknown: readonly string[]) {
+    super(
+      `Missing or invalid IndexedDB storage epoch manifest: unsupported storage format: ` +
+        `this epoch-${INDEXEDDB_STORAGE_EPOCH} root lacks codec families ${JSON.stringify(missing)} ` +
+        `required by this build and declares ${JSON.stringify(unknown)} that this build does not read`,
+    );
+    this.missing = missing;
+    this.unknown = unknown;
   }
 }
 

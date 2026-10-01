@@ -1322,7 +1322,6 @@ fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
         tx.tx_id,
     )
     .expect("SYSTEM must not bind session claims for a bypassed write");
-    assert_eq!(peer.terminal_authority_scope_proof_count(), 0);
 
     let denied = crate::local_executor::block_on(
         node_state.dry_run_mergeable_write_allows_in_schema(

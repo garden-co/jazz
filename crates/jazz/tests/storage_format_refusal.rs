@@ -170,7 +170,7 @@ fn published_alpha56_rocksdb_root_is_refused_with_a_typed_format_error() {
 fn pre_linear_native_corpora_are_refused_before_any_mutation() {
     for (base64, archive_sha, sqlite_sha, unknown, store) in [
         (
-            include_str!("../fixtures/current-native-jazz.sqlite.gz.base64"),
+            include_str!("../fixtures/pre-linear-native-jazz.sqlite.gz.base64"),
             "a3606d7045d477dab33d9bf0c60d3a1d1c1608dfd581f9e1bbf1c8abd6447c13",
             "28902888353cf33af039811b82c45875a3c2f72a4176e06e3e5d50826b8734bd",
             &[][..],
@@ -199,7 +199,7 @@ fn pre_linear_native_corpora_are_refused_before_any_mutation() {
 
     let directory = tempfile::tempdir().unwrap();
     let archive = checked_fixture(
-        include_str!("../fixtures/current-native-jazz-rocksdb.tar.gz.base64"),
+        include_str!("../fixtures/pre-linear-native-jazz-rocksdb.tar.gz.base64"),
         "21a6c49b90d83f33ba3deba2cfd7605db155e78deeec22f683158037c66d7ba7",
     );
     let path = unpack_rocksdb(directory.path(), &archive);

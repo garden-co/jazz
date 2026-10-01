@@ -279,6 +279,47 @@ fn authorization_policy_queries(
     }
 }
 
+/// Policy clauses for one advice action, seeded with the target row where the
+/// clause is evaluated on the stored row. Such a clause only needs that row and
+/// the dependencies reachable from it, not every row the policy matches
+/// (#3468). `update_check` stays unseeded: it runs on the patched row, whose
+/// dependencies (for example a new parent) the stored row cannot reach.
+fn authorization_row_policy_queries(
+    table: &crate::schema::TableSchema,
+    action: &PermissionAdviceAction,
+) -> Vec<JazzQuery> {
+    let seed =
+        |policy: JazzQuery, row: RowUuid| policy.filter(eq(col("id"), lit(Value::Uuid(row.0))));
+    match action {
+        PermissionAdviceAction::Read { row, .. } => {
+            authorization_policy_queries(table, AuthorizationScopeOperation::Read)
+                .into_iter()
+                .map(|policy| seed(policy, *row))
+                .collect()
+        }
+        PermissionAdviceAction::Insert { .. } => {
+            authorization_policy_queries(table, AuthorizationScopeOperation::Insert)
+        }
+        PermissionAdviceAction::Update { row, .. } => [
+            table
+                .write_policies
+                .update_using
+                .clone()
+                .map(|policy| seed(policy, *row)),
+            table.write_policies.update_check.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        PermissionAdviceAction::Delete { row, .. } => {
+            authorization_policy_queries(table, AuthorizationScopeOperation::Delete)
+                .into_iter()
+                .map(|policy| seed(policy, *row))
+                .collect()
+        }
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn authorization_operation_key(
     operation: AuthorizationScopeOperation,
@@ -742,10 +783,46 @@ where
             insert_candidate,
             provenance,
             PolicyDecisionRole::Write,
+            &TransactionWriteOverlay::default(),
         )
         .await
     }
 
+    /// Authorize an inline candidate whose policy evidence is committed
+    /// state overlaid with its own transaction's other writes (`INV-RLS-9`).
+    /// With an empty overlay this is exactly
+    /// [`Self::write_policy_query_allows_candidate_with_provenance_for_schema`].
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::node) async fn write_policy_query_allows_candidate_over_transaction(
+        &mut self,
+        policy_schema_version: SchemaVersionId,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorSubject,
+        insert_candidate: bool,
+        provenance: RowProvenance,
+        transaction_overlay: &TransactionWriteOverlay,
+    ) -> Result<bool, Error> {
+        self.policy_query_allows_candidate_with_provenance_for_schema(
+            policy_schema_version,
+            table,
+            policy,
+            row_uuid,
+            cells,
+            identity,
+            insert_candidate,
+            provenance,
+            PolicyDecisionRole::Write,
+            transaction_overlay,
+        )
+        .await
+    }
+
+    /// Authorize read-for-write visibility of a row a commit unit acts on.
+    /// Only a commit unit's decision asks this, so its evidence is
+    /// authority-accepted state (`INV-RLS-9`).
     pub(in crate::node) async fn read_policy_query_allows_candidate_with_provenance_for_schema(
         &mut self,
         policy_schema_version: SchemaVersionId,
@@ -766,6 +843,7 @@ where
             false,
             provenance,
             PolicyDecisionRole::Read,
+            &TransactionWriteOverlay::accepted_state(),
         )
         .await
     }
@@ -782,6 +860,7 @@ where
         insert_candidate: bool,
         provenance: RowProvenance,
         role: PolicyDecisionRole,
+        transaction_overlay: &TransactionWriteOverlay,
     ) -> Result<bool, Error> {
         let mut policy = policy.clone();
         if insert_candidate {
@@ -858,7 +937,7 @@ where
                 &input.shape,
                 policy_shape.schema_version(),
                 policy_shape.schema_version(),
-                DurabilityTier::Local,
+                transaction_overlay.evidence_tier(),
                 None,
                 None,
                 false,
@@ -875,14 +954,26 @@ where
         )?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
         let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
-        let program = Box::pin(
-            self.compile_query_program_request_with_inline_sources_and_access_paths(
-                request,
-                inline_sources,
-                access_paths,
-            ),
-        )
-        .await?;
+        let program = if !transaction_overlay.is_active() {
+            Box::pin(
+                self.compile_query_program_request_with_inline_sources_and_access_paths(
+                    request,
+                    inline_sources,
+                    access_paths,
+                ),
+            )
+            .await?
+        } else {
+            Box::pin(
+                self.compile_query_program_request_with_inline_sources_and_transaction_overlay(
+                    request,
+                    inline_sources,
+                    access_paths,
+                    transaction_overlay.clone(),
+                ),
+            )
+            .await?
+        };
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
             .await
     }
@@ -1560,9 +1651,9 @@ where
                 ))?
                 .schema
         };
-        let policies = authorization_policy_queries(
+        let policies = authorization_row_policy_queries(
             &self.table_in_schema(table_name, policy_schema_version)?,
-            operation,
+            action,
         );
         let claim_values = permission_scope_claim_values(writer, claims);
         // Authorization support is authority-current: historic/branch views

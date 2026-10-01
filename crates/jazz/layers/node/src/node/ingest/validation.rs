@@ -202,7 +202,7 @@ where
         batch.deliver_notifications(groove::db::NotificationTiming::AfterPersistence);
         self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.apply_node_batch(batch).await?;
-        let persisted = applied.persist().await;
+        let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
         if let Some(rejected) = rejected_payload {
             self.rejections.rejected_transactions.insert(tx_id, rejected);
@@ -741,8 +741,8 @@ where
         );
         self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.apply_node_batch(batch).await?;
-let persisted = applied.persist().await;
-self.database.finish_persistence(persisted)?;
+        let persisted = self.database.persist_with_progress(&applied).await;
+        self.database.finish_persistence(persisted)?;
         Ok(())
     }
 }

@@ -230,7 +230,7 @@ impl PendingPipeline {
         if let Some((_, error)) = self.error {
             return Err(error);
         }
-        let bytes = self.output.freeze();
+        let bytes = freeze_batch_buffer(self.output);
         let deltas = if self.spans.is_empty() {
             self.borrowed
         } else {
@@ -342,8 +342,6 @@ impl TickEvaluator<'_> {
         frame_inputs: super::evaluator::FrameInputs<'_>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
-        #[cfg(feature = "cold-settle-attribution")]
-        let _phase = tracing::trace_span!("cold.phase.op_map").entered();
         let tail = *nodes.last().expect("nonempty pipeline");
         if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(tail) {
             if self
@@ -410,36 +408,38 @@ impl TickEvaluator<'_> {
                 stage_visits: 0,
             });
         }
-        let batch = pending.get_mut(&tail).expect("prepared pipeline");
-        let mut budget = 256;
-        while batch.next < batch.input.deltas.len() && budget > 0 {
-            if !batch.row(batch.next, &mut budget) {
-                break;
+        let finished = {
+            // Only the fused row loop is filter/map work: memo lookups and
+            // the `compute_node` fallbacks above belong to the caller's phase,
+            // and fallback kernels enter their own operator phase.
+            #[cfg(feature = "cold-settle-attribution")]
+            let _phase = tracing::trace_span!("cold.phase.op_map").entered();
+            let batch = pending.get_mut(&tail).expect("prepared pipeline");
+            let mut budget = 256;
+            while batch.next < batch.input.deltas.len() && budget > 0 {
+                if !batch.row(batch.next, &mut budget) {
+                    break;
+                }
+                batch.next += 1;
+                batch.stage = 0;
+                batch.location = 0;
+                if batch.error.as_ref().is_some_and(|(stage, _)| *stage == 0) {
+                    break;
+                }
             }
-            batch.next += 1;
-            batch.stage = 0;
-            batch.location = 0;
-            if batch.error.as_ref().is_some_and(|(stage, _)| *stage == 0) {
-                break;
+            if batch.next < batch.input.deltas.len()
+                && batch.error.as_ref().is_none_or(|(stage, _)| *stage != 0)
+            {
+                return Poll::Pending;
             }
-        }
-        if batch.next < batch.input.deltas.len()
-            && batch.error.as_ref().is_none_or(|(stage, _)| *stage != 0)
-        {
-            return Poll::Pending;
-        }
-        #[cfg(feature = "cold-settle-attribution")]
-        crate::cold_settle_attribution::record_pipeline(
-            self.context.eval_mode == EvalMode::Hydrate,
-            batch.input.deltas.len(),
-            batch.stage_visits,
-        );
-        Poll::Ready(
-            pending
-                .remove(&tail)
-                .expect("completed pipeline")
-                .finish()
-                .map(|(lookup, output)| self.memoize_result(&lookup, output)),
-        )
+            #[cfg(feature = "cold-settle-attribution")]
+            crate::cold_settle_attribution::record_pipeline(
+                self.context.eval_mode == EvalMode::Hydrate,
+                batch.input.deltas.len(),
+                batch.stage_visits,
+            );
+            pending.remove(&tail).expect("completed pipeline").finish()
+        };
+        Poll::Ready(finished.map(|(lookup, output)| self.memoize_result(&lookup, output)))
     }
 }

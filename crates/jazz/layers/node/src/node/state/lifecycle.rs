@@ -751,7 +751,7 @@ impl NodeState {
                 );
             }
             let applied = database.apply_batch(batch).await?;
-            let persisted = applied.persist().await;
+            let persisted = database.persist_with_progress(&applied).await;
             database.finish_persistence(persisted)?;
             schemas.insert(
                 staged.publication.schema.id,
@@ -867,6 +867,7 @@ impl NodeState {
                 open_transactions: BTreeMap::new(),
                 closed_batches: BTreeSet::new(),
                 local_permission_subjects: BTreeMap::new(),
+                released_large_values: Vec::new(),
                 pending_foreign_transactions: BTreeSet::new(),
             },
             rejections: RejectionTracking::default(),
@@ -933,7 +934,7 @@ impl NodeState {
             Self::write_active_schema_to_batch(&mut batch, &active)?;
             node.write_active_schema_bootstrap_to_batch(&mut batch, &active).await?;
             let applied = node.database.apply_batch(batch).await?;
-            let persisted = applied.persist().await;
+            let persisted = node.database.persist_with_progress(&applied).await;
             node.database.finish_persistence(persisted)?;
         }
         #[cfg(feature = "testing")]
@@ -1436,6 +1437,20 @@ where
             }
         }
         Ok(evicted)
+    }
+
+    /// Ids of every unpublished Groove staging root, for leak assertions.
+    #[doc(hidden)]
+    pub async fn staged_large_value_ids(
+        &self,
+    ) -> Result<Vec<groove::large_values::StagedLargeValueId>, Error> {
+        Ok(self
+            .database
+            .staged_large_values()
+            .await?
+            .into_iter()
+            .map(|staged| staged.id)
+            .collect())
     }
 
     /// Evict an opaque Groove staging root selected by Jazz policy. All
@@ -2371,7 +2386,7 @@ where
                     &mapping,
                 )?;
                 let applied = meta_database.apply_batch(batch).await?;
-                let persisted = applied.persist().await;
+                let persisted = meta_database.persist_with_progress(&applied).await;
                 meta_database.finish_persistence(persisted)?;
             }
             schema_version_aliases.insert(local_schema_version_id, alias);

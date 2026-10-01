@@ -2054,9 +2054,11 @@ fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurre
         !graph.contains("__flat_join_source_"),
         "authorization decision graph must not request public occurrence carriers: {graph}"
     );
+    // Every predicate compares the assignment row id, so no later step reads
+    // the earlier joins' internal values and the chain stops carrying them.
     assert!(
-        graph.contains("__policy_join_source_0_"),
-        "the next correlated predicate still needs the first join's internal values: {graph}"
+        !graph.contains("__policy_join_source_"),
+        "unread join values must not be carried through the chain: {graph}"
     );
     let OutputTerminalSchema::Fact(ProgramFactOutput {
         schema: ProgramFactSchema::ResultMembership(schema),

@@ -18,7 +18,6 @@ use groove::records::Value;
 use groove::storage::OrderedKvStorage;
 use web_time::Instant;
 
-use crate::authorization_scope::AuthorityScopeAggregate;
 use crate::ids::AuthorSubject;
 use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
@@ -75,9 +74,6 @@ pub struct PeerState {
     /// that declared them. A shared canonical coverage output must never adopt
     /// one subscriber's cursor.
     downstream_known_states: BTreeMap<SubscriptionKey, KnownStateDeclaration>,
-    /// Completed authority-local aggregate proofs used by terminal commit
-    /// admission.  This is intentionally separate from ordinary views.
-    authority_scope_proofs: u64,
     announced_catalogue_fingerprint: Option<[u8; 32]>,
     /// Deterministic counters for this peer.
     pub metrics: PeerMetrics,
@@ -101,7 +97,6 @@ impl Default for PeerState {
             ship_complete_exclusive_payloads: false,
             publication_states: BTreeMap::new(),
             downstream_known_states: BTreeMap::new(),
-            authority_scope_proofs: 0,
             announced_catalogue_fingerprint: None,
             metrics: PeerMetrics::default(),
         }

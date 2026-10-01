@@ -24,14 +24,17 @@ pub enum SubscriptionLifetime {
     Retained,
 }
 
-/// How indirect (large) scalar values appear in an *initial* root snapshot:
-/// a one-shot query result or a subscription's first published result.
+/// How indirect (large) scalar values appear in a subscription's root output:
+/// a one-shot query result, or every result a retained subscription publishes.
 ///
 /// Operators still materialize exactly the fields they inspect (filters,
 /// sorts, collectors), so this choice never changes which rows a graph
 /// produces. It only decides whether the root output rebuilds whole large
-/// values for its caller. Incremental updates of a retained subscription are
-/// always materialized, whatever its initial snapshot used.
+/// values for its caller. A retained subscription keeps its choice for its
+/// whole lifetime: its initial snapshot and every later update present the
+/// same fields physically, so a retraction always names the exact record its
+/// insertion published. Subscriptions sharing a graph node may choose
+/// differently, because the choice is applied per subscription at publication.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum RootIndirectValues {
     /// Rebuild every indirect root value into its logical scalar.
@@ -70,17 +73,6 @@ impl RootIndirectValues {
                     .map(|(index, _)| index)
                     .collect(),
             ),
-        }
-    }
-}
-
-impl RootIndirectValues {
-    /// Retained subscriptions always deliver materialized updates, so a
-    /// physical first snapshot could never be retracted by them.
-    fn check_lifetime(&self, lifetime: SubscriptionLifetime) -> Result<(), IvmRuntimeError> {
-        match (self, lifetime) {
-            (Self::Materialize, _) | (_, SubscriptionLifetime::FirstResult) => Ok(()),
-            _ => Err(IvmRuntimeError::PhysicalRootValuesRequireFirstResult),
         }
     }
 }
@@ -756,6 +748,9 @@ pub(super) struct MultisinkSubscriptionState {
     pub(super) outputs: BTreeMap<String, CompiledNode>,
     pub(super) target: MultisinkSubscriptionTarget,
     pub(super) failed: bool,
+    /// How this subscription's published root records present indirect
+    /// values, for its initial snapshot and every later update alike.
+    pub(super) root_indirect_values: RootIndirectValues,
 }
 
 #[derive(Clone, Debug)]
@@ -3499,7 +3494,6 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage + 'static,
     {
-        root_indirect_values.check_lifetime(lifetime)?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
@@ -3516,6 +3510,9 @@ impl IvmRuntime {
         &mut self,
         progress_waker: Option<&Waker>,
     ) -> Result<(), IvmRuntimeError> {
+        if let Some(owner) = progress_waker {
+            self.retain_owner_progress_waker(owner);
+        }
         let mut cx = Context::from_waker(progress_waker.unwrap_or(Waker::noop()));
         match self.poll_pending_incremental(&mut cx) {
             Poll::Ready(result) => result,
@@ -3602,6 +3599,7 @@ impl IvmRuntime {
                 outputs: outputs.clone(),
                 target: MultisinkSubscriptionTarget::Direct,
                 failed: false,
+                root_indirect_values: root_indirect_values.clone(),
             },
         );
         if lifetime == SubscriptionLifetime::Retained {
@@ -3827,7 +3825,6 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
-        root_indirect_values.check_lifetime(lifetime)?;
         let subscription = self.bind_shape_with_public_fields_staged(
             shape_id,
             binding_values,
@@ -3934,7 +3931,7 @@ impl IvmRuntime {
             debug_assert_eq!(live.binding_key, binding_key);
         }
         let subscription_id = self.next_subscription_id();
-        let (outputs, binding_snapshots, route_barriers) = {
+        let (outputs, binding_snapshots, route_barriers, binding_added) = {
             let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
             let runtime = install.runtime();
             runtime.logical_nodes_requested += shape
@@ -3991,11 +3988,19 @@ impl IvmRuntime {
                     runtime.add_retainer(output.node, lifetime.retainer(subscription_id));
                 }
                 install.commit();
-                (outputs, binding_snapshots, route_barriers)
+                (outputs, binding_snapshots, route_barriers, false)
             } else {
                 let cancelled_retraction = lifetime == SubscriptionLifetime::Retained
                     && runtime.cancel_pending_binding_retraction(&binding_shape, &binding_key);
                 let binding_delta = runtime.provisional_binding_delta(shape_id, &binding_key)?;
+                // A queued retraction still changes the source's binding set
+                // before this hydration's results are current, so it keeps the
+                // conservative path even for a binding the source holds.
+                let binding_added = !binding_delta.deltas.is_empty()
+                    || runtime
+                        .pending_binding_retractions
+                        .iter()
+                        .any(|pending| pending.key == binding_delta.key);
                 let mut binding_snapshots = runtime.binding_snapshot_deltas();
                 let snapshot = Arc::make_mut(
                     Arc::make_mut(&mut binding_snapshots)
@@ -4028,7 +4033,7 @@ impl IvmRuntime {
                     runtime.add_retainer(output.node, lifetime.retainer(subscription_id));
                 }
                 install.commit();
-                (outputs, binding_snapshots, route_barriers)
+                (outputs, binding_snapshots, route_barriers, binding_added)
             }
         };
         let (sender, receiver) = mpsc::channel();
@@ -4054,15 +4059,22 @@ impl IvmRuntime {
                     MultisinkSubscriptionTarget::Direct
                 },
                 failed: false,
+                root_indirect_values: root_indirect_values.clone(),
             },
         );
         if lifetime == SubscriptionLifetime::Retained {
             self.index_subscription_outputs(subscription_id, &outputs);
         }
         let initial = Arc::new(Mutex::new(None));
+        // Only a change to the source's binding set changes what its readers
+        // produce. Another reference to a live binding leaves every retained
+        // result over the shape valid, so it must not invalidate them (#3797).
         let (binding_frontier_advance, borrowed) = match live {
             Some(live) => (None, live.borrowed),
-            None => (Some(shape.shape.as_str()), HashSet::default()),
+            None => (
+                binding_added.then_some(shape.shape.as_str()),
+                HashSet::default(),
+            ),
         };
         self.enqueue_subscription_hydration(
             subscription_id,

@@ -60,6 +60,7 @@ include!("time_travel.rs");
 include!("branch_views.rs");
 include!("queries.rs");
 include!("exclusive_transactions.rs");
+include!("exclusive_read_evidence.rs");
 include!("mergeable_open_transactions.rs");
 include!("policies_rls/mod.rs");
 include!("persistence_contracts.rs");

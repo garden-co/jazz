@@ -1131,21 +1131,52 @@ where
     ) -> Result<StoredTransaction, Error> {
         #[cfg(test)]
         TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(count.get() + 1));
+        let kind =
+            tx_kind_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?)?;
+        let evidence_slot = |idx: usize| -> Result<Option<Vec<u8>>, Error> {
+            match record.get_idx(idx)? {
+                Value::Nullable(None) => Ok(None),
+                Value::Nullable(Some(value)) => match *value {
+                    Value::Bytes(bytes) => Ok(Some(bytes)),
+                    _ => Err(Error::InvalidStoredValue(
+                        "exclusive read evidence slot is not bytes",
+                    )),
+                },
+                _ => Err(Error::InvalidStoredValue(
+                    "exclusive read evidence slot is not nullable",
+                )),
+            }
+        };
+        let slots = [
+            evidence_slot(TransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX)?,
+            evidence_slot(TransactionRowRecord::FIELD_ROW_READ_SET_IDX)?,
+            evidence_slot(TransactionRowRecord::FIELD_ABSENT_READ_SET_IDX)?,
+            evidence_slot(TransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX)?,
+        ];
+        if kind != TxKind::Exclusive && slots.iter().any(Option::is_some) {
+            return Err(Error::InvalidStoredValue(
+                "mergeable transaction carries exclusive read evidence",
+            ));
+        }
+        let evidence = super::exclusive_read_evidence::decode_evidence_slots(
+            slots[0].as_deref(),
+            slots[1].as_deref(),
+            slots[2].as_deref(),
+            slots[3].as_deref(),
+        )?;
         let tx = Transaction {
             tx_id,
-            kind: tx_kind_from_discriminant(
-                record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?,
-            )?,
+            kind,
             n_total_writes: record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
             made_by: self.stored_transaction_made_by(record)?,
             permission_subject: <Option<AuthorSubject> as groove::records::RecordField>::read(
                 &record,
                 TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX,
             )?,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
+            base_snapshot: evidence.base_snapshot,
+            row_read_set: evidence.row_read_set,
+            absent_read_set: evidence.absent_read_set,
+            predicate_read_set: evidence.predicate_read_set,
             user_metadata_json: record
                 .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
                 .map(str::to_owned),

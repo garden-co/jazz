@@ -107,6 +107,22 @@ where
         ))
     }
 
+    /// Return the subject whose policies govern an open transaction's writes.
+    pub fn transaction_permission_subject(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<AuthorSubject, Error> {
+        Ok(match self.open_tx(id)?.kind {
+            OpenTransactionKind::Exclusive {
+                permission_subject, ..
+            } => permission_subject,
+            OpenTransactionKind::Mergeable {
+                made_by,
+                permission_subject,
+            } => permission_subject.unwrap_or(made_by),
+        })
+    }
+
     /// Return the permission subject bound to an open exclusive transaction.
     pub fn exclusive_transaction_permission_subject(
         &self,
@@ -171,6 +187,7 @@ where
                 source_narrowing: SourceNarrowing::default(),
                 narrowed_predicate_reads: BTreeSet::new(),
                 writes: Vec::new(),
+                superseded_large_values: Vec::new(),
                 user_metadata_json: None,
             },
         );
@@ -603,6 +620,37 @@ where
         deletion: Option<DeletionEvent>,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.tx_write_in_schema_with_staged_large_values(
+            tx_id,
+            write_schema_version,
+            table,
+            row_uuid,
+            cells,
+            deletion,
+            now_ms,
+            BTreeMap::new(),
+        )
+        .await
+    }
+
+    /// Stage an exclusive row replacement whose `staged_large_cells` columns
+    /// hold descriptors of Groove roots this transaction staged itself for a
+    /// partial large-value update (#2087). The transaction takes ownership of
+    /// those roots: commit publishes them, and a later replacement of the
+    /// column supersedes them.
+    #[allow(clippy::too_many_arguments)]
+    #[doc(hidden)]
+    pub async fn tx_write_in_schema_with_staged_large_values<V: Into<Value>>(
+        &mut self,
+        tx_id: OpenTransactionId,
+        write_schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        cells: BTreeMap<String, V>,
+        deletion: Option<DeletionEvent>,
+        now_ms: Option<u64>,
+        staged_large_cells: BTreeMap<String, groove::large_values::StagedLargeValue>,
+    ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
             OpenTransactionKind::Exclusive { .. }
@@ -632,7 +680,9 @@ where
             known_fresh_row: false,
             verified_inherited_cells: None,
             branch_view_copy: None,
+            staged_large_cells,
         };
+        let mut pending = pending;
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx
             .base_snapshot_rows
@@ -644,8 +694,18 @@ where
                 && write.row_uuid == pending.row_uuid
                 && write.deletion.is_some() == pending.deletion.is_some()
         }) {
+            // A replacement usually carries the earlier staged descriptor
+            // forward (it was read back through the transaction overlay), so
+            // the earlier claim stays valid exactly while its cell is unchanged.
+            pending.staged_large_cells = merge_large_value_claims(
+                std::mem::take(&mut existing.staged_large_cells),
+                std::mem::take(&mut pending.staged_large_cells),
+                &mut open_tx.superseded_large_values,
+            );
             *existing = pending;
+            existing.retain_current_large_value_claims(&mut open_tx.superseded_large_values);
         } else {
+            pending.retain_current_large_value_claims(&mut open_tx.superseded_large_values);
             open_tx.writes.push(pending);
         }
         Ok(())
@@ -774,6 +834,7 @@ where
                 known_fresh_row,
                 verified_inherited_cells,
                 branch_view_copy,
+                staged_large_cells: BTreeMap::new(),
             },
             replace_pending_deletion,
         )
@@ -836,6 +897,38 @@ where
         branch: BranchSelector,
         replace_pending_deletion: bool,
     ) -> Result<(), Error> {
+        self.tx_patch_mergeable_with_staged_large_values(
+            tx_id,
+            write_schema_version,
+            table,
+            row_uuid,
+            patch,
+            now_ms,
+            branch,
+            replace_pending_deletion,
+            BTreeMap::new(),
+        )
+        .await
+    }
+
+    /// Stage a mergeable root patch whose `staged_large_cells` columns hold
+    /// descriptors of Groove roots this transaction staged itself for a
+    /// partial large-value update (#2087). See
+    /// [`Self::tx_write_in_schema_with_staged_large_values`].
+    #[allow(clippy::too_many_arguments)]
+    #[doc(hidden)]
+    pub async fn tx_patch_mergeable_with_staged_large_values(
+        &mut self,
+        tx_id: OpenTransactionId,
+        write_schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        patch: BTreeMap<String, Value>,
+        now_ms: Option<u64>,
+        branch: BranchSelector,
+        replace_pending_deletion: bool,
+        staged_large_cells: BTreeMap<String, groove::large_values::StagedLargeValue>,
+    ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -865,6 +958,7 @@ where
                 known_fresh_row: false,
                 verified_inherited_cells: None,
                 branch_view_copy: None,
+                staged_large_cells,
             },
             replace_pending_deletion,
         )
@@ -990,22 +1084,38 @@ where
                     }
                     (_, PendingCells::Replace(cells)) => PendingCells::Replace(cells.clone()),
                 };
-                *existing = PendingWrite { cells, ..pending };
+                let staged_large_cells = merge_large_value_claims(
+                    std::mem::take(&mut existing.staged_large_cells),
+                    std::mem::take(&mut pending.staged_large_cells),
+                    &mut open_tx.superseded_large_values,
+                );
+                *existing = PendingWrite {
+                    cells,
+                    staged_large_cells,
+                    ..pending
+                };
+                existing.retain_current_large_value_claims(&mut open_tx.superseded_large_values);
             } else {
+                pending.retain_current_large_value_claims(&mut open_tx.superseded_large_values);
                 open_tx.writes.push(pending);
             }
             return Ok(());
         }
 
+        let superseded = &mut open_tx.superseded_large_values;
         open_tx.writes.retain(|existing| {
-            existing.table != pending.table
+            let keep = existing.table != pending.table
                 || existing.row_uuid != pending.row_uuid
                 || existing.branch != pending.branch
                 || match pending.deletion {
                     Some(DeletionEvent::Deleted) => false,
                     Some(DeletionEvent::Restored) => existing.deletion.is_none(),
                     None => true,
-                }
+                };
+            if !keep {
+                superseded.extend(existing.staged_large_cells.values().map(|staged| staged.id));
+            }
+            keep
         });
         open_tx.writes.push(pending);
         Ok(())
@@ -1023,10 +1133,15 @@ where
         &self,
         id: OpenTransactionId,
     ) -> Result<bool, Error> {
-        Ok(self.open_tx(id)?.writes.iter().any(|write| {
-            let (PendingCells::Replace(cells) | PendingCells::Patch(cells)) = &write.cells;
-            cells.values().any(value_needs_large_value_staging)
-        }))
+        let open_tx = self.open_tx(id)?;
+        Ok(!open_tx.superseded_large_values.is_empty()
+            || open_tx.writes.iter().any(|write| {
+                !write.staged_large_cells.is_empty()
+                    || write
+                        .staged_cells()
+                        .values()
+                        .any(value_needs_large_value_staging)
+            }))
     }
 
     /// Commit an exclusive transaction and return its sync commit unit.
@@ -1133,6 +1248,8 @@ where
         };
         let provenance_snapshot = open_tx.base_snapshot.clone();
         let mut versions = Vec::with_capacity(open_tx.writes.len());
+        let mut claimed_large_values = BTreeSet::new();
+        let mut superseded_large_values = open_tx.superseded_large_values;
         for (write, has_content) in coalesce_exclusive_writes(open_tx.writes) {
             let snapshot_content = self
                 .snapshot_winner(
@@ -1164,13 +1281,29 @@ where
                 .filter_map(|(column, value)| value.map(|value| (column.name.clone(), value)))
                 .collect::<BTreeMap<_, _>>();
             for (column, value) in &cells {
-                if value_contains_indirect_descriptor(value) && inherited.get(column) != Some(value)
+                if !value_contains_indirect_descriptor(value)
+                    || inherited.get(column) == Some(value)
                 {
-                    return Err(Error::InvalidMergeableCommit(
-                        "exclusive transaction contains an unverified large-value descriptor",
-                    ));
+                    continue;
+                }
+                match write.staged_large_cells.get(column) {
+                    Some(staged) if value_is_exact_descriptor(value, &staged.value_ref) => {
+                        claimed_large_values.insert(staged.id);
+                    }
+                    _ => {
+                        return Err(Error::InvalidMergeableCommit(
+                            "exclusive transaction contains an unverified large-value descriptor",
+                        ));
+                    }
                 }
             }
+            superseded_large_values.extend(
+                write
+                    .staged_large_cells
+                    .values()
+                    .map(|staged| staged.id)
+                    .filter(|id| !claimed_large_values.contains(id)),
+            );
             // A delete or restore without replacement content writes the
             // snapshot's row image with its new deletion state.
             if !has_content {
@@ -1236,6 +1369,14 @@ where
             user_metadata_json: open_tx.user_metadata_json,
             contribution_merge: None,
         };
+        // Publication accepts staged roots by descriptor and tolerates a
+        // missing one; a root this transaction staged must still be present.
+        self.ensure_large_value_stages_current(&claimed_large_values)
+            .await?;
+        // Evict before publishing: a resident publication holds Groove's
+        // large-value lifecycle until it is durable, and eviction then defers.
+        self.evict_superseded_large_values(superseded_large_values)
+            .await;
         let publication = self
             .publish_pending_transaction_and_versions(
                 tx.clone(),
@@ -1487,7 +1628,9 @@ where
             })
             .collect::<Vec<_>>();
         let mut commits = Vec::with_capacity(open_tx.writes.len());
-        for (index, write) in open_tx.writes.into_iter().enumerate() {
+        let mut superseded_large_values = open_tx.superseded_large_values;
+        for (index, mut write) in open_tx.writes.into_iter().enumerate() {
+            let staged_large_cells = std::mem::take(&mut write.staged_large_cells);
             let (cells, authored_columns, patch_preimage) = match write.cells {
                 PendingCells::Replace(cells) => (cells, None, None),
                 PendingCells::Patch(patch) => {
@@ -1525,6 +1668,18 @@ where
             }
             if let Some(preimage) = patch_preimage.as_ref() {
                 commit = commit.verified_inherited_large_cells(preimage);
+            }
+            for (column, staged) in staged_large_cells {
+                if commit
+                    .cells
+                    .get(&column)
+                    .is_some_and(|value| value_is_exact_descriptor(value, &staged.value_ref))
+                {
+                    commit.prepared_large_columns.insert(column);
+                    commit.staged_large_values.push(staged.id);
+                } else {
+                    superseded_large_values.push(staged.id);
+                }
             }
             if let Some(authored_columns) = authored_columns {
                 commit = commit.authored_columns(authored_columns);
@@ -1579,6 +1734,10 @@ where
                 branch_write_intents,
             })
         };
+        // Evict before publishing: a resident publication holds Groove's
+        // large-value lifecycle until it is durable, and eviction then defers.
+        self.evict_superseded_large_values(superseded_large_values)
+            .await;
         let committed = self
             .commit_mergeable_many_at_with_schema_versions_and_provenance(
                 commits,
@@ -1591,13 +1750,35 @@ where
         Ok(committed)
     }
 
+    /// Evict Groove roots a committing transaction staged but no longer
+    /// references. Callers commit under a lock that has settled earlier local
+    /// publications, so Groove does not defer these evictions. Eviction is
+    /// idempotent, and a root that survives a failed eviction is reclaimed by
+    /// the staging TTL, so failures are not surfaced.
+    async fn evict_superseded_large_values(
+        &self,
+        ids: Vec<groove::large_values::StagedLargeValueId>,
+    ) {
+        for id in ids {
+            let _ = self.database.evict_staged_large_value(id).await;
+        }
+    }
+
     /// Abandon an open transaction.
+    ///
+    /// Groove roots its partial large-value updates staged become unreachable;
+    /// they are queued for [`Self::evict_released_large_values`], and the
+    /// staging TTL reclaims any that eviction misses.
     pub fn abandon_tx(&mut self, tx_id: OpenTransactionId) -> Result<(), Error> {
-        self.open_tx
+        let open_tx = self
+            .open_tx
             .open_transactions
             .remove(&tx_id)
             .ok_or(Error::MissingOpenBatch(tx_id))?;
         self.open_tx.closed_batches.insert(tx_id);
+        self.open_tx
+            .released_large_values
+            .extend(open_tx.staged_large_value_ids());
         Ok(())
     }
 
@@ -1606,9 +1787,27 @@ where
     /// Database shutdown closes transaction admission before calling this, so
     /// moving the live ids into `closed_batches` is the final ownership pass.
     pub fn abandon_all_open_transactions(&mut self) {
-        self.open_tx
-            .closed_batches
-            .extend(std::mem::take(&mut self.open_tx.open_transactions).into_keys());
+        for (tx_id, open_tx) in std::mem::take(&mut self.open_tx.open_transactions) {
+            self.open_tx.closed_batches.insert(tx_id);
+            self.open_tx
+                .released_large_values
+                .extend(open_tx.staged_large_value_ids());
+        }
+    }
+
+    /// Whether abandoned transactions left Groove roots awaiting eviction.
+    pub fn has_released_large_values(&self) -> bool {
+        !self.open_tx.released_large_values.is_empty()
+    }
+
+    /// Evict Groove roots staged by abandoned transactions.
+    ///
+    /// Call with earlier local publications settled: while one is resident,
+    /// Groove defers eviction. Eviction is idempotent, and a root that
+    /// survives a failed eviction is reclaimed by the staging TTL.
+    pub async fn evict_released_large_values(&mut self) {
+        let released = std::mem::take(&mut self.open_tx.released_large_values);
+        self.evict_superseded_large_values(released).await;
     }
 
     /// Return whether local transaction time advanced after this transaction opened.
@@ -2081,6 +2280,10 @@ pub(super) struct OpenTransaction {
     pub(super) narrowed_predicate_reads: BTreeSet<(crate::query::ShapeId, crate::query::BindingId)>,
     /// Pending writes staged by the transaction.
     pub(super) writes: Vec<PendingWrite>,
+    /// Groove roots this transaction staged for a partial large-value update
+    /// and later replaced (by another splice, or an ordinary write of the same
+    /// column). No pending cell references them; commit evicts them.
+    pub(super) superseded_large_values: Vec<groove::large_values::StagedLargeValueId>,
     /// Optional application metadata.
     pub(super) user_metadata_json: Option<String>,
 }
@@ -2154,6 +2357,81 @@ pub(super) struct PendingWrite {
     /// Exact logical source used to create this first head overlay. It is
     /// carried to authority admission but never made causal.
     branch_view_copy: Option<BranchViewCopyEvidence>,
+    /// Groove roots staged by this transaction's own partial large-value
+    /// updates (#2087), keyed by the column whose pending cell is exactly that
+    /// root's descriptor. This engine-private provenance is the only way a
+    /// staged, unpublished descriptor may enter a transaction commit; public
+    /// input can never create it.
+    staged_large_cells: BTreeMap<String, groove::large_values::StagedLargeValue>,
+}
+
+impl OpenTransaction {
+    /// Every Groove root this transaction staged and has not yet released.
+    fn staged_large_value_ids(&self) -> Vec<groove::large_values::StagedLargeValueId> {
+        self.superseded_large_values
+            .iter()
+            .copied()
+            .chain(
+                self.writes
+                    .iter()
+                    .flat_map(|write| write.staged_large_cells.values().map(|staged| staged.id)),
+            )
+            .collect()
+    }
+}
+
+impl PendingWrite {
+    /// The cells this write currently stages, whether replacement or patch.
+    fn staged_cells(&self) -> &BTreeMap<String, Value> {
+        match &self.cells {
+            PendingCells::Replace(cells) | PendingCells::Patch(cells) => cells,
+        }
+    }
+
+    /// Keep only claims whose column still holds exactly the claimed
+    /// descriptor, moving every other claim to `superseded`.
+    fn retain_current_large_value_claims(
+        &mut self,
+        superseded: &mut Vec<groove::large_values::StagedLargeValueId>,
+    ) {
+        let claims = std::mem::take(&mut self.staged_large_cells);
+        for (column, staged) in claims {
+            if self
+                .staged_cells()
+                .get(&column)
+                .is_some_and(|value| value_is_exact_descriptor(value, &staged.value_ref))
+            {
+                self.staged_large_cells.insert(column, staged);
+            } else {
+                superseded.push(staged.id);
+            }
+        }
+    }
+}
+
+/// Combine a pending write's claims with a later write's claims for the same
+/// row. A later claim for a column supersedes the earlier one.
+fn merge_large_value_claims(
+    mut earlier: BTreeMap<String, groove::large_values::StagedLargeValue>,
+    later: BTreeMap<String, groove::large_values::StagedLargeValue>,
+    superseded: &mut Vec<groove::large_values::StagedLargeValueId>,
+) -> BTreeMap<String, groove::large_values::StagedLargeValue> {
+    for (column, staged) in later {
+        if let Some(previous) = earlier.insert(column, staged)
+            && earlier.values().all(|kept| kept.id != previous.id)
+        {
+            superseded.push(previous.id);
+        }
+    }
+    earlier
+}
+
+/// Whether `value` (optionally nullable) is exactly the indirect descriptor
+/// `target`, and nothing else.
+fn value_is_exact_descriptor(value: &Value, target: &groove::large_values::LargeValueRef) -> bool {
+    let mut descriptors = Vec::new();
+    collect_indirect_descriptors(value, &mut descriptors);
+    descriptors.as_slice() == std::slice::from_ref(target)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2185,6 +2463,8 @@ fn coalesce_exclusive_writes(writes: Vec<PendingWrite>) -> Vec<(PendingWrite, bo
                 let resurrects = has_content && candidate.deletion == Some(DeletionEvent::Deleted);
                 if has_content {
                     candidate.cells = write.cells;
+                    // The staged roots claimed by those cells move with them.
+                    candidate.staged_large_cells = write.staged_large_cells;
                     *candidate_has_content = true;
                 }
                 candidate.deletion = if resurrects {
