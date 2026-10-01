@@ -5537,6 +5537,76 @@ mod tests {
     }
 
     #[test]
+    fn deferred_upload_close_preserves_native_tick_and_retry() {
+        use crate::{CoreDb, CoreDbConfig, CoreDbIdentity, CoreMemoryStorage, CoreNodeUuid,
+            CoreAuthorSubject, CoreRowUuid, CoreValue};
+        use napi::bindgen_prelude::Either;
+
+        core_block_on(async {
+            let source = SchemaBuilder::new().table(
+                TableSchema::builder("files")
+                    .column("body", ColumnType::Text),
+            ).build();
+            let schema = jazz::schema::JazzSchema::new(&source).unwrap();
+            let families = schema.column_families();
+            let owner = Rc::new(CoreDb::open(CoreDbConfig::new(
+                schema,
+                CoreMemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()).unwrap(),
+                CoreDbIdentity { node: CoreNodeUuid::from_bytes([0xf6; 16]), author: CoreAuthorSubject::SYSTEM },
+            )).await.unwrap());
+            let mut abandoned = owner.begin_streaming_value_upload("files", &BTreeMap::new(), "body").unwrap();
+            owner.push_streaming_value_upload(&mut abandoned, b"abandoned").await.unwrap();
+            let mut published = owner.begin_streaming_value_upload("files", &BTreeMap::new(), "body").unwrap();
+            owner.push_streaming_value_upload(&mut published, b"published").await.unwrap();
+            owner.set_deferred_local_persistence(true);
+            let write = owner.finish_streaming_value_upload(
+                published, jazz::db::StreamingMutationKind::Insert, "files",
+                CoreRowUuid::from_bytes([0xf6; 16]), BTreeMap::new(), "body",
+                jazz::db::WriteIdentity::Database, None, None, None,
+            ).await.unwrap();
+            let lifecycle = StreamingOwnerLifecycle::new();
+            lifecycle.enqueue_cleanup(0, NapiDbInnerStorage::Memory(Rc::clone(&owner)), abandoned);
+            let binding = NapiDb {
+                inner: Rc::new(std::cell::RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(&owner))))),
+                owns_runtime: true, non_durable_client: Rc::new(Cell::new(false)), view_id: 0,
+                streaming: lifecycle, trusted_backend: false,
+                author_admissions: NativeAuthorAdmissions::default(), initialization_seals: Rc::default(),
+            };
+            match binding.close() {
+                Err(_) => {}
+                Ok(Either::A(_)) => panic!("unresolved cleanup must reject close"),
+                Ok(Either::B(pending)) => {
+                    let mut rejected = false;
+                    for _ in 0..512 {
+                        match pending.poll() {
+                            Err(_) => { rejected = true; break; }
+                            Ok(Some(_)) => panic!("unresolved cleanup must reject close"),
+                            Ok(None) => {}
+                        }
+                    }
+                    assert!(rejected, "close must return the deferred cleanup failure");
+                }
+            }
+            for _ in 0..16 {
+                binding.tick().expect("deferred close must retain a native tick route");
+            }
+            assert_eq!(owner.write_state(write.mergeable_tx_id()).unwrap().durability, DurabilityTier::Local);
+            assert!(owner.insert("files", BTreeMap::from([("body".to_owned(), CoreValue::String("late".to_owned()))]),
+                Default::default()).await.is_err(), "close must not reopen mutation admission");
+            match binding.close().expect("settled cleanup permits close retry") {
+                Either::A(_) => {}
+                Either::B(pending) => {
+                    let mut complete = false;
+                    for _ in 0..512 {
+                        if pending.poll().unwrap().is_some() { complete = true; break; }
+                    }
+                    assert!(complete, "close retry completes after publication settles");
+                }
+            }
+        });
+    }
+
+    #[test]
     fn cleanup_failure_is_secondary_to_close_failure() {
         let result = crate::compose_close_result(
             Err(napi::Error::from_reason("injected close failure")),
