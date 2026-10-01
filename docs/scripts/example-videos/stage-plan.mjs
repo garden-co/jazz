@@ -139,13 +139,10 @@ await record({
     await stage.caption("…and Cole's board catches up", 2400);
     await stage.caption("");
 
-    // Dark mode and the private checklist, with a live filter.
-    await a.emulateMedia({ colorScheme: "dark" });
+    // The private checklist, with a live filter.
     await stage.full("a");
     await click(a, a.getByRole("link", { name: "Checklist" }), { after: 800 });
-    await stage.caption(
-      "A private checklist for show day, in dark mode. Only its owner can read it.",
-    );
+    await stage.caption("A private checklist for show day. Only its owner can read it.");
     const item = a.getByPlaceholder(/Spare gaffer tape/);
     for (const title of ["In-ears", "Spare batteries", "Spare gaffer tape"]) {
       await type(a, item, title, { delay: 35 });

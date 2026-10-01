@@ -173,10 +173,9 @@ await record({
     await stage.caption("…and Bo's filtered list catches up", 2400);
     await stage.caption("");
 
-    await a.emulateMedia({ colorScheme: "dark" });
     await stage.full("a");
     await click(a, nav(a, "Teams"), { after: 1400 });
-    await stage.caption("Teams, in dark mode", 2000);
+    await stage.caption("Teams: groups of members with their own roles", 2000);
     await stage.caption("");
   },
 });

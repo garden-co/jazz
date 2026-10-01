@@ -411,7 +411,7 @@ export const heroExamples: HeroExample[] = [
       src: "/examples/videos/jamazon.mp4",
       poster: "/examples/videos/jamazon.jpg",
       caption:
-        "A live catalogue search, a guest cart carried into a new account, a quantity change arriving on a phone, an edit made on the phone with the Wi-Fi off, then checkout and the order's status updating live on both screens.",
+        "A live catalogue search, an item added on the laptop appearing in the cart on her phone, an edit made on the phone with the Wi-Fi off, then checkout and the order's status updating live on both screens.",
     },
     metrics: [],
     plannedMetrics:

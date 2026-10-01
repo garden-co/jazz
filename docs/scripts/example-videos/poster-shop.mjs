@@ -60,6 +60,7 @@ await record({
     await signUp(b, "Grace", false);
     await a.goto(origin);
     await a.getByRole("button", { name: "Create an account" }).waitFor({ timeout: 120_000 });
+    await signUp(a, "Ada", false);
 
     await stage.start();
     await stage.full("a");
@@ -69,10 +70,8 @@ await record({
       "Design gig posters together: layers, shapes, images and checkpoints. Next.js + Better Auth + Jazz.",
       2600,
     );
-    await signUp(a, "Ada", true);
-    await sleep(1200);
     await stage.caption(
-      "A first sign-in seeds a demo poster: layers, an SVG artboard and an inspector",
+      "Ada's first sign-in seeded a demo poster: layers, an SVG artboard and an inspector",
       2600,
     );
 
@@ -168,10 +167,6 @@ await record({
     await type(a, a.getByLabel("Checkpoint name"), "First draft");
     await click(a, a.getByRole("button", { name: "Save" }), { after: 1000 });
     await stage.caption("Named checkpoints keep a copy of the poster to preview later", 2400);
-    await stage.caption("");
-
-    await a.emulateMedia({ colorScheme: "dark" });
-    await stage.caption("Dark mode", 2200);
     await stage.caption("");
   },
 });

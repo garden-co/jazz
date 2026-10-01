@@ -56,8 +56,8 @@ await record({
     // Laptop and phone together; the phone keeps its own size.
     const together = () =>
       stage.show([
-        { id: "a", x: 20, y: 20, w: 860, h: 690, scale: 0.72 },
-        { id: "p", x: 912, y: 20, w: 348, h: 690 },
+        { id: "a", x: 20, y: 20, w: 860, h: 760, scale: 0.72 },
+        { id: "p", x: 912, y: 20, w: 348, h: 760 },
       ]);
 
     // Off camera: compile the store, the cart, sign-in, checkout and orders.
@@ -65,17 +65,35 @@ await record({
       await a.goto(origin + path);
       await a.getByRole("heading").first().waitFor({ timeout: 240_000 });
     }
+    // Off camera: Ada creates her account on the laptop and signs in on her
+    // phone, which has her (empty) cart open.
+    await a.goto(`${origin}/sign-in`);
+    await a.getByText("Create account", { exact: true }).first().click();
+    await a.getByLabel("Name").fill("Ada");
+    await a.getByLabel("Email").fill(email);
+    await a.getByLabel("Password").fill(password);
+    await a.getByRole("button", { name: "Create account" }).last().click();
+    await a.waitForURL((url) => !url.pathname.startsWith("/sign-in"), { timeout: 120_000 });
+    await p.goto(`${origin}/sign-in`);
+    await p.getByLabel("Email").fill(email);
+    await p.getByLabel("Password").fill(password);
+    await p.getByRole("button", { name: "Sign in" }).last().click();
+    await p.waitForURL((url) => !url.pathname.startsWith("/sign-in"), { timeout: 120_000 });
+    await p.goto(`${origin}/cart`);
+    await p.getByText("Your cart is empty").waitFor({ timeout: 120_000 });
     await a.goto(origin);
     await a.getByPlaceholder("Search the store").waitFor({ timeout: 120_000 });
 
     await stage.start();
-    await stage.full("a");
+    await together();
     stage.roll();
     await stage.title(
       "Jamazon",
       "A music-gear store: catalogue, cart, checkout and orders. Next.js + Better Auth + Jazz.",
       2600,
     );
+    await stage.caption("Ada is signed in on her laptop and her phone, with her cart open there");
+    await sleep(1600);
     await stage.caption("Search is a live query over the local catalogue: each key narrows it");
     await type(a, a.getByPlaceholder("Search the store"), "snare", { delay: 160 });
     await a.getByRole("link", { name: PRODUCT }).waitFor();
@@ -83,40 +101,12 @@ await record({
     await stage.caption("");
     await click(a, a.getByRole("link", { name: PRODUCT }), { after: 800, direct: true });
     await a.getByRole("button", { name: "Add to cart" }).waitFor();
-    await click(a, a.getByRole("button", { name: "Add to cart" }), { after: 600 });
-    await stage.caption("Ada hasn't signed up: this is a guest cart, kept on her device", 2200);
+    await stage.caption("She adds the snare on the laptop…");
+    await click(a, a.getByRole("button", { name: "Add to cart" }), { after: 300 });
+    await quantity(p).waitFor({ timeout: 30_000 });
+    await stage.caption("…and it shows up in the cart on her phone", 2200);
     await click(a, a.getByRole("link", { name: /^Cart/ }).first(), { after: 800 });
     await quantity(a).waitFor();
-    await stage.caption("");
-
-    await click(a, a.getByRole("link", { name: "Sign in" }).first(), { after: 600 });
-    await click(a, a.getByText("Create account", { exact: true }).first(), { after: 300 });
-    await type(a, a.getByLabel("Name"), "Ada", { delay: 60 });
-    await type(a, a.getByLabel("Email"), email, { delay: 25 });
-    await a.getByLabel("Password").fill(password);
-    await stage.caption("She creates an account, and the guest cart becomes her account's cart");
-    await click(a, a.getByRole("button", { name: "Create account" }).last(), { after: 600 });
-    await a.waitForURL((url) => !url.pathname.startsWith("/sign-in"), { timeout: 120_000 });
-    // Off camera: Ada signs in on her phone, meanwhile.
-    const phone = (async () => {
-      await p.goto(`${origin}/sign-in?next=/cart`);
-      await p.getByLabel("Email").fill(email);
-      await p.getByLabel("Password").fill(password);
-      await p.getByRole("button", { name: "Sign in" }).last().click();
-      await p.waitForURL((url) => !url.pathname.startsWith("/sign-in"), { timeout: 120_000 });
-      await p.goto(`${origin}/cart`);
-      await quantity(p).waitFor();
-    })();
-    await a.goto(`${origin}/cart`);
-    await stage.recast("a");
-    await quantity(a).waitFor();
-    await stage.caption("Signed in, her cart is part of her account, on every device", 2400);
-    await phone;
-    await stage.recast("p");
-    await stage.caption("");
-
-    await together();
-    await stage.caption("On her phone, signed in: the same cart", 2000);
     await stage.caption("She bumps the quantity on the laptop, and the phone follows");
     await setQuantity(a, 2);
     if (!(await until(() => hasQuantity(p, 2))))
@@ -137,8 +127,21 @@ await record({
       throw new Error("The phone's offline edit never reached the laptop");
     await stage.caption("…and the laptop catches up", 2200);
 
-    await p.goto(`${origin}/orders`);
-    await stage.recast("p");
+    // Through the phone's menu: a client-side navigation keeps the session warm, so the
+    // phone never flashes the signed-out state a full page load shows while auth resolves.
+    await click(
+      p,
+      p
+        .getByRole("button", { name: /navigation|menu/i })
+        .filter({ visible: true })
+        .first(),
+      { after: 500 },
+    );
+    await click(
+      p,
+      p.getByRole("link", { name: "Orders", exact: true }).filter({ visible: true }).first(),
+      { after: 300 },
+    );
     await p.getByRole("heading", { name: "Orders", exact: true }).first().waitFor();
     await stage.caption("Checkout on the laptop. Her phone has her order list open.");
     await click(
@@ -178,12 +181,6 @@ await record({
     );
     await p.getByText("Shipped", { exact: true }).first().waitFor({ timeout: 60_000 });
     await sleep(2400);
-    await stage.caption("");
-
-    await a.emulateMedia({ colorScheme: "dark" });
-    await stage.full("a");
-    await click(a, a.getByRole("link", { name: "Drums" }).first(), { after: 1200 });
-    await stage.caption("Dark mode", 2000);
     await stage.caption("");
   },
 });

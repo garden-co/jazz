@@ -59,6 +59,7 @@ await record({
     const benId = (await ben.getByTestId("member-id").textContent()).trim();
     await ada.goto(origin);
     await ada.getByRole("button", { name: "Create an account" }).waitFor({ timeout: 120_000 });
+    await signUp(ada, "Ada", false);
 
     await stage.start();
     await stage.split("a", "b", { scale: 0.8 });
@@ -68,8 +69,7 @@ await record({
       "A shared step sequencer: one pattern, one transport, one mix. Next.js + Better Auth + Jazz.",
       2600,
     );
-    await stage.caption("Ada signs up. The server bootstraps her account in one transaction.");
-    await signUp(ada, "Ada", true);
+    await stage.caption("Ada and Ben are signed in; each starts on an empty dashboard", 2200);
     await stage.caption("");
 
     await click(ada, ada.getByRole("button", { name: "New session" }).first());
@@ -158,10 +158,6 @@ await record({
     await ada.reload();
     await stage.recast("a");
     await ada.getByRole("heading", { name: "Friday jam" }).waitFor({ timeout: 120_000 });
-    await sleep(2500);
-
-    await stage.caption("Dark mode");
-    for (const page of [ada, ben]) await page.emulateMedia({ colorScheme: "dark" });
     await sleep(2500);
     await click(ada, ada.getByRole("button", { name: "Stop" })).catch(() => {});
     await stage.caption("");

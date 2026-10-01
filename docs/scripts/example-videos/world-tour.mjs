@@ -15,6 +15,8 @@ const url = `http://127.0.0.1:${port}/`;
 
 await record({
   id: "world-tour",
+  // The globe is WebGL.
+  webgl: true,
   app: "examples/world-tour",
   server: () => ({
     command: "pnpm",
@@ -158,7 +160,7 @@ await record({
     await stage.caption("As a member, Robin now sees every stop and the private notes", 2500);
     await stage.caption("");
 
-    // Phone, dark mode. Stop the other two globes first so the phone renders smoothly.
+    // Phone. Stop the other two globes first so the phone renders smoothly.
     await a.goto("about:blank");
     await b.goto("about:blank");
     await p.goto(publicLink);
@@ -166,7 +168,7 @@ await record({
     await p.getByRole("dialog").waitFor({ timeout: 60_000 });
     await sleep(1200);
     await stage.show([{ id: "p", x: 452, y: 20, w: 375, h: 760 }]);
-    await stage.caption("The public tour page on a phone, in dark mode", 1800);
+    await stage.caption("The public tour page on a phone", 1800);
     await click(p, p.getByRole("button", { name: "Explore the globe" }), { after: 4500 });
     await stage.caption("");
   },

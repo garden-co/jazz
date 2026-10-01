@@ -1,7 +1,7 @@
 // Examples-page walkthrough for BandBook (examples/band-book, Next.js + Better Auth).
 //   node scripts/example-videos/band-book.mjs   # writes public/examples/videos/band-book.*
 import { nextServer, record } from "./walkthrough.mjs";
-import { click, sleep, type } from "./stage.mjs";
+import { click, sleep } from "./stage.mjs";
 
 const port = 3461;
 const origin = `http://127.0.0.1:${port}`;
@@ -45,17 +45,19 @@ await record({
       await page.keyboard.type(text, { delay: 70 });
     };
 
-    // Off camera: Bo signs up first, on his own laptop.
-    await a.goto(origin);
-    await a.getByRole("button", { name: "Create an account" }).waitFor({ timeout: 180_000 });
-    await b.goto(origin);
-    await b.getByRole("button", { name: "Create an account" }).click();
-    await b.getByLabel("Name").fill("Bo");
-    await b.getByLabel("Email").fill(`bo-${run}@band-book.test`);
-    await b.getByLabel("Password").fill("correct horse battery");
-    await b.getByRole("button", { name: "Create account" }).click();
-    await b.waitForURL(/\/workspace/);
-    await side(b, "Setlist: spring tour").waitFor();
+    // Off camera: Bo and Ada sign up, each on their own laptop.
+    const signUp = async (page, name) => {
+      await page.goto(origin);
+      await page.getByRole("button", { name: "Create an account" }).click({ timeout: 180_000 });
+      await page.getByLabel("Name").fill(name);
+      await page.getByLabel("Email").fill(`${name.toLowerCase()}-${run}@band-book.test`);
+      await page.getByLabel("Password").fill("correct horse battery");
+      await page.getByRole("button", { name: "Create account" }).click();
+      await page.waitForURL(/\/workspace/);
+      await side(page, "Setlist: spring tour").waitFor();
+    };
+    await signUp(b, "Bo");
+    await signUp(a, "Ada");
 
     await stage.start();
     await stage.full("a");
@@ -65,15 +67,8 @@ await record({
       "A Notion-style notebook for running a band, with an issue tracker inside. Next.js + Better Auth + Jazz.",
       2600,
     );
-    await click(a, a.getByRole("button", { name: "Create an account" }));
-    await type(a, a.getByLabel("Name"), "Ada", { delay: 70 });
-    await type(a, a.getByLabel("Email"), `ada-${run}@band-book.test`, { delay: 25 });
-    await a.getByLabel("Password").fill("correct horse battery");
-    await click(a, a.getByRole("button", { name: "Create account" }));
-    await a.waitForURL(/\/workspace/);
-    await side(a, "Setlist: spring tour").waitFor();
     await stage.caption(
-      "The server bootstraps a demo band in one transaction: pages, songs, tour notes, issues",
+      "On sign-up the server bootstrapped a demo band in one transaction: pages, songs, tour notes, issues",
       2600,
     );
     await stage.caption("");
@@ -147,12 +142,6 @@ await record({
       "…and both edits arrive. Each keystroke is a small text splice, so they merge.",
       3000,
     );
-    await stage.caption("");
-
-    await a.emulateMedia({ colorScheme: "dark" });
-    await stage.full("a");
-    await click(a, side(a, "Porto, 14 April"), { after: 800 }).catch(() => {});
-    await stage.caption("Dark mode", 2000);
     await stage.caption("");
   },
 });

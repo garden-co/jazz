@@ -175,10 +175,6 @@ await record({
     await stage.recast("b");
     await file(b, "set-list-final.txt").waitFor({ timeout: 60_000 });
     await sleep(1800);
-
-    await stage.caption("The theme follows the system colour scheme");
-    for (const page of [a, b]) await page.emulateMedia({ colorScheme: "dark" });
-    await sleep(3000);
     await stage.caption("");
   },
 });

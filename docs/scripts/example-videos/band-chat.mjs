@@ -77,12 +77,13 @@ await record({
     };
     const invite = (page) => page.getByRole("button", { name: /^Invite/ }).first();
 
-    // Off camera: Gus signs up on his own laptop.
+    // Off camera: Gus and Olive sign up on their own laptops.
     await b.goto(origin);
     await b.getByRole("button", { name: "Create an account" }).waitFor({ timeout: 240_000 });
     await signUp(b, "Gus Moreno", false);
     await a.goto(origin);
     await a.getByRole("button", { name: "Create an account" }).waitFor({ timeout: 120_000 });
+    await signUp(a, "Olive Park", false);
 
     await stage.start();
     await stage.full("a");
@@ -92,8 +93,10 @@ await record({
       "A band's group chat: rooms, join requests, attachments. Next.js + Better Auth + Jazz.",
       2600,
     );
-    await stage.caption("Olive signs up. Better Auth signs her in; Jazz enrols her from its JWT.");
-    await signUp(a, "Olive Park", true);
+    await stage.caption(
+      "Olive is signed in with Better Auth; Jazz enrolled her account from its JWT",
+      2400,
+    );
     await stage.caption("");
 
     await click(a, a.getByRole("button", { name: "Create a room" }));
@@ -154,11 +157,6 @@ await record({
     await stage.wifi("b", true);
     await a.getByText("Running 10 min late").first().waitFor({ timeout: 30_000 });
     await stage.caption("…and it arrives in Olive's room", 2400);
-    await stage.caption("");
-
-    await a.emulateMedia({ colorScheme: "dark" });
-    await stage.full("a");
-    await stage.caption("Dark mode", 2000);
     await stage.caption("");
   },
 });

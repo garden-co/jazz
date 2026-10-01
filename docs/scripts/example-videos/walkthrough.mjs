@@ -30,6 +30,7 @@ export async function record({
   width = 1280,
   height = 800,
   captionSize = 22,
+  webgl = false,
 }) {
   const dir = join(repo, app);
   const specs = [server({ dir })].flat();
@@ -50,7 +51,7 @@ export async function record({
       );
       await spec.warm?.();
     }
-    stage = await Stage.launch({ width, height, captionSize, videoDir });
+    stage = await Stage.launch({ width, height, captionSize, webgl, videoDir });
     await run(stage);
     const { path, trimStart, posterAt } = await stage.finish();
     await mkdir(outDir, { recursive: true });
