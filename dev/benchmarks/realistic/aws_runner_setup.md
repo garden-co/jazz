@@ -37,9 +37,14 @@ configuration/service activation. Root-owned manifests cover the Node tree and
 the runner package's immutable entries (runtime links are excluded). Rust tool
 binaries in `.cargo/bin` and the Rustup-managed `.rustup` tree are sealed with
 root-owned manifests under `/var/lib/actions-runner/.toolchain-integrity`;
-bootstrap verifies both before executing persistent Rustup or wasm-pack. Missing,
-partial, unmanifested, or modified state is rejected rather than upgraded or
-overwritten. Mutable Cargo registry/cache data is outside these manifests.
+bootstrap verifies both before executing persistent Rustup or wasm-pack. On a
+rerun with an existing runner service, bootstrap stops the service before
+executing persistent Rust tools, then verifies both manifests again to catch
+changes made by an in-flight job. A stop or post-stop verification failure
+aborts setup and leaves the runner service stopped; the service starts only
+after bootstrap succeeds. Missing, partial, unmanifested, or modified state is
+rejected rather than upgraded or overwritten. Mutable Cargo registry/cache
+data is outside these manifests.
 
 The private on-disk manifest is canonical JSON format 1. Its exact bytes are pinned by `bootstrap_runner_manifest_v1.json`; the verifier fails closed on unknown formats. An incompatible manifest change requires a format-version bump, corresponding verifier support, and a revised byte fixture. A complete pinned installation can be rerun without downloading tool archives. Registration tokens are passed as opaque data and are suppressed from failure diagnostics.
 

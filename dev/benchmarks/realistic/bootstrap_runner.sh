@@ -69,6 +69,19 @@ seal_toolchain_manifest() {
   chmod 0444 "${staged}"
   mv -- "${staged}" "${manifest}"
 }
+verify_toolchain_manifests() {
+  local cargo_bin_dir="$1" rustup_home_dir="$2" integrity_dir="$3"
+  local cargo_manifest="$4" rustup_manifest="$5" rustup_executable="$6"
+  validate_trusted_directory "${integrity_dir}"
+  [[ -d "${cargo_bin_dir}" && -x "${rustup_executable}" && -d "${rustup_home_dir}" ]] || fail 'existing Rust tool state is incomplete'
+  [[ -f "${cargo_manifest}" && ! -L "${cargo_manifest}" ]] || fail 'Rust tool binary manifest is missing or unsafe'
+  [[ -f "${rustup_manifest}" && ! -L "${rustup_manifest}" ]] || fail 'Rust toolchain manifest is missing or unsafe'
+  validate_root_manifest "${cargo_manifest}"
+  validate_root_manifest "${rustup_manifest}"
+  python3 "${HELPER}" verify "${cargo_bin_dir}" "${cargo_manifest}" || fail 'existing Rust tool binaries are partial or modified'
+  python3 "${HELPER}" verify "${rustup_home_dir}" "${rustup_manifest}" || fail 'existing Rust toolchain is partial or modified'
+}
+
 validate_runtime_state() {
   local path item metadata owner group mode runner_gid
   runner_gid="$(id -g "${INSTALL_OWNER}")"
@@ -155,15 +168,9 @@ if [[ -d "${cargo_bin}" ]] && [[ -n "$(find "${cargo_bin}" -mindepth 1 -maxdepth
   toolchain_state_present=1
 fi
 if [[ -e "${toolchain_integrity_dir}" || -L "${toolchain_integrity_dir}" ]]; then
-  validate_trusted_directory "${toolchain_integrity_dir}"
   [[ "${toolchain_state_present}" == 1 ]] || fail 'toolchain integrity manifests exist without installed state'
-  [[ -d "${cargo_bin}" && -x "${rustup_bin}" && -d "${rustup_home}" ]] || fail 'existing Rust tool state is incomplete'
-  [[ -f "${cargo_bin_manifest}" && ! -L "${cargo_bin_manifest}" ]] || fail 'Rust tool binary manifest is missing or unsafe'
-  [[ -f "${rustup_home_manifest}" && ! -L "${rustup_home_manifest}" ]] || fail 'Rust toolchain manifest is missing or unsafe'
-  validate_root_manifest "${cargo_bin_manifest}"
-  validate_root_manifest "${rustup_home_manifest}"
-  python3 "${HELPER}" verify "${cargo_bin}" "${cargo_bin_manifest}" || fail 'existing Rust tool binaries are partial or modified'
-  python3 "${HELPER}" verify "${rustup_home}" "${rustup_home_manifest}" || fail 'existing Rust toolchain is partial or modified'
+  verify_toolchain_manifests "${cargo_bin}" "${rustup_home}" "${toolchain_integrity_dir}" \
+    "${cargo_bin_manifest}" "${rustup_home_manifest}" "${rustup_bin}"
   toolchain_state_verified=1
 elif [[ "${toolchain_state_present}" == 1 ]]; then
   fail 'existing Rust tool state has no protected integrity manifests'
@@ -219,19 +226,6 @@ fi
 
 offline_ready=0
 if [[ -f "${os_deps_marker}" && -x "${NODE_ROOT}/bin/node" && "${toolchain_state_verified}" == 1 && -d "${runner_package}" ]]; then
-  [[ "$("${NODE_ROOT}/bin/node" --version)" == "v${NODE_VERSION}" ]] || fail 'existing Node installation is not the pinned version'
-  rustup_list="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${cargo_bin}:${PATH}" "${rustup_bin}" toolchain list)"
-  rust_toolchain_found=0
-  while IFS= read -r toolchain; do
-    case "${toolchain}" in "${RUST_VERSION}"|"${RUST_VERSION}-"*) rust_toolchain_found=1 ;; esac
-  done <<< "${rustup_list}"
-  [[ "${rust_toolchain_found}" == 1 ]] || fail 'existing Rust toolchain is not the pinned version'
-  installed_targets="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${cargo_bin}:${PATH}" "${rustup_bin}" target list --installed --toolchain "${RUST_VERSION}")"
-  [[ "${installed_targets}" == *wasm32-unknown-unknown* ]] || fail 'existing Rust wasm target is missing'
-  if [[ "${INSTALL_WASM_PACK}" == 1 ]]; then
-    wasm_pack_version="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${cargo_bin}:${PATH}" "${wasm_pack_bin}" --version)"
-    [[ "${wasm_pack_version}" == "wasm-pack ${WASM_PACK_VERSION}" ]] || fail 'existing wasm-pack is not the pinned version'
-  fi
   if [[ "${install_ssm:-0}" == 1 ]] && ! systemctl is-active --quiet snap.amazon-ssm-agent.amazon-ssm-agent.service; then
     offline_ready=0
   else
@@ -301,6 +295,35 @@ if [[ ! -d "${runner_package}" ]]; then
   [[ ! -e "${runner_package}" && ! -L "${runner_package}" ]] || fail 'runner package appeared during installation; refusing replacement'
   mv -- "${runner_stage}" "${runner_package}"
   rmdir -- "${runner_stage_parent}"
+fi
+
+if [[ -f "${runner_state}/.service" ]]; then
+  [[ -x "${runner_package}/svc.sh" ]] || fail 'configured runner service installer is missing'
+  if ! (cd -- "${runner_package}" && "${runner_package}/svc.sh" stop) >"${work_tmp}/service-stop.log" 2>&1; then
+    fail 'runner service stop failed'
+  fi
+  if [[ "${toolchain_state_verified}" == 1 ]]; then
+    verify_toolchain_manifests "${cargo_bin}" "${rustup_home}" "${toolchain_integrity_dir}" \
+      "${cargo_bin_manifest}" "${rustup_home_manifest}" "${rustup_bin}"
+  fi
+fi
+
+if [[ "${offline_ready}" == 1 ]]; then
+  [[ "$("${NODE_ROOT}/bin/node" --version)" == "v${NODE_VERSION}" ]] || fail 'existing Node installation is not the pinned version'
+fi
+if [[ "${toolchain_state_verified}" == 1 ]]; then
+  rustup_list="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${cargo_bin}:${PATH}" "${rustup_bin}" toolchain list)"
+  rust_toolchain_found=0
+  while IFS= read -r toolchain; do
+    case "${toolchain}" in "${RUST_VERSION}"|"${RUST_VERSION}-"*) rust_toolchain_found=1 ;; esac
+  done <<< "${rustup_list}"
+  [[ "${rust_toolchain_found}" == 1 ]] || fail 'existing Rust toolchain is not the pinned version'
+  installed_targets="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${cargo_bin}:${PATH}" "${rustup_bin}" target list --installed --toolchain "${RUST_VERSION}")"
+  [[ "${installed_targets}" == *wasm32-unknown-unknown* ]] || fail 'existing Rust wasm target is missing'
+  if [[ "${INSTALL_WASM_PACK}" == 1 ]]; then
+    wasm_pack_version="$(runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${cargo_bin}:${PATH}" "${wasm_pack_bin}" --version)"
+    [[ "${wasm_pack_version}" == "wasm-pack ${WASM_PACK_VERSION}" ]] || fail 'existing wasm-pack is not the pinned version'
+  fi
 fi
 
 
