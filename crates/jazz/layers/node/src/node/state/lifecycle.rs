@@ -1582,6 +1582,16 @@ where
         Ok(())
     }
 
+    /// Retire the pending or promoted claim owned by one original upload.
+    /// A resident publication defers cleanup without changing storage.
+    #[doc(hidden)]
+    pub async fn cancel_large_value_upload(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+    ) -> Result<bool, Error> {
+        Ok(self.database.cancel_large_value_upload(upload_id).await?)
+    }
+
     #[doc(hidden)]
     pub async fn finalize_large_value_upload(
         &self,
