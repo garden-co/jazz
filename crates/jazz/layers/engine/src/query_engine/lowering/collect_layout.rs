@@ -59,7 +59,7 @@ pub(super) fn collect_layout(
                     .filter(|field| {
                         field.name.as_deref() == Some("__jazz_deleted")
                             && field.value_type == ValueType::Bool
-                            && crate::node::query_engine::descriptor_public_name(field).is_none()
+                            && crate::query_engine::descriptor_public_name(field).is_none()
                     })
                     .filter_map(|field| field.name.clone()),
             );
