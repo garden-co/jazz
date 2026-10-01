@@ -5498,6 +5498,85 @@ fn streaming_promotion_ack_loss_releases_the_original_upload_receipt() {
     });
 }
 
+/// Alice cancels a direct streamed replacement after durable staging but before
+/// the cold row read needed for publication. The live owner reclaims the receipt.
+/// alice push -> promoted receipt -> cold publication / cancel -> owner cleanup
+/// Retainer inspection distinguishes prompt cleanup from invisible leaked bytes.
+#[test]
+fn streaming_finish_cancellation_after_promotion_releases_unpublished_receipt() {
+    use std::task::{Context, Poll, Waker};
+
+    block_on(async {
+        let schema = doctest_support::schema();
+        let families = schema.column_families();
+        let (storage, control) = groove::storage::TestStorage::controlled(
+            &families.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let eviction = storage.clone();
+        let alice = Db::open(DbConfig::new(
+            schema,
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xf4; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .await
+        .unwrap();
+        alice.set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            max_age_ms: u64::MAX,
+            ..Default::default()
+        });
+        let target = row(0xf4);
+        alice.insert(
+            "todos",
+            doctest_support::todo_cells("before", false),
+            InsertOptions { row_id: Some(target), ..Default::default() },
+        ).await.unwrap();
+        let cells = BTreeMap::from([("done".to_owned(), Value::Bool(true))]);
+        let mut upload = alice.begin_streaming_value_upload("todos", &cells, "title").unwrap();
+        alice.push_streaming_value_upload(&mut upload, b"unpublished replacement").await.unwrap();
+        eviction.evict_all();
+        let scans_before = control.poll_count(groove::storage::TestStorageOperation::ScanOpen);
+        control.pause_on(groove::storage::TestStorageOperation::ScanOpen);
+        let mut finish = Box::pin(alice.finish_streaming_value_upload(
+            upload, StreamingMutationKind::Update, "todos", target, cells, "title",
+            WriteIdentity::Database, None, None, None,
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        let mut suspended_on_publication = false;
+        for _ in 0..512 {
+            assert!(matches!(finish.as_mut().poll(&mut context), Poll::Pending),
+                "the cold publication must remain cancellable");
+            if control.poll_count(groove::storage::TestStorageOperation::ScanOpen) > scans_before {
+                suspended_on_publication = true;
+                break;
+            }
+        }
+        assert!(suspended_on_publication, "the replacement must reach its cold row read");
+        drop(finish);
+        control.resume_operation(groove::storage::TestStorageOperation::ScanOpen);
+        assert_eq!(
+            alice.node.node.lock().await.staged_large_value_count_for_test().await.unwrap(),
+            1,
+            "publication was cancelled only after promotion produced a receipt",
+        );
+        for _ in 0..16 {
+            alice.tick().await.unwrap();
+        }
+        assert_eq!(
+            alice.node.node.lock().await.staged_large_value_count_for_test().await.unwrap(),
+            0,
+            "cancellation must retain origin cleanup ownership through publication",
+        );
+        let visible = streamed_todo(&alice, target).await.unwrap().unwrap();
+        assert_eq!(
+            visible.cell(&alice.schema.tables[0], "title"),
+            Some(Value::String("before".to_owned())),
+        );
+    });
+}
+
 /// Alice stages bytes without a visible row, then publishes the file and its
 /// companion row in one exclusive commit. Reusing the capability is rejected.
 #[test]
