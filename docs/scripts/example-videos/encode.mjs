@@ -81,10 +81,19 @@ export async function startServer(command, args, { cwd, env, ready, timeout = 18
   let output = "";
   child.stdout.on("data", (chunk) => (output += chunk));
   child.stderr.on("data", (chunk) => (output += chunk));
-  const stop = () => {
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch {}
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  // Stops the whole process group (the dev server and the sync server it runs).
+  const stop = async () => {
+    const kill = (signal) => {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {}
+    };
+    kill("SIGTERM");
+    const timer = setTimeout(() => kill("SIGKILL"), 10_000);
+    await exited;
+    clearTimeout(timer);
+    kill("SIGKILL");
   };
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`Server did not start:\n${output}`)), timeout);

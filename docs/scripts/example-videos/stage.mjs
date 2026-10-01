@@ -77,6 +77,7 @@ async function startDeviceNetwork({ keepPorts = [] } = {}) {
   // WebSockets (and anything else tunnelled) use CONNECT.
   server.on("connect", (req, client, head) => {
     const [host, port] = req.url.split(":");
+    if (process.env.WALK_TRACE) console.log(`proxy CONNECT ${req.url} online=${online}`);
     if (!online && !kept(port)) return client.destroy();
     track(client, port);
     const upstream = net.connect(Number(port) || 80, host, () => {
@@ -149,10 +150,11 @@ function installCursor({ color }) {
   else mount();
 }
 
-// The dev-only inspector overlay (a floating toggle) isn't part of the app.
+// Dev-only overlays (Jazz's inspector toggle, Next.js's dev indicator) aren't
+// part of the app.
 function hideDevOverlay() {
   const style = document.createElement("style");
-  style.textContent = "jazz-inspector-overlay{display:none!important}";
+  style.textContent = "jazz-inspector-overlay,nextjs-portal{display:none!important}";
   if (document.documentElement) document.documentElement.append(style);
   else addEventListener("DOMContentLoaded", () => document.head.append(style));
 }
@@ -188,6 +190,10 @@ function stageHtml({ width, height, fonts, captionSize, backdrop }) {
 html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;background:${backdrop};font-family:StageBody,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
 .device{position:absolute;display:none;flex-direction:column;overflow:hidden;border-radius:10px;background:#000;box-shadow:0 0 0 1px rgba(255,255,255,.12),0 14px 40px rgba(0,0,0,.45)}
 .device.fill{border-radius:0;box-shadow:none}
+.device.phone{border-radius:30px;box-shadow:0 0 0 9px #0d0d0f,0 0 0 10px rgba(255,255,255,.14),0 16px 44px rgba(0,0,0,.55)}
+.device.phone .toolbar,.device.phone .os,.device.phone .name{display:none}
+.device.phone .menubar{padding:0 18px 0 22px;border-bottom:0}
+.device.phone .menubar .clock{order:-1;color:#f1f2f4;font-weight:700}
 .menubar{flex:none;height:${FRAME.menuBar}px;display:flex;align-items:center;gap:10px;padding:0 10px 0 12px;background:#1d1e22;color:#e8e9ec;font-size:13px;border-bottom:1px solid #000}
 .menubar .os{width:12px;height:12px;border-radius:3px;background:linear-gradient(135deg,#9aa0aa,#5b616b)}
 .menubar .name{font-weight:700;letter-spacing:.01em}
@@ -228,9 +234,9 @@ html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;backgroun
 }
 
 /** Adds a device frame to the stage page (runs in the stage page). */
-function mountDevice({ id, name, address, wifiOn, wifiOff }) {
+function mountDevice({ id, name, address, kind, wifiOn, wifiOff }) {
   const device = document.createElement("div");
-  device.className = "device";
+  device.className = `device ${kind}`;
   device.id = `device-${id}`;
   device.innerHTML = `
     <div class="menubar"><span class="os"></span><span class="name"></span><span class="spacer"></span>
@@ -279,7 +285,8 @@ export class Stage {
 
   /**
    * A device: its own browser context (own storage and identity) behind its
-   * own network. Returns the page. `name` is shown in the device's menu bar.
+   * own network. Returns the page. `name` is shown in a laptop's menu bar;
+   * `kind: "phone"` draws a phone with a status bar and no browser toolbar.
    */
   async device(
     id,
@@ -287,6 +294,7 @@ export class Stage {
       name = id,
       address = "",
       color = "#2563eb",
+      kind = "laptop",
       viewport,
       colorScheme,
       keepPorts = [],
@@ -305,7 +313,17 @@ export class Stage {
     await context.addInitScript(hideDevOverlay);
     const page = await context.newPage();
     page.on("pageerror", (e) => console.log(`[${id}] pageerror:`, String(e).slice(0, 300)));
-    this.devices.set(id, { id, name, address, context, page, network, cdp: null, wifi: true });
+    this.devices.set(id, {
+      id,
+      name,
+      address,
+      kind,
+      context,
+      page,
+      network,
+      cdp: null,
+      wifi: true,
+    });
     return page;
   }
 
@@ -332,6 +350,7 @@ export class Stage {
         id: d.id,
         name: d.name,
         address: d.address,
+        kind: d.kind,
         wifiOn: WIFI_ON,
         wifiOff: WIFI_OFF,
       });
@@ -344,6 +363,11 @@ export class Stage {
   /** Marks the moment the walkthrough begins; the video is trimmed to start here. */
   roll() {
     this.rolledAt = Date.now();
+  }
+
+  /** Marks the current moment as the poster frame. */
+  poster() {
+    this.posterAt = (Date.now() - (this.rolledAt ?? this.recordingStartedAt)) / 1000;
   }
 
   async #cast(d) {
@@ -399,7 +423,8 @@ export class Stage {
       const d = this.devices.get(p.id);
       const scale = p.scale ?? 1;
       const width = Math.round(p.w / scale);
-      const height = Math.round((p.h - FRAME.menuBar - FRAME.toolbar) / scale);
+      const frame = d.kind === "phone" ? FRAME.menuBar : FRAME.menuBar + FRAME.toolbar;
+      const height = Math.round((p.h - frame) / scale);
       const current = d.page.viewportSize();
       if (!current || current.width !== width || current.height !== height)
         await d.page.setViewportSize({ width, height });
@@ -441,6 +466,8 @@ export class Stage {
 
   /** Shows a subtitle at the bottom of the frame (empty text hides it). */
   async caption(text, ms = 0) {
+    if (process.env.WALK_TRACE)
+      console.log(`${((Date.now() - (this.rolledAt ?? 0)) / 1000).toFixed(1)}s caption ${text}`);
     await this.stagePage.evaluate((text) => {
       const cap = document.getElementById("cap");
       if (text) cap.textContent = text;
@@ -544,7 +571,7 @@ export class Stage {
     await sleep(250);
   }
 
-  /** Stops recording; returns { path, trimStart } for encodeRecording. */
+  /** Stops recording; returns { path, trimStart, posterAt } for encodeRecording. */
   async finish() {
     this.running = false;
     await this.pump;
@@ -560,7 +587,7 @@ export class Stage {
       0,
       ((this.rolledAt ?? this.recordingStartedAt) - this.recordingStartedAt) / 1000,
     );
-    return { path, trimStart };
+    return { path, trimStart, posterAt: this.posterAt };
   }
 
   async abort(debugDir) {
@@ -588,16 +615,25 @@ export async function pointAt(page, locator, { steps = 8, hover = 320 } = {}) {
   const box = await locator.boundingBox();
   if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps });
   await sleep(hover);
+  return box;
 }
 
-export async function click(page, locator, { after = 400, ...options } = {}) {
-  await pointAt(page, locator, options);
-  await locator.click();
+/**
+ * Glides the drawn cursor to the element and clicks it. `direct` clicks with
+ * the mouse where the element is, skipping Playwright's actionability checks,
+ * which are slow on pages that animate every frame (a WebGL globe).
+ */
+export async function click(page, locator, { after = 400, direct = false, ...options } = {}) {
+  const started = Date.now();
+  const box = await pointAt(page, locator, options);
+  if (direct && box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  else await locator.click();
+  if (process.env.WALK_TRACE) console.log(`click ${locator} ${Date.now() - started} ms`);
   await sleep(after);
 }
 
-export async function type(page, locator, text, { delay = 55, clear = false } = {}) {
-  await click(page, locator, { after: 150 });
+export async function type(page, locator, text, { delay = 55, clear = false, ...options } = {}) {
+  await click(page, locator, { after: 150, ...options });
   if (clear) await locator.fill("");
   await locator.pressSequentially(text, { delay });
   await sleep(300);

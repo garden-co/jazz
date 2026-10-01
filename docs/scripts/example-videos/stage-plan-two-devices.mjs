@@ -161,6 +161,6 @@ try {
   await stage.abort(process.env.DEBUG_DIR);
   throw error;
 } finally {
-  server.stop();
+  await server.stop();
   await stage.cleanup();
 }
