@@ -570,22 +570,95 @@ fn permission_advice_hydrates_same_shape_update_policy_clauses_independently() {
         .unwrap();
     assert_eq!(support_scope.subscriptions.len(), 2);
     assert_eq!(
-        support_scope.subscriptions[0].0.shape_id(),
-        support_scope.subscriptions[1].0.shape_id(),
+        support_scope.subscriptions[0].shape.shape_id(),
+        support_scope.subscriptions[1].shape.shape_id(),
         "USING and CHECK deliberately share the public shape identity",
     );
     assert_eq!(
-        support_scope.subscriptions[0].1.binding_id(),
-        support_scope.subscriptions[1].1.binding_id(),
+        support_scope.subscriptions[0].binding.binding_id(),
+        support_scope.subscriptions[1].binding.binding_id(),
         "USING and CHECK deliberately share the public binding identity",
     );
+    assert_eq!(
+        support_scope.subscriptions[0].slot,
+        crate::schema::PolicySlot::UpdateUsing,
+    );
+    assert_eq!(
+        support_scope.subscriptions[1].slot,
+        crate::schema::PolicySlot::UpdateWithCheck,
+    );
     assert_ne!(
-        support_scope.subscriptions[0].0.policy_provenance(),
-        support_scope.subscriptions[1].0.policy_provenance(),
+        support_scope.subscriptions[0].shape.policy_provenance(),
+        support_scope.subscriptions[1].shape.policy_provenance(),
         "each slot carries a different private compound ExistsRel equality",
     );
 
     let client = open_db(0xa7, author, &schema);
+    // Model a replica that already has the current row and both independent
+    // relational witnesses before asking for authority-bound update advice.
+    client
+        .seed_settled_mergeable_for_bootstrap(
+            "resources",
+            resource,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([("label".to_owned(), Value::String("before".to_owned()))]),
+        )
+        .unwrap();
+    client
+        .seed_settled_mergeable_for_bootstrap(
+            "left_facts",
+            row(0xaa),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+            ]),
+        )
+        .unwrap();
+    client
+        .seed_settled_mergeable_for_bootstrap(
+            "right_facts",
+            row(0xab),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+            ]),
+        )
+        .unwrap();
+    client
+        .seed_settled_mergeable_for_bootstrap(
+            "evidence",
+            row(0xac),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    client
+        .seed_settled_mergeable_for_bootstrap(
+            "evidence",
+            row(0xad),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                (
+                    "right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("right".to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
     let (client_transport, server_transport, server_outbound) =
         duplex_with_admitted_session_context_and_server_outbound_tap(
             author,

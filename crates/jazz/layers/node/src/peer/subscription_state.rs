@@ -20,13 +20,18 @@ use super::super::node::{
     CoveredInputReceiver, LocalAuthorityReconciliation, PreparedQueryPlanHandle,
 };
 use super::super::protocol::{
-    AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, SubscriptionKey,
+    AuthorityResultKey, AuthorizationSupportScopeKey, KnownStateCompleteness,
+    KnownStateDeclaration, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, SubscriptionKey,
 };
-use super::super::query::{Binding, ValidatedQuery};
-use super::super::schema::TableSchema;
+use super::super::query::{Binding, BindingId, ShapeId, ValidatedQuery};
+use super::super::schema::{PolicySlot, TableSchema};
 use super::super::tx::{DurabilityTier, TxId};
 use crate::object::OutputOccurrenceId;
+
+pub(super) type AuthorizationSupportIdentity = (
+    AuthorizationSupportScopeKey,
+    (PolicySlot, ShapeId, BindingId),
+);
 
 pub(super) fn fast_current_membership_position(
     known_state: &Option<KnownStateDeclaration>,
@@ -133,6 +138,7 @@ pub(super) struct PeerSubscriptionState {
     /// deliberately separate from the source key: direct authorities may
     /// retain a D source without awaiting an upstream handoff.
     pub(super) awaiting_selected_authority_source: bool,
+    pub(super) authorization_support_identity: Option<AuthorizationSupportIdentity>,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
     pub(super) supporting_revision: Option<[u8; 16]>,
     /// Shared Local-plus-authority provenance. Receiver/materialization state

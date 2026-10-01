@@ -62,6 +62,23 @@ async fn wait_for_policy_proof_compilation_for_test() {
     }
 }
 
+/// One operation-slot-specific policy support query.
+pub struct AuthorizationSupportClause {
+    /// Policy slot that compiled this private support query.
+    pub slot: crate::schema::PolicySlot,
+    /// Validated support query with slot-specific relation provenance.
+    pub shape: ValidatedQuery,
+    /// Parameter binding for the compiled support query.
+    pub binding: Binding,
+}
+
+impl AuthorizationSupportClause {
+    /// Canonical identity retaining the policy slot as well as query identity.
+    pub fn identity(&self) -> (crate::schema::PolicySlot, ShapeId, crate::query::BindingId) {
+        (self.slot, self.shape.shape_id(), self.binding.binding_id())
+    }
+}
+
 /// Exact, action-specific policy support compiled for a hypothetical operation.
 ///
 /// The support key deliberately excludes the row/candidate operation key: two
@@ -71,10 +88,10 @@ pub struct AuthorizationSupportScope {
     pub key: AuthorizationSupportScopeKey,
     pub operation: AuthorizationOperationKey,
     /// The sole read/serving semantics under which support can authorize an
-    /// operation.  A scope must never be satisfied by a branch, snapshot, or
+    /// operation. A scope must never be satisfied by a branch, snapshot, or
     /// local-tier view that merely happens to have the same query identity.
     pub options: RegisterShapeOptions,
-    pub subscriptions: Vec<(ValidatedQuery, Binding)>,
+    pub subscriptions: Vec<AuthorizationSupportClause>,
 }
 
 fn empty_policy_filtered_current_source_graph(
@@ -1583,6 +1600,11 @@ where
                     &claim_values,
                     policy_schema,
                 )
+                .map(|(shape, binding)| AuthorizationSupportClause {
+                    slot: *slot,
+                    shape,
+                    binding,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let policy_provenance = policies
@@ -1602,7 +1624,7 @@ where
             &options,
             subscriptions
                 .iter()
-                .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
+                .map(AuthorizationSupportClause::identity)
                 .collect::<Vec<_>>(),
         ))
         .map_err(|_| Error::InvalidStoredValue("authorization scope serialization failed"))?;
@@ -1891,7 +1913,7 @@ mod authorization_scope_compiler_tests {
             )
             .expect("UUID session user_id must bind permission support");
         assert_eq!(scope.subscriptions.len(), 1);
-        let binding = &scope.subscriptions[0].1;
+        let binding = &scope.subscriptions[0].binding;
         assert!(
             binding
                 .values()

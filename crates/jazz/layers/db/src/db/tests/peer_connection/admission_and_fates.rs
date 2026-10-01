@@ -3422,10 +3422,10 @@ fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
 /// ```
 ///
 /// This targets the opaque terminal-support allocation rather than a public
-/// subscription: its canonical query key is intentionally shared, while its
-/// policy snapshot must not be selected from the node's author-keyed legacy
-/// cache. Replacing the explicit A snapshot below with `session_claims_for`
-/// makes the final assertion observe B and fail.
+/// subscription: the canonical query shape is shared, but each claim snapshot
+/// has its own binding. The policy snapshot must not be selected from the
+/// node's author-keyed legacy cache. Replacing the explicit A snapshot below
+/// with `session_claims_for` makes the final assertion observe B and fail.
 #[test]
 fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
     let schema = editor_claim_write_schema();
@@ -3494,39 +3494,34 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
             },
         )
         .expect("editor policy has a support clause");
-    let (shape, binding) = scope
+    let a_clause = scope
         .subscriptions
         .into_iter()
         .next()
         .expect("editor policy produces one support subscription");
-    let a_subscription = SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: scope.options.read_view_key(),
-    };
+    let a_shape_id = a_clause.shape.shape_id();
+    let a_binding_id = a_clause.binding.binding_id();
 
     {
         let mut a_connection = a_subscriber.borrow_mut();
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A is an admitted subscriber link");
         };
-        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-            &mut server.node().borrow_mut(),
-            alice,
-            a_state.session_claims.clone(),
-            &versions,
-            tx.tx_id,
-        ))
-        .expect("A terminal proof remains valid after B updates the legacy cache");
-        assert_eq!(
-            a_state.peer.subscription_policy_binding(a_subscription),
-            Some((alice, a_claims.clone())),
-            "the maintained terminal support receiver retains A rather than B's sibling snapshot"
+        assert!(
+            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
+                &mut server.node().borrow_mut(),
+                alice,
+                a_state.session_claims.clone(),
+                &versions,
+                tx.tx_id,
+            ))
+            .expect("A's terminal proof uses its admitted claims"),
+            "A's editor claims remain valid after B overwrites the legacy cache",
         );
     }
 
-    // 0→1→2 authenticated refreshes reuse the same canonical support key,
-    // but each must replace its maintained receiver before terminal proof.
+    // Refreshing claims changes the support binding while preserving the
+    // public shape identity; A's retained proof must not stand in for B's.
     a_subscriber
         .borrow_mut()
         .update_authenticated_session_claims(b_claims.clone());
@@ -3542,33 +3537,28 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
             },
         )
         .expect("viewer policy has the same support clause under its own snapshot");
-    let (b_shape, b_binding) = b_scope
+    let b_clause = b_scope
         .subscriptions
         .into_iter()
         .next()
         .expect("viewer policy produces one support subscription");
-    let b_subscription = SubscriptionKey {
-        shape_id: b_shape.shape_id(),
-        binding_id: b_binding.binding_id(),
-        read_view: b_scope.options.read_view_key(),
-    };
+    assert_eq!(b_clause.shape.shape_id(), a_shape_id);
+    assert_ne!(b_clause.binding.binding_id(), a_binding_id);
     {
         let mut a_connection = a_subscriber.borrow_mut();
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A remains an admitted subscriber link");
         };
-        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-            &mut server.node().borrow_mut(),
-            alice,
-            a_state.session_claims.clone(),
-            &versions,
-            tx.tx_id,
-        ))
-        .expect("a refreshed terminal proof replaces the stale support receiver");
-        assert_eq!(
-            a_state.peer.subscription_policy_binding(b_subscription),
-            Some((alice, b_claims)),
-            "terminal support reuse is keyed by exact immutable claims, not just its query key"
+        assert!(
+            !crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
+                &mut server.node().borrow_mut(),
+                alice,
+                a_state.session_claims.clone(),
+                &versions,
+                tx.tx_id,
+            ))
+            .expect("the refreshed viewer proof completes"),
+            "viewer claims must not reuse editor authorization support",
         );
     }
     a_subscriber
@@ -3579,18 +3569,16 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A remains an admitted subscriber link");
         };
-        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-            &mut server.node().borrow_mut(),
-            alice,
-            a_state.session_claims.clone(),
-            &versions,
-            tx.tx_id,
-        ))
-        .expect("the next refreshed terminal proof replaces the stale support receiver");
-        assert_eq!(
-            a_state.peer.subscription_policy_binding(a_subscription),
-            Some((alice, a_claims)),
-            "each claim revision receives a fresh terminal support receiver"
+        assert!(
+            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
+                &mut server.node().borrow_mut(),
+                alice,
+                a_state.session_claims.clone(),
+                &versions,
+                tx.tx_id,
+            ))
+            .expect("the restored editor proof completes"),
+            "returning to editor claims rehydrates a valid terminal proof",
         );
     }
 }

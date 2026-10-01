@@ -2806,21 +2806,6 @@ struct RelaySubscriptionRejection {
     reason: SubscribeRejectReason,
 }
 
-/// Authority-derived scope identity retained for a support subscription.
-/// Never constructed from the caller's wire payload.
-#[derive(Clone, Debug, PartialEq)]
-struct AuthorizedScopePurpose {
-    key: crate::protocol::AuthorizationSupportScopeKey,
-    operation: crate::protocol::AuthorizationOperationKey,
-    action: PermissionAdviceAction,
-    expected_support: BTreeSet<(ShapeId, BindingId)>,
-}
-
-// Compatibility spelling retained for module-local tests while the actual
-// implementation is the shared authority proof primitive.
-#[cfg(test)]
-type ScopeAggregate = AuthorityScopeAggregate;
-
 /// One receipt-bound authorization operation owned by one admitted upstream.
 ///
 /// This state deliberately lives on `ConnectionLink::Upstream`: a receipt is
@@ -6884,4 +6869,4 @@ fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
 mod tests;
 
 #[cfg(test)]
-use crate::{protocol::VersionRecord, tx::Transaction};
+use crate::tx::Transaction;

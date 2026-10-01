@@ -3,6 +3,7 @@
 
 use crate::protocol::{AuthorizationScopeReceipt, AuthorizationSupportScopeKey, SubscriptionKey};
 use crate::query::{BindingId, ShapeId};
+use crate::schema::PolicySlot;
 use crate::time::GlobalTime;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -11,21 +12,20 @@ use std::rc::Rc;
 pub const MAX_AUTHORIZATION_SCOPES: usize = 256;
 
 /// The authority-owned, all-clause proof lifecycle shared by locally terminal
-/// fate admission and wire-delivered authorization advice.  Membership is
-/// canonical (shape/binding); transport subscription keys are allocated by the
-/// authority and merely name one registered clause instance.
+/// fate admission and wire-delivered authorization advice. Membership is
+/// clause-specific, including the originating policy slot.
 #[derive(Clone, Debug)]
 pub struct AuthorityScopeAggregate {
     #[doc(hidden)]
-    pub expected_support: BTreeSet<(ShapeId, BindingId)>,
+    pub expected_support: BTreeSet<(PolicySlot, ShapeId, BindingId)>,
     #[doc(hidden)]
-    pub members: BTreeMap<SubscriptionKey, (ShapeId, BindingId)>,
+    pub members: BTreeMap<SubscriptionKey, (PolicySlot, ShapeId, BindingId)>,
     #[doc(hidden)]
     pub applied: BTreeMap<SubscriptionKey, (GlobalTime, u64)>,
 }
 
 impl AuthorityScopeAggregate {
-    pub fn new(expected_support: BTreeSet<(ShapeId, BindingId)>) -> Self {
+    pub fn new(expected_support: BTreeSet<(PolicySlot, ShapeId, BindingId)>) -> Self {
         Self {
             expected_support,
             members: BTreeMap::new(),
@@ -33,16 +33,16 @@ impl AuthorityScopeAggregate {
         }
     }
 
-    pub fn expected_support(&self) -> &BTreeSet<(ShapeId, BindingId)> {
+    pub fn expected_support(&self) -> &BTreeSet<(PolicySlot, ShapeId, BindingId)> {
         &self.expected_support
     }
 
-    /// Register exactly one server-owned subscription for a canonical support
-    /// clause.  A duplicate or an out-of-scope clause invalidates completion.
+    /// Register exactly one server-owned subscription for a policy-slot clause.
+    /// A duplicate or an out-of-scope clause invalidates completion.
     pub fn register(
         &mut self,
         subscription: SubscriptionKey,
-        clause: (ShapeId, BindingId),
+        clause: (PolicySlot, ShapeId, BindingId),
     ) -> bool {
         if !self.expected_support.contains(&clause)
             || self.members.contains_key(&subscription)
@@ -64,7 +64,7 @@ impl AuthorityScopeAggregate {
     }
 
     /// Records a locally applied clause and returns the aggregate lower bounds
-    /// only when every canonical clause has an applied current view.
+    /// only when every expected policy-slot clause has a current view.
     pub fn apply(
         &mut self,
         subscription: SubscriptionKey,
@@ -451,22 +451,24 @@ mod tests {
 
     #[test]
     fn aggregate_requires_every_registered_clause_even_when_views_arrive_in_reverse_order() {
+        let shape_id = ShapeId(uuid::Uuid::from_bytes([1; 16]));
+        let binding_id = BindingId(uuid::Uuid::from_bytes([2; 16]));
         let first = SubscriptionKey {
-            shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
-            binding_id: BindingId(uuid::Uuid::from_bytes([2; 16])),
+            shape_id,
+            binding_id: BindingId(uuid::Uuid::from_bytes([3; 16])),
             read_view: Default::default(),
         };
         let second = SubscriptionKey {
-            shape_id: ShapeId(uuid::Uuid::from_bytes([3; 16])),
+            shape_id,
             binding_id: BindingId(uuid::Uuid::from_bytes([4; 16])),
             read_view: Default::default(),
         };
-        let mut aggregate = AuthorityScopeAggregate::new(BTreeSet::from([
-            (first.shape_id, first.binding_id),
-            (second.shape_id, second.binding_id),
-        ]));
-        assert!(aggregate.register(first, (first.shape_id, first.binding_id)));
-        assert!(aggregate.register(second, (second.shape_id, second.binding_id)));
+        let using_clause = (PolicySlot::UpdateUsing, shape_id, binding_id);
+        let check_clause = (PolicySlot::UpdateWithCheck, shape_id, binding_id);
+        let mut aggregate =
+            AuthorityScopeAggregate::new(BTreeSet::from([using_clause, check_clause]));
+        assert!(aggregate.register(first, using_clause));
+        assert!(aggregate.register(second, check_clause));
         assert_eq!(aggregate.apply(second, GlobalTime(9), 7), None);
         assert_eq!(
             aggregate.apply(first, GlobalTime(12), 11),

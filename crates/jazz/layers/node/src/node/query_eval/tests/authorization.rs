@@ -1165,11 +1165,13 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
         )
         .expect("missing policy claim is represented by a denied support shape");
     let options = scope.options.clone();
-    let (shape, binding) = scope
+    let clause = scope
         .subscriptions
         .into_iter()
         .next()
         .expect("read policy requires one support subscription");
+    let shape = clause.shape;
+    let binding = clause.binding;
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),

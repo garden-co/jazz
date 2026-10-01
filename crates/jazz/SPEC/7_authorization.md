@@ -649,6 +649,7 @@ verified route/request correlation precede this internal receipt application.
   correlation id plus the advice value, never supporting rows, policy reasons,
   or hidden dependency facts. Advice is non-mutating and does not reserve or
   authorize the ordinary optimistic write that may follow (`INV-API-28`).
+- **Support-clause identity.** One operation may require multiple policy clauses. Each clause is identified by policy slot, canonical shape, and binding, so distinct slots remain separate even when their public shape and binding IDs coincide. The aggregate receipt settles only after every clause view is hydrated. Retained terminal support is reusable only for the exact scope key and clause identity; changed policy provenance therefore requires rehydrating its maintained view.
 - **Safe local permission fail-fast.** A future client-local `Denied` may be
   added only when it is mechanically proven that every fact required for that
   rejection is locally complete (for example, proposed-row or structural facts).

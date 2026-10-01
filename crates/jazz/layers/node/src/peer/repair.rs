@@ -1,3 +1,28 @@
+fn terminal_authorization_support_binding_id(
+    identity: (
+        crate::schema::PolicySlot,
+        crate::query::ShapeId,
+        crate::query::BindingId,
+    ),
+) -> crate::query::BindingId {
+    let (slot, shape_id, binding_id) = identity;
+    let mut input = [0; 49];
+    input[..16].copy_from_slice(b"jazz-terminal-v1");
+    input[16] = match slot {
+        crate::schema::PolicySlot::SelectUsing => 0,
+        crate::schema::PolicySlot::InsertWithCheck => 1,
+        crate::schema::PolicySlot::UpdateUsing => 2,
+        crate::schema::PolicySlot::UpdateWithCheck => 3,
+        crate::schema::PolicySlot::DeleteUsing => 4,
+    };
+    input[17..33].copy_from_slice(shape_id.0.as_bytes());
+    input[33..].copy_from_slice(binding_id.0.as_bytes());
+    let digest = blake3::hash(&input);
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    crate::query::BindingId(uuid::Uuid::from_bytes(bytes))
+}
+
 impl PeerState {
     fn record_outgoing_view_update_metadata(&mut self, update: &SyncMessage) {
         if let SyncMessage::ViewUpdate(view) = update
@@ -111,20 +136,23 @@ impl PeerState {
             if scope.subscriptions.is_empty() {
                 continue;
             }
-            let mut aggregate = AuthorityScopeAggregate::new(
-                scope
-                    .subscriptions
-                    .iter()
-                    .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
-                    .collect(),
-            );
-            for (shape, binding) in scope.subscriptions {
+            let expected_support = scope
+                .subscriptions
+                .iter()
+                .map(|clause| clause.identity())
+                .collect();
+            let mut aggregate = AuthorityScopeAggregate::new(expected_support);
+            for clause in scope.subscriptions {
+                let identity = clause.identity();
+                let support_identity = (scope.key.clone(), identity);
+                let shape = clause.shape;
+                let binding = clause.binding;
                 let subscription = SubscriptionKey {
                     shape_id: shape.shape_id(),
-                    binding_id: binding.binding_id(),
+                    binding_id: terminal_authorization_support_binding_id(identity),
                     read_view: scope.options.read_view_key(),
                 };
-                if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
+                if !aggregate.register(subscription, identity) {
                     continue;
                 }
                 let policy_binding = (writer, claims.clone());
@@ -132,20 +160,33 @@ impl PeerState {
                     .publication_states
                     .get(&subscription)
                     .is_some_and(|state| state.maintained_subscription_view.is_some());
-                if maintained
-                    && self.subscription_policy_binding(subscription)
-                        != Some(policy_binding.clone())
+                let retained_support_matches = self
+                    .publication_states
+                    .get(&subscription)
+                    .is_some_and(|state| {
+                        state.authorization_support_identity.as_ref() == Some(&support_identity)
+                    });
+                let stale_support_identity = self
+                    .publication_states
+                    .get(&subscription)
+                    .is_some_and(|state| {
+                        state
+                            .authorization_support_identity
+                            .as_ref()
+                            .is_some_and(|retained| retained != &support_identity)
+                    });
+                let policy_binding_matches =
+                    self.subscription_policy_binding(subscription) == Some(policy_binding.clone());
+                if stale_support_identity
+                    || (maintained && (!retained_support_matches || !policy_binding_matches))
                 {
-                    // A canonical support key does not encode the session
-                    // snapshot. Reusing a receiver installed by an earlier
-                    // claim revision (or a sibling link) would prove this
-                    // commit under the wrong immutable policy binding.
                     self.forget_subscription_with_node(&mut node, subscription);
                 }
                 let (cut, progress) = if self
                     .publication_states
                     .get(&subscription)
                     .is_some_and(|state| state.maintained_subscription_view.is_some())
+                    && retained_support_matches
                     && self.subscription_policy_binding(subscription) == Some(policy_binding)
                 {
                     (
@@ -178,6 +219,10 @@ impl PeerState {
                         self.authorization_progress_for_subscription(subscription),
                     )
                 };
+                self.publication_states
+                    .entry(subscription)
+                    .or_default()
+                    .authorization_support_identity = Some(support_identity);
                 let _ = aggregate.apply(subscription, cut, progress);
             }
             if aggregate.bounds().is_none() {

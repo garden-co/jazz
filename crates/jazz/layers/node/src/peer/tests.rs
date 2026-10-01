@@ -6,6 +6,16 @@ use crate::node::legacy_test_future::{
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ids::{NodeUuid, RowUuid};
+use crate::model::public_schema::{
+    ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
+    RelColumnRef as PublicRelColumnRef, RelExpr as PublicRelExpr,
+    RelJoinCondition as PublicRelJoinCondition, RelJoinKind as PublicRelJoinKind,
+    RelPredicateCmpOp as PublicRelPredicateCmpOp, RelPredicateExpr as PublicRelPredicateExpr,
+    RelValueRef as PublicRelValueRef, RowIdRef as PublicRelRowIdRef,
+    SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
+    TableSchemaBuilder as PublicTableSchemaBuilder,
+};
+use crate::model::transaction::OpenTransactionId;
 use crate::node::MergeableCommit;
 use crate::protocol::{
     BranchSelector, BranchViewBase, RealRowMemberEntry, SyncMessage, VersionRecord,
@@ -16,16 +26,6 @@ use crate::query::{
 };
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
-use crate::model::transaction::OpenTransactionId;
-use crate::model::public_schema::{
-    ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
-    RelColumnRef as PublicRelColumnRef, RelExpr as PublicRelExpr,
-    RelJoinCondition as PublicRelJoinCondition, RelJoinKind as PublicRelJoinKind,
-    RelPredicateCmpOp as PublicRelPredicateCmpOp, RelPredicateExpr as PublicRelPredicateExpr,
-    RelValueRef as PublicRelValueRef, RowIdRef as PublicRelRowIdRef,
-    SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
-    TableSchemaBuilder as PublicTableSchemaBuilder,
-};
 use crate::tx::DeletionEvent;
 use crate::tx::{DurabilityTier, Fate, TxKind};
 use groove::records::Value;
@@ -1298,9 +1298,7 @@ fn session_seed_write_policy_schema() -> JazzSchema {
     )
 }
 
-fn terminal_exists_rel_policy_with_secondary(
-    evidence_right_column: &str,
-) -> PublicPolicyExpr {
+fn terminal_exists_rel_policy_with_secondary(evidence_right_column: &str) -> PublicPolicyExpr {
     let relation_column = |scope: &str, column: &str| PublicRelColumnRef {
         scope: Some(scope.to_owned()),
         column: column.to_owned(),
@@ -1403,16 +1401,12 @@ fn terminal_support_rehydrates_after_provenance_only_policy_change() {
     let writer = AuthorSubject::for_test_bytes([0xb3; 16]);
     let claims = BTreeMap::new();
     let resource = row(0xb4);
-    let (_dir, mut node_state) =
-        open_node_with_schema(node(0xb5), original_schema.clone());
+    let (_dir, mut node_state) = open_node_with_schema(node(0xb5), original_schema.clone());
     let seed_commits = [
         (
             "resources",
             resource,
-            BTreeMap::from([(
-                "label".to_owned(),
-                Value::String("resource".to_owned()),
-            )]),
+            BTreeMap::from([("label".to_owned(), Value::String("resource".to_owned()))]),
         ),
         (
             "left_facts",
@@ -1435,7 +1429,10 @@ fn terminal_support_rehydrates_after_provenance_only_policy_change() {
             row(0xb8),
             BTreeMap::from([
                 ("left_key".to_owned(), Value::String("left".to_owned())),
-                ("right_key".to_owned(), Value::String("not-right".to_owned())),
+                (
+                    "right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
                 (
                     "alternate_right_key".to_owned(),
                     Value::String("right".to_owned()),
@@ -1471,17 +1468,14 @@ fn terminal_support_rehydrates_after_provenance_only_policy_change() {
     let action = crate::protocol::PermissionAdviceAction::Update {
         table: "resources".to_owned(),
         row: resource,
-        patch: BTreeMap::from([(
-            "label".to_owned(),
-            Value::String("candidate".to_owned()),
-        )]),
+        patch: BTreeMap::from([("label".to_owned(), Value::String("candidate".to_owned()))]),
     };
     let original_scope = node_state
         .authorization_support_scope_for_session(writer, Some(&claims), &action)
         .unwrap();
     assert_eq!(original_scope.subscriptions.len(), 1);
-    let support_shape_id = original_scope.subscriptions[0].0.shape_id();
-    let support_binding_id = original_scope.subscriptions[0].1.binding_id();
+    let support_shape_id = original_scope.subscriptions[0].shape.shape_id();
+    let support_binding_id = original_scope.subscriptions[0].binding.binding_id();
     let mut peer = PeerState::client_link(writer);
     crate::local_executor::block_on(peer.prove_terminal_commit_support(
         &mut node_state,
@@ -1522,20 +1516,20 @@ fn terminal_support_rehydrates_after_provenance_only_policy_change() {
         .authorization_support_scope_for_session(writer, Some(&claims), &action)
         .unwrap();
     assert_eq!(
-        updated_scope.subscriptions[0].0.shape_id(),
+        updated_scope.subscriptions[0].shape.shape_id(),
         support_shape_id,
         "the changed private equality preserves ShapeId",
     );
     assert_eq!(
-        updated_scope.subscriptions[0].1.binding_id(),
+        updated_scope.subscriptions[0].binding.binding_id(),
         support_binding_id,
         "the changed private equality preserves BindingId",
     );
     assert_ne!(updated_scope.key, original_scope.key);
     let updated_rows = node_state
         .query_rows_at(
-            &updated_scope.subscriptions[0].0,
-            &updated_scope.subscriptions[0].1,
+            &updated_scope.subscriptions[0].shape,
+            &updated_scope.subscriptions[0].binding,
             GlobalTime(5),
         )
         .unwrap();
@@ -1562,7 +1556,6 @@ fn terminal_support_rehydrates_after_provenance_only_policy_change() {
         original_maintained_id,
         "updated support provenance installs a fresh maintained receiver",
     );
-
 }
 
 #[test]
@@ -4893,12 +4886,15 @@ fn full_diff_fallbacks_count_only_rehydrates_of_published_views() {
     accept_global(&mut core, second_tx, 2);
     peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_eq!(
-        peer.maintained_subscription_view_metrics().full_diff_fallbacks,
+        peer.maintained_subscription_view_metrics()
+            .full_diff_fallbacks,
         FullDiffFallbackMetrics::default()
     );
 
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let fallbacks = peer.maintained_subscription_view_metrics().full_diff_fallbacks;
+    let fallbacks = peer
+        .maintained_subscription_view_metrics()
+        .full_diff_fallbacks;
     assert_eq!(fallbacks.query_reopens, 1, "{fallbacks:?}");
     assert_eq!(fallbacks.total(), 1, "{fallbacks:?}");
 }
@@ -6634,14 +6630,15 @@ fn maintained_publication_retries_source_changes_after_abandoned_drain() {
         )
         .unwrap();
     accept_global(&mut core, second, 2);
-    let abandoned = crate::local_executor::block_on(peer.drain_maintained_subscription_view_changes(
-        &mut core,
-        &shape,
-        subscription,
-        None,
-        None,
-    ))
-    .unwrap();
+    let abandoned =
+        crate::local_executor::block_on(peer.drain_maintained_subscription_view_changes(
+            &mut core,
+            &shape,
+            subscription,
+            None,
+            None,
+        ))
+        .unwrap();
     assert!(abandoned.supporting_changed);
     assert_eq!(
         peer.publication_states[&subscription]
