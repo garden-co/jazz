@@ -949,13 +949,22 @@ export class WriteResult<T> extends WriteHandle<T, T> {
  */
 export class ExclusiveWriteHandle extends WriteHandle<void> {
   /**
+   * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
+   * `"edge"` now waits for `"global"`.
+   */
+  override wait(options: { tier: "edge" }): Promise<void>;
+  /**
    * Wait for the selected durability tier. Without options, use global with an
    * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
    */
-  override async wait(options?: { tier: DurabilityTier }): Promise<void> {
-    await this.client().waitForExclusiveTransaction(await this.txId, options?.tier);
+  override wait(options?: { tier: DurabilityTier }): Promise<void>;
+  override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<void> {
+    await this.client().waitForExclusiveTransaction(
+      await this.txId,
+      options === undefined ? undefined : resolveWriteWaitTier(options.tier),
+    );
   }
 }
 
@@ -964,14 +973,23 @@ export class ExclusiveWriteHandle extends WriteHandle<void> {
  */
 export class ExclusiveWriteResult<T> extends WriteResult<T> {
   /**
+   * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
+   * `"edge"` now waits for `"global"`.
+   */
+  override wait(options: { tier: "edge" }): Promise<T>;
+  /**
    * Wait for the selected durability tier. Without options, use global with an
    * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
    * @returns the callback result.
    */
-  override async wait(options?: { tier: DurabilityTier }): Promise<T> {
-    await this.client().waitForExclusiveTransaction(await this.txId, options?.tier);
+  override wait(options?: { tier: DurabilityTier }): Promise<T>;
+  override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<T> {
+    await this.client().waitForExclusiveTransaction(
+      await this.txId,
+      options === undefined ? undefined : resolveWriteWaitTier(options.tier),
+    );
     return this.value;
   }
 
