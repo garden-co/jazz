@@ -172,8 +172,7 @@ struct CandidateIndex {
 
 type OccurrenceDependencies = BTreeMap<SourceId, Vec<(usize, CurrentRow)>>;
 
-pub(in crate::node) type AuthorizedCreatedSources =
-    BTreeMap<SourceId, Vec<(usize, CurrentRow)>>;
+pub(in crate::node) type AuthorizedCreatedSources = BTreeMap<SourceId, Vec<(usize, CurrentRow)>>;
 
 /// Unit-local proof ceiling and occurrence capabilities. These do not admit
 /// ordinary writes; the canonical unit evaluator still grounds every row.
@@ -284,11 +283,16 @@ impl<S: OrderedKvStorage> NodeState<S> {
         versions: &[VersionRecord],
         identity: AuthorSubject,
     ) -> Result<Option<AuthorizedCreatedEvidence>, Error> {
-        let Some(selected) = self.select_possible_created_policy_versions(tx, versions).await?
+        let Some(selected) = self
+            .select_possible_created_policy_versions(tx, versions)
+            .await?
         else {
             return Ok(None);
         };
-        if !selected.iter().any(|version| version.uses_authorized_created_sources()) {
+        if !selected
+            .iter()
+            .any(|version| version.uses_authorized_created_sources())
+        {
             return Ok(None);
         }
         let mut evidence = AuthorizedCreatedEvidence {
@@ -298,7 +302,8 @@ impl<S: OrderedKvStorage> NodeState<S> {
             selected,
             budget: CandidateProofBudget(MAX_CANDIDATE_PROOF_WORK),
         };
-        self.authorized_created_commit_proof(tx, versions, identity, &mut evidence).await?;
+        self.authorized_created_commit_proof(tx, versions, identity, &mut evidence)
+            .await?;
         Ok(Some(evidence))
     }
 
@@ -318,7 +323,10 @@ impl<S: OrderedKvStorage> NodeState<S> {
             if selection.uses_authorized_created_sources() {
                 baseline_allowed[index] = self
                     .evaluate_selected_write_policy(
-                        selection, identity, true, Some(&mut *budget),
+                        selection,
+                        identity,
+                        true,
+                        Some(&mut *budget),
                         &TransactionWriteOverlay::accepted_state(),
                     )
                     .await?;
@@ -361,8 +369,11 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 }
             }
         }
-        for (version_index, ((version, selection), allowed)) in
-            versions.iter().zip(selected).zip(baseline_allowed).enumerate()
+        for (version_index, ((version, selection), allowed)) in versions
+            .iter()
+            .zip(selected)
+            .zip(baseline_allowed)
+            .enumerate()
         {
             budget.charge(1)?;
             let physical =
@@ -559,10 +570,13 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 evidence.allowed[version] = authorized_candidate_evidence[id];
                 for (source, entries) in &dependencies[id] {
                     budget.charge(entries.len())?;
-                    let rows = entries.iter().filter_map(|(dependency, row)| {
-                        authorized_candidate_evidence[*dependency]
-                            .then(|| (candidates[*dependency].version_index, row.clone()))
-                    }).collect::<Vec<_>>();
+                    let rows = entries
+                        .iter()
+                        .filter_map(|(dependency, row)| {
+                            authorized_candidate_evidence[*dependency]
+                                .then(|| (candidates[*dependency].version_index, row.clone()))
+                        })
+                        .collect::<Vec<_>>();
                     if !rows.is_empty() {
                         evidence.sources[version].insert(source.clone(), rows);
                     }
@@ -588,9 +602,15 @@ impl<S: OrderedKvStorage> NodeState<S> {
             if !selection.uses_authorized_created_sources() && !evidence.qualified[index] {
                 continue;
             }
-            let passes = self.evaluate_selected_write_policy(
-                selection, identity, true, Some(&mut evidence.budget), &overlay,
-            ).await?;
+            let passes = self
+                .evaluate_selected_write_policy(
+                    selection,
+                    identity,
+                    true,
+                    Some(&mut evidence.budget),
+                    &overlay,
+                )
+                .await?;
             allowed[index] = passes && evidence.allowed[index];
             qualified[index] = passes && evidence.qualified[index];
         }
@@ -621,24 +641,40 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 continue;
             }
             let selection = &evidence.selected[index];
-            let policy = selection.table.write_policies.insert_check.as_ref()
+            let policy = selection
+                .table
+                .write_policies
+                .insert_check
+                .as_ref()
                 .expect("selected marked insert policy");
             self.charge_candidate_policy(selection.schema, policy, true, &mut evidence.budget)?;
             let mut sources = BTreeMap::new();
             for (source, rows) in &evidence.sources[index] {
                 evidence.budget.charge(rows.len())?;
-                let rows = rows.iter().filter_map(|(dependency, row)| {
-                    qualified[*dependency].then(|| row.clone())
-                }).collect::<Vec<_>>();
+                let rows = rows
+                    .iter()
+                    .filter_map(|(dependency, row)| qualified[*dependency].then(|| row.clone()))
+                    .collect::<Vec<_>>();
                 if !rows.is_empty() {
                     sources.insert(source.clone(), rows);
                 }
             }
-            if self.policy_query_allows_candidate_with_provenance_for_schema(
-                selection.schema, &selection.table, policy, selection.row,
-                &selection.cells, identity, true, selection.provenance,
-                PolicyDecisionRole::Write, Some(sources), &overlay,
-            ).await? {
+            if self
+                .policy_query_allows_candidate_with_provenance_for_schema(
+                    selection.schema,
+                    &selection.table,
+                    policy,
+                    selection.row,
+                    &selection.cells,
+                    identity,
+                    true,
+                    selection.provenance,
+                    PolicyDecisionRole::Write,
+                    Some(sources),
+                    &overlay,
+                )
+                .await?
+            {
                 allowed[index] = true;
                 qualified[index] = evidence.qualified[index];
                 for consumer in &dependents[index] {
@@ -650,9 +686,13 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 }
             }
         }
-        Ok(evidence.selected.iter().enumerate().all(|(index, selection)| {
-            !selection.uses_authorized_created_sources() || allowed[index]
-        }))
+        Ok(evidence
+            .selected
+            .iter()
+            .enumerate()
+            .all(|(index, selection)| {
+                !selection.uses_authorized_created_sources() || allowed[index]
+            }))
     }
 
     async fn candidate_index_key(
