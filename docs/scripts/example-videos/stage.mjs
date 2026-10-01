@@ -1,9 +1,13 @@
 // The shared recording stage for the example walkthrough videos.
 //
 // Each person in a walkthrough is a real browser context with its own storage,
-// identity and Jazz client, talking to the example's real sync server. Their
-// pages are streamed (CDP screencast) into one "stage" page, and Playwright
-// records that stage. The stage draws everything that isn't the app:
+// identity and Jazz client, talking to the example's real sync server. Each
+// device's screen is captured (CDP screencast) as timed frames while the
+// story runs; afterwards the "stage" page composes them, frame by frame at a
+// steady rate, into one video. Capturing and composing are separate so the
+// recording never competes with the apps for the CPU (a live re-recording of
+// the stage dropped motion to about 5 frames a second). The stage draws
+// everything that isn't the app:
 //
 // - a device frame per pane: an OS menu bar (device name, Wi-Fi) above a slim
 //   browser toolbar, so the app itself is never covered;
@@ -14,15 +18,17 @@
 //   ones until it's back on (a walkthrough can keep its bundler's dev server
 //   reachable, so hot reload doesn't reload the page). The browser context
 //   goes offline too, so the page sees `navigator.onLine === false`;
-// - subtitles at the bottom of the frame, in a rounded, bordered box;
+// - subtitles in a band below the devices, in a rounded, bordered box;
 // - title cards.
 //
-// `encodeRecording` (./encode.mjs) turns the stage recording into the
-// committed MP4 and poster.
+// `encodeRecording` (./encode.mjs) turns the composed video into the committed
+// MP4 and poster.
 
-import { readFile, mkdir, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
+import { join } from "node:path";
 import { chromium } from "playwright";
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -184,10 +190,10 @@ export const FRAME = { menuBar: 28, toolbar: 32 };
 const WIFI_ON = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M2.5 8.8a14 14 0 0 1 19 0"/><path d="M5.8 12.4a9.2 9.2 0 0 1 12.4 0"/><path d="M9.1 15.9a4.4 4.4 0 0 1 5.8 0"/><circle cx="12" cy="19.2" r="1.3" fill="currentColor" stroke="none"/></svg>`;
 const WIFI_OFF = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M2.5 8.8a14 14 0 0 1 19 0" opacity=".35"/><path d="M5.8 12.4a9.2 9.2 0 0 1 12.4 0" opacity=".35"/><path d="M9.1 15.9a4.4 4.4 0 0 1 5.8 0" opacity=".35"/><circle cx="12" cy="19.2" r="1.3" fill="currentColor" stroke="none" opacity=".35"/><path d="M4 3.5 20.5 20"/></svg>`;
 
-function stageHtml({ width, height, fonts, captionSize, backdrop }) {
+function stageHtml({ width, height, band, fonts, captionSize, backdrop }) {
   return `<!doctype html><html><head><meta charset="utf-8"><style>${fonts}
 *{box-sizing:border-box}
-html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;background:${backdrop};font-family:StageBody,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+html,body{margin:0;width:${width}px;height:${height + band}px;overflow:hidden;background:${backdrop};font-family:StageBody,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
 .device{position:absolute;display:none;flex-direction:column;overflow:hidden;border-radius:10px;background:#000;box-shadow:0 0 0 1px rgba(255,255,255,.12),0 14px 40px rgba(0,0,0,.45)}
 .device.fill{border-radius:0;box-shadow:none}
 .device.phone{border-radius:30px;box-shadow:0 0 0 9px #0d0d0f,0 0 0 10px rgba(255,255,255,.14),0 16px 44px rgba(0,0,0,.55)}
@@ -206,7 +212,7 @@ html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;backgroun
 .toolbar{flex:none;height:${FRAME.toolbar}px;display:flex;align-items:center;gap:8px;padding:0 10px;background:#2a2c31;border-bottom:1px solid #18191c}
 .toolbar .dot{width:10px;height:10px;border-radius:50%;background:#55585e}
 .toolbar .url{flex:1;margin:0 8% 0 6%;height:22px;border-radius:6px;background:#3a3d43;color:#c9ccd1;font-size:12px;line-height:22px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.screen{flex:1;position:relative;background:#fff;overflow:hidden}
+.screen{flex:1;position:relative;background:#000;overflow:hidden}
 .screen img{display:block;width:100%;height:100%;object-fit:fill}
 .screen .net{position:absolute;inset:0;pointer-events:none;box-shadow:inset 0 0 0 3px rgba(255,120,100,0);transition:box-shadow .3s}
 .device.offline .screen .net{box-shadow:inset 0 0 0 3px rgba(255,120,100,.75)}
@@ -222,13 +228,14 @@ html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;backgroun
 #cursor .ripple{position:absolute;left:-14px;top:-14px;width:32px;height:32px;border-radius:50%;border:3px solid #fff;opacity:0}
 #cursor.press .ripple{animation:ripple .5s ease-out}
 @keyframes ripple{from{transform:scale(.3);opacity:.95}to{transform:scale(1.4);opacity:0}}
-#cap{position:absolute;z-index:30;left:50%;bottom:22px;transform:translateX(-50%);max-width:${Math.round(width * 0.86)}px;padding:${Math.round(captionSize * 0.5)}px ${Math.round(captionSize * 1.05)}px;border-radius:${Math.round(captionSize * 0.75)}px;background:rgba(14,15,18,.9);border:1.5px solid rgba(255,255,255,.34);box-shadow:0 8px 26px rgba(0,0,0,.4);color:#fff;font-size:${captionSize}px;line-height:1.3;text-align:center;opacity:0;transition:opacity .3s}
+#band{position:absolute;left:0;right:0;top:${height}px;height:${band}px;display:flex;align-items:center;justify-content:center}
+#cap{max-width:${Math.round(width * 0.86)}px;padding:${Math.round(captionSize * 0.5)}px ${Math.round(captionSize * 1.05)}px;border-radius:${Math.round(captionSize * 0.75)}px;background:rgba(14,15,18,.9);border:1.5px solid rgba(255,255,255,.34);box-shadow:0 8px 26px rgba(0,0,0,.4);color:#fff;font-size:${captionSize}px;line-height:1.3;text-align:center;opacity:0;transition:opacity .3s}
 #title{position:absolute;inset:0;z-index:50;display:none;align-items:center;justify-content:center;flex-direction:column;color:#fff;background:${backdrop}}
 #title h1{font-size:56px;margin:0 0 14px;font-weight:700}
 #title p{font-size:23px;opacity:.82;margin:0;max-width:900px;text-align:center;line-height:1.35}
 </style></head><body>
 <div id="title"><h1></h1><p></p></div>
-<div id="cap"></div>
+<div id="band"><div id="cap"></div></div>
 <div id="cursor"><svg width="22" height="28" viewBox="0 0 22 28" style="display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))"><path d="M2 2 L2 23 L7.5 17.5 L11.5 26 L15 24.4 L11.2 16.2 L19 16.2 Z" fill="#111" stroke="white" stroke-width="1.6" stroke-linejoin="round"/></svg><div class="ripple"></div></div>
 </body></html>`;
 }
@@ -259,44 +266,55 @@ function mountDevice({ id, name, address, kind, wifiOn, wifiOff }) {
 
 export class Stage {
   /**
-   * width/height: the recorded frame. captionSize: subtitle font size in px.
-   * executablePath: optional Chromium build (defaults to Playwright's own).
+   * width/height: the area the devices share. Subtitles get their own band
+   * below it (`captionBand`, default about four lines of `captionSize`), so
+   * they never cover a device. `webgl` turns on software WebGL.
+   * executablePath: optional Chromium build.
    */
   static async launch({
     width = 1280,
     height = 800,
-    captionSize = 20,
-    backdrop = "#16171a",
+    captionSize = 22,
+    captionBand,
+    backdrop = "#000",
+    fps = 30,
+    webgl = false,
     videoDir,
     executablePath = process.env.CHROMIUM_PATH || undefined,
   } = {}) {
-    await mkdir(videoDir, { recursive: true });
+    await mkdir(join(videoDir, "frames"), { recursive: true });
+    // Software WebGL only for apps that need it (a globe): it slows down
+    // every other page's rendering, and so the captured frame rate.
     const browser = await chromium.launch({
       executablePath,
-      args: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
+      args: webgl
+        ? ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
+        : [],
     });
     const stage = new Stage();
-    Object.assign(stage, { browser, width, height, captionSize, backdrop, videoDir });
+    const band = captionBand ?? Math.round((captionSize * 4.2) / 2) * 2;
+    Object.assign(stage, { browser, width, height, band, captionSize, backdrop, fps, videoDir });
     stage.devices = new Map();
-    stage.pending = new Map();
-    stage.running = false;
+    stage.ops = [];
+    stage.frameCount = 0;
     return stage;
   }
 
   /**
    * A device: its own browser context (own storage and identity) behind its
-   * own network. Returns the page. `name` is shown in a laptop's menu bar;
-   * `kind: "phone"` draws a phone with a status bar and no browser toolbar.
+   * own network, in dark mode unless `colorScheme` says otherwise. Returns
+   * the page. `name` is shown in a laptop's menu bar; `kind: "phone"` draws a
+   * phone with a status bar and no browser toolbar.
    */
   async device(
     id,
     {
       name = id,
       address = "",
-      color = "#2563eb",
+      color = "#3b82f6",
       kind = "laptop",
       viewport,
-      colorScheme,
+      colorScheme = "dark",
       keepPorts = [],
       contextOptions = {},
     } = {},
@@ -322,31 +340,38 @@ export class Stage {
       page,
       network,
       cdp: null,
+      frames: [],
+      writes: [],
       wifi: true,
     });
     return page;
   }
 
-  /** Starts recording the stage. Call once every device is set up. */
+  /**
+   * Starts capturing. Call once every device is set up. Each device's frames
+   * are kept with the time they arrived; the stage page (frames, subtitles,
+   * Wi-Fi menu, cursor) runs live for layout, and every change to it is
+   * logged. `finish()` then renders the video frame by frame at a steady
+   * `fps`, so the capture never competes with the apps for the CPU.
+   */
   async start() {
     this.stageContext = await this.browser.newContext({
-      viewport: { width: this.width, height: this.height },
-      recordVideo: { dir: this.videoDir, size: { width: this.width, height: this.height } },
+      viewport: { width: this.width, height: this.height + this.band },
     });
-    this.recordingStartedAt = Date.now();
     this.stagePage = await this.stageContext.newPage();
-    await this.stagePage.setContent(
-      stageHtml({
-        width: this.width,
-        height: this.height,
-        fonts: await fontFaces(),
-        captionSize: this.captionSize,
-        backdrop: this.backdrop,
-      }),
-    );
+    this.html = stageHtml({
+      width: this.width,
+      height: this.height,
+      band: this.band,
+      fonts: await fontFaces(),
+      captionSize: this.captionSize,
+      backdrop: this.backdrop,
+    });
+    await this.stagePage.setContent(this.html);
     await this.stagePage.evaluate(() => document.fonts.ready);
+    this.startedAt = Date.now();
     for (const d of this.devices.values()) {
-      await this.stagePage.evaluate(mountDevice, {
+      await this.#ui(mountDevice, {
         id: d.id,
         name: d.name,
         address: d.address,
@@ -356,31 +381,52 @@ export class Stage {
       });
       await this.#cast(d);
     }
-    this.running = true;
-    this.pump = this.#pump();
   }
 
-  /** Marks the moment the walkthrough begins; the video is trimmed to start here. */
+  /** Runs `fn(arg)` in the stage page now, and logs it for the render. */
+  #ui(fn, arg) {
+    this.ops.push({ t: Date.now(), fn: fn.toString(), arg });
+    return this.stagePage.evaluate(fn, arg);
+  }
+
+  /** Marks the moment the walkthrough begins; the video starts here. */
   roll() {
     this.rolledAt = Date.now();
   }
 
   /** Marks the current moment as the poster frame. */
   poster() {
-    this.posterAt = (Date.now() - (this.rolledAt ?? this.recordingStartedAt)) / 1000;
+    this.posterAt = (Date.now() - (this.rolledAt ?? this.startedAt)) / 1000;
   }
 
   async #cast(d) {
     d.cdp = await d.page.context().newCDPSession(d.page);
+    // Keeps at most one frame per output frame: a frame that arrives sooner
+    // waits, and is replaced if a newer one comes before it's due.
+    const gap = 1000 / this.fps;
+    const store = () => {
+      clearTimeout(d.timer);
+      d.timer = undefined;
+      if (!d.pending) return;
+      const { t, data } = d.pending;
+      d.pending = undefined;
+      d.lastStored = t;
+      const file = join(this.videoDir, "frames", `${d.id}-${this.frameCount++}.jpg`);
+      d.frames.push({ t, file });
+      d.writes.push(writeFile(file, Buffer.from(data, "base64")));
+    };
     d.cdp.on("Page.screencastFrame", (frame) => {
-      this.pending.set(d.id, frame.data);
       d.cdp.send("Page.screencastFrameAck", { sessionId: frame.sessionId }).catch(() => {});
+      d.pending = { t: Date.now(), data: frame.data };
+      const wait = (d.lastStored ?? 0) + gap - Date.now();
+      if (wait <= 0) store();
+      else d.timer ??= setTimeout(store, wait);
     });
     await d.cdp.send("Page.startScreencast", {
       format: "jpeg",
-      quality: 90,
-      maxWidth: 2600,
-      maxHeight: 2600,
+      quality: 82,
+      maxWidth: 2000,
+      maxHeight: 2000,
     });
   }
 
@@ -391,25 +437,6 @@ export class Stage {
       await d.cdp.send("Page.stopScreencast");
     } catch {}
     await this.#cast(d);
-  }
-
-  async #pump() {
-    while (this.running) {
-      if (this.pending.size === 0) {
-        await sleep(15);
-        continue;
-      }
-      const frames = [...this.pending.entries()];
-      this.pending.clear();
-      await this.stagePage
-        .evaluate((frames) => {
-          for (const [id, data] of frames) {
-            const img = document.querySelector(`#device-${id} .screen img`);
-            if (img) img.src = `data:image/jpeg;base64,${data}`;
-          }
-        }, frames)
-        .catch(() => {});
-    }
   }
 
   /**
@@ -429,7 +456,7 @@ export class Stage {
       if (!current || current.width !== width || current.height !== height)
         await d.page.setViewportSize({ width, height });
     }
-    await this.stagePage.evaluate((panes) => {
+    await this.#ui((panes) => {
       const ids = panes.map((p) => p.id);
       for (const el of document.querySelectorAll(".device"))
         if (!ids.includes(el.id.slice(7))) el.style.display = "none";
@@ -449,7 +476,7 @@ export class Stage {
     await sleep(350);
   }
 
-  /** One device filling the frame. */
+  /** One device filling the device area. */
   full(id) {
     return this.show([{ id, x: 0, y: 0, w: this.width, h: this.height, fill: true }]);
   }
@@ -464,11 +491,11 @@ export class Stage {
     ]);
   }
 
-  /** Shows a subtitle at the bottom of the frame (empty text hides it). */
+  /** Shows a subtitle in the band below the devices (empty text hides it). */
   async caption(text, ms = 0) {
     if (process.env.WALK_TRACE)
       console.log(`${((Date.now() - (this.rolledAt ?? 0)) / 1000).toFixed(1)}s caption ${text}`);
-    await this.stagePage.evaluate((text) => {
+    await this.#ui((text) => {
       const cap = document.getElementById("cap");
       if (text) cap.textContent = text;
       cap.style.opacity = text ? "1" : "0";
@@ -477,7 +504,7 @@ export class Stage {
   }
 
   async title(heading, text, ms = 2500) {
-    await this.stagePage.evaluate(
+    await this.#ui(
       ([heading, text]) => {
         const title = document.getElementById("title");
         title.querySelector("h1").textContent = heading;
@@ -487,12 +514,12 @@ export class Stage {
       [heading, text],
     );
     await sleep(ms);
-    await this.stagePage.evaluate(() => (document.getElementById("title").style.display = "none"));
+    await this.#ui(() => (document.getElementById("title").style.display = "none"));
   }
 
   /** Glides the stage's own cursor (outside every app) to a point and clicks. */
   async #stageClick(x, y) {
-    await this.stagePage.evaluate(
+    await this.#ui(
       ([x, y]) => {
         const cursor = document.getElementById("cursor");
         cursor.style.opacity = "1";
@@ -501,7 +528,7 @@ export class Stage {
       [x, y],
     );
     await sleep(560);
-    await this.stagePage.evaluate(() => {
+    await this.#ui(() => {
       const cursor = document.getElementById("cursor");
       cursor.classList.remove("press");
       void cursor.offsetWidth;
@@ -519,7 +546,7 @@ export class Stage {
     const d = this.devices.get(id);
     const icon = await this.stagePage.locator(`#device-${id} [data-wifi]`).boundingBox();
     const startX = icon.x + icon.width / 2 - 60;
-    await this.stagePage.evaluate(
+    await this.#ui(
       ([x, y]) => {
         const cursor = document.getElementById("cursor");
         cursor.style.transition = "none";
@@ -530,7 +557,7 @@ export class Stage {
       [startX, icon.y + 90],
     );
     await this.#stageClick(icon.x + icon.width / 2, icon.y + icon.height / 2);
-    const popover = await this.stagePage.evaluate(
+    const popover = await this.#ui(
       ({ id, x, y }) => {
         const pop = document.getElementById(`wifi-${id}`);
         const left = Math.min(x - 200, document.body.clientWidth - 240);
@@ -549,7 +576,7 @@ export class Stage {
     d.network.setOnline(on);
     await d.context.setOffline(!on);
     d.wifi = on;
-    await this.stagePage.evaluate(
+    await this.#ui(
       ({ id, on }) => {
         const device = document.getElementById(`device-${id}`);
         const pop = document.getElementById(`wifi-${id}`);
@@ -563,7 +590,7 @@ export class Stage {
       { id, on },
     );
     await sleep(500);
-    await this.stagePage.evaluate((id) => {
+    await this.#ui((id) => {
       document.getElementById(`wifi-${id}`).classList.remove("show");
       document.querySelector(`#device-${id} [data-wifi]`).classList.remove("open");
       document.getElementById("cursor").style.opacity = "0";
@@ -571,23 +598,155 @@ export class Stage {
     await sleep(250);
   }
 
-  /** Stops recording; returns { path, trimStart, posterAt } for encodeRecording. */
+  /**
+   * Stops capturing and renders the video: from `roll()` to now, at a steady
+   * `fps`, each frame shows every device's latest frame and the stage as it
+   * was at that moment (its CSS transitions seeked to that time). Returns
+   * { path, trimStart, posterAt } for encodeRecording.
+   */
   async finish() {
-    this.running = false;
-    await this.pump;
-    const video = this.stagePage.video();
-    await this.stageContext.close();
-    const path = await video.path();
+    const end = Date.now();
     for (const d of this.devices.values()) {
+      await d.cdp?.send("Page.stopScreencast").catch(() => {});
+      clearTimeout(d.timer);
+      await Promise.all(d.writes);
       await d.context.close().catch(() => {});
       await d.network.close();
     }
+    const from = this.rolledAt ?? this.startedAt;
+    if (process.env.WALK_TRACE)
+      for (const d of this.devices.values()) {
+        // Busiest second of captured frames, a ceiling for on-screen motion.
+        let best = 0;
+        for (let i = 0, j = 0; j < d.frames.length; j++) {
+          while (d.frames[j].t - d.frames[i].t >= 1000) i++;
+          best = Math.max(best, j - i + 1);
+        }
+        console.log(`${d.id}: ${d.frames.length} frames, busiest second ${best}`);
+      }
+    const path = join(this.videoDir, "stage.mp4");
+    const started = Date.now();
+    const frames = await this.#render(from, end, path);
+    if (process.env.WALK_TRACE)
+      console.log(`rendered ${frames} frames in ${((Date.now() - started) / 1000).toFixed(1)} s`);
     await this.browser.close();
-    const trimStart = Math.max(
-      0,
-      ((this.rolledAt ?? this.recordingStartedAt) - this.recordingStartedAt) / 1000,
+    return { path, trimStart: 0, posterAt: this.posterAt };
+  }
+
+  async #render(from, end, path) {
+    const page = this.stagePage;
+    await page.setContent(this.html);
+    await page.evaluate(() => document.fonts.ready);
+    // Replays logged stage changes; CSS transitions they start are paused and
+    // seeked to the frame's time instead of running in real time.
+    await page.evaluate(() => {
+      // Returns whether anything is still moving at time t.
+      window.__seek = (t) => {
+        let moving = false;
+        for (const a of document.getAnimations()) {
+          if (a.__start === undefined) {
+            a.__start = window.__opTime;
+            a.pause();
+          }
+          const at = Math.max(0, t - a.__start);
+          a.currentTime = at;
+          const end = a.effect?.getComputedTiming().endTime ?? 0;
+          if (at < end) moving = true;
+        }
+        return moving;
+      };
+    });
+    const ffmpeg = spawn(
+      "ffmpeg",
+      [
+        "-y",
+        "-loglevel",
+        "error",
+        "-f",
+        "image2pipe",
+        "-c:v",
+        "mjpeg",
+        "-framerate",
+        String(this.fps),
+        "-i",
+        "-",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "14",
+        "-pix_fmt",
+        "yuv420p",
+        path,
+      ],
+      { stdio: ["pipe", "ignore", "inherit"] },
     );
-    return { path, trimStart, posterAt: this.posterAt };
+    const done = new Promise((resolve, reject) =>
+      ffmpeg.on("exit", (code) => (code ? reject(new Error(`ffmpeg exited ${code}`)) : resolve())),
+    );
+    const cdp = await page.context().newCDPSession(page);
+    const shown = new Map();
+    let op = 0;
+    let n = 0;
+    let last;
+    let moving = true;
+    for (let t = from; t <= end; t = from + (++n * 1000) / this.fps) {
+      let changed = moving;
+      if (op < this.ops.length && this.ops[op].t <= t) changed = true;
+      while (op < this.ops.length && this.ops[op].t <= t) {
+        const { t: opTime, fn, arg } = this.ops[op++];
+        await page.evaluate(
+          ([opTime, fn, arg]) => {
+            window.__opTime = opTime;
+            // eslint-disable-next-line no-new-func
+            new Function(`return (${fn})`)()(arg);
+            window.__seek(opTime);
+          },
+          [opTime, fn, arg],
+        );
+      }
+      const changes = [];
+      for (const d of this.devices.values()) {
+        let latest;
+        for (const f of d.frames) {
+          if (f.t > t) break;
+          latest = f;
+        }
+        if (latest && shown.get(d.id) !== latest.file) {
+          shown.set(d.id, latest.file);
+          changes.push([d.id, (await readFile(latest.file)).toString("base64")]);
+        }
+      }
+      if (changes.length) changed = true;
+      if (changed || !last) {
+        moving = await page.evaluate(
+          async ([t, changes]) => {
+            const moving = window.__seek(t);
+            await Promise.all(
+              changes.map(([id, data]) => {
+                const img = document.querySelector(`#device-${id} .screen img`);
+                img.src = `data:image/jpeg;base64,${data}`;
+                return img.decode().catch(() => {});
+              }),
+            );
+            return moving;
+          },
+          [t, changes],
+        );
+        const { data } = await cdp.send("Page.captureScreenshot", {
+          format: "jpeg",
+          quality: 92,
+          optimizeForSpeed: true,
+        });
+        last = Buffer.from(data, "base64");
+      }
+      if (!ffmpeg.stdin.write(last))
+        await new Promise((resolve) => ffmpeg.stdin.once("drain", resolve));
+    }
+    ffmpeg.stdin.end();
+    await done;
+    return n;
   }
 
   async abort(debugDir) {
@@ -596,7 +755,6 @@ export class Stage {
       for (const d of this.devices.values())
         await d.page.screenshot({ path: `${debugDir}/${d.id}.png` }).catch(() => {});
     }
-    this.running = false;
     await this.browser.close().catch(() => {});
     for (const d of this.devices.values()) await d.network.close().catch(() => {});
   }
