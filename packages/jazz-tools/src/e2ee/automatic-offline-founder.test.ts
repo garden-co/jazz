@@ -356,6 +356,159 @@ it.each([
   60_000,
 );
 
+it.each(["a second device store", "a missing original founder journal"] as const)(
+  "refuses another offline founder for the same durable account with %s",
+  async (scenario) => {
+    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    const gate = await transportGate(server.url);
+    const directory = await mkdtemp(join(tmpdir(), "jazz-single-founder-"));
+    const accountStore = privateStore();
+    const founderStore = privateStore();
+    const secondStore = privateStore();
+    const sessions: JazzSession<JazzClient>[] = [];
+    const config = {
+      appId: server.appId,
+      app,
+      permissions: founderPermissions,
+      serverUrl: gate.url,
+      env: "test",
+    };
+    const founderDriver = { type: "persistent" as const, dataPath: join(directory, "founder") };
+    const secondDriver = { type: "persistent" as const, dataPath: join(directory, "second") };
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        schema: app,
+        permissions: founderPermissions,
+      });
+      // Authenticate each durable root's catalogue before cutting TCP. Warm-up
+      // accounts are separate from the one whose first-device claim is tested.
+      for (const driver of [founderDriver, secondDriver]) {
+        const warm = await createJazzSession({
+          ...config,
+          driver,
+          initial: "local-first",
+          store: privateStore(),
+          e2ee: { app, store: privateStore() },
+        });
+        sessions.push(warm);
+        await warm
+          .getSnapshot()
+          .client!.db.insert(app.projects, { title: "Authenticated catalogue warm-up" })
+          .wait({ tier: "global" });
+        await warm.close();
+        sessions.pop();
+      }
+      gate.block();
+
+      const ownerConfig = {
+        ...config,
+        driver: founderDriver,
+        store: accountStore,
+        e2ee: { app, store: founderStore },
+      };
+      const owner = await createJazzSession({ ...ownerConfig, initial: "local-first" });
+      sessions.push(owner);
+      const { account, client } = owner.getSnapshot();
+      const founder = client!.db;
+      const tx = founder.beginExclusiveTransaction();
+      const project = tx.insert(app.projects, { title: "Original offline founder" });
+      const note = tx.insert(app.notes, {
+        projectId: project.id,
+        body: "Only the original device may encrypt",
+      });
+      const commit = tx.commit();
+      await commit.wait({ tier: "local" });
+      const originalTxId = await commit.txId;
+      expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+      const observe = async (db: Db) => ({
+        projects: await db.all(app.projects, { tier: "local" }),
+        notes: await db.all(app.notes, { tier: "local" }),
+        identities: await db.all(app.__e2ee_account_identities, { tier: "local" }),
+        roots: await db.all(app.__e2ee_account_roots, { tier: "local" }),
+        spaces: await db.all(app.__e2ee_spaces, { tier: "local" }),
+        grants: await db.all(app.__e2ee_space_grants, { tier: "local" }),
+        deliveries: await db.all(app.__e2ee_space_deliveries, { tier: "local" }),
+      });
+      const originalRows = await observe(founder);
+      const originalState = (await founderStore.read())!;
+      const originalJournal = JSON.parse(originalState).initializationJournalV1;
+      const founderEntry = originalJournal.find(
+        (entry: { proposal: string }) => JSON.parse(entry.proposal).kind === "founder",
+      );
+      expect(founderEntry).toMatchObject({
+        reservation: expect.any(String),
+        local: true,
+        outcome: "pending",
+      });
+      const proposal = JSON.parse(founderEntry.proposal);
+      expect(originalRows.identities).toEqual([
+        expect.objectContaining({
+          id: account!.id,
+          deviceId: proposal.deviceId,
+          epochId: proposal.epochId,
+        }),
+      ]);
+      expect(originalRows.roots).toEqual([
+        expect.objectContaining({ id: proposal.rootId, epochId: proposal.epochId }),
+      ]);
+      expect(originalRows.projects).toEqual([project]);
+      expect(originalRows.notes).toEqual([note]);
+
+      const missingJournal = scenario === "a missing original founder journal";
+      if (missingJournal) {
+        await owner.close();
+        sessions.pop();
+        // Keep valid original keypairs, but lose the journal in an otherwise
+        // valid store. A fresh catalogue root has no local identity to mask
+        // accidental regeneration of the already-bound founder epoch.
+        await founderStore.update((current) => {
+          const state = JSON.parse(current!);
+          delete state.initializationJournalV1;
+          return JSON.stringify(state);
+        });
+      }
+      const attemptedStore = missingJournal ? founderStore : secondStore;
+      await expect(
+        (async () => {
+          const other = await createJazzSession({
+            ...config,
+            driver: secondDriver,
+            store: accountStore,
+            e2ee: { app, store: attemptedStore },
+          });
+          sessions.push(other);
+        })(),
+      ).rejects.toMatchObject({ code: "e2ee_initialization_not_ready", retryable: true });
+      expect(
+        JSON.parse((await attemptedStore.read()) ?? "{}").initializationJournalV1 ?? [],
+      ).toEqual([]);
+
+      let original = founder;
+      if (missingJournal) {
+        await founderStore.update(() => originalState);
+        const reopened = await createJazzSession(ownerConfig);
+        sessions.push(reopened);
+        expect(reopened.getSnapshot().account!.id).toBe(account!.id);
+        original = reopened.getSnapshot().client!.db;
+      }
+      expect(await observe(original)).toEqual(originalRows);
+      expect(JSON.parse((await founderStore.read())!).initializationJournalV1).toEqual(
+        originalJournal,
+      );
+      expect(await commit.txId).toBe(originalTxId);
+    } finally {
+      await Promise.all(sessions.map((session) => session.close()));
+      await gate.close();
+      await server.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
 it("resumes the exact pending founder journal after importing into the same durable root", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const gate = await transportGate(server.url);
