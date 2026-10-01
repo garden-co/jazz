@@ -511,7 +511,9 @@ export class Groups {
     const device = await this.loadDevice();
     try {
       if (!offline)
-        await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), { tier: "global" });
+        await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
+          tier: "global",
+        });
       const readSnapshot = async (tx: E2eeHistoryReader) => {
         const state = await this.deviceStates(tx);
         const group = await this.readMembership(tx, observed, state.publicHistory);
