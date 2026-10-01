@@ -28,3 +28,8 @@ require their original owner's exact transaction evidence.
 Transfer application wait ownership before deferred transaction submission can
 deliver a rejection callback. Waited failures remain on their returned handles;
 unwaited failures retain their once-only fallback notification.
+
+Preserve checked point-snapshot observations after the core layer split.
+Initialisation propagates storage and transaction-audit decoding failures rather
+than treating an unreadable existing coordinate as absent. Legacy nonfallible
+snapshot observations keep their existing conservative exclusion behaviour.
