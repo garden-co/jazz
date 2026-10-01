@@ -17,6 +17,8 @@ Indexed whole-enum matches now work in subscriptions as well as ordinary reads;
 partial enum matches remain unsupported. Encrypted equality queries accept the
 same UUID scope spellings as ordinary queries, including uppercase and compact
 forms, while tracking key changes and revoked access under the canonical scope.
+Encrypted reads and restarted subscriptions use the current shared read-tier
+resolver; they do not restore the removed `RemoteIfPossible` tier.
 
 Align encrypted subscription data-readiness checks with the existing bounded
 integration-test allowance, retaining exact results and the shorter revocation
