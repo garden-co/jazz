@@ -1338,9 +1338,8 @@ fn jazz_tools_server_serves_a_symbolized_heap_profile_to_admins() {
     let temp_dir = tempfile::tempdir().expect("create server temp dir");
     let data_dir = temp_dir.path().join("data");
     let port_file = temp_dir.path().join("port");
-    // Sample about every allocation so the profile deterministically
-    // contains the server's startup allocations; the shipped rate samples
-    // ~1 per 512 KiB.
+    // Turn sampling on at about every allocation so the profile
+    // deterministically contains the server's startup allocations.
     // Started as `./jazz-tools`, the way operators often run it: the
     // profile must still find the executable's symbols.
     let binary = cargo_binary("jazz-tools");
@@ -1363,6 +1362,31 @@ fn jazz_tools_server_serves_a_symbolized_heap_profile_to_admins() {
     assert!(
         profile.contains("jazz_server"),
         "heap profile should be symbolized with the server's own functions"
+    );
+
+    // SAFETY: `server.id()` names the live child process spawned above.
+    let result = unsafe { libc::kill(server.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(result, 0, "send SIGTERM to jazz-tools server");
+    wait_for_successful_exit(&mut server, Duration::from_secs(10));
+}
+
+/// Sampling is opt-in: without `JAZZ_HEAP_PROFILE_SAMPLE_BYTES` alice, the
+/// admin, gets an explicit "not enabled" answer instead of an empty profile.
+#[cfg(heap_profiling)]
+#[test]
+fn jazz_tools_server_without_heap_sampling_says_it_is_not_enabled() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let port_file = temp_dir.path().join("port");
+    let mut command = jazz_tools_command_at(cargo_binary("jazz-tools"));
+    command.env_remove("JAZZ_HEAP_PROFILE_SAMPLE_BYTES");
+    let (mut server, port) = start_jazz_tools_server_with(command, &data_dir, &port_file);
+
+    let (status, body) = http_get(port, "/debug/pprof/heap", Some("sigterm-test-secret"));
+    assert_eq!(status, 404, "{}", String::from_utf8_lossy(&body));
+    assert!(
+        String::from_utf8_lossy(&body).contains("JAZZ_HEAP_PROFILE_SAMPLE_BYTES"),
+        "the answer says how to turn sampling on"
     );
 
     // SAFETY: `server.id()` names the live child process spawned above.

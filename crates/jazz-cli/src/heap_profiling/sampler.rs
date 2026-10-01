@@ -7,7 +7,10 @@
 //! for `size / (1 - exp(-size / mean))` bytes, which keeps the in-use
 //! estimate unbiased whatever the mix of allocation sizes.
 //!
-//! Unsampled calls pay one thread-local subtraction on allocation and one
+//! Sampling is off until [`enable_sampling`] is called. While it is off, each
+//! thread's first allocation parks its countdown at `i64::MAX`, so
+//! allocations pay one thread-local subtraction and deallocations one load of
+//! a flag. Once on, unsampled calls pay the subtraction on allocation and one
 //! load from a 128 KiB counting filter on deallocation; only samples and
 //! frees that hit the filter take the lock on the table of live samples.
 
@@ -15,10 +18,10 @@ use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
-/// Mean bytes allocated between samples unless [`set_sample_interval`]
-/// changes it.
+/// Mean bytes allocated between samples unless [`enable_sampling`] sets
+/// another.
 pub const DEFAULT_SAMPLE_INTERVAL: u64 = 512 * 1024;
 const MAX_FRAMES: usize = 64;
 const FILTER_SLOTS: usize = 1 << 16;
@@ -36,18 +39,25 @@ impl<A> SamplingAllocator<A> {
 }
 
 static SAMPLE_INTERVAL: AtomicU64 = AtomicU64::new(DEFAULT_SAMPLE_INTERVAL);
+static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Mean bytes allocated between samples.
 pub fn sample_interval() -> u64 {
     SAMPLE_INTERVAL.load(Ordering::Relaxed)
 }
 
-/// Change the mean bytes allocated between samples. The calling thread and
-/// threads that start later use it right away; other running threads pick
-/// it up from their next sample on, so set it before spawning threads.
-pub fn set_sample_interval(bytes: u64) {
-    let mean = bytes.max(1);
+/// Whether [`enable_sampling`] has been called.
+pub fn sampling_enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
+
+/// Start sampling, about once per `mean_bytes` allocated. The calling thread
+/// and threads that start later sample right away; threads that already
+/// allocated never do, so call it before spawning threads.
+pub fn enable_sampling(mean_bytes: u64) {
+    let mean = mean_bytes.max(1);
     SAMPLE_INTERVAL.store(mean, Ordering::Relaxed);
+    ENABLED.store(true, Ordering::Relaxed);
     COUNTDOWN.set(next_interval(mean));
 }
 
@@ -132,7 +142,7 @@ fn after_alloc(ptr: *mut u8, size: usize) {
 
 #[inline(always)]
 fn before_dealloc(ptr: *mut u8) {
-    if filter_slot(ptr as usize).load(Ordering::Relaxed) != 0 {
+    if ENABLED.load(Ordering::Relaxed) && filter_slot(ptr as usize).load(Ordering::Relaxed) != 0 {
         forget(ptr as usize);
     }
 }
@@ -140,6 +150,11 @@ fn before_dealloc(ptr: *mut u8) {
 #[cold]
 #[inline(never)]
 fn crossed_interval(ptr: usize, size: usize) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        // Never cross again on this thread.
+        COUNTDOWN.set(i64::MAX);
+        return;
+    }
     if IN_SAMPLER.get() {
         // One of the sampler's own allocations: sample a later one instead.
         return;
