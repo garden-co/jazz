@@ -30,6 +30,7 @@ deliver a rejection callback. Waited failures remain on their returned handles;
 unwaited failures retain their once-only fallback notification.
 
 Preserve checked point-snapshot observations after the core layer split.
-Initialisation propagates storage and transaction-audit decoding failures rather
-than treating an unreadable existing coordinate as absent. Legacy nonfallible
-snapshot observations keep their existing conservative exclusion behaviour.
+Initialisation propagates storage and required transaction-audit field decoding
+failures rather than treating an unreadable existing coordinate as absent.
+Coverage projects global time without decoding full payloads per row version.
+Legacy nonfallible snapshot observations keep their conservative exclusion.
