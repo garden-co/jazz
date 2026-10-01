@@ -245,6 +245,10 @@ where
     /// stay observable until every waiter that was woken by the same fate has
     /// had one polling opportunity, then are discarded before the turn ends.
     deferred_rejection_discards: RefCell<BTreeSet<TxId>>,
+    /// Upload cleanup that completed its FIFO attempt but was deferred by a
+    /// resident publication or failed storage. Never duplicated in the FIFO.
+    deferred_upload_cleanups: Rc<RefCell<BTreeSet<groove::large_values::StagedLargeValueId>>>,
+    upload_cleanup_error: Rc<RefCell<Option<Error>>>,
     queued_open_transaction_failures: RefCell<BTreeMap<OpenTransactionId, Error>>,
     reserved_mutations: RefCell<BTreeSet<TxId>>,
     pub(super) pending_transaction_abandonments: TransactionAbandonmentTombstones,
@@ -395,6 +399,8 @@ where
             transaction_wait_observers: RefCell::new(Vec::new()),
             queued_mutation_failures: RefCell::new(BTreeMap::new()),
             deferred_rejection_discards: RefCell::new(BTreeSet::new()),
+            deferred_upload_cleanups: Rc::new(RefCell::new(BTreeSet::new())),
+            upload_cleanup_error: Rc::new(RefCell::new(None)),
             queued_open_transaction_failures: RefCell::new(BTreeMap::new()),
             reserved_mutations: RefCell::new(BTreeSet::new()),
             pending_transaction_abandonments: Rc::new(RefCell::new(BTreeSet::new())),
@@ -682,6 +688,69 @@ where
                 completion,
             });
         self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    pub(super) fn enqueue_large_value_upload_cleanup(
+        &self,
+        id: groove::large_values::StagedLargeValueId,
+        completion: Option<QueuedMutationCompletion>,
+    ) {
+        let node = Rc::clone(&self.node);
+        let deferred = Rc::clone(&self.deferred_upload_cleanups);
+        let pending_error = Rc::clone(&self.upload_cleanup_error);
+        self.enqueue_transaction_cleanup_with_completion(
+            Box::pin(async move {
+                match node.lock().await.cancel_large_value_upload(id).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => {
+                        deferred.borrow_mut().insert(id);
+                        Err(Self::deferred_upload_cleanup_error())
+                    }
+                    Err(error) => {
+                        deferred.borrow_mut().insert(id);
+                        let error = Error::from(error);
+                        pending_error.borrow_mut().get_or_insert_with(|| error.clone());
+                        Err(error)
+                    }
+                }
+            }),
+            completion,
+        );
+    }
+
+    pub(super) fn deferred_upload_cleanup_error() -> Error {
+        Error::new(
+            ErrorCode::WriteRejected,
+            "large-value upload cleanup is waiting for resident publication",
+        )
+    }
+
+    /// One bounded maintenance pass. IDs remain owned across cold awaits and
+    /// cancellation; deferral never re-enqueues or schedules another host turn.
+    pub(super) async fn flush_deferred_upload_cleanups(&self, limit: usize) -> Result<bool, Error> {
+        if let Some(error) = self.upload_cleanup_error.borrow_mut().take() {
+            return Err(error);
+        }
+        let count = self.deferred_upload_cleanups.borrow().len().min(limit);
+        let mut after = None;
+        for _ in 0..count {
+            let id = {
+                let deferred = self.deferred_upload_cleanups.borrow();
+                match after {
+                    Some(id) => deferred
+                        .range((std::ops::Bound::Excluded(id), std::ops::Bound::Unbounded))
+                        .next()
+                        .copied(),
+                    None => deferred.first().copied(),
+                }
+            };
+            let Some(id) = id else { break };
+            if self.node.lock().await.cancel_large_value_upload(id).await? {
+                self.deferred_upload_cleanups.borrow_mut().remove(&id);
+            }
+            after = Some(id);
+        }
+        Ok(self.deferred_upload_cleanups.borrow().is_empty())
     }
 
     /// Whether owner-free queue waiting can coexist with semantic maintenance.
