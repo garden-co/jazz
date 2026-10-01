@@ -13,6 +13,8 @@ Add `Db.streamingTransaction` for mutation declarations that publish a new scope
 its exact initial recipients and first encrypted files together. Complete initial
 recipient device delivery after authoritative acceptance; a denied later delivery
 does not roll back accepted data and requires explicit reconciliation.
+Capture the declaring Db's access context once for staging and publication,
+preserving backend write-session and attribution boundaries.
 
 Version stream records independently from ordinary encrypted cells, including the
 cipher adapter mechanism and authenticated context. Ordinary queries return
