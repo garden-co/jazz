@@ -54,7 +54,7 @@ it.each(["delivery-missing", "protector-missing", "protector-unusable"])(
       };
       const { db: owner } = await open();
       const { material } = await owner.e2ee.recovery.create().wait();
-      const requests = await owner.all(app.__e2ee_device_requests, { tier: "edge" });
+      const requests = await owner.all(app.__e2ee_device_requests, { tier: "remote" });
       await owner.shutdown();
       if (fault !== "protector-unusable") {
         // Missing means unavailable to this client, including policy-filtered records.
@@ -73,7 +73,7 @@ it.each(["delivery-missing", "protector-missing", "protector-unusable"])(
         await deploy({ ...deployment, permissions });
       }
       const observer = await open(true);
-      expect(await observer.db.all(app.__e2ee_recovery_roots, { tier: "edge" })).toHaveLength(1);
+      expect(await observer.db.all(app.__e2ee_recovery_roots, { tier: "remote" })).toHaveLength(1);
       const error = await observer.db.e2ee.recovery
         .status(fault === "delivery-missing" ? material : undefined)
         .then(
@@ -85,7 +85,9 @@ it.each(["delivery-missing", "protector-missing", "protector-unusable"])(
       expect(String(error)).not.toContain(sensitive);
       expect(error).not.toHaveProperty("cause");
       expect(observer.saved()).toBeNull();
-      expect(await observer.db.all(app.__e2ee_device_requests, { tier: "edge" })).toEqual(requests);
+      expect(await observer.db.all(app.__e2ee_device_requests, { tier: "remote" })).toEqual(
+        requests,
+      );
       if (fault === "protector-unusable") {
         failDecrypt = false;
         expect(await observer.db.e2ee.recovery.status()).toMatchObject({

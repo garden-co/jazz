@@ -39,7 +39,7 @@ it("keeps recovery root writes account-owned and immutable while exposing only p
     const [owner, other] = clients;
     const [device] = await owner!.e2ee.devices.list();
     const [foreignDevice] = await other!.e2ee.devices.list();
-    const identity = await owner!.one(app.__e2ee_account_identities, { tier: "edge" });
+    const identity = await owner!.one(app.__e2ee_account_identities, { tier: "remote" });
     const roots = app.__e2ee_recovery_roots;
     // Inert public bytes test ordinary policy, not cryptographic recovery authority.
     const values = {
@@ -55,7 +55,7 @@ it("keeps recovery root writes account-owned and immutable while exposing only p
       signature: new Uint8Array(64),
     };
     const root = await owner!.insert(roots, values).wait({ tier: "global" });
-    expect(await other!.all(roots, { tier: "edge" })).toEqual([root]);
+    expect(await other!.all(roots, { tier: "remote" })).toEqual([root]);
     await expect(other!.insert(roots, values).wait({ tier: "global" })).rejects.toThrow();
     await expect(
       owner!.insert(roots, { ...values, signerId: foreignDevice!.id }).wait({ tier: "global" }),
@@ -71,7 +71,7 @@ it("keeps recovery root writes account-owned and immutable while exposing only p
       ).rejects.toThrow();
       await expect(client.delete(roots, root.id).wait({ tier: "global" })).rejects.toThrow();
     }
-    expect(await owner!.one(roots.where({ id: root.id }), { tier: "edge" })).toEqual(root);
+    expect(await owner!.one(roots.where({ id: root.id }), { tier: "remote" })).toEqual(root);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

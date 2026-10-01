@@ -66,7 +66,7 @@ it("inspects recovery registration without enrolling a device or claiming recove
       code: "recovery-root-mismatch",
       message: "Recovery material does not match an accepted recovery root",
     });
-    const requests = await owner.all(deviceRequestApp.__e2ee_device_requests, { tier: "edge" });
+    const requests = await owner.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" });
     await owner.shutdown();
 
     const configured = await observer.e2ee.recovery.status();
