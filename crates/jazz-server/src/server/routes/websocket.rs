@@ -3571,7 +3571,7 @@ mod tests {
         let core = JazzServer::builder()
             .with_schema(schema)
             .with_storage_factory(std::sync::Arc::new(FailNextAccountFlushFactory {
-                inner: jazz_storage_rocksdb::RocksDbStorageFactory,
+                inner: jazz_storage_rocksdb::RocksDbStorageFactory::default(),
                 fail_next_account_flush: fail.clone(),
             }))
             .start()
@@ -3753,7 +3753,7 @@ mod tests {
         let core = JazzServer::builder()
             .with_persistent_storage()
             .with_storage_factory(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             ))
             .start()
             .await
