@@ -696,7 +696,8 @@ impl Query {
         self
     }
 
-    pub(crate) fn uses_authorized_created_sources(&self) -> bool {
+    #[doc(hidden)]
+    pub fn uses_authorized_created_sources(&self) -> bool {
         self.joins.iter().any(join_has_created_source)
             || self
                 .policy_branches

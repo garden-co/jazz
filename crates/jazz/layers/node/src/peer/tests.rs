@@ -1383,7 +1383,7 @@ fn open_node_with_schema(
 ) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
-    let storage = crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+    let storage = crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
         &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
         temp_dir.path().to_path_buf(),
         cfs,
