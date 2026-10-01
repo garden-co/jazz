@@ -121,6 +121,21 @@ pub async fn run(
                 shutdown.active_websockets() as u64
             })
         });
+    #[cfg(feature = "otel")]
+    let _rocksdb_memory_gauge = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .is_ok()
+        .then(|| {
+            let meter = opentelemetry::global::meter("jazz-server");
+            jazz_otel::register_rocksdb_memory_gauge(&meter, || {
+                let usage = jazz_storage_rocksdb::process_memory_usage()?;
+                Some(vec![
+                    ("block_cache", usage.block_cache_bytes),
+                    ("block_cache_pinned", usage.block_cache_pinned_bytes),
+                    ("memtables", usage.memtable_bytes),
+                    ("table_readers", usage.table_reader_bytes),
+                ])
+            })
+        });
     let shutdown_budget = shutdown_timeout
         .saturating_mul(2)
         .saturating_add(Duration::from_secs(5));
