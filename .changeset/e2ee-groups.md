@@ -1,5 +1,5 @@
 ---
-"jazz-tools": minor
+"jazz-tools": patch
 ---
 
 Add explicit authenticated groups with nested membership, signed key epochs,
