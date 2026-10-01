@@ -168,6 +168,7 @@ pub enum TestStorageOperation {
     ApproximateClassBytes,
     Reopen,
 }
+type WriteManyAcknowledgementLossCondition = Box<dyn Fn(&[OwnedWriteOperation]) -> bool>;
 
 struct ControlState {
     yield_before_ready: bool,
@@ -187,7 +188,7 @@ struct ControlState {
     failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
     definitely_uncommitted_failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
     lost_write_many_acknowledgements: usize,
-    lost_write_many_acknowledgement_condition: Option<Box<dyn Fn(&[OwnedWriteOperation]) -> bool>>,
+    lost_write_many_acknowledgement_condition: Option<WriteManyAcknowledgementLossCondition>,
 }
 
 impl ControlState {

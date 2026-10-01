@@ -5519,7 +5519,10 @@ fn streaming_promotion_ack_loss_releases_the_original_upload_receipt() {
             Ok(_) => panic!("the committed promotion must report its lost acknowledgement"),
             Err(_) => {}
         };
-        assert!(promotion_committed.get(), "the injected failure must follow durable promotion");
+        assert!(
+            promotion_committed.get(),
+            "the injected failure must follow durable promotion"
+        );
         assert_eq!(
             alice
                 .node
@@ -5581,36 +5584,67 @@ fn streaming_finish_cancellation_after_promotion_releases_unpublished_receipt() 
             ..Default::default()
         });
         let target = row(0xf4);
-        alice.insert(
-            "todos",
-            doctest_support::todo_cells("before", false),
-            InsertOptions { row_id: Some(target), ..Default::default() },
-        ).await.unwrap();
+        alice
+            .insert(
+                "todos",
+                doctest_support::todo_cells("before", false),
+                InsertOptions {
+                    row_id: Some(target),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         let cells = BTreeMap::from([("done".to_owned(), Value::Bool(true))]);
-        let mut upload = alice.begin_streaming_value_upload("todos", &cells, "title").unwrap();
-        alice.push_streaming_value_upload(&mut upload, b"unpublished replacement").await.unwrap();
+        let mut upload = alice
+            .begin_streaming_value_upload("todos", &cells, "title")
+            .unwrap();
+        alice
+            .push_streaming_value_upload(&mut upload, b"unpublished replacement")
+            .await
+            .unwrap();
         eviction.evict_all();
         let scans_before = control.poll_count(groove::storage::TestStorageOperation::ScanOpen);
         control.pause_on(groove::storage::TestStorageOperation::ScanOpen);
         let mut finish = Box::pin(alice.finish_streaming_value_upload(
-            upload, StreamingMutationKind::Update, "todos", target, cells, "title",
-            WriteIdentity::Database, None, None, None,
+            upload,
+            StreamingMutationKind::Update,
+            "todos",
+            target,
+            cells,
+            "title",
+            WriteIdentity::Database,
+            None,
+            None,
+            None,
         ));
         let mut context = Context::from_waker(Waker::noop());
         let mut suspended_on_publication = false;
         for _ in 0..512 {
-            assert!(matches!(finish.as_mut().poll(&mut context), Poll::Pending),
-                "the cold publication must remain cancellable");
+            assert!(
+                matches!(finish.as_mut().poll(&mut context), Poll::Pending),
+                "the cold publication must remain cancellable"
+            );
             if control.poll_count(groove::storage::TestStorageOperation::ScanOpen) > scans_before {
                 suspended_on_publication = true;
                 break;
             }
         }
-        assert!(suspended_on_publication, "the replacement must reach its cold row read");
+        assert!(
+            suspended_on_publication,
+            "the replacement must reach its cold row read"
+        );
         drop(finish);
         control.resume_operation(groove::storage::TestStorageOperation::ScanOpen);
         assert_eq!(
-            alice.node.node.lock().await.staged_large_value_count_for_test().await.unwrap(),
+            alice
+                .node
+                .node
+                .lock()
+                .await
+                .staged_large_value_count_for_test()
+                .await
+                .unwrap(),
             1,
             "publication was cancelled only after promotion produced a receipt",
         );
@@ -5618,7 +5652,14 @@ fn streaming_finish_cancellation_after_promotion_releases_unpublished_receipt() 
             alice.tick().await.unwrap();
         }
         assert_eq!(
-            alice.node.node.lock().await.staged_large_value_count_for_test().await.unwrap(),
+            alice
+                .node
+                .node
+                .lock()
+                .await
+                .staged_large_value_count_for_test()
+                .await
+                .unwrap(),
             0,
             "cancellation must retain origin cleanup ownership through publication",
         );
@@ -5644,16 +5685,43 @@ fn streaming_cleanup_deferred_by_publication_keeps_close_retryable() {
             ..Default::default()
         });
         let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
-        let mut abandoned = alice.begin_streaming_value_upload("todos", &cells, "title").unwrap();
-        alice.push_streaming_value_upload(&mut abandoned, b"abandoned").await.unwrap();
-        let mut published = alice.begin_streaming_value_upload("todos", &cells, "title").unwrap();
-        alice.push_streaming_value_upload(&mut published, b"published").await.unwrap();
+        let mut abandoned = alice
+            .begin_streaming_value_upload("todos", &cells, "title")
+            .unwrap();
+        alice
+            .push_streaming_value_upload(&mut abandoned, b"abandoned")
+            .await
+            .unwrap();
+        let mut published = alice
+            .begin_streaming_value_upload("todos", &cells, "title")
+            .unwrap();
+        alice
+            .push_streaming_value_upload(&mut published, b"published")
+            .await
+            .unwrap();
         alice.set_deferred_local_persistence(true);
-        let write = alice.finish_streaming_value_upload(
-            published, StreamingMutationKind::Insert, "todos", row(0xf5), cells, "title",
-            WriteIdentity::Database, None, None, None,
-        ).await.unwrap();
-        assert_eq!(alice.write_state(write.mergeable_tx_id()).unwrap().durability, DurabilityTier::None);
+        let write = alice
+            .finish_streaming_value_upload(
+                published,
+                StreamingMutationKind::Insert,
+                "todos",
+                row(0xf5),
+                cells,
+                "title",
+                WriteIdentity::Database,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            alice
+                .write_state(write.mergeable_tx_id())
+                .unwrap()
+                .durability,
+            DurabilityTier::None
+        );
         drop(abandoned);
 
         let mut closing = Box::pin(alice.close());
@@ -5666,13 +5734,23 @@ fn streaming_cleanup_deferred_by_publication_keeps_close_retryable() {
             }
         }
         drop(closing);
-        let error = outcome.expect("close must not wait behind a resident publication")
+        let error = outcome
+            .expect("close must not wait behind a resident publication")
             .expect_err("unresolved upload cleanup must keep storage open");
         assert_eq!(error.code, ErrorCode::WriteRejected);
         alice.tick().await.unwrap();
-        assert_eq!(alice.write_state(write.mergeable_tx_id()).unwrap().durability, DurabilityTier::Local);
         assert_eq!(
-            streamed_todo(&alice, row(0xf5)).await.unwrap().unwrap()
+            alice
+                .write_state(write.mergeable_tx_id())
+                .unwrap()
+                .durability,
+            DurabilityTier::Local
+        );
+        assert_eq!(
+            streamed_todo(&alice, row(0xf5))
+                .await
+                .unwrap()
+                .unwrap()
                 .cell(&alice.schema.tables[0], "title"),
             Some(Value::String("published".to_owned())),
         );
