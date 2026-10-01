@@ -272,6 +272,169 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     assert_eq!(after_delete.rows[0].row_uuid(), inherited);
 }
 
+/// Alice's branch INSERT must use accepted evidence, never the main rows in
+/// its own unit (SPEC 7, INV-RLS-9). This uses the authority ingress seam
+/// because a public client cannot choose the incoming unit's exact versions
+/// and branch-write provenance. The preaccepted control proves that the real
+/// INSERT policy and ExactHeadInsert descriptor otherwise authorize the row.
+///
+/// ```text
+/// alice --tx{ grant, filler, branch doc }--> authority --> denied
+/// alice --grant--> authority --> Global
+/// alice --tx{ grant, filler, branch doc }--> authority --> accepted
+/// ```
+#[test]
+fn branch_insert_cannot_use_grounded_main_rows_from_same_commit_unit() {
+    let insert_policy = PublicPolicyExpr::Exists {
+        table: "grants".to_owned(),
+        condition: Box::new(PublicPolicyExpr::And(vec![
+            public_claim_eq("owner", "sub"),
+            public_literal_eq("kind", PublicValue::Text("grant".to_owned())),
+        ])),
+    };
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("grants")
+                    .column("owner", PublicColumnType::Uuid)
+                    .column("kind", PublicColumnType::Text)
+                    .policies(public_owner_policies("owner")),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("branch_docs")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .column("owner", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_insert(insert_policy),
+                    ),
+            ),
+    );
+    let alice = user(0xa1);
+    let main_rows = [row(0x75), row(0x76)];
+    let branch_row = row(0x77);
+    let head = branch_selector(0x78);
+    let grant_cells = |kind: &str| {
+        BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
+            ("kind".to_owned(), v(kind)),
+        ])
+    };
+    let branch_table = schema.tables.iter().find(|table| table.name == "branch_docs").unwrap();
+    let (head_key, mut branch_cells) = schema.project_branch_selector(branch_table, &head).unwrap();
+    branch_cells.extend(BTreeMap::from([
+        ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
+        ("title".to_owned(), v("requires an accepted grant")),
+    ]));
+
+    // Run the valid positive control first, so descriptor/schema mistakes
+    // cannot masquerade as the expected policy denial.
+    for preaccepted_witness in [true, false] {
+        let (_dir, mut authority) = open_history_complete_node_with_schema(node(0x79), schema.clone());
+        install_test_uuid_sub_claim(&mut authority, alice);
+        if preaccepted_witness {
+            let witness_tx = authority
+                .commit_mergeable_settled(
+                    MergeableCommit::new("grants", row(0x7a), 10)
+                        .made_by(alice)
+                        .cells(grant_cells("grant")),
+                )
+                .unwrap();
+            authority.finalize_local_mergeable_commit_settled(witness_tx).unwrap();
+            assert!(matches!(
+                authority.transaction_state_settled(witness_tx),
+                Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+            ));
+        }
+
+        let tx_id = TxId::new(TxTime::from(20), node(0x7b));
+        let make_version = |table_name: &str, row_uuid, cells: &BTreeMap<String, Value>| {
+            let table = schema.tables.iter().find(|table| table.name == table_name).unwrap();
+            VersionRecord::from_cells(
+                table,
+                schema.version_id(),
+                row_uuid,
+                Vec::new(),
+                alice,
+                tx_id.time.physical_ms(),
+                alice,
+                tx_id.time.physical_ms(),
+                cells,
+                None,
+            )
+            .unwrap()
+        };
+        // Two independently authorized main rows are necessary to activate
+        // the ordinary unit overlay. Only the first matches the doc's EXISTS.
+        let versions = vec![
+            make_version("grants", main_rows[0], &grant_cells("grant")),
+            make_version("grants", main_rows[1], &grant_cells("filler")),
+            make_version("branch_docs", branch_row, &branch_cells)
+                .with_branch_key(head_key.clone()),
+        ];
+        let tx = Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: 3,
+            made_by: alice,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: Some(crate::tx::ContributionMergeProvenance {
+                source: BranchKey::default(),
+                target: BranchKey::default(),
+                substitutions: Vec::new(),
+                branch_view_copies: Vec::new(),
+                branch_write_intents: vec![crate::tx::BranchWriteIntent {
+                    version: 1,
+                    physical_table_id: authority
+                        .physical_table_id_for_schema(schema.version_id(), "branch_docs")
+                        .unwrap(),
+                    authored_schema: schema.version_id(),
+                    row_uuid: branch_row,
+                    head: head_key.clone(),
+                    operation: crate::tx::BranchWriteOperation::ExactHeadInsert,
+                }],
+            }),
+        };
+        let outcome =
+            crate::local_executor::block_on(authority.ingest_commit_unit(tx, versions, 20)).unwrap();
+        settle_outcome(&mut authority, outcome).unwrap();
+
+        let branch_visible = authority
+            .visible_current_cells_in_branch("branch_docs", &head, branch_row)
+            .unwrap();
+        if preaccepted_witness {
+            assert!(matches!(
+                authority.transaction_state_settled(tx_id),
+                Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+            ));
+            assert_eq!(branch_visible, Some(branch_cells.clone()));
+            for (main_row, kind) in main_rows.into_iter().zip(["grant", "filler"]) {
+                assert_eq!(
+                    authority.visible_current_cells("grants", main_row).unwrap(),
+                    Some(grant_cells(kind))
+                );
+            }
+        } else {
+            assert!(matches!(
+                authority.transaction_state_settled(tx_id),
+                Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+            ), "a branch INSERT must not borrow its own unit's grounded main grant");
+            assert_eq!(branch_visible, None);
+            for main_row in main_rows {
+                assert_eq!(authority.visible_current_cells("grants", main_row).unwrap(), None);
+            }
+        }
+    }
+}
+
 /// A first branch-head overlay has no legal cross-branch history parent.
 /// This receipt exercises the authority boundary directly because the
 /// observable contract is an accept/reject fate for an incoming commit unit:
