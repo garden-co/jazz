@@ -97,7 +97,7 @@ it.each(["private-signature", "device-envelope", "delivery-verification"])(
         fault === "private-signature"
           ? deviceRequestApp.__e2ee_device_approvals
           : deviceRequestApp.__e2ee_device_deliveries;
-      expect(await second.all<{ id: string }>(table, { tier: "edge" })).toEqual([]);
+      expect(await second.all<{ id: string }>(table, { tier: "remote" })).toEqual([]);
       corrupt = false;
       await second.e2ee.recovery.use(material).wait();
       expect(await second.e2ee.devices.list()).toContainEqual(
@@ -243,10 +243,10 @@ it("publishes neither recovery approval when the public approval write is refuse
     const { material } = await owner.e2ee.recovery.create().wait();
     const pending = (await recovering.e2ee.devices.list()).find((row) => row.id !== creator!.id)!;
     const privateBefore = await recovering.all(deviceRequestApp.__e2ee_device_approvals, {
-      tier: "edge",
+      tier: "remote",
     });
     const publicBefore = await recovering.all(deviceRequestApp.__e2ee_public_device_approvals, {
-      tier: "edge",
+      tier: "remote",
     });
     const originalTransaction = recovering.transaction.bind(recovering);
     let injected = 0;
@@ -287,10 +287,10 @@ it("publishes neither recovery approval when the public approval write is refuse
     await expect(recovering.e2ee.recovery.use(material).wait()).rejects.toThrow();
     expect(injected).toBe(1);
     expect(
-      await recovering.all(deviceRequestApp.__e2ee_device_approvals, { tier: "edge" }),
+      await recovering.all(deviceRequestApp.__e2ee_device_approvals, { tier: "remote" }),
     ).toEqual(privateBefore);
     expect(
-      await recovering.all(deviceRequestApp.__e2ee_public_device_approvals, { tier: "edge" }),
+      await recovering.all(deviceRequestApp.__e2ee_public_device_approvals, { tier: "remote" }),
     ).toEqual(publicBefore);
 
     transactionFault.mockRestore();
