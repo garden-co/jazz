@@ -451,7 +451,7 @@ export default function HomePage() {
                 muted
                 loop
                 playsInline
-                aria-label="Two browser windows running the StagePlan example, a crew chief and a crew member on the same show board. A task added or a card moved in one appears in the other; edits made with sync turned off arrive when it is turned back on."
+                aria-label="Two laptops running the StagePlan example, a crew chief and a crew member on the same show board. A task added or a card moved on one appears on the other, and a comment shows up live in the task the other has open. Edits made with the laptop's Wi-Fi turned off arrive when it is turned back on."
               />
             </Figure>
           </div>
