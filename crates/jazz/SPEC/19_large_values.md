@@ -294,12 +294,12 @@ admission; physical storage-close errors remain terminal. Uploads hold only a we
 runtime reference; cleanup is not guaranteed after that owner closes or disappears.
 
 Retries must preserve the original exclusive evidence, never convert the upload
-to a mergeable write or refresh away stale dependencies. The existing durable
-exclusive restart limitation remains: reconstructed transactions lacking their
-read evidence fail closed at authority admission (§3.7, issue #3228). Reopening
-does not erase rejected payload bytes; they remain until normal explicit
-acknowledgement/discard. This addition does not define a new durable evidence or
-Groove encoding.
+to a mergeable write or refresh away stale dependencies. New durable exclusive
+transactions retain their exact scoped read evidence across reopen (§3.7);
+legacy reconstructed transactions without that evidence fail closed at authority
+admission. Reopening does not erase rejected payload bytes; they remain until
+normal explicit acknowledgement/discard. The durable evidence envelope does not
+change Groove's large-value encoding.
 
 Behavioural receipts are `staged_streaming_attaches_atomically_and_only_once`,
 `staged_streaming_rejects_foreign_runtime_identity_and_mergeable_transaction`,
