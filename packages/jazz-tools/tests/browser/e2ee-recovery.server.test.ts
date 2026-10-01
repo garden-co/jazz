@@ -50,7 +50,7 @@ it.each(["material", "protected", "external"])(
       const { material } = await first.e2ee.recovery.create().wait();
       if (mode === "external") {
         expect(
-          await first.all(deviceRequestApp.__e2ee_recovery_protectors, { tier: "edge" }),
+          await first.all(deviceRequestApp.__e2ee_recovery_protectors, { tier: "remote" }),
         ).toEqual([]);
       }
       await first.shutdown();
