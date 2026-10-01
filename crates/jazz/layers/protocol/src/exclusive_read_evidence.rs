@@ -317,8 +317,7 @@ pub fn evidence_slot_values(tx: &Transaction) -> Result<[Value; 4], Error> {
             && decoded.row_read_set == tx.row_read_set
             && decoded.absent_read_set == tx.absent_read_set
             && match decoded.predicate_read_set.as_deref() {
-                Some(reads) => encode_predicate_reads(reads)
-                    .is_ok_and(|bytes| bytes == predicate),
+                Some(reads) => encode_predicate_reads(reads).is_ok_and(|bytes| bytes == predicate),
                 None => predicate.is_none(),
             }
     });
@@ -584,10 +583,7 @@ mod tests {
     }
 
     fn encoded(tx: &Transaction) -> [Option<Vec<u8>>; 4] {
-        evidence_slot_values(tx)
-            .unwrap()
-            .each_ref()
-            .map(slot_bytes)
+        evidence_slot_values(tx).unwrap().each_ref().map(slot_bytes)
     }
 
     fn decode(slots: &[Option<Vec<u8>>; 4]) -> Result<StoredEvidence, Error> {
@@ -644,7 +640,9 @@ mod tests {
             Value::U64(1),
             Value::String("exclusive".to_owned()),
             Value::U32(1),
-            RowAuthor::from_persisted_subject(tx.made_by).unwrap().to_value(),
+            RowAuthor::from_persisted_subject(tx.made_by)
+                .unwrap()
+                .to_value(),
         ];
         values.extend(evidence_slot_values(&tx).unwrap());
         values.extend([
@@ -663,9 +661,10 @@ mod tests {
         let descriptor = schema.table("jazz_transactions").unwrap().record_schema();
         let validate = |values: &[Value]| {
             let bytes = descriptor.create(values).unwrap();
-            validate_epoch_one_transaction_record(
-                groove::records::BorrowedRecord::new(&bytes, &descriptor),
-            )
+            validate_epoch_one_transaction_record(groove::records::BorrowedRecord::new(
+                &bytes,
+                &descriptor,
+            ))
         };
         let slots = values[5..9]
             .iter()
@@ -689,16 +688,24 @@ mod tests {
         for index in 5..9 {
             let mut partial = values.clone();
             partial[index] = Value::Nullable(None);
-            assert!(matches!(validate(&partial), Err(Error::InvalidStoredValue(_))));
+            assert!(matches!(
+                validate(&partial),
+                Err(Error::InvalidStoredValue(_))
+            ));
 
             let mut malformed = values.clone();
-            malformed[index] =
-                Value::Nullable(Some(Box::new(Value::Bytes(vec![0]))));
-            assert!(matches!(validate(&malformed), Err(Error::InvalidStoredValue(_))));
+            malformed[index] = Value::Nullable(Some(Box::new(Value::Bytes(vec![0]))));
+            assert!(matches!(
+                validate(&malformed),
+                Err(Error::InvalidStoredValue(_))
+            ));
         }
         let mut wrong_kind = values;
         wrong_kind[2] = Value::String("mergeable".to_owned());
-        assert!(matches!(validate(&wrong_kind), Err(Error::InvalidStoredValue(_))));
+        assert!(matches!(
+            validate(&wrong_kind),
+            Err(Error::InvalidStoredValue(_))
+        ));
     }
 
     /// A predicate read v1 cannot represent stores nothing, which fails closed
