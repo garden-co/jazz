@@ -55,7 +55,7 @@ export class E2ee {
     list: async (): Promise<DeviceInfo[]> => {
       await this.prepare();
       const { approved, verified, revoked } = await this.approval!.deviceStates();
-      const rows = await this.db.all(this.app.__e2ee_device_requests, { tier: "edge" });
+      const rows = await this.db.all(this.app.__e2ee_device_requests, { tier: "global" });
       this.assertOpen();
       return rows.map((row) => ({
         id: row.id,
@@ -136,7 +136,7 @@ export class E2ee {
       // A later disconnect must not cache skipped enrolment as successful.
       {
         const query = requests.where({ id: device.id });
-        let row = await this.db.one(query, { tier: "edge" });
+        let row = await this.db.one(query, { tier: "global" });
         if (!row) {
           this.assertOpen();
           try {
@@ -154,10 +154,10 @@ export class E2ee {
                 },
                 { id: device.id },
               )
-              .wait({ tier: "edge" });
+              .wait({ tier: "global" });
           } catch (error) {
             // Another context may have published this same durable proposal.
-            row = await this.db.one(query, { tier: "edge" });
+            row = await this.db.one(query, { tier: "global" });
             if (!row) throw error;
           }
         }
@@ -174,7 +174,7 @@ export class E2ee {
           throw new Error("E2EE device request does not match the locally retained key");
         const publicKeys = this.app.__e2ee_device_keys;
         const publicQuery = publicKeys.where({ deviceId: device.id });
-        if (!(await this.db.one(publicQuery, { tier: "edge" }))) {
+        if (!(await this.db.one(publicQuery, { tier: "global" }))) {
           this.assertOpen();
           try {
             await this.db
@@ -187,10 +187,10 @@ export class E2ee {
                 signingMechanism: row.signingMechanism,
                 signingVersion: row.signingVersion,
               })
-              .wait({ tier: "edge" });
+              .wait({ tier: "global" });
           } catch (error) {
             // Concurrent contexts may publish the same immutable, policy-checked keys.
-            if (!(await this.db.one(publicQuery, { tier: "edge" }))) throw error;
+            if (!(await this.db.one(publicQuery, { tier: "global" }))) throw error;
           }
         }
         this.assertOpen();
