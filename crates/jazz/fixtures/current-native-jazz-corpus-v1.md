@@ -27,6 +27,10 @@ author aliases (`jazz.history-version-current.v4`, `groove.durable-index.v2`,
 families `jazz_deletion_history`, `jazz_global_changes`, `jazz_merge_heads`,
 `jazz_pending_edges` and the `*_register*` families no longer exist; per-tx
 touched rows live in `jazz_tx_touched_rows`.
+History records carry an empty `counter_signs` byte string after
+`authored_columns` (SPEC 4 §4.3) and a 4-byte author alias into
+`jazz_authors` (see below), so the history bytes and every digest below
+were regenerated when each of those was added.
 
 | Store                               | Entries |
 | ----------------------------------- | ------: |
@@ -70,7 +74,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `431a5fe1b69fbc796bd5ef8a7fbd257d78ddf5aded8f4c5de9fdb8f29cab0a87` |
-| SQLite payload      | `8f852a8a4f064cb28240eb8dad6b4b2221d424272fd9981152d126e02e45263c` |
-| gzip SQLite archive | `a2ada226fd83cd49395466f7b896e9febe20bb597c506d1fd2c1a64a6904f4d3` |
-| RocksDB archive     | `67733266dc23d0835e6f29203909d08f0f0c9e9f31f3be77172faa40c08946b4` |
+| logical pack        | `7e4047bd225a5aabc4b57d6e7876ded98e14c5aa459215abe452912747d7e732` |
+| SQLite payload      | `f0b04ee9313a2cd5dd9d55d6355999c1f13cb535f6b0001144d9dcebde6b5368` |
+| gzip SQLite archive | `502b5f7b076307e0db90864f50e87baabcaea2206a15a88e176de717fc46da9e` |
+| RocksDB archive     | `1dd4a7b6e2852fe6aa1183170cf2e454cbe218aba6e15ab4abb1af12271f482b` |
