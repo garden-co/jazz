@@ -57,6 +57,21 @@ authenticate its verification marker before reporting itself active.
 Temporary generated/opened secrets and marker buffers are cleared;
 other devices remain pending and cannot cause an existing identity to reset.
 
+Automatic offline creation additionally requires durable first-device ownership
+in the shared account-selection store. This private v3 inventory preserves
+secret roots, selection and generation provenance, and records eligibility plus
+one device/epoch claim per root and full application scope. Ordinary v1/v2
+migration does not infer eligibility from old generation provenance; valid
+candidate-v2 ownership extensions retain their claims and eligibility.
+
+Reservation precedes durable founder-journal creation, and exact epoch binding
+precedes publication. A bound claim requires the original matching journal;
+missing or changed journals cannot regenerate a founder. The exact original
+journal may resume through an imported account store. Handle invalidation
+rejects subsequent ownership operations without deleting the durable claim.
+This arbitration protects managers sharing one atomic store, not independent
+stores, and never substitutes for Global identity acceptance or device approval.
+
 ## Device approval records, version 1
 
 Approval records bind one accepted account epoch; successor records rotate it.

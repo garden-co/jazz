@@ -35,3 +35,14 @@ Initialisation propagates storage and required transaction-audit field decoding
 failures rather than treating an unreadable existing coordinate as absent.
 Coverage projects global time without decoding full payloads per row version.
 Legacy nonfallible snapshot observations keep their conservative exclusion.
+
+Preserve first-device ownership in a compatible v3 account inventory. Retain
+ordinary v1/v2 roots and selection without inferring unknown founder eligibility,
+and preserve valid candidate-v2 claims. A second device sharing the store cannot
+replace a bound offline founder, and a missing original journal cannot regenerate
+its epoch. Exact original journals remain resumable after recovery import.
+
+Keep accepted mergeable encryption usable under a pending local root deletion,
+while provisional and exclusive writes retain their transaction-snapshot guard.
+Optional accepted-history cache failure no longer rejects an accepted commit or
+verified read; durable offline reopening still requires a successfully saved cache.

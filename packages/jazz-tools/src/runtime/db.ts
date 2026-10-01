@@ -1842,12 +1842,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         db,
         scope,
         identifier,
-        async (secret, root) => {
-          const rootQuery = new TypedTableQueryBuilder("__e2ee_spaces", scope._schema)
-            .where({ id: root.id })
-            .select("id");
-          if (!(await readTransactionRows(rootQuery, { tier: "local" }, false, binding, io)).length)
-            throw new E2eeDataError("key-unavailable");
+        async (secret, root, source) => {
+          if (source === "provisional" || this.kind === "exclusive") {
+            const rootQuery = new TypedTableQueryBuilder("__e2ee_spaces", scope._schema)
+              .where({ id: root.id })
+              .select("id");
+            if (
+              !(await readTransactionRows(rootQuery, { tier: "local" }, false, binding, io)).length
+            )
+              throw new E2eeDataError("key-unavailable");
+          }
           entered = true;
           await stage(secret, root);
         },
