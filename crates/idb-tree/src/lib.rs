@@ -1407,8 +1407,8 @@ impl<S: PageStore> TreeCore<S> {
                 page_size: self.options.page_size,
             });
         }
-        let split = page::leaf_split_index(entries, self.options.page_size)
-            .ok_or(Error::PageTooLarge {
+        let split =
+            page::leaf_split_index(entries, self.options.page_size).ok_or(Error::PageTooLarge {
                 page_id,
                 page_size: self.options.page_size,
             })?;
