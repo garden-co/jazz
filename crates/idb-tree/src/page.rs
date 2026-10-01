@@ -105,7 +105,7 @@ pub(crate) fn leaf_split_index(
     const LEAF_OVERHEAD: usize = HEADER_LEN + 1 + 4;
     const ROOT_OVERHEAD: usize = HEADER_LEN + 1 + 4 + 4 + 4 + 2 * 8;
     let total = entries.iter().try_fold(0usize, |total, (key, value)| {
-        total.checked_add(leaf_entry_len(key, value)?)
+        total.checked_add(leaf_entry_len(key, value))
     })?;
     let capacity = page_size.checked_sub(LEAF_OVERHEAD)?;
     let mut left = 0usize;
@@ -115,7 +115,7 @@ pub(crate) fn leaf_split_index(
         .enumerate()
         .take(entries.len().saturating_sub(1))
     {
-        left += leaf_entry_len(key, value)?;
+        left += leaf_entry_len(key, value);
         let right = total - left;
         let separator_len = entries[index + 1].0.len();
         if left > capacity
@@ -130,14 +130,6 @@ pub(crate) fn leaf_split_index(
         }
     }
     best.map(|(_, index)| index)
-}
-
-fn leaf_entry_len(key: &[u8], value: &ValueCell) -> Option<usize> {
-    let value_len = match value {
-        ValueCell::Inline(bytes) => 4usize.checked_add(bytes.len())?,
-        ValueCell::Overflow { .. } => 8 + 8,
-    };
-    key.len().checked_add(4 + 1)?.checked_add(value_len)
 }
 
 /// Encode one page using the fixed IDBTree v1 storage format.
