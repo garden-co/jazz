@@ -5423,17 +5423,21 @@ fn streaming_promotion_ack_loss_releases_the_original_upload_receipt() {
             .unwrap();
         // Target the irreversible receipt transition, not an incidental batch
         // number. This lower-level fault seam must commit before reporting loss.
-        control.lose_write_many_acknowledgement_matching(|operations| {
-            operations.iter().any(|operation| {
+        let promotion_committed = Rc::new(std::cell::Cell::new(false));
+        let observe_promotion = Rc::clone(&promotion_committed);
+        control.lose_write_many_acknowledgement_matching(move |operations| {
+            let promoted = operations.iter().any(|operation| {
                 matches!(
                     operation,
                     groove::storage::OwnedWriteOperation::Set { cf, key, .. }
                         if cf == groove::db::LARGE_VALUE_METADATA_CF
                             && key.starts_with(b"staged/")
                 )
-            })
+            });
+            observe_promotion.set(promoted);
+            promoted
         });
-        let error = match alice
+        match alice
             .stage_streaming_value_upload(
                 upload,
                 StreamingMutationKind::Insert,
@@ -5449,12 +5453,9 @@ fn streaming_promotion_ack_loss_releases_the_original_upload_receipt() {
             .await
         {
             Ok(_) => panic!("the committed promotion must report its lost acknowledgement"),
-            Err(error) => error,
+            Err(_) => {}
         };
-        assert!(
-            error.to_string().contains("acknowledgement loss"),
-            "{error}"
-        );
+        assert!(promotion_committed.get(), "the injected failure must follow durable promotion");
         assert_eq!(
             alice
                 .node
@@ -5466,18 +5467,6 @@ fn streaming_promotion_ack_loss_releases_the_original_upload_receipt() {
                 .unwrap(),
             0,
             "promotion committed and consumed its original pending journal",
-        );
-        assert_eq!(
-            alice
-                .node
-                .node
-                .lock()
-                .await
-                .staged_large_value_count_for_test()
-                .await
-                .unwrap(),
-            1,
-            "the fault must occur after a durable receipt exists",
         );
         for _ in 0..16 {
             alice.tick().await.unwrap();

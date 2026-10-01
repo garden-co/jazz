@@ -636,6 +636,11 @@ where
         // owner enters Closing it retains this Db and awaits every operation
         // it already accepted, in FIFO order, before storage is retired.
         self.node.drain_queued_mutations().await;
+        if !self.node.flush_deferred_upload_cleanups(usize::MAX).await? {
+            // Closing is retryable: ticks may settle already-admitted
+            // publications, but storage must remain open until debt retires.
+            return Err(Node::<S>::deferred_upload_cleanup_error());
+        }
         // Local waits that became satisfied during the drain complete
         // normally. Higher-tier waits cannot make further progress after
         // retirement, so the shared Closing state terminalizes them instead
@@ -737,15 +742,8 @@ where
         let result = Rc::new(RefCell::new(None));
         let id = upload.cleanup_id();
         let completion_result = Rc::clone(&result);
-        let node = Rc::clone(&self.node.node);
-        self.node.enqueue_transaction_cleanup_with_completion(
-            Box::pin(async move {
-                node.lock()
-                    .await
-                    .evict_pending_large_value_upload(id)
-                    .await
-                    .map_err(Error::from)
-            }),
+        self.node.enqueue_large_value_upload_cleanup(
+            id,
             Some(Box::new(move |outcome| {
                 *completion_result.borrow_mut() = Some(outcome);
             })),
@@ -1385,6 +1383,7 @@ where
         self.node.poll_transaction_wait_observers();
         if self.node.owner_is_available_or_wake_when_released() {
             self.flush_deferred_rejection_discards_after_tick().await?;
+            self.node.flush_deferred_upload_cleanups(1).await?;
         }
         Ok(())
     }
@@ -1418,6 +1417,7 @@ where
         self.node.poll_transaction_wait_observers();
         if self.node.owner_is_available_or_wake_when_released() {
             self.flush_deferred_rejection_discards_after_tick().await?;
+            self.node.flush_deferred_upload_cleanups(1).await?;
         }
         Ok(stats)
     }

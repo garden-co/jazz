@@ -1524,6 +1524,35 @@ impl Database {
         Ok(true)
     }
 
+    /// Cancel an upload by its original identity, including an unpublished
+    /// receipt created by a possibly-committed promotion. Returns `true` once
+    /// its claim is absent, retired, or transferred into a publication.
+    /// Returns `false` without mutation while resident publication owns the
+    /// lifecycle guard; the live owner must retry after publication settles.
+    pub async fn cancel_large_value_upload(
+        &self,
+        id: crate::large_values::StagedLargeValueId,
+    ) -> Result<bool, Error> {
+        if self.large_value_lifecycle_held.get() {
+            return Ok(false);
+        }
+        let _lifecycle = self.large_value_lifecycle.lock().await;
+        let key = pending_large_value_upload_key(id);
+        if let Some(encoded) = self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+            .await?
+        {
+            let upload = decode_pending_large_value_upload_at_key(&key, &encoded)?;
+            self.release_pending_large_value_upload(key, upload).await?;
+        } else if let Some(staged) =
+            completed_large_value_upload_receipt(&self.storage, id).await?
+        {
+            self.evict_staged_large_value_locked(staged.id).await?;
+        }
+        Ok(true)
+    }
+
     /// Return persisted opaque staging receipts for host rate/expiry policy.
     pub async fn staged_large_values(
         &self,
@@ -1574,6 +1603,14 @@ impl Database {
             return Ok(false);
         }
         let _lifecycle = self.large_value_lifecycle.lock().await;
+        self.evict_staged_large_value_locked(id).await
+    }
+
+    async fn evict_staged_large_value_locked(
+        &self,
+        id: crate::large_values::StagedLargeValueId,
+    ) -> Result<bool, Error> {
+        let staged_key = staged_large_value_key(id);
         let Some(encoded) = self
             .storage
             .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
