@@ -71,10 +71,7 @@ export function decodeInitializationStatuses(
     if (!status || status.reservedTxId !== ids[index])
       throw new Error("Initialization status identity mismatch");
     if (status.kind === "not-observed" || status.kind === "incomplete") continue;
-    if (
-      status.kind !== "complete" ||
-      !["none", "local", "global"].includes(status.durability)
-    )
+    if (status.kind !== "complete" || !["none", "local", "global"].includes(status.durability))
       throw new Error("Invalid initialization transaction status");
     if (status.fate?.kind === "pending" || status.fate?.kind === "accepted") continue;
     if (
