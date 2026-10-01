@@ -3839,11 +3839,7 @@ export class Db {
       await this.ensureReady(readinessTier(effectiveTier));
       const rows =
         context || usesRelationTraversal
-          ? await client.queryInternal(
-              wasmQuery,
-              queryOptions,
-              context?.readSession,
-            )
+          ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
           : await client.queryInternal(wasmQuery, queryOptions);
       if (equality && !(await equality.isCurrent())) {
         // Bound work under continuous rotation; never present incomplete history as exhaustion.
