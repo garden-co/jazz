@@ -5666,6 +5666,7 @@ mod tests {
             let lifecycle = StreamingOwnerLifecycle::new();
             lifecycle.enqueue_cleanup(0, NapiDbInnerStorage::Memory(Rc::clone(&owner)), abandoned);
             let binding = NapiDb {
+                initialization_seals: Rc::default(),
                 inner: Rc::new(std::cell::RefCell::new(Some(NapiDbInnerStorage::Memory(
                     Rc::clone(&owner),
                 )))),
