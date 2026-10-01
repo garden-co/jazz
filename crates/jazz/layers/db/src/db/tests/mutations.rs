@@ -5577,6 +5577,56 @@ fn streaming_finish_cancellation_after_promotion_releases_unpublished_receipt() 
     });
 }
 
+/// A resident publication owns Groove's lifecycle guard while another upload
+/// is abandoned. Close must return retryable failure, not wait behind itself
+/// or retire storage; a normal owner tick settles publication and cleanup.
+#[test]
+fn streaming_cleanup_deferred_by_publication_keeps_close_retryable() {
+    use std::task::{Context, Poll, Waker};
+
+    block_on(async {
+        let alice = doctest_support::open_todos_db().await.unwrap();
+        alice.set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            max_age_ms: u64::MAX,
+            ..Default::default()
+        });
+        let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+        let mut abandoned = alice.begin_streaming_value_upload("todos", &cells, "title").unwrap();
+        alice.push_streaming_value_upload(&mut abandoned, b"abandoned").await.unwrap();
+        let mut published = alice.begin_streaming_value_upload("todos", &cells, "title").unwrap();
+        alice.push_streaming_value_upload(&mut published, b"published").await.unwrap();
+        alice.set_deferred_local_persistence(true);
+        let write = alice.finish_streaming_value_upload(
+            published, StreamingMutationKind::Insert, "todos", row(0xf5), cells, "title",
+            WriteIdentity::Database, None, None, None,
+        ).await.unwrap();
+        assert_eq!(alice.write_state(write.mergeable_tx_id()).unwrap().durability, DurabilityTier::None);
+        drop(abandoned);
+
+        let mut closing = Box::pin(alice.close());
+        let mut context = Context::from_waker(Waker::noop());
+        let mut outcome = None;
+        for _ in 0..512 {
+            if let Poll::Ready(result) = closing.as_mut().poll(&mut context) {
+                outcome = Some(result);
+                break;
+            }
+        }
+        drop(closing);
+        let error = outcome.expect("close must not wait behind a resident publication")
+            .expect_err("unresolved upload cleanup must keep storage open");
+        assert_eq!(error.code, ErrorCode::WriteRejected);
+        alice.tick().await.unwrap();
+        assert_eq!(alice.write_state(write.mergeable_tx_id()).unwrap().durability, DurabilityTier::Local);
+        assert_eq!(
+            streamed_todo(&alice, row(0xf5)).await.unwrap().unwrap()
+                .cell(&alice.schema.tables[0], "title"),
+            Some(Value::String("published".to_owned())),
+        );
+        alice.close().await.unwrap();
+    });
+}
+
 /// Alice stages bytes without a visible row, then publishes the file and its
 /// companion row in one exclusive commit. Reusing the capability is rejected.
 #[test]
