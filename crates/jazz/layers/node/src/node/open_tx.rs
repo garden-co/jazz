@@ -2311,15 +2311,13 @@ where
         tx_id: TxId,
         snapshot: &Snapshot,
     ) -> Result<bool, Error> {
-        let stored = self
-            .query_transaction(tx_id)
+        let global_time = self
+            .query_transaction_global_time(tx_id)
             .await?
             .ok_or(Error::InvalidStoredValue(
                 "snapshot version has no transaction audit",
             ))?;
-        Ok(stored
-            .global_time
-            .is_some_and(|global_time| global_time <= snapshot.global_base)
+        Ok(global_time.is_some_and(|global_time| global_time <= snapshot.global_base)
             || (tx_id.node == snapshot.owner && tx_id.time <= snapshot.local_base)
             || snapshot.dots.contains(&tx_id))
     }
