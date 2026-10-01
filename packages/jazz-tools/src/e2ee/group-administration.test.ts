@@ -108,10 +108,10 @@ it.each(["ordinary", "forged-candidate", "forged-malformed-id"])(
         const request = (await pending.e2ee.devices.list()).find(
           (device) => device.state === "pending",
         )!;
-        const root = await administrator.one(app.__e2ee_groups.where({ id }), { tier: "edge" });
+        const root = await administrator.one(app.__e2ee_groups.where({ id }), { tier: "remote" });
         const accountRoot = await administrator.one(
           app.__e2ee_account_roots.where({ accountId: admin.account.id }),
-          { tier: "edge" },
+          { tier: "remote" },
         );
         // Malformed UUIDs fail at insertion. Well-formed proposals still need
         // an active device signature before they can establish membership.
@@ -144,7 +144,7 @@ it.each(["ordinary", "forged-candidate", "forged-malformed-id"])(
       expect(
         await administrator.all(
           app.__e2ee_group_deliveries.where({ recipientAccountId: admin.account.id }),
-          { tier: "edge" },
+          { tier: "remote" },
         ),
       ).toEqual([]);
       // Having the group key must not grant this account administration rights.

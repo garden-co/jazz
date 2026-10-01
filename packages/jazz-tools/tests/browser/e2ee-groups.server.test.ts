@@ -115,7 +115,9 @@ it.each(["ordinary", "repair"])(
         expect(corruptRecipient).toBeUndefined();
         await expect(second.e2ee.explain({ groupId: group.id })).rejects.toThrow();
         expect(
-          await second.all(app.__e2ee_group_repairs.where({ groupId: group.id }), { tier: "edge" }),
+          await second.all(app.__e2ee_group_repairs.where({ groupId: group.id }), {
+            tier: "remote",
+          }),
         ).toHaveLength(1);
         expect(await first.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
       }
@@ -124,9 +126,7 @@ it.each(["ordinary", "repair"])(
       expect(
         await first.all(
           app.__e2ee_group_deliveries.where({ recipientDeviceId: pendingDevice.id }),
-          {
-            tier: "edge",
-          },
+          { tier: "remote" },
         ),
       ).toEqual([]);
 

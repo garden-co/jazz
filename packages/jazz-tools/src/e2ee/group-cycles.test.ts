@@ -97,7 +97,7 @@ it("accepts only one of two overlapping group edges that would form a cycle", as
     expect(arrivals).toBe(2);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
-    const edges = await a.db.all(app.__e2ee_group_membership, { tier: "edge" });
+    const edges = await a.db.all(app.__e2ee_group_membership, { tier: "remote" });
     expect(edges).toHaveLength(1);
     expect(edges[0]!.memberKind).toBe("group");
     const parent = edges[0]!.groupId === a.id ? a : b;
@@ -109,8 +109,10 @@ it("accepts only one of two overlapping group edges that would form a cycle", as
     await expect(child.db.e2ee.groups.add(child.id, parent.id).wait()).rejects.toThrow(
       "cycle or depth",
     );
-    expect(await a.db.all(app.__e2ee_group_membership, { tier: "edge" })).toEqual(edges);
-    const root = (await child.db.one(app.__e2ee_groups.where({ id: child.id }), { tier: "edge" }))!;
+    expect(await a.db.all(app.__e2ee_group_membership, { tier: "remote" })).toEqual(edges);
+    const root = (await child.db.one(app.__e2ee_groups.where({ id: child.id }), {
+      tier: "remote",
+    }))!;
     const device = JSON.parse(child.stored()).devices[0];
     const key = Uint8Array.from(device.signingPrivateKey);
     const candidate = {
@@ -139,7 +141,7 @@ it("accepts only one of two overlapping group edges that would form a cycle", as
     }
     // The ordinary policy admits the administrator's raw row; graph replay
     // must reject the cycle despite the valid signature and durable acceptance.
-    expect(await a.db.all(app.__e2ee_group_membership, { tier: "edge" })).toHaveLength(2);
+    expect(await a.db.all(app.__e2ee_group_membership, { tier: "remote" })).toHaveLength(2);
     expect(await parent.db.e2ee.explain({ groupId: child.id })).toMatchObject({ state: "refused" });
     expect(await child.db.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
   } finally {
