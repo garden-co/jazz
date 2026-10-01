@@ -50,6 +50,13 @@ membership. A first visit without that catalogue still needs a connection.
 Imported accounts and recipients without accepted public keys cannot be treated
 as fresh local founders.
 
+Account-selection storage reserves one original device for each account and
+application before publishing an offline founder. Its v3 inventory keeps v1/v2
+roots and selection readable, but ordinary legacy provenance does not prove
+first-device ownership. A missing bound founder journal cannot regenerate an
+epoch; the exact original journal can resume after an account recovery import.
+Independent account stores still rely on Global authority to select one winner.
+
 Use `wait({ tier: "local" })` to wait for the persistent local owner before
 clearing a draft or reporting “Saved on this device”. This is not server
 acceptance, verified membership or delivery to another person. Keep the original
