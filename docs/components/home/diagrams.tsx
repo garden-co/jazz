@@ -264,35 +264,25 @@ export function StackDiagram() {
     { x: 404, title: "backend", lines: [...copy("in memory"), "typescript · rust"] },
     { x: 602, title: "agents & jobs", lines: [...copy("in memory"), "any server"] },
   ];
-  // Jazz Cloud sits left-aligned with the web app. Each peer gets its own wire
-  // from its own point on the cloud: straight down for the peers underneath it,
-  // out of the right side (farthest peer highest, so wires never cross) for
-  // the rest.
-  const coreX = 8;
+  // Jazz Cloud sits centred above the peers. Every peer's wire enters it from
+  // below, at evenly spaced points along its bottom edge, and all four turn at
+  // the same height, so the one "sync" label between them covers them all.
   const coreW = 340;
+  const coreX = 400 - coreW / 2;
   const coreY = 16;
   const coreH = 82;
   const peerY = 164;
-  const wires: Point[][] = [
-    [
-      [102, coreY + coreH],
-      [102, peerY],
-    ],
-    [
-      [300, coreY + coreH],
-      [300, peerY],
-    ],
-    [
-      [coreX + coreW, 74],
-      [498, 74],
-      [498, peerY],
-    ],
-    [
-      [coreX + coreW, 50],
-      [696, 50],
-      [696, peerY],
-    ],
-  ];
+  const turnY = (coreY + coreH + peerY) / 2;
+  const wires: Point[][] = peers.map((peer, index) => {
+    const entryX = coreX + (coreW * (index + 0.5)) / peers.length;
+    const peerX = peer.x + w / 2;
+    return [
+      [entryX, coreY + coreH],
+      [entryX, turnY],
+      [peerX, turnY],
+      [peerX, peerY],
+    ];
+  });
   return (
     <Diagram
       viewBox="0 0 800 300"
@@ -310,7 +300,7 @@ export function StackDiagram() {
       {wires.map((points) => (
         <Wire key={points[points.length - 1][0]} points={points} start />
       ))}
-      <Label x={362} y={42}>
+      <Label x={400} y={turnY + 4} anchor="middle">
         sync
       </Label>
       {peers.map((peer) => (
