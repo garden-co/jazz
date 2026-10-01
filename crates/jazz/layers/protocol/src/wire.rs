@@ -604,6 +604,18 @@ impl WireError {
             message: message.into(),
         }
     }
+
+    /// Whether this error ends a link without ending the client: the peer is
+    /// overloaded or still bootstrapping and asks to be reconnected with
+    /// backoff. `Later` alone is not enough, since an authentication or
+    /// malformed-frame error can carry it and retrying those cannot succeed.
+    pub fn asks_reconnect_later(&self) -> bool {
+        self.retry == WireRetry::Later
+            && matches!(
+                self.code,
+                WireErrorCode::Backpressure | WireErrorCode::NotReady
+            )
+    }
 }
 
 /// Admit one decoded complete envelope through the canonical wire checks.
@@ -672,6 +684,14 @@ pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, postcard::Error> {
     to_allocvec(frame)
 }
 
+/// Whether encoded frame bytes carry a [`WireFrame::ChannelCredit`] grant,
+/// judged by its pinned postcard-v1 enum tag (5) alone. Callers still decode
+/// and validate the grant; this only lets a receiver route credit frames
+/// without decoding every channel payload.
+pub fn is_channel_credit_frame(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&5)
+}
+
 /// Decode a wire frame serialized by [`encode_frame`].
 pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
     if validate_wire_frame_len(bytes.len()).is_err() {
@@ -721,6 +741,13 @@ pub fn validate_frame_for_artifact_corpus(
 /// Serialize a semantic sync message with the canonical Jazz payload codec.
 pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
     // Our encoder owns correctness; do not decode/revalidate its input rows.
+    if matches!(message, SyncMessage::ViewUpdate(_)) {
+        // A view update can carry a whole snapshot. Growing the buffer while
+        // encoding it holds the old and new allocation at each doubling and
+        // leaves up to twice its bytes queued, so size it exactly first.
+        let len = encoded_sync_message_len(message)?;
+        return postcard::to_extend(message, Vec::with_capacity(len));
+    }
     to_allocvec(message)
 }
 

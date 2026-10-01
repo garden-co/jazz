@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { Button } from "@astryxdesign/core/Button";
-import { Card } from "@astryxdesign/core/Card";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Link as AstryxLink } from "@astryxdesign/core/Link";
 import {
@@ -31,6 +30,7 @@ import { FrameworkLogos } from "@/components/home/framework-logos";
 import { pricingMeters } from "@/lib/home-pricing";
 import { adopterQuotes } from "@/lib/home-quotes";
 import { blogSource } from "@/lib/source";
+import { StippleCanvas, heroPattern } from "@garden-co/design/stipple";
 
 export const metadata: Metadata = {
   title: "Jazz - The database that syncs.",
@@ -258,7 +258,7 @@ const hostingRows: {
     topic: "Setup",
     selfHosted: "One open-source, single-tenant server binary",
     cloud: "Zero config; create an app from the CLI or dashboard",
-    enterprise: "Dedicated deployment, set up with you",
+    enterprise: "Dedicated deployment or bring your own cloud, set up with you",
   },
   {
     topic: "Topology",
@@ -356,29 +356,10 @@ function latestPosts(count: number) {
 export default function HomePage() {
   return (
     <div className="w-full">
-      <section className="h-[80vh] w-full">
+      <section className="home-hero h-[80vh] w-full">
+        <StippleCanvas pattern={heroPattern} className="home-hero-pattern" />
+        <div aria-hidden className="home-hero-fade" />
         <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4 relative">
-          <aside className="absolute right-4 top-4 z-30 max-w-sm">
-            <Card className="border-fd-border/70 shadow dark:border-white/50">
-              <Text as="p" display="block" className="leading-relaxed">
-                Announcing the Jazz v2 alpha!
-              </Text>
-              <Text as="p" display="block" className="leading-relaxed">
-                See the{" "}
-                <AppLink href="/blog/what-is-jazz" color="inherit" className="font-medium">
-                  announcement post
-                </AppLink>
-                .
-              </Text>
-              <Text as="p" display="block" color="secondary" className="leading-relaxed">
-                (Looking for{" "}
-                <AstryxLink href="https://classic.jazz.tools" color="inherit">
-                  classic Jazz
-                </AstryxLink>
-                ?)
-              </Text>
-            </Card>
-          </aside>
           <div className="w-full max-w-[42rem] space-y-6 pb-2 sm:space-y-10">
             <Heading level={1} type="display-1">
               <span className="block">the</span>
@@ -386,9 +367,10 @@ export default function HomePage() {
               <span className="block">that syncs</span>
             </Heading>
             <Text as="p" display="block" className="max-w-[40em] text-xl leading-relaxed">
-              Jazz is a relational database built on real-time sync. It runs distributed across the
-              cloud, your backend, frontend, native apps, CLIs and agent sandboxes. Mix and match
-              ACID and local-first.
+              Jazz is a relational database built on real-time sync.
+              <br />
+              It runs across the cloud, your backend, frontend, native apps, CLIs and agent VMs. Mix
+              and match ACID and eventually consistent / local-first.
             </Text>
           </div>
         </div>
@@ -419,7 +401,7 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="code" title="In the client: feels like simple reactive state">
+          <SectionHeader id="code" title="Use straight from the client as simple reactive state">
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
               Define tables and permissions in TypeScript, then query from any component. Writes
               apply locally at once and sync in the background.
@@ -473,10 +455,7 @@ export default function HomePage() {
       <section className="home-section">
         <div className="home-container">
           <Heading level={2} type="display-3" id="features" className="home-anchor home-statement">
-            Built into the database.{" "}
-            <span className="home-statement-muted">
-              The hard parts of shared, live data, handled once instead of in every app.
-            </span>
+            A database responsible for more.
           </Heading>
           <div className="mt-6">
             {features.map((feature, index) => (
@@ -520,19 +499,29 @@ export default function HomePage() {
             </Text>
           </SectionHeader>
           <div id="pricing" className="home-table home-anchor mt-6">
+            {/* Below 900px each topic gets its own row above a rounded box of
+                values; from 900px the topic moves into a left column and the
+                values form one ordinary table (see .home-table in global.css). */}
             <Table density="balanced" verticalAlign="top">
               <TableHeader>
                 <TableRow>
-                  <TableHeaderCell> </TableHeaderCell>
+                  <TableHeaderCell className="home-table-topic-cell">
+                    <span className="sr-only">Topic</span>
+                  </TableHeaderCell>
                   <TableHeaderCell>Self-hosted</TableHeaderCell>
                   <TableHeaderCell>Jazz Cloud</TableHeaderCell>
                   <TableHeaderCell>Enterprise</TableHeaderCell>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {hostingRows.map((row) => (
-                  <TableRow key={row.topic}>
-                    <TableCell>
+                {hostingRows.flatMap((row) => [
+                  <TableRow key={`${row.topic}-topic`} className="home-table-topic">
+                    <TableCell colSpan={3}>
+                      <Text weight="medium">{row.topic}</Text>
+                    </TableCell>
+                  </TableRow>,
+                  <TableRow key={row.topic} className="home-table-values">
+                    <TableCell className="home-table-topic-cell">
                       <Text weight="medium">{row.topic}</Text>
                     </TableCell>
                     <TableCell>
@@ -540,10 +529,10 @@ export default function HomePage() {
                     </TableCell>
                     <TableCell>{row.cloud}</TableCell>
                     <TableCell>{row.enterprise}</TableCell>
-                  </TableRow>
-                ))}
-                <TableRow>
-                  <TableCell> </TableCell>
+                  </TableRow>,
+                ])}
+                <TableRow className="home-table-actions">
+                  <TableCell className="home-table-topic-cell" />
                   <TableCell>
                     <Button
                       label="How to self-host"
@@ -553,14 +542,14 @@ export default function HomePage() {
                   </TableCell>
                   <TableCell>
                     <Button
-                      label="Generate API key"
+                      label={"Generate API\u00a0key"}
                       variant="primary"
                       href="https://v2.dashboard.jazz.tools"
                     />
                   </TableCell>
                   <TableCell>
                     <Button
-                      label="Book a call"
+                      label={"Book a\u00a0call"}
                       variant="primary"
                       href="https://cal.com/anselm-io/cloud-pro-intro"
                     />
@@ -569,17 +558,12 @@ export default function HomePage() {
               </TableBody>
             </Table>
           </div>
-          <div className="mt-12 grid gap-8 lg:grid-cols-12">
-            <div className="lg:col-span-4">
-              <Heading level={3}>Estimate your Jazz Cloud bill</Heading>
-              <Text as="p" display="block" color="secondary" className="mt-3">
-                Move the sliders to match your app. The estimate uses the Jazz Cloud prices above.
-              </Text>
-            </div>
+          <div className="mt-12 grid gap-8">
+            <Heading level={3}>Estimate your Jazz Cloud bill</Heading>
             {/* Not ported to Astryx yet. A data-astryx-theme attribute ends the
                 theme's @scope, so its element resets (p, h1-h6, code) leave the
                 calculator's Tailwind typography alone. */}
-            <div className="lg:col-span-8" data-astryx-theme="none">
+            <div data-astryx-theme="none">
               <PricingCalculator />
             </div>
           </div>

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { statSync } from "node:fs";
 import test from "node:test";
+import { MAX_BYTES } from "../../scripts/example-videos/encode.mjs";
 import { benchmarkMetadata } from "../../../dev/benchmarks/metadata/index.ts";
 import {
   engineBenchmarks,
@@ -18,6 +20,22 @@ test("every metric card names a current CodSpeed benchmark of its own example", 
       assert.ok(source, `${example.id}: ${metric.benchmark} has no benchmark metadata`);
       assert.equal(placeBenchmark(source), example.id, metric.benchmark);
     }
+  }
+});
+
+test("every walkthrough video is a committed MP4 under the size budget, with a JPEG poster", () => {
+  const publicFile = (path: string) => new URL(`../../public${path}`, import.meta.url);
+  for (const example of heroExamples) {
+    if (!example.video) {
+      assert.ok(example.plannedVideo, `${example.id}: no video and no plannedVideo`);
+      continue;
+    }
+    const { src, poster, caption } = example.video;
+    assert.equal(src, `/examples/videos/${example.id}.mp4`);
+    assert.equal(poster, `/examples/videos/${example.id}.jpg`);
+    assert.ok(caption.trim(), `${example.id}: empty caption`);
+    assert.ok(statSync(publicFile(src)).size <= MAX_BYTES, `${src} is over ${MAX_BYTES} bytes`);
+    assert.ok(statSync(publicFile(poster)).size > 0, `${poster} is empty`);
   }
 });
 

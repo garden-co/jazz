@@ -17,7 +17,14 @@ import { bootstrap } from "./console";
  * the console, which switches to the dashboard on its own.
  */
 export function JoinWarehouse({ warehouses }: { warehouses: Warehouse[] }) {
-  const [warehouseId, setWarehouseId] = useState(warehouses[0]?.id ?? "");
+  // Warehouse rows can arrive after this mounts (a fresh database is seeded on
+  // first sign-in), so the default is derived from the current rows rather
+  // than captured once as initial state.
+  const [picked, setPicked] = useState<string>();
+  const warehouseId =
+    (picked && warehouses.some((warehouse) => warehouse.id === picked) ? picked : undefined) ??
+    warehouses[0]?.id ??
+    "";
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -35,7 +42,7 @@ export function JoinWarehouse({ warehouses }: { warehouses: Warehouse[] }) {
           <Selector
             label="Warehouse"
             value={warehouseId}
-            onChange={setWarehouseId}
+            onChange={setPicked}
             options={warehouses.map((warehouse) => ({
               value: warehouse.id,
               label: warehouse.name,

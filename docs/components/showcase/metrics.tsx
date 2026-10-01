@@ -8,6 +8,7 @@ import { Table, TableBody, TableCell, TableRow } from "@astryxdesign/core/Table"
 import { Text } from "@astryxdesign/core/Text";
 import { formatTime, plotGeometry } from "@/lib/perf-timeline/model";
 import {
+  ESTIMATE_DIVISOR,
   getBenchmarkMetadata,
   displayedTime,
   formatThroughput,
@@ -116,7 +117,8 @@ function History({
         </Text>
       )}
       <Text type="supporting" display="block">
-        Measured on the CodSpeed runner: {formatTime(summary.headline.median / divisor)}
+        Measurement on the de-noised CodSpeed environment (about {ESTIMATE_DIVISOR}x slower than a
+        normal CPU): {formatTime(summary.headline.median / divisor)}
       </Text>
       {metadata && (
         <Text type="supporting" display="block">
