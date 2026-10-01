@@ -175,7 +175,13 @@ where
         table: TableSchema,
         deltas: groove::ivm::RecordDeltas,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let deleted_field_idx = current_row_fields(&table).len();
+        let deleted_field_idx =
+            deltas
+                .descriptor
+                .field_index("__jazz_deleted")
+                .ok_or(Error::InvalidStoredValue(
+                    "include-deleted materialization requires __jazz_deleted",
+                ))?;
         let mut rows = Vec::new();
         for (record, weight) in deltas.iter() {
             if weight > 0 {
