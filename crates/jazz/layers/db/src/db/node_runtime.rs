@@ -753,6 +753,10 @@ where
         Ok(self.deferred_upload_cleanups.borrow().is_empty())
     }
 
+    pub(super) fn has_deferred_upload_cleanup(&self) -> bool {
+        !self.deferred_upload_cleanups.borrow().is_empty()
+    }
+
     /// Whether owner-free queue waiting can coexist with semantic maintenance.
     pub(super) fn owner_is_available(&self) -> bool {
         // Drop the probe guard before maintenance can acquire the owner.

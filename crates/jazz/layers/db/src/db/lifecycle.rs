@@ -663,6 +663,14 @@ where
         Ok(())
     }
 
+    /// Binding-only observation after a rejected close. A `WriteRejected`
+    /// result with retained upload cleanup leaves the runtime serviceable for
+    /// tick and close retry; mutation admission remains closed.
+    #[doc(hidden)]
+    pub fn close_has_deferred_upload_cleanup(&self) -> bool {
+        self.node.has_deferred_upload_cleanup()
+    }
+
     /// Configure this database as an optimistic foreground whose upstream
     /// owns Local durability (for example, a browser worker or native relay).
     /// Full Local subscriptions wait for that owner's initial query answer.
