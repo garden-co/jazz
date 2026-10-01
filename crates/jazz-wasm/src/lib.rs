@@ -5122,45 +5122,98 @@ mod dynamic_schema_view_tests {
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
     async fn deferred_upload_close_preserves_wasm_tick_and_retry() {
-        let source = SchemaBuilder::new().table(
-            TableSchema::builder("files").column("body", ColumnType::Text),
-        ).build();
+        let source = SchemaBuilder::new()
+            .table(TableSchema::builder("files").column("body", ColumnType::Text))
+            .build();
         let schema = JazzSchema::new(&source).unwrap();
         let families = schema.column_families();
-        let owner = Rc::new(Db::open(DbConfig::new(
-            schema,
-            MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()).unwrap(),
-            DbIdentity { node: jazz::ids::NodeUuid::from_bytes([0xf7; 16]), author: AuthorSubject::SYSTEM },
-        )).await.unwrap());
-        let mut abandoned = owner.begin_streaming_value_upload("files", &BTreeMap::new(), "body").unwrap();
-        owner.push_streaming_value_upload(&mut abandoned, b"abandoned").await.unwrap();
-        let mut published = owner.begin_streaming_value_upload("files", &BTreeMap::new(), "body").unwrap();
-        owner.push_streaming_value_upload(&mut published, b"published").await.unwrap();
+        let owner = Rc::new(
+            Db::open(DbConfig::new(
+                schema,
+                MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>())
+                    .unwrap(),
+                DbIdentity {
+                    node: jazz::ids::NodeUuid::from_bytes([0xf7; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            ))
+            .await
+            .unwrap(),
+        );
+        let mut abandoned = owner
+            .begin_streaming_value_upload("files", &BTreeMap::new(), "body")
+            .unwrap();
+        owner
+            .push_streaming_value_upload(&mut abandoned, b"abandoned")
+            .await
+            .unwrap();
+        let mut published = owner
+            .begin_streaming_value_upload("files", &BTreeMap::new(), "body")
+            .unwrap();
+        owner
+            .push_streaming_value_upload(&mut published, b"published")
+            .await
+            .unwrap();
         owner.set_deferred_local_persistence(true);
-        let write = owner.finish_streaming_value_upload(
-            published, jazz::db::StreamingMutationKind::Insert, "files",
-            RowUuid::from_bytes([0xf7; 16]), BTreeMap::new(), "body",
-            jazz::db::WriteIdentity::Database, None, None, None,
-        ).await.unwrap();
+        let write = owner
+            .finish_streaming_value_upload(
+                published,
+                jazz::db::StreamingMutationKind::Insert,
+                "files",
+                RowUuid::from_bytes([0xf7; 16]),
+                BTreeMap::new(),
+                "body",
+                jazz::db::WriteIdentity::Database,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         drop(abandoned);
         let binding = WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&owner))))),
-            owns_runtime: true, non_durable_client: Rc::new(Cell::new(false)), trusted_backend: false,
+            owns_runtime: true,
+            non_durable_client: Rc::new(Cell::new(false)),
+            trusted_backend: false,
             initialization_seals: Rc::default(),
         };
-        wasm_bindgen_futures::JsFuture::from(binding.close()).await
+        wasm_bindgen_futures::JsFuture::from(binding.close())
+            .await
             .expect_err("unresolved cleanup must reject close");
-        wasm_bindgen_futures::JsFuture::from(binding.tick()).await
+        wasm_bindgen_futures::JsFuture::from(binding.tick())
+            .await
             .expect("deferred close must retain a WASM tick route");
-        assert_eq!(owner.write_state(write.mergeable_tx_id()).unwrap().durability, DurabilityTier::Local);
-        assert!(owner.insert("files", BTreeMap::from([("body".to_owned(), Value::String("late".to_owned()))]),
-            Default::default()).await.is_err(), "close must not reopen mutation admission");
         assert_eq!(
-            wasm_bindgen_futures::JsFuture::from(binding.close()).await.unwrap().as_bool(),
+            owner
+                .write_state(write.mergeable_tx_id())
+                .unwrap()
+                .durability,
+            DurabilityTier::Local
+        );
+        assert!(
+            owner
+                .insert(
+                    "files",
+                    BTreeMap::from([("body".to_owned(), Value::String("late".to_owned()))]),
+                    Default::default()
+                )
+                .await
+                .is_err(),
+            "close must not reopen mutation admission"
+        );
+        assert_eq!(
+            wasm_bindgen_futures::JsFuture::from(binding.close())
+                .await
+                .unwrap()
+                .as_bool(),
             Some(true),
         );
         assert_eq!(
-            wasm_bindgen_futures::JsFuture::from(binding.close()).await.unwrap().as_bool(),
+            wasm_bindgen_futures::JsFuture::from(binding.close())
+                .await
+                .unwrap()
+                .as_bool(),
             Some(false),
         );
     }
