@@ -232,8 +232,8 @@ cross-branch-key row-UUID collisions (`INV-DATA-21`).
 The replicated wire payload for a version (`VersionRecord`) is exactly the
 replicated-immutable fields (§2.1): `row_uuid`, the provenance cells, a nullable
 `_deletion`, and nullable `user_{col}` cells, carried in the `JVRR` version-2
-row blob (SPEC 16) and followed by the record's `col_stamps` (SPEC 4 §4.6)
-and `counter_signs` (SPEC 4 §4.3).
+row blob (SPEC 16) and followed by the record's `authored_columns`, its
+`base` and `lost_cells` (SPEC 4 §4.6) and its `counter_signs` (SPEC 4 §4.3).
 Wire protocol v4 removed `parents`; a version-1 blob is rejected. Receiver-local currency and
 authority-state columns are excluded (`INV-DATA-16`). Mixed-version _sync_ is
 owned by ch. 8 / ch. 10.
@@ -284,17 +284,28 @@ history (Core, relay and client stores on every adapter) declares the codec
 family `jazz.history-version-current.v4` in its storage manifest, in addition
 to the shared Jazz epoch-one profile. That family is the linear row-state
 layout: one history record per accepted transaction holding the row state after
-Core's merge, keyed `(branch_key, row_uuid, tx_time, tx_node_id)` with no
-secondary index; a global-current record per row with `global_time` (the row's seq) and
-index `by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
-`(branch_key, row_uuid)` with its `ahead_shadow` copy; `_deletion` as an
-ordinary nullable cell; and, after `authored_columns` (and, in history, the
-`counter_signs` bytes of a patch's counter ops, SPEC 4 §4.3), one hidden `U48` stamp
-per LWW column then `_ts__deletion` (SPEC 4 §4.6). The history images of one
-transaction are found through that transaction's `jazz_tx_touched_rows` list
-(§2.8), not through an index: fate replay, relay forwarding and
-materialization read the listed `(table, branch, row)` keys at the
-transaction's `(tx_time, tx_node_id)`. Recovery takes the transaction-clock
+Core's merge, keyed `(branch_key, row_uuid, seq)` where `seq` is the
+transaction's accepted `GlobalTime`, with no secondary index; the record keeps
+the transaction identity in its `tx_time` and `tx_node_id` fields. Pending
+records (a node's own uploads, and foreign writes a relay holds before their
+fate) live in the lineage's pending table with the same record layout, keyed
+`(branch_key, row_uuid, tx_time, tx_node_id)` and with `seq = 0`; the batch
+that stores an accepted fate moves each of the transaction's pending records
+to history at its seq, and a rejected fate deletes them. A history and pending
+record ends, after `authored_columns` and the `counter_signs` bytes of a
+patch's counter ops (SPEC 4 §4.3), with `seq`, the write's `base_seq` and
+`base_pending` and its `lost_cells` (SPEC 4 §4.6). Beside them: a
+global-current record per row with `global_time` (the row's seq) and index
+`by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
+`(branch_key, row_uuid)` with its `ahead_shadow` copy; and `_deletion` as an
+ordinary nullable cell. No row state carries a timestamp used for merging.
+The history images of one transaction are found through that transaction's
+`jazz_tx_touched_rows` list (§2.8), not through an index: fate replay, relay
+forwarding and materialization read the listed `(table, branch, row)` keys at
+the transaction's seq (from its `jazz_transactions` record) in history, or at
+its `(tx_time, tx_node_id)` in the pending table while it has no accepted
+fate. "The row at seq `S`" and "the row's writes after `S`" are a point read
+and a range read of history (SPEC 4 §4.6). Recovery takes the transaction-clock
 high-water mark from the last `jazz_transactions` key. A history image's
 `updated_by` is null when it equals the `made_by` of the transaction its key
 names, and every read fills it in from that `jazz_transactions` record; it is
@@ -306,7 +317,8 @@ register tables, no shared deletion history, no `jazz_merge_heads`, no
 layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) or by the
 unreleased v2 (history and ahead-current `by_tx` indexes, no touched-row list)
 or v3 (`updated_by` stored in every history image) row layouts lacks the v4
-family, so opening it fails at the manifest check, before any record is
+family (v4 itself is unreleased, and its history key, pending table and
+merge fields changed in place before release, without a new codec ID), so opening it fails at the manifest check, before any record is
 decoded, with the typed `groove::storage::Error::UnsupportedStorageCodecs`,
 which names the codec IDs the root lacks and the ones this build does not know.
 There is no migration: whether old stores are refused, discarded and resynced,

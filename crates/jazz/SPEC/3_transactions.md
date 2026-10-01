@@ -21,7 +21,7 @@ Invariant digest:
 - `INV-TX-3`: A commit unit whose `Transaction.n_total_writes` does not equal the delivered version count MUST be rejected by the fate authority as `RejectionReason::MalformedCommit(...)` and MUST NOT ingest version rows.
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as `Error::ConflictingCommitUnit`.
 - `INV-TX-5`: Core MUST park a commit unit authored under a schema version it does not yet know, with no fate, seq or visible rows, parking a resent copy only once, and MUST decide it exactly once after that schema arrives. Linear history has no version parents, so a unit has no parent prerequisites.
-- `INV-TX-6`: A write made on a node after it has applied a row state MUST carry a transaction time at least that state's highest column stamp, so it overrides every value it observed even when the node's clock is behind. Core orders writes by its own seq and does not reject a write because its clock is behind; such a write that observed nothing simply loses per column.
+- `INV-TX-6`: A write MUST carry the base of the row image it was made over (ch. 4 §4.6), so it overrides every value it observed whatever its clock. Core orders writes by its own seq, never by writer clocks, and does not reject a write because the writer's clock is behind.
 - `INV-TX-7`: A commit unit whose `tx_id.time.physical_ms()` exceeds the authority admission clock by more than `SKEW_TOLERANCE_MS` MUST be rejected as `RejectionReason::ClientClockTooFarAhead` and MUST NOT leave visible version rows.
 - `INV-TX-8`: When Core rejects a transaction, its effects MUST leave the originating node's local view as soon as the rejection is applied, while the node's other pending writes, including edits to the same row, MUST stay visible and settle by their own fates. Rejection does not cascade: no other transaction is rejected because of it.
 - `INV-TX-9`: Originating nodes MUST retain rejected local payloads in retry storage and remove the rejected versions from normal history; non-origin authorities MUST NOT retain foreign rejected retry payloads.
@@ -289,9 +289,9 @@ an exclusive transaction and its read set (§3.7).
 
 Core orders accepted writes by the seq it assigns, not by the writer's clock,
 and it does not reject a write because the writer's clock is behind. Causality
-is kept by the writer's HLC instead: a node that applies a row state merges its
-highest column stamp into its clock, so a write made after observing a value
-overrides it (`INV-TX-6`, ch. 4 §4.6). A unit whose `physical_ms` is more than
+is kept by each write's base instead: a row version names the image its writer
+made it over, and Core lets it override exactly the values that image held
+(`INV-TX-6`, ch. 4 §4.6). No clock takes part in a merge. A unit whose `physical_ms` is more than
 `SKEW_TOLERANCE_MS` (~30 seconds) ahead of the authority's clock is rejected as
 `ClientClockTooFarAhead` (`INV-TX-7`), and no visible version rows remain. Write-policy authorization (ch. 7) and, for exclusive units, the
 validation of §3.7 follow. Only after those checks pass does the authority

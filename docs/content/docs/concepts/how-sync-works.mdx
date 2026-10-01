@@ -104,21 +104,21 @@ Core settles writes and sends the authorized updates needed by each subscription
 Local-first reads can use cached data and pending edits immediately. Strict remote
 reads wait for Core-authorized query coverage and exclude pending local edits.
 
-When clients write concurrently to the same field of the same row, Jazz uses
-**last-writer-wins (LWW)** with deterministic hybrid logical clock ordering to decide the current
-visible result. Even row versions that lose that race remain in row history, so the system keeps
-enough information to reconcile deterministically and to support richer history-aware behaviour
-later.
+When clients write concurrently to the same field of the same row, Core decides the current visible
+result field by field, based on what each writer had seen. Every write records the version of the
+row it was made over. A field takes the new value unless another write changed that field since
+that version; then the value Core already accepted stays. Edits that lose remain in row history, so
+the system keeps enough information to show what was overridden and to support richer history-aware
+behaviour later.
 
 <Accordions type="single">
-<Accordion id="hybrid-logical-clock" title="What is a hybrid logical clock?">
-A hybrid logical clock gives each write a timestamp made from the device's clock time and a counter.
-The counter moves the timestamp forwards when several writes happen in the same millisecond or when
-the device's clock has fallen behind an earlier write.
+<Accordion id="concurrent-edits" title="Which edit wins a conflict?">
+Two edits conflict only when both change the same field and neither writer had seen the other's
+edit. Core accepts writes one at a time, in the order it receives them, so the edit it receives
+first wins and the other is kept in history as a lost edit. Device clocks play no part: an edit made
+after seeing a value always replaces it, even if the device's clock is behind.
 
-If two devices still produce the same timestamp, Jazz uses the ID of the writing node as a final
-tie-breaker. Once replicas have received the same updates, they choose the same winner regardless of
-the order in which the updates arrived.
+Every replica receives Core's result, so all replicas converge on the same row.
 
 </Accordion>
 </Accordions>
