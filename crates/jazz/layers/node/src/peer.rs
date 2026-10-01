@@ -31,8 +31,7 @@ use crate::protocol::ResultRowEntry;
 use crate::protocol::{
     AuthorityResultKey, DelegatedSessionBinding, KnownStateDeclaration, ProgramFactEntry,
     ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe,
-    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord,
-    expand_version_carriers,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, expand_version_carriers,
 };
 use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};

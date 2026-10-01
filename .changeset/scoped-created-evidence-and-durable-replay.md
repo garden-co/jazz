@@ -29,3 +29,14 @@ Keep browser storage under one physical-root owner through admission and reset.
 Await lock release before successful reset notifications permit immediate reopen.
 These core capabilities do not by themselves provide automatic offline E2EE
 initialization or establish accepted membership.
+
+Adjudicate terminal uploads once in Node, after structural checks and missing
+schema or parent prerequisites are resolved. Relay writes require the exact
+immutable session identity and claims admitted by their connection; unbound
+relays cannot borrow transport identities, transaction hints, or cached claims.
+Parked authority uploads retain that original binding, reject conflicting
+resend claims, and restore the caller's claim scope after adjudication.
+
+Remove the Rust `CommitUnitIngestContext.admitted_write_authorization` field and
+the obsolete terminal preproof helpers. Downstream Rust context literals must
+omit that field; wire and storage encodings are unchanged.

@@ -214,7 +214,6 @@ groove::define_record! {
     }
 }
 
-
 groove::define_record! {
 pub(super) struct ContributionMergeStorageRecord {
         0 => source: Vec<u8>,
@@ -2709,13 +2708,31 @@ impl ParkedIngressRole {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(super) struct ParkedCommitUnit {
     pub(super) tx: Transaction,
     pub(super) versions: Vec<VersionRecord>,
     pub(super) now_ms: u64,
     pub(super) ingest_context: Option<CommitUnitIngestContext>,
     pub(super) ingress_role: ParkedIngressRole,
+    /// Exact operation-local admission, never the mutable author claims cache.
+    pub(super) session_claim_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+}
+
+impl std::fmt::Debug for ParkedCommitUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParkedCommitUnit")
+            .field("tx", &self.tx)
+            .field("versions", &self.versions)
+            .field("now_ms", &self.now_ms)
+            .field("ingest_context", &self.ingest_context)
+            .field("ingress_role", &self.ingress_role)
+            .field(
+                "session_claim_binding",
+                &self.session_claim_binding.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 pub(super) fn current_version_index(
@@ -3842,7 +3859,6 @@ pub(super) fn known_transaction_payload_matches(
     redacted_incoming.predicate_read_set = None;
     redacted_existing == redacted_incoming
 }
-
 
 /// Copy a transaction for a carrier boundary or duplicate comparison without
 /// its local-only policy capability. Durable provenance remains untouched.

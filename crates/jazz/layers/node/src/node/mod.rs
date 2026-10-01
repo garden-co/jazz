@@ -354,6 +354,16 @@ mod views;
 #[doc(hidden)]
 pub use open_tx::StagedTransactionCell;
 pub use open_tx::{TransactionBranchRowState, TransactionInsertTargetState};
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InitializationTransactionStatus {
+    NotObserved,
+    Incomplete,
+    Complete {
+        fate: Fate,
+        durability: DurabilityTier,
+    },
+}
 pub use query_engine::{
     CurrentRowBindingRole, CurrentRowPublicationField, CurrentRowResultVisibility,
 };
@@ -1574,15 +1584,12 @@ impl PendingParentTimeBound {
 /// Authenticated identity attached to an inbound commit-unit upload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommitUnitIngestContext {
-    /// Identity authenticated by the connection carrying the upload.
+    /// Authenticated connection identity, or the exact delegated session
+    /// selected by relay admission. Relay policy requires a matching active
+    /// immutable claims scope; the transport identity alone grants nothing.
     pub identity: AuthorSubject,
     /// Whether the connection may attribute writes to a different `made_by`.
     pub trust: CommitUnitTrust,
-    /// The authenticated connection admission path has already proved every
-    /// terminal write clause against its immutable delegated session binding.
-    /// This may only be set by the peer-connection authority path immediately
-    /// after that proof; wire messages cannot carry it.
-    pub admitted_write_authorization: bool,
     /// The connection's checked wire decoder has already validated every
     /// version receipt in this upload. Set only by a peer connection whose
     /// transport reports that it admits all inbound messages that way; wire

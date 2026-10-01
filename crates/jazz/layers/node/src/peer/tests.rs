@@ -1294,6 +1294,9 @@ fn session_seed_write_policy_schema() -> JazzSchema {
     )
 }
 
+/// A trusted SYSTEM upload bypasses claim-and-join policies at terminal ingest;
+/// Alice's unseeded session must not inherit that capability.
+/// SYSTEM -> Core -> Accepted; alice -> local policy preview -> Denied
 #[test]
 fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
     let schema = session_seed_write_policy_schema();
@@ -1312,15 +1315,24 @@ fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
         panic!("mergeable unit must carry a CommitUnit");
     };
 
-    let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
-    peer.prove_terminal_commit_authorization(
-        &mut node_state,
-        AuthorSubject::SYSTEM,
-        BTreeMap::new(),
-        &versions,
-        &tx,
-    )
-    .expect("SYSTEM must not bind session claims for a bypassed write");
+    let candidate_tx_id = tx.tx_id;
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0xa4), schema.clone());
+    let outcome = crate::local_executor::block_on(receiver.ingest_commit_unit_with_context(
+        tx,
+        versions,
+        u64::MAX,
+        Some(crate::node::CommitUnitIngestContext {
+            identity: AuthorSubject::SYSTEM,
+            trust: crate::node::CommitUnitTrust::TrustedBackend,
+            version_receipts_validated: false,
+        }),
+    ))
+    .expect("SYSTEM ingest does not need session claims or join evidence");
+    assert!(outcome.value.iter().any(|message| matches!(
+        message,
+        SyncMessage::FateUpdate { tx_id, fate: crate::tx::Fate::Accepted, .. }
+            if *tx_id == candidate_tx_id
+    )));
 
     let denied = crate::local_executor::block_on(
         node_state.dry_run_mergeable_write_allows_in_schema(

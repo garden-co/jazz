@@ -3998,20 +3998,13 @@ fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
     );
 }
 
-/// A terminal proof uses its own admitted link's claims, even if another live
-/// link authenticates the same author with different claims first.
+/// Alice's admitted claims survive a same-author sibling's cache overwrite.
+/// Authenticated refreshes affect subsequent uploads, not the sibling's scope.
 ///
-/// ```text
-/// alice/A link ──admitted──► Core ──terminal proof──► A's claims
-///                                  ▲
-/// alice/B link ──binds B───────────┘
-/// ```
-///
-/// The policy snapshot must not be selected from the node's author-keyed
-/// legacy cache. Replacing the explicit A snapshot below with
-/// `session_claims_for` makes the first proof observe B and fail.
+/// alice/editor A -> Core <- alice/viewer B
+/// A uploads -> Accepted; A refreshes viewer -> Denied; editor -> Accepted
 #[test]
-fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
+fn terminal_commit_ingest_keeps_same_author_sibling_claim_snapshot() {
     // The clause reads an open workspace as well as the claim.
     let schema = editor_claim_workspace_write_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -4031,7 +4024,7 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
         crate::query::provider_claim_key("role"),
         Value::String("viewer".to_owned()),
     )]);
-    let (_a_transport, a_server_transport) = duplex_with_admitted_session_context(
+    let (mut a_transport, a_server_transport) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0xa1; 16]),
         1,
@@ -4061,74 +4054,46 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
 
     let client = open_db(0xa1, alice, &schema);
     client.set_test_provider_claims(alice, a_claims.clone());
-    let candidate_cells = cells("same-author sibling snapshot", false, alice);
-    let write = client
-        .insert("todos", candidate_cells.clone(), Default::default())
-        .expect("A can prepare its editor-authorized write");
-    let SyncMessage::CommitUnit { tx, versions } = client
-        .node
-        .node
-        .borrow_mut()
-        .commit_unit_for(write.mergeable_tx_id())
-        .expect("prepared write retains a commit unit")
-    else {
-        panic!("prepared mergeable write must produce one commit unit");
-    };
-    {
-        let mut a_connection = a_subscriber.borrow_mut();
-        let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
-            unreachable!("A is an admitted subscriber link");
-        };
-        let allowed =
-            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-                &mut server.node().borrow_mut(),
-                alice,
-                a_state.session_claims.clone(),
-                &versions,
-                &tx,
-            ))
-            .expect("A terminal proof remains valid after B updates the legacy cache");
-        assert!(allowed, "A's editor snapshot authorizes the write");
-    }
-
-    // 0→1→2 authenticated refreshes each prove under their own snapshot.
-    a_subscriber
-        .borrow_mut()
-        .update_authenticated_session_claims(b_claims.clone());
-    {
-        let mut a_connection = a_subscriber.borrow_mut();
-        let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
-            unreachable!("A remains an admitted subscriber link");
-        };
-        let allowed =
-            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-                &mut server.node().borrow_mut(),
-                alice,
-                a_state.session_claims.clone(),
-                &versions,
-                &tx,
-            ))
-            .expect("a refreshed terminal proof uses the refreshed snapshot");
-        assert!(!allowed, "the viewer snapshot denies the same write");
-    }
-    a_subscriber
-        .borrow_mut()
-        .update_authenticated_session_claims(a_claims.clone());
-    {
-        let mut a_connection = a_subscriber.borrow_mut();
-        let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
-            unreachable!("A remains an admitted subscriber link");
-        };
-        let allowed =
-            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-                &mut server.node().borrow_mut(),
-                alice,
-                a_state.session_claims.clone(),
-                &versions,
-                &tx,
-            ))
-            .expect("the next refreshed terminal proof uses the restored snapshot");
-        assert!(allowed, "the restored editor snapshot authorizes it again");
+    for (claims, expected) in [
+        (a_claims.clone(), Fate::Accepted),
+        (
+            b_claims,
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+        ),
+        (a_claims, Fate::Accepted),
+    ] {
+        a_subscriber
+            .borrow_mut()
+            .update_authenticated_session_claims(claims);
+        let write = client
+            .insert(
+                "todos",
+                cells("same-author sibling snapshot", false, alice),
+                Default::default(),
+            )
+            .expect("A can prepare a fresh candidate before terminal adjudication");
+        let tx_id = write.mergeable_tx_id();
+        let unit = client
+            .node
+            .node
+            .borrow_mut()
+            .commit_unit_for(tx_id)
+            .expect("prepared write retains its commit unit");
+        a_transport.send(unit).unwrap();
+        a_subscriber
+            .borrow_mut()
+            .tick()
+            .expect("terminal ingest uses A's current immutable admitted snapshot");
+        let fate =
+            std::iter::from_fn(|| a_transport.try_recv()).find_map(|message| match message {
+                SyncMessage::FateUpdate {
+                    tx_id: candidate,
+                    fate,
+                    ..
+                } if candidate == tx_id => Some(fate),
+                _ => None,
+            });
+        assert_eq!(fate, Some(expected));
     }
 }
 
@@ -5250,7 +5215,14 @@ mod e13_terminal_ingress {
             block_on(server.node().borrow_mut().transaction_state(tx_id)).is_none(),
             "a missing authored schema must not produce an authority fate"
         );
-        assert_eq!(server.node().borrow().sync_metrics().parked_catalogue_orphans, 1);
+        assert_eq!(
+            server
+                .node()
+                .borrow()
+                .sync_metrics()
+                .parked_catalogue_orphans,
+            1
+        );
     }
 
     fn assert_captured_binding(original_role: &str, later_role: &str, expected: Fate) {
@@ -5299,22 +5271,27 @@ mod e13_terminal_ingress {
             ambient.persist_and_settle_outcome(outcome).await
         })
         .unwrap();
-        assert!(updates.iter().any(|message| matches!(
-            message,
-            SyncMessage::FateUpdate { tx_id: candidate, fate, .. }
-                if *candidate == tx_id && *fate == expected
-        )), "schema arrival must adjudicate under Alice's captured {original_role} binding: {updates:?}");
+        assert!(
+            updates.iter().any(|message| matches!(
+                message,
+                SyncMessage::FateUpdate { tx_id: candidate, fate, .. }
+                    if *candidate == tx_id && *fate == expected
+            )),
+            "schema arrival must adjudicate under Alice's captured {original_role} binding: {updates:?}"
+        );
         let (fate, global_time, _) = block_on(ambient.transaction_state(tx_id)).unwrap();
         assert_eq!(fate, expected);
         assert_eq!(global_time.is_some(), matches!(expected, Fate::Accepted));
         let mut bob_values = cells("Bob's subsequent policy check", false, bob);
         bob_values.insert("body".to_owned(), Value::String("complete body".to_owned()));
-        let bob_allowed = block_on(ambient.dry_run_mergeable_write_allows_in_schema(
-            authored.version_id(),
-            MergeableCommit::new("todos", row(0xec), 1)
-                .made_by(bob)
-                .cells(bob_values),
-        ))
+        let bob_allowed = block_on(
+            ambient.dry_run_mergeable_write_allows_in_schema(
+                authored.version_id(),
+                MergeableCommit::new("todos", row(0xec), 1)
+                    .made_by(bob)
+                    .cells(bob_values),
+            ),
+        )
         .unwrap();
         assert_eq!(
             bob_allowed,
@@ -5362,7 +5339,10 @@ mod e13_terminal_ingress {
         let claims = role_claims("editor");
         let (mut first, transport) = duplex();
         let first_subscriber = server.server.accept_scope_isolated_relay_subscriber(
-            transport, alice, claims.clone(), 14,
+            transport,
+            alice,
+            claims.clone(),
+            14,
         );
         first.send(unit.clone()).unwrap();
         block_on(first_subscriber.borrow_mut().tick()).expect("first upload parks");
@@ -5370,7 +5350,10 @@ mod e13_terminal_ingress {
 
         let (mut same, transport) = duplex();
         let same_subscriber = server.server.accept_scope_isolated_relay_subscriber(
-            transport, alice, claims.clone(), 15,
+            transport,
+            alice,
+            claims.clone(),
+            15,
         );
         same.send(unit.clone()).unwrap();
         block_on(same_subscriber.borrow_mut().tick())
@@ -5384,7 +5367,10 @@ mod e13_terminal_ingress {
         );
         let (mut changed, transport) = duplex();
         let changed_subscriber = server.server.accept_scope_isolated_relay_subscriber(
-            transport, alice, changed_claims, 16,
+            transport,
+            alice,
+            changed_claims,
+            16,
         );
         changed.send(unit).unwrap();
         let error = block_on(changed_subscriber.borrow_mut().tick())
@@ -5409,7 +5395,10 @@ mod e13_terminal_ingress {
         let alice = AuthorSubject::for_test_bytes([0xe8; 16]);
         let client = open_db(0xe8, alice, &authored);
         let server = open_core(0xe9, AuthorSubject::SYSTEM, &authored);
-        server.node().borrow_mut().set_test_provider_claims(alice, role_claims("editor"));
+        server
+            .node()
+            .borrow_mut()
+            .set_test_provider_claims(alice, role_claims("editor"));
         let (tx_id, unit) = authored_unit(&client, alice);
         let (mut relay, transport) = duplex();
         let subscriber = server.server.accept_relay_subscriber(transport);
@@ -5417,7 +5406,11 @@ mod e13_terminal_ingress {
         block_on(subscriber.borrow_mut().tick()).expect("unbound relay produces a denied fate");
         assert!(matches!(
             block_on(server.node().borrow_mut().transaction_state(tx_id)),
-            Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, _))
+            Some((
+                Fate::Rejected(RejectionReason::AuthorizationDenied),
+                None,
+                _
+            ))
         ));
     }
 
@@ -5439,16 +5432,28 @@ mod e13_terminal_ingress {
         tx.n_total_writes += 1;
         let (mut relay, transport) = duplex();
         let subscriber = server.server.accept_scope_isolated_relay_subscriber(
-            transport, alice, role_claims("editor"), 17,
+            transport,
+            alice,
+            role_claims("editor"),
+            17,
         );
-        relay.send(SyncMessage::CommitUnit { tx, versions }).unwrap();
+        relay
+            .send(SyncMessage::CommitUnit { tx, versions })
+            .unwrap();
         block_on(subscriber.borrow_mut().tick())
             .expect("malformed count is rejected without trying an unavailable-schema proof");
         assert!(matches!(
             block_on(server.node().borrow_mut().transaction_state(tx_id)),
             Some((Fate::Rejected(RejectionReason::MalformedCommit(_)), None, _))
         ));
-        assert_eq!(server.node().borrow().sync_metrics().parked_catalogue_orphans, 0);
+        assert_eq!(
+            server
+                .node()
+                .borrow()
+                .sync_metrics()
+                .parked_catalogue_orphans,
+            0
+        );
         let updates = install_authored_schema(&server, &base, &authored);
         assert!(!updates.iter().any(|message| matches!(
             message,
