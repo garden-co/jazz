@@ -1,6 +1,8 @@
 //! Claim-bound, seeded, inherited-policy, and identity-isolation subscriptions.
 
 use super::*;
+#[path = "authorization_compound.rs"]
+mod authorization_compound;
 
 struct TrustedBackendRelayTransport {
     inner: Box<dyn crate::db::Transport>,
@@ -22,6 +24,840 @@ impl crate::db::Transport for TrustedBackendRelayTransport {
     fn permits_delegated_sessions(&self) -> bool {
         true
     }
+}
+
+/// A relation-backed SELECT policy must require every equality in a compound
+/// join, including equalities that reference distinct aliases from its left
+/// input. The reader may see `allowed` only when its proof row matches both.
+///
+/// left_facts ──┐
+///              ├── compound join ──► evidence
+/// right_facts ─┘                         │
+/// resource row id ── correlated filter ──┘
+#[test]
+fn exists_rel_compound_join_requires_cross_alias_equalities_for_read() {
+    let resource_id = |byte| row(byte);
+    let reader = AuthorSubject::for_test_bytes([0x9a; 16]);
+    let relation_column = |scope: &str, column: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: column.to_owned(),
+    };
+    let equality = |left: (&str, &str), right: (&str, &str)| PublicRelJoinCondition {
+        left: relation_column(left.0, left.1),
+        right: relation_column(right.0, right.1),
+    };
+    let rel = PublicRelExpr::Filter {
+        input: Box::new(PublicRelExpr::Join {
+            left: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::TableScan {
+                    table: "left_facts".into(),
+                    alias: Some("left_fact".to_owned()),
+                }),
+                right: Box::new(PublicRelExpr::TableScan {
+                    table: "right_facts".into(),
+                    alias: Some("right_fact".to_owned()),
+                }),
+                on: vec![equality(
+                    ("left_fact", "resource_id"),
+                    ("right_fact", "resource_id"),
+                )],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            right: Box::new(PublicRelExpr::TableScan {
+                table: "evidence".into(),
+                alias: Some("evidence".to_owned()),
+            }),
+            on: vec![
+                equality(("left_fact", "left_key"), ("evidence", "left_key")),
+                equality(("right_fact", "right_key"), ("evidence", "right_key")),
+            ],
+            join_kind: PublicRelJoinKind::Inner,
+        }),
+        predicate: PublicRelPredicateExpr::Cmp {
+            left: relation_column("left_fact", "resource_id"),
+            op: PublicRelPredicateCmpOp::Eq,
+            right: PublicRelValueRef::RowId(PublicRelRowIdRef::Outer),
+        },
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new().with_select(PublicPolicyExpr::ExistsRel { rel }),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text),
+            ),
+    );
+    let db = open_db(0x9a, AuthorSubject::SYSTEM, &schema);
+    let denied = resource_id(0xd1);
+    let allowed = resource_id(0xa1);
+    for (id, label) in [
+        (denied, "first equality only"),
+        (allowed, "both equalities"),
+    ] {
+        db.insert(
+            "resources",
+            BTreeMap::from([("label".to_owned(), Value::String(label.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    for (id, left_key, right_key) in [
+        (denied, "left-denied", "right-denied"),
+        (allowed, "left-allowed", "right-allowed"),
+    ] {
+        db.insert(
+            "left_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(id.0)),
+                ("left_key".to_owned(), Value::String(left_key.to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+        db.insert(
+            "right_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(id.0)),
+                ("right_key".to_owned(), Value::String(right_key.to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    }
+    for (left_key, right_key) in [
+        ("left-denied", "not-right-denied"),
+        ("left-allowed", "right-allowed"),
+    ] {
+        db.insert(
+            "evidence",
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String(left_key.to_owned())),
+                ("right_key".to_owned(), Value::String(right_key.to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    }
+
+    let prepared = db.prepare_query(&Query::from("resources")).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), reader)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
+        vec![allowed],
+        "the row whose evidence matches only the first compound equality must be denied"
+    );
+}
+/// A compound relation can participate in a nested boolean policy without
+/// turning its ON equalities into independent witnesses. Alice sees the row
+/// through the compound branch only with a complete witness; the public row is
+/// visible through the alternate OR branch.
+///
+/// left_facts ──┐
+///              ├── all equalities ──► evidence ──┐
+/// right_facts ─┘                                  ├── OR / AND ──► reader
+/// public label ──────────────────────────────────┘
+#[test]
+fn exists_rel_compound_join_composes_with_nested_boolean_policy() {
+    let reader = AuthorSubject::for_test_bytes([0x9b; 16]);
+    let compound = compound_exists_rel_test_policy();
+    let policy = PublicPolicyExpr::And(vec![
+        PublicPolicyExpr::Or(vec![
+            compound,
+            PublicPolicyExpr::eq_literal("label", PublicValue::Text("public".to_owned())),
+        ]),
+        PublicPolicyExpr::eq_literal("enabled", PublicValue::Boolean(true)),
+    ]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .column("enabled", PublicColumnType::Boolean)
+                    .policies(PublicTablePolicies::new().with_select(policy)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text),
+            ),
+    );
+    let db = open_db(0x9b, AuthorSubject::SYSTEM, &schema);
+    let partial = row(0xd2);
+    let complete = row(0xa2);
+    let alternate = row(0xb2);
+    for (id, label) in [
+        (partial, "private"),
+        (complete, "private"),
+        (alternate, "public"),
+    ] {
+        db.insert(
+            "resources",
+            BTreeMap::from([
+                ("label".to_owned(), Value::String(label.to_owned())),
+                ("enabled".to_owned(), Value::Bool(true)),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    for (id, left_key, right_key) in [
+        (partial, "left-partial", "right-partial"),
+        (complete, "left-complete", "right-complete"),
+    ] {
+        db.insert(
+            "left_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(id.0)),
+                ("left_key".to_owned(), Value::String(left_key.to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+        db.insert(
+            "right_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(id.0)),
+                ("right_key".to_owned(), Value::String(right_key.to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    }
+    for (left_key, right_key) in [
+        ("left-partial", "not-right-partial"),
+        ("left-complete", "right-complete"),
+    ] {
+        db.insert(
+            "evidence",
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String(left_key.to_owned())),
+                ("right_key".to_owned(), Value::String(right_key.to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    }
+
+    let prepared = db.prepare_query(&Query::from("resources")).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), reader)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
+        vec![complete, alternate],
+        "the nested policy allows a complete compound witness or the explicit alternate branch, but not the false-prefix witness"
+    );
+}
+
+/// Maintained policy membership must add and retract a resource as one
+/// compound witness appears and disappears. Alice never observes the row from
+/// a proof matching only the first equality.
+///
+/// partial evidence ──► empty result
+/// full evidence ─────► add row
+/// retract evidence ──► remove row
+#[test]
+fn exists_rel_compound_witness_add_and_retract_updates_maintained_read() {
+    let reader = AuthorSubject::for_test_bytes([0x9c; 16]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new().with_select(compound_exists_rel_test_policy()),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text),
+            ),
+    );
+    let db = open_db(0x9c, AuthorSubject::SYSTEM, &schema);
+    let resource = row(0xa3);
+    db.insert(
+        "resources",
+        BTreeMap::from([("label".to_owned(), Value::String("maintained".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(resource),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "left_facts",
+        BTreeMap::from([
+            ("resource_id".to_owned(), Value::Uuid(resource.0)),
+            (
+                "left_key".to_owned(),
+                Value::String("left-maintained".to_owned()),
+            ),
+        ]),
+        Default::default(),
+    )
+    .unwrap();
+    db.insert(
+        "right_facts",
+        BTreeMap::from([
+            ("resource_id".to_owned(), Value::Uuid(resource.0)),
+            (
+                "right_key".to_owned(),
+                Value::String("right-maintained".to_owned()),
+            ),
+        ]),
+        Default::default(),
+    )
+    .unwrap();
+    db.insert(
+        "evidence",
+        BTreeMap::from([
+            (
+                "left_key".to_owned(),
+                Value::String("left-maintained".to_owned()),
+            ),
+            (
+                "right_key".to_owned(),
+                Value::String("wrong-right".to_owned()),
+            ),
+        ]),
+        Default::default(),
+    )
+    .unwrap();
+    let prepared = db.prepare_query(&Query::from("resources")).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), reader)).unwrap();
+    assert!(
+        opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty(),
+        "matching only the first equality is not a policy witness"
+    );
+
+    let complete = db
+        .insert(
+            "evidence",
+            BTreeMap::from([
+                (
+                    "left_key".to_owned(),
+                    Value::String("left-maintained".to_owned()),
+                ),
+                (
+                    "right_key".to_owned(),
+                    Value::String("right-maintained".to_owned()),
+                ),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&added),
+        vec![resource],
+        "complete witness adds the row"
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    db.delete("evidence", complete.row_uuid(), Default::default())
+        .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![resource],
+        "retracting the complete witness removes the row even while a false-prefix witness remains"
+    );
+}
+
+fn compound_exists_rel_test_policy() -> PublicPolicyExpr {
+    compound_exists_rel_test_policy_with_secondary("right_key")
+}
+
+fn compound_exists_rel_test_policy_with_secondary(evidence_right_column: &str) -> PublicPolicyExpr {
+    let relation_column = |scope: &str, column: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: column.to_owned(),
+    };
+    let equality = |left: (&str, &str), right: (&str, &str)| PublicRelJoinCondition {
+        left: relation_column(left.0, left.1),
+        right: relation_column(right.0, right.1),
+    };
+    PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::Join {
+                    left: Box::new(PublicRelExpr::TableScan {
+                        table: "left_facts".into(),
+                        alias: Some("left_fact".to_owned()),
+                    }),
+                    right: Box::new(PublicRelExpr::TableScan {
+                        table: "right_facts".into(),
+                        alias: Some("right_fact".to_owned()),
+                    }),
+                    on: vec![equality(
+                        ("left_fact", "resource_id"),
+                        ("right_fact", "resource_id"),
+                    )],
+                    join_kind: PublicRelJoinKind::Inner,
+                }),
+                right: Box::new(PublicRelExpr::TableScan {
+                    table: "evidence".into(),
+                    alias: Some("evidence".to_owned()),
+                }),
+                on: vec![
+                    equality(("left_fact", "left_key"), ("evidence", "left_key")),
+                    equality(
+                        ("right_fact", "right_key"),
+                        ("evidence", evidence_right_column),
+                    ),
+                ],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: PublicRelPredicateExpr::Cmp {
+                left: relation_column("left_fact", "resource_id"),
+                op: PublicRelPredicateCmpOp::Eq,
+                right: PublicRelValueRef::RowId(PublicRelRowIdRef::Outer),
+            },
+        },
+    }
+}
+
+#[test]
+fn permission_advice_hydrates_same_shape_update_policy_clauses_independently() {
+    let author = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let resource = row(0xa9);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_update(
+                                Some(compound_exists_rel_test_policy_with_secondary("right_key")),
+                                PublicPolicyExpr::And(vec![
+                                    compound_exists_rel_test_policy_with_secondary(
+                                        "alternate_right_key",
+                                    ),
+                                    PublicPolicyExpr::Cmp {
+                                        column: "id".to_owned(),
+                                        op: PublicCmpOp::Eq,
+                                        value: crate::model::public_schema::PolicyValue::Literal(
+                                            PublicValue::Uuid(PublicObjectId::from_uuid(
+                                                resource.0,
+                                            )),
+                                        ),
+                                    },
+                                ]),
+                            ),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text)
+                    .column("alternate_right_key", PublicColumnType::Text),
+            ),
+    );
+    let server = open_core(0xa8, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "resources",
+            resource,
+            BTreeMap::from([("label".to_owned(), Value::String("before".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert(
+            "left_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert(
+            "right_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert(
+            "evidence",
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert(
+            "evidence",
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                (
+                    "right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("right".to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+
+    // USING is implicitly row-seeded; CHECK includes the same immutable row
+    // predicate explicitly so these provenance-distinct slots really collide.
+    let action = PermissionAdviceAction::Update {
+        table: "resources".to_owned(),
+        row: resource,
+        patch: BTreeMap::from([("label".to_owned(), Value::String("after".to_owned()))]),
+    };
+    let support_scope = server
+        .node()
+        .borrow()
+        .authorization_support_scope(author, &action)
+        .unwrap();
+    assert_eq!(support_scope.subscriptions.len(), 2);
+    assert_eq!(
+        support_scope.subscriptions[0].shape.shape_id(),
+        support_scope.subscriptions[1].shape.shape_id(),
+        "USING and CHECK deliberately share the public shape identity",
+    );
+    assert_eq!(
+        support_scope.subscriptions[0].binding.binding_id(),
+        support_scope.subscriptions[1].binding.binding_id(),
+        "USING and CHECK deliberately share the public binding identity",
+    );
+    assert_eq!(
+        support_scope.subscriptions[0].slot,
+        crate::schema::PolicySlot::UpdateUsing,
+    );
+    assert_eq!(
+        support_scope.subscriptions[1].slot,
+        crate::schema::PolicySlot::UpdateWithCheck,
+    );
+    assert_ne!(
+        support_scope.subscriptions[0].shape.policy_provenance(),
+        support_scope.subscriptions[1].shape.policy_provenance(),
+        "each slot carries a different private compound ExistsRel equality",
+    );
+
+    let client = open_db(0xa7, author, &schema);
+    // Model a replica that already has the current row and both independent
+    // relational witnesses before asking for authority-bound update advice.
+    client
+        .seed_settled_mergeable_for_bootstrap(
+            "resources",
+            resource,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([("label".to_owned(), Value::String("before".to_owned()))]),
+        )
+        .unwrap();
+    client
+        .seed_settled_mergeable_for_bootstrap(
+            "left_facts",
+            row(0xaa),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+            ]),
+        )
+        .unwrap();
+    client
+        .seed_settled_mergeable_for_bootstrap(
+            "right_facts",
+            row(0xab),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+            ]),
+        )
+        .unwrap();
+    client
+        .seed_settled_mergeable_for_bootstrap(
+            "evidence",
+            row(0xac),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    client
+        .seed_settled_mergeable_for_bootstrap(
+            "evidence",
+            row(0xad),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                (
+                    "right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("right".to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    let (client_transport, server_transport, server_outbound) =
+        duplex_with_admitted_session_context_and_server_outbound_tap(
+            author,
+            NodeUuid::from_bytes([0xa7; 16]),
+            1,
+            NodeUuid::from_bytes([0xa8; 16]),
+            1,
+        );
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let advice = client.request_permission_advice(action);
+
+    client.tick().unwrap();
+    for _ in 0..16 {
+        server.tick().unwrap();
+        if server_outbound.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+            )
+        }) {
+            break;
+        }
+    }
+    {
+        let messages = server_outbound.borrow();
+        let views = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(position, message)| match message {
+                SyncMessage::AuthorizationScopeView {
+                    clause_index,
+                    clause_count,
+                    ..
+                } => Some((position, *clause_index, *clause_count)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            views
+                .iter()
+                .map(|(_, index, count)| (*index, *count))
+                .collect::<Vec<_>>(),
+            vec![(0, 2), (1, 2)],
+            "both provenance-distinct clauses must be served",
+        );
+        let receipt_position = messages
+            .iter()
+            .position(|message| {
+                matches!(
+                    message,
+                    SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+                )
+            })
+            .expect("complete support hydration emits an aggregate receipt");
+        assert!(
+            views
+                .iter()
+                .all(|(position, _, _)| *position < receipt_position),
+            "the aggregate receipt follows both support views",
+        );
+    }
+
+    client.tick().unwrap();
+    assert_eq!(block_on(advice), PermissionAdvice::Allowed);
+}
+
+#[test]
+fn compound_exists_rel_annotation_change_rebuilds_retained_read() {
+    let reader = AuthorSubject::for_test_bytes([0x9d; 16]);
+    let schema_with = |evidence_right_column| {
+        build_public_db_test_schema(
+            PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("resources")
+                        .column("label", PublicColumnType::Text)
+                        .policies(PublicTablePolicies::new().with_select(
+                            compound_exists_rel_test_policy_with_secondary(evidence_right_column),
+                        )),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("left_facts")
+                        .fk_column("resource_id", "resources")
+                        .column("left_key", PublicColumnType::Text),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("right_facts")
+                        .fk_column("resource_id", "resources")
+                        .column("right_key", PublicColumnType::Text),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("evidence")
+                        .column("left_key", PublicColumnType::Text)
+                        .column("right_key", PublicColumnType::Text)
+                        .column("alternate_right_key", PublicColumnType::Text),
+                ),
+        )
+    };
+    let original = schema_with("right_key");
+    let updated = schema_with("alternate_right_key");
+    assert_eq!(
+        original.version_id(),
+        updated.version_id(),
+        "changing only policy relation provenance must not change the data schema version"
+    );
+    let db = open_db(0x9d, AuthorSubject::SYSTEM, &original);
+    let resource = row(0xa9);
+    db.insert(
+        "resources",
+        BTreeMap::from([(
+            "label".to_owned(),
+            Value::String("visible before policy change".to_owned()),
+        )]),
+        crate::db::InsertOptions {
+            row_id: Some(resource),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "left_facts",
+        BTreeMap::from([
+            ("resource_id".to_owned(), Value::Uuid(resource.0)),
+            ("left_key".to_owned(), Value::String("left".to_owned())),
+        ]),
+        Default::default(),
+    )
+    .unwrap();
+    db.insert(
+        "right_facts",
+        BTreeMap::from([
+            ("resource_id".to_owned(), Value::Uuid(resource.0)),
+            ("right_key".to_owned(), Value::String("right".to_owned())),
+        ]),
+        Default::default(),
+    )
+    .unwrap();
+    db.insert(
+        "evidence",
+        BTreeMap::from([
+            ("left_key".to_owned(), Value::String("left".to_owned())),
+            ("right_key".to_owned(), Value::String("right".to_owned())),
+            (
+                "alternate_right_key".to_owned(),
+                Value::String("not-right".to_owned()),
+            ),
+        ]),
+        Default::default(),
+    )
+    .unwrap();
+
+    let prepared = db.prepare_query(&Query::from("resources")).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), reader)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
+        vec![resource]
+    );
+
+    db.activate_schema_for_test(2, updated).unwrap();
+    db.seed_settled_mergeable_for_bootstrap(
+        "resources",
+        row(0xaa),
+        AuthorSubject::SYSTEM,
+        BTreeMap::from([("label".to_owned(), Value::String("still denied".to_owned()))]),
+    )
+    .unwrap();
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        ..
+    } = subscription
+        .try_next_event()
+        .expect("annotation-only policy change refreshes the retained view")
+    else {
+        panic!("policy change must produce a reset delta");
+    };
+    assert!(reset);
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![resource]
+    );
 }
 
 #[test]
@@ -2612,4 +3448,182 @@ fn recursive_reachable_scoped_receiver_settles_once_on_small_frontier() {
         vec![row(0xc1), row(0xc2)],
         "a worker relay must forward one scoped closure, not repeatedly reopen it"
     );
+}
+
+/// Alice's immutable role selects one compound OR policy for advice.
+/// The backend delegates each role snapshot independently: an incomplete editor
+/// witness denies, a reviewer witness allows, and a later complete editor
+/// witness allows without misaligning the surviving branch's provenance.
+///
+/// ```text
+/// alice(role) ──backend──► authority ──compound support──► Allowed / Denied
+/// ```
+#[test]
+fn permission_advice_prunes_role_alternatives_with_compound_provenance() {
+    let branch = |role: &str, evidence_column: &str| {
+        PublicPolicyExpr::And(vec![
+            PublicPolicyExpr::SessionCmp {
+                path: vec!["claims".to_owned(), "role".to_owned()],
+                op: PublicCmpOp::Eq,
+                value: PublicValue::Text(role.to_owned()),
+            },
+            compound_exists_rel_test_policy_with_secondary(evidence_column),
+        ])
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_update(
+                                None,
+                                PublicPolicyExpr::Or(vec![
+                                    branch("editor", "right_key"),
+                                    branch("reviewer", "alternate_right_key"),
+                                ]),
+                            ),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text)
+                    .column("alternate_right_key", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let authority = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let backend = open_db(0xbe, AuthorSubject::SYSTEM, &schema);
+    let resource = authority
+        .insert(
+            "resources",
+            BTreeMap::from([("label".to_owned(), Value::String("resource".to_owned()))]),
+        )
+        .unwrap()
+        .row_uuid();
+    // Update advice operates on a cached pre-state, as in the existing
+    // same-shape update-clause regression. This isolates support compilation.
+    backend
+        .seed_settled_mergeable_for_bootstrap(
+            "resources",
+            resource,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([("label".to_owned(), Value::String("resource".to_owned()))]),
+        )
+        .unwrap();
+    for (table, cells) in [
+        (
+            "left_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+            ]),
+        ),
+        (
+            "right_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("right_key".to_owned(), Value::String("right".to_owned())),
+            ]),
+        ),
+        (
+            "evidence",
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String("left".to_owned())),
+                (
+                    "right_key".to_owned(),
+                    Value::String("not-right".to_owned()),
+                ),
+                (
+                    "alternate_right_key".to_owned(),
+                    Value::String("right".to_owned()),
+                ),
+            ]),
+        ),
+    ] {
+        let row_id = authority.insert(table, cells.clone()).unwrap().row_uuid();
+        backend
+            .seed_settled_mergeable_for_bootstrap(table, row_id, AuthorSubject::SYSTEM, cells)
+            .unwrap();
+    }
+    let (backend_transport, authority_transport) = duplex_with_admitted_session_context(
+        AuthorSubject::SYSTEM,
+        NodeUuid::from_bytes([0xbe; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = block_on(backend.connect_upstream(backend_transport));
+    let _subscriber = authority.server.accept_subscriber_with_claims_and_trust(
+        authority_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
+    let ask = |role: &str| {
+        let mut claims = test_provider_claims(alice);
+        claims.insert(
+            crate::query::provider_claim_key("role"),
+            Value::String(role.to_owned()),
+        );
+        let mut advice = pin!(backend.request_permission_advice_with_delegated_session(
+            PermissionAdviceAction::Update {
+                table: "resources".to_owned(),
+                row: resource,
+                patch: BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("candidate".to_owned())
+                )]),
+            },
+            crate::protocol::DelegatedSessionBinding {
+                identity: alice,
+                claims
+            },
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        for _ in 0..32 {
+            backend.tick().unwrap();
+            authority.tick().unwrap();
+            backend.tick().unwrap();
+            if let Poll::Ready(advice) = advice.as_mut().poll(&mut cx) {
+                return advice;
+            }
+        }
+        panic!("role-bound advice did not finish after 32 owner turns");
+    };
+    assert_eq!(ask("editor"), PermissionAdvice::Denied);
+    assert_eq!(ask("reviewer"), PermissionAdvice::Allowed);
+    assert_eq!(ask("visitor"), PermissionAdvice::Denied);
+    let cells = BTreeMap::from([
+        ("left_key".to_owned(), Value::String("left".to_owned())),
+        ("right_key".to_owned(), Value::String("right".to_owned())),
+        (
+            "alternate_right_key".to_owned(),
+            Value::String("not-right".to_owned()),
+        ),
+    ]);
+    let witness = authority
+        .insert("evidence", cells.clone())
+        .unwrap()
+        .row_uuid();
+    backend
+        .seed_settled_mergeable_for_bootstrap("evidence", witness, AuthorSubject::SYSTEM, cells)
+        .unwrap();
+    assert_eq!(ask("editor"), PermissionAdvice::Allowed);
 }

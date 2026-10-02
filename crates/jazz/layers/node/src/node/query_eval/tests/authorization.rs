@@ -1165,11 +1165,13 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
         )
         .expect("missing policy claim is represented by a denied support shape");
     let options = scope.options.clone();
-    let (shape, binding) = scope
+    let clause = scope
         .subscriptions
         .into_iter()
         .next()
         .expect("read policy requires one support subscription");
+    let shape = clause.shape;
+    let binding = clause.binding;
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
@@ -1195,13 +1197,22 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
             options,
         )
         .expect("missing policy seed claim must hydrate as an empty authorization proof");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) = update else {
+    let SyncMessage::ViewUpdate(view) = update else {
         panic!("authorization support must return a settled view update");
     };
-    assert_eq!(
-        peer.subscription_policy_binding(subscription),
-        Some((writer, BTreeMap::new())),
-        "the internally allocated authorization support subscription records its proof subject rather than inheriting a transport identity"
+    assert!(
+        view.supporting_rows.added_rows().is_empty(),
+        "a missing seed claim must disclose no protected supporting rows"
+    );
+    assert!(
+        view.version_carriers.is_empty(),
+        "a denied proof must not carry the protected native body"
+    );
+    assert!(
+        !node
+            .dry_run_read_current_allows("resources", resource, writer)
+            .unwrap(),
+        "the complete stored witness cannot authorize a reader without its seed claim"
     );
 }
 
@@ -1458,6 +1469,11 @@ fn owner_policy_does_not_materialize_unreferenced_large_scalar_candidates() {
                         schema_version,
                         &table,
                         &policy,
+                        if insert_candidate {
+                            crate::schema::PolicySlot::InsertWithCheck
+                        } else {
+                            crate::schema::PolicySlot::UpdateUsing
+                        },
                         row(1),
                         &cells,
                         author(1),
@@ -1490,6 +1506,7 @@ fn owner_policy_does_not_materialize_unreferenced_large_scalar_candidates() {
                 schema_version,
                 &table,
                 &content_policy,
+                crate::schema::PolicySlot::InsertWithCheck,
                 row(1),
                 &cells,
                 author(1),
@@ -1599,6 +1616,11 @@ fn nullable_json_policy_candidates_preserve_logical_wrappers() {
                             schema_version,
                             &table,
                             &policy,
+                            if insert_candidate {
+                                crate::schema::PolicySlot::InsertWithCheck
+                            } else {
+                                crate::schema::PolicySlot::UpdateUsing
+                            },
                             row(1),
                             &cells,
                             author(1),

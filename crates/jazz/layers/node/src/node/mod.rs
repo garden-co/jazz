@@ -808,17 +808,18 @@ impl ActiveSchema {
     }
 
     fn same_permissions(&self, other: &Self) -> bool {
-        self.compiled
-            .tables
-            .iter()
-            .map(|table| (&table.name, &table.read_policy, &table.write_policies))
-            .eq(other
+        self.compiled.policy_provenance == other.compiled.policy_provenance
+            && self
                 .compiled
                 .tables
                 .iter()
-                .map(|table| (&table.name, &table.read_policy, &table.write_policies)))
+                .map(|table| (&table.name, &table.read_policy, &table.write_policies))
+                .eq(other
+                    .compiled
+                    .tables
+                    .iter()
+                    .map(|table| (&table.name, &table.read_policy, &table.write_policies)))
     }
-
     fn new(pointer: CurrentWriteSchema, compiled: JazzSchema) -> Result<Self, Error> {
         if compiled.version_id() != pointer.schema {
             return Err(Error::InvalidCatalogueUpdate(
@@ -1479,6 +1480,7 @@ enum ParamBindingModeCacheKey {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct ReadPolicyAuthorizationRequestCacheKey {
     policy_schema_version: SchemaVersionId,
+    policy_provenance_digest: [u8; 32],
     table_name: String,
     identity: AuthorSubject,
     param_binding_mode: ParamBindingModeCacheKey,

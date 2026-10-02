@@ -6,6 +6,8 @@ pub struct ValidatedQuery {
     params: BTreeMap<String, ColumnType>,
     canonical: Vec<u8>,
     shape_id: ShapeId,
+    #[serde(skip)]
+    policy_provenance: Option<crate::schema::PolicyRelationProvenance>,
 }
 
 impl ValidatedQuery {
@@ -32,6 +34,12 @@ impl ValidatedQuery {
     /// Original AST normalized into canonical order.
     pub fn query(&self) -> &Query {
         &self.query
+    }
+    #[doc(hidden)]
+    pub fn policy_provenance(
+        &self,
+    ) -> Option<&crate::schema::PolicyRelationProvenance> {
+        self.policy_provenance.as_ref()
     }
 
     /// Validate a binding against this shape.
@@ -379,7 +387,51 @@ fn validate_query_with_schema_version_as(
     schema_version: SchemaVersionId,
     role: RelationProjectionRole,
 ) -> Result<ValidatedQuery, QueryError> {
-    let (normalized, params, canonical) = validate_query_canonical_parts_as(query, schema, role)?;
+    validate_query_with_schema_version_as_and_provenance(
+        query,
+        schema,
+        schema_version,
+        role,
+        None,
+    )
+}
+
+fn validate_query_with_policy_provenance(
+    query: &Query,
+    schema: &RuntimeSchema,
+    provenance: crate::schema::PolicyRelationProvenance,
+) -> Result<ValidatedQuery, QueryError> {
+    validate_query_with_policy_provenance_version(query, schema, schema.version_id(), provenance)
+}
+
+fn validate_query_with_policy_provenance_version(
+    query: &Query,
+    schema: &RuntimeSchema,
+    schema_version: SchemaVersionId,
+    provenance: crate::schema::PolicyRelationProvenance,
+) -> Result<ValidatedQuery, QueryError> {
+    validate_query_with_schema_version_as_and_provenance(
+        query,
+        schema,
+        schema_version,
+        RelationProjectionRole::Result,
+        Some(provenance),
+    )
+}
+
+fn validate_query_with_schema_version_as_and_provenance(
+    query: &Query,
+    schema: &RuntimeSchema,
+    schema_version: SchemaVersionId,
+    role: RelationProjectionRole,
+    mut policy_provenance: Option<crate::schema::PolicyRelationProvenance>,
+) -> Result<ValidatedQuery, QueryError> {
+    let (normalized, params, canonical) = validate_query_canonical_parts_as_with_provenance(
+        query,
+        schema,
+        role,
+        policy_provenance.as_mut(),
+    )?;
     let mut shape_identity = canonical.clone();
     shape_identity.extend_from_slice(schema_version.as_bytes());
     let shape_id = ShapeId(uuid::Uuid::new_v5(&QUERY_NAMESPACE, &shape_identity));
@@ -389,6 +441,7 @@ fn validate_query_with_schema_version_as(
         params,
         canonical,
         shape_id,
+        policy_provenance,
     })
 }
 
@@ -406,6 +459,20 @@ fn validate_query_canonical_parts_as(
     schema: &RuntimeSchema,
     role: RelationProjectionRole,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    validate_query_canonical_parts_as_with_provenance(query, schema, role, None)
+}
+
+fn validate_query_canonical_parts_as_with_provenance(
+    query: &Query,
+    schema: &RuntimeSchema,
+    role: RelationProjectionRole,
+    policy_provenance: Option<&mut crate::schema::PolicyRelationProvenance>,
+) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    if query.relation.is_some() && policy_provenance.is_some() {
+        return Err(QueryError::UnsupportedRelationQuery(
+            "policy provenance is unsupported on relation queries".to_owned(),
+        ));
+    }
     let root = schema_table(schema, &query.table)?;
     let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
@@ -561,7 +628,11 @@ fn validate_query_canonical_parts_as(
             planner_column_type(&root, &order.column)?;
         }
     }
-    let normalized = normalize_query(&resolved_query);
+    let normalized = if let Some(provenance) = policy_provenance {
+        normalize_policy_query(&resolved_query, provenance)?
+    } else {
+        normalize_query(&resolved_query)
+    };
     let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
     Ok((normalized, params, canonical))
 }
@@ -1813,7 +1884,7 @@ fn is_orderable(column_type: &ColumnType) -> bool {
     )
 }
 
-fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
+pub(crate) fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
     let left = non_null_column_type(left);
     let right = non_null_column_type(right);
     left == right

@@ -648,7 +648,14 @@ pub(super) fn bind_query_params_with_mode(
             Ok(branch)
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    let rebound = query.validate_with_schema_version(schema, shape.schema_version())?;
+    let rebound = match shape.policy_provenance() {
+        Some(provenance) => query.validate_with_policy_provenance_version(
+            schema,
+            shape.schema_version(),
+            provenance.clone(),
+        )?,
+        None => query.validate_with_schema_version(schema, shape.schema_version())?,
+    };
     if rebound.schema_version() != shape.schema_version() {
         return Err(Error::InvalidStoredValue("bound query schema changed"));
     }

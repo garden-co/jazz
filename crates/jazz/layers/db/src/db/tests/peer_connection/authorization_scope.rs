@@ -2038,13 +2038,13 @@ fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
     let entries = expected
         .subscriptions
         .iter()
-        .map(|(shape, binding)| {
+        .map(|clause| {
             let subscription = SubscriptionKey {
-                shape_id: shape.shape_id(),
-                binding_id: binding.binding_id(),
+                shape_id: clause.shape.shape_id(),
+                binding_id: clause.binding.binding_id(),
                 read_view: RegisterShapeOptions::default().read_view_key(),
             };
-            (shape.clone(), subscription)
+            (clause.shape.clone(), subscription)
         })
         .collect::<Vec<_>>();
     let (mut client_transport, server_transport) = duplex();
@@ -2107,119 +2107,6 @@ fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
 }
 
 #[test]
-fn authorization_scope_aggregate_bounds_cuts_and_progress_independently() {
-    let subscription = |seed| SubscriptionKey {
-        shape_id: ShapeId(uuid::Uuid::from_bytes([seed; 16])),
-        binding_id: BindingId(uuid::Uuid::from_bytes([seed.wrapping_add(1); 16])),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    };
-    let mut applied = BTreeMap::new();
-    applied.insert(subscription(1), (GlobalTime(5), 100));
-    applied.insert(subscription(2), (GlobalTime(10), 1));
-
-    assert_eq!(
-        aggregate_authorization_scope_bounds(&applied),
-        Some((GlobalTime(5), 1)),
-        "a later support view may be the limiting authorization generation"
-    );
-}
-
-// The server-only generation stamp and scope receipt are wire details that the
-// public query API intentionally hides, so this stays a narrow internal test.
-#[test]
-fn sibling_scope_receipt_uses_the_view_stamped_canonical_generation() {
-    let canonical_generation = PeerPayloadInventory {
-        authorization_progress: Some(7),
-        ..PeerPayloadInventory::default()
-    };
-    assert_eq!(
-        authorization_progress_for_view_receipt(&canonical_generation, 0),
-        7,
-        "a sibling receipt must use the canonical generation already stamped on its view"
-    );
-    assert_eq!(
-        authorization_progress_for_view_receipt(&PeerPayloadInventory::default(), 3),
-        3,
-        "an ordinary unstamped view keeps its usage-site generation"
-    );
-}
-
-#[test]
-fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_clause() {
-    let subscription = |seed| SubscriptionKey {
-        shape_id: ShapeId(uuid::Uuid::from_bytes([seed; 16])),
-        binding_id: BindingId(uuid::Uuid::from_bytes([seed.wrapping_add(1); 16])),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    };
-    let first = subscription(0x21);
-    let second = subscription(0x31);
-    let expected_support = BTreeSet::from([
-        (first.shape_id, first.binding_id),
-        (second.shape_id, second.binding_id),
-    ]);
-    let key = AuthorizationSupportScopeKey {
-        support_shape_digest: [0x41; 32],
-        subject: AuthorSubject::for_test_bytes([0x42; 16]),
-        claims_digest: [0x43; 32],
-        policy_digest: [0x44; 32],
-    };
-    let mut aggregates = BTreeMap::from([(
-        key.clone(),
-        ScopeAggregate {
-            expected_support: expected_support.clone(),
-            members: BTreeMap::from([
-                (first, (first.shape_id, first.binding_id)),
-                (second, (second.shape_id, second.binding_id)),
-            ]),
-            applied: BTreeMap::from([(first, (GlobalTime(5), 5)), (second, (GlobalTime(5), 5))]),
-        },
-    )]);
-
-    // A claims or policy transition can make both compiled clauses disappear.
-    // Returning to the same digest must not revive either previous cut.
-    remove_scope_aggregate_member(&mut aggregates, &key, first);
-    remove_scope_aggregate_member(&mut aggregates, &key, second);
-    assert!(aggregates.is_empty());
-
-    let aggregate = aggregates.entry(key).or_insert_with(|| ScopeAggregate {
-        expected_support,
-        members: BTreeMap::new(),
-        applied: BTreeMap::new(),
-    });
-    aggregate
-        .members
-        .insert(first, (first.shape_id, first.binding_id));
-    aggregate
-        .members
-        .insert(second, (second.shape_id, second.binding_id));
-    assert!(
-        aggregate.applied.is_empty(),
-        "the first returning clause has no receipt until its replacement view arrives"
-    );
-    aggregate.applied.insert(first, (GlobalTime(6), 6));
-    assert!(
-        aggregate
-            .members
-            .keys()
-            .any(|member| !aggregate.applied.contains_key(member)),
-        "one refreshed clause still cannot prove the aggregate"
-    );
-    assert!(
-        aggregate
-            .members
-            .keys()
-            .any(|member| !aggregate.applied.contains_key(member))
-    );
-    aggregate.applied.insert(second, (GlobalTime(6), 6));
-    assert!(
-        aggregate
-            .members
-            .keys()
-            .all(|member| aggregate.applied.contains_key(member))
-    );
-}
-
-#[test]
 fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
     let link = AuthorSubject::for_test_bytes([0x8b; 16]);
     let context = AuthorityContext {
@@ -2278,52 +2165,6 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
         ),
         "a stale support cut must not ride a fresh authorization generation"
     );
-}
-
-#[test]
-fn authorization_scope_requires_canonical_current_global_support_options() {
-    let expected = RegisterShapeOptions::default();
-    let subscription_for = |opts: &RegisterShapeOptions| SubscriptionKey {
-        shape_id: ShapeId(uuid::Uuid::from_bytes([0x51; 16])),
-        binding_id: BindingId(uuid::Uuid::from_bytes([0x52; 16])),
-        read_view: opts.read_view_key(),
-    };
-    assert!(authorization_scope_support_options_match(
-        &expected,
-        &expected,
-        subscription_for(&expected),
-    ));
-    let variants = [
-        RegisterShapeOptions {
-            tier: DurabilityTier::Global,
-            read_view: ReadViewSpec {
-                source: ReadViewSourceSpec::Snapshot {
-                    snapshot: SnapshotRef {
-                        owner: NodeUuid::from_bytes([0x54; 16]),
-                        global_base: GlobalTime(0),
-                        local_base: TxTime(0),
-                        dots: Vec::new(),
-                    },
-                },
-            },
-            ..RegisterShapeOptions::default()
-        },
-        RegisterShapeOptions {
-            tier: DurabilityTier::Local,
-            read_view: ReadViewSpec::default(),
-            ..RegisterShapeOptions::default()
-        },
-    ];
-    for actual in variants {
-        assert!(
-            !authorization_scope_support_options_match(
-                &expected,
-                &actual,
-                subscription_for(&actual),
-            ),
-            "noncanonical scope support must not satisfy the pure admission fence"
-        );
-    }
 }
 
 #[test]

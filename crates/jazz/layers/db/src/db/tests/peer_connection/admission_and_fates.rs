@@ -448,6 +448,143 @@ fn downstream_fate_retries_after_bounded_transport_backpressure() {
     assert!(outbound.borrow().is_empty());
 }
 
+/// Alice's ordinary subscription reaches Core before its permissions head is
+/// published. Core must deliver pending-opening progress, retain that exact
+/// notification when its first transport admission is refused, and never turn
+/// it into a settled empty opening or duplicate it on later owner turns.
+///
+/// ```text
+/// alice ──ordinary Subscribe──► Core (permissions not ready)
+/// alice ◄──pending opening──✗─ bounded admission
+/// alice ◄──same pending opening── owner retry
+/// ```
+///
+/// This stays at the actual peer/transport seam because the public query API
+/// hides pending-opening notifications. The adapter only refuses admission and
+/// forwards real protocol messages; Node and PeerConnection produce the reply.
+#[test]
+fn ordinary_subscribe_pending_opening_retries_after_backpressure_without_settling() {
+    struct PendingOpeningBackpressureTransport {
+        inner: Box<dyn Transport>,
+        rejected: Rc<RefCell<Option<SyncMessage>>>,
+    }
+
+    impl Transport for PendingOpeningBackpressureTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(&message, SyncMessage::ViewUpdate(_)) && self.rejected.borrow().is_none() {
+                *self.rejected.borrow_mut() = Some(message);
+                return Err(TransportError::Backpressure);
+            }
+            self.inner.send(message)
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+
+        fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+            self.inner.connection_session_context()
+        }
+    }
+
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0xc7; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    core.insert(
+        "todos",
+        cells("not yet authorized for delivery", false, alice),
+    )
+    .unwrap();
+    core.server.set_permissions_ready(false).unwrap();
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let opts = RegisterShapeOptions::default();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
+    let (mut alice_transport, core_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xc7; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let rejected = Rc::new(RefCell::new(None));
+    let subscriber = core.accept_subscriber(
+        Box::new(PendingOpeningBackpressureTransport {
+            inner: core_transport,
+            rejected: Rc::clone(&rejected),
+        }),
+        alice,
+    );
+    alice_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts,
+        })
+        .unwrap();
+    alice_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+            delegated_session: None,
+        }))
+        .unwrap();
+
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        assert!(
+            try_recv_subscriber_payload(alice_transport.as_mut()).is_none(),
+            "refused byte admission must not deliver any opening or rejection"
+        );
+        if rejected.borrow().is_some() {
+            break;
+        }
+    }
+    let rejected = rejected
+        .borrow()
+        .clone()
+        .expect("ordinary Subscribe must attempt pending progress within 32 owner turns");
+    let SyncMessage::ViewUpdate(pending) = &rejected else {
+        panic!("the refused notification must be a ViewUpdate");
+    };
+    assert_eq!(pending.subscription, subscription);
+    assert!(
+        pending.peer_payload_inventory.opening_pending,
+        "an unpublished permissions head cannot establish settled coverage"
+    );
+    assert!(pending.supporting_rows.is_snapshot());
+    assert!(pending.supporting_rows.added_rows().is_empty());
+    assert!(
+        pending.version_carriers.is_empty(),
+        "Core must not disclose Alice's stored row before permission publication"
+    );
+
+    let mut delivered = Vec::new();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        while let Some(message) = try_recv_subscriber_payload(alice_transport.as_mut()) {
+            assert!(
+                matches!(&message, SyncMessage::ViewUpdate(view)
+                    if view.subscription == subscription
+                        && view.peer_payload_inventory.opening_pending),
+                "retry must not emit a rejection or settled opening: {message:?}"
+            );
+            delivered.push(message);
+        }
+    }
+    assert_eq!(
+        delivered,
+        vec![rejected],
+        "existing owner retry must deliver the exact pending notification once, without a duplicate or settled empty opening"
+    );
+}
+
 /// The ordinary-wire chunk responder is a legacy path below the public chunk
 /// API. It needs the same bounded ownership rule as fates: a rejected byte
 /// admission retains one response batch and does not consume another inbound
@@ -1770,6 +1907,52 @@ fn backend_permission_advice_keeps_concurrent_delegated_claim_scopes_separate_af
         "viewer binding must not coalesce with the editor support scope"
     );
 }
+#[test]
+fn scope_isolated_relay_permission_advice_uses_admitted_claims() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0xc8; 16]);
+    let authority = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let owned = authority
+        .insert("todos", cells("scoped", false, alice))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xc8, alice, &schema);
+    let claims = test_provider_claims(alice);
+    client.set_test_provider_claims(alice, claims.clone());
+    let (client_transport, authority_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xc8; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+    let _subscriber = authority.server.accept_scope_isolated_relay_subscriber(
+        authority_transport,
+        alice,
+        claims.clone(),
+        1,
+    );
+    let advice = client.request_permission_advice_with_delegated_session(
+        PermissionAdviceAction::Read {
+            table: "todos".to_owned(),
+            row: owned,
+        },
+        crate::protocol::DelegatedSessionBinding {
+            identity: alice,
+            claims,
+        },
+    );
+    for _ in 0..16 {
+        client.tick().unwrap();
+        authority.tick().unwrap();
+    }
+    assert_eq!(
+        block_on(advice),
+        PermissionAdvice::Allowed,
+        "an admitted relay binding must not be compared with the empty transport claims map"
+    );
+}
 
 #[test]
 fn ordinary_session_link_rejects_forged_delegated_permission_advice_intent() {
@@ -2128,6 +2311,337 @@ fn row_seeded_update_and_delete_advice_follow_the_patched_row() {
     );
 }
 
+/// Alice's stable provider subject is admitted independently at the client
+/// and at a fresh Core connection. Their claim revisions need not agree:
+/// matching Text-owner inserts are Allowed and other owners are Denied.
+#[test]
+fn direct_text_owner_advice_accepts_independent_authority_claim_revision() {
+    let owner = || public_session_eq("owner", &["claims", "sub"]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(owner())
+                        .with_insert(owner()),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("alice".to_owned()),
+    )]);
+    let client = open_db(0xa1, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    client.set_test_provider_claims(alice, claims.clone());
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    // Initial admission is not a refresh of the serving connection's claims.
+    let _subscriber = server.accept_subscriber_with_claims(server_transport, alice, claims);
+    let insert = |owner: &str| PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: BTreeMap::from([
+            ("title".to_owned(), Value::String("candidate".to_owned())),
+            ("owner".to_owned(), Value::String(owner.to_owned())),
+        ]),
+    };
+    let mut allowed = Box::pin(client.request_permission_advice(insert("alice")));
+    let mut denied = Box::pin(client.request_permission_advice(insert("mallory")));
+    for _ in 0..16 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(
+        allowed.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Allowed),
+        "a stable local claim revision must not be used as the authority revision"
+    );
+    assert_eq!(
+        denied.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Denied),
+        "independent revisions must not hide a definitive owner mismatch"
+    );
+    assert!(server.read(&Query::from("todos")).unwrap().is_empty());
+}
+
+/// Alice changes A→B→A after Core completes a read proof but before receiving
+/// it. The old future is Unknown; a fresh identical action must not coalesce
+/// with the old request and receives its own Allowed proof.
+///
+/// alice ──A request──► Core ──buffered support + receipt──► alice
+/// alice ──B then A; fresh request────────────────────────► Core
+///
+/// The transport seam controls receive ordering; assertions use public advice.
+#[test]
+fn direct_scope_receipt_aba_retires_old_request_without_coalescing_fresh_a() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("owner", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "sub"])),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let a_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("alice".to_owned()),
+    )]);
+    let b_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("bob".to_owned()),
+    )]);
+    let client = open_db(0xa1, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let target = server
+        .insert(
+            "todos",
+            BTreeMap::from([("owner".to_owned(), Value::String("alice".to_owned()))]),
+        )
+        .unwrap()
+        .row_uuid();
+    client.set_test_provider_claims(alice, a_claims.clone());
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber_with_claims(server_transport, alice, BTreeMap::new());
+    // Core has independently refreshed this link before Alice's request.
+    // Its revision happens to equal Alice's later ABA revision, so comparing
+    // counters from the two domains cannot accidentally reject the old proof.
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(a_claims.clone());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(b_claims.clone());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(a_claims.clone());
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    };
+    let mut old = Box::pin(client.request_permission_advice(action.clone()));
+    client.tick().unwrap();
+    for _ in 0..4 {
+        server.tick().unwrap();
+    }
+    // No client receive occurs until the A proof is already buffered.
+    client.set_test_provider_claims(alice, b_claims);
+    client.set_test_provider_claims(alice, a_claims);
+    let mut fresh = Box::pin(client.request_permission_advice(action));
+    for _ in 0..16 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(
+        old.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Unknown),
+        "equal claim values after ABA must not revive a completed old proof"
+    );
+    assert_eq!(
+        fresh.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Allowed),
+        "fresh A must not inherit the stale request's retirement through coalescing"
+    );
+}
+
+/// Core denies Alice's read without a select policy using a real zero-clause
+/// decision. An A→B→A change while that decision is buffered invalidates the
+/// old future even though there are no support views or aggregate receipt.
+///
+/// alice ──A read──► Core ──buffered Denied──► alice changes B→A
+/// alice ──fresh A read──► Core ──Denied──► fresh future only
+///
+/// The transport seam controls receive ordering; assertions use public advice.
+#[test]
+fn direct_zero_clause_decision_aba_retires_old_request() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("owner", PublicColumnType::Text)),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let a_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("alice".to_owned()),
+    )]);
+    let b_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("bob".to_owned()),
+    )]);
+    let client = open_db(0xa1, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let target = server
+        .insert(
+            "todos",
+            BTreeMap::from([("owner".to_owned(), Value::String("alice".to_owned()))]),
+        )
+        .unwrap()
+        .row_uuid();
+    client.set_test_provider_claims(alice, a_claims.clone());
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let _subscriber =
+        server.accept_subscriber_with_claims(server_transport, alice, a_claims.clone());
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    };
+    let mut old = Box::pin(client.request_permission_advice(action.clone()));
+    client.tick().unwrap();
+    for _ in 0..4 {
+        server.tick().unwrap();
+    }
+    client.set_test_provider_claims(alice, b_claims);
+    client.set_test_provider_claims(alice, a_claims);
+    let mut fresh = Box::pin(client.request_permission_advice(action));
+    for _ in 0..16 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(
+        old.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Unknown),
+        "zero-clause decisions have the same direct-session freshness contract"
+    );
+    assert_eq!(
+        fresh.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Denied),
+        "the missing select policy remains a definitive denial for a fresh request"
+    );
+}
+
+/// Alice's first read intent is backpressured, then its link detaches. An ABA
+/// while disconnected must retire the captured request rather than recapture
+/// A on replay; a fresh A read still receives Allowed from the successor.
+///
+/// alice ──A intent (backpressure)──► detach ──B→A──► reconnect
+/// alice ──old: Unknown; fresh A intent──► Core ──Allowed──► alice
+///
+/// The transport seam supplies one bounded send refusal, not an advice mock.
+#[test]
+fn direct_backpressured_scope_aba_during_detach_preserves_original_stamp() {
+    struct BackpressureScopeIntent {
+        inner: Box<dyn Transport>,
+    }
+
+    impl Transport for BackpressureScopeIntent {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::AuthorizationScopeIntent { .. }) {
+                return Err(TransportError::Backpressure);
+            }
+            self.inner.send(message)
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+
+        fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+            self.inner.connection_session_context()
+        }
+    }
+
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("owner", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "sub"])),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let a_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("alice".to_owned()),
+    )]);
+    let b_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("bob".to_owned()),
+    )]);
+    let client = open_db(0xa1, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let target = server
+        .insert(
+            "todos",
+            BTreeMap::from([("owner".to_owned(), Value::String("alice".to_owned()))]),
+        )
+        .unwrap()
+        .row_uuid();
+    client.set_test_provider_claims(alice, a_claims.clone());
+    let (first_transport, _first_server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let upstream = block_on(client.connect_upstream(Box::new(BackpressureScopeIntent {
+        inner: first_transport,
+    })));
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    };
+    let mut old = Box::pin(client.request_permission_advice(action.clone()));
+    client.tick().unwrap();
+    assert!(client.detach_connection(&upstream));
+    client.set_test_provider_claims(alice, b_claims);
+    client.set_test_provider_claims(alice, a_claims.clone());
+    let (retry_transport, retry_server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        2,
+        NodeUuid::from_bytes([0x5e; 16]),
+        2,
+    );
+    let _retry_upstream = block_on(client.connect_upstream(retry_transport));
+    let _subscriber = server.accept_subscriber_with_claims(retry_server_transport, alice, a_claims);
+    let mut fresh = Box::pin(client.request_permission_advice(action));
+    for _ in 0..16 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(
+        old.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Unknown),
+        "detach replay must preserve the pre-backpressure local stamp"
+    );
+    assert_eq!(
+        fresh.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Allowed),
+        "the successor authority must answer a newly captured A request"
+    );
+}
+
 /// This stays at the peer/transport seam because the public advice future
 /// cannot hold an authority's completed proof between its wire receipt and
 /// the local callback. It proves that the request owns the claims it observed
@@ -2260,7 +2774,11 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
         1,
     );
     let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
-    let subscriber = server.accept_subscriber(server_transport, alice);
+    let subscriber = server.accept_subscriber_with_claims(server_transport, alice, BTreeMap::new());
+    // Both trusted admission boundaries observe the same 0→1 claim refresh.
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(test_provider_claims(alice));
 
     let first = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -2330,6 +2848,479 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     assert_eq!(
         hydration_count, 3,
         "each 0→1→2 authority claim transition must reject stale evidence and rehydrate"
+    );
+}
+
+fn request_advice_with_scope_views(
+    client: &Db,
+    server: &CoreDb,
+    server_outbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
+    action: PermissionAdviceAction,
+) -> (
+    PermissionAdvice,
+    Vec<(
+        AuthorizationSupportScopeKey,
+        SubscriptionKey,
+        Vec<crate::ids::GlobalPhysicalTableId>,
+    )>,
+) {
+    let mut advice = pin!(client.request_permission_advice(action));
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut views = Vec::new();
+    for _ in 0..32 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        views.extend(server_outbound.borrow().iter().filter_map(|message| {
+            match message {
+                SyncMessage::AuthorizationScopeView { key, view, .. } => Some((
+                    key.clone(),
+                    view.subscription,
+                    view.supporting_rows
+                        .added_rows()
+                        .iter()
+                        .map(|row| row.physical_table)
+                        .collect(),
+                )),
+                _ => None,
+            }
+        }));
+        client.tick().unwrap();
+        if let Poll::Ready(advice) = advice.as_mut().poll(&mut cx) {
+            return (advice, views);
+        }
+    }
+    panic!(
+        "permission advice did not complete after 32 owner-loop progress turns; captured {} views",
+        views.len()
+    );
+}
+
+/// A reused authority support view must not survive a Groove runtime rebuild.
+/// This peer-level protocol assertion is needed because the public advice API
+/// hides the authority's opaque proof subscription; the answer remains public.
+///
+/// ```text
+/// alice ──advice──► authority ──support(A)──► alice
+///        runtime rebuild
+/// alice ──advice──► authority ──support(B)──► alice
+/// ```
+#[test]
+fn cached_scope_hydration_rehydrates_after_runtime_generation_changes() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let target = server
+        .insert("todos", cells("owned", false, alice))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, alice, &schema);
+    client.set_test_provider_claims(alice, test_provider_claims(alice));
+    let (client_transport, server_transport, server_outbound) =
+        duplex_with_admitted_session_context_and_server_outbound_tap(
+            alice,
+            NodeUuid::from_bytes([0xa1; 16]),
+            1,
+            NodeUuid::from_bytes([0x5e; 16]),
+            1,
+        );
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber_with_claims(server_transport, alice, BTreeMap::new());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(test_provider_claims(alice));
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    };
+
+    let (first_advice, first_views) =
+        request_advice_with_scope_views(&client, &server, &server_outbound, action.clone());
+    assert_eq!(first_advice, PermissionAdvice::Allowed);
+    assert_eq!(first_views.len(), 1);
+    let (first_scope, first_subscription, first_tables) = &first_views[0];
+    let node = server.node();
+    let policy_epoch = node.borrow().active_catalogue_seq();
+    let cut = node.borrow().committed_global_time();
+    let identity_generation = node.borrow().physical_identity_generation();
+    let runtime_token = node.borrow().groove_runtime_token();
+
+    node.borrow_mut().invalidate_groove_runtime_for_test();
+
+    assert_eq!(node.borrow().active_catalogue_seq(), policy_epoch);
+    assert_eq!(node.borrow().committed_global_time(), cut);
+    assert_eq!(
+        node.borrow().physical_identity_generation(),
+        identity_generation
+    );
+    assert_ne!(node.borrow().groove_runtime_token(), runtime_token);
+
+    let (next_advice, next_views) =
+        request_advice_with_scope_views(&client, &server, &server_outbound, action);
+    assert_eq!(next_advice, PermissionAdvice::Allowed);
+    assert_eq!(next_views.len(), 1);
+    assert_eq!(
+        &next_views[0].0, first_scope,
+        "the same proof scope was requested"
+    );
+    assert_ne!(
+        &next_views[0].1, first_subscription,
+        "runtime invalidation must rehydrate cached support under a fresh subscription"
+    );
+    assert_eq!(next_views[0].2, *first_tables);
+}
+
+/// A reused authority support view must follow physical catalogue rebinding.
+/// The wire assertion pins the physical table identity that public advice
+/// consumes after alice's client adopts the trusted snapshot.
+///
+/// ```text
+/// alice ──advice──► authority ──support(old table)──► alice
+///        catalogue rebind
+/// alice ──advice──► authority ──support(new table)──► alice
+/// ```
+#[test]
+fn cached_scope_hydration_rehydrates_after_physical_identity_changes() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let target = server
+        .insert("todos", cells("owned", false, alice))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, alice, &schema);
+    client.set_test_provider_claims(alice, test_provider_claims(alice));
+    let (client_transport, server_transport, server_outbound) =
+        duplex_with_admitted_session_context_and_server_outbound_tap(
+            alice,
+            NodeUuid::from_bytes([0xa1; 16]),
+            1,
+            NodeUuid::from_bytes([0x5e; 16]),
+            1,
+        );
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber_with_claims(server_transport, alice, BTreeMap::new());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(test_provider_claims(alice));
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    };
+
+    let (first_advice, first_views) =
+        request_advice_with_scope_views(&client, &server, &server_outbound, action.clone());
+    assert_eq!(first_advice, PermissionAdvice::Allowed);
+    assert_eq!(first_views.len(), 1);
+    let (first_scope, first_subscription, first_tables) = &first_views[0];
+    let old_physical_table = first_tables[0].clone();
+    let node = server.node();
+    let old_runtime_token = node.borrow().groove_runtime_token();
+    let old_identity_generation = node.borrow().physical_identity_generation();
+    let policy_epoch = node.borrow().active_catalogue_seq();
+    let cut = node.borrow().committed_global_time();
+    let alternate = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let snapshot = alternate.node().borrow().catalogue_snapshot().unwrap();
+
+    node.borrow_mut()
+        .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .unwrap();
+    assert_eq!(node.borrow().active_catalogue_seq(), policy_epoch);
+    assert_eq!(node.borrow().committed_global_time(), cut);
+    assert_eq!(node.borrow().groove_runtime_token(), old_runtime_token);
+    assert_ne!(
+        node.borrow().physical_identity_generation(),
+        old_identity_generation
+    );
+    client
+        .node
+        .node
+        .borrow_mut()
+        .apply_trusted_catalogue_snapshot_settled(snapshot)
+        .unwrap();
+
+    let current_physical_table = client
+        .physical_table_identity_for_test(schema.version_id(), "todos")
+        .unwrap();
+    assert_ne!(current_physical_table, old_physical_table);
+
+    let (next_advice, next_views) =
+        request_advice_with_scope_views(&client, &server, &server_outbound, action);
+    assert_eq!(next_advice, PermissionAdvice::Allowed);
+    assert_eq!(next_views.len(), 1);
+    assert_eq!(
+        &next_views[0].0, first_scope,
+        "the same proof scope was requested"
+    );
+    assert_ne!(
+        &next_views[0].1, first_subscription,
+        "physical identity changes must rehydrate cached support under a fresh subscription"
+    );
+    assert_eq!(next_views[0].2, vec![current_physical_table]);
+}
+
+/// A queued multi-clause scope proof is bound to the claims and policy context
+/// that produced it. Backpressure after its view frames must not let a stale
+/// aggregate receipt escape on retry.
+///
+/// ```text
+/// alice ──intent(A)──► authority ──views(A)──► backpressure(receipt)
+///                       claims/policy advance
+/// alice ◄──unavailable── authority       ✗ no receipt(A)
+/// ```
+#[test]
+fn backpressured_scope_receipt_is_invalidated_after_claim_refresh() {
+    assert_backpressured_scope_receipt_invalidated(ScopeContextChange::Claims);
+}
+
+#[test]
+fn backpressured_scope_receipt_is_invalidated_after_policy_epoch_change() {
+    assert_backpressured_scope_receipt_invalidated(ScopeContextChange::PolicyEpoch);
+}
+
+#[test]
+fn backpressured_scope_receipt_is_invalidated_after_data_cut_change() {
+    assert_backpressured_scope_receipt_invalidated(ScopeContextChange::DataCut);
+}
+#[test]
+fn backpressured_scope_receipt_is_invalidated_after_scope_relay_epoch_change() {
+    assert_backpressured_scope_receipt_invalidated(ScopeContextChange::ScopeRelayAdmissionEpoch);
+}
+
+#[derive(Clone, Copy)]
+enum ScopeContextChange {
+    Claims,
+    PolicyEpoch,
+    DataCut,
+    ScopeRelayAdmissionEpoch,
+}
+
+fn assert_backpressured_scope_receipt_invalidated(change: ScopeContextChange) {
+    struct RejectAggregateOnce {
+        inner: Box<dyn Transport>,
+        rejected: bool,
+        accepted_views: Rc<RefCell<Vec<SyncMessage>>>,
+        accepted_aggregate: Rc<RefCell<Vec<SyncMessage>>>,
+    }
+
+    impl Transport for RejectAggregateOnce {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::AuthorizationScopeView { .. }) {
+                self.accepted_views.borrow_mut().push(message.clone());
+            }
+            if matches!(
+                message,
+                SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+            ) {
+                if !self.rejected {
+                    self.rejected = true;
+                    return Err(TransportError::Backpressure);
+                }
+                self.accepted_aggregate.borrow_mut().push(message.clone());
+            }
+            self.inner.send(message)
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+
+        fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+            self.inner.connection_session_context()
+        }
+    }
+
+    let make_schema = |workspace_note: bool| {
+        let editor = PublicPolicyExpr::SessionCmp {
+            path: vec!["claims".to_owned(), "role".to_owned()],
+            op: PublicCmpOp::Eq,
+            value: PublicValue::Text("editor".to_owned()),
+        };
+        let open_workspace = public_exists(
+            "workspaces",
+            [public_literal_eq("open", PublicValue::Boolean(true))],
+        );
+        let workspace =
+            PublicTableSchemaBuilder::new("workspaces").column("open", PublicColumnType::Boolean);
+        let workspace = if workspace_note {
+            workspace.column("note", PublicColumnType::Text)
+        } else {
+            workspace
+        };
+        build_public_db_test_schema(
+            PublicSchemaBuilder::new()
+                .table(
+                    workspace
+                        .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("todos")
+                        .column("title", PublicColumnType::Text)
+                        .column("done", PublicColumnType::Boolean)
+                        .column("owner", PublicColumnType::Uuid)
+                        .policies(
+                            PublicTablePolicies::new().with_update(Some(editor), open_workspace),
+                        ),
+                ),
+        )
+    };
+    let schema = make_schema(false);
+    let policy_epoch_schema = make_schema(true);
+    let alice = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "workspaces",
+            row(0xd2),
+            BTreeMap::from([("open".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    let todo = row(0xd3);
+    server
+        .insert_with_id("todos", todo, cells("before", false, alice))
+        .unwrap();
+    let client = open_db(0xd1, alice, &schema);
+    let a_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("editor".to_owned()),
+    )]);
+    client.set_test_provider_claims(alice, a_claims.clone());
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xd1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+    let accepted_views = Rc::new(RefCell::new(Vec::new()));
+    let accepted_aggregate = Rc::new(RefCell::new(Vec::new()));
+    let wrapped_server_transport: Box<dyn Transport> = Box::new(RejectAggregateOnce {
+        inner: server_transport,
+        rejected: false,
+        accepted_views: Rc::clone(&accepted_views),
+        accepted_aggregate: Rc::clone(&accepted_aggregate),
+    });
+    let scope_isolated_relay = matches!(change, ScopeContextChange::ScopeRelayAdmissionEpoch);
+    let subscriber = if scope_isolated_relay {
+        server.server.accept_scope_isolated_relay_subscriber(
+            wrapped_server_transport,
+            alice,
+            a_claims.clone(),
+            1,
+        )
+    } else {
+        server.accept_subscriber_with_claims(wrapped_server_transport, alice, a_claims.clone())
+    };
+    let action = PermissionAdviceAction::Update {
+        table: "todos".to_owned(),
+        row: todo,
+        patch: BTreeMap::from([("title".to_owned(), Value::String("after".to_owned()))]),
+    };
+    let advice = if scope_isolated_relay {
+        client.request_permission_advice_with_delegated_session(
+            action,
+            crate::protocol::DelegatedSessionBinding {
+                identity: alice,
+                claims: a_claims,
+            },
+        )
+    } else {
+        client.request_permission_advice(action)
+    };
+
+    client.tick().unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(
+        accepted_views.borrow().len(),
+        2,
+        "the real multi-clause scope views are accepted before receipt backpressure"
+    );
+    assert!(accepted_aggregate.borrow().is_empty());
+
+    match change {
+        ScopeContextChange::Claims => {
+            let refreshed_claims = BTreeMap::from([(
+                crate::query::provider_claim_key("role"),
+                Value::String("viewer".to_owned()),
+            )]);
+            client.set_test_provider_claims(alice, refreshed_claims.clone());
+            subscriber
+                .borrow_mut()
+                .update_authenticated_session_claims(refreshed_claims);
+        }
+        ScopeContextChange::PolicyEpoch => {
+            let old_epoch = server.node().borrow().active_catalogue_seq();
+            let payload = crate::protocol::SchemaVersion::new(policy_epoch_schema.clone());
+            let lens = crate::protocol::MigrationLens::new(
+                schema.version_id(),
+                payload.id,
+                vec![
+                    crate::protocol::TableLens {
+                        source_table: "workspaces".to_owned(),
+                        target_table: "workspaces".to_owned(),
+                        ops: vec![crate::protocol::LensOp::AddColumn {
+                            column: "note".to_owned(),
+                            default: Value::String(String::new()),
+                        }],
+                    },
+                    crate::protocol::TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "todos".to_owned(),
+                        ops: Vec::new(),
+                    },
+                ],
+            )
+            .expect("policy epoch publication has a valid workspace lens");
+            let publication = server
+                .author_schema_lineage_publication(
+                    payload.clone(),
+                    lens,
+                    Vec::<String>::new(),
+                    Vec::<String>::new(),
+                )
+                .unwrap();
+            server.publish_schema_with_lens(1, publication).unwrap();
+            server
+                .activate_catalogue_schema_for_test(crate::protocol::CurrentWriteSchema {
+                    revision: 1,
+                    schema: payload.id,
+                })
+                .unwrap();
+            assert_eq!(server.node().borrow().active_catalogue_seq(), old_epoch + 1);
+        }
+        ScopeContextChange::DataCut => {
+            let old_cut = server.node().borrow().committed_global_time();
+            server
+                .insert_with_id(
+                    "workspaces",
+                    row(0xd4),
+                    BTreeMap::from([("open".to_owned(), Value::Bool(false))]),
+                )
+                .unwrap();
+            assert!(server.node().borrow().committed_global_time() > old_cut);
+        }
+        ScopeContextChange::ScopeRelayAdmissionEpoch => {
+            let mut connection = subscriber.borrow_mut();
+            let ConnectionLink::Subscriber(state) = &mut connection.link else {
+                unreachable!("scope-isolated relay is served by a subscriber link")
+            };
+            assert!(
+                state.peer.refresh_scope_relay_admission_epoch(),
+                "the admitted relay capability must advance its attachment epoch"
+            );
+        }
+    }
+    subscriber.borrow_mut().tick().unwrap();
+
+    assert!(
+        accepted_aggregate.borrow().is_empty(),
+        "retry must not accept the aggregate receipt from the retired context"
+    );
+    client.tick().unwrap();
+    assert_eq!(
+        block_on(advice),
+        PermissionAdvice::Unknown,
+        "an invalidated scope request completes unavailable instead of using stale proof"
     );
 }
 
@@ -3548,10 +4539,6 @@ impl RelayUpload {
             })
             .expect("the relay receives the upload's fate")
     }
-
-    fn support_views(&self) -> usize {
-        subscriber_support_views(&self.subscriber)
-    }
 }
 
 /// Alice may post to a chat only while she is a member. The relay receipt is
@@ -3608,7 +4595,6 @@ fn relay_join_write_policy_proofs_read_current_dependencies() {
         relay.upload_insert(&client, "messages", message(chat_b)),
         Fate::Accepted
     ));
-    assert_eq!(relay.support_views(), 0);
 }
 
 /// Seeds the reachable-doc schema: Alice holds access to `engineering`, which
@@ -3692,7 +4678,6 @@ fn relay_reachable_write_policy_proofs_walk_stored_edges() {
         relay.upload_insert_with_id(&client, "docs", sales_doc, doc()),
         Fate::Rejected(_)
     ));
-    assert_eq!(relay.support_views(), 0);
 }
 
 /// A scope-isolated relay carries one binding selected by server admission. A
@@ -4007,9 +4992,11 @@ fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
 /// alice/B link ──binds B───────────┘
 /// ```
 ///
-/// The policy snapshot must not be selected from the node's author-keyed
-/// legacy cache. Replacing the explicit A snapshot below with
-/// `session_claims_for` makes the first proof observe B and fail.
+/// This targets the opaque terminal-support allocation rather than a public
+/// subscription: the canonical query shape is shared, but each claim snapshot
+/// has its own binding. The policy snapshot must not be selected from the
+/// node's author-keyed legacy cache. Replacing the explicit A snapshot below
+/// with `session_claims_for` makes the final assertion observe B and fail.
 #[test]
 fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
     // The clause reads an open workspace as well as the claim.
@@ -4061,6 +5048,35 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
 
     let client = open_db(0xa1, alice, &schema);
     client.set_test_provider_claims(alice, a_claims.clone());
+    let (ordinary_shape, ordinary_binding) = server
+        .node()
+        .borrow()
+        .whole_table_shape_binding("workspaces")
+        .unwrap();
+    {
+        let mut connection = a_subscriber.borrow_mut();
+        let ConnectionLink::Subscriber(state) = &mut connection.link else {
+            unreachable!("A is an admitted subscriber link");
+        };
+        crate::local_executor::block_on(state.peer.rehydrate_query(
+            &mut server.node().borrow_mut(),
+            &ordinary_shape,
+            &ordinary_binding,
+        ))
+        .unwrap();
+    }
+    let ordinary_peer_views = {
+        let connection = a_subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("A is an admitted subscriber link");
+        };
+        state.peer.maintained_subscription_count()
+    };
+    let ordinary_node_bindings = server
+        .node()
+        .borrow()
+        .registered_query_binding_count_for_test();
+    assert_eq!(ordinary_peer_views, 1, "one ordinary view is resumable");
     let candidate_cells = cells("same-author sibling snapshot", false, alice);
     let write = client
         .insert("todos", candidate_cells.clone(), Default::default())
@@ -4074,12 +5090,32 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
     else {
         panic!("prepared mergeable write must produce one commit unit");
     };
+    let scope = server
+        .node()
+        .borrow()
+        .authorization_support_scope_for_session(
+            alice,
+            Some(&a_claims),
+            &PermissionAdviceAction::Insert {
+                table: "todos".to_owned(),
+                cells: candidate_cells.clone(),
+            },
+        )
+        .expect("editor policy has a support clause");
+    let expected_terminal_support_views = scope.subscriptions.len();
+    let a_clause = scope
+        .subscriptions
+        .into_iter()
+        .next()
+        .expect("editor policy produces one support subscription");
+    let a_shape_id = a_clause.shape.shape_id();
+    let a_binding_id = a_clause.binding.binding_id();
     {
         let mut a_connection = a_subscriber.borrow_mut();
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A is an admitted subscriber link");
         };
-        let allowed =
+        assert!(
             crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
                 &mut server.node().borrow_mut(),
                 alice,
@@ -4087,29 +5123,51 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
                 &versions,
                 tx.tx_id,
             ))
-            .expect("A terminal proof remains valid after B updates the legacy cache");
-        assert!(allowed, "A's editor snapshot authorizes the write");
+            .expect("A's terminal proof uses its admitted claims"),
+            "A's editor claims remain valid after B overwrites the legacy cache",
+        );
     }
 
-    // 0→1→2 authenticated refreshes each prove under their own snapshot.
+    // Refreshing claims changes the support binding while preserving the
+    // public shape identity; A's retained proof must not stand in for B's.
     a_subscriber
         .borrow_mut()
         .update_authenticated_session_claims(b_claims.clone());
+    let b_scope = server
+        .node()
+        .borrow()
+        .authorization_support_scope_for_session(
+            alice,
+            Some(&b_claims),
+            &PermissionAdviceAction::Insert {
+                table: "todos".to_owned(),
+                cells: candidate_cells.clone(),
+            },
+        )
+        .expect("viewer policy has the same support clause under its own snapshot");
+    let b_clause = b_scope
+        .subscriptions
+        .into_iter()
+        .next()
+        .expect("viewer policy produces one support subscription");
+    assert_eq!(b_clause.shape.shape_id(), a_shape_id);
+    assert_ne!(b_clause.binding.binding_id(), a_binding_id);
     {
         let mut a_connection = a_subscriber.borrow_mut();
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A remains an admitted subscriber link");
         };
-        let allowed =
-            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
+        assert!(
+            !crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
                 &mut server.node().borrow_mut(),
                 alice,
                 a_state.session_claims.clone(),
                 &versions,
                 tx.tx_id,
             ))
-            .expect("a refreshed terminal proof uses the refreshed snapshot");
-        assert!(!allowed, "the viewer snapshot denies the same write");
+            .expect("the refreshed viewer proof completes"),
+            "viewer claims must not reuse editor authorization support",
+        );
     }
     a_subscriber
         .borrow_mut()
@@ -4119,7 +5177,7 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A remains an admitted subscriber link");
         };
-        let allowed =
+        assert!(
             crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
                 &mut server.node().borrow_mut(),
                 alice,
@@ -4127,8 +5185,97 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
                 &versions,
                 tx.tx_id,
             ))
-            .expect("the next refreshed terminal proof uses the restored snapshot");
-        assert!(allowed, "the restored editor snapshot authorizes it again");
+            .expect("the restored editor proof completes"),
+            "returning to editor claims rehydrates a valid terminal proof",
+        );
+    }
+    let peer_views_before_cursor = {
+        let connection = a_subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("A is an admitted subscriber link");
+        };
+        state.peer.maintained_subscription_count()
+    };
+    let terminal_support_views = peer_views_before_cursor - ordinary_peer_views;
+    assert!(terminal_support_views > 0);
+    let registered_before_cursor = server
+        .node()
+        .borrow()
+        .registered_query_binding_count_for_test();
+    assert_eq!(
+        registered_before_cursor,
+        ordinary_node_bindings + terminal_support_views,
+        "terminal support owns separate Node/Groove registrations",
+    );
+    let cursor = a_subscriber
+        .borrow_mut()
+        .take_resume_cursor()
+        .expect("subscriber connection yields its resume cursor");
+    assert_eq!(
+        cursor.peer.maintained_subscription_count(),
+        ordinary_peer_views,
+        "ordinary resumable state remains while terminal-only support is removed",
+    );
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .registered_query_binding_count_for_test(),
+        registered_before_cursor,
+        "retirement waits for node-aware detach completion",
+    );
+    let suspended_owner = block_on(a_subscriber.lock());
+    assert!(
+        server.server.detach_connection(&a_subscriber),
+        "detach is queued while the old connection owner is held"
+    );
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .registered_query_binding_count_for_test(),
+        registered_before_cursor,
+        "a queued detach does not pretend to have cleaned the old owner",
+    );
+    drop(suspended_owner);
+    server.tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .registered_query_binding_count_for_test(),
+        ordinary_node_bindings,
+        "actual detach drains terminal support intents and preserves ordinary cursor state",
+    );
+    let (resumed_transport, _resumed_peer) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        3,
+        NodeUuid::from_bytes([0x5e; 16]),
+        3,
+    );
+    let resumed = server.accept_subscriber_with_resume(resumed_transport, alice, cursor);
+    {
+        let mut connection = resumed.borrow_mut();
+        let ConnectionLink::Subscriber(state) = &mut connection.link else {
+            unreachable!("resume restores a subscriber link");
+        };
+        assert!(
+            crate::local_executor::block_on(state.peer.prove_terminal_commit_authorization(
+                &mut server.node().borrow_mut(),
+                alice,
+                state.session_claims.clone(),
+                &versions,
+                tx.tx_id,
+            ))
+            .expect("resumed terminal support rehydrates"),
+            "support is available again on the resumed connection"
+        );
+        assert_eq!(
+            state.peer.maintained_subscription_count(),
+            ordinary_peer_views + expected_terminal_support_views,
+            "ordinary view survives and only the active scope rehydrates on resume",
+        );
     }
 }
 

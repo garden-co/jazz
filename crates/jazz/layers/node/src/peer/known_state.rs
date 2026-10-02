@@ -16,6 +16,9 @@ impl PeerState {
     pub fn forget_subscription(&mut self, subscription: SubscriptionKey) {
         self.publication_states.remove(&subscription);
         self.downstream_known_states.remove(&subscription);
+        self.terminal_authorization_support.remove(&subscription);
+        self.terminal_authorization_support_lru
+            .retain(|candidate| *candidate != subscription);
     }
 
     /// Record a downstream known-state declaration for a usage-site subscription.
@@ -68,6 +71,75 @@ impl PeerState {
         state.has_served_authorization_progress = true;
     }
 
+    /// Remove proof-only maintained subscriptions before moving a peer's
+    /// ordinary publication state into a resume cursor.
+    #[doc(hidden)]
+    pub fn take_terminal_authorization_support_retirements(
+        &mut self,
+    ) -> Vec<TerminalAuthorizationSupportRetirement> {
+        self.terminal_authorization_support_context = None;
+        use std::mem::take;
+
+        let tracked = take(&mut self.terminal_authorization_support);
+        self.terminal_authorization_support_lru.clear();
+        let mut retirements = Vec::with_capacity(tracked.len());
+        for (subscription, identity) in tracked {
+            let matching = self
+                .publication_states
+                .get(&subscription)
+                .is_some_and(|state| {
+                    state.authorization_support_identity.as_ref() == Some(&identity)
+                });
+            if !matching {
+                continue;
+            }
+            let Some(mut state) = self.publication_states.remove(&subscription) else {
+                continue;
+            };
+            self.downstream_known_states.remove(&subscription);
+            let policy_binding = state.policy_binding.take().map(|(identity, claims)| {
+                crate::protocol::PolicyBindingKey::from_canonical_parts(identity, claims)
+            });
+            retirements.push(TerminalAuthorizationSupportRetirement {
+                publication_owner: self.publication_owner,
+                subscription,
+                policy_binding,
+                runtime_token: state.groove_runtime_token,
+                maintained_subscription_view: state.maintained_subscription_view.take(),
+            });
+        }
+        retirements
+    }
+
+    /// Finish asynchronous node-aware retirement using each saved publication
+    /// owner, not whichever PeerState happens to be attached now.
+    #[doc(hidden)]
+    pub fn retire_terminal_authorization_support_with_node<S: OrderedKvStorage>(
+        node: &mut NodeState<S>,
+        retirements: Vec<TerminalAuthorizationSupportRetirement>,
+    ) {
+        for retirement in retirements {
+            if retirement.runtime_token == Some(node.groove_runtime_token())
+                && let Some(maintained) = retirement.maintained_subscription_view
+            {
+                node.unsubscribe_groove_subscription(maintained.subscription.id());
+            }
+            if let Some(policy_binding) = retirement.policy_binding {
+                node.release_query_subscription_for_peer_with_admitted_policy_binding(
+                    retirement.publication_owner,
+                    retirement.subscription,
+                    policy_binding,
+                );
+            } else {
+                node.release_query_subscription_for_peer(
+                    retirement.publication_owner,
+                    retirement.subscription,
+                );
+            }
+        }
+    }
+
+
     /// Drop one subscription and eagerly unregister any maintained Groove
     /// subscription from the runtime before dropping the receiver.
     pub fn forget_subscription_with_node<S>(
@@ -78,6 +150,9 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        self.terminal_authorization_support.remove(&subscription);
+        self.terminal_authorization_support_lru
+            .retain(|candidate| *candidate != subscription);
         let Some(mut state) = self.publication_states.remove(&subscription) else {
             self.downstream_known_states.remove(&subscription);
             // `ensure_query_subscription_registered` may have installed the

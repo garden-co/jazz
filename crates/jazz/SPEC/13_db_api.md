@@ -629,6 +629,17 @@ client-provided identity. The response contains only the opaque request id and
 one advice value: no supporting rows, policy reasons, or hidden dependency facts
 cross the boundary.
 
+Direct advice captures the canonical admitted claim values and their local
+revision together at first dispatch, before any backpressured send. Retries,
+coalescing and reconnect replay preserve that same stamp. A change to either
+the values or revision retires the old request as `Unknown`, even if the values
+later return to A after A→B→A; this also applies to zero-clause decisions.
+Delegated advice instead retains its immutable admitted session snapshot.
+Local claim revisions are not serving-connection revisions: authority receipts
+must pass same-authority/epoch, support and monotonic-context admission before
+advancing the authority floor. The active catalogue sequence remains a shared,
+Core-owned freshness check.
+
 Each live link correlates a request and response with a fresh opaque id. Dropping
 or cancelling a request removes its waiter, so a late response is ignored;
 replayed responses cannot resolve another request, including after reopening.
