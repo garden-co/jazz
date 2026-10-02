@@ -13,17 +13,19 @@ import { redeemInviteLink } from "@/src/lib/server-calls";
  */
 export default function InvitePage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = use(params);
-  const account = useSession()?.user.account;
+  const session = useSession();
+  const account = session?.user.account;
+  const principal = session?.user.identity.subject;
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   // Redeem once per token, even when StrictMode runs the effect twice.
   const redeemed = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!account || redeemed.current === token) return;
+    if (!account || !principal || redeemed.current === token) return;
     redeemed.current = token;
     void (async () => {
-      const response = await redeemInviteLink(token).catch((cause: unknown) => cause);
+      const response = await redeemInviteLink(principal, token).catch((cause: unknown) => cause);
       if (!(response instanceof Response))
         return setError(response instanceof Error ? response.message : String(response));
       if (!response.ok)
@@ -42,7 +44,7 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
       // open, so the workspace renders from it instead of booting Jazz again.
       router.replace(`/workspace?${search.toString()}`);
     })();
-  }, [account, router, token]);
+  }, [account, principal, router, token]);
 
   if (error)
     return (
