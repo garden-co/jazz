@@ -63,16 +63,31 @@ impl WasmDb {
             .map_err(|error| JsValue::from_str(&error))?;
         let now_ms = current_timestamp();
         Ok(future_to_promise(async move {
+            macro_rules! seal {
+                ($db:expr, $drive:expr) => {{
+                    let owner = Rc::clone($db);
+                    let receiver = $db.enqueue_transaction_read(open_id, async move {
+                        owner
+                            .seal_initialization_transaction_at_ms(open_id, now_ms)
+                            .await
+                    });
+                    let result = if $drive {
+                        await_memory_initialization_read(receiver, |waker| {
+                            $db.drive_queued_mutation_with_waker_for_binding(waker)
+                        })
+                        .await
+                    } else {
+                        receiver.await
+                    };
+                    result
+                        .map_err(transaction_read_cancelled)
+                        .map_err(to_js_error)?
+                }};
+            }
             let seal = match &inner {
-                WasmDbInner::Memory(db) => {
-                    db.seal_initialization_transaction_at_ms(open_id, now_ms)
-                        .await
-                }
+                WasmDbInner::Memory(db) => seal!(db, true),
                 #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => {
-                    db.seal_initialization_transaction_at_ms(open_id, now_ms)
-                        .await
-                }
+                WasmDbInner::Browser(db) => seal!(db, false),
                 WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
             }
             .map_err(to_js_error)?;
@@ -170,16 +185,31 @@ impl WasmDb {
             .map_err(|error| JsValue::from_str(&error))?;
         let row_id = row_uuid_from_bytes(&row_id)?;
         Ok(future_to_promise(async move {
-            match inner {
-                WasmDbInner::Memory(db) => {
-                    db.prepare_initialization_insert(open_id, &table, row_id)
+            macro_rules! prepare {
+                ($db:expr, $drive:expr) => {{
+                    let owner = Rc::clone($db);
+                    let receiver = $db.enqueue_transaction_read(open_id, async move {
+                        owner
+                            .prepare_initialization_insert(open_id, &table, row_id)
+                            .await
+                    });
+                    let result = if $drive {
+                        await_memory_initialization_read(receiver, |waker| {
+                            $db.drive_queued_mutation_with_waker_for_binding(waker)
+                        })
                         .await
-                }
+                    } else {
+                        receiver.await
+                    };
+                    result
+                        .map_err(transaction_read_cancelled)
+                        .map_err(to_js_error)?
+                }};
+            }
+            match &inner {
+                WasmDbInner::Memory(db) => prepare!(db, true),
                 #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => {
-                    db.prepare_initialization_insert(open_id, &table, row_id)
-                        .await
-                }
+                WasmDbInner::Browser(db) => prepare!(db, false),
                 WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
             }
             .map_err(to_js_error)?;
@@ -218,6 +248,24 @@ impl WasmDb {
             )
         }))
     }
+}
+
+async fn await_memory_initialization_read<T>(
+    mut receiver: futures_channel::oneshot::Receiver<T>,
+    drive: impl Fn(&std::task::Waker) -> bool,
+) -> Result<T, futures_channel::oneshot::Canceled> {
+    std::future::poll_fn(|context| {
+        if let std::task::Poll::Ready(result) = std::pin::Pin::new(&mut receiver).poll(context) {
+            return std::task::Poll::Ready(result);
+        }
+        let made_progress = drive(context.waker());
+        let result = std::pin::Pin::new(&mut receiver).poll(context);
+        if result.is_pending() && made_progress {
+            context.waker().wake_by_ref();
+        }
+        result
+    })
+    .await
 }
 
 pub(super) async fn open_cached_db<S>(
