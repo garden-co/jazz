@@ -54,6 +54,8 @@ pub enum ErrorCode {
     NotObserved,
     /// Historical read must be evaluated by a complete-history server.
     HistoricalReadRequiresServer,
+    /// A synchronous owner-dependent operation could not acquire the local node owner.
+    Busy,
 }
 
 impl ErrorCode {
@@ -75,6 +77,7 @@ impl ErrorCode {
             ErrorCode::Backpressure => "backpressure",
             ErrorCode::NotObserved => "not_observed",
             ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
+            ErrorCode::Busy => "busy",
         }
     }
 }

@@ -5106,7 +5106,78 @@ fn assert_relation_snapshot_unset_nullable_json_include(forward: bool) {
         Default::default(),
     )
     .unwrap();
-    block_on(subscription.next_raw()).unwrap();
+    let mut changed = subscription
+        .try_next_event()
+        .expect("the completed included-row update must publish its terminal edit");
+    block_on(db.hydrate_subscription_event_for_binding(&mut changed)).unwrap();
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = changed
+    else {
+        panic!("the included-row update must remain an incremental delta");
+    };
+    assert!(!reset);
+    assert!(added.is_empty() && updated.is_empty() && removed.is_empty());
+    let mut changed_values = Vec::new();
+    for operation in terminal_operations {
+        assert_eq!(
+            terminal_root_occurrence_id_with_root_union(&operation.root_key, false)
+                .unwrap()
+                .root_source()
+                .uuid(),
+            &root.0,
+            "the edit must address the existing public root"
+        );
+        assert_eq!(
+            operation.path,
+            vec![groove::ivm::TerminalPathSegment::Collection(arm.to_owned())],
+            "the edit must address only the included collection"
+        );
+        let key = match &operation.edit {
+            groove::ivm::TerminalEdit::Insert { key, .. }
+            | groove::ivm::TerminalEdit::Update { key, .. }
+            | groove::ivm::TerminalEdit::Remove { key }
+            | groove::ivm::TerminalEdit::Move { key, .. } => key,
+        };
+        assert_eq!(
+            terminal_root_occurrence_id_with_root_union(key, false)
+                .unwrap()
+                .root_source()
+                .uuid(),
+            &nested.0,
+            "the included row must retain its stable identity"
+        );
+        if let groove::ivm::TerminalEdit::Insert { value, .. }
+        | groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit
+        {
+            let field = operation
+                .root_descriptor
+                .fields()
+                .iter()
+                .find(|field| field.name.as_deref() == Some(arm))
+                .expect("the carried descriptor identifies the included collection");
+            let ValueType::Array(element) = &field.value_type else {
+                panic!("the included collection must be an array");
+            };
+            let ValueType::Record(descriptor) = element.as_ref() else {
+                panic!("the included collection must carry records");
+            };
+            let record = groove::records::BorrowedRecord::new(value, descriptor.as_ref());
+            assert_eq!(record.get("row_uuid").unwrap(), Value::Uuid(nested.0));
+            changed_values.push(record.get("meta").unwrap());
+        }
+    }
+    assert_eq!(
+        changed_values,
+        vec![Value::Nullable(Some(Box::new(Value::String(
+            "{\"a\":1}".to_owned()
+        ))))]
+    );
     let mut snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
     block_on(db.hydrate_rows_for_binding(&mut snapshot.rows)).unwrap();
     assert_eq!(

@@ -236,8 +236,8 @@ async fn publish_reference_schema<S: OrderedKvStorage + ReopenableStorage + 'sta
     })
     .await
     .unwrap();
-    assert!(db.catalogue_lens(lens_id).is_some());
-    assert_eq!(db.catalogue_schema(old.version_id()), Some(old));
+    assert!(db.catalogue_lens(lens_id).unwrap().is_some());
+    assert_eq!(db.catalogue_schema(old.version_id()).unwrap(), Some(old));
 }
 
 /// Alice keeps existing UUID/null/array cells and an open author batch while
@@ -289,9 +289,9 @@ fn reference_metadata_and_old_rows_survive_rocksdb_reopen() {
             db.current_write_schema().unwrap().schema,
             schema(true).version_id()
         );
-        assert_eq!(db.catalogue_schema(old.version_id()), Some(old));
+        assert_eq!(db.catalogue_schema(old.version_id()).unwrap(), Some(old));
         assert_eq!(
-            db.catalogue_schema(schema(true).version_id()),
+            db.catalogue_schema(schema(true).version_id()).unwrap(),
             Some(schema(true).without_permissions())
         );
         assert_rows(&db, &[2, 3, 4, 6]);

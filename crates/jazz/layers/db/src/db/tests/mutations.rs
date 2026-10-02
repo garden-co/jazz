@@ -4607,6 +4607,44 @@ fn deferred_publication_does_not_starve_the_queued_operation_holding_node_state(
     assert_eq!(prepared_read(&db, &db.table("todos")).len(), 1);
 }
 
+#[test]
+fn finalize_local_commit_queues_upload_before_waiting_for_node_owner() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa9; 16]);
+    let db = open_db(0xa9, owner, &schema);
+    let write = block_on(db.insert(
+        "todos",
+        cells("commit finalization", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    db.node
+        .outbox
+        .borrow_mut()
+        .retain(|pending| pending.tx_id != tx_id);
+    assert!(!db.node.outbox.borrow().contains(tx_id));
+
+    let node = db.node.node();
+    let _owner_guard = block_on(node.lock());
+    let mut finalize = Box::pin(db.finalize_local_commit(tx_id));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(
+        finalize.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(
+        db.node.outbox.borrow().contains(tx_id),
+        "durable commit must enter the upload outbox before waiting for node ownership"
+    );
+    drop(finalize);
+    assert!(
+        db.node.outbox.borrow().contains(tx_id),
+        "cancelling finalization must retain the durable upload marker"
+    );
+}
+
 /// Causal flow: a mergeable transaction enters the node-owned deferred queue,
 /// its subscriber refresh stalls, and the caller future is cancelled. The next
 /// node tick must still persist the exact queued transaction.
@@ -5004,6 +5042,57 @@ fn client_partial_update_of_unloaded_row_is_not_observed_rather_than_read_denied
             "{label}: the partial update preserves unauthored cells"
         );
     }
+}
+/// Persistence can finish before the local transaction owner settles its
+/// publication, so owner contention must not strand its upload.
+///
+/// ```text
+/// insert ──persist──► owner held ──settle
+///                └──outbox marker is already durable in runtime memory
+/// ```
+#[test]
+fn persisted_publication_queues_upload_before_waiting_for_node_owner() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    use std::task::{Context, Poll, Waker};
+
+    let schema = owner_write_schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let author = AuthorSubject::for_test_bytes([0xaa; 16]);
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xaa; 16]),
+            author,
+        },
+    )))
+    .expect("open controlled test storage");
+    control.pause_on(TestStorageOperation::WriteMany);
+
+    let mut insert = Box::pin(db.insert(
+        "todos",
+        cells("persist before owner", false, author),
+        Default::default(),
+    ));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(insert.as_mut().poll(&mut context), Poll::Pending));
+    assert!(control.poll_count(TestStorageOperation::WriteMany) > 0);
+
+    let node = db.node.node();
+    let owner = block_on(node.lock());
+    control.resume_operation(TestStorageOperation::WriteMany);
+    assert!(matches!(insert.as_mut().poll(&mut context), Poll::Pending));
+    assert!(
+        !db.node.outbox.borrow().entries.is_empty(),
+        "known-persisted transaction enters the upload outbox before NodeState settlement"
+    );
+
+    drop(owner);
+    let write = block_on(insert).expect("settle the persisted local publication");
+    assert!(db.node.outbox.borrow().contains(write.mergeable_tx_id()));
 }
 
 // A shape the authority does not support yet is not a malformed transaction:

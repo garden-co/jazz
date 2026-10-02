@@ -2321,7 +2321,8 @@ where
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .dry_run_mergeable_write_allows_for_view(
                 &self.schema,
                 MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
@@ -2758,7 +2759,7 @@ where
         crate::local_executor::block_on(
             self.node
                 .node
-                .borrow_mut()
+                .try_borrow_mut()?
                 .dry_run_read_current_allows(table, row, author),
         )
         .map(|allowed| {
@@ -2863,7 +2864,8 @@ where
         self.table_schema(table)?;
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .dry_run_delete_current_allows(table, row, author)
             .await
             .map(|allowed| {
@@ -3098,7 +3100,7 @@ where
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
                 .await?;
-            self.finalize_local_commit(tx_id)?
+            self.finalize_local_commit(tx_id).await?
         };
         Ok(WriteHandle {
             node: Rc::downgrade(&self.node.node),
@@ -3154,7 +3156,12 @@ where
                         .collect::<HashSet<_>>();
                     let mut persisted = Vec::with_capacity(publications.len());
                     for publication in &publications {
-                        persisted.push((publication.tx_id(), publication.persist().await));
+                        let tx_id = publication.tx_id();
+                        let persistence = publication.persist().await;
+                        if persistence.is_successful() {
+                            self.node.queue_pending_upload(tx_id, None);
+                        }
+                        persisted.push((tx_id, persistence));
                     }
                     let mut node = self.node.node.lock().await;
                     for (tx_id, persistence) in persisted {
@@ -3250,9 +3257,12 @@ where
 
     /// Client writes stay pending at this runtime's authored durability until
     /// peer durability or fate updates arrive over a connection.
-    pub(super) fn finalize_local_commit(&self, tx_id: TxId) -> Result<DurabilityTier, Error> {
+    pub(super) async fn finalize_local_commit(&self, tx_id: TxId) -> Result<DurabilityTier, Error> {
+        // Persistence has already succeeded. Queue the recovery marker before
+        // the owner wait so cancellation cannot strand a durable local write.
         self.node.queue_pending_upload(tx_id, None);
-        Ok(self.node.node.borrow().authored_commit_durability())
+        let durability = self.node.node.lock().await.authored_commit_durability();
+        Ok(durability)
     }
 
     pub(super) fn next_now_ms(&self) -> u64 {
@@ -3300,7 +3310,7 @@ where
         if self.schema_view_is_fixed {
             return Ok((self.schema.clone(), self.schema_version_id));
         }
-        let node = self.node.node.borrow();
+        let node = self.node.node.try_borrow()?;
         let current = node.current_write_schema().map_err(Error::from)?;
         if current.schema == self.schema_version_id {
             return Ok((self.schema.clone(), self.schema_version_id));

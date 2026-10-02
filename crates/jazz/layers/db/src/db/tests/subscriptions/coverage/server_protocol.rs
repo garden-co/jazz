@@ -95,7 +95,7 @@ fn upstream_transport_rejects_forged_system_catalogue_publication() {
     let error = upstream.borrow_mut().tick().unwrap_err();
     assert_eq!(error.code, ErrorCode::Protocol);
     assert!(error.message.contains("unauthorized catalogue update"));
-    assert!(client.catalogue_schema(target.id).is_none());
+    assert!(client.catalogue_schema(target.id).unwrap().is_none());
 }
 
 #[test]

@@ -203,7 +203,7 @@ where
         let snapshot = self
             .node
             .node
-            .borrow()
+            .try_borrow()?
             .open_transaction_snapshot(open_tx_id)?;
         opts.read_view = ReadViewSpec {
             source: ReadViewSourceSpec::Snapshot {
@@ -228,7 +228,7 @@ where
         let upstream_opts = self
             .node
             .upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
-        let mut owner = self.node.node.borrow_mut();
+        let mut owner = self.node.node.try_borrow_mut()?;
         let mut node = prepared.scoped_node(&mut owner, author)?;
         let (shape, binding, _) = super::block_on(node.prepare_query_binding_for_link(
             &prepared.shape,
@@ -260,7 +260,7 @@ where
         let snapshot = self
             .node
             .node
-            .borrow()
+            .try_borrow()?
             .open_transaction_snapshot(open_tx_id)?;
         opts.read_view = ReadViewSpec {
             source: ReadViewSourceSpec::Snapshot {
@@ -300,7 +300,7 @@ where
         policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         requires_current_authority_receipt: bool,
     ) -> Result<QueryAttachment, Error> {
-        let node = self.node.node.borrow();
+        let node = self.node.node.try_borrow()?;
         self.attach_or_refresh_query_coverage_with_node(
             &node,
             shape,

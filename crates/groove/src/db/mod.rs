@@ -1673,6 +1673,13 @@ pub struct PersistedBatch {
     metrics: CommitMetrics,
     receipt: PersistenceReceipt,
 }
+impl PersistedBatch {
+    /// Whether the batch's storage write is known to have committed.
+    #[doc(hidden)]
+    pub fn is_successful(&self) -> bool {
+        self.result.is_ok()
+    }
+}
 
 struct PersistenceReceipt {
     storage: Rc<RefCell<Option<Rc<LayoutStorage>>>>,

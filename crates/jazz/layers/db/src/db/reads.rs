@@ -818,28 +818,28 @@ where
         self.ensure_open_schema_admitted()?;
         let shape = query.validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(params)?;
-        let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
-            && !self.node.node.borrow().uses_schema_projected_read(&shape)
-        {
-            let mut node = self.node.node.borrow_mut();
-            (
-                Some(super::block_on(node.prepared_query_plan(
-                    &shape,
-                    &binding,
-                    DurabilityTier::Local,
-                    AuthorSubject::SYSTEM,
-                ))?),
-                Some(super::block_on(node.prepared_query_plan(
-                    &shape,
-                    &binding,
-                    DurabilityTier::Global,
-                    AuthorSubject::SYSTEM,
-                ))?),
-            )
-        } else {
-            (None, None)
-        };
-        let groove_runtime_token = self.node.node.borrow().groove_runtime_token();
+        let mut node = self.node.node.try_borrow_mut()?;
+        let groove_runtime_token = node.groove_runtime_token();
+        let (local_plan, global_plan) =
+            if should_install_prepared_plan(&shape) && !node.uses_schema_projected_read(&shape) {
+                (
+                    Some(super::block_on(node.prepared_query_plan(
+                        &shape,
+                        &binding,
+                        DurabilityTier::Local,
+                        AuthorSubject::SYSTEM,
+                    ))?),
+                    Some(super::block_on(node.prepared_query_plan(
+                        &shape,
+                        &binding,
+                        DurabilityTier::Global,
+                        AuthorSubject::SYSTEM,
+                    ))?),
+                )
+            } else {
+                (None, None)
+            };
+        drop(node);
         Ok(PreparedQuery {
             request_identity_claims: None,
             shape,
@@ -857,7 +857,7 @@ where
     /// subscription reads.
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
         self.ensure_open_schema_admitted()?;
-        let mut node = self.node.node.borrow_mut();
+        let mut node = self.node.node.try_borrow_mut()?;
         let groove_runtime_token = node.groove_runtime_token();
         super::block_on(node.query_rows_local_preview(
             &prepared.shape,
@@ -887,7 +887,7 @@ where
         prepared: &PreparedQuery,
     ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
         self.ensure_open_schema_admitted()?;
-        let mut node = self.node.node.borrow_mut();
+        let mut node = self.node.node.try_borrow_mut()?;
         let groove_runtime_token = node.groove_runtime_token();
         super::block_on(node.query_rows_local_preview_profiled(
             &prepared.shape,
@@ -930,7 +930,7 @@ where
         self.ensure_open_schema_admitted()?;
         self.node
             .node
-            .borrow_mut()
+            .try_borrow_mut()?
             .row_provenance(row)
             .map_err(Into::into)
     }
@@ -972,7 +972,7 @@ where
         super::block_on(
             self.node
                 .node
-                .borrow_mut()
+                .try_borrow_mut()?
                 .at(position)
                 .read(&prepared.shape, &prepared.binding),
         )
