@@ -1481,18 +1481,18 @@ impl AppliedBatch {
             Poll::Pending
         })
         .await;
-        let snapshot = self.operations.borrow().snapshot();
-        let operations = snapshot
-            .iter()
-            .flat_map(|block| block.iter())
-            .map(OwnedWriteOperation::as_write_operation)
-            .collect::<Vec<_>>();
-        let storage_writes = StorageWriteMetrics::from_operations(&operations);
+        let operations = self.operations.borrow().operations().to_vec();
+        let storage_writes = StorageWriteMetrics::from_operations(
+            &operations
+                .iter()
+                .map(OwnedWriteOperation::as_write_operation)
+                .collect::<Vec<_>>(),
+        );
         let storage_start = Instant::now();
         let outcome = match turn {
             Ok(()) => {
                 attempt.write_started = true;
-                storage.write_many_borrowed_outcome(operations).await
+                storage.write_many_outcome(operations).await
             }
             Err(error) => WriteManyOutcome::Uncommitted(error),
         };
