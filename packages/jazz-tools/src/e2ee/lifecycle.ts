@@ -706,9 +706,10 @@ export class E2ee {
             throw new E2eeHistoryUnavailable("Accepted founder history is not yet available");
           this.approval?.startResponder();
         } else {
-          await this.requireSpaces().completeInitial(proposal.root);
+          await this.requireSpaces().promoteInitial(proposal.root);
         }
       },
+      (proposal) => this.requireSpaces().completeInitial(proposal.root),
     );
     configureAcceptedHistory(db, {
       store: config.store,
@@ -723,7 +724,7 @@ export class E2ee {
       await this.journal.reconcile();
       for (const entry of await this.journal.entries()) {
         if (entry.proposal.kind === "space" && entry.outcome === "accepted" && !entry.promoted)
-          await this.requireSpaces().promoteInitial(entry.proposal.root);
+          await this.journal.promoteAccepted(entry.proposal.id);
       }
     });
     db.onE2eeReconnect(() => {
