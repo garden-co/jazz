@@ -245,19 +245,19 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
                 <Spinner label="Loading messages…" />
               </Center>
             ) : (
-            <EmptyState
-              title="No messages yet"
-              description={
-                isCreator
-                  ? "Say hello, or invite bandmates with the room link."
-                  : "Say hello to the band."
-              }
-              actions={
-                isCreator ? (
-                  <Button label="Invite bandmates" onClick={() => setMembersOpen(true)} />
-                ) : undefined
-              }
-            />
+              <EmptyState
+                title="No messages yet"
+                description={
+                  isCreator
+                    ? "Say hello, or invite bandmates with the room link."
+                    : "Say hello to the band."
+                }
+                actions={
+                  isCreator ? (
+                    <Button label="Invite bandmates" onClick={() => setMembersOpen(true)} />
+                  ) : undefined
+                }
+              />
             )
           }
         >
