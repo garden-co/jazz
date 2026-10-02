@@ -762,6 +762,15 @@ where
         self.node.poll_queued_mutation_once();
     }
 
+    /// Drive one bounded owner turn, retaining the installed scheduler wake.
+    ///
+    /// Without a scheduler, cold work wakes the binding's own continuation.
+    /// Returns true only when an operation completed, never for cold pending work.
+    #[doc(hidden)]
+    pub fn drive_queued_mutation_with_waker_for_binding(&self, waker: &std::task::Waker) -> bool {
+        self.node.poll_queued_mutation_with_waker(waker).1
+    }
+
     /// Number of admitted owner operations (mutations, fenced reads and
     /// cleanups) that have not finished yet. Bindings bound their direct
     /// mutation admission with it.
