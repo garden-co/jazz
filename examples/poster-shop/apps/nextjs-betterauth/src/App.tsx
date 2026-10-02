@@ -14,7 +14,7 @@ import {
   VStack,
 } from "@astryxdesign/core";
 import { useAll, useSession } from "jazz-tools/react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { app } from "@/schema";
 import { AssetShelf } from "@/src/components/AssetShelf";
 import { CanvasSurface } from "@/src/components/CanvasSurface";
@@ -28,37 +28,71 @@ import { roleForActiveCanvas } from "@/src/lib/identity";
 
 export function PosterShopApp({
   initialCanvasId,
+  preparing = false,
   notice,
 }: {
   initialCanvasId?: string | null;
+  /** The server is still seeding the first poster or redeeming an invite. */
+  preparing?: boolean;
   /** Shown above the studio, for example when an invite link was not valid. */
   notice?: ReactNode;
 }) {
-  return <PosterStudio initialCanvasId={initialCanvasId ?? null} notice={notice} />;
+  return (
+    <PosterStudio initialCanvasId={initialCanvasId ?? null} preparing={preparing} notice={notice} />
+  );
 }
 
 type SidePanel = "design" | "assets" | "history";
+
+const activeCanvasKey = (author: string) => `poster-shop:active-canvas:${author}`;
+
+function rememberedCanvas(author: string): string | null {
+  try {
+    return localStorage.getItem(activeCanvasKey(author));
+  } catch {
+    return null;
+  }
+}
+
+function rememberCanvas(author: string, canvasId: string) {
+  try {
+    localStorage.setItem(activeCanvasKey(author), canvasId);
+  } catch {
+    // Storage unavailable: a reload opens the first poster instead.
+  }
+}
 
 /** The shell only reads canvas metadata and owns selection state. Child
  * surfaces keep independent Jazz subscriptions, so a cursor or asset update
  * cannot invalidate the shape renderer. */
 export function PosterStudio({
   initialCanvasId,
+  preparing = false,
   notice,
 }: {
   initialCanvasId: string | null;
+  preparing?: boolean;
   notice?: ReactNode;
 }) {
   const session = useSession();
   const { data: authSession } = authClient.useSession();
   const { data: canvases, error: canvasesError } = useAll(app.canvases);
-  const [activeId, setActiveId] = useState<string | null>(initialCanvasId);
+  const author = session?.user.account ?? null;
+  // The poster the user picked in this visit; until then the invited poster,
+  // else the one open before a reload (not whichever syncs first). The
+  // remembered poster is read once the account is known, which can be after
+  // the first render, and a rejected invite falls back to it.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const remembered = useMemo(() => (author ? rememberedCanvas(author) : null), [author]);
+  const activeId = selectedId ?? initialCanvasId ?? remembered;
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null);
   const [previewCheckpointId, setPreviewCheckpointId] = useState<string | null>(null);
   const [panel, setPanel] = useState<SidePanel>("design");
   const active = canvases?.find((canvas) => canvas.id === activeId) ?? canvases?.[0];
-  const author = session?.user.account ?? null;
+  useEffect(() => {
+    if (author && active && active.id === activeId) rememberCanvas(author, active.id);
+  }, [author, active, activeId]);
   const { data: memberships = [] } = useAll(app.canvasMembers);
   const role = roleForActiveCanvas(memberships, active?.id, author);
   const canEdit = (role === "editor" || role === "admin") && !previewCheckpointId;
@@ -76,14 +110,21 @@ export function PosterStudio({
   if (!canvases) return <Spinner label="Opening your posters" />;
   if (!active)
     return (
-      <EmptyState
-        title="No posters yet"
-        description="Your first poster is being prepared. It appears here as soon as it syncs."
-      />
+      <>
+        {notice}
+        {preparing ? (
+          <Spinner label="Preparing your poster studio" />
+        ) : (
+          <EmptyState
+            title="No posters yet"
+            description="Your first poster is being prepared. It appears here as soon as it syncs."
+          />
+        )}
+      </>
     );
 
   const selectCanvas = (id: string) => {
-    setActiveId(id);
+    setSelectedId(id);
     setSelectedShapeId(null);
     setActiveLayerId(null);
     setPreviewCheckpointId(null);
