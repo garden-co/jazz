@@ -206,6 +206,10 @@ function AccountApp({
   const [client, setClient] = React.useState<JazzClient>();
   const [ready, setReady] = React.useState(false);
   const [bootstrapping, setBootstrapping] = React.useState(false);
+  // A failed background bootstrap is shown as a banner over the working app,
+  // not the full-screen failure: the account and its local data are fine.
+  const [bootstrapError, setBootstrapError] = React.useState<Error>();
+  const bootstrapAccount = React.useRef<string | undefined>(undefined);
   const [error, setError] = React.useState<Error>();
   const [retry, setRetry] = React.useState(0);
   const active = React.useRef(true);
@@ -224,6 +228,7 @@ function AccountApp({
     let current = true;
     active.current = true;
     setError(undefined);
+    setBootstrapError(undefined);
     setReady(false);
     enrollAndBootstrap({
       lifecycle,
@@ -237,6 +242,7 @@ function AccountApp({
       needsBootstrap: (accountId) => readBootstrapped(accountId) !== email,
       onBootstrapStart: () => setBootstrapping(true),
       bootstrap: async (token, accountId) => {
+        bootstrapAccount.current = accountId;
         try {
           await bootstrapOnce(accountId, token, email);
         } finally {
@@ -244,7 +250,7 @@ function AccountApp({
         }
       },
       onBootstrapError: (cause) => {
-        if (current) setError(toError(cause));
+        if (current) setBootstrapError(toError(cause));
       },
       isCurrent: () => current,
     }).then(
@@ -261,6 +267,21 @@ function AccountApp({
       void lifecycle.close().catch((cause) => console.error("Jazz shutdown failed", cause));
     };
   }, [email, identityId, lifecycle, retry]);
+
+  const retryBootstrap = React.useCallback(() => {
+    const accountId = bootstrapAccount.current;
+    if (!accountId) return;
+    setBootstrapError(undefined);
+    setBootstrapping(true);
+    void requireJazzToken()
+      .then((token) => bootstrapOnce(accountId, token, email))
+      .catch((cause: unknown) => {
+        if (active.current) setBootstrapError(toError(cause));
+      })
+      .finally(() => {
+        if (active.current) setBootstrapping(false);
+      });
+  }, [email]);
 
   const signOut = React.useCallback(async () => {
     try {
@@ -284,6 +305,9 @@ function AccountApp({
       <Operations
         email={email}
         preparing={bootstrapping}
+        setupError={
+          bootstrapError ? { message: bootstrapError.message, retry: retryBootstrap } : null
+        }
         onSignOut={() => void signOut().catch(() => {})}
       />
     </JazzClientProvider>

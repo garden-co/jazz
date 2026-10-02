@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import {
   AppShell,
+  Banner,
   Button,
   Center,
   EmptyState,
@@ -46,11 +47,14 @@ const navigation = [
 export function Operations({
   email,
   preparing = false,
+  setupError = null,
   onSignOut,
 }: {
   email: string;
   /** The server is still creating the personal label. */
   preparing?: boolean;
+  /** Setting up the personal label failed; shown as a banner with a retry. */
+  setupError?: { message: string; retry: () => void } | null;
   onSignOut: () => void;
 }) {
   const session = useSession();
@@ -107,11 +111,21 @@ export function Operations({
     />
   );
 
+  const setupBanner = setupError ? (
+    <Banner
+      status="error"
+      title="Couldn't set up your personal label"
+      description={setupError.message}
+      endContent={<Button label="Try again" size="sm" onClick={setupError.retry} />}
+    />
+  ) : null;
+
   if (!organization)
     return (
       <AppShell topNav={topNav} height="auto" variant="section">
         <LayoutContent padding={8}>
-          {preparing ? (
+          {setupBanner}
+          {setupBanner ? null : preparing ? (
             <Center>
               <Spinner label="Preparing your personal label…" />
             </Center>
@@ -167,6 +181,7 @@ export function Operations({
       }
     >
       <LayoutContent padding={8} isScrollable={false}>
+        {setupBanner}
         <OrganizationProvider organization={organization}>
           <Page key={organization.id} route={route} />
         </OrganizationProvider>
