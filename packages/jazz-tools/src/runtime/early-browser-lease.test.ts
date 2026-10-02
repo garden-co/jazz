@@ -110,18 +110,26 @@ describe("early browser worker lease", () => {
     await vi.waitFor(() => expect(lease.returnWithHighWater).toHaveBeenCalledWith(7n));
   });
 
-  it("returns a caller's lease for a different root and acquires the matching one", async () => {
+  it("returns a caller's lease for a different root before acquiring the matching one", async () => {
     const { source, raw, lease } = fakeRuntimeSource(Promise.resolve());
+    const returned = deferred<void>();
+    vi.mocked(lease.returnWithHighWater).mockReturnValueOnce(returned.promise);
     const create = vi.spyOn(Db, "createWithBrowserWorker").mockResolvedValue({} as Db);
     const otherAccount = startBrowserWorkerLease(
       accountConfig("00000000-0000-4000-8000-0000000000b2"),
       source,
     )!;
 
-    await createDbWithRuntimeSource(accountConfig(), source, otherAccount);
-
-    expect(create.mock.calls[0]![2]).toBeUndefined();
+    const opening = createDbWithRuntimeSource(accountConfig(), source, otherAccount);
     await vi.waitFor(() => expect(lease.returnWithHighWater).toHaveBeenCalledOnce());
+    // The Db (and so its own lease acquisition) waits for that return.
+    await Promise.resolve();
+    expect(create).not.toHaveBeenCalled();
+
+    returned.resolve();
+    await opening;
+    expect(create.mock.calls[0]![2]).toBeUndefined();
+    expect(lease.returnWithHighWater).toHaveBeenCalledOnce();
     expect(raw.acquireBrowserForegroundNodeLease).toHaveBeenCalledOnce();
   });
 

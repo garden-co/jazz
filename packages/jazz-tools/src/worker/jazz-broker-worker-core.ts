@@ -1177,10 +1177,12 @@ async function initialize(context: RuntimeContext): Promise<void> {
 }
 
 /**
- * Fetch and compile this realm's WASM while lease admission, IndexedDB and the
- * page's setup run. The realm name already fixes its asset source, and this
- * neither opens a database nor configures tracing or telemetry, so owner
- * admission still precedes every configuring WASM step in `initialize`.
+ * Fetch, compile and instantiate this realm's WASM while lease admission,
+ * IndexedDB and the page's setup run. The realm name already fixes its asset
+ * source. Instantiation runs wasm-bindgen's start function, which only installs
+ * the panic hook: this neither opens a database nor configures tracing or
+ * telemetry, so owner admission still precedes every configuring WASM step in
+ * `initialize`.
  */
 function prefetchWorkerWasmModule(
   runtimeSources: BrowserWorkerInitOptions["runtimeSources"],

@@ -3274,11 +3274,22 @@ function leaseMatches(lease: Promise<BrowserForegroundNodeLease>, config: DbConf
   return root !== undefined && root === browserLeaseRoot(config);
 }
 
-/** @internal Return a lease that no Db adopted, keeping its node reusable. */
-export function releaseUnusedLease(lease: Promise<BrowserForegroundNodeLease> | undefined): void {
-  void lease
-    ?.then((acquired) => acquired.returnWithHighWater(acquired.confirmedTxTime))
-    .catch(() => undefined);
+/**
+ * @internal Return a lease that no Db adopted, keeping its node reusable.
+ * Resolves once the worker has the lease back (or it never issued one), so a
+ * replacement acquired afterwards never queues behind it.
+ */
+export async function releaseUnusedLease(
+  lease: Promise<BrowserForegroundNodeLease> | undefined,
+): Promise<void> {
+  if (!lease || leaseClaimed.has(lease)) return;
+  leaseClaimed.add(lease);
+  try {
+    const acquired = await lease;
+    await acquired.returnWithHighWater(acquired.confirmedTxTime);
+  } catch {
+    // A lease that failed to arrive, or could not be returned, holds nothing.
+  }
 }
 
 export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
@@ -3293,11 +3304,12 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       return lease;
     });
   } finally {
-    if (lease && !leaseAdopted.has(lease)) releaseUnusedLease(lease);
+    void releaseUnusedLease(lease);
   }
 }
 
-const leaseAdopted = new WeakSet<Promise<BrowserForegroundNodeLease>>();
+/** Leases already adopted by a Db or released; neither may happen twice. */
+const leaseClaimed = new WeakSet<Promise<BrowserForegroundNodeLease>>();
 
 async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
@@ -3375,7 +3387,13 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     earlyLease && browserWorker && leaseMatches(earlyLease, resolvedConfig)
       ? earlyLease
       : undefined;
-  if (adoptedLease) leaseAdopted.add(adoptedLease);
+  if (adoptedLease) {
+    leaseClaimed.add(adoptedLease);
+  } else if (earlyLease) {
+    // Hand a lease for some other root back before this Db acquires its own,
+    // so the two are never held, or queued behind each other, at once.
+    await releaseUnusedLease(earlyLease);
+  }
   const db = browserWorker
     ? await Db.createWithBrowserWorker(
         resolvedConfig,

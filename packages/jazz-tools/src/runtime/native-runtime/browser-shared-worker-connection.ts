@@ -85,7 +85,7 @@ type ForegroundNodeLeaseAttemptOutcome =
 const pendingForegroundLeaseCleanups = new Map<string, symbol>();
 
 /**
- * Ask a newly started worker to fetch and compile its WASM while the lease,
+ * Ask a newly started worker to fetch, compile and instantiate its WASM while the lease,
  * IndexedDB admission and the page's own setup run. Only URL-addressed assets
  * are prefetched: in-memory modules are never cloned twice.
  */
