@@ -1,5 +1,16 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.59
+
+### Patch Changes
+
+- d06d76d: Name the table, row and versions that disagreed when a subscription's supporting-set transition is rejected, so an out-of-sync live query can be traced to the row that caused it.
+- c93763e: Keep React Native foreground ticks running when an established native upstream connection drops and the socket worker reconnects, instead of throwing a recurring `Jazz native foreground runtime failed during tick` on a healthy `Db`. The outage is reported as disconnected by `nativeConnectionStatus()` until the next successful connection. A server that rejects the session, or a socket worker that gives up, still fails the tick, and `reconnectNativeUpstream()` now replaces a worker that gave up instead of leaving its failure latched.
+- 36d7f66: Keep local writes visible while a query waits for large-value bytes from the server. A write no longer waits for another query's first result that is stuck on an attachment fetch, for example while offline. That query restarts after the write and keeps its pending fetch.
+- 6eebb2c: Surface a fixed, sanitized diagnostic when a remote HTTP account-session endpoint is rejected; local development endpoints remain supported.
+  - jazz-rn-ios@2.0.0-alpha.59
+  - jazz-rn-android@2.0.0-alpha.59
+
 ## 2.0.0-alpha.58
 
 ### Patch Changes
