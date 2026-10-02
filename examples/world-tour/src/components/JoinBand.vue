@@ -27,7 +27,7 @@ import { useDb } from "jazz-tools/vue";
 import { app } from "../../schema.js";
 import Button from "./ui/Button.vue";
 import Dialog from "./ui/Dialog.vue";
-import { writeError } from "../lib/write-errors.js";
+import { reportWriteError } from "../lib/write-errors.js";
 
 const props = defineProps<{ bandId: string; bandName: string; code: string; userId: string }>();
 const emit = defineEmits<{ done: [] }>();
@@ -58,9 +58,9 @@ function join() {
     joining.value = false;
     return;
   }
-  write.wait({ tier: "global" }).catch(() => {
-    writeError.value = rejected;
-  });
+  // This wait owns the join's rejection, so it is reported once, here, with
+  // the invite message rather than the generic one (see write-errors.ts).
+  write.wait({ tier: "global" }).catch((cause: unknown) => reportWriteError(cause, rejected));
   joining.value = false;
   emit("done");
 }
