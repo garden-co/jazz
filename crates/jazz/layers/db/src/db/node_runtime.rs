@@ -278,6 +278,8 @@ where
     pub(super) detached_large_value_uploads:
         Rc<RefCell<BTreeMap<UpstreamUploadDestination, peer_connection::LargeValueUploadQueues>>>,
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
+    /// Retry-later answers each pending upload has received, for backoff.
+    pub(super) upload_retry_later_attempts: Rc<RefCell<BTreeMap<TxId, u32>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) open_schema_admission: OpenSchemaAdmission,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
@@ -426,6 +428,7 @@ where
             upload_retry_clock: Rc::new(RefCell::new(Rc::new(MonotonicUploadRetryClock::new()))),
             detached_large_value_uploads: Rc::new(RefCell::new(BTreeMap::new())),
             large_value_upload_retry_deadlines: Rc::new(RefCell::new(BTreeMap::new())),
+            upload_retry_later_attempts: Rc::new(RefCell::new(BTreeMap::new())),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             open_schema_admission: Rc::new(RefCell::new(None)),
             mutation_errors: Rc::new(RefCell::new(MutationErrorState {
@@ -2474,6 +2477,7 @@ where
                 large_value_upload_retry_deadlines: Rc::clone(
                     &self.large_value_upload_retry_deadlines,
                 ),
+                upload_retry_later_attempts: Rc::clone(&self.upload_retry_later_attempts),
                 write_state_waiters: Rc::clone(&self.write_state_waiters),
                 open_schema_admission: Rc::clone(&self.open_schema_admission),
                 permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
@@ -2869,6 +2873,7 @@ where
             upload_retry_clock: Rc::clone(&self.upload_retry_clock),
             upstream_upload_destination: None,
             large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
+            upload_retry_later_attempts: Rc::clone(&self.upload_retry_later_attempts),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             open_schema_admission: Rc::clone(&self.open_schema_admission),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
@@ -4291,6 +4296,9 @@ where
                 .forget_released_outbox_tx_ids(&released_tx_ids);
         }
         self.large_value_upload_retry_deadlines
+            .borrow_mut()
+            .retain(|tx_id, _| !released_tx_ids.contains(tx_id));
+        self.upload_retry_later_attempts
             .borrow_mut()
             .retain(|tx_id, _| !released_tx_ids.contains(tx_id));
         self.detached_large_value_uploads

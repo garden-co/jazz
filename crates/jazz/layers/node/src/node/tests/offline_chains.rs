@@ -879,11 +879,13 @@ fn parked_writes_converge_after_a_core_restart() {
     }
 }
 
-/// N1: a writer cannot fill Core's parking. Writes naming a predecessor
-/// Core never sees park only up to the per-writer-node cap; the next one is
-/// refused with a fate. A session that may not make the write at all (its
-/// identity is not the write's author, or it is anonymous) is refused
-/// before it can park.
+/// A writer cannot fill Core's parking, and a write over the cap is not
+/// lost. Writes naming a predecessor Core never sees park only up to the
+/// per-writer-node cap. The next write that would wait gets a retry-later
+/// answer, not a fate: Core stores nothing, and once its predecessor is
+/// decided the writer's resend is accepted. A session that may not make the
+/// write at all (its identity is not the write's author, or it is
+/// anonymous) is refused before it can park.
 #[test]
 fn predecessor_parking_is_bounded_and_admits_first() {
     let target = row(0x97);
@@ -957,44 +959,79 @@ fn predecessor_parking_is_bounded_and_admits_first() {
         }
     }
     let (tx, messages) = last.unwrap();
-    let Some(Fate::Rejected(RejectionReason::MalformedCommit(reason))) = fate_for(&messages, tx)
-    else {
-        panic!("the write over the cap is refused: {messages:?}");
-    };
-    assert!(reason.contains("too many writes"), "{reason}");
+    assert_eq!(fate_for(&messages, tx), Some(&Fate::Pending), "{messages:?}");
+    assert!(messages.iter().any(crate::node::is_retry_later_fate_update));
     assert_eq!(core.parking.awaiting_predecessor.len(), cap);
+    assert_eq!(core.transaction_state_settled(tx), None, "nothing is stored");
+
+    // carol's real chain over the cap: e2 is asked to retry, e1 settles, and
+    // the resent e2 is accepted.
+    let base = |unit: &SyncMessage| {
+        let SyncMessage::CommitUnit { versions, .. } = unit else {
+            panic!("expected a commit unit");
+        };
+        versions[0].base()
+    };
+    let (e1, e1_unit) = offline_edit(carol, target, 5_000, &[("title", "c1")]);
+    let e1_unit = with_base(
+        e1_unit.clone(),
+        crate::protocol::RowBase {
+            pending: None,
+            ..base(&e1_unit)
+        },
+    );
+    let (e2, e2_unit) = offline_edit(carol, target, 5_001, &[("body", "c2")]);
+    assert_eq!(base(&e2_unit).pending, Some(e1));
+    let retry = core.apply_sync_message_settled(e2_unit.clone()).unwrap();
+    assert_eq!(fate_for(&retry, e2), Some(&Fate::Pending));
+    assert!(retry.iter().any(crate::node::is_retry_later_fate_update));
+    let decided = core.apply_sync_message_settled(e1_unit).unwrap();
+    assert_eq!(fate_for(&decided, e1), Some(&Fate::Accepted));
+    assert_eq!(fate_for(&decided, e2), None, "e2 was not parked");
+    let resent = core.apply_sync_message_settled(e2_unit).unwrap();
+    assert_eq!(fate_for(&resent, e2), Some(&Fate::Accepted));
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("c1", "c2")
+    );
 }
 
-/// N1/N4: a parked write whose predecessor never reaches Core gets a fate
-/// once its wait expires, on the next authority ingest. The refusal is
-/// stored, so the predecessor arriving afterwards does not decide it again.
+/// A parked write whose predecessor has not reached Core when its wait
+/// expires is dropped with a retry-later answer, on the next authority
+/// ingest: no fate is stored, so the writer's resend after the predecessor
+/// arrives is accepted. The dropped copy never produces a fate later.
 ///
 /// ```text
 /// carol ──e2──► core            t=1000, parked on e1
-/// dave  ──other row──► core     t=1000+TTL: e2 refused
-/// carol ──e1──► core            e1 accepted, no second fate for e2
+/// dave  ──other row──► core     t=1000+TTL: e2 dropped, retry later
+/// carol ──e1──► core            e1 accepted, nothing for e2
+/// carol ──e2──► core            e2 accepted
 /// ```
 #[test]
-fn parked_write_expires_with_a_fate() {
+fn expired_parked_write_is_retried_and_accepted() {
     let target = row(0x98);
     let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
     let (e1, e1_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "c1")]);
-    let (e2, e2_unit) = offline_edit(&mut writers[0].1, target, 101, &[("title", "c2")]);
+    let (e2, e2_unit) = offline_edit(&mut writers[0].1, target, 101, &[("body", "c2")]);
     let (dave_tx, dave_unit) =
         offline_edit(&mut writers[1].1, row(0x99), 50, &[("title", "dave")]);
-    assert_eq!(fate_for(&ingest_at(&mut core, e2_unit, 1_000), e2), None);
+    assert_eq!(fate_for(&ingest_at(&mut core, e2_unit.clone(), 1_000), e2), None);
     let ttl = crate::node::ingest::PREDECESSOR_PARK_TTL_MS;
     let later = ingest_at(&mut core, dave_unit, 1_000 + ttl);
     assert_eq!(fate_for(&later, dave_tx), Some(&Fate::Accepted));
-    let Some(Fate::Rejected(RejectionReason::MalformedCommit(reason))) = fate_for(&later, e2)
-    else {
-        panic!("the expired write gets a fate: {later:?}");
-    };
-    assert!(reason.contains("got no fate"), "{reason}");
+    assert_eq!(fate_for(&later, e2), Some(&Fate::Pending), "{later:?}");
+    assert!(later.iter().any(crate::node::is_retry_later_fate_update));
     assert_eq!(core.parking.awaiting_predecessor.len(), 0);
+    assert_eq!(core.transaction_state_settled(e2), None, "nothing is stored");
     let decided = ingest_at(&mut core, e1_unit, 1_000 + ttl);
     assert_eq!(fate_for(&decided, e1), Some(&Fate::Accepted));
-    assert_eq!(fate_for(&decided, e2), None);
+    assert_eq!(fate_for(&decided, e2), None, "the dropped copy is gone");
+    let resent = ingest_at(&mut core, e2_unit, 1_000 + ttl);
+    assert_eq!(fate_for(&resent, e2), Some(&Fate::Accepted));
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("c1", "c2")
+    );
 }
 
 /// `counters` with plain `title` and `body`, and in the descendant also

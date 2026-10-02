@@ -580,15 +580,12 @@ where
         {
             PredecessorPark::Ready => {}
             PredecessorPark::Parked => return Ok(PublicationOutcome::settled(Vec::new())),
+            // Over the caps the write is not refused: nothing is stored, and
+            // the writer is asked to send it again later.
             PredecessorPark::Full => {
-                return self
-                    .reject_malformed_commit(
-                        tx,
-                        "too many writes of this writer are waiting for a pending predecessor"
-                            .to_owned(),
-                    )
-                    .await
-                    .map(PublicationOutcome::settled);
+                return Ok(PublicationOutcome::settled(vec![retry_later_fate_update(
+                    tx.tx_id,
+                )]));
             }
         }
         if let Some(reason) = Box::pin(self.commit_unit_write_policy_rejection(

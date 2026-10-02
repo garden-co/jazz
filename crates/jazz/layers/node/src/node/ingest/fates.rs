@@ -803,8 +803,8 @@ where
     /// predecessor its base names has no fate here (SPEC 4 §4.6, "Ancestor
     /// at Core"): Core resolves the write's ancestor only once it knows
     /// whether that predecessor is in history. The unit re-enters authority
-    /// ingest when the predecessor's fate is stored, or is refused once
-    /// [`PREDECESSOR_PARK_TTL_MS`] passes. A base whose predecessor can never
+    /// ingest when the predecessor's fate is stored, or is dropped with a
+    /// retry-later answer (no fate) once [`PREDECESSOR_PARK_TTL_MS`] passes. A base whose predecessor can never
     /// be resolved (another node's transaction, or one not older than the
     /// write) is not parked; ancestor resolution refuses it. Callers run the
     /// unit's cheap admission checks first, so only an admitted writer can
@@ -899,10 +899,12 @@ where
     }
 
     /// Release the units parked on a predecessor once fates are stored, and
-    /// refuse the units whose wait expired by `now_ms` (when given). `fates`
-    /// are the fate updates just produced; every fate a released unit gets
-    /// releases its own successors in turn. A unit that already has a fate
-    /// here (its parked copy is stale) is dropped without a second fate.
+    /// drop the units whose wait expired by `now_ms` (when given), answering
+    /// each with a [retry-later fate update](is_retry_later_fate_update)
+    /// rather than a fate. `fates` are the fate updates just produced; every
+    /// fate a released unit gets releases its own successors in turn. A unit
+    /// that already has a fate here (its parked copy is stale) is dropped
+    /// without a second fate.
     pub(super) async fn release_units_awaiting_predecessors(
         &mut self,
         fates: &[SyncMessage],
@@ -928,18 +930,12 @@ where
                 if self.has_decided_fate(tx_id).await? {
                     continue;
                 }
+                // The wait ends without a fate: the writer still holds the
+                // write pending and is asked to send it again later.
                 self.sync_metrics.parked_orphans_resolved += 1;
-                let messages = self
-                    .reject_malformed_commit(
-                        parked.unit.tx,
-                        format!(
-                            "pending predecessor {:?} got no fate within {} ms",
-                            parked.predecessor, PREDECESSOR_PARK_TTL_MS
-                        ),
-                    )
-                    .await?;
-                fated.extend(decided_fate_tx_ids(&messages));
-                updates.extend(PublicationOutcome::settled(messages));
+                updates.extend(PublicationOutcome::settled(vec![retry_later_fate_update(
+                    parked.unit.tx.tx_id,
+                )]));
             }
         }
         while let Some(tx_id) = fated.pop_front() {
@@ -1206,7 +1202,7 @@ pub(super) enum PredecessorPark {
     /// The unit waits for its predecessor's fate.
     Parked,
     /// The unit would wait, but its writer node or session has too many
-    /// writes waiting already.
+    /// writes waiting already: it gets a retry-later answer, not a fate.
     Full,
 }
 
@@ -1327,4 +1323,33 @@ pub(super) fn commit_unit_admission_subject(
         return Err(RejectionReason::AuthorizationDenied);
     }
     Ok(Some(permission_subject))
+}
+
+/// The authority's transient refusal of a commit unit: a `FateUpdate` with
+/// `Fate::Pending` and neither a global time nor a durability claim. It
+/// stores nothing and decides nothing; the writer keeps the write pending
+/// and uploads it again after a backoff (SPEC 8). Core sends it for a write
+/// over the predecessor-parking caps and for one whose wait expired.
+pub(super) fn retry_later_fate_update(tx_id: TxId) -> SyncMessage {
+    SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Pending,
+        global_time: None,
+        durability: None,
+    }
+}
+
+/// Whether `message` is the authority's retry-later answer to an upload
+/// (see [`retry_later_fate_update`]). No other fate update has this shape: a
+/// relay's local acknowledgement carries `Local` durability.
+pub fn is_retry_later_fate_update(message: &SyncMessage) -> bool {
+    matches!(
+        message,
+        SyncMessage::FateUpdate {
+            fate: Fate::Pending,
+            global_time: None,
+            durability: None,
+            ..
+        }
+    )
 }

@@ -19,7 +19,7 @@ pub(super) const MAX_SCHEMA_LINEAGE_OPS: usize = 16_384;
 /// no fate here, measured from the write's arrival (SPEC 4 §4.6).
 pub(super) const PREDECESSOR_PARK_TTL_MS: u64 = 5 * 60 * 1000;
 /// Most writes one writer node may have waiting on predecessors at once.
-pub(super) const MAX_PREDECESSOR_PARKED_PER_WRITER_NODE: usize = 256;
+pub const MAX_PREDECESSOR_PARKED_PER_WRITER_NODE: usize = 256;
 /// Most writes one authenticated session identity may have waiting on
 /// predecessors at once, across the nodes it writes for.
 pub(super) const MAX_PREDECESSOR_PARKED_PER_SESSION: usize = 1024;

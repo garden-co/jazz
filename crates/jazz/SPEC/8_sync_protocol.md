@@ -164,7 +164,16 @@ baseline, frozen fresh rather than appended to v3, is:
   `lost_cells`; Core resolves the base to the write's ancestor or rejects the
   write as `MalformedCommit`, and holds the unit without a fate while its
   pending predecessor has none at Core yet, bounded per writer and in time
-  (SPEC 4 §4.6). A history record that a view
+  (SPEC 4 §4.6). Over those bounds Core answers with a **retry-later** fate
+  update: `FateUpdate { fate: Pending, global_time: None, durability: None }`
+  (a relay's local acknowledgement always carries `Local` durability, so the
+  two never collide). It is not a fate: Core stores nothing, and the
+  receiver neither applies nor forwards it. A writer that has the
+  transaction in its upload outbox keeps it pending and uploads it again on
+  the same link after a backoff (1 s, doubling per answer, at most 30 s), in
+  outbox order; a new link uploads every pending transaction again anyway. A
+  peer that does not know the answer treats it as a no-op Pending update and
+  resends on its next reconnect. A history record that a view
   update or relay forwards carries the base and lost cells Core stored, and
   takes its seq from the bundle's accepted `GlobalTime`. `FateUpdate` is
   unchanged;

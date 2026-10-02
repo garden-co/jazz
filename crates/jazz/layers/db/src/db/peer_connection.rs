@@ -444,6 +444,7 @@ where
     pub(super) upload_retry_clock: SharedUploadRetryClock,
     pub(super) upstream_upload_destination: Option<UpstreamUploadDestination>,
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
+    pub(super) upload_retry_later_attempts: Rc<RefCell<BTreeMap<TxId, u32>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) open_schema_admission: OpenSchemaAdmission,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
@@ -710,6 +711,19 @@ pub(super) fn merge_reconnectable_large_value_uploads(
 }
 
 const RATE_LIMITED_UPLOAD_RETRY_DELAY_MS: u64 = 1_000;
+/// First delay before re-uploading a write the authority asked to retry
+/// later; it doubles with each further answer for the same write.
+const RETRY_LATER_UPLOAD_INITIAL_DELAY_MS: u64 = 1_000;
+/// Longest delay between re-uploads of a write asked to retry later.
+const RETRY_LATER_UPLOAD_MAX_DELAY_MS: u64 = 30_000;
+
+/// Backoff before the `attempt`-th re-upload (from 1) of a write the
+/// authority answered with retry-later.
+fn retry_later_upload_delay_ms(attempt: u32) -> u64 {
+    RETRY_LATER_UPLOAD_INITIAL_DELAY_MS
+        .saturating_mul(1_u64 << attempt.saturating_sub(1).min(16))
+        .min(RETRY_LATER_UPLOAD_MAX_DELAY_MS)
+}
 
 fn collect_large_value_refs(value: &Value, refs: &mut Vec<groove::large_values::LargeValueRef>) {
     match value {
@@ -3336,6 +3350,33 @@ where
                                 }
                                 scope_receipts.insert(subscription, receipt);
                             }
+                            SyncMessage::FateUpdate { tx_id, .. }
+                                if crate::node::is_retry_later_fate_update(&message) =>
+                            {
+                                // The authority stored nothing and asks for
+                                // this write again later (SPEC 8): it stays
+                                // pending here, keeps its local visibility,
+                                // and goes up again after a backoff, in
+                                // outbox order. It is not a fate, so it is
+                                // neither applied nor routed downstream.
+                                if outbox.borrow().contains(tx_id) && uploaded.remove(&tx_id) {
+                                    let attempt = {
+                                        let mut attempts =
+                                            self.upload_retry_later_attempts.borrow_mut();
+                                        let attempt = attempts.entry(tx_id).or_default();
+                                        *attempt = attempt.saturating_add(1);
+                                        *attempt
+                                    };
+                                    let delay = retry_later_upload_delay_ms(attempt);
+                                    let now_ms = self.upload_retry_clock.borrow().now_ms();
+                                    self.large_value_upload_retry_deadlines
+                                        .borrow_mut()
+                                        .insert(tx_id, now_ms.saturating_add(delay));
+                                    if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                                        scheduler.schedule_tick_after(delay);
+                                    }
+                                }
+                            }
                             message => {
                                 let admitted = *self.admitted_upstream_authority.borrow();
                                 let current_authority_receipt_eligible =
@@ -5027,9 +5068,40 @@ where
                                     .iter()
                                     .any(|response| fate_update_settles_upload(response, *tx_id))
                             });
+                            let own_tx_id = local_upload.as_ref().map(|(tx_id, _)| *tx_id);
+                            let settles_locally = outbox.borrow().settles_uploads_locally();
+                            let mut own_decided = false;
+                            let mut own_retry_later = false;
                             for response in responses {
-                                if matches!(response, SyncMessage::FateUpdate { .. }) {
-                                    self.downstream_fates.borrow_mut().push(response);
+                                if let SyncMessage::FateUpdate { tx_id, .. } = &response {
+                                    let tx_id = *tx_id;
+                                    let retry_later =
+                                        crate::node::is_retry_later_fate_update(&response);
+                                    if settles_locally
+                                        && fate_update_settles_upload(&response, tx_id)
+                                        && outbox.borrow().contains(tx_id)
+                                    {
+                                        // A write decided after it waited here
+                                        // (for its schema or predecessor).
+                                        self.released_outbox_tx_ids.push(tx_id);
+                                    }
+                                    if Some(tx_id) == own_tx_id {
+                                        own_decided |= !matches!(
+                                            response,
+                                            SyncMessage::FateUpdate { fate: Fate::Pending, .. }
+                                        );
+                                        own_retry_later |= retry_later;
+                                        self.downstream_fates.borrow_mut().push(response);
+                                    } else {
+                                        // Another write this ingest decided
+                                        // (one that waited here) or asked to
+                                        // retry: only its uploader's link,
+                                        // registered when it waited, may
+                                        // receive it. Without a live route the
+                                        // writer resends on reconnect and gets
+                                        // the stored fate then.
+                                        route_local_fate(&self.local_fate_routes, tx_id, &response);
+                                    }
                                 } else {
                                     send_with_sync_context(
                                         &self.node,
@@ -5039,8 +5111,25 @@ where
                                     )?;
                                 }
                             }
+                            if let Some(tx_id) = own_tx_id
+                                && !*local_receiver
+                                && !own_decided
+                                && !own_retry_later
+                            {
+                                // The write waits here without a fate: route
+                                // its later fate (or retry-later answer) to
+                                // this link.
+                                register_local_fate_observer(
+                                    &self.local_fate_routes,
+                                    tx_id,
+                                    &self.downstream_fates,
+                                );
+                            }
                             if let Some((tx_id, unit)) = local_upload {
-                                if settled_here {
+                                if own_retry_later {
+                                    // Nothing is held for a write asked to
+                                    // retry: its writer sends it again.
+                                } else if settled_here {
                                     // A reconnect may have reconstructed this
                                     // upload before the unit arrived here.
                                     if outbox.borrow().contains(tx_id) {

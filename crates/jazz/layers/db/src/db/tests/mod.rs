@@ -144,6 +144,7 @@ mod node_runtime;
 mod peer_connection;
 mod reads;
 mod reference_metadata_migration;
+mod retry_later_uploads;
 mod subscriptions;
 mod support;
 mod transactions;

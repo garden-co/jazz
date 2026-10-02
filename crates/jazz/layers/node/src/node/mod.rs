@@ -352,6 +352,7 @@ pub mod terminal_record;
 pub mod terminal_root;
 mod views;
 
+pub use ingest::{MAX_PREDECESSOR_PARKED_PER_WRITER_NODE, is_retry_later_fate_update};
 pub use open_tx::{TransactionBranchRowState, TransactionInsertTargetState};
 pub use query_engine::{
     CurrentRowBindingRole, CurrentRowPublicationField, CurrentRowResultVisibility,
