@@ -4,7 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use jazz::storage_codec_profile::JAZZ_EPOCH_1_STORAGE_CODECS;
+use jazz::storage_codec_profile::{JAZZ_EPOCH_1_STORAGE_CODECS, JAZZ_NODE_STORAGE_CODECS};
 use serde::Deserialize;
 
 const REGISTRY_PATH: &str = concat!(
@@ -131,6 +131,13 @@ fn expected_profile_ids() -> BTreeMap<&'static str, Vec<String>> {
                 .collect(),
         ),
         (
+            "jazz-node-root",
+            JAZZ_NODE_STORAGE_CODECS
+                .iter()
+                .map(|id| (*id).to_owned())
+                .collect(),
+        ),
+        (
             "server-catalogue-root",
             vec!["jazz.server-catalogue-entry.v1".to_owned()],
         ),
@@ -156,7 +163,7 @@ fn validate_registry_with_profiles(
         }
         if !matches!(
             family.profile.as_deref(),
-            None | Some("groove-root" | "jazz-root" | "server-catalogue-root")
+            None | Some("groove-root" | "jazz-root" | "jazz-node-root" | "server-catalogue-root")
         ) {
             return Err(format!("{} has an unknown codec profile", family.id));
         }
@@ -197,10 +204,14 @@ fn validate_registry_with_profiles(
     for required in [
         "groove.typed-record.v1",
         "groove.storage-epoch-manifest.v1",
-        "groove.jazz-physical-class.v1",
-        "jazz.history-version-current.v1",
-        "jazz.contribution-provenance.v1",
-        "jazz.merge-heads.v1",
+        "groove.jazz-physical-class.v2",
+        "groove.durable-index.v2",
+        // Linear row-state history retired `jazz.history-version-current.v1`,
+        // `jazz.contribution-provenance.v1` and `jazz.merge-heads.v1`; the
+        // touched-rows transaction record retired `...v2` (history `by_tx`),
+        // and implicit history `updated_by` retired `...v3`.
+        "jazz.history-version-current.v4",
+        "jazz.subscription-watermark.v1",
         "jazz.idb-page.v1",
         "jazz.wire-frame.v1",
         "jazz.binding-abi.v1",

@@ -13,22 +13,20 @@ Invariant digest:
 
 - `INV-HIST-1`: A row version that lists a parent MUST dominate that parent for content-current selection when both versions are present in the same layer.
 - `INV-HIST-2`: Among content heads not dominated by known parents, the current content version MUST be the head with the greatest made-at/`TxId` sort key.
-- `INV-HIST-5`: An upstream node that observes two or more concurrent mergeable content heads for a row MUST create an accepted mergeable merge version with those heads as parents, unless a content version with the same sorted parent set already exists.
 - `INV-HIST-6`: A merge version MUST dominate all of its parent heads and become the current content winner when present and accepted.
-- `INV-HIST-7`: A merge version's transaction time MUST be strictly after the maximum made-at time of the observed heads.
-- `INV-HIST-8`: For `MergeStrategy::Lww`, a merged column MUST take the value from the highest made-at/`TxId` head that sets the column, and if no head sets it, from the highest made-at/`TxId` parent-union version that sets it.
+- `INV-HIST-8`: For a plain (`MergeStrategy::Lww`) column and for `_deletion`, Core MUST merge each accepted write into the row's post-image cell by cell against the write's **ancestor** (the row image the writer made it over, §4.6): an authored cell applies iff the ancestor's value equals the current image's value, or the ancestor's value is unknown; otherwise the current value stays and the write's value is kept as a **lost cell** of its history record. Concurrent writes to different cells of one row therefore all survive, and a write never overrides a value its writer did not see.
 - `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
-- `INV-HIST-10`: For `MergeStrategy::Counter`, concurrent integer deltas from their observed parent bases MUST be summed exactly.
+- `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly. Core MUST reject a write whose delta would take the counter outside its column type's range rather than wrap, and a write that does not author a merge column MUST NOT replace that column's accepted ops with the writer's snapshot, also across schema versions.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
-- `INV-HIST-15`: Merge strategy behavior MUST be deterministic and grouping-insensitive over the parent/head set; write-time canonicalization remains validation and rejects loudly.
-- `INV-HIST-16`: A merge value MUST be the deterministic fold over the de-duplicated raw head set, never a fold of already-merged values. Combining divergent merge versions MUST fold the union of their raw parent-closures de-duplicated by version identity (LWW argmax; `Counter` sums per-`TxId` deltas so shared ancestors count once), so divergent merges converge to the single-merger-over-the-union result.
+- `INV-HIST-15`: Core's post-image MUST be a deterministic function of the accepted writes in seq order and of each write's base: no wall clock, writer clock or other node-local state enters a merged value. Concurrent writes to different cells give the same post-image in any seq order, merge-strategy ops commute, and when two concurrent writes change one plain cell the one Core sequences first keeps it.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
+- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another ancestor. A write whose predecessor has no fate at Core yet MUST wait, without a fate, until that fate (acceptance or any rejection) is stored, and is then resolved; it MUST pass its cheap admission checks before it waits, the waiting writes of one writer node and of one session identity MUST be bounded, and a write over a bound or waiting longer than the time bound MUST get a retry-later answer that stores no fate, so that its writer keeps it pending and uploads it again. A write MUST never get a second fate from a stale parked copy.
+- `INV-HIST-21`: A write's own patch MUST be recoverable from its history record (the post-image restricted to `authored_columns`, overridden by `lost_cells`), and the ancestor of a chained write MUST be built from those patches, never from Core's post-images of the writer's earlier writes.
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
-- `INV-HIST-19`: A node-local content-frontier helper, if retained, MUST be keyed by the complete physical content-row coordinate and encode a strictly increasing, duplicate-free canonical `TxId` array using Groove values rather than an opaque collection payload.
-- `INV-TX-6`: A commit unit MUST be rejected with RejectionReason::CausalityViolation if its txid.time is less than or equal to any same-row/layer history parent's txid.time, and its versions...
+- `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6), so it overrides every value it observed whatever its clock. Core orders writes by its own seq, never by writer clocks, and does not reject a write because the writer's clock is behind.
 
 ## Details
 
@@ -49,10 +47,12 @@ later restore parents `D` rather than `C` (covered by
 `known_parent_must_match_exact_row_coordinate_and_layer`). Ordering is based on `TxId.time`, the HLC input, with the full
 sort key `(time, node)` used for deterministic tie-breaking.
 
-Causality is enforced at acceptance time. A causal child has a strictly greater
-time than every parent; the authority rejects a violation as
-`CausalityViolation` (ch. 3, `INV-TX-6`). Within accepted history, therefore, a
-parent always precedes its children.
+On the linear-history line versions carry no parents, and Core's seq, not
+the writer's clock, orders accepted writes. Causality is kept by each write's
+**base** instead of by an admission check or a clock: a write names the row
+image it was made over, so Core knows which values its writer saw and lets
+it override exactly those (`INV-TX-6`, §4.6). Core no longer rejects a write
+as `CausalityViolation`, and no clock value takes part in a merge.
 
 A version **dominates** the parents it lists, and by transitivity it dominates
 their ancestors. When both a version and its parent are present in the same
@@ -82,87 +82,59 @@ current rows, not proportional to history depth. The overlay still applies the
 same known-history domination and argmax rules (`INV-HIST-1`, `INV-HIST-2`); it
 is a bounded currentness computation over the ahead set, not a history scan.
 
-### 4.3 Merging concurrent heads
+### 4.3 Merging concurrent writes
 
-Concurrent writes are reconciled by adding a version that records the frontier it
-merged. When **Core** observes two or
-more concurrent mergeable content heads for a row, it creates one accepted
-mergeable **merge version** whose `parents` are those heads sorted, unless a
-content version with the same sorted parent set already exists (`INV-HIST-5`).
-The merge version dominates all of its parent heads and becomes the current
-content winner when present and accepted (`INV-HIST-6`).
+On the linear-history line there are no merge heads and no merge versions.
+Core sequences every accepted write and merges it into the row's post-image
+as it accepts it; the post-image is what Core stores and ships. Clients and
+local persistence relays preserve authored patches, sync them to Core, and
+store Core's post-images when they arrive; they never merge on Core's behalf.
 
-Clients and local persistence relays preserve authored versions and sync them
-to Core; they do not generate authoritative merge versions. Core reconciles
-concurrent writes during admission, including independent inserts of the same
-row ID, and persists the resulting merge with Global durability. Replaying a
-commit already accepted by Core must not generate a redundant merge.
-
-The cells of a merge version are computed per column. The default strategy
-(`MergeStrategy::Lww`) fills each column independently: it takes the value from
-the highest-sort-key head that sets that column; if no head sets it, it falls
-back to the **parent-union** — the set of all direct parents of the merge's heads
-— and takes the value from the highest-sort-key version in that set that sets it
-(`INV-HIST-8`). For example, with two concurrent heads `A (t=5)` setting
-`title="x"` and `B (t=7)` setting `body="y"`, the merge is `{title:"x",
-body:"y"}`: each column comes from the head that set it. If both had set
-`title`, `B`'s higher sort key would win.
+The cells of a post-image are computed per column. A plain column
+(`MergeStrategy::Lww`) takes a write's value iff the write authored it and
+nothing changed that cell since the image the writer saw (`INV-HIST-8`,
+§4.6). For example, from a row `{title:"a", body:"b"}` at seq 5, two writes
+both made over seq 5, `A` setting `title="x"` and `B` setting `title="y",
+body="z"`, give `{title:"x", body:"z"}` when Core sequences `A` first: `B`'s
+body has no competitor, and its title was changed concurrently (seq 5 holds
+`"a"`, the row now holds `"x"`), so `B`'s `"y"` is kept only as a lost cell
+of `B`'s history record. Sequenced the other way the row is
+`{title:"y", body:"z"}` and `A`'s `"x"` is the lost cell.
 
 Counter columns use delta summation instead of last-writer selection. The counter
 strategy (`MergeStrategy::Counter`) may be declared only on non-nullable integer
-columns (`INV-HIST-9`, ch. 2). It computes each
-concurrent writer's delta from its observed base and sums those deltas exactly
-(`INV-HIST-10`). Concurrent increments therefore converge to the exact total:
-from a base of `10`, a concurrent `+3` and `+5` merge to `18`, not to a single
-last-writer value.
+columns (`INV-HIST-9`, ch. 2). A counter write travels as its delta from the
+row image it was made over, and Core adds each accepted delta to the current
+value (`INV-HIST-10`). Concurrent increments therefore converge to the exact
+total: from a base of `10`, a concurrent `+3` and `+5` merge to `18`, not to a
+single last-writer value. The difference of two values of a `width`-bit type
+lies in `-(2^width - 1)..=2^width - 1`, so the delta is carried as its
+two's-complement value one bit wider than the column's type: the op cell holds
+its low `width` bits in the column's own integer type, and the patch's
+**counter signs** hold its sign bit. Every single write of an in-range value
+is therefore expressible, an unsigned decrement and a change across the whole
+type included (a `U8` set from `200` to `1` travels as low bits `57` with the
+sign set, i.e. `-199`, never `+57`). Counter signs are a byte string, bit `i`
+(least significant first) belonging to the `i`-th counter column of the
+version's authored table in schema order; they are empty when no op is
+negative, carry no trailing zero byte, and are always empty on a settled
+image. They travel as `VersionRecord.counter_signs` on the wire and as the
+history field `counter_signs` (after `authored_columns`); a non-canonical value is rejected at ingest. Core never wraps: when adding an op to the
+row's current value would take the column outside its type's range (below `0`
+or above the maximum for an unsigned type, outside `MIN..=MAX` for a signed
+one), Core rejects that write with a `MalformedCommit` reason naming the
+counter and the out-of-range sum, and the counter keeps its value. From `1` on
+a `U64` counter, two concurrent `-1`s settle the first to `0` and reject the
+second. Which of two such concurrent writes is rejected depends on the order
+Core sequences them; accepted ops still commute (`INV-HIST-15`). A redelivered
+commit unit is the same transaction
+and is not applied again, so a retried increment counts once (`INV-EDGE-16`).
 
-_Further invariants._ `INV-HIST-7` — a merge version's transaction time is
-strictly after the maximum made-at time of the observed heads. `INV-HIST-15` —
-merge-strategy output is deterministic and grouping-insensitive over the
-head/parent set, with no wall-clock or node-local state in merged values.
-
-**Merging merges.** Distinct upstream nodes may each mint merge versions for the
-same row. If those nodes observed different frontiers, one merge may include a
-concurrent head the other has not yet seen. Such divergent merges reconcile by
-the same rule that defines every merge: a merge value is the deterministic fold
-over the **de-duplicated raw head set**, never a fold of already-merged values. A
-merge version is therefore a _cache_ over its sorted raw parent set, not an
-opaque value that is itself re-merged.
-
-To combine two merge versions, an authority folds over the union of their raw
-parent-closures, de-duplicated by version identity. LWW takes the argmax raw head
-with the parent-union fallback; `Counter` sums each raw version's delta keyed by
-its `TxId`, so a shared ancestor is counted exactly once and never
-double-counted. Consequently, duplicate merges over the _same_ frontier carry
-identical cells, with the deterministic `(time, node)` tie-break picking one.
-Merges over divergent frontiers converge to exactly what a single merger over
-the union would have produced (`INV-HIST-16`). Reconciliation re-folds the
-underlying versions, deltas, and ops, which are replicated history and so always
-on hand.
-
-#### Durable content-frontier helper
-
-An implementation may retain a node-local derived content-frontier helper to
-avoid rewalking history while accepting a new content version or preparing a
-merge. The helper belongs to the **content** layer only: deletion is an
-independent register (§4.4) and has no merge-head row. Its complete physical
-key is `(PhysicalTableId, canonical BranchKey, RowUuid)`; omitting a branch or
-using a logical table name would alias independent histories.
-
-The helper's `heads` field is one normal Groove `Array<Tuple<U64, Uuid>>`: one
-canonical `(TxTime, NodeUuid)` tuple per `TxId`, in strictly increasing
-canonical `TxId` order with no duplicate. It is neither a `Bytes` wrapper nor
-a serde/postcard collection. For example, concurrent `A=(10, node-a)` and
-`B=(10, node-b)` with `node-a < node-b` are stored as `[A, B]`; replaying `A`
-does not append a second `A`. A malformed, out-of-order, duplicate, or
-wrongly typed value fails closed before it affects a merge.
-
-This helper is derived local state, never a wire identity or source of history
-truth. Immutable content history remains authoritative and can rebuild the
-helper. The helper is nevertheless durable whenever retained, so an existing
-storage root must first pass the top-level epoch-manifest admission gate before
-any row is decoded: an unsupported former-alpha opaque payload must not be
-guessed as the new untagged array (`INV-HIST-19`; Groove storage §2).
+_Further invariants._ `INV-HIST-15` — the post-image is a deterministic
+function of the accepted writes in seq order and their bases, with no clock or
+node-local state in merged values; concurrent writes to different cells and
+merge-strategy ops commute, and on a cell two concurrent writes both change
+the first one Core sequences keeps it.
 
 ### Durable codec profile
 
@@ -265,6 +237,265 @@ version rows in a different order is idempotent and conflict-free. `INV-HIST-14`
 rejected transactions never appear as accepted history and never participate in
 currentness or domination.
 
+### 4.6 Ancestor merge (linear-history per-cell merge)
+
+On the linear-history line Core merges each accepted write into the row's
+post-image one cell at a time, against the image the writer made the write
+over: its **ancestor**. No timestamp takes part. A plain
+(`MergeStrategy::Lww`) user cell and `_deletion` are decided by comparing the
+ancestor with the row's current image; merge-strategy columns (counters,
+sets) keep applying their ops in seq order (§4.3).
+
+**Base of a write.** Every row version a writer uploads carries a **base**:
+
+- `seq` — the seq (`GlobalTime`) of the settled image of the row the writer's
+  node held when it made the write (its global-current image), or none;
+- `pending` — the `TxId` of the writer's own newest write to the same row
+  that has no fate on its node yet, whose patch the writer's image included,
+  or none. It is the node's own write even when the newest write in its
+  pending overlay is a foreign one the node relays: Core's chain is the
+  writer's own writes, and a foreign write's patch is never part of it.
+
+So a write made over a settled image is `{seq: S}`; a write made over the
+node's own pending write `P`, itself resting on the settled image at `S`, is
+`{seq: S, pending: P}`; and a write over a pending chain with no settled image
+under it (the row was inserted, or blindly updated, by that chain) is
+`{pending: P}`. The settled seq travels with the pending predecessor because
+the node rebases its pending overlay onto every newer settled image it
+receives: the image the writer saw is the image at `S` plus its own pending
+patches, not the image the chain started from.
+
+A write with an empty base has no ancestor: an **insert**, and a **blind
+update** of a row the writer's node holds no image of (it never loaded the
+row, or evicted it). Every cell such a write authors applies over whatever
+the row holds — arrival wins — exactly as if nothing were concurrent.
+
+The originator stores each pending write's base in its history record and
+uploads it unchanged, so a resent write carries the same base. When a pending
+predecessor receives its fate nothing is rewritten on the client: Core
+resolves the chain.
+
+**Ancestor at Core.** For an incoming write `W` from node `N` with base
+`{seq: S, pending: P}` Core builds the ancestor cell by cell:
+
+1. **Root.** With `S`, the root is the post-image in history at `(row, S)`,
+   one exact point read. Without `S` the root is empty.
+2. **Chain.** With `P`, the chain is every accepted write of node `N` to the
+   row with seq `> S` (any seq without `S`) and transaction time
+   `<= P.time`, in seq order. These are exactly the writer's own writes its
+   image contained on top of the root: a write of `N` accepted after `S` had
+   not settled into the node's image at `S`, so it was still in the node's
+   pending overlay, and `N`'s writes after `P` were made after `W`. Without
+   `P` the chain is empty.
+3. **Patches.** Each chain write contributes its **own patch**: its history
+   post-image restricted to its `authored_columns`, with its `lost_cells`
+   (below) overriding (`INV-HIST-21`). A chained write that lost a cell
+   therefore counts with the value its writer saw, not with Core's winner. A
+   chained write Core rejected is not in history and contributes nothing;
+   the chain continues past it to the writes before it.
+
+The ancestor is the root with the patches applied in seq order; a cell
+neither the root nor any patch holds is **unknown**. Core reads only the
+row's accepted history after `S` (the whole history of that one row when the
+base has no seq, which happens only for chains rooted at the row's insert or
+at a blind write) — never a scan beyond the row.
+
+Core resolves the base exactly or refuses the write with a `MalformedCommit`
+reason saying the base is not supported yet (`INV-HIST-20`): when `S` is `0`
+or names no accepted history record of the row (for example a seq above the
+row's current seq, or a seq of another row's write), when `P`'s node is not
+`N`, and when `P` is not older than `W`. A predecessor Core holds no fate for
+yet (it has not arrived, or Core holds it as a relayed or recovered Pending
+unit) is an ordering race, not a refusal: Core parks `W`, with no fate, and
+ingests it again once `P`'s fate is stored, whether `P` is accepted or
+rejected (a refusal before admission included). Parking is bounded:
+
+- `W` parks only after its cheap admission checks pass (the session is
+  `W`'s author and not anonymous, the clock is within tolerance, and the
+  provenance is well formed); a failing `W` gets its refusal at once.
+- At most 256 writes of one writer node, and 1024 of one authenticated
+  session identity, wait at once. A write over either cap is not refused:
+  Core stores nothing for it and answers with a **retry-later** fate update
+  (SPEC 8), and the writer, which still holds it pending, uploads it again
+  after a backoff.
+- A write waits at most 5 minutes from its arrival. On the first authority
+  ingest after that, Core drops its parked copy, stores nothing, and sends
+  the retry-later answer to the link that uploaded it, if that link is still
+  connected (otherwise the writer resends it on reconnect). Over the caps or
+  expired, an honest writer's write is therefore never lost: it stays
+  pending, keeps its local visibility, and is decided once its predecessor
+  reaches Core.
+- Parked writes are indexed by `P`: a fate releases only the writes that
+  wait on it, and a released write's own fate releases its successors in
+  turn.
+- A write that gets a fate while a parked copy of it waits (for example a
+  refused resend) drops that copy, and is never decided twice; a dropped
+  copy never produces a fate later.
+- Core sends the fate of a write that waited (and any retry-later answer for
+  it) to the link that uploaded it, not to the link whose message released
+  it.
+
+The parking is in memory: a Core restart forgets it, and a writer resends
+its pending writes on reconnect. Core never guesses an ancestor. Uploads carry no lost cells; a nonempty `lost_cells` on an upload is
+malformed.
+
+**Merge rule (Core only).** For each plain cell `c` the write authored, and
+for `_deletion` when authored:
+
+- if `ancestor[c]` is unknown, or `ancestor[c] == current[c]`, nothing changed
+  `c` since the writer's image: the post-image takes the write's value;
+- otherwise `c` changed concurrently: the **accepted value stays**, and the
+  write's value is recorded in the write's history record as a **lost cell**.
+
+A cell the write did not author keeps the current value. The comparison is by
+value, so a concurrent change that was reverted to the ancestor's value is no
+conflict. Merge-strategy columns apply their op whatever the bases.
+
+The post-image keeps the incoming write's identity and seq (it is the row as of
+this write, also when every cell it authored was lost, so the lost cells are
+recorded at their seq), takes `updated_by` and `updated_at` from that write as
+ordinary provenance, and keeps `created_by` and `created_at` from the previous
+image. Two concurrent writes over the same image that change one cell
+therefore resolve to the one Core sequences first; a write never overrides a
+value its writer had not seen (`INV-HIST-8`, `INV-HIST-15`).
+
+**Fast path.** When `W` has no `P` and `S` equals the row's current seq, the
+ancestor is the current image and every authored cell applies without reading
+history. When every accepted write of the row after `S` is a chain write and
+no chain write lost a cell, the current image is the ancestor on every cell
+the chain or the root holds, so again every authored cell applies (a chain
+write that lost a cell contributes its own value, which differs from the
+current one, so it takes the full rule); Core detects this from the same history
+range read and skips the root read and patch application. Both give exactly
+the result of the full rule.
+
+**Lost cells.** A history record carries `lost_cells`: the write's own values
+for the cells it authored but lost, as a sparse record (§"Durable layout"
+below). Key presence names a lost cell; a lost null is a present key holding
+null. It is empty in the common case. The write's own patch is the post-image
+restricted to `authored_columns`, with `lost_cells` overriding; history
+viewers and the ancestor rebuild both read it that way. Lost cells are part
+of the replicated history record, so peers that receive the record see which
+edits lost.
+
+**Across schema versions.** Cells are matched by physical column id, so a
+lens rename keeps its cell. A cell takes part in the comparison only when the
+root or patch that supplies the ancestor's value and the current image both
+carry its physical column with the same column type as the incoming write's
+layout; otherwise the cell's ancestor is unknown and the incoming value
+applies, as for a blind write. In particular a cell the current image's
+layout does not carry, and a cell a writer of another layout never saw, apply
+as written. The post-image takes the incoming write's layout: its cells the
+write did not author take the current image's value where the current layout
+carries the same physical column with the same type, and the writer's
+snapshot value otherwise. A cell only the current image's layout carries is
+not part of a post-image in the incoming layout (readers under the other
+schema version see it through the lens path). Merge-column ops cannot apply
+across layouts this way, so Core rejects a
+write that authors a merge column under a schema version other than the one
+the row's current image is stored under, with a `MalformedCommit` reason
+saying this is not supported yet ([#3899](https://github.com/garden-co/jazz/issues/3899)).
+A cross-layout write that leaves a merge column alone still carries the
+writer's snapshot of it as an absolute value, which may predate ops Core has
+accepted since; in the post-image each merge column it did not author takes
+the row's settled value from the current image instead
+(`INV-HIST-10`). That value carries over when the current image's schema has
+a column of the same name, type and merge strategy that the lens path between
+the two versions leaves alone; a column the current image's schema lacks, and
+that no lens op renames or copies into, takes the lens default, since no op
+can have touched it under that layout. For any other mapping (a renamed or
+copied merge column, or one whose type or strategy changed) Core rejects the
+write with the same not-supported-yet `MalformedCommit` reason rather than
+guess. Core also refuses, with the same reason, a cross-layout write whose
+schema would not carry a merge column of the current image: one the write's
+table lacks, or has under another type or strategy, or that the lens path
+renames, copies, adds or drops. Its image would replace the row without that
+column, and the next write under the image's schema would rebuild it from the
+lens default, silently losing every op Core had accepted on it (v2 adds a
+counter `likes`; a v1 write over a v2 image with `likes = 5` would leave a
+later v2 write reading `likes = 0`). The refusal holds whatever the stored
+value, including one equal to the lens default, and also when the write's own
+table has no merge column at all. It applies on every path that mints a seq:
+a foreign commit unit and Core's own mergeable or exclusive commit.
+
+**Only Core derives post-images.** A `FateUpdate` carries the fate and seq,
+not Core's post-image; Core's post-image reaches other nodes in view updates
+for the rows they subscribe to. An originator that receives the accepted fate
+of its own write may settle it locally by applying its patch over the image it
+holds (authored plain cells overwrite, merge ops apply; across layouts the
+write replaces the row, keeping carried merge cells), but that image is only a
+prediction of Core's, and it replaces it with the authority's post-image at
+the same seq when that arrives; only a newer seq keeps a stored row. The
+originator never resolves bases or compares ancestors, and makes no prediction
+(keeping its stored image, and failing nothing) when
+
+- it already holds Core's image at a later seq: Core applies writes in seq
+  order, so that image already counts the write, and merging it again would
+  apply its merge ops twice and move the row back to an older seq;
+- the prediction cannot be made over its stale image: a merge column's
+  settled value cannot be carried across schema versions (above), or a
+  counter op leaves its type's range over the stale value. Core accepted the
+  write over its own image, so this is the local image's staleness, not a
+  reason to fail the fate (which would wedge fate ingest).
+
+In both cases the write shows locally once Core's post-image for the row
+arrives. Only Core, which mints seqs in order and refuses such writes before
+minting one, treats either case as an error. The pending local overlay is not
+merged and always wins locally.
+
+A base seq names Core's image at that seq. When the originator's image at
+`S` is its own prediction of Core's post-image (its write's fate arrived
+before Core's image did), Core resolves `S` to its own post-image there, so a
+value Core accepted before `S` that the originator had not yet received counts
+as seen and resolves as arrival-wins. Naming the seq of the newest image Core
+itself delivered would make this exact; it is listed under Open Questions.
+
+**Durable layout.** History, global-current, ahead-current and ahead-shadow
+records carry no stamp fields. A history record carries, after
+`authored_columns` and `counter_signs` (§4.3):
+
+- `seq` (`U64`) — the write's seq; `0` on a pending record (below);
+- `base_seq` (nullable `U64`) — the base's settled seq;
+- `base_pending` (nullable `(U64 tx time, UUID node)`) — the base's pending
+  predecessor;
+- `lost_cells` (`Bytes`) — empty, or the sparse cells described next.
+
+Sparse cells are one byte string: a varint count `n >= 1`, then `n` strictly
+increasing varint keys, then one groove record whose `n` fields are the keyed
+cells as nullable values of their column types, in key order. In storage the
+keys are node-local physical column ids (`u64::MAX` is `_deletion`, as in
+`authored_columns`) and the values are encoded for the record's own schema
+version, enum cells with that version's authored tags (as on the wire), not
+the lineage's physical tags the record's other cells use. A lost enum cell is
+re-tagged to the physical registry before the ancestor rebuild compares it
+with a stored image. The record of a write that lost nothing has empty `lost_cells`, so
+the merge costs four small fields per history record in the common case.
+
+History is keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`: "the row
+at seq `S`" is one prefix read, and "the row's writes after `S`" is one range
+read. Pending writes (a node's own uploads, and foreign writes a relay holds
+before their fate) are held in the same table with the same record layout and
+`seq = 0`, so they sort before every accepted write of the row and never fall
+in a range after a base seq. An accepted fate moves each of the transaction's
+records from its `seq = 0` key to its key at the transaction's seq in the batch
+that stores the fate; a rejected fate deletes them (SPEC 2 §2.7.1).
+
+**Wire layout.** The wire `VersionRecord` carries, after `authored_columns`,
+the version's `base` (`{ seq: Option<GlobalTime>, pending: Option<TxId> }`)
+and `lost_cells` (a postcard byte sequence), then `counter_signs` (§4.3). On
+the wire the sparse-cell keys are slots of the authored table instead of
+physical ids: slot `0` is `_deletion` and slot `i + 1` the table's `i`-th user
+column in schema order; values are the cells' wire encodings. An upload
+carries its write's base and empty `lost_cells`. A history record a peer
+receives carries the base and lost cells Core stored; its seq is the
+transaction's accepted `GlobalTime`, which travels with the bundle and is not
+repeated per record. The byte receipts are the protocol tests of the
+`VersionRecord` postcard layout and the sparse-cell codec tests.
+
+**Per-row cost.** A history record of a write that lost nothing costs its
+`seq` (8 bytes), two null markers and an empty byte string over the former
+stamp-free layout, and nothing on current rows.
+
 ### 4.8 Subsumed merge-strategy backlog
 
 The former TODO notes on complex merge strategies are treated as future surface
@@ -276,3 +507,7 @@ without wedging authority progress.
 ## Open Questions
 
 - 🔶 [#1782](https://github.com/garden-co/jazz/issues/1782) — External merge strategies and schema-version movement.
+- A base seq that names the originator's own prediction of Core's post-image
+  (§4.6) resolves to Core's image at that seq. An exact ancestor needs the
+  originator to name the newest seq whose image Core delivered, with its own
+  writes accepted after it as the pending chain (no tracking issue filed yet).

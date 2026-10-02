@@ -94,7 +94,7 @@ use jazz::protocol::{
     ReadViewSpec as CoreReadViewSpec,
 };
 use jazz::schema::JazzSchema;
-use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
+use jazz::storage_codec_profile::node_storage_codec_profile;
 use jazz::tools::OpenTransactionId as CoreOpenTransactionId;
 use jazz::tools::identity;
 use jazz::tools::{AppId, TransactionId};
@@ -3819,7 +3819,7 @@ fn decode_public_schema(schema: &[u8]) -> napi::Result<JazzSchema> {
 ///
 /// This is deliberately the Jazz profile rather than the adapter's generic
 /// Groove-only convenience open: the runtime can persist every Jazz codec
-/// family in `epoch_1_storage_codec_profile`, so its root must declare all of
+/// family in `node_storage_codec_profile`, so its root must declare all of
 /// them before any bytes are admitted.
 fn open_persistent_core_storage(
     data_path: String,
@@ -3827,7 +3827,7 @@ fn open_persistent_core_storage(
 ) -> napi::Result<CoreRocksDbStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    let codec_profile = epoch_1_storage_codec_profile().map_err(napi_error)?;
+    let codec_profile = node_storage_codec_profile().map_err(napi_error)?;
     CoreRocksDbStorage::open_with_durability_and_codec_profile(
         data_path,
         &refs,

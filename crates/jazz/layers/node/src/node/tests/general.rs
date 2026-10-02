@@ -1327,6 +1327,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             groove::schema::ColumnType::U16 => Value::U16(u16::from(seed) * 17),
             groove::schema::ColumnType::U32 => Value::U32(u32::from(seed) * 65_537),
             groove::schema::ColumnType::U64 => Value::U64(u64::MAX - u64::from(seed)),
+            groove::schema::ColumnType::U48 => Value::U48(u64::from(seed) << 40),
             groove::schema::ColumnType::I32 => Value::I32(i32::from(seed) - 128),
             groove::schema::ColumnType::I64 => Value::I64(i64::from(seed) - 128),
             groove::schema::ColumnType::F64 => Value::F64(f64::from(seed) + 0.5),
@@ -1378,10 +1379,6 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             tx_node_alias: NodeAlias(u64::from(seed) + 10),
             schema_version_alias: SchemaVersionAlias(u64::from(seed) + 20),
             tx_time: TxTime::from(u64::from(seed) + 30),
-            parents: vec![TxId::new(
-                TxTime::from(u64::from(seed) + 1),
-                node(seed.wrapping_add(1)),
-            )],
             created_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(2); 16])),
             created_at: TxTime::from(u64::from(seed) + 40),
             updated_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(3); 16])),
@@ -1420,6 +1417,10 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                         .collect()
                 }),
             deletion,
+            seq: crate::time::GlobalTime(0),
+            base: crate::protocol::RowBase::default(),
+            lost_cells: Vec::new(),
+            counter_signs: Vec::new(),
         }
     }
 
@@ -1457,7 +1458,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
         );
 
         let current_values = global_current_values(table, &content, Some(GlobalTime(7))).unwrap();
-        let global_current_table = table.global_current_storage_tables().remove(0);
+        let global_current_table = table.global_current_storage_table();
         global_current_table
             .record_schema()
             .create(&current_values)
@@ -1470,23 +1471,26 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             None,
         )
         .unwrap();
-        assert_eq!(deletion.record.descriptor().fields(), table.register_storage_table().record_schema().fields());
+        assert_eq!(
+            deletion.record.descriptor().fields(),
+            table.history_storage_table().record_schema().fields()
+        );
+        assert_eq!(deletion.deletion(), Some(DeletionEvent::Deleted));
         let deletion_values = deletion.record.to_values().unwrap();
         assert_eq!(
             table
-                .register_storage_table()
+                .history_storage_table()
                 .record_schema()
                 .create(&deletion_values)
                 .unwrap(),
             deletion.record.raw()
         );
 
-        let register_current_values =
-            register_global_current_values(&deletion, Some(GlobalTime(8))).unwrap();
-        let register_global_current_table = table.global_current_storage_tables().remove(1);
-        register_global_current_table
+        let deleted_current_values =
+            global_current_values(table, &deletion, Some(GlobalTime(8))).unwrap();
+        global_current_table
             .record_schema()
-            .create(&register_current_values)
+            .create(&deleted_current_values)
             .unwrap();
     }
 }
@@ -1620,7 +1624,6 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
                     tx_node_alias: version.tx_node_alias(),
                     schema_version_alias: version.schema_version_alias(),
                     tx_time: version.tx_time(),
-                    parents: version.parents(),
                     created_by: version.created_by(),
                     created_at: version.created_at(),
                     updated_by: version.updated_by(),
@@ -1628,12 +1631,18 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
                     cells: version.cells(&table).unwrap(),
                     authored_columns: Some(BTreeSet::from([PhysicalColumnId(invalid_id)])),
                     deletion: None,
+                    seq: crate::time::GlobalTime(0),
+                    base: crate::protocol::RowBase::default(),
+                    lost_cells: Vec::new(),
+                    counter_signs: Vec::new(),
                 },
                 None,
                 None,
             )
             .unwrap();
-            let (history_table, raw) = node.version_storage_write_binding(&corrupted).unwrap();
+            let (history_table, raw) = node
+                .version_storage_write_binding(&corrupted, version.updated_by())
+                .unwrap();
             let mut corruption = node.database.open_batch();
             corruption.update_raw(
                 history_table.to_string(),
@@ -1667,64 +1676,163 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
     }
 }
 
-// This is intentionally an internal codec test: malformed derived storage is
-// not constructible through the public API. It guards the canonical form used
-// for physical merge-head rows before they are consumed by merge semantics.
 #[test]
-fn stored_merge_heads_require_a_canonical_transaction_id_array() {
-    let first = TxId::new(TxTime::from(2), node(1));
-    let second = TxId::new(TxTime::from(2), node(2));
-    let heads = BTreeSet::from([first, second]);
-    assert_eq!(merge_heads_from_value(merge_heads_value(&heads)).unwrap(), heads);
-    assert_eq!(
-        merge_heads_value(&heads),
-        Value::Array(vec![tx_id_value(first), tx_id_value(second)]),
-        "same-time transaction IDs use their canonical node UUID tie-breaker"
-    );
-
-    assert!(matches!(
-        merge_heads_from_value(Value::Array(vec![
-            tx_id_value(first),
-            tx_id_value(first),
-        ])),
-        Err(Error::InvalidStoredValue(
-            "merge heads must be strictly increasing"
-        ))
-    ));
-    assert!(matches!(
-        merge_heads_from_value(Value::Array(vec![
-            tx_id_value(second),
-            tx_id_value(first),
-        ])),
-        Err(Error::InvalidStoredValue(
-            "merge heads must be strictly increasing"
-        ))
-    ));
-    assert!(matches!(
-        merge_heads_from_value(Value::Bytes(Vec::new())),
-        Err(Error::InvalidStoredValue(
-            "merge heads must be an array of transaction ids"
-        ))
-    ));
-}
-
-#[test]
-fn authoring_stamps_explicit_child_after_parent_time() {
-    let (_temp_dir, mut core) = open_node();
-    let parent = TxId::new(TxTime::from(10_000), node(0x77));
-    let child = core
+fn every_history_write_is_listed_in_its_transaction_by_the_same_batch() {
+    // Internal receipt for SPEC 2 §2.8: history has no by-transaction index,
+    // so a row missing from `touched_rows` would be invisible to fate replay
+    // and forwarding. Both the pending write and the authority's post-image
+    // at acceptance must leave no row mark behind their batch.
+    let (_temp_dir, mut node) = open_node();
+    let table_id = node
+        .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
+        .unwrap();
+    let listed = |node: &mut NodeState, tx_id| {
+        let alias = node.query_transaction(tx_id).unwrap().unwrap().node_alias;
+        crate::local_executor::block_on(node.load_tx_touched_rows(None, tx_id.time, alias))
+            .unwrap()
+            .iter()
+            .map(|(table, branch, row)| (table, branch.to_vec(), row))
+            .collect::<Vec<_>>()
+    };
+    let tx_id = node
         .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0x71), 1)
-                .parents(vec![parent])
-                .cells(title_cells("child")),
+            MergeableCommit::new("todos", row(3), 10).cells(title_cells("listed")),
         )
         .unwrap();
+    assert!(node.tx_touched_dirty.is_empty());
+    let expected = vec![(table_id, BranchKey::default().canonical_bytes(), row(3))];
+    assert_eq!(listed(&mut node, tx_id), expected);
 
-    assert!(
-        child.time > parent.time,
-        "author must stamp explicit child after parent: child={child:?}, parent={parent:?}"
+    node.finalize_local_mergeable_commit_settled(tx_id).unwrap();
+    assert!(node.tx_touched_dirty.is_empty());
+    assert_eq!(listed(&mut node, tx_id), expected);
+    assert_eq!(node.query_versions_for_tx(tx_id).unwrap().len(), 1);
+}
+
+#[test]
+fn a_touched_row_list_is_node_local_and_survives_batches_applied_before_its_transaction() {
+    // Internal receipt for SPEC 2 §2.8. Ingest can apply another node batch
+    // (a schema or node alias) while the batch holding a transaction's
+    // history rows is still being built, before that transaction's record
+    // exists. That batch lists the marked rows; they must not be dropped
+    // for want of a transaction record, and the replicated transaction
+    // record must not carry the list at all.
+    let (_temp_dir, mut node) = open_node();
+    let tx_id = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(5), 10).cells(title_cells("listed")),
+        )
+        .unwrap();
+    let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+    let alias = version.tx_node_alias();
+    let table_id = node
+        .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
+        .unwrap();
+    let transaction = node
+        .database
+        .primary_key_get_raw("jazz_transactions", &[Value::U64(tx_id.time.0), Value::U64(alias.0)])
+        .unwrap()
+        .unwrap()
+        .owned_record();
+    assert_eq!(
+        transaction.borrowed().descriptor().fields().len(),
+        TransactionRowRecord::FIELD_DURABILITY_IDX + 1,
+        "the transaction record ends at durability; it carries no node-local list"
+    );
+
+    // Forget the list and the transaction record, as if neither was written yet.
+    let mut forget = node.database.open_batch();
+    forget.delete(
+        TX_TOUCHED_ROWS_TABLE,
+        PrimaryKeyValue::Composite(vec![
+            PrimaryKeyValue::U64(tx_id.time.0),
+            PrimaryKeyValue::U64(alias.0),
+        ]),
+    );
+    forget.delete(
+        "jazz_transactions",
+        PrimaryKeyValue::Composite(vec![
+            PrimaryKeyValue::U64(tx_id.time.0),
+            PrimaryKeyValue::U64(alias.0),
+        ]),
+    );
+    let applied = crate::local_executor::block_on(node.database.apply_batch(forget)).unwrap();
+    let persisted = crate::local_executor::block_on(applied.persist());
+    node.database.finish_persistence(persisted).unwrap();
+
+    // The history write is marked, then an unrelated node batch applies first.
+    node.mark_tx_touched_row(table_id, &version);
+    let unrelated = node.database.open_batch();
+    let applied = crate::local_executor::block_on(node.apply_node_batch(unrelated)).unwrap();
+    let persisted = crate::local_executor::block_on(applied.persist());
+    node.database.finish_persistence(persisted).unwrap();
+
+    assert!(node.tx_touched_dirty.is_empty());
+    assert_eq!(
+        crate::local_executor::block_on(node.load_tx_touched_rows(None, tx_id.time, alias))
+            .unwrap()
+            .iter()
+            .map(|(table, branch, row)| (table, branch.to_vec(), row))
+            .collect::<Vec<_>>(),
+        vec![(table_id, version.branch_key().canonical_bytes(), row(5))]
     );
 }
+
+#[test]
+fn history_images_store_updated_by_only_when_it_differs_from_the_transaction_author() {
+    // Internal storage receipt (SPEC 2 §2.7.1): the public API always sees
+    // `updated_by`, so read the raw history bytes to pin that an image
+    // written by its own transaction's author omits it.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        let tx_id = node
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row(1), 10)
+                    .made_by(alice)
+                    .cells(title_cells("own author")),
+            )
+            .unwrap();
+        let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+        assert_eq!(version.updated_by(), alice);
+        let table_id = node
+            .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
+            .unwrap();
+        let stored = node
+            .database
+            .primary_key_scan_raw(&physical_history_table_name(table_id), &[])
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0]
+                .record()
+                .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)
+                .unwrap(),
+            Value::Nullable(None),
+            "the transaction's own author is not stored in the image"
+        );
+        // An image whose merge kept another writer's provenance (here: the
+        // same image written under bob's transaction) stores it.
+        let (_, explicit) = node.version_storage_write_binding(&version, bob).unwrap();
+        assert_eq!(
+            explicit
+                .record()
+                .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)
+                .unwrap(),
+            history_updated_by_value(alice).unwrap()
+        );
+    }
+    // A cold reopen fills the author in from the transaction record.
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    let versions = reopened.query_table_versions("todos").unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].updated_by(), alice);
+    assert!(!versions[0].updated_by_is_implicit().unwrap());
+}
+
 #[test]
 fn deletion_register_hides_and_restore_reveals_current_content() {
     let (_temp_dir, mut node) = open_node();
@@ -1880,684 +1988,6 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
 }
 
 #[test]
-fn late_lower_hlc_child_is_rejected_at_admission() {
-    let (_dir, mut core) = open_node_with_uuid(node(9));
-    let row = row(7);
-    let parent = TxId::new(TxTime::from(200), node(1));
-    let child = TxId::new(TxTime::from(50), node(1));
-
-    let [parent_fate] = core
-        .ingest_commit_unit_settled(
-            Transaction {
-                tx_id: parent,
-                kind: TxKind::Mergeable,
-                n_total_writes: 1,
-                made_by: AuthorSubject::system_at(parent.node),
-                permission_subject: None,
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: None,
-                contribution_merge: None,
-            },
-            vec![version_record(row, Vec::new(), title_cells("parent"), None)],
-            u64::MAX - SKEW_TOLERANCE_MS,
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-    assert!(matches!(
-        parent_fate,
-        SyncMessage::FateUpdate {
-            fate: Fate::Accepted,
-            ..
-        }
-    ));
-
-    let [child_fate] = core
-        .ingest_commit_unit_settled(
-            Transaction {
-                tx_id: child,
-                kind: TxKind::Mergeable,
-                n_total_writes: 1,
-                made_by: AuthorSubject::system_at(child.node),
-                permission_subject: None,
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: None,
-                contribution_merge: None,
-            },
-            vec![version_record(
-                row,
-                vec![parent],
-                title_cells("child"),
-                None,
-            )],
-            u64::MAX - SKEW_TOLERANCE_MS,
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-    assert_eq!(
-        child_fate,
-        SyncMessage::FateUpdate {
-            tx_id: child,
-            fate: Fate::Rejected(RejectionReason::CausalityViolation),
-            global_time: None,
-            durability: None,
-        }
-    );
-    assert!(
-        core.row_history("todos", row)
-            .unwrap()
-            .iter()
-            .all(|entry| entry.tx_id() != child)
-    );
-    assert_eq!(
-        core.transaction_record(child).unwrap().fate,
-        Fate::Rejected(RejectionReason::CausalityViolation)
-    );
-}
-#[test]
-fn unlawful_child_with_known_parent_rejects_before_global_state() {
-    let (_dir, mut core) = open_node_with_uuid(node(9));
-    let row = row(7);
-    let parent = TxId::new(TxTime::from(400), node(1));
-    let child = TxId::new(TxTime::from(100), node(1));
-
-    let parent_state = core
-        .ingest_commit_unit_settled(
-            Transaction {
-                tx_id: parent,
-                kind: TxKind::Mergeable,
-                n_total_writes: 1,
-                made_by: AuthorSubject::system_at(parent.node),
-                permission_subject: None,
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: None,
-                contribution_merge: None,
-            },
-            vec![version_record(row, Vec::new(), title_cells("parent"), None)],
-            u64::MAX - SKEW_TOLERANCE_MS,
-        )
-        .unwrap();
-    assert!(matches!(
-        parent_state.as_slice(),
-        [SyncMessage::FateUpdate {
-            fate: Fate::Accepted,
-            global_time: Some(_),
-            ..
-        }]
-    ));
-
-    let child_state = core
-        .ingest_commit_unit_settled(
-            Transaction {
-                tx_id: child,
-                kind: TxKind::Mergeable,
-                n_total_writes: 1,
-                made_by: AuthorSubject::system_at(child.node),
-                permission_subject: None,
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: None,
-                contribution_merge: None,
-            },
-            vec![version_record(
-                row,
-                vec![parent],
-                title_cells("child"),
-                None,
-            )],
-            u64::MAX - SKEW_TOLERANCE_MS,
-        )
-        .unwrap();
-    assert_eq!(
-        child_state,
-        vec![SyncMessage::FateUpdate {
-            tx_id: child,
-            fate: Fate::Rejected(RejectionReason::CausalityViolation),
-            global_time: None,
-            durability: None,
-        }]
-    );
-    assert_eq!(
-        global_winner_tx(&mut core, "todos", row, VersionLayer::Content),
-        Some(parent)
-    );
-    assert_eq!(
-        core.current_rows("todos", DurabilityTier::Global).unwrap(),
-        vec![(row, title_cells("parent"))]
-    );
-}
-
-#[test]
-fn local_history_rejects_noncanonical_parent_order_before_persistence() {
-    let (_dir, mut core) = open_node_with_uuid(node(0x71));
-    let later = TxId::new(TxTime::from(20), node(0x01));
-    let earlier = TxId::new(TxTime::from(10), node(0x01));
-
-    assert!(matches!(
-        core.commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0x71), 30)
-                .parents(vec![later, earlier])
-                .cells(title_cells("must not reorder durable parents")),
-        ),
-        Err(Error::InvalidMergeableCommit("row version parents must be sorted and unique"))
-    ));
-    assert!(core.row_history("todos", row(0x71)).unwrap().is_empty());
-}
-
-#[test]
-fn remote_history_rejects_noncanonical_parent_order_before_parking() {
-    let (_dir, mut core) = open_node_with_uuid(node(0x76));
-    let tx_id = TxId::new(TxTime::from(30), node(0x77));
-    let later = TxId::new(TxTime::from(20), node(0x01));
-    let earlier = TxId::new(TxTime::from(10), node(0x01));
-
-    // `VersionRecord::from_cells` is an authoring helper and deliberately
-    // canonicalizes its parent set. A remote peer can instead construct the
-    // physical wire record directly, so make the malformed spelling below
-    // that guarded helper and prove authority ingress rejects it before it
-    // can become a parked missing-parent edge.
-    let canonical = version_record(
-        row(0x76),
-        vec![later, earlier],
-        title_cells("must reject before parking"),
-        None,
-    );
-    let mut values = (0..canonical.record().descriptor().fields().len())
-        .map(|index| canonical.record().get_idx(index).unwrap())
-        .collect::<Vec<_>>();
-    values[1] = Value::Array(
-        [later, earlier]
-            .into_iter()
-            .map(|parent| Value::Tuple(vec![Value::U64(parent.time.0), Value::Uuid(parent.node.0)]))
-            .collect(),
-    );
-    let raw = canonical.record().descriptor().create(&values).unwrap();
-    let malformed = VersionRecord::new(
-        canonical.table(),
-        canonical.schema_version(),
-        OwnedRecord::new(raw, *canonical.record().descriptor()),
-    );
-    assert!(canonical.validate_receipt().is_ok());
-    assert!(malformed.validate_receipt().is_err());
-
-    core.ingest_commit_unit_settled(
-        Transaction {
-            tx_id,
-            kind: TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by: AuthorSubject::system_at(tx_id.node),
-            permission_subject: None,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: None,
-            contribution_merge: None,
-        },
-        vec![malformed],
-        u64::MAX - SKEW_TOLERANCE_MS,
-    )
-    .unwrap();
-
-    let fate = core.transaction_record(tx_id).unwrap().fate;
-    assert!(matches!(
-        fate,
-        Fate::Rejected(RejectionReason::MalformedCommit(ref detail))
-            if detail == "malformed version receipt"
-    ));
-    assert_eq!(core.sync_metrics().parked_orphans, 0);
-}
-
-#[test]
-fn known_parent_must_match_exact_row_coordinate_and_layer() {
-    let (_dir, mut core) = open_node_with_uuid(node(0x72));
-    let content_parent = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0x72), 10).cells(title_cells("parent")),
-        )
-        .unwrap();
-
-    assert!(matches!(
-        core.commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0x73), 11)
-                .parents(vec![content_parent])
-                .cells(title_cells("wrong row")),
-        ),
-        Err(Error::InvalidMergeableCommit(
-            "version parent does not resolve to the same physical row, branch, and layer"
-        ))
-    ));
-
-    let deletion_parent = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0x72), 12)
-                .deletion(DeletionEvent::Deleted),
-        )
-        .unwrap();
-    assert!(matches!(
-        core.commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0x72), 13)
-                .parents(vec![deletion_parent])
-                .cells(title_cells("wrong layer")),
-        ),
-        Err(Error::InvalidMergeableCommit(
-            "version parent does not resolve to the same physical row, branch, and layer"
-        ))
-    ));
-
-    // A mergeable transaction may still atomically write unrelated rows; the
-    // transaction envelope supplies that atomicity, so no cross-row parent is
-    // available (or needed) to encode a general dependency.
-    let multi_row = core
-        .commit_mergeable_many_settled(vec![
-            MergeableCommit::new("todos", row(0x72), 14)
-                .parents(vec![content_parent])
-                .cells(title_cells("same-row successor")),
-            MergeableCommit::new("todos", row(0x74), 14)
-                .cells(title_cells("independent atomic member")),
-        ])
-        .unwrap();
-    let versions = core.query_versions_for_tx(multi_row).unwrap();
-    assert_eq!(versions.len(), 2);
-    assert!(versions.iter().any(|version| {
-        version.row_uuid() == row(0x72) && version.parents() == vec![content_parent]
-    }));
-    assert!(versions
-        .iter()
-        .any(|version| version.row_uuid() == row(0x74) && version.parents().is_empty()));
-}
-
-#[test]
-fn known_parent_must_match_exact_physical_table_for_local_and_replicated_versions() {
-    let schema = todos_notes_schema();
-    let (_dir, mut core) = open_node_with_schema(node(0x7a), schema.clone());
-    let row_uuid = row(0x7a);
-    let parent = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("parent")),
-        )
-        .unwrap();
-
-    assert!(matches!(
-        core.commit_mergeable_settled(
-            MergeableCommit::new("notes", row_uuid, 11)
-                .parents(vec![parent])
-                .cells(BTreeMap::from([("body".to_owned(), v("wrong table"))])),
-        ),
-        Err(Error::InvalidMergeableCommit(
-            "version parent does not resolve to the same physical row, branch, and layer"
-        ))
-    ));
-
-    let notes = schema
-        .tables
-        .iter()
-        .find(|table| table.name == "notes")
-        .expect("notes table");
-    let remote = VersionRecord::from_cells(
-        notes,
-        schema.version_id(),
-        row_uuid,
-        vec![parent],
-        AuthorSubject::system_at(node(1)),
-        12,
-        AuthorSubject::system_at(node(1)),
-        12,
-        &BTreeMap::from([("body".to_owned(), v("replicated wrong table"))]),
-        None,
-    )
-    .unwrap();
-    let error = core
-        .ingest_known_transaction(
-            Transaction {
-                tx_id: TxId::new(TxTime::from(12), node(0x7b)),
-                kind: TxKind::Mergeable,
-                n_total_writes: 1,
-                made_by: AuthorSubject::system_at(node(0x7b)),
-                permission_subject: None,
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: None,
-                contribution_merge: None,
-            },
-            vec![remote],
-            Fate::Accepted,
-            None,
-            DurabilityTier::Global,
-        )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::InvalidMergeableCommit(
-            "version parent does not resolve to the same physical row, branch, and layer"
-        )
-    ));
-}
-
-#[test]
-fn unknown_parent_constraint_rejects_child_when_wrong_parent_row_arrives() {
-    let schema = schema();
-    let dir = tempfile::tempdir().unwrap();
-    let mut core = open_node_at(&dir, schema.clone());
-    let child_row = row(0x73);
-    let parent = TxId::new(TxTime::from(40), node(0x74));
-    let child = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", child_row, 50)
-                .parents(vec![parent])
-                .cells(title_cells("constrained pending child")),
-        )
-        .unwrap();
-    assert_eq!(core.transaction_record(child).unwrap().fate, Fate::Pending);
-
-    core.database.close().unwrap();
-    drop(core);
-    let mut core = reopen_node_at(&dir, node(1), schema);
-
-    core.ingest_commit_unit_settled(
-        Transaction {
-            tx_id: parent,
-            kind: TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by: AuthorSubject::system_at(parent.node),
-            permission_subject: None,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: None,
-            contribution_merge: None,
-        },
-        vec![version_record(
-            row(0x75),
-            Vec::new(),
-            title_cells("wrong parent coordinate"),
-            None,
-        )],
-        u64::MAX - SKEW_TOLERANCE_MS,
-    )
-    .unwrap();
-
-    assert_eq!(
-        core.transaction_record(child).unwrap().fate,
-        Fate::Rejected(RejectionReason::CausalityViolation),
-        "arrival of a parent transaction with only another row must resolve the durable constraint"
-    );
-}
-
-#[test]
-fn unknown_parent_constraint_rejects_cross_table_parent_after_reopen() {
-    let schema = todos_notes_schema();
-    let dir = tempfile::tempdir().unwrap();
-    let mut core = open_node_at(&dir, schema.clone());
-    let row_uuid = row(0x7c);
-    let parent = TxId::new(TxTime::from(40), node(0x7d));
-    let child = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("notes", row_uuid, 50)
-                .parents(vec![parent])
-                .cells(BTreeMap::from([("body".to_owned(), v("constrained child"))])),
-        )
-        .unwrap();
-    core.database.close().unwrap();
-    drop(core);
-    let mut core = reopen_node_at(&dir, node(1), schema);
-    let todos = core
-        .catalogue
-        .catalogue_schemas
-        .get(&core.catalogue.local_schema_version_id)
-        .expect("current schema")
-        .schema
-        .tables
-        .iter()
-        .find(|table| table.name == "todos")
-        .expect("todos table")
-        .clone();
-    let parent_version = VersionRecord::from_cells(
-        &todos,
-        core.catalogue.local_schema_version_id,
-        row_uuid,
-        Vec::new(),
-        AuthorSubject::system_at(node(1)),
-        40,
-        AuthorSubject::system_at(node(1)),
-        40,
-        &title_cells("wrong physical table"),
-        None,
-    )
-    .unwrap();
-
-    core.ingest_commit_unit_settled(
-        Transaction {
-            tx_id: parent,
-            kind: TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by: AuthorSubject::system_at(parent.node),
-            permission_subject: None,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: None,
-            contribution_merge: None,
-        },
-        vec![parent_version],
-        u64::MAX - SKEW_TOLERANCE_MS,
-    )
-    .unwrap();
-
-    assert_eq!(
-        core.transaction_record(child).unwrap().fate,
-        Fate::Rejected(RejectionReason::CausalityViolation)
-    );
-}
-
-#[test]
-fn unknown_parent_constraint_survives_matching_parent_arrival() {
-    let (_dir, mut core) = open_node_with_uuid(node(0x78));
-    let row_uuid = row(0x78);
-    let parent = TxId::new(TxTime::from(40), node(0x79));
-    let child = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 50)
-                .parents(vec![parent])
-                .cells(title_cells("constrained pending child")),
-        )
-        .unwrap();
-
-    core.ingest_commit_unit_settled(
-        Transaction {
-            tx_id: parent,
-            kind: TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by: AuthorSubject::system_at(parent.node),
-            permission_subject: None,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: None,
-            contribution_merge: None,
-        },
-        vec![version_record(
-            row_uuid,
-            Vec::new(),
-            title_cells("matching parent coordinate"),
-            None,
-        )],
-        u64::MAX - SKEW_TOLERANCE_MS,
-    )
-    .unwrap();
-
-    assert_eq!(core.transaction_record(child).unwrap().fate, Fate::Pending);
-    assert_eq!(
-        core.database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap()
-            .len(),
-        1,
-        "a matching parent does not erase a pending child's rejection-cascade edge"
-    );
-}
-
-#[test]
-fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wrong_completion() {
-    let schema = schema();
-    let dir = tempfile::tempdir().unwrap();
-    let mut reader = open_node_at(&dir, schema.clone());
-    let parent = TxId::new(TxTime::from(70), node(0x82));
-    let child = TxId::new(TxTime::from(80), node(0x83));
-    let child_row = row(0x84);
-    reader
-        .ingest_view_scoped_transaction_with_current_indexes(
-            Transaction {
-                tx_id: child,
-                kind: TxKind::Mergeable,
-                n_total_writes: 1,
-                made_by: AuthorSubject::system_at(child.node),
-                permission_subject: None,
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: None,
-                contribution_merge: None,
-            },
-            vec![version_record(
-                child_row,
-                vec![parent],
-                title_cells("accepted partial child"),
-                None,
-            )],
-            Fate::Accepted,
-            Some(GlobalTime(2)),
-            DurabilityTier::Global,
-        )
-        .unwrap();
-    assert_eq!(
-        reader
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap()
-            .len(),
-        1
-    );
-
-    reader.database.close().unwrap();
-    drop(reader);
-    let mut reader = reopen_node_at(&dir, node(1), schema);
-    assert_eq!(
-        reader
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap()
-            .len(),
-        1,
-        "accepted-child coordinate constraint must survive reopen"
-    );
-
-    let wrong_partial = version_record(
-        row(0x85),
-        Vec::new(),
-        title_cells("partial wrong parent row"),
-        None,
-    );
-    reader
-        .ingest_view_scoped_transaction_with_current_indexes(
-            Transaction {
-                tx_id: parent,
-                kind: TxKind::Mergeable,
-                n_total_writes: 1,
-                made_by: AuthorSubject::system_at(parent.node),
-                permission_subject: None,
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: None,
-                contribution_merge: None,
-            },
-            vec![wrong_partial.clone()],
-            Fate::Accepted,
-            Some(GlobalTime(1)),
-            DurabilityTier::Global,
-        )
-        .unwrap();
-    assert_eq!(
-        reader
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap()
-            .len(),
-        1,
-        "a wrong partial parent fragment is inconclusive"
-    );
-
-    let wrong_completion = version_record(
-        row(0x86),
-        Vec::new(),
-        title_cells("second wrong parent row"),
-        None,
-    );
-    let error = reader
-        .ingest_known_transaction(
-            Transaction {
-                tx_id: parent,
-                kind: TxKind::Mergeable,
-                n_total_writes: 2,
-                made_by: AuthorSubject::system_at(parent.node),
-                permission_subject: None,
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: None,
-                contribution_merge: None,
-            },
-            vec![wrong_partial, wrong_completion],
-            Fate::Accepted,
-            Some(GlobalTime(1)),
-            DurabilityTier::Global,
-        )
-        .unwrap_err();
-    assert!(matches!(error, Error::ConflictingCommitUnit(tx) if tx == parent));
-    assert!(reader
-        .query_transaction(parent)
-        .unwrap()
-        .unwrap()
-        .view_scoped_cardinality);
-    assert_eq!(reader.query_versions_for_tx(parent).unwrap().len(), 1);
-    assert_eq!(
-        reader.transaction_record(child).unwrap().fate,
-        Fate::Accepted,
-        "an already-accepted partial child is immutable"
-    );
-    assert_eq!(
-        reader
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap()
-            .len(),
-        1,
-        "failed completion must not erase the durable constraint"
-    );
-}
-
-#[test]
 fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
     let (_dir, mut reader) = open_node_with_uuid(node(0x87));
     let parent = TxId::new(TxTime::from(70), node(0x88));
@@ -2647,11 +2077,6 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
     let stored_parent = reader.query_transaction(parent).unwrap().unwrap();
     assert!(!stored_parent.view_scoped_cardinality);
     assert_eq!(reader.query_versions_for_tx(parent).unwrap().len(), 2);
-    assert!(reader
-        .database
-        .primary_key_scan_raw("jazz_pending_edges", &[])
-        .unwrap()
-        .is_empty());
     assert_eq!(reader.transaction_record(child).unwrap().fate, Fate::Accepted);
 }
 /// Keeps the active query claim scope opaque and deterministic, and restores

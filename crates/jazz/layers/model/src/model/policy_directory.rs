@@ -247,7 +247,7 @@ fn encode_policy_claim_node(
             policy_claim_container(POLICY_CLAIM_ARRAY)?,
             values.iter().collect(),
         ),
-        Value::Record(_) | Value::Enum(_) | Value::Large(_) => {
+        Value::Record(_) | Value::Enum(_) | Value::Large(_) | Value::U48(_) => {
             return Err(
                 "policy binding directory does not admit engine-owned claim values".to_owned(),
             );

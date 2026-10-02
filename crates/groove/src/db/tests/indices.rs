@@ -109,7 +109,7 @@ async fn persist_maintains_schema_index_entries() {
     );
     database.commit_batch(batch).await.unwrap();
 
-    let prefix = b"albums\0albums_by_title\0";
+    let prefix = index_prefix(&database, "albums", "albums_by_title");
     let entries = database
         .storage
         .prefix("indices".to_owned(), prefix.to_vec())
@@ -1000,7 +1000,10 @@ async fn persisted_index_keys_sort_by_index_value_then_primary_key() {
 
     let keys = database
         .storage
-        .prefix("indices".to_owned(), b"albums\0albums_by_title\0".to_vec())
+        .prefix(
+            "indices".to_owned(),
+            index_prefix(&database, "albums", "albums_by_title").to_vec(),
+        )
         .await
         .unwrap()
         .into_iter()
@@ -1010,8 +1013,16 @@ async fn persisted_index_keys_sort_by_index_value_then_primary_key() {
     assert_eq!(
         keys,
         [
-            persisted_index_storage_key("albums_by_title", &encoded_title_index_key("aa", 1)),
-            persisted_index_storage_key("albums_by_title", &encoded_title_index_key("b", 256)),
+            persisted_index_storage_key(
+                &database,
+                "albums_by_title",
+                &encoded_title_index_key("aa", 1)
+            ),
+            persisted_index_storage_key(
+                &database,
+                "albums_by_title",
+                &encoded_title_index_key("b", 256)
+            ),
         ]
     );
 }
@@ -1033,13 +1044,20 @@ async fn durable_non_unique_index_keys_append_separator_and_primary_key_suffix()
 
     let entries = database
         .storage
-        .prefix("indices".to_owned(), b"albums\0albums_by_title\0".to_vec())
+        .prefix(
+            "indices".to_owned(),
+            index_prefix(&database, "albums", "albums_by_title").to_vec(),
+        )
         .await
         .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0].0,
-        persisted_index_storage_key("albums_by_title", &encoded_title_index_key("Blue Train", 7))
+        persisted_index_storage_key(
+            &database,
+            "albums_by_title",
+            &encoded_title_index_key("Blue Train", 7)
+        )
     );
     assert!(
         encoded_title_index_key("Blue Train", 7)
@@ -1063,13 +1081,14 @@ async fn unique_indices_use_only_index_columns_as_storage_keys() {
     );
     database.commit_batch(batch).await.unwrap();
 
-    let prefix = b"albums\0unique_albums_by_title\0";
+    let prefix = index_prefix(&database, "albums", "unique_albums_by_title");
     let entries = database
         .storage
         .prefix("indices".to_owned(), prefix.to_vec())
         .await
         .unwrap();
     let expected_key = persisted_index_storage_key(
+        &database,
         "unique_albums_by_title",
         &encoded_title_key_part("Blue Train"),
     );
@@ -1101,7 +1120,7 @@ async fn durable_unique_index_keys_omit_primary_key_suffix() {
         .storage
         .prefix(
             "indices".to_owned(),
-            b"albums\0unique_albums_by_title\0".to_vec(),
+            index_prefix(&database, "albums", "unique_albums_by_title").to_vec(),
         )
         .await
         .unwrap();
@@ -1109,6 +1128,7 @@ async fn durable_unique_index_keys_omit_primary_key_suffix() {
     assert_eq!(
         entries[0].0,
         persisted_index_storage_key(
+            &database,
             "unique_albums_by_title",
             &encoded_title_key_part("Blue Train"),
         )
@@ -1144,7 +1164,10 @@ async fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_
 
     let entries = database
         .storage
-        .prefix("indices".to_owned(), b"history\0by_tx\0".to_vec())
+        .prefix(
+            "indices".to_owned(),
+            index_prefix(&database, "history", "by_tx").to_vec(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1154,11 +1177,13 @@ async fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_
             .collect::<Vec<_>>(),
         [
             persisted_table_index_storage_key(
+                &database,
                 "history",
                 "by_tx",
                 &encoded_history_by_tx_key(10, 1, 2)
             ),
             persisted_table_index_storage_key(
+                &database,
                 "history",
                 "by_tx",
                 &encoded_history_by_tx_key(20, 7, 1)
@@ -1217,7 +1242,7 @@ async fn unique_indices_reject_existing_conflicting_values() {
         Error::IvmRuntime(IvmRuntimeError::UniqueIndexViolation { .. })
     ));
 
-    let prefix = b"albums\0unique_albums_by_title\0";
+    let prefix = index_prefix(&database, "albums", "unique_albums_by_title");
     let entries = database
         .storage
         .prefix("indices".to_owned(), prefix.to_vec())
@@ -1344,7 +1369,7 @@ async fn unique_indices_reject_conflicts_within_one_batch() {
                 .storage
                 .prefix(
                     "indices".to_owned(),
-                    b"albums\0unique_albums_by_title\0".to_vec()
+                    index_prefix(&database, "albums", "unique_albums_by_title").to_vec()
                 )
                 .await
                 .unwrap()
@@ -1537,7 +1562,7 @@ async fn rejected_live_unique_backfill_preserves_runtime_storage_and_usability()
         let schema_before = database.ivm_runtime.schema().clone();
         let stats_before = database.runtime_stats();
         let nodes_before = database.ivm_runtime.retained_node_ids();
-        let index_prefix = b"albums\0unique_albums_by_title\0";
+        let index_prefix = index_prefix(&database, "albums", "unique_albums_by_title");
         let index_bytes_before = database
             .storage
             .prefix("indices".to_owned(), index_prefix.to_vec())
@@ -1685,7 +1710,7 @@ async fn live_index_backfill_write_failure_remains_poisoning() {
         .storage
         .prefix(
             "indices".to_owned(),
-            b"albums\0unique_albums_by_title\0".to_vec(),
+            index_prefix(&database, "albums", "unique_albums_by_title").to_vec(),
         )
         .await
         .unwrap();
@@ -1722,7 +1747,7 @@ async fn live_index_backfill_write_failure_remains_poisoning() {
             .storage
             .prefix(
                 "indices".to_owned(),
-                b"albums\0unique_albums_by_title\0".to_vec(),
+                index_prefix(&database, "albums", "unique_albums_by_title").to_vec(),
             )
             .await
             .unwrap(),
@@ -1753,7 +1778,7 @@ async fn live_index_hydration_io_failure_remains_poisoning() {
         .storage
         .prefix(
             "indices".to_owned(),
-            b"albums\0unique_albums_by_title\0".to_vec(),
+            index_prefix(&database, "albums", "unique_albums_by_title").to_vec(),
         )
         .await
         .unwrap();
@@ -1785,7 +1810,7 @@ async fn live_index_hydration_io_failure_remains_poisoning() {
             .storage
             .prefix(
                 "indices".to_owned(),
-                b"albums\0unique_albums_by_title\0".to_vec(),
+                index_prefix(&database, "albums", "unique_albums_by_title").to_vec(),
             )
             .await
             .unwrap(),
@@ -1823,7 +1848,7 @@ async fn live_index_non_unique_runtime_error_remains_poisoning() {
         .storage
         .prefix(
             "indices".to_owned(),
-            b"albums\0unique_albums_by_title\0".to_vec(),
+            index_prefix(&database, "albums", "unique_albums_by_title").to_vec(),
         )
         .await
         .unwrap();
@@ -1858,7 +1883,7 @@ async fn live_index_non_unique_runtime_error_remains_poisoning() {
             .storage
             .prefix(
                 "indices".to_owned(),
-                b"albums\0unique_albums_by_title\0".to_vec(),
+                index_prefix(&database, "albums", "unique_albums_by_title").to_vec(),
             )
             .await
             .unwrap(),
@@ -1937,7 +1962,10 @@ async fn declared_index_generation_repairs_missing_and_stale_entries_once() {
     database.commit_batch(batch).await.unwrap();
     let primary_before = storage.prefix("albums".into(), Vec::new()).await.unwrap();
     let expected = storage
-        .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+        .prefix(
+            "indices".into(),
+            index_prefix(&database, "albums", "albums_by_title").to_vec(),
+        )
         .await
         .unwrap();
     assert_eq!(expected.len(), 1030);
@@ -1945,7 +1973,11 @@ async fn declared_index_generation_repairs_missing_and_stale_entries_once() {
         .delete("indices".into(), expected[0].0.clone())
         .await
         .unwrap();
-    let stale_key = b"albums\0albums_by_title\0obsolete".to_vec();
+    let stale_key = {
+        let mut key = index_prefix(&database, "albums", "albums_by_title");
+        key.extend(b"obsolete");
+        key
+    };
     storage
         .set(
             "indices".into(),
@@ -1961,7 +1993,10 @@ async fn declared_index_generation_repairs_missing_and_stale_entries_once() {
     database.ensure_declared_index_generation(1).await.unwrap();
     assert_eq!(
         storage
-            .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+            .prefix(
+                "indices".into(),
+                index_prefix(&database, "albums", "albums_by_title").to_vec()
+            )
             .await
             .unwrap(),
         expected
@@ -2185,7 +2220,10 @@ async fn declared_index_generation_final_marker_flush_failure_and_cancel() {
         batch.insert("albums", vec![Value::U64(7), Value::String("title".into())]);
         database.commit_batch(batch).await.unwrap();
         let expected = storage
-            .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+            .prefix(
+                "indices".into(),
+                index_prefix(&database, "albums", "albums_by_title").to_vec(),
+            )
             .await
             .unwrap();
         control.take_observed();
@@ -2245,7 +2283,10 @@ async fn declared_index_generation_final_marker_flush_failure_and_cancel() {
         );
         assert_eq!(
             storage
-                .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+                .prefix(
+                    "indices".into(),
+                    index_prefix(&database, "albums", "albums_by_title").to_vec()
+                )
                 .await
                 .unwrap(),
             expected
@@ -2329,5 +2370,624 @@ async fn declared_index_generation_rejects_unknown_primary_variant() {
             .await
             .unwrap(),
         Some(invalid)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Durable index layout v2: numeric ids, compact keys, empty values.
+// ---------------------------------------------------------------------------
+
+fn registered_index_id(database: &Database, table: &str, index: &str) -> u32 {
+    database
+        .ivm_runtime
+        .index_ids()
+        .borrow()
+        .id(table, index)
+        .unwrap_or_else(|| panic!("{table}.{index} has a durable id"))
+}
+
+fn albums_schema_with_indices(indices: Vec<IndexSchema>) -> DatabaseSchema {
+    let mut table = TableSchema::new(
+        "albums",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("title", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64));
+    for index in indices {
+        table = table.with_index(index);
+    }
+    DatabaseSchema::new([table])
+}
+
+async fn indexed_titles(database: &Database, index: &str) -> Vec<Vec<u8>> {
+    database
+        .index_scan_raw("albums", index, &[])
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.key().to_vec())
+        .collect()
+}
+
+#[futures_test::test]
+async fn durable_index_ids_survive_reopen_added_indices_and_reordering() {
+    let storage = MemoryStorage::new(&["albums", "indices"]).unwrap();
+    let by_title = IndexSchema::new("albums_by_title", ["title"]);
+    let mut database = Database::new(
+        albums_schema_with_indices(vec![by_title.clone()]),
+        storage.clone(),
+    )
+    .await
+    .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".into())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(8), Value::String("Kind of Blue".into())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    let title_id = registered_index_id(&database, "albums", "albums_by_title");
+    let before = indexed_titles(&database, "albums_by_title").await;
+    assert_eq!(before.len(), 2);
+    drop(database);
+
+    // A newly declared index, listed first, gets the next id; the existing
+    // one keeps its id and its entries stay readable.
+    let reordered = albums_schema_with_indices(vec![
+        IndexSchema::new("albums_by_title_and_id", ["title", "id"]),
+        by_title.clone(),
+    ]);
+    let database = Database::new(reordered.clone(), storage.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        registered_index_id(&database, "albums", "albums_by_title"),
+        title_id
+    );
+    let added_id = registered_index_id(&database, "albums", "albums_by_title_and_id");
+    assert_eq!(added_id, title_id + 1);
+    assert_eq!(indexed_titles(&database, "albums_by_title").await, before);
+    drop(database);
+
+    let mut database = Database::new(reordered, storage.clone()).await.unwrap();
+    assert_eq!(
+        registered_index_id(&database, "albums", "albums_by_title"),
+        title_id
+    );
+    // The added id was only allocated in memory by the previous instance;
+    // it becomes durable with this instance's first publication.
+    database.commit_batch(database.open_batch()).await.unwrap();
+    assert_eq!(
+        registered_index_id(&database, "albums", "albums_by_title_and_id"),
+        added_id
+    );
+    drop(database);
+    let database = Database::new(albums_schema_with_indices(vec![by_title]), storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        registered_index_id(&database, "albums", "albums_by_title"),
+        title_id
+    );
+    assert_eq!(
+        registered_index_id(&database, "albums", "albums_by_title_and_id"),
+        added_id,
+        "an undeclared index keeps its registration"
+    );
+}
+
+#[futures_test::test]
+async fn redefined_or_recreated_index_gets_a_fresh_id_and_never_reads_stale_entries() {
+    let storage = MemoryStorage::new(&["albums", "indices"]).unwrap();
+    let mut database = Database::new(indexed_albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".into())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(8), Value::String("Kind of Blue".into())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    let first_id = registered_index_id(&database, "albums", "albums_by_title");
+    drop(database);
+
+    // Same name, changed definition: a fresh id. Entries under the old id
+    // are not read, even before the declared-index repair backfills.
+    let redefined =
+        albums_schema_with_indices(vec![IndexSchema::new("albums_by_title", ["title", "id"])]);
+    let mut database = Database::new(redefined, storage.clone()).await.unwrap();
+    let second_id = registered_index_id(&database, "albums", "albums_by_title");
+    assert!(second_id > first_id);
+    assert!(
+        indexed_titles(&database, "albums_by_title")
+            .await
+            .is_empty()
+    );
+    database.ensure_declared_index_generation(1).await.unwrap();
+    assert_eq!(indexed_titles(&database, "albums_by_title").await.len(), 2);
+    drop(database);
+
+    // Drop the index, change rows while it is absent, then recreate it with
+    // the identical definition: the recreation backfills under a fresh id,
+    // so neither the deleted row nor a missing entry leaks through.
+    let mut database = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.delete("albums", PrimaryKeyValue::U64(7));
+    batch.insert(
+        "albums",
+        vec![Value::U64(9), Value::String("Giant Steps".into())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    database
+        .register_table_index(
+            "albums",
+            IndexSchema::new("albums_by_title", ["title", "id"]),
+        )
+        .await
+        .unwrap();
+    let third_id = registered_index_id(&database, "albums", "albums_by_title");
+    assert!(third_id > second_id);
+    let titles = database
+        .index_scan("albums", "albums_by_title", &[])
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.record().get("title").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        [
+            Value::String("Giant Steps".into()),
+            Value::String("Kind of Blue".into())
+        ]
+    );
+    drop(database);
+
+    // Retired ids are never reused, even after reopening.
+    let database = Database::new(
+        albums_schema_with_indices(vec![IndexSchema::new("albums_by_year", ["id"])]),
+        storage,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        registered_index_id(&database, "albums", "albums_by_year"),
+        third_id + 1
+    );
+}
+
+#[futures_test::test]
+async fn first_index_entries_carry_the_exact_id_registration_and_layout_marker() {
+    let storage = MemoryStorage::new(&["albums", "indices"]).unwrap();
+    let mut database = Database::new(indexed_albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    // Opening alone writes nothing: registrations are lazy.
+    assert!(
+        storage
+            .prefix("indices".into(), Vec::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".into())],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    // Byte fixture: `\0groove-index-id\0`, u16 BE table length, table,
+    // index -> u32 BE id, unique flag, u16 BE column count, then u16 BE
+    // length + name per column.
+    let mut registry_key = b"\0groove-index-id\0\x00\x06albums".to_vec();
+    registry_key.extend_from_slice(b"albums_by_title");
+    assert_eq!(
+        storage.prefix("indices".into(), Vec::new()).await.unwrap(),
+        vec![
+            (
+                registry_key,
+                b"\x00\x00\x00\x01\x00\x00\x01\x00\x05title".to_vec()
+            ),
+            (
+                b"\0groove-index-layout".to_vec(),
+                b"groove-durable-index-v2".to_vec()
+            ),
+            (
+                [
+                    &[0x01][..],
+                    b"\x06Blue Train\x00\x00\xff\x03\x00\x00\x00\x00\x00\x00\x00\x07"
+                ]
+                .concat(),
+                Vec::new()
+            ),
+        ]
+    );
+}
+
+#[futures_test::test]
+async fn durable_index_layout_refuses_earlier_or_unknown_index_layouts() {
+    // An `indices` family written by the previous layout: name-prefixed
+    // entries and no layout marker.
+    let storage = MemoryStorage::new(&["albums", "indices"]).unwrap();
+    storage
+        .set(
+            "indices".into(),
+            b"\0groove-declared-index-generation".to_vec(),
+            1_u64.to_be_bytes().to_vec(),
+        )
+        .await
+        .unwrap();
+    // Metadata alone (keys starting with 0x00) is not an index entry.
+    Database::new(indexed_albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    storage
+        .set(
+            "indices".into(),
+            b"albums\0albums_by_title\0\x07\x06Blue Train\x00\x00\x00\x00".to_vec(),
+            b"legacy record".to_vec(),
+        )
+        .await
+        .unwrap();
+    for storage in [storage, {
+        let unknown = MemoryStorage::new(&["albums", "indices"]).unwrap();
+        unknown
+            .set(
+                "indices".into(),
+                b"\0groove-index-layout".to_vec(),
+                b"groove-durable-index-v3".to_vec(),
+            )
+            .await
+            .unwrap();
+        unknown
+    }] {
+        match Database::new(indexed_albums_schema(), storage).await {
+            Err(Error::Storage(error)) => assert!(
+                matches!(*error, crate::storage::Error::InvalidStorageLayout(_)),
+                "expected InvalidStorageLayout, got {error:?}"
+            ),
+            Err(other) => panic!("expected a storage layout refusal, got {other:?}"),
+            Ok(_) => panic!("an earlier or unknown index layout must be refused"),
+        }
+    }
+}
+
+#[futures_test::test]
+async fn composite_primary_key_dedup_and_unique_entries_have_exact_compact_bytes() {
+    // Jazz-shaped: `(branch_key, row_uuid)` primary key; the fk index leads
+    // with the branch, so only `row_uuid` follows the separator.
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "current",
+        [
+            ColumnSchema::new("branch_key", ColumnType::Bytes),
+            ColumnSchema::new("row_uuid", ColumnType::Uuid),
+            ColumnSchema::new("parent", ColumnType::Uuid.nullable()),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::bytes("branch_key"),
+        PrimaryKeyColumn::uuid("row_uuid"),
+    ]))
+    .with_index(IndexSchema::new("by_parent", ["branch_key", "parent"]))
+    .with_index(IndexSchema::new("unique_parent", ["parent"]).unique())
+    .with_index(IndexSchema::new("by_row", ["row_uuid", "branch_key"]))]);
+    let storage = MemoryStorage::new(&["current", "indices"]).unwrap();
+    let mut database = Database::new(schema, storage.clone()).await.unwrap();
+    let row = uuid::Uuid::from_bytes([0x11; 16]);
+    let parent = uuid::Uuid::from_bytes([0x22; 16]);
+    let mut batch = database.open_batch();
+    batch.insert(
+        "current",
+        vec![
+            Value::Bytes(vec![0x01, 0x00, 0x00, 0x00, 0x00]),
+            Value::Uuid(row),
+            Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    let branch: &[u8] = b"\x07\x01\x00\xff\x00\xff\x00\xff\x00\xff\x00\x00";
+    let parent_part = [&[0x09, 0x0a][..], parent.as_bytes()].concat();
+    let row_part = [&[0x0a][..], row.as_bytes()].concat();
+    let entries = |index: &str| {
+        let prefix = index_prefix(&database, "current", index);
+        let storage = storage.clone();
+        async move { storage.prefix("indices".into(), prefix).await.unwrap() }
+    };
+    // [id][branch 12][parent 18][ff][row_uuid 17] -> empty value.
+    let by_parent = entries("by_parent").await;
+    assert_eq!(
+        by_parent,
+        vec![(
+            [&[1][..], branch, &parent_part, &[0xff], &row_part].concat(),
+            Vec::new()
+        )]
+    );
+    assert_eq!(by_parent[0].0.len(), 49);
+    // Unique: [id][parent 18] -> the primary-key columns the index lacks.
+    assert_eq!(
+        entries("unique_parent").await,
+        vec![(
+            [&[2][..], &parent_part].concat(),
+            [branch, &row_part].concat()
+        )]
+    );
+    // Covers the primary key: no separator, no suffix, empty value.
+    assert_eq!(
+        entries("by_row").await,
+        vec![([&[3][..], &row_part, branch].concat(), Vec::new())]
+    );
+    // Every layout decodes back to the row through its index.
+    for index in ["by_parent", "unique_parent", "by_row"] {
+        let rows = database.index_scan("current", index, &[]).await.unwrap();
+        assert_eq!(rows.len(), 1, "{index}");
+        assert_eq!(
+            rows[0].record().get("row_uuid").unwrap(),
+            Value::Uuid(row),
+            "{index}"
+        );
+    }
+}
+
+/// Deterministic splitmix64 stream for the key-encoding property test.
+struct KeyRng(u64);
+
+impl KeyRng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+
+    /// Variable-length bytes drawn mostly from boundary values.
+    fn bytes(&mut self) -> Vec<u8> {
+        const ALPHABET: [u8; 6] = [0x00, 0x01, 0x7f, 0xfe, 0xff, b'a'];
+        (0..self.below(5))
+            .map(|_| ALPHABET[self.below(ALPHABET.len() as u64) as usize])
+            .collect()
+    }
+
+    fn value(&mut self, column_type: &ColumnType) -> Value {
+        match column_type {
+            ColumnType::U8 => Value::U8([0, 1, 0xfe, 0xff][self.below(4) as usize]),
+            ColumnType::U64 => Value::U64([0, 1, 0xff, 1 << 56, u64::MAX][self.below(5) as usize]),
+            ColumnType::I64 => Value::I64([i64::MIN, -1, 0, 1, i64::MAX][self.below(5) as usize]),
+            ColumnType::Bool => Value::Bool(self.below(2) == 1),
+            ColumnType::Bytes => Value::Bytes(self.bytes()),
+            ColumnType::String => Value::String(
+                ["", "\0", "\0\0", "a", "a\0", "a\0b", "\u{ff}", "ÿ\0", "b"]
+                    [self.below(9) as usize]
+                    .to_owned(),
+            ),
+            ColumnType::Uuid => {
+                let byte = [0x00, 0x7f, 0xff][self.below(3) as usize];
+                Value::Uuid(uuid::Uuid::from_bytes([byte; 16]))
+            }
+            ColumnType::Nullable(inner) => {
+                if self.below(3) == 0 {
+                    Value::Nullable(None)
+                } else {
+                    Value::Nullable(Some(Box::new(self.value(inner))))
+                }
+            }
+            other => unreachable!("not generated: {other:?}"),
+        }
+    }
+}
+
+fn natural_order(left: &Value, right: &Value) -> std::cmp::Ordering {
+    match (left, right) {
+        (Value::U8(a), Value::U8(b)) => a.cmp(b),
+        (Value::U64(a), Value::U64(b)) => a.cmp(b),
+        (Value::I64(a), Value::I64(b)) => a.cmp(b),
+        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
+        (Value::String(a), Value::String(b)) => a.cmp(b),
+        (Value::Uuid(a), Value::Uuid(b)) => a.cmp(b),
+        (Value::Nullable(a), Value::Nullable(b)) => match (a, b) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(a), Some(b)) => natural_order(a, b),
+        },
+        _ => unreachable!("columns share one type"),
+    }
+}
+
+/// Property: concatenated, single-escaped key parts of mixed column types
+/// (with NUL/0xff bytes and variable-length strings) are prefix-free,
+/// order-preserving and decode back exactly, also after a `0xff` + primary-key
+/// suffix and behind a numeric index-id prefix.
+#[test]
+fn mixed_type_index_keys_are_prefix_free_order_preserving_and_decodable() {
+    let types = [
+        ColumnType::U8,
+        ColumnType::U64,
+        ColumnType::I64,
+        ColumnType::Bool,
+        ColumnType::Bytes,
+        ColumnType::String,
+        ColumnType::Uuid,
+        ColumnType::Bytes.nullable(),
+        ColumnType::U64.nullable(),
+        ColumnType::String.nullable(),
+    ];
+    let mut rng = KeyRng(0x5eed_1dc5);
+    let encode = |values: &[Value]| {
+        let mut key = Vec::new();
+        for value in values {
+            crate::ivm::runtime::encode_key_part(&mut key, value).unwrap();
+        }
+        key
+    };
+    for _ in 0..20_000 {
+        let columns = (0..1 + rng.below(4))
+            .map(|_| types[rng.below(types.len() as u64) as usize].clone())
+            .collect::<Vec<_>>();
+        let left = columns.iter().map(|ty| rng.value(ty)).collect::<Vec<_>>();
+        let right = columns.iter().map(|ty| rng.value(ty)).collect::<Vec<_>>();
+        let (left_key, right_key) = (encode(&left), encode(&right));
+
+        for (values, key) in [(&left, &left_key), (&right, &right_key)] {
+            let mut remaining = key.as_slice();
+            for (column, value) in columns.iter().zip(values.iter()) {
+                let decoded =
+                    crate::db::encoding::decode_index_key_part(&mut remaining, column, "prop")
+                        .unwrap();
+                assert_eq!(&decoded, value);
+            }
+            assert!(remaining.is_empty(), "exact consumption of {values:?}");
+        }
+
+        let expected = left
+            .iter()
+            .zip(right.iter())
+            .map(|(a, b)| natural_order(a, b))
+            .find(|ordering| ordering.is_ne())
+            .unwrap_or(std::cmp::Ordering::Equal);
+        assert_eq!(left_key.cmp(&right_key), expected, "{left:?} vs {right:?}");
+        if expected.is_ne() {
+            assert!(!right_key.starts_with(&left_key) && !left_key.starts_with(&right_key));
+            // Any primary-key suffix keeps the index-column order.
+            let mut left_entry = left_key.clone();
+            left_entry.push(0xff);
+            left_entry.extend(rng.bytes());
+            let mut right_entry = right_key.clone();
+            right_entry.push(0xff);
+            right_entry.extend(rng.bytes());
+            assert_eq!(left_entry.cmp(&right_entry), expected);
+        }
+
+        let id = [1, 127, 128, 16_383, 16_384, u32::MAX][rng.below(6) as usize];
+        let mut stored = crate::ivm::runtime::durable_index_key_prefix(id);
+        stored.extend_from_slice(&left_key);
+        assert_eq!(
+            crate::ivm::runtime::split_durable_index_key(&stored),
+            Some((id, left_key.as_slice()))
+        );
+    }
+}
+
+/// Measurement harness: key/value bytes of one entry of each Jazz index
+/// shape (column types as Jazz declares them), read raw from the physical
+/// class-layout family. Run with `--nocapture` to print.
+#[futures_test::test]
+async fn jazz_shaped_index_entries_have_compact_sizes() {
+    let branch = || Value::Bytes(vec![0x01, 0x00, 0x00, 0x00, 0x00]);
+    let schema = DatabaseSchema::new([
+        TableSchema::new(
+            "jazz_physical_2_global_current",
+            [
+                ColumnSchema::new("branch_key", ColumnType::Bytes),
+                ColumnSchema::new("row_uuid", ColumnType::Uuid),
+                ColumnSchema::new("global_time", ColumnType::U64.nullable()),
+                ColumnSchema::new("_app_project_id", ColumnType::Uuid.nullable()),
+            ],
+        )
+        .with_primary_key(PrimaryKey::composite([
+            PrimaryKeyColumn::bytes("branch_key"),
+            PrimaryKeyColumn::uuid("row_uuid"),
+        ]))
+        .with_index(IndexSchema::new(
+            "by_physical_app_v1_5",
+            ["branch_key", "_app_project_id"],
+        ))
+        .with_index(IndexSchema::new(
+            "by_seq",
+            ["branch_key", "global_time", "row_uuid"],
+        )),
+        TableSchema::new(
+            "jazz_transactions",
+            [
+                ColumnSchema::new("time", ColumnType::U64),
+                ColumnSchema::new("node_id", ColumnType::U64),
+                ColumnSchema::new("global_time", ColumnType::U64.nullable()),
+            ],
+        )
+        .with_primary_key(PrimaryKey::composite([
+            PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
+            PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
+        ]))
+        .with_index(IndexSchema::new("by_global_time", ["global_time"])),
+    ]);
+    let layout = StorageLayout::jazz_class_v2();
+    let families = layout.physical_column_families(schema.column_families());
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let physical = MemoryStorage::new(&refs).unwrap();
+    let mut database = Database::new_with_storage_layout(schema, physical.clone(), layout)
+        .await
+        .unwrap();
+    // UUIDv7-shaped ids and realistic stamps: no zero padding to flatter
+    // the escaping.
+    let row = uuid::Uuid::from_u128(0x0192_1f3a_6b2c_7d4e_9f10_a2b3_c4d5_e6f7);
+    let project = uuid::Uuid::from_u128(0x0192_1f3a_6b2c_7c11_8a22_b3c4_d5e6_f708);
+    let (tx_time, node_id, global_time) = (1_727_000_000_123_456_u64, 0x3a5f_19c2_77e1_0b4d, 4_242);
+    let mut batch = database.open_batch();
+    batch.insert(
+        "jazz_physical_2_global_current",
+        vec![
+            branch(),
+            Value::Uuid(row),
+            Value::Nullable(Some(Box::new(Value::U64(global_time)))),
+            Value::Nullable(Some(Box::new(Value::Uuid(project)))),
+        ],
+    );
+    batch.insert(
+        "jazz_transactions",
+        vec![
+            Value::U64(tx_time),
+            Value::U64(node_id),
+            Value::Nullable(Some(Box::new(Value::U64(global_time)))),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    let raw = physical
+        .prefix("__groove_class_indices".into(), Vec::new())
+        .await
+        .unwrap();
+    let registry = database.ivm_runtime.index_ids().borrow();
+    let mut sizes = std::collections::BTreeMap::new();
+    for (key, value) in &raw {
+        let Some((id, _)) = crate::ivm::runtime::split_durable_index_key(key) else {
+            continue;
+        };
+        let (table, index) = registry.names(id).unwrap();
+        println!(
+            "{table}.{index}: key {} B + value {} B = {} B",
+            key.len(),
+            value.len(),
+            key.len() + value.len()
+        );
+        sizes.insert(index.to_owned(), (key.len(), value.len()));
+    }
+    // Before (name-prefixed layout, same shapes): fk 138+66, by_seq 99+45,
+    // by_global_time 91+35 bytes. (`history.by_tx`, 110+53 before, no longer
+    // exists.)
+    assert_eq!(
+        sizes,
+        std::collections::BTreeMap::from([
+            ("by_global_time".to_owned(), (30, 0)),
+            ("by_physical_app_v1_5".to_owned(), (49, 0)),
+            ("by_seq".to_owned(), (40, 0)),
+        ])
     );
 }

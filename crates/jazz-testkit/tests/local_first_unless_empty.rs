@@ -203,9 +203,9 @@ async fn empty_local_and_empty_remote_view_opens_once_the_remote_view_settles() 
 }
 
 /// Without a configured server nothing can supply a remote view, so the read
-/// is plain local-first. (A serverless native client publishes a subscription
-/// only from local changes, for `LocalFirst` too, so the subscription is
-/// observed through its first local write.)
+/// is plain local-first: the empty local opening is published at once, still
+/// pending (nothing has settled it, exactly as with a disconnected server), and
+/// the first local write follows as an ordinary change.
 #[tokio::test(flavor = "current_thread")]
 async fn empty_local_result_without_a_server_opens_immediately() {
     tokio::task::LocalSet::new()
@@ -224,6 +224,10 @@ async fn empty_local_result_without_a_server_opens_immediately() {
                 .subscribe_with_read_tier(Query::from("items"), ReadTier::LocalFirstUnlessEmpty)
                 .await
                 .expect("subscribe");
+            let opening = first_delta(&mut stream, IMMEDIATE).await;
+            assert!(opening.is_empty(), "{opening:?}");
+            assert!(opening.pending, "{opening:?}");
+
             let (id, _, _) = client
                 .insert("items", row_input!("label" => "offline"))
                 .expect("insert local row");

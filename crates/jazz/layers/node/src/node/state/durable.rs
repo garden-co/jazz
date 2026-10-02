@@ -2,237 +2,6 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    const SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1: u64 = 1;
-
-    /// Record exact row versions successfully applied from this durable
-    /// relay's selected authority. Deliberately append-only: later authority
-    /// removal controls future delivery but cannot erase retained knowledge.
-    #[cfg(test)]
-    pub(crate) async fn record_scope_relay_authoritative_bundles(
-        &mut self,
-        bundles: &[VersionBundle],
-    ) -> Result<(), Error> {
-        self.record_scope_relay_authoritative_bundles_with_progress(bundles, None)
-            .await
-    }
-
-    #[doc(hidden)]
-    pub async fn record_scope_relay_authoritative_bundles_with_progress(
-        &mut self,
-        bundles: &[VersionBundle],
-        progress_waker: Option<&std::task::Waker>,
-    ) -> Result<(), Error> {
-        let Some(scope) = self.client_relay_scope() else {
-            return Ok(());
-        };
-        let (owner, subject) = scope.durable_components();
-        let digest = scope.durable_digest();
-
-        let mut writes = Vec::new();
-        for bundle in bundles {
-            for version in &bundle.versions {
-                let table_id =
-                    self.physical_table_id_for_schema(version.schema_version(), version.table())?;
-                writes.push(DirectRecordStoreWrite::Set {
-                    key: vec![
-                        Value::Bytes(digest.to_vec()),
-                        Value::U64(table_id.0),
-                        Value::Uuid(version.row_uuid().0),
-                        Value::U64(bundle.tx.tx_id.time.0),
-                        Value::Uuid(bundle.tx.tx_id.node.0),
-                    ],
-                    value: vec![
-                        Value::U64(Self::SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1),
-                        Value::String(owner.to_owned()),
-                        Value::Nullable(
-                            subject
-                                .as_ref()
-                                .map(|value| Box::new(Value::String(value.clone()))),
-                        ),
-                    ],
-                });
-            }
-        }
-        if !writes.is_empty() {
-            self.database
-                .write_direct_records_with_progress(
-                    SCOPE_RELAY_REPAIR_LEDGER_STORE,
-                    &writes,
-                    progress_waker,
-                )
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// A row-version payload is durable same-scope disclosure evidence only
-    /// when its pending repair still belongs to the selected authority
-    /// receipt. Stale/fallback payloads can be ingested as cache data but are
-    /// never repair authority.
-    #[cfg(test)]
-    pub(crate) async fn record_scope_relay_authoritative_repair_payloads(
-        &mut self,
-        bundles: &[VersionBundle],
-        authority_receipt_eligible: bool,
-    ) -> Result<(), Error> {
-        self.record_scope_relay_authoritative_repair_payloads_with_progress(
-            bundles,
-            authority_receipt_eligible,
-            None,
-        )
-        .await
-    }
-
-    #[doc(hidden)]
-    pub async fn record_scope_relay_authoritative_repair_payloads_with_progress(
-        &mut self,
-        bundles: &[VersionBundle],
-        authority_receipt_eligible: bool,
-        progress_waker: Option<&std::task::Waker>,
-    ) -> Result<(), Error> {
-        if authority_receipt_eligible {
-            self.record_scope_relay_authoritative_bundles_with_progress(bundles, progress_waker)
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// Record a foreground transaction once this exact scope's durable relay
-    /// has accepted it locally. Its caller establishes the live admitted
-    /// session and author ownership; this helper only persists the immutable
-    /// row-version identities.
-    #[cfg(test)]
-    pub(crate) async fn record_scope_relay_authored_pending_versions(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        admitted_session: AuthorSubject,
-    ) -> Result<(), Error> {
-        self.record_scope_relay_authored_pending_versions_with_progress(
-            tx,
-            versions,
-            admitted_session,
-            None,
-        )
-        .await
-    }
-
-    #[doc(hidden)]
-    pub async fn record_scope_relay_authored_pending_versions_with_progress(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        admitted_session: AuthorSubject,
-        progress_waker: Option<&std::task::Waker>,
-    ) -> Result<(), Error> {
-        let Some(scope) = self.client_relay_scope() else {
-            return Ok(());
-        };
-        if !scope.admits_session(admitted_session) || tx.made_by != admitted_session {
-            return Ok(());
-        }
-        let (owner, subject) = scope.durable_components();
-        let digest = scope.durable_digest();
-
-        let mut writes = Vec::new();
-        for version in versions {
-            let table_id =
-                self.physical_table_id_for_schema(version.schema_version(), version.table())?;
-            writes.push(DirectRecordStoreWrite::Set {
-                key: vec![
-                    Value::Bytes(digest.to_vec()),
-                    Value::U64(table_id.0),
-                    Value::Uuid(version.row_uuid().0),
-                    Value::U64(tx.tx_id.time.0),
-                    Value::Uuid(tx.tx_id.node.0),
-                ],
-                value: vec![
-                    Value::U64(Self::SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1),
-                    Value::String(owner.to_owned()),
-                    Value::Nullable(
-                        subject
-                            .as_ref()
-                            .map(|value| Box::new(Value::String(value.clone()))),
-                    ),
-                ],
-            });
-        }
-        if !writes.is_empty() {
-            self.database
-                .write_direct_records_with_progress(
-                    SCOPE_RELAY_REPAIR_LEDGER_STORE,
-                    &writes,
-                    progress_waker,
-                )
-                .await?;
-        }
-        Ok(())
-    }
-
-    #[doc(hidden)]
-    pub async fn scope_relay_repair_ledger_contains(
-        &self,
-        table_id: PhysicalTableId,
-        request: &RowVersionRef,
-    ) -> Result<bool, Error> {
-        let Some(scope) = self.client_relay_scope() else {
-            return Ok(false);
-        };
-        let (expected_owner, expected_subject) = scope.durable_components();
-        let store = self
-            .database
-            .direct_record_store(SCOPE_RELAY_REPAIR_LEDGER_STORE)?;
-        let record = store
-            .get(&[
-                Value::Bytes(scope.durable_digest().to_vec()),
-                Value::U64(table_id.0),
-                Value::Uuid(request.row_uuid.0),
-                Value::U64(request.tx_time.0),
-                Value::Uuid(request.tx_node_id.0),
-            ])
-            .await?;
-        let Some(record) = record else {
-            return Ok(false);
-        };
-        match record.get_idx(0)? {
-            Value::U64(Self::SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1) => {}
-            _ => {
-                return Err(Error::InvalidStoredValue(
-                    "unknown scope relay ledger format",
-                ));
-            }
-        }
-        let owner = match record.get_idx(1)? {
-            Value::String(value) => value,
-            _ => {
-                return Err(Error::InvalidStoredValue(
-                    "scope relay ledger owner must be string",
-                ));
-            }
-        };
-        let subject = match record.get_idx(2)? {
-            Value::Nullable(None) => None,
-            Value::Nullable(Some(value)) => match value.as_ref() {
-                Value::String(value) => Some(value.to_owned()),
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "scope relay ledger subject must be string",
-                    ));
-                }
-            },
-            _ => {
-                return Err(Error::InvalidStoredValue(
-                    "scope relay ledger subject must be nullable string",
-                ));
-            }
-        };
-        if owner != expected_owner || subject != expected_subject {
-            return Err(Error::InvalidStoredValue(
-                "scope relay ledger value does not match admitted scope",
-            ));
-        }
-        Ok(true)
-    }
 
     /// Return local synchronization counters.
     pub fn sync_metrics(&self) -> &SyncMetrics {
@@ -733,6 +502,7 @@ where
             };
         }
         self.query.retained_root_window_sources.clear();
+        self.query.watermarks_invalidated = true;
     }
 
     async fn persist_policy_binding_directory(
@@ -856,7 +626,7 @@ where
                 );
             }
         }
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
         let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
         self.rejections.rejected_transactions.remove(&tx_id);
@@ -886,12 +656,10 @@ where
                 .await?
                 .ok_or(Error::MissingTransaction(tx_id))?;
             let local_current = self
-                .query_local_layer_winner_in_branch(
+                .query_local_winner_in_branch(
                     table,
                     version.branch_key(),
-                    row_uuid,
-                    version.layer(),
-                )
+                    row_uuid,)
                 .await?
                 .as_ref()
                 .map(|winner| {
@@ -900,12 +668,10 @@ where
                 })
                 .unwrap_or(false);
             let global_current = self
-                .query_global_layer_winner_in_branch(
+                .query_global_winner_in_branch(
                     table,
                     version.branch_key(),
-                    row_uuid,
-                    version.layer(),
-                )
+                    row_uuid,)
                 .await?
                 .as_ref()
                 .map(|winner| {

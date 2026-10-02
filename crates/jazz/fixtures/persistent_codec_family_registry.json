@@ -116,7 +116,7 @@
       ]
     },
     {
-      "id": "groove.jazz-physical-class.v1",
+      "id": "groove.jazz-physical-class.v2",
       "boundary": "durable-storage",
       "spec": {
         "path": "crates/groove/SPEC/2_storage_model.md",
@@ -128,12 +128,16 @@
       },
       "rejection_receipt": {
         "path": "crates/groove/src/storage/mod.rs",
-        "anchor": "class_layout_rejects_missing_marker_with_legacy_mapped_families"
+        "anchor": "class_layout_rejects_unknown_old_future_and_malformed_markers_before_logical_access"
       },
       "evidence": [
         {
           "path": "crates/groove/src/storage/mod.rs",
-          "anchor": "class_layout_isolates_every_jazz_physical_class"
+          "anchor": "class_layout_marker_and_mapped_key_receipt_is_exact"
+        },
+        {
+          "path": "crates/groove/src/storage/mod.rs",
+          "anchor": "class_layout_rejects_missing_marker_with_legacy_mapped_families"
         }
       ]
     },
@@ -372,46 +376,49 @@
       ]
     },
     {
-      "id": "jazz.history-version-current.v1",
+      "id": "jazz.history-version-current.v4",
       "boundary": "durable-storage",
+      "profile": "jazz-node-root",
       "spec": {
         "path": "crates/jazz/SPEC/2_data_model_identity.md",
-        "anchor": "### 2.7.1 Settled history layout and canonical receipts"
+        "anchor": "**Linear-history storage boundary (2026-09-29).**"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/layers/node/src/node/tests/general.rs",
-        "anchor": "policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records"
+        "path": "crates/jazz/layers/node/src/node/physical/tests.rs",
+        "anchor": "fn history_record_ends_with_merge_fields_and_is_keyed_by_seq"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/layers/node/src/node/tests/general.rs",
-        "anchor": "local_history_rejects_noncanonical_parent_order_before_persistence"
+        "path": "crates/jazz/tests/storage_format_refusal.rs",
+        "anchor": "fn published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error"
       },
       "evidence": [
+        {
+          "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
+          "anchor": "fn node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots"
+        },
+        {
+          "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
+          "anchor": "fn node_profile_refuses_history_v2_and_v3_roots"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/codec.rs",
+          "anchor": "fn touched_rows_round_trip_and_reject_noncanonical_groups"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/general.rs",
+          "anchor": "fn history_images_store_updated_by_only_when_it_differs_from_the_transaction_author"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/general.rs",
+          "anchor": "fn a_touched_row_list_is_node_local_and_survives_batches_applied_before_its_transaction"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/general.rs",
+          "anchor": "policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records"
+        },
         {
           "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
           "anchor": "row_history_reports_versions_flags_and_audit_records_across_restart"
-        }
-      ]
-    },
-    {
-      "id": "jazz.contribution-provenance.v1",
-      "boundary": "durable-storage",
-      "spec": {
-        "path": "crates/jazz/SPEC/18_representation_ownership.md",
-        "anchor": "## Non-negotiable representation rules"
-      },
-      "semantic_fixture": {
-        "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
-        "anchor": "contribution_operation_payloads_use_physical_columns_and_canonical_groove_bytes"
-      },
-      "rejection_receipt": {
-        "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
-        "anchor": "unknown_durable_contribution_component_tag_is_rejected_by_the_storage_decoder"
-      },
-      "evidence": [
-        {
-          "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
-          "anchor": "contribution_merge_provenance_survives_reopen"
         }
       ]
     },
@@ -450,24 +457,37 @@
       ]
     },
     {
-      "id": "jazz.merge-heads.v1",
+      "id": "groove.durable-index.v2",
       "boundary": "durable-storage",
+      "profile": "jazz-node-root",
       "spec": {
-        "path": "crates/jazz/SPEC/4_history_merging.md",
-        "anchor": "#### Durable content-frontier helper"
+        "path": "crates/groove/SPEC/2_storage_model.md",
+        "anchor": "### Durable index layout"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/layers/node/src/node/tests/merge_heads.rs",
-        "anchor": "merge_heads_match_history_across_restart_between_concurrent_units"
+        "path": "crates/groove/src/db/tests/indices.rs",
+        "anchor": "fn composite_primary_key_dedup_and_unique_entries_have_exact_compact_bytes"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/layers/node/src/node/tests/general.rs",
-        "anchor": "stored_merge_heads_require_a_canonical_transaction_id_array"
+        "path": "crates/jazz/tests/storage_format_refusal.rs",
+        "anchor": "fn linear_history_root_without_the_durable_index_family_is_refused"
       },
       "evidence": [
         {
-          "path": "crates/jazz/layers/node/src/node/tests/merge_heads.rs",
-          "anchor": "across_reopen"
+          "path": "crates/groove/src/db/tests/indices.rs",
+          "anchor": "fn first_index_entries_carry_the_exact_id_registration_and_layout_marker"
+        },
+        {
+          "path": "crates/groove/src/db/tests/indices.rs",
+          "anchor": "fn durable_index_ids_survive_reopen_added_indices_and_reordering"
+        },
+        {
+          "path": "crates/groove/src/db/tests/indices.rs",
+          "anchor": "fn durable_index_layout_refuses_earlier_or_unknown_index_layouts"
+        },
+        {
+          "path": "crates/groove/src/db/tests/indices.rs",
+          "anchor": "fn mixed_type_index_keys_are_prefix_free_order_preserving_and_decodable"
         }
       ]
     },
@@ -646,6 +666,28 @@
         {
           "path": "crates/jazz/layers/node/src/node/query_eval/tests/unavailable_inputs.rs",
           "anchor": "fn local_availability_receipts_survive_reopen_and_retain_readmission_watermarks"
+        }
+      ]
+    },
+    {
+      "id": "jazz.subscription-watermark.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/8_sync_protocol.md",
+        "anchor": "#### Persisted subscription watermark record v1"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/node/src/node/query_eval/subscription_watermarks.rs",
+        "anchor": "fn subscription_watermark_v1_record_bytes_and_rejection_are_pinned"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/layers/node/src/node/query_eval/subscription_watermarks.rs",
+        "anchor": "fn subscription_watermark_v1_record_bytes_and_rejection_are_pinned"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/layers/db/src/db/tests/node_runtime.rs",
+          "anchor": "fn reopened_client_catches_up_from_its_stored_watermark"
         }
       ]
     }

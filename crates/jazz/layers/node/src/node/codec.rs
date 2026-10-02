@@ -7,7 +7,7 @@
 
 use super::query_engine::user_column_field;
 use super::*;
-use crate::protocol::SnapshotRef;
+use crate::protocol::{RowBase, SnapshotRef};
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
 use crate::tx::{
     BranchViewCopyBase, BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation,
@@ -22,48 +22,12 @@ groove::define_record! {
         2 => tx_time: TxTime,
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
-        5 => parents: ParentRefs,
-        6 => created_by: RowAuthor,
-        7 => created_at: TxTime,
-        8 => updated_by: RowAuthor,
-        9 => updated_at: TxTime,
+        5 => created_by: RowAuthor,
+        6 => created_at: TxTime,
+        7 => updated_by: Option<RowAuthor>,
+        8 => updated_at: TxTime,
+        9 => _deletion: Option<DeletionEvent>,
         .. user_cells,
-    }
-}
-
-groove::define_record! {
-    pub(super) struct RegisterRowRecord {
-        0 => branch_key: Vec<u8>,
-        1 => row_uuid: RowUuid,
-        2 => tx_time: TxTime,
-        3 => tx_node_id: NodeAlias,
-        4 => schema_version: SchemaVersionAlias,
-        5 => parents: ParentRefs,
-        6 => created_by: RowAuthor,
-        7 => created_at: TxTime,
-        8 => updated_by: RowAuthor,
-        9 => updated_at: TxTime,
-        10 => _deletion: DeletionEvent,
-    }
-}
-
-// Fixed physical carrier for the shared deletion-history relation. The logical
-// `VersionRow` remains a `RegisterRowRecord`; this wrapper exists only at the
-// storage boundary where lineage/table routing is attached.
-groove::define_record! {
-    pub(super) struct SharedDeletionHistoryRowRecord {
-        0 => branch_key: Vec<u8>,
-        1 => physical_table_id: u64,
-        2 => row_uuid: RowUuid,
-        3 => tx_time: TxTime,
-        4 => tx_node_id: NodeAlias,
-        5 => schema_version: SchemaVersionAlias,
-        6 => parents: ParentRefs,
-        7 => created_by: RowAuthor,
-        8 => created_at: TxTime,
-        9 => updated_by: RowAuthor,
-        10 => updated_at: TxTime,
-        11 => _deletion: DeletionEvent,
     }
 }
 
@@ -74,43 +38,13 @@ groove::define_record! {
         2 => tx_time: TxTime,
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
-        5 => parents: ParentRefs,
-        6 => created_by: RowAuthor,
-        7 => created_at: u64,
-        8 => updated_by: RowAuthor,
-        9 => updated_at: u64,
-        10 => global_time: Option<GlobalTime>,
+        5 => created_by: RowAuthor,
+        6 => created_at: u64,
+        7 => updated_by: RowAuthor,
+        8 => updated_at: u64,
+        9 => global_time: Option<GlobalTime>,
+        10 => _deletion: Option<DeletionEvent>,
         .. user_cells,
-    }
-}
-
-groove::define_record! {
-    pub(super) struct RegisterGlobalCurrentRowRecord {
-        0 => branch_key: Vec<u8>,
-        1 => row_uuid: RowUuid,
-        2 => tx_time: TxTime,
-        3 => tx_node_id: NodeAlias,
-        4 => schema_version: SchemaVersionAlias,
-        5 => parents: ParentRefs,
-        6 => created_by: RowAuthor,
-        7 => created_at: u64,
-        8 => updated_by: RowAuthor,
-        9 => updated_at: u64,
-        10 => global_time: Option<GlobalTime>,
-        11 => _deletion: DeletionEvent,
-    }
-}
-
-groove::define_record! {
-    pub(super) struct GlobalChangeRowRecord {
-        0 => physical_table_id: u64,
-        1 => branch_key: Vec<u8>,
-        2 => row_uuid: RowUuid,
-        3 => layer: Vec<u8>,
-        4 => global_time: GlobalTime,
-        5 => tx_time: TxTime,
-        6 => tx_node_id: NodeAlias,
-        7 => _deletion: Option<DeletionEvent>,
     }
 }
 
@@ -146,28 +80,6 @@ groove::impl_record_field_enum!(RejectionReasonTag {
     RejectionReasonTag::MalformedCommit = 5,
 });
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ParentRefs(Vec<TxId>);
-
-impl records::RecordField for ParentRefs {
-    fn read(record: &records::BorrowedRecord<'_>, idx: usize) -> Result<Self, records::Error> {
-        tx_ids_from_value(record.get_idx(idx)?)
-            .map(Self)
-            .map_err(|_| records::Error::TypeMismatch {
-                expected: records::ValueType::Array(Box::new(records::ValueType::Tuple(vec![
-                    records::ValueType::U64,
-                    records::ValueType::Uuid,
-                ]))),
-            })
-    }
-
-    fn to_value(&self) -> Value {
-        Value::Array(self.0.iter().map(|parent| tx_id_value(*parent)).collect())
-    }
-
-    const COLUMN_KIND: records::FieldKind = records::FieldKind::Array;
-}
-
 groove::define_record! {
     pub(super) struct CurrentRowRecord {
         0 => row_uuid: RowUuid,
@@ -178,12 +90,11 @@ groove::define_record! {
 groove::define_record! {
     pub(super) struct WireRowRecord {
         0 => row_uuid: RowUuid,
-        1 => parents: ParentRefs,
-        2 => created_by: RowAuthor,
-        3 => created_at: u64,
-        4 => updated_by: RowAuthor,
-        5 => updated_at: u64,
-        6 => _deletion: Option<Value>,
+        1 => created_by: RowAuthor,
+        2 => created_at: u64,
+        3 => updated_by: RowAuthor,
+        4 => updated_at: u64,
+        5 => _deletion: Option<Value>,
         .. user_cells,
     }
 }
@@ -211,6 +122,156 @@ groove::define_record! {
         16 => cascade_root: Option<Value>,
         17 => reason_detail: Option<String>,
         18 => durability: DurabilityTier,
+    }
+}
+
+/// Node-local touched-row lists, one record per transaction `(tx_time,
+/// tx_node_id)` (SPEC 2 §2.8).
+pub(super) const TX_TOUCHED_ROWS_TABLE: &str = "jazz_tx_touched_rows";
+
+/// Field of the touched-row list in a `jazz_tx_touched_rows` record.
+const TX_TOUCHED_ROWS_LIST_IDX: usize = 2;
+
+/// The history rows one transaction wrote on this node, keyed exactly as
+/// history is: `(physical table lineage, branch key bytes) -> row UUIDs`.
+///
+/// Stored in the node-local `jazz_tx_touched_rows` record of the transaction
+/// (SPEC 2 §2.8), never in the transaction record itself, which is the
+/// replicated identity of the transaction. It is how the node finds a
+/// transaction's versions (fate replay, relay forwarding, settlement,
+/// rejection clean-up) without a `by_tx` index over every history version:
+/// each listed row is one exact history point read at `(branch, row, tx_time,
+/// tx_node)`.
+///
+/// The list is a superset of the transaction's live history rows. Eviction
+/// may delete a listed row, and a listed row that is absent is skipped; a
+/// rejected transaction's rows are deleted with the list. It costs 16 bytes
+/// per row plus about 20 bytes per `(table, branch)` group, and it is read
+/// only when the transaction's versions are listed, which reads every listed
+/// row anyway.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct TouchedRows(BTreeMap<(PhysicalTableId, Vec<u8>), BTreeSet<RowUuid>>);
+
+impl TouchedRows {
+    pub(super) fn insert(&mut self, table: PhysicalTableId, branch_key: Vec<u8>, row: RowUuid) {
+        self.0.entry((table, branch_key)).or_default().insert(row);
+    }
+
+    pub(super) fn extend(&mut self, other: &TouchedRows) {
+        for ((table, branch_key), rows) in &other.0 {
+            self.0
+                .entry((*table, branch_key.clone()))
+                .or_default()
+                .extend(rows.iter().copied());
+        }
+    }
+
+    /// Every touched row in `(table, branch, row)` order.
+    pub(super) fn iter(&self) -> impl Iterator<Item = (PhysicalTableId, &[u8], RowUuid)> + '_ {
+        self.0.iter().flat_map(|((table, branch_key), rows)| {
+            rows.iter()
+                .map(move |row| (*table, branch_key.as_slice(), *row))
+        })
+    }
+
+    fn group_descriptor() -> records::RecordDescriptor {
+        records::RecordDescriptor::new([
+            ("physical_table_id", records::ValueType::U64),
+            ("branch_key", records::ValueType::Bytes),
+            ("row_uuids", records::ValueType::Uuid.array_of()),
+        ])
+    }
+
+    /// The canonical list.
+    pub(super) fn to_value(&self) -> Result<Value, Error> {
+        let descriptor = Self::group_descriptor();
+        let groups = self
+            .0
+            .iter()
+            .map(|((table, branch_key), rows)| {
+                let values = [
+                    Value::U64(table.0),
+                    Value::Bytes(branch_key.clone()),
+                    Value::Array(rows.iter().map(|row| Value::Uuid(row.0)).collect()),
+                ];
+                Ok(Value::Record(OwnedRecord::new(
+                    descriptor.create(&values)?,
+                    descriptor,
+                )))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Value::Array(groups))
+    }
+
+    /// Decode a stored `jazz_tx_touched_rows` record's list, refusing any
+    /// non-canonical spelling: unordered or repeated groups, empty groups,
+    /// unordered or repeated rows.
+    pub(super) fn from_list_record(record: BorrowedRecord<'_>) -> Result<Self, Error> {
+        Self::from_value(&record.get_idx(TX_TOUCHED_ROWS_LIST_IDX)?)
+    }
+
+    /// Values of the `jazz_tx_touched_rows` record listing these rows.
+    pub(super) fn list_record_values(
+        &self,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) -> Result<Vec<Value>, Error> {
+        Ok(vec![
+            Value::U64(tx_time.0),
+            Value::U64(tx_node_alias.0),
+            self.to_value()?,
+        ])
+    }
+
+    fn from_value(value: &Value) -> Result<Self, Error> {
+        let Value::Array(groups) = value else {
+            return Err(Error::InvalidStoredValue(
+                "transaction touched_rows must be an array",
+            ));
+        };
+        let mut touched = BTreeMap::new();
+        let mut previous: Option<(PhysicalTableId, Vec<u8>)> = None;
+        for group in groups {
+            let Value::Record(group) = group else {
+                return Err(Error::InvalidStoredValue(
+                    "transaction touched_rows group must be a record",
+                ));
+            };
+            let group = group.borrowed();
+            let key = (
+                PhysicalTableId(group.get_u64(0)?),
+                group.get_bytes(1)?.to_vec(),
+            );
+            let Value::Array(rows) = group.get_idx(2)? else {
+                return Err(Error::InvalidStoredValue(
+                    "transaction touched_rows group rows must be an array",
+                ));
+            };
+            let mut uuids = BTreeSet::new();
+            let mut last = None;
+            for row in rows {
+                let Value::Uuid(row) = row else {
+                    return Err(Error::InvalidStoredValue(
+                        "transaction touched row must be a UUID",
+                    ));
+                };
+                if last.is_some_and(|last| last >= row) {
+                    return Err(Error::InvalidStoredValue(
+                        "transaction touched rows are not strictly increasing",
+                    ));
+                }
+                last = Some(row);
+                uuids.insert(RowUuid(row));
+            }
+            if uuids.is_empty() || previous.as_ref().is_some_and(|previous| *previous >= key) {
+                return Err(Error::InvalidStoredValue(
+                    "transaction touched_rows groups are empty or not strictly increasing",
+                ));
+            }
+            previous = Some(key.clone());
+            touched.insert(key, uuids);
+        }
+        Ok(Self(touched))
     }
 }
 
@@ -1843,26 +1904,11 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    pub(super) struct PendingEdgeRowRecord {
-        0 => child_time: TxTime,
-        1 => child_node_id: NodeAlias,
-        2 => parent_time: TxTime,
-        3 => parent_node_id: NodeAlias,
-        4 => physical_table_id: u64,
-        5 => branch_key: Vec<u8>,
-        6 => row_uuid: RowUuid,
-        7 => layer: Vec<u8>,
-    }
-}
-
-groove::define_record! {
     pub(super) struct RejectedVersionRowRecord {
         0 => tx_time: TxTime,
         1 => tx_node_id: NodeAlias,
         2 => row_uuid: RowUuid,
-        3 => layer: Vec<u8>,
-        4 => parents: ParentRefs,
-        5 => _deletion: Option<Value>,
+        3 => _deletion: Option<Value>,
         .. user_cells,
     }
 }
@@ -1881,6 +1927,7 @@ pub(super) trait VersionRecordFromNode: Sized {
         table: &TableSchema,
         schema_version: SchemaVersionId,
         authored_columns: Option<BTreeSet<String>>,
+        lost_cells: Vec<u8>,
     ) -> Result<Self, Error>;
 }
 
@@ -1900,7 +1947,6 @@ impl VersionRecordFromNode for VersionRecord {
             table,
             schema_version,
             commit.row_uuid,
-            commit.parents.clone(),
             commit.made_by,
             commit.now_ms,
             commit.made_by,
@@ -1917,10 +1963,10 @@ impl VersionRecordFromNode for VersionRecord {
         table: &TableSchema,
         schema_version: SchemaVersionId,
         authored_columns: Option<BTreeSet<String>>,
+        lost_cells: Vec<u8>,
     ) -> Result<Self, Error> {
         let descriptor = version_record_descriptors(table).1;
         let input = stored.record.borrowed();
-        let register = stored.is_register_record();
         let raw = descriptor.create_with_encoded_fields::<Error>(
             input.raw().len(),
             |index, output| {
@@ -1928,10 +1974,9 @@ impl VersionRecordFromNode for VersionRecord {
                 // are packed HLC values in storage and milliseconds on wire.
                 let source = match index {
                     0 => Some(HistoryRowRecord::FIELD_ROW_UUID_IDX),
-                    1 => Some(HistoryRowRecord::FIELD_PARENTS_IDX),
-                    2 => Some(HistoryRowRecord::FIELD_CREATED_BY_IDX),
-                    4 => Some(HistoryRowRecord::FIELD_UPDATED_BY_IDX),
-                    i if i >= WireRowRecord::USER_CELLS && !register => {
+                    1 => Some(HistoryRowRecord::FIELD_CREATED_BY_IDX),
+                    5 => Some(HistoryRowRecord::FIELD__DELETION_IDX),
+                    i if i >= WireRowRecord::USER_CELLS => {
                         Some(HistoryRowRecord::USER_CELLS + i - WireRowRecord::USER_CELLS)
                     }
                     _ => None,
@@ -1942,9 +1987,10 @@ impl VersionRecordFromNode for VersionRecord {
                     return Ok(());
                 }
                 let value = match index {
-                    3 => Value::U64(stored.created_at().physical_ms()),
-                    5 => Value::U64(stored.updated_at().physical_ms()),
-                    6 => Value::Nullable(stored.deletion().map(|deletion| {
+                    2 => Value::U64(stored.created_at().physical_ms()),
+                    3 => row_author_value(stored.updated_by())?,
+                    4 => Value::U64(stored.updated_at().physical_ms()),
+                    5 => Value::Nullable(stored.deletion().map(|deletion| {
                         Box::new(Value::EnumTag(match deletion {
                             DeletionEvent::Deleted => 0,
                             DeletionEvent::Restored => 1,
@@ -1969,7 +2015,6 @@ impl VersionRecordFromNode for VersionRecord {
                 table,
                 schema_version,
                 stored.row_uuid(),
-                stored.parents(),
                 stored.created_by(),
                 stored.created_at().physical_ms(),
                 stored.updated_by(),
@@ -1985,7 +2030,10 @@ impl VersionRecordFromNode for VersionRecord {
             OwnedRecord::new(raw, descriptor),
         )
         .with_branch_key(stored.branch_key().clone())
-        .with_authored_columns(authored_columns))
+        .with_authored_columns(authored_columns)
+        .with_base(stored.base()?)
+        .with_lost_cells(lost_cells)
+        .with_counter_signs(stored.counter_signs()?))
     }
 }
 
@@ -2031,18 +2079,6 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
             .record_schema();
         RejectedTransactionRowRecord::assert_layout(&rejected_tx_descriptor);
 
-        let pending_edge_descriptor = groove_schema
-            .table("jazz_pending_edges")
-            .expect("pending edges table")
-            .record_schema();
-        PendingEdgeRowRecord::assert_layout(&pending_edge_descriptor);
-
-        let global_change_descriptor = groove_schema
-            .table("jazz_global_changes")
-            .expect("global changes table")
-            .record_schema();
-        GlobalChangeRowRecord::assert_layout(&global_change_descriptor);
-
         for table in &schema.tables {
             let rejected_version_descriptor =
                 table.rejected_versions_storage_table().record_schema();
@@ -2060,23 +2096,14 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
                 );
             }
 
-            let register_descriptor = table.register_storage_table().record_schema();
-            RegisterRowRecord::assert_layout(&register_descriptor);
-
-            for global_table in table.global_current_storage_tables() {
-                let descriptor = global_table.record_schema();
-                if global_table.name.ends_with("_register_global_current") {
-                    RegisterGlobalCurrentRowRecord::assert_layout(&descriptor);
-                } else {
-                    GlobalCurrentRowRecord::assert_layout(&descriptor);
-                    for (idx, column) in table.columns.iter().enumerate() {
-                        assert_user_field(
-                            &descriptor,
-                            GlobalCurrentRowRecord::USER_CELLS + idx,
-                            &user_column_field(&column.name),
-                        );
-                    }
-                }
+            let descriptor = table.global_current_storage_table().record_schema();
+            GlobalCurrentRowRecord::assert_layout(&descriptor);
+            for (idx, column) in table.columns.iter().enumerate() {
+                assert_user_field(
+                    &descriptor,
+                    GlobalCurrentRowRecord::USER_CELLS + idx,
+                    &user_column_field(&column.name),
+                );
             }
 
             let wire_descriptor = table.wire_record_descriptor();
@@ -2155,7 +2182,6 @@ pub(super) struct VersionRowParts {
     pub(super) tx_node_alias: NodeAlias,
     pub(super) schema_version_alias: SchemaVersionAlias,
     pub(super) tx_time: TxTime,
-    pub(super) parents: Vec<TxId>,
     pub(super) created_by: AuthorSubject,
     pub(super) created_at: TxTime,
     pub(super) updated_by: AuthorSubject,
@@ -2163,17 +2189,29 @@ pub(super) struct VersionRowParts {
     pub(super) cells: BTreeMap<String, Value>,
     pub(super) authored_columns: Option<BTreeSet<PhysicalColumnId>>,
     pub(super) deletion: Option<DeletionEvent>,
+    /// The write's accepted seq; `0` while pending (SPEC 4 §4.6).
+    pub(super) seq: GlobalTime,
+    /// The write's base (SPEC 4 §4.6, "Base of a write").
+    pub(super) base: RowBase,
+    /// The write's lost cells keyed by physical column id; empty when none.
+    pub(super) lost_cells: Vec<u8>,
+    /// Sign bits of this patch's counter ops (`merge_ops::counter_signs`):
+    /// empty when none is negative, and on every settled image.
+    pub(super) counter_signs: Vec<u8>,
 }
 
-// Record layout depends on the table name (enum registry binding) and ordered
-// physical column shape, not defaults, indices, or policies. Compare the shape
-// itself: schema objects are mutable and a table name alone is insufficient.
+// Record layout depends on the table name (enum registry binding), the ordered
+// physical column shape, and each column's merge strategy — not defaults,
+// indices, or policies. Compare all of it: schema objects are mutable, and two tables with
+// the same name and column types but different merge strategies (two apps in
+// one process, or a strategy-only schema change) have different layouts.
 struct HistoryDescriptorCacheEntry {
     table_name: String,
     columns: Vec<(
         String,
         groove::schema::ColumnType,
         crate::schema::LargeValueSemanticKind,
+        crate::schema::MergeStrategy,
     )>,
     descriptor: records::RecordDescriptor,
     wire_descriptor: records::RecordDescriptor,
@@ -2188,7 +2226,7 @@ pub(super) fn prepared_wire_record_descriptor(table: &TableSchema) -> records::R
     version_record_descriptors(table).1
 }
 
-fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+pub(super) fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     version_record_descriptors(table).0
 }
 
@@ -2205,15 +2243,14 @@ fn version_record_descriptors(
         if let Some(entry) = cache.iter().find(|entry| {
             entry.table_name == table.name
                 && entry.columns.len() == table.columns.len()
-                && entry
-                    .columns
-                    .iter()
-                    .zip(&table.columns)
-                    .all(|((name, ty, kind), column)| {
+                && entry.columns.iter().zip(&table.columns).all(
+                    |((name, ty, kind, strategy), column)| {
                         name == &column.name
                             && ty == &column.column_type
                             && kind == &column.large_value_kind
-                    })
+                            && *strategy == table.merge_strategy(&column.name)
+                    },
+                )
         }) {
             return (entry.descriptor, entry.wire_descriptor);
         }
@@ -2236,6 +2273,7 @@ fn version_record_descriptors(
                         column.name.clone(),
                         column.column_type.clone(),
                         column.large_value_kind,
+                        table.merge_strategy(&column.name),
                     )
                 })
                 .collect(),
@@ -2246,13 +2284,21 @@ fn version_record_descriptors(
     })
 }
 
-pub(super) fn register_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
-    // Every table uses the same fixed deletion-register record fields.
-    static DESCRIPTOR: std::sync::OnceLock<records::RecordDescriptor> = std::sync::OnceLock::new();
-    *DESCRIPTOR.get_or_init(|| table.register_storage_table().record_schema())
-}
-
 impl VersionRow {
+    /// The same row image with its record fields replaced, keeping the
+    /// record layout. Used by Core to build a merged post-image.
+    pub(super) fn with_record_values(&self, values: Vec<Value>) -> Result<Self, Error> {
+        let record = owned_record_from_storage_values_with_descriptor(
+            self.record.borrowed().descriptor(),
+            values,
+        )?;
+        Ok(Self {
+            table: self.table,
+            branch_key: self.branch_key.clone(),
+            record,
+        })
+    }
+
     /// Count one cold-path conversion that produced or consumed this version.
     #[cfg(feature = "cold-settle-attribution")]
     pub(super) fn record_conversion(&self, site: &'static str, bytes: usize) {
@@ -2264,7 +2310,6 @@ impl VersionRow {
             self.branch_key(),
             self.tx_time(),
             self.tx_node_alias(),
-            self.layer(),
         )
             .hash(&mut hasher);
         groove::cold_settle_attribution::conversions::record(site, hasher.finish(), bytes);
@@ -2276,28 +2321,11 @@ impl VersionRow {
         _storage_schema_version: Option<SchemaVersionId>,
         history_descriptor: Option<records::RecordDescriptor>,
     ) -> Result<Self, Error> {
-        let is_deletion = parts.deletion.is_some();
-        let values = if is_deletion {
-            register_values_from_parts(&parts)?
-        } else {
-            history_values_from_parts(table, &parts)?
-        };
-        let record = if is_deletion {
-            owned_record_from_storage_values_with_descriptor(
-                register_record_descriptor(table),
-                values,
-            )?
-        } else {
-            match history_descriptor {
-                Some(descriptor) => {
-                    owned_record_from_storage_values_with_descriptor(descriptor, values)?
-                }
-                None => owned_record_from_storage_values_with_descriptor(
-                    history_record_descriptor(table),
-                    values,
-                )?,
-            }
-        };
+        let values = history_values_from_parts(table, &parts)?;
+        let record = owned_record_from_storage_values_with_descriptor(
+            history_descriptor.unwrap_or_else(|| history_record_descriptor(table)),
+            values,
+        )?;
         Ok(Self {
             table: groove::Intern::new(parts.table),
             branch_key: parts.branch_key,
@@ -2312,6 +2340,8 @@ impl VersionRow {
         tx_node_alias: NodeAlias,
         schema_version_alias: SchemaVersionAlias,
         tx_time: TxTime,
+        seq: GlobalTime,
+        lost_cells: Vec<u8>,
         _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
         if !version.branch_key().is_canonical() {
@@ -2319,17 +2349,11 @@ impl VersionRow {
                 "row version branch key is not canonical",
             ));
         }
-        if version.parents().windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(Error::InvalidMergeableCommit(
-                "row version parents must be sorted and unique",
-            ));
-        }
         let deletion = version.deletion();
-        let descriptor = if deletion.is_some() {
-            register_record_descriptor(table)
-        } else {
-            history_record_descriptor(table)
-        };
+        super::merge_ops::validate_counter_signs(table, version.counter_signs())?;
+        // `authored_columns` and `counter_signs` precede the merge fields.
+        let first_merge_field = HistoryRowRecord::USER_CELLS + table.columns.len() + 2;
+        let descriptor = history_record_descriptor(table);
         let source = version.record().borrowed();
         let source_descriptor = source.descriptor();
         // Admission still requires an account-bearing row author, including the
@@ -2350,10 +2374,12 @@ impl VersionRow {
                 let source_index = match index {
                     1 => Some(0),
                     5 => Some(1),
-                    6 => Some(2),
-                    8 => Some(4),
-                    i if deletion.is_none() && i >= 10 && i < 10 + table.columns.len() => {
-                        Some(i - 10 + 7)
+                    7 => Some(3),
+                    9 => Some(5),
+                    i if i >= HistoryRowRecord::USER_CELLS
+                        && i < HistoryRowRecord::USER_CELLS + table.columns.len() =>
+                    {
+                        Some(i - HistoryRowRecord::USER_CELLS + 6)
                     }
                     _ => None,
                 };
@@ -2376,26 +2402,36 @@ impl VersionRow {
                     2 => Value::U64(tx_time.0),
                     3 => Value::U64(tx_node_alias.0),
                     4 => Value::U64(schema_version_alias.0),
-                    5 => Value::Array(
-                        version
-                            .parents()
-                            .iter()
-                            .map(|parent| tx_id_value(*parent))
-                            .collect(),
-                    ),
-                    6 => row_author_value(version.created_by())?,
-                    7 => Value::U64(created_at),
-                    8 => row_author_value(version.updated_by())?,
-                    9 => Value::U64(updated_at),
-                    _ if deletion.is_some() => deletion_event_value(deletion.unwrap()),
-                    i if i < 10 + table.columns.len() => {
-                        let value = version.optional_cell_at(i - 10);
+                    5 => row_author_value(version.created_by())?,
+                    6 => Value::U64(created_at),
+                    7 => history_updated_by_value(version.updated_by())?,
+                    8 => Value::U64(updated_at),
+                    9 => nullable_deletion_value(deletion),
+                    i if i < HistoryRowRecord::USER_CELLS + table.columns.len() => {
+                        let column = i - HistoryRowRecord::USER_CELLS;
+                        let value = version.optional_cell_at(column);
                         if let Some(value) = value.as_ref() {
-                            validate_cell_value(&table.columns[i - 10], value)?;
+                            validate_cell_value(&table.columns[column], value)?;
                         }
                         Value::Nullable(value.map(Box::new))
                     }
-                    _ => authored_column_ids_value(authored_columns.as_ref()),
+                    i if i == HistoryRowRecord::USER_CELLS + table.columns.len() => {
+                        authored_column_ids_value(authored_columns.as_ref())
+                    }
+                    i if i == HistoryRowRecord::USER_CELLS + table.columns.len() + 1 => {
+                        Value::Bytes(version.counter_signs().to_vec())
+                    }
+                    i => match i - first_merge_field {
+                        0 => Value::U64(seq.0),
+                        1 => base_seq_value(version.base()),
+                        2 => base_pending_value(version.base()),
+                        3 => Value::Bytes(lost_cells.clone()),
+                        _ => {
+                            return Err(Error::InvalidStoredValue(
+                                "history layout does not end with the merge fields",
+                            ));
+                        }
+                    },
                 };
                 descriptor.encode_field_into(index, &value, output)?;
                 Ok(())
@@ -2405,24 +2441,16 @@ impl VersionRow {
         {
             // Compare the optimized representation boundary with the previous
             // Value-based encoder across every ingress fixture in the unit suite.
-            let values = if let Some(deletion) = deletion {
-                register_values_from_wire(
-                    version,
-                    tx_node_alias,
-                    schema_version_alias,
-                    tx_time,
-                    deletion,
-                )?
-            } else {
-                history_values_from_wire(
-                    table,
-                    version,
-                    authored_columns.clone(),
-                    tx_node_alias,
-                    schema_version_alias,
-                    tx_time,
-                )?
-            };
+            let values = history_values_from_wire(
+                table,
+                version,
+                authored_columns.clone(),
+                tx_node_alias,
+                schema_version_alias,
+                tx_time,
+                seq,
+                &lost_cells,
+            )?;
             assert_eq!(
                 raw,
                 descriptor.create(&values)?,
@@ -2448,11 +2476,7 @@ impl VersionRow {
     }
 
     pub(super) fn row_uuid(&self) -> RowUuid {
-        let idx = if self.is_register_record() {
-            RegisterRowRecord::FIELD_ROW_UUID_IDX
-        } else {
-            HistoryRowRecord::FIELD_ROW_UUID_IDX
-        };
+        let idx = HistoryRowRecord::FIELD_ROW_UUID_IDX;
         RowUuid(
             self.record
                 .borrowed()
@@ -2462,11 +2486,7 @@ impl VersionRow {
     }
 
     pub(super) fn tx_node_alias(&self) -> NodeAlias {
-        let idx = if self.is_register_record() {
-            RegisterRowRecord::FIELD_TX_NODE_ID_IDX
-        } else {
-            HistoryRowRecord::FIELD_TX_NODE_ID_IDX
-        };
+        let idx = HistoryRowRecord::FIELD_TX_NODE_ID_IDX;
         NodeAlias(
             self.record
                 .borrowed()
@@ -2476,38 +2496,16 @@ impl VersionRow {
     }
 
     pub(super) fn tx_time(&self) -> TxTime {
-        let idx = if self.is_register_record() {
-            RegisterRowRecord::FIELD_TX_TIME_IDX
-        } else {
-            HistoryRowRecord::FIELD_TX_TIME_IDX
-        };
+        let idx = HistoryRowRecord::FIELD_TX_TIME_IDX;
         TxTime(self.record.borrowed().get_u64(idx).expect("valid tx_time"))
     }
 
-    pub(super) fn parents(&self) -> Vec<TxId> {
-        self.checked_parents()
-            .expect("valid canonical parent tx ids")
-    }
-
     pub(super) fn validate_canonical(&self) -> Result<(), Error> {
-        validate_canonical_version_parts(&self.branch_key, &self.checked_parents()?)
-    }
-
-    fn checked_parents(&self) -> Result<Vec<TxId>, Error> {
-        let idx = if self.is_register_record() {
-            RegisterRowRecord::FIELD_PARENTS_IDX
-        } else {
-            HistoryRowRecord::FIELD_PARENTS_IDX
-        };
-        tx_ids_from_value(self.record.borrowed().get_idx(idx)?)
+        validate_canonical_version_parts(&self.branch_key)
     }
 
     pub(super) fn created_by(&self) -> AuthorSubject {
-        let idx = if self.is_register_record() {
-            RegisterRowRecord::FIELD_CREATED_BY_IDX
-        } else {
-            HistoryRowRecord::FIELD_CREATED_BY_IDX
-        };
+        let idx = HistoryRowRecord::FIELD_CREATED_BY_IDX;
         RowAuthor::from_record(
             self.record
                 .borrowed()
@@ -2519,11 +2517,7 @@ impl VersionRow {
     }
 
     pub(super) fn created_at(&self) -> TxTime {
-        let idx = if self.is_register_record() {
-            RegisterRowRecord::FIELD_CREATED_AT_IDX
-        } else {
-            HistoryRowRecord::FIELD_CREATED_AT_IDX
-        };
+        let idx = HistoryRowRecord::FIELD_CREATED_AT_IDX;
         TxTime(
             self.record
                 .borrowed()
@@ -2532,28 +2526,31 @@ impl VersionRow {
         )
     }
 
+    /// The image's `updated_by`. History storage omits it when it is the
+    /// author of the image's own transaction; every read path fills it in
+    /// from that transaction record (`resolve_history_updated_by`) before a
+    /// `VersionRow` leaves storage, so an in-memory row always carries it.
     pub(super) fn updated_by(&self) -> AuthorSubject {
-        let idx = if self.is_register_record() {
-            RegisterRowRecord::FIELD_UPDATED_BY_IDX
-        } else {
-            HistoryRowRecord::FIELD_UPDATED_BY_IDX
-        };
-        RowAuthor::from_record(
+        let idx = HistoryRowRecord::FIELD_UPDATED_BY_IDX;
+        <Option<RowAuthor> as records::RecordField>::read(&self.record.borrowed(), idx)
+            .expect("valid updated_by")
+            .expect("history updated_by is resolved when the image is read")
+            .as_author_subject()
+    }
+
+    /// Whether this image still lacks `updated_by`: it was read from history
+    /// storage, which omits the transaction's own author.
+    pub(super) fn updated_by_is_implicit(&self) -> Result<bool, Error> {
+        Ok(matches!(
             self.record
                 .borrowed()
-                .get_record(idx)
-                .expect("valid updated_by"),
-        )
-        .expect("canonical updated_by")
-        .as_author_subject()
+                .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)?,
+            Value::Nullable(None)
+        ))
     }
 
     pub(super) fn updated_at(&self) -> TxTime {
-        let idx = if self.is_register_record() {
-            RegisterRowRecord::FIELD_UPDATED_AT_IDX
-        } else {
-            HistoryRowRecord::FIELD_UPDATED_AT_IDX
-        };
+        let idx = HistoryRowRecord::FIELD_UPDATED_AT_IDX;
         TxTime(
             self.record
                 .borrowed()
@@ -2563,11 +2560,7 @@ impl VersionRow {
     }
 
     pub(super) fn schema_version_alias(&self) -> SchemaVersionAlias {
-        let idx = if self.is_register_record() {
-            RegisterRowRecord::FIELD_SCHEMA_VERSION_IDX
-        } else {
-            HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX
-        };
+        let idx = HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX;
         SchemaVersionAlias(
             self.record
                 .borrowed()
@@ -2576,38 +2569,24 @@ impl VersionRow {
         )
     }
 
-    /// Bind a derived storage row to the same schema version as this version.
-    pub(super) fn bind_groove_record(&self, record: OwnedRecord) -> groove::records::VariantRecord {
-        groove::records::VariantRecord::new(
-            u32::try_from(self.schema_version_alias().0)
-                .expect("schema aliases are allocated in Groove's variant-tag space"),
-            record,
-        )
-    }
-
+    /// The row's deletion state, stamped into the row image like any cell.
     pub(super) fn deletion(&self) -> Option<DeletionEvent> {
-        if !self.is_register_record() {
-            return None;
-        }
-        deletion_event_from_value(
+        nullable_value(
             self.record
                 .borrowed()
-                .get_idx(RegisterRowRecord::FIELD__DELETION_IDX)
+                .get_idx(HistoryRowRecord::FIELD__DELETION_IDX)
                 .expect("valid deletion"),
         )
-        .map(Some)
         .expect("valid deletion")
+        .map(|value| deletion_event_from_value(value).expect("valid deletion"))
     }
 
-    pub(super) fn layer(&self) -> VersionLayer {
-        version_layer_from_deletion(self.deletion())
+    pub(super) fn is_deleted(&self) -> bool {
+        self.deletion() == Some(DeletionEvent::Deleted)
     }
 
     pub(super) fn cells(&self, table: &TableSchema) -> Result<BTreeMap<String, Value>, Error> {
         let mut cells = BTreeMap::new();
-        if self.is_register_record() {
-            return Ok(cells);
-        }
         let borrowed = self.record.borrowed();
         for (idx, column) in table.columns.iter().enumerate() {
             if let Some(value) =
@@ -2620,9 +2599,6 @@ impl VersionRow {
     }
 
     pub(super) fn cell(&self, table: &TableSchema, column: &str) -> Result<Option<Value>, Error> {
-        if self.is_register_record() {
-            return Ok(None);
-        }
         let field = HistoryRowRecord::USER_CELLS
             + table
                 .columns
@@ -2636,9 +2612,6 @@ impl VersionRow {
     /// treated as authored by merge code. Exact sets use strictly increasing
     /// node-local physical column ids; alternate set spellings are invalid.
     pub(super) fn authored_column_ids(&self) -> Result<Option<BTreeSet<PhysicalColumnId>>, Error> {
-        if self.is_register_record() {
-            return Ok(None);
-        }
         let Some(field) = self.record.descriptor().field_index("authored_columns") else {
             return Ok(None);
         };
@@ -2646,8 +2619,101 @@ impl VersionRow {
         value.map(authored_column_ids_from_value).transpose()
     }
 
-    pub(super) fn is_register_record(&self) -> bool {
-        self.record.descriptor().field_index("_deletion").is_some()
+    /// The sign bits of this patch's counter ops (`merge_ops::counter_signs`):
+    /// empty on a settled image or a layout without the field.
+    pub(super) fn counter_signs(&self) -> Result<Vec<u8>, Error> {
+        let Some(field) = self
+            .record
+            .descriptor()
+            .field_index(crate::schema::COUNTER_SIGNS_FIELD)
+        else {
+            return Ok(Vec::new());
+        };
+        match self.record.borrowed().get_idx(field)? {
+            Value::Bytes(bytes) => Ok(bytes),
+            _ => Err(Error::InvalidStoredValue(
+                "counter_signs field must be bytes",
+            )),
+        }
+    }
+
+    fn trailing_field(&self, name: &str) -> Result<Option<Value>, Error> {
+        let Some(field) = self.record.descriptor().field_index(name) else {
+            return Ok(None);
+        };
+        Ok(Some(self.record.borrowed().get_idx(field)?))
+    }
+
+    /// The write's accepted seq; `0` while it has no accepted fate (SPEC 4
+    /// §4.6, "Durable layout"), and on a layout without the field.
+    pub(super) fn seq(&self) -> Result<GlobalTime, Error> {
+        match self.trailing_field(crate::schema::SEQ_FIELD)? {
+            None => Ok(GlobalTime(0)),
+            Some(Value::U64(seq)) => Ok(GlobalTime(seq)),
+            Some(_) => Err(Error::InvalidStoredValue("history seq must be u64")),
+        }
+    }
+
+    /// The write's base (SPEC 4 §4.6, "Base of a write").
+    pub(super) fn base(&self) -> Result<RowBase, Error> {
+        let seq = match self.trailing_field(crate::schema::BASE_SEQ_FIELD)? {
+            None => None,
+            Some(value) => match nullable_value(value)? {
+                None => None,
+                Some(Value::U64(seq)) => Some(GlobalTime(seq)),
+                Some(_) => return Err(Error::InvalidStoredValue("history base_seq must be u64")),
+            },
+        };
+        let pending = match self.trailing_field(crate::schema::BASE_PENDING_FIELD)? {
+            None => None,
+            Some(value) => nullable_value(value)?.map(tx_id_from_value).transpose()?,
+        };
+        Ok(RowBase { seq, pending })
+    }
+
+    /// The write's lost cells, keyed by node-local physical column id
+    /// (`lost_cells`): empty when it lost nothing.
+    pub(super) fn lost_cells_raw(&self) -> Result<Vec<u8>, Error> {
+        match self.trailing_field(crate::schema::LOST_CELLS_FIELD)? {
+            None => Ok(Vec::new()),
+            Some(Value::Bytes(bytes)) => Ok(bytes),
+            Some(_) => Err(Error::InvalidStoredValue(
+                "history lost_cells must be bytes",
+            )),
+        }
+    }
+
+    /// This image with its trailing merge fields replaced. A layout without
+    /// the fields (none is written today) keeps its record.
+    pub(super) fn with_merge_fields(
+        &self,
+        seq: GlobalTime,
+        base: RowBase,
+        lost_cells: Vec<u8>,
+    ) -> Result<Self, Error> {
+        let descriptor = self.record.descriptor();
+        let Some(seq_idx) = descriptor.field_index(crate::schema::SEQ_FIELD) else {
+            return Ok(self.clone());
+        };
+        let mut values = self.record.to_values()?;
+        values[seq_idx] = Value::U64(seq.0);
+        let mut set = |name: &str, value: Value| {
+            if let Some(idx) = descriptor.field_index(name) {
+                values[idx] = value;
+            }
+        };
+        set(crate::schema::BASE_SEQ_FIELD, base_seq_value(base));
+        set(crate::schema::BASE_PENDING_FIELD, base_pending_value(base));
+        set(crate::schema::LOST_CELLS_FIELD, Value::Bytes(lost_cells));
+        self.with_record_values(values)
+    }
+
+    /// This image at `seq`, keeping its base and lost cells.
+    pub(super) fn with_seq(&self, seq: GlobalTime) -> Result<Self, Error> {
+        if self.seq()? == seq {
+            return Ok(self.clone());
+        }
+        self.with_merge_fields(seq, self.base()?, self.lost_cells_raw()?)
     }
 
     pub(super) fn to_history_entry(
@@ -2720,91 +2786,13 @@ pub(super) struct ParkedCommitUnit {
 pub(super) fn current_version_index(
     versions: &[VersionRow],
     candidate_indices: &[usize],
-    layer: VersionLayer,
     node_aliases: &NodeAliases,
 ) -> Option<usize> {
-    match layer {
-        VersionLayer::Content => {
-            let heads = content_head_indices(versions, candidate_indices, node_aliases);
-            heads.into_iter().max_by_key(|idx| {
-                let tx_id = version_tx_id_from_aliases(&versions[*idx], node_aliases)
-                    .expect("valid version tx id");
-                versions[*idx].tx_time().sort_key(tx_id.node)
-            })
-        }
-        VersionLayer::Deletion => candidate_indices.iter().copied().max_by_key(|idx| {
-            let tx_id = version_tx_id_from_aliases(&versions[*idx], node_aliases)
-                .expect("valid version tx id");
-            versions[*idx].tx_time().sort_key(tx_id.node)
-        }),
-    }
-}
-
-pub(super) fn version_wins_over_open_winner(
-    incoming: &VersionRow,
-    incoming_tx_id: TxId,
-    incoming_made_at: TxTime,
-    open_winner: Option<(&VersionRow, TxId, TxTime)>,
-) -> bool {
-    match open_winner {
-        None => true,
-        Some((_, winner_tx_id, _)) if incoming.parents().contains(&winner_tx_id) => true,
-        Some((_, winner_tx_id, winner_made_at)) => {
-            incoming_made_at.sort_key(incoming_tx_id.node)
-                > winner_made_at.sort_key(winner_tx_id.node)
-        }
-    }
-}
-
-pub(super) fn content_head_indices(
-    versions: &[VersionRow],
-    candidate_indices: &[usize],
-    node_aliases: &NodeAliases,
-) -> Vec<usize> {
-    let txs = candidate_indices
-        .iter()
-        .map(|idx| {
-            version_tx_id_from_aliases(&versions[*idx], node_aliases).expect("valid version tx id")
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    let parents_by_tx = candidate_indices
-        .iter()
-        .map(|idx| {
-            let tx_id = version_tx_id_from_aliases(&versions[*idx], node_aliases)
-                .expect("valid version tx id");
-            (tx_id, versions[*idx].parents())
-        })
-        .collect::<BTreeMap<_, _>>();
-    // A candidate is dominated when it is reachable through parent edges from
-    // any candidate. One walk with a shared visited set expands each ancestor
-    // once; a walk per candidate re-walked the whole chain behind every
-    // version, which is quadratic in a row's history.
-    let mut dominated = std::collections::BTreeSet::new();
-    let mut seen = std::collections::BTreeSet::new();
-    let mut stack = candidate_indices
-        .iter()
-        .flat_map(|idx| versions[*idx].parents())
-        .collect::<Vec<_>>();
-    while let Some(parent) = stack.pop() {
-        if !seen.insert(parent) {
-            continue;
-        }
-        if txs.contains(&parent) {
-            dominated.insert(parent);
-        }
-        if let Some(parents) = parents_by_tx.get(&parent) {
-            stack.extend(parents.iter().copied());
-        }
-    }
-    candidate_indices
-        .iter()
-        .copied()
-        .filter(|idx| {
-            let tx_id = version_tx_id_from_aliases(&versions[*idx], node_aliases)
-                .expect("valid version tx id");
-            !dominated.contains(&tx_id)
-        })
-        .collect()
+    candidate_indices.iter().copied().max_by_key(|idx| {
+        let tx_id =
+            version_tx_id_from_aliases(&versions[*idx], node_aliases).expect("valid version tx id");
+        versions[*idx].tx_time().sort_key(tx_id.node)
+    })
 }
 
 pub(super) fn version_tx_id_from_aliases(
@@ -2816,43 +2804,24 @@ pub(super) fn version_tx_id_from_aliases(
         .map(|node| TxId::new(version.tx_time(), node))
 }
 
+/// Test vocabulary for the two maintained witness kinds. Storage has one row
+/// image per version; a version reads as a deletion witness when its image
+/// carries a `_deletion` cell.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum VersionLayer {
     Content,
     Deletion,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct ParentCoordinate {
-    pub(super) physical_table_id: PhysicalTableId,
-    pub(super) branch_key: BranchKey,
-    pub(super) row_uuid: RowUuid,
-    pub(super) layer: VersionLayer,
-}
-
-impl VersionLayer {
-    pub(super) fn for_commit(commit: &MergeableCommit) -> Self {
-        if commit.deletion.is_some() {
-            Self::Deletion
+#[cfg(test)]
+impl VersionRow {
+    pub(super) fn layer(&self) -> VersionLayer {
+        if self.deletion().is_some() {
+            VersionLayer::Deletion
         } else {
-            Self::Content
+            VersionLayer::Content
         }
-    }
-
-    pub(super) fn for_record(record: &VersionRecord) -> Self {
-        if record.deletion().is_some() {
-            Self::Deletion
-        } else {
-            Self::Content
-        }
-    }
-}
-
-pub(super) fn version_layer_from_deletion(deletion: Option<DeletionEvent>) -> VersionLayer {
-    if deletion.is_some() {
-        VersionLayer::Deletion
-    } else {
-        VersionLayer::Content
     }
 }
 
@@ -3573,6 +3542,7 @@ pub(super) fn runtime_result_identity_bytes(
     Ok(encoded)
 }
 
+/// Values of a `jazz_transactions` record.
 pub(super) fn transaction_values(
     node_alias: NodeAlias,
     tx: &Transaction,
@@ -3680,75 +3650,6 @@ pub(super) fn rejected_transaction_values(
     ])
 }
 
-pub(super) fn pending_edge_values(
-    child_alias: NodeAlias,
-    child: TxId,
-    parent_alias: NodeAlias,
-    parent: TxId,
-    coordinate: &ParentCoordinate,
-) -> Result<Vec<Value>, Error> {
-    Ok(vec![
-        Value::U64(child.time.0),
-        Value::U64(child_alias.0),
-        Value::U64(parent.time.0),
-        Value::U64(parent_alias.0),
-        Value::U64(coordinate.physical_table_id.0),
-        Value::Bytes(coordinate.branch_key.try_canonical_bytes().map_err(|_| {
-            Error::InvalidMergeableCommit("pending parent coordinate branch key is not canonical")
-        })?),
-        Value::Uuid(coordinate.row_uuid.0),
-        Value::Bytes(version_layer_string(coordinate.layer).into_bytes()),
-    ])
-}
-
-pub(super) fn pending_edge_primary_key(
-    child_alias: NodeAlias,
-    child: TxId,
-    parent_alias: NodeAlias,
-    parent: TxId,
-    coordinate: &ParentCoordinate,
-) -> Result<PrimaryKeyValue, Error> {
-    Ok(PrimaryKeyValue::Composite(vec![
-        PrimaryKeyValue::U64(child.time.0),
-        PrimaryKeyValue::U64(child_alias.0),
-        PrimaryKeyValue::U64(parent.time.0),
-        PrimaryKeyValue::U64(parent_alias.0),
-        PrimaryKeyValue::U64(coordinate.physical_table_id.0),
-        PrimaryKeyValue::Bytes(coordinate.branch_key.try_canonical_bytes().map_err(|_| {
-            Error::InvalidStoredValue("pending parent coordinate branch key is invalid")
-        })?),
-        PrimaryKeyValue::Uuid(coordinate.row_uuid.0),
-        PrimaryKeyValue::Bytes(version_layer_string(coordinate.layer).into_bytes()),
-    ]))
-}
-
-pub(super) fn pending_edge_coordinate_from_record(
-    record: BorrowedRecord<'_>,
-) -> Result<ParentCoordinate, Error> {
-    let layer = match record.get_bytes(PendingEdgeRowRecord::FIELD_LAYER_IDX)? {
-        b"content" => VersionLayer::Content,
-        b"deletion" => VersionLayer::Deletion,
-        _ => {
-            return Err(Error::InvalidStoredValue(
-                "pending parent coordinate layer is invalid",
-            ));
-        }
-    };
-    Ok(ParentCoordinate {
-        physical_table_id: PhysicalTableId(
-            record.get_u64(PendingEdgeRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?,
-        ),
-        branch_key: BranchKey::from_canonical_bytes(
-            record.get_bytes(PendingEdgeRowRecord::FIELD_BRANCH_KEY_IDX)?,
-        )
-        .map_err(|_| {
-            Error::InvalidStoredValue("pending parent coordinate branch key is invalid")
-        })?,
-        row_uuid: RowUuid(record.get_uuid(PendingEdgeRowRecord::FIELD_ROW_UUID_IDX)?),
-        layer,
-    })
-}
-
 pub(super) fn rejected_version_values(
     table_schema: &TableSchema,
     version: &VersionRow,
@@ -3758,20 +3659,7 @@ pub(super) fn rejected_version_values(
         Value::U64(version.tx_time().0),
         Value::U64(version.tx_node_alias().0),
         Value::Uuid(version.row_uuid().0),
-        Value::Bytes(version_layer_string(version.layer()).into_bytes()),
-        Value::Array(
-            version
-                .parents()
-                .iter()
-                .map(|parent| tx_id_value(*parent))
-                .collect(),
-        ),
-        Value::Nullable(version.deletion().map(|deletion| {
-            Box::new(Value::EnumTag(match deletion {
-                DeletionEvent::Deleted => 0,
-                DeletionEvent::Restored => 1,
-            }))
-        })),
+        nullable_deletion_value(version.deletion()),
     ];
     for column in &table_schema.columns {
         values.push(Value::Nullable(
@@ -3809,14 +3697,6 @@ pub(super) fn next_fate(current: &Fate, incoming: Fate) -> Result<Fate, Error> {
         (Fate::Accepted, Fate::Rejected(_)) | (Fate::Rejected(_), Fate::Accepted) => {
             Err(Error::ConflictingFate)
         }
-    }
-}
-
-pub(super) fn rejected_root_for(fate: &Fate, tx_id: TxId) -> Option<TxId> {
-    match fate {
-        Fate::Rejected(RejectionReason::Cascade { root }) => Some(*root),
-        Fate::Rejected(_) => Some(tx_id),
-        Fate::Pending | Fate::Accepted => None,
     }
 }
 
@@ -3924,6 +3804,14 @@ pub(super) fn canonical_versions(mut versions: Vec<VersionRecord>) -> Vec<Versio
     versions
 }
 
+/// Reserved authored-column marker for the row image's `_deletion` cell.
+/// Deletion is stamped into every version; a version authors it only when it
+/// deletes or restores the row. Allocated physical ids are small and
+/// increasing, so the maximal id can never collide and sorts last.
+pub(super) const DELETION_COLUMN_ID: PhysicalColumnId = PhysicalColumnId(u64::MAX);
+/// Wire/logical spelling of [`DELETION_COLUMN_ID`] in `authored_columns`.
+pub(super) const DELETION_COLUMN_NAME: &str = "_deletion";
+
 pub(super) fn authored_column_ids_from_value(
     value: Value,
 ) -> Result<BTreeSet<PhysicalColumnId>, Error> {
@@ -3967,10 +3855,16 @@ fn authored_column_ids_value(columns: Option<&BTreeSet<PhysicalColumnId>>) -> Va
     }))
 }
 
-fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
+pub(super) fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
     Ok(RowAuthor::from_persisted_subject(author)
         .map_err(|_| Error::UnadmittedWriteAuthor)?
         .to_value())
+}
+
+/// `updated_by` of an in-memory history image: always present. Storage may
+/// omit it (see [`VersionRow::updated_by`]).
+pub(super) fn history_updated_by_value(author: AuthorSubject) -> Result<Value, Error> {
+    Ok(Value::Nullable(Some(Box::new(row_author_value(author)?))))
 }
 
 pub(super) fn history_values_from_parts(
@@ -3983,17 +3877,11 @@ pub(super) fn history_values_from_parts(
         Value::U64(version.tx_time.0),
         Value::U64(version.tx_node_alias.0),
         Value::U64(version.schema_version_alias.0),
-        Value::Array(
-            version
-                .parents
-                .iter()
-                .map(|parent| tx_id_value(*parent))
-                .collect(),
-        ),
         row_author_value(version.created_by)?,
         Value::U64(version.created_at.0),
-        row_author_value(version.updated_by)?,
+        history_updated_by_value(version.updated_by)?,
         Value::U64(version.updated_at.0),
+        nullable_deletion_value(version.deletion),
     ];
     for column in &table.columns {
         values.push(Value::Nullable(
@@ -4001,7 +3889,22 @@ pub(super) fn history_values_from_parts(
         ));
     }
     values.push(authored_column_ids_value(version.authored_columns.as_ref()));
+    values.push(Value::Bytes(version.counter_signs.clone()));
+    values.push(Value::U64(version.seq.0));
+    values.push(base_seq_value(version.base));
+    values.push(base_pending_value(version.base));
+    values.push(Value::Bytes(version.lost_cells.clone()));
     Ok(values)
+}
+
+/// History `base_seq` value of `base`.
+pub(super) fn base_seq_value(base: RowBase) -> Value {
+    Value::Nullable(base.seq.map(|seq| Box::new(Value::U64(seq.0))))
+}
+
+/// History `base_pending` value of `base`.
+pub(super) fn base_pending_value(base: RowBase) -> Value {
+    Value::Nullable(base.pending.map(|tx_id| Box::new(tx_id_value(tx_id))))
 }
 
 #[cfg(test)]
@@ -4012,6 +3915,8 @@ fn history_values_from_wire(
     tx_node_alias: NodeAlias,
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
+    seq: GlobalTime,
+    lost_cells: &[u8],
 ) -> Result<Vec<Value>, Error> {
     let mut values = Vec::with_capacity(HistoryRowRecord::USER_CELLS + table.columns.len());
     values.push(Value::Bytes(version.branch_key().canonical_bytes()));
@@ -4019,13 +3924,6 @@ fn history_values_from_wire(
     values.push(Value::U64(tx_time.0));
     values.push(Value::U64(tx_node_alias.0));
     values.push(Value::U64(schema_version_alias.0));
-    values.push(Value::Array(
-        version
-            .parents()
-            .iter()
-            .map(|parent| tx_id_value(*parent))
-            .collect(),
-    ));
     values.push(row_author_value(version.created_by())?);
     // Wire provenance carries public Unix milliseconds. Reconstruct the
     // internal HLC with logical counter zero at this ingestion boundary.
@@ -4034,12 +3932,13 @@ fn history_values_from_wire(
             .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
             .0,
     ));
-    values.push(row_author_value(version.updated_by())?);
+    values.push(history_updated_by_value(version.updated_by())?);
     values.push(Value::U64(
         TxTime::from_physical_ms(version.updated_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
             .0,
     ));
+    values.push(nullable_deletion_value(version.deletion()));
     for (idx, column) in table.columns.iter().enumerate() {
         let value = version.optional_cell_at(idx);
         if let Some(value) = value.as_ref() {
@@ -4048,73 +3947,16 @@ fn history_values_from_wire(
         values.push(Value::Nullable(value.map(Box::new)));
     }
     values.push(authored_column_ids_value(authored_columns.as_ref()));
+    values.push(Value::Bytes(version.counter_signs().to_vec()));
+    values.push(Value::U64(seq.0));
+    values.push(base_seq_value(version.base()));
+    values.push(base_pending_value(version.base()));
+    values.push(Value::Bytes(lost_cells.to_vec()));
     Ok(values)
 }
 
-pub(super) fn register_values_from_parts(version: &VersionRowParts) -> Result<Vec<Value>, Error> {
-    let deletion = version
-        .deletion
-        .ok_or(Error::InvalidStoredValue("register row requires deletion"))?;
-    Ok(vec![
-        Value::Bytes(version.branch_key.canonical_bytes()),
-        Value::Uuid(version.row_uuid.0),
-        Value::U64(version.tx_time.0),
-        Value::U64(version.tx_node_alias.0),
-        Value::U64(version.schema_version_alias.0),
-        Value::Array(
-            version
-                .parents
-                .iter()
-                .map(|parent| tx_id_value(*parent))
-                .collect(),
-        ),
-        row_author_value(version.created_by)?,
-        Value::U64(version.created_at.0),
-        row_author_value(version.updated_by)?,
-        Value::U64(version.updated_at.0),
-        deletion_event_value(deletion),
-    ])
-}
-
-#[cfg(test)]
-fn register_values_from_wire(
-    version: &VersionRecord,
-    tx_node_alias: NodeAlias,
-    schema_version_alias: SchemaVersionAlias,
-    tx_time: TxTime,
-    deletion: DeletionEvent,
-) -> Result<Vec<Value>, Error> {
-    Ok(vec![
-        Value::Bytes(version.branch_key().canonical_bytes()),
-        Value::Uuid(version.row_uuid().0),
-        Value::U64(tx_time.0),
-        Value::U64(tx_node_alias.0),
-        Value::U64(schema_version_alias.0),
-        Value::Array(
-            version
-                .parents()
-                .iter()
-                .map(|parent| tx_id_value(*parent))
-                .collect(),
-        ),
-        row_author_value(version.created_by())?,
-        Value::U64(
-            TxTime::from_physical_ms(version.created_at_ms())
-                .map_err(|_| {
-                    Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range")
-                })?
-                .0,
-        ),
-        row_author_value(version.updated_by())?,
-        Value::U64(
-            TxTime::from_physical_ms(version.updated_at_ms())
-                .map_err(|_| {
-                    Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range")
-                })?
-                .0,
-        ),
-        deletion_event_value(deletion),
-    ])
+pub(super) fn nullable_deletion_value(deletion: Option<DeletionEvent>) -> Value {
+    Value::Nullable(deletion.map(|deletion| Box::new(deletion_event_value(deletion))))
 }
 
 pub(super) fn deletion_event_value(deletion: DeletionEvent) -> Value {
@@ -4124,13 +3966,58 @@ pub(super) fn deletion_event_value(deletion: DeletionEvent) -> Value {
     })
 }
 
-pub(super) fn history_primary_key(version: &VersionRow) -> PrimaryKeyValue {
+/// The history key of `version`: accepted writes are keyed by seq, pending
+/// ones (seq `0`) by their transaction (SPEC 2 §2.7.1).
+pub(super) fn history_primary_key(version: &VersionRow) -> Result<PrimaryKeyValue, Error> {
+    Ok(history_primary_key_at(
+        version.branch_key(),
+        version.row_uuid(),
+        version.seq()?,
+        version.tx_time(),
+        version.tx_node_alias(),
+    ))
+}
+
+pub(super) fn history_primary_key_at(
+    branch_key: &BranchKey,
+    row_uuid: RowUuid,
+    seq: GlobalTime,
+    tx_time: TxTime,
+    tx_node_alias: NodeAlias,
+) -> PrimaryKeyValue {
     PrimaryKeyValue::Composite(vec![
-        PrimaryKeyValue::Bytes(version.branch_key().canonical_bytes()),
-        PrimaryKeyValue::Uuid(version.row_uuid().0),
-        PrimaryKeyValue::U64(version.tx_time().0),
-        PrimaryKeyValue::U64(version.tx_node_alias().0),
+        PrimaryKeyValue::Bytes(branch_key.canonical_bytes()),
+        PrimaryKeyValue::Uuid(row_uuid.0),
+        PrimaryKeyValue::U64(seq.0),
+        PrimaryKeyValue::U64(tx_time.0),
+        PrimaryKeyValue::U64(tx_node_alias.0),
     ])
+}
+
+/// The seqs a transaction's history record may be stored at, most likely
+/// first: its global time, then `0` (pending, or not yet moved).
+pub(super) fn history_seq_candidates(global_time: Option<GlobalTime>) -> Vec<GlobalTime> {
+    match global_time {
+        Some(global_time) if global_time != GlobalTime(0) => vec![global_time, GlobalTime(0)],
+        _ => vec![GlobalTime(0)],
+    }
+}
+
+/// The history key values of a stored write, for point reads.
+pub(super) fn history_key_values(
+    branch_key: &[u8],
+    row_uuid: RowUuid,
+    seq: GlobalTime,
+    tx_time: TxTime,
+    tx_node_alias: NodeAlias,
+) -> Vec<Value> {
+    vec![
+        Value::Bytes(branch_key.to_vec()),
+        Value::Uuid(row_uuid.0),
+        Value::U64(seq.0),
+        Value::U64(tx_time.0),
+        Value::U64(tx_node_alias.0),
+    ]
 }
 
 pub(super) fn global_current_primary_key(
@@ -4143,6 +4030,7 @@ pub(super) fn global_current_primary_key(
     ])
 }
 
+#[cfg(test)]
 fn stored_version_prefix_values(version: &VersionRow) -> Result<Vec<Value>, Error> {
     Ok(vec![
         Value::Bytes(version.branch_key().canonical_bytes()),
@@ -4150,13 +4038,6 @@ fn stored_version_prefix_values(version: &VersionRow) -> Result<Vec<Value>, Erro
         Value::U64(version.tx_time().0),
         Value::U64(version.tx_node_alias().0),
         Value::U64(version.schema_version_alias().0),
-        Value::Array(
-            version
-                .parents()
-                .iter()
-                .map(|parent| tx_id_value(*parent))
-                .collect(),
-        ),
         row_author_value(version.created_by())?,
         Value::U64(version.created_at().0),
         row_author_value(version.updated_by())?,
@@ -4180,6 +4061,7 @@ pub(super) fn global_current_values(
     values.push(Value::Nullable(
         global_time.map(|seq| Box::new(Value::U64(seq.0))),
     ));
+    values.push(nullable_deletion_value(version.deletion()));
     for (idx, _column) in table.columns.iter().enumerate() {
         let field = HistoryRowRecord::USER_CELLS + idx;
         values.push(Value::Nullable(
@@ -4190,68 +4072,6 @@ pub(super) fn global_current_values(
         version.authored_column_ids()?.as_ref(),
     ));
     Ok(values)
-}
-
-pub(super) fn register_global_current_values(
-    version: &VersionRow,
-    global_time: Option<GlobalTime>,
-) -> Result<Vec<Value>, Error> {
-    let mut values = stored_version_prefix_values(version)?;
-    values[RegisterGlobalCurrentRowRecord::FIELD_CREATED_AT_IDX] =
-        Value::U64(version.created_at().physical_ms());
-    values[RegisterGlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX] =
-        Value::U64(version.updated_at().physical_ms());
-    values.push(Value::Nullable(
-        global_time.map(|seq| Box::new(Value::U64(seq.0))),
-    ));
-    values.push(deletion_event_value(
-        version
-            .deletion()
-            .expect("register global-current row requires deletion"),
-    ));
-    Ok(values)
-}
-
-pub(super) fn global_change_values(
-    table_id: PhysicalTableId,
-    version: &VersionRow,
-    global_time: GlobalTime,
-) -> Vec<Value> {
-    vec![
-        Value::U64(table_id.0),
-        Value::Bytes(version.branch_key().canonical_bytes()),
-        Value::Uuid(version.row_uuid().0),
-        Value::Bytes(version_layer_string(version.layer()).into_bytes()),
-        Value::U64(global_time.0),
-        Value::U64(version.tx_time().0),
-        Value::U64(version.tx_node_alias().0),
-        Value::Nullable(
-            version
-                .deletion()
-                .map(|deletion| Box::new(deletion_event_value(deletion))),
-        ),
-    ]
-}
-
-#[allow(dead_code)]
-pub(super) fn global_change_primary_key_from_record(
-    record: &BorrowedRecord<'_>,
-) -> Result<PrimaryKeyValue, Error> {
-    Ok(PrimaryKeyValue::Composite(vec![
-        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?),
-        PrimaryKeyValue::Bytes(
-            record
-                .get_bytes(GlobalChangeRowRecord::FIELD_BRANCH_KEY_IDX)?
-                .to_vec(),
-        ),
-        PrimaryKeyValue::Uuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?),
-        PrimaryKeyValue::Bytes(
-            record
-                .get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?
-                .to_vec(),
-        ),
-        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_TIME_IDX)?),
-    ]))
 }
 
 pub(super) fn rejected_transaction_primary_key(alias: NodeAlias, tx_id: TxId) -> PrimaryKeyValue {
@@ -4277,11 +4097,20 @@ pub(super) fn rejected_version_primary_key_from_record(
             record.get_idx(RejectedVersionRowRecord::FIELD_ROW_UUID_IDX)?,
             "row_uuid",
         )?),
-        PrimaryKeyValue::Bytes(expect_bytes(
-            record.get_idx(RejectedVersionRowRecord::FIELD_LAYER_IDX)?,
-            "layer",
-        )?),
     ]))
+}
+
+/// Predicate selecting row images that are not deleted. `_deletion` is a
+/// nullable cell of the image; SQL comparison treats null as unknown, so the
+/// never-deleted case is matched explicitly.
+pub(super) fn not_deleted_predicate() -> PredicateExpr {
+    PredicateExpr::Or(vec![
+        PredicateExpr::is_null("_deletion"),
+        PredicateExpr::Neq {
+            field: "_deletion".to_owned(),
+            value: Value::EnumTag(0).into(),
+        },
+    ])
 }
 
 pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier) -> GraphBuilder {
@@ -4297,75 +4126,37 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
         "created_at".to_owned(),
         "updated_by".to_owned(),
         "updated_at".to_owned(),
+        "tx_time".to_owned(),
+        "tx_node_id".to_owned(),
+        "_deletion".to_owned(),
     ]);
-    content_fields.push("tx_time".to_owned());
-    content_fields.push("tx_node_id".to_owned());
 
-    let (content_current, deleted_winners) = if settled == DurabilityTier::Global {
-        // The global-current table now carries every user cell, so current rows
-        // resolve directly from it in O(current rows) — no join against the full
-        // history table (which made cold subscription hydration O(history depth)).
-        let content = GraphBuilder::table(global_current_table_name(&table.name))
-            .project(content_fields.clone());
-        let deleted = GraphBuilder::table(register_global_current_table_name(&table.name))
-            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-            .project(["row_uuid"]);
-        (content, deleted)
+    // The global-current table carries every user cell, so current rows
+    // resolve directly from it in O(current rows). Deletion is a cell of the
+    // winning image: select the winner first, then drop deleted images.
+    let current = if settled == DurabilityTier::Global {
+        GraphBuilder::table(global_current_table_name(&table.name)).project(content_fields.clone())
     } else {
-        let ahead_content = {
+        pending_overlay_over(
+            GraphBuilder::table(global_current_table_name(&table.name))
+                .project(content_fields.clone()),
             GraphBuilder::table(ahead_current_table_name(&table.name))
-                .project(content_fields.clone())
-        };
-        let deletion_fields = vec![
-            "row_uuid".to_owned(),
-            "tx_time".to_owned(),
-            "tx_node_id".to_owned(),
-            "created_by".to_owned(),
-            "created_at".to_owned(),
-            "updated_by".to_owned(),
-            "updated_at".to_owned(),
-            "_deletion".to_owned(),
-        ];
-        let ahead_deleted = {
-            GraphBuilder::table(register_ahead_current_table_name(&table.name))
-                .project(deletion_fields.clone())
-        };
-        let content = GraphBuilder::arg_max_by(
-            GraphBuilder::union([
-                GraphBuilder::table(global_current_table_name(&table.name))
-                    .project(content_fields.clone()),
-                ahead_content,
-            ]),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
+                .project(content_fields.clone()),
         )
-        .project(content_fields);
-        let deleted = GraphBuilder::arg_max_by(
-            GraphBuilder::union([
-                GraphBuilder::table(register_global_current_table_name(&table.name))
-                    .project(deletion_fields),
-                ahead_deleted,
-            ]),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
-        )
-        .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-        .project(["row_uuid"]);
-        (content, deleted)
+        .project(content_fields)
     };
-    GraphBuilder::anti_join(content_current, deleted_winners, ["row_uuid"], ["row_uuid"])
-        .project_fields(
-            std::iter::once(ProjectField::named("row_uuid"))
-                .chain(user_fields.into_iter().map(ProjectField::named))
-                .chain([
-                    ProjectField::renamed("created_by", "$createdBy"),
-                    ProjectField::renamed("created_at", "$createdAt"),
-                    ProjectField::renamed("updated_by", "$updatedBy"),
-                    ProjectField::renamed("updated_at", "$updatedAt"),
-                    ProjectField::named("tx_time"),
-                    ProjectField::named("tx_node_id"),
-                ]),
-        )
+    current.filter(not_deleted_predicate()).project_fields(
+        std::iter::once(ProjectField::named("row_uuid"))
+            .chain(user_fields.into_iter().map(ProjectField::named))
+            .chain([
+                ProjectField::renamed("created_by", "$createdBy"),
+                ProjectField::renamed("created_at", "$createdAt"),
+                ProjectField::renamed("updated_by", "$updatedBy"),
+                ProjectField::renamed("updated_at", "$updatedAt"),
+                ProjectField::named("tx_time"),
+                ProjectField::named("tx_node_id"),
+            ]),
+    )
 }
 
 pub(super) fn decode_current_row(
@@ -4501,10 +4292,6 @@ fn current_row_prefix_and_cells_from_version(
 ) -> Result<Vec<Value>, Error> {
     let mut values = Vec::with_capacity(table.columns.len() + 7);
     values.push(Value::Uuid(version.row_uuid().0));
-    if version.is_register_record() {
-        values.extend(table.columns.iter().map(|_| Value::Nullable(None)));
-        return Ok(values);
-    }
     let borrowed = version.record.borrowed();
     for (idx, _) in table.columns.iter().enumerate() {
         values.push(Value::Nullable(
@@ -4732,13 +4519,6 @@ pub(super) fn expect_u64(value: Value, field: &'static str) -> Result<u64, Error
     }
 }
 
-pub(super) fn expect_bytes(value: Value, field: &'static str) -> Result<Vec<u8>, Error> {
-    match value {
-        Value::Bytes(value) => Ok(value),
-        _ => Err(Error::InvalidStoredValue(field)),
-    }
-}
-
 pub(super) fn expect_uuid(value: Value, field: &'static str) -> Result<uuid::Uuid, Error> {
     match value {
         Value::Uuid(value) => Ok(value),
@@ -4746,65 +4526,11 @@ pub(super) fn expect_uuid(value: Value, field: &'static str) -> Result<uuid::Uui
     }
 }
 
-pub(super) fn tx_ids_from_value(value: Value) -> Result<Vec<TxId>, Error> {
-    match value {
-        Value::Array(values) => {
-            let parents = values
-                .into_iter()
-                .map(tx_id_from_value)
-                .collect::<Result<Vec<_>, _>>()?;
-            validate_parent_tx_ids(&parents)?;
-            Ok(parents)
-        }
-        _ => Err(Error::InvalidStoredValue("parents must be array")),
-    }
-}
-
-pub(super) fn validate_parent_tx_ids(parents: &[TxId]) -> Result<(), Error> {
-    if parents.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(Error::InvalidMergeableCommit(
-            "row version parents must be sorted and unique",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_canonical_version_parts(
-    branch_key: &BranchKey,
-    parents: &[TxId],
-) -> Result<(), Error> {
+pub(super) fn validate_canonical_version_parts(branch_key: &BranchKey) -> Result<(), Error> {
     branch_key
         .try_canonical_bytes()
         .map_err(|_| Error::InvalidMergeableCommit("row version branch key is not canonical"))?;
-    validate_parent_tx_ids(parents)
-}
-
-pub(super) fn merge_heads_value(heads: &BTreeSet<TxId>) -> Value {
-    Value::Array(heads.iter().copied().map(tx_id_value).collect())
-}
-
-pub(super) fn merge_heads_from_value(value: Value) -> Result<BTreeSet<TxId>, Error> {
-    // This is an intentional pre-v1 storage cut. Do not accept the former
-    // postcard-in-Bytes representation: this derived table has one
-    // schema-declared representation and can be rebuilt from history.
-    let Value::Array(values) = value else {
-        return Err(Error::InvalidStoredValue(
-            "merge heads must be an array of transaction ids",
-        ));
-    };
-    let mut heads = BTreeSet::new();
-    let mut previous = None;
-    for value in values {
-        let head = tx_id_from_value(value)?;
-        if previous.is_some_and(|previous| previous >= head) {
-            return Err(Error::InvalidStoredValue(
-                "merge heads must be strictly increasing",
-            ));
-        }
-        previous = Some(head);
-        heads.insert(head);
-    }
-    Ok(heads)
+    Ok(())
 }
 
 pub(super) fn tx_id_from_value(value: Value) -> Result<TxId, Error> {
@@ -4895,6 +4621,7 @@ pub(super) fn durability_from_discriminant(value: u8) -> Result<DurabilityTier, 
 
 pub(super) fn deletion_event_from_value(value: Value) -> Result<DeletionEvent, Error> {
     match value {
+        Value::Nullable(Some(inner)) => deletion_event_from_value(*inner),
         Value::EnumTag(0) => Ok(DeletionEvent::Deleted),
         Value::EnumTag(1) => Ok(DeletionEvent::Restored),
         _ => Err(Error::InvalidStoredValue("unknown deletion event")),
@@ -4909,23 +4636,22 @@ pub(super) fn global_current_table_name(table: &str) -> String {
     format!("jazz_{table}_global_current")
 }
 
-pub(super) fn register_global_current_table_name(table: &str) -> String {
-    format!("jazz_{table}_register_global_current")
+/// A row's pending overlay, when present, is what the client sees: it is
+/// already the synced image with every pending patch folded on top, so it
+/// wins regardless of how its stamp compares with the synced row.
+pub(in crate::node) fn pending_overlay_over(
+    global: GraphBuilder,
+    ahead: GraphBuilder,
+) -> GraphBuilder {
+    let overlaid = ahead.clone().project(["row_uuid"]);
+    GraphBuilder::union([
+        ahead,
+        GraphBuilder::anti_join(global, overlaid, ["row_uuid"], ["row_uuid"]),
+    ])
 }
 
 pub(super) fn ahead_current_table_name(table: &str) -> String {
     format!("jazz_{table}_ahead_current")
-}
-
-pub(super) fn register_ahead_current_table_name(table: &str) -> String {
-    format!("jazz_{table}_register_ahead_current")
-}
-
-pub(super) fn version_layer_string(layer: VersionLayer) -> String {
-    match layer {
-        VersionLayer::Content => "content".to_owned(),
-        VersionLayer::Deletion => "deletion".to_owned(),
-    }
 }
 
 #[cfg(test)]
@@ -4965,10 +4691,6 @@ mod authority_storage_codec_tests {
                     version_record_descriptors(table).1,
                     table.wire_record_descriptor()
                 );
-                assert_eq!(
-                    register_record_descriptor(table),
-                    table.register_storage_table().record_schema()
-                );
             }
         }
         assert_eq!(HISTORY_DESCRIPTOR_BUILDS.with(|count| count.get()), 5);
@@ -5002,13 +4724,8 @@ mod authority_storage_codec_tests {
     fn physical_version_name_resolution_preserves_exact_constructor_spelling() {
         for id in [0, 1, 10, 1000, u64::MAX] {
             let id = PhysicalTableId(id);
-            for (name, deletion) in [
-                (physical_history_table_name(id), false),
-                (physical_register_table_name(id), true),
-            ] {
-                assert_eq!(physical_version_table_id(&name, deletion), Some(id));
-                assert_eq!(physical_version_table_id(&name, !deletion), None);
-            }
+            let name = physical_history_table_name(id);
+            assert_eq!(physical_version_table_id(&name), Some(id));
         }
         for name in [
             "jazz_physical__history",
@@ -5020,7 +4737,7 @@ mod authority_storage_codec_tests {
             "jazz_physical_1a_history",
             "jazz_deletion_history",
         ] {
-            assert_eq!(physical_version_table_id(name, false), None, "{name}");
+            assert_eq!(physical_version_table_id(name), None, "{name}");
         }
     }
 }
@@ -5055,6 +4772,78 @@ pub(super) fn decode_active_schema(bytes: &[u8]) -> Result<ActiveSchema, Error> 
         schema.schema,
     )?;
     Ok(active)
+}
+
+#[cfg(test)]
+mod touched_rows_tests {
+    use super::*;
+
+    fn group(table: u64, branch: &[u8], rows: &[u8]) -> Value {
+        let descriptor = TouchedRows::group_descriptor();
+        let values = [
+            Value::U64(table),
+            Value::Bytes(branch.to_vec()),
+            Value::Array(
+                rows.iter()
+                    .map(|row| Value::Uuid(RowUuid::from_bytes([*row; 16]).0))
+                    .collect(),
+            ),
+        ];
+        Value::Record(OwnedRecord::new(
+            descriptor.create(&values).unwrap(),
+            descriptor,
+        ))
+    }
+
+    #[test]
+    fn touched_rows_round_trip_and_reject_noncanonical_groups() {
+        let mut touched = TouchedRows::default();
+        touched.insert(
+            PhysicalTableId(2),
+            b"main".to_vec(),
+            RowUuid::from_bytes([9; 16]),
+        );
+        touched.insert(
+            PhysicalTableId(1),
+            b"main".to_vec(),
+            RowUuid::from_bytes([3; 16]),
+        );
+        touched.insert(
+            PhysicalTableId(2),
+            b"main".to_vec(),
+            RowUuid::from_bytes([1; 16]),
+        );
+        touched.insert(
+            PhysicalTableId(2),
+            b"main".to_vec(),
+            RowUuid::from_bytes([9; 16]),
+        );
+        let value = touched.to_value().unwrap();
+        assert_eq!(
+            value,
+            Value::Array(vec![group(1, b"main", &[3]), group(2, b"main", &[1, 9])]),
+            "groups ascend by (table, branch); rows ascend and are unique"
+        );
+        assert_eq!(TouchedRows::from_value(&value).unwrap(), touched);
+        assert_eq!(
+            TouchedRows::from_value(&Value::Array(Vec::new())).unwrap(),
+            TouchedRows::default()
+        );
+
+        for malformed in [
+            Value::Array(vec![group(2, b"main", &[1]), group(1, b"main", &[1])]),
+            Value::Array(vec![group(1, b"main", &[1]), group(1, b"main", &[2])]),
+            Value::Array(vec![group(1, b"main", &[])]),
+            Value::Array(vec![group(1, b"main", &[2, 1])]),
+            Value::Array(vec![group(1, b"main", &[1, 1])]),
+            Value::U64(0),
+        ] {
+            assert!(
+                TouchedRows::from_value(&malformed).is_err(),
+                "{malformed:?} must be refused"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

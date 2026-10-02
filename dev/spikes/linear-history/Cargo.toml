@@ -1,0 +1,18 @@
+[package]
+name = "jazz-linear-history-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Measurement spike: Core-sequenced linear row history (no version DAG) over Groove ordered KV storage."
+
+[lib]
+name = "linear_history"
+
+[dependencies]
+groove.workspace = true
+jazz-storage-rocksdb.workspace = true
+tempfile = "3.27.0"
+
+[[bin]]
+name = "linear-profile"
+path = "src/bin/linear_profile.rs"

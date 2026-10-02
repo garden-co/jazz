@@ -2255,17 +2255,15 @@ pub(super) fn key_matches_static_scan(
 }
 
 pub(super) fn persisted_index_scan_bounds(
-    table: &str,
-    index: &str,
+    index_id: u32,
     scan: Option<&StaticScanSpec>,
 ) -> Result<StaticScanBounds, IvmRuntimeError> {
-    let base = durable_index_key_prefix(table, index);
-    let wrap_prefix = |logical_key: Vec<u8>| {
+    // The ordered part encodings are prefix-free and order-preserving on
+    // their own, so the logical key follows the numeric index id directly.
+    let base = durable_index_key_prefix(index_id);
+    let prefixed = |logical_key: Vec<u8>| {
         let mut storage_key = base.clone();
-        if !logical_key.is_empty() {
-            storage_key.push(7);
-            encode_ordered_bytes_without_terminal(&mut storage_key, &logical_key);
-        }
+        storage_key.extend(logical_key);
         storage_key
     };
     Ok(match scan {
@@ -2275,10 +2273,10 @@ pub(super) fn persisted_index_scan_bounds(
             | StaticScanSpec::Prefix(values)
             | StaticScanSpec::PrefixLimit { prefix: values, .. }
             | StaticScanSpec::ReversePrefixLimit { prefix: values, .. },
-        ) => StaticScanBounds::Prefix(wrap_prefix(static_scan_key(values)?)),
+        ) => StaticScanBounds::Prefix(prefixed(static_scan_key(values)?)),
         Some(StaticScanSpec::Range { start, end }) => StaticScanBounds::Range {
-            start: wrap_prefix(static_scan_key(start)?),
-            end: wrap_prefix(static_scan_key(end)?),
+            start: prefixed(static_scan_key(start)?),
+            end: prefixed(static_scan_key(end)?),
         },
     })
 }

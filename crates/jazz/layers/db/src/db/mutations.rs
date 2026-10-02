@@ -1,7 +1,6 @@
 //! Row insertion, update, deletion, restoration, and authorization.
 
 use super::*;
-use crate::node::{ContributionMergeRequest, ContributionMergeRow};
 use crate::protocol::{BranchSelector, BranchViewBase};
 use serde::{Deserialize, Serialize};
 
@@ -925,7 +924,7 @@ where
                 )
                 .await;
         }
-        let (mut cells, parent, mut authored_columns) =
+        let (mut cells, _parent, mut authored_columns) =
             self.merge_existing_cells(table, row, patch).await?;
         let mut staged = Vec::<(String, groove::large_values::StagedLargeValue)>::new();
         let mut cleanup = Vec::<groove::large_values::StagedLargeValueId>::new();
@@ -978,7 +977,6 @@ where
             let commit =
                 MergeableCommit::new(table, row, now_ms.unwrap_or_else(|| self.next_now_ms()))
                     .made_by(self.identity.author)
-                    .parents(parent.into_iter().collect())
                     .cells(cells)
                     .authored_columns(authored_columns);
             let published = {
@@ -1497,14 +1495,8 @@ where
                 column.to_owned(),
                 preserve_nullable(Value::Large(Box::new(staged.value_ref.clone())), nullable),
             );
-            let parents = node
-                .local_content_winner_tx_id_in_schema(self.schema_version_id, table, row)
-                .await?
-                .into_iter()
-                .collect();
             let commit = MergeableCommit::new(table, row, self.next_now_ms())
                 .made_by(self.identity.author)
-                .parents(parents)
                 .cells(cells)
                 .authored_columns(BTreeSet::from([column.to_owned()]));
             let commit = node
@@ -1527,44 +1519,6 @@ where
             }
         };
         self.finish_published_write(row, published).await
-    }
-
-    /// Calculate and commit novel contributions from one exact branch key into
-    /// another. This requires a history-complete database and emits an ordinary
-    /// mergeable transaction when the target does not already represent every
-    /// selected contribution.
-    pub async fn merge_branch_contributions(
-        &self,
-        source: BranchSelector,
-        target: BranchSelector,
-        rows: impl IntoIterator<Item = ContributionMergeRow>,
-    ) -> Result<Option<TxId>, Error> {
-        let rows = rows.into_iter().collect::<Vec<_>>();
-        let representative_row = rows.first().map(|row| row.row_uuid);
-        let tx_id = self
-            .node
-            .node
-            .lock()
-            .await
-            .merge_branch_contributions(ContributionMergeRequest {
-                source,
-                target,
-                rows,
-                made_by: self.identity.author,
-                permission_subject: Some(self.identity.author),
-                now_ms: self.next_now_ms(),
-            })
-            .await?;
-        let Some(published) = tx_id else {
-            return Ok(None);
-        };
-        let tx_id = published.tx_id;
-        self.finish_published_write(
-            representative_row.expect("a published contribution merge has at least one row"),
-            published,
-        )
-        .await?;
-        Ok(Some(tx_id))
     }
 
     /// Insert a row locally.
@@ -2093,7 +2047,7 @@ where
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle<S>, Error> {
         let branch = head.clone().unwrap_or_default();
-        let (mut cells, parents, authored_columns, inserting) = match mutation {
+        let (mut cells, _parents, authored_columns, inserting) = match mutation {
             StreamingMutationKind::Insert => {
                 if head.is_some() {
                     self.ensure_exact_branch_row_absent(table, &branch, row)
@@ -2267,7 +2221,6 @@ where
             MergeableCommit::new(table, row, now_ms.unwrap_or_else(|| self.next_now_ms()))
                 .branch(branch)
                 .made_by(made_by)
-                .parents(parents)
                 .cells(cells);
         if let Some(authored_columns) = authored_columns {
             commit = commit.authored_columns(authored_columns);
@@ -2907,7 +2860,7 @@ where
         let cells = cells
             .map(|cells| self.apply_insert_defaults(table, cells))
             .transpose()?;
-        let (content_parents, deletion_parents) = match target {
+        let (_content_parents, _deletion_parents) = match target {
             ExactWriteTarget::Root => {
                 self.ensure_row_deleted(table, row, permission_subject.unwrap_or(made_by))
                     .await?;
@@ -2943,7 +2896,6 @@ where
                 MergeableCommit::new(table, row, now_ms)
                     .branch(branch.clone())
                     .made_by(made_by)
-                    .parents(content_parents)
                     .cells(cells),
             ));
         }
@@ -2951,7 +2903,6 @@ where
             MergeableCommit::new(table, row, now_ms)
                 .branch(branch)
                 .made_by(made_by)
-                .parents(deletion_parents)
                 .cells(BTreeMap::<String, Value>::new())
                 .deletion(DeletionEvent::Restored),
         ));
@@ -3041,7 +2992,6 @@ where
         let mut commit = MergeableCommit::new(table, row, now_ms)
             .branch(branch)
             .made_by(made_by)
-            .parents(parents)
             .cells(cells);
         if let Some(authored_columns) = authored_columns {
             commit = commit.authored_columns(authored_columns);
@@ -3256,9 +3206,7 @@ where
     }
 
     pub(super) fn next_now_ms(&self) -> u64 {
-        let next = self.next_now_ms.get();
-        self.next_now_ms.set(next + 1);
-        next
+        self.next_now_ms.next_now_ms()
     }
 
     pub(super) fn ensure_open_schema_admitted(&self) -> Result<(), Error> {

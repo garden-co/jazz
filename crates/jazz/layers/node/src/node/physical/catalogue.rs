@@ -538,10 +538,6 @@ pub(super) fn physical_history_table_name(table_id: PhysicalTableId) -> String {
     format!("jazz_physical_{}_history", table_id.0)
 }
 
-pub(super) fn physical_register_table_name(table_id: PhysicalTableId) -> String {
-    format!("jazz_physical_{}_register", table_id.0)
-}
-
 /// Split a per-table physical name (`jazz_physical_{id}_{suffix}`) into its id
 /// and suffix. Only the exact spelling the name constructors produce is
 /// accepted: unsigned decimal, no sign, no padding, including the single digit
@@ -555,47 +551,24 @@ pub(super) fn split_physical_table_name(name: &str) -> Option<(PhysicalTableId, 
     digits.parse().ok().map(|id| (PhysicalTableId(id), suffix))
 }
 
-/// Inverse of the physical history/register name constructors. Resolve the id
-/// once instead of allocating a formatted name for every catalogue candidate.
-pub(super) fn physical_version_table_id(name: &str, is_deletion: bool) -> Option<PhysicalTableId> {
-    let expected = if is_deletion { "register" } else { "history" };
+/// Inverse of the physical history name constructor. Resolve the id once
+/// instead of allocating a formatted name for every catalogue candidate.
+pub(super) fn physical_version_table_id(name: &str) -> Option<PhysicalTableId> {
     split_physical_table_name(name)
-        .and_then(|(table_id, suffix)| (suffix == expected).then_some(table_id))
+        .and_then(|(table_id, suffix)| (suffix == "history").then_some(table_id))
 }
 
-/// Fixed sparse deletion history shared by every physical content lineage.
-///
-/// Unlike `physical_register_table_name`, this is not a per-lineage table;
-/// callers must pair it with the full `(BranchKey, PhysicalTableId)` key.
-pub(super) const SHARED_DELETION_HISTORY_TABLE: &str = "jazz_deletion_history";
-
-pub(super) fn shared_deletion_history_primary_key(
-    table_id: PhysicalTableId,
-    version: &VersionRow,
-) -> PrimaryKeyValue {
-    PrimaryKeyValue::Composite(vec![
-        PrimaryKeyValue::Bytes(version.branch_key().canonical_bytes()),
-        PrimaryKeyValue::U64(table_id.0),
-        PrimaryKeyValue::Uuid(version.row_uuid().0),
-        PrimaryKeyValue::U64(version.tx_time().0),
-        PrimaryKeyValue::U64(version.tx_node_alias().0),
-    ])
-}
 
 pub(super) fn physical_global_current_table_name(table_id: PhysicalTableId) -> String {
     format!("jazz_physical_{}_global_current", table_id.0)
-}
-
-pub(super) fn physical_register_global_current_table_name(table_id: PhysicalTableId) -> String {
-    format!("jazz_physical_{}_register_global_current", table_id.0)
 }
 
 pub(super) fn physical_ahead_current_table_name(table_id: PhysicalTableId) -> String {
     format!("jazz_physical_{}_ahead_current", table_id.0)
 }
 
-pub(super) fn physical_register_ahead_current_table_name(table_id: PhysicalTableId) -> String {
-    format!("jazz_physical_{}_register_ahead_current", table_id.0)
+pub(super) fn physical_ahead_shadow_table_name(table_id: PhysicalTableId) -> String {
+    format!("jazz_physical_{}_ahead_shadow", table_id.0)
 }
 
 pub(super) fn physical_rejected_versions_table_name(table_id: PhysicalTableId) -> String {

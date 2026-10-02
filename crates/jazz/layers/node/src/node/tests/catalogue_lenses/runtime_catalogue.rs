@@ -253,9 +253,7 @@ fn publishing_schema_registers_new_physical_tables_live() {
     .unwrap();
     let table_id = core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id;
     let history = physical_history_table_name(table_id);
-    let register = physical_register_table_name(table_id);
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
-    assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 
     core.activate_catalogue_schema_settled(CurrentWriteSchema {
         revision: 1,
@@ -263,7 +261,6 @@ fn publishing_schema_registers_new_physical_tables_live() {
     })
     .unwrap();
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
-    assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 }
 
 #[test]

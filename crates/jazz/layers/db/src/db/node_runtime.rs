@@ -278,10 +278,14 @@ where
     pub(super) detached_large_value_uploads:
         Rc<RefCell<BTreeMap<UpstreamUploadDestination, peer_connection::LargeValueUploadQueues>>>,
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
+    /// Retry-later answers each pending upload has received, for backoff.
+    pub(super) upload_retry_later_attempts: Rc<RefCell<BTreeMap<TxId, u32>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) open_schema_admission: OpenSchemaAdmission,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) current_rows: row_availability::SharedCurrentRows,
+    /// Deletion reconciliation that outlives the strict stream that found it.
+    held_row_checks: RefCell<HeldRowChecks>,
     pub(super) local_fate_routes: LocalFateRoutes,
     pub(super) admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     pub(super) admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
@@ -424,6 +428,7 @@ where
             upload_retry_clock: Rc::new(RefCell::new(Rc::new(MonotonicUploadRetryClock::new()))),
             detached_large_value_uploads: Rc::new(RefCell::new(BTreeMap::new())),
             large_value_upload_retry_deadlines: Rc::new(RefCell::new(BTreeMap::new())),
+            upload_retry_later_attempts: Rc::new(RefCell::new(BTreeMap::new())),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             open_schema_admission: Rc::new(RefCell::new(None)),
             mutation_errors: Rc::new(RefCell::new(MutationErrorState {
@@ -436,6 +441,7 @@ where
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             current_rows: Rc::new(RefCell::new(row_availability::CurrentRowsRouter::default())),
+            held_row_checks: RefCell::new(HeldRowChecks::default()),
             local_fate_routes: Rc::new(RefCell::new(BTreeMap::new())),
             admitted_upstream_authorities: Rc::new(RefCell::new(Vec::new())),
             admitted_upstream_authority: Rc::new(RefCell::new(None)),
@@ -1587,6 +1593,25 @@ where
                 let owner = Rc::downgrade(&state);
                 let mut state = state.borrow_mut();
                 state.scalar_reconciliation = ScalarReconciliation::default();
+                // A closing stream stops withholding, never reconciling: an
+                // unfinished discovery and unprobed rows move to the runtime
+                // (INV-SYNC-48). Rows already in `Probing` are runtime-owned.
+                match std::mem::take(&mut state.deletion_reconciliation) {
+                    DeletionReconciliation::Pending { rows, context, .. } => {
+                        let _ = self.held_row_checks.borrow_mut().enqueue(rows, &context);
+                        self.schedule_tick(TickUrgency::Immediate);
+                    }
+                    reconciliation @ (DeletionReconciliation::Deferred { .. }
+                    | DeletionReconciliation::Discovering { .. }) => {
+                        let redundant = self
+                            .held_row_checks
+                            .borrow_mut()
+                            .adopt_discovery(reconciliation);
+                        release_redundant_discovery(&mut node, redundant);
+                        self.schedule_tick(TickUrgency::Immediate);
+                    }
+                    _ => {}
+                }
                 let mut upstream = std::mem::take(&mut state.upstream_subscription_handles);
                 upstream.append(&mut state.authority_witness);
                 (state.local_subscription_cleanup.take(), upstream, owner)
@@ -2452,6 +2477,7 @@ where
                 large_value_upload_retry_deadlines: Rc::clone(
                     &self.large_value_upload_retry_deadlines,
                 ),
+                upload_retry_later_attempts: Rc::clone(&self.upload_retry_later_attempts),
                 write_state_waiters: Rc::clone(&self.write_state_waiters),
                 open_schema_admission: Rc::clone(&self.open_schema_admission),
                 permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
@@ -2486,9 +2512,7 @@ where
                     large_value_uploads: transferred_large_value_uploads,
                     awaiting_large_value_uploads: BTreeMap::new(),
                     failed_large_value_uploads: BTreeSet::new(),
-                    pending_row_version_fetches: VecDeque::new(),
-                    pending_row_version_repairs: VecDeque::new(),
-                    deferred_repair_fates: VecDeque::new(),
+                    missing_body_resends: BTreeSet::new(),
                     scope_view_cuts: BTreeMap::new(),
                     scope_receipts: BTreeMap::new(),
                     expected_scope_authority,
@@ -2849,6 +2873,7 @@ where
             upload_retry_clock: Rc::clone(&self.upload_retry_clock),
             upstream_upload_destination: None,
             large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
+            upload_retry_later_attempts: Rc::clone(&self.upload_retry_later_attempts),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             open_schema_admission: Rc::clone(&self.open_schema_admission),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
@@ -3053,9 +3078,7 @@ where
         }
         connection_ref.staged_inbound.clear();
         if let ConnectionLink::Upstream(state) = &mut connection_ref.link {
-            state.pending_row_version_repairs.clear();
-            state.pending_row_version_fetches.clear();
-            state.deferred_repair_fates.clear();
+            state.missing_body_resends.clear();
         }
         self.current_rows.borrow_mut().disconnect(connection_epoch);
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
@@ -3456,6 +3479,7 @@ where
         }
         connections
             .retain(|connection| !retired.iter().any(|failed| Rc::ptr_eq(connection, failed)));
+        Box::pin(self.advance_deletion_reconciliations()).await?;
         Box::pin(self.reconcile_scalar_query_inputs()).await?;
         if !released_outbox_tx_ids.is_empty() {
             self.release_outbox_uploads(released_outbox_tx_ids);
@@ -3582,6 +3606,391 @@ where
             }
         }
         Ok(())
+    }
+
+    /// Re-run local subscription refresh on the next owner turn.
+    fn mark_local_subscriptions_dirty(&self) {
+        self.subscriber_dirty_epoch
+            .set(self.subscriber_dirty_epoch.get().wrapping_add(1));
+        self.local_subscription_dirty_generation.set(
+            self.local_subscription_dirty_generation
+                .get()
+                .wrapping_add(1),
+        );
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    /// Drive deletion reconciliation (see [`DeletionReconciliation`] and
+    /// [`HeldRowChecks`]). Streams hand their omitted rows to the runtime and
+    /// withhold first settlement for at most `DELETION_DISCOVERY_LIMIT`;
+    /// past that bound an unfinished discovery moves to the runtime too.
+    /// Nothing is abandoned on a timer: every held row stays checked until
+    /// the authority answers it (INV-SYNC-48). Access loss is never applied
+    /// as local redaction (INV-SYNC-14).
+    async fn advance_deletion_reconciliations(&self) -> Result<(), Error> {
+        let live = self.subscriptions.borrow().clone();
+        for weak in live {
+            let Some(owner) = weak.upgrade() else {
+                continue;
+            };
+            let since = {
+                let state = owner.borrow();
+                if state.closed.get() {
+                    continue;
+                }
+                match state.deletion_reconciliation.waiting_since() {
+                    Some(since) => since,
+                    None => continue,
+                }
+            };
+            let elapsed = since.elapsed();
+            let expired = elapsed >= DELETION_DISCOVERY_LIMIT;
+            let reconciliation = std::mem::take(&mut owner.borrow_mut().deletion_reconciliation);
+            let next = match reconciliation {
+                DeletionReconciliation::Pending {
+                    rows,
+                    context,
+                    since,
+                } => {
+                    let rows = self.held_row_checks.borrow_mut().enqueue(rows, &context);
+                    DeletionReconciliation::Probing { rows, since }
+                }
+                DeletionReconciliation::Probing { rows, .. }
+                    if expired || {
+                        let checks = self.held_row_checks.borrow();
+                        rows.iter().all(|row| !checks.rows.contains_key(row))
+                    } =>
+                {
+                    // Resolved, or settlement stops waiting; unresolved rows
+                    // keep being checked by the runtime.
+                    DeletionReconciliation::Done
+                }
+                reconciliation @ (DeletionReconciliation::Deferred { .. }
+                | DeletionReconciliation::Discovering { .. })
+                    if expired =>
+                {
+                    let redundant = self
+                        .held_row_checks
+                        .borrow_mut()
+                        .adopt_discovery(reconciliation);
+                    if redundant.is_some() {
+                        let mut node = self.node.lock().await;
+                        release_redundant_discovery(&mut node, redundant);
+                    }
+                    DeletionReconciliation::Done
+                }
+                reconciliation => reconciliation,
+            };
+            let done = matches!(next, DeletionReconciliation::Done);
+            let deferred = matches!(next, DeletionReconciliation::Deferred { .. });
+            let discovering =
+                deferred || matches!(next, DeletionReconciliation::Discovering { .. });
+            owner.borrow_mut().deletion_reconciliation = next;
+            if done {
+                // Ingested images changed local storage, or the bound passed;
+                // the withheld stream now refreshes and settles.
+                self.mark_local_subscriptions_dirty();
+                continue;
+            }
+            // Discovery progresses in subscription refresh; re-arm it on a
+            // short cadence (not a hot loop) within the bound. A deferred
+            // stream waits for its own receiver graph, which a busy runtime
+            // is still advancing; an opened discovery graph always drains.
+            if discovering && (!deferred || !self.node.lock().await.has_pending_query_runtime()) {
+                self.local_subscription_dirty_generation.set(
+                    self.local_subscription_dirty_generation
+                        .get()
+                        .wrapping_add(1),
+                );
+            }
+            if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                let remaining =
+                    u64::try_from(DELETION_DISCOVERY_LIMIT.saturating_sub(elapsed).as_millis())
+                        .unwrap_or(u64::MAX)
+                        .max(1);
+                scheduler.schedule_tick_after(if discovering {
+                    remaining.min(50)
+                } else {
+                    remaining
+                });
+            }
+        }
+        Box::pin(self.advance_runtime_deletion_discoveries()).await?;
+        let held_before = self.held_row_checks.borrow().rows.len();
+        self.advance_held_row_checks().await;
+        // Release waiting streams in this same turn, not one turn later (the
+        // pass above ran before this turn's answers were polled): those whose
+        // held rows are all answered, and, while no upstream authority is
+        // admitted, every probing stream, since no probe can be routed at all.
+        // Released rows stay in `HeldRowChecks` and are probed once an
+        // upstream is admitted (INV-SYNC-48).
+        let routable = self.admitted_upstream_authority.borrow().is_some();
+        let held_after = self.held_row_checks.borrow().rows.len();
+        if held_after < held_before || (!routable && held_after > 0) {
+            self.release_probing_streams(routable);
+        }
+        Ok(())
+    }
+
+    /// Mark `Probing` streams as `Done` so they refresh and settle on the next
+    /// owner turn: every one when `routable` is false, otherwise those whose
+    /// held rows the authority has all answered.
+    fn release_probing_streams(&self, routable: bool) {
+        let live = self.subscriptions.borrow().clone();
+        let mut released = false;
+        for weak in live {
+            let Some(owner) = weak.upgrade() else {
+                continue;
+            };
+            let mut state = owner.borrow_mut();
+            if state.closed.get() {
+                continue;
+            }
+            let DeletionReconciliation::Probing { rows, .. } = &state.deletion_reconciliation
+            else {
+                continue;
+            };
+            let resolved = !routable || {
+                let checks = self.held_row_checks.borrow();
+                rows.iter().all(|row| !checks.rows.contains_key(row))
+            };
+            if resolved {
+                state.deletion_reconciliation = DeletionReconciliation::Done;
+                released = true;
+            }
+        }
+        if released {
+            self.mark_local_subscriptions_dirty();
+        }
+    }
+
+    /// Finish discoveries whose stream closed or stopped waiting. These no
+    /// longer depend on the stream's receiver graph; a cold discovery graph
+    /// is drained without blocking on other query work.
+    async fn advance_runtime_deletion_discoveries(&self) -> Result<(), Error> {
+        if self.held_row_checks.borrow().discoveries.is_empty() {
+            return Ok(());
+        }
+        let discoveries = std::mem::take(&mut self.held_row_checks.borrow_mut().discoveries);
+        let waker = self.query_runtime_waker();
+        let mut node = self.node.lock().await;
+        let runtime_token = node.groove_runtime_token();
+        let mut remaining = Vec::new();
+        let mut found = Vec::new();
+        let mut failure = None;
+        for discovery in discoveries {
+            if failure.is_some() {
+                remaining.push(discovery);
+                continue;
+            }
+            let (maintained, spec) = match discovery {
+                DeletionReconciliation::Discovering {
+                    maintained,
+                    runtime_token: token,
+                    spec,
+                    ..
+                } if token == runtime_token => (Some(maintained), spec),
+                // A runtime rebuild retired the old graph with its IDs.
+                DeletionReconciliation::Discovering { spec, .. }
+                | DeletionReconciliation::Deferred { spec, .. } => (None, spec),
+                _ => continue,
+            };
+            let since = web_time::Instant::now();
+            let result = match maintained {
+                Some(maintained) => {
+                    drain_deletion_discovery(&mut node, maintained, waker.as_ref()).await
+                }
+                None => open_deletion_discovery(&mut node, &spec, waker.as_ref(), false).await,
+            };
+            match result {
+                Ok(DiscoveryStep::Cold(maintained)) => {
+                    remaining.push(DeletionReconciliation::Discovering {
+                        maintained,
+                        runtime_token,
+                        since,
+                        spec,
+                    });
+                }
+                Ok(DiscoveryStep::Snapshot(snapshot)) => {
+                    match deletion_candidates(&mut node, &snapshot, &spec).await {
+                        Ok(rows) => found.push((rows, spec.context.clone())),
+                        Err(error) => {
+                            remaining.push(DeletionReconciliation::Deferred { since, spec });
+                            failure = Some(error);
+                        }
+                    }
+                }
+                Err(error) => {
+                    remaining.push(DeletionReconciliation::Deferred { since, spec });
+                    failure = Some(error);
+                }
+            }
+        }
+        drop(node);
+        let mut checks = self.held_row_checks.borrow_mut();
+        for (rows, context) in found {
+            let _ = checks.enqueue(rows, &context);
+        }
+        let pending = !remaining.is_empty();
+        remaining.append(&mut checks.discoveries);
+        checks.discoveries = remaining;
+        drop(checks);
+        if pending && let Some(scheduler) = self.scheduler.borrow().as_ref() {
+            scheduler.schedule_tick_after(100);
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    /// Probe held rows in `MAX_CURRENT_ROWS` batches through the ordinary
+    /// current-rows path; the router ingests each receipt's carriers
+    /// (deleted images included) before exposing it. A row leaves the set
+    /// only when the authority answers it (`Readable`, including a deletion,
+    /// or `CurrentUnavailable`, which is access loss and is not applied) or
+    /// when its local coordinate changes. Unknown answers, dropped receipts,
+    /// timeouts and disconnects are retried with backoff.
+    async fn advance_held_row_checks(&self) {
+        let upstream = self
+            .admitted_upstream_authority
+            .borrow()
+            .map(|authority| authority.connection_id);
+        let now = web_time::Instant::now();
+        let (changed, held) = {
+            let mut checks = self.held_row_checks.borrow_mut();
+            if checks.rows.is_empty() {
+                checks.active = None;
+                checks.upstream_connection = upstream;
+                return;
+            }
+            if upstream.is_some() && checks.upstream_connection != upstream {
+                // A new upstream link: retry every held row immediately.
+                for check in checks.rows.values_mut() {
+                    check.attempts = 0;
+                    check.retry_at = None;
+                }
+            }
+            checks.upstream_connection = upstream;
+            let mut changed = false;
+            if let Some(probe) = checks.active.as_mut() {
+                let waker = self.query_runtime_waker();
+                let mut cx = std::task::Context::from_waker(
+                    waker.as_ref().unwrap_or(std::task::Waker::noop()),
+                );
+                let result = match probe.future.as_mut().poll(&mut cx) {
+                    std::task::Poll::Ready(result) => Some(result),
+                    std::task::Poll::Pending if now >= probe.deadline => {
+                        Some(row_availability::CurrentRowsResult::Unknown)
+                    }
+                    std::task::Poll::Pending => None,
+                };
+                if let Some(result) = result {
+                    let probe = checks.active.take().expect("active probe was polled");
+                    let answered = match &result {
+                        row_availability::CurrentRowsResult::Applied(receipt) => receipt
+                            .rows
+                            .iter()
+                            .zip(&receipt.outcomes)
+                            .filter(|(_, outcome)| {
+                                **outcome != crate::protocol::CurrentRowOutcome::Unknown
+                            })
+                            .map(|(row, _)| (row.table.clone(), row.row))
+                            .collect::<BTreeSet<_>>(),
+                        row_availability::CurrentRowsResult::Unknown => BTreeSet::new(),
+                    };
+                    changed = !answered.is_empty();
+                    for key in probe.rows {
+                        if answered.contains(&key) {
+                            checks.rows.remove(&key);
+                        } else if let Some(check) = checks.rows.get_mut(&key) {
+                            check.retry_at = Some(now + HeldRowChecks::retry_delay(check.attempts));
+                            check.attempts = check.attempts.saturating_add(1);
+                        }
+                    }
+                }
+            }
+            // Rows to re-validate before dispatching the next batch.
+            let held = (checks.active.is_none() && upstream.is_some()).then(|| {
+                checks
+                    .rows
+                    .iter()
+                    .map(|(key, check)| (key.clone(), check.coordinate.clone()))
+                    .collect::<Vec<_>>()
+            });
+            (changed, held)
+        };
+        if let Some(held) = held {
+            // Cancel rows whose local version changed (or was deleted) since
+            // discovery: later reads reconcile the new version.
+            let changed_rows = {
+                let node = self.node.lock().await;
+                held.into_iter()
+                    .filter(|(_, coordinate)| {
+                        node.current_row_coordinate(&coordinate.table, coordinate.row)
+                            .ok()
+                            .as_ref()
+                            != Some(coordinate)
+                    })
+                    .map(|(key, _)| key)
+                    .collect::<Vec<_>>()
+            };
+            let mut checks = self.held_row_checks.borrow_mut();
+            for key in changed_rows {
+                checks.rows.remove(&key);
+            }
+            let ready = checks
+                .rows
+                .iter()
+                .filter(|(_, check)| check.retry_at.is_none_or(|at| at <= now))
+                .map(|(key, check)| (key.clone(), check.context.clone()))
+                .collect::<Vec<_>>();
+            if let Some((_, context)) = ready.first() {
+                let context = context.clone();
+                let keys = ready
+                    .into_iter()
+                    .filter(|(_, candidate)| *candidate == context)
+                    .map(|(key, _)| key)
+                    .take(crate::protocol::MAX_CURRENT_ROWS)
+                    .collect::<Vec<_>>();
+                let batch = keys
+                    .iter()
+                    .map(|key| checks.rows[key].coordinate.clone())
+                    .collect::<Vec<_>>();
+                checks.active = Some(HeldRowProbe {
+                    rows: keys,
+                    deadline: now + std::time::Duration::from_secs(10),
+                    future: Box::pin(self.request_current_rows(batch, context)),
+                });
+                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                    scheduler.schedule_tick_after(10_000);
+                }
+                self.schedule_tick(TickUrgency::Immediate);
+            }
+        }
+        // Wake for the earliest backoff; with no upstream, a reconnect's own
+        // turn resumes the checks instead of a timer spinning.
+        let checks = self.held_row_checks.borrow();
+        let next_retry = checks
+            .rows
+            .values()
+            .filter_map(|check| check.retry_at)
+            .filter(|at| *at > now)
+            .min();
+        let active = checks.active.is_some();
+        drop(checks);
+        if !active
+            && upstream.is_some()
+            && let Some(at) = next_retry
+            && let Some(scheduler) = self.scheduler.borrow().as_ref()
+        {
+            let delay = u64::try_from(at.saturating_duration_since(now).as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1);
+            scheduler.schedule_tick_after(delay);
+        }
+        if changed {
+            // Deletions applied after settlement emit the ordinary local
+            // change, so live subscriptions update.
+            self.mark_local_subscriptions_dirty();
+        }
     }
 
     async fn advance_scalar_reconciliation(
@@ -3889,6 +4298,9 @@ where
         self.large_value_upload_retry_deadlines
             .borrow_mut()
             .retain(|tx_id, _| !released_tx_ids.contains(tx_id));
+        self.upload_retry_later_attempts
+            .borrow_mut()
+            .retain(|tx_id, _| !released_tx_ids.contains(tx_id));
         self.detached_large_value_uploads
             .borrow_mut()
             .retain(|_, uploads| {
@@ -3988,8 +4400,337 @@ fn subscription_needs_targeted_refresh(
     maintained.uses_logical_tables(changed_logical_tables)
 }
 
+/// The answer of [`check_deletion_reconciliation`] when it needs no node
+/// work: a stream that is not reconciling, has finished, is waiting on a
+/// probe, or has no upstream answer to compare against. Checked before the
+/// (large) async check is built, since every refresh of every live stream
+/// asks and almost all of them are in one of these states.
+fn deletion_reconciliation_known(state: &Rc<RefCell<SubscriptionState>>) -> Option<bool> {
+    let state = state.borrow();
+    match &state.deletion_reconciliation {
+        DeletionReconciliation::Disabled | DeletionReconciliation::Done => Some(false),
+        DeletionReconciliation::Pending { .. } | DeletionReconciliation::Probing { .. } => {
+            Some(true)
+        }
+        DeletionReconciliation::Unchecked
+        | DeletionReconciliation::Deferred { .. }
+        | DeletionReconciliation::Discovering { .. } => state
+            .upstream_subscription_handles
+            .is_empty()
+            .then_some(false),
+    }
+}
+
 /// Re-evaluate live subscriptions whose maintained logical inputs may have
 /// changed. Protocol and lifecycle refreshes use the unfiltered wrapper below.
+/// Compare a fresh strict stream's first settled authority answer with the
+/// rows this client holds live for the same query, and return whether the
+/// stream must withhold publication for a probe of the difference.
+///
+/// Local candidates come from an ordinary Local-tier maintained graph of the
+/// same query, never a blocking one-shot evaluation: this runs inside the
+/// sync turn that must itself send any large-value chunk requests. A cold
+/// discovery graph withholds settlement and is drained on later turns. Only
+/// rows whose current local winner is an accepted Global transaction are
+/// candidates: pending local writes are legitimately absent from the
+/// authority's answer. The comparison runs once per stream; agreeing views
+/// with a warm discovery graph settle in this same refresh, as before.
+///
+/// Discovery waits only for this stream's own receiver graph, never for a
+/// globally idle query runtime: other streams' continuous work must not
+/// starve it (INV-SYNC-48). While other work is pending the discovery graph
+/// is opened without driving the runtime, and drained on later turns.
+async fn check_deletion_reconciliation<S>(
+    node: &SharedNodeState<S>,
+    state: &Rc<RefCell<SubscriptionState>>,
+    stream_graph: Option<&LocalMaintainedViewSubscription>,
+    progress_waker: Option<&Waker>,
+) -> Result<bool, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    if let Some(withheld) = deletion_reconciliation_known(state) {
+        return Ok(withheld);
+    }
+    let (shape, binding, subscription, author, request_claims, previous) = {
+        let mut state_ref = state.borrow_mut();
+        let subscription = state_ref
+            .upstream_subscription_handles
+            .first()
+            .map(|handle| handle.subscription)
+            .expect("checked by deletion_reconciliation_known");
+        let previous = std::mem::replace(
+            &mut state_ref.deletion_reconciliation,
+            DeletionReconciliation::Unchecked,
+        );
+        let SubscriptionKind::Prepared { shape, binding, .. } = &state_ref.kind;
+        (
+            shape.clone(),
+            binding.clone(),
+            subscription,
+            state_ref.author,
+            state_ref.request_identity_claims.clone(),
+            previous,
+        )
+    };
+    let restore = |reconciliation| {
+        state.borrow_mut().deletion_reconciliation = reconciliation;
+    };
+    let mut owner = node.lock().await;
+    let runtime_token = owner.groove_runtime_token();
+    let previous = match previous {
+        // A runtime rebuild retired the old discovery graph with its IDs.
+        DeletionReconciliation::Discovering {
+            runtime_token: token,
+            since,
+            spec,
+            ..
+        } if token != runtime_token => DeletionReconciliation::Deferred { since, spec },
+        previous => previous,
+    };
+    let settled_key = owner
+        .authority_result_key_for_subscription(subscription)
+        .ok()
+        .filter(|key| {
+            owner.has_settled_authority_result(key)
+                && !owner.opening_pending_for_authority_result(key)
+                && !owner.publication_deferred_for_authority_result(key)
+                && owner.authority_source_closure_generation(key).is_some()
+        });
+    let Some(key) = settled_key else {
+        // Nothing can claim settlement yet; compare once an answer settles.
+        let withheld = !matches!(previous, DeletionReconciliation::Unchecked);
+        restore(previous);
+        return Ok(withheld);
+    };
+    let table = shape.query().table.clone();
+    let authoritative = owner.scalar_authority_input_rows(&key, &table);
+    let (since, mut spec, maintained) = match previous {
+        DeletionReconciliation::Discovering {
+            maintained,
+            since,
+            spec,
+            ..
+        } => (since, spec, Some(maintained)),
+        DeletionReconciliation::Deferred { since, spec } => (since, spec, None),
+        _ => {
+            let (identity, claims) =
+                request_claims.unwrap_or_else(|| (author, owner.session_claims_for(author)));
+            (
+                web_time::Instant::now(),
+                Box::new(DeletionDiscoverySpec {
+                    shape,
+                    binding,
+                    author,
+                    context: crate::protocol::PolicyBindingKey {
+                        identity,
+                        canonical_claims: crate::protocol::CanonicalPolicyClaims::new(
+                            claims.clone(),
+                        ),
+                    },
+                    claims,
+                    authoritative: BTreeSet::new(),
+                }),
+                None,
+            )
+        }
+    };
+    // The freshest settled answer decides which held rows are omitted.
+    spec.authoritative = authoritative;
+    let step = match maintained {
+        Some(maintained) => {
+            drain_deletion_discovery(&mut owner, maintained, progress_waker).await?
+        }
+        None => {
+            // The stream's own receiver graph must have installed and fully
+            // evaluated this closure (large-value chunks included) before a
+            // discovery graph reads the same rows from local storage.
+            let stream_graph_ready = stream_graph.is_some_and(|maintained| {
+                maintained.has_covered_input_sources()
+                    && owner
+                        .authority_source_closure_generation(&key)
+                        .is_some_and(|generation| {
+                            maintained.has_installed_covered_closure(&key, generation)
+                        })
+                    && !owner.subscription_has_pending_query_runtime(maintained.subscription_id())
+            });
+            if !stream_graph_ready {
+                drop(owner);
+                restore(DeletionReconciliation::Deferred { since, spec });
+                return Ok(true);
+            }
+            // Finish a cold opening in this turn only when nothing else is
+            // queued (so agreeing views need not wait for another turn);
+            // otherwise leave it to drain on later turns rather than queue
+            // behind work, such as chunk hydration, only this turn advances.
+            let drive = !owner.has_pending_query_runtime();
+            open_deletion_discovery(&mut owner, &spec, progress_waker, drive).await?
+        }
+    };
+    let snapshot = match step {
+        DiscoveryStep::Cold(maintained) => {
+            drop(owner);
+            restore(DeletionReconciliation::Discovering {
+                maintained,
+                runtime_token,
+                since,
+                spec,
+            });
+            return Ok(true);
+        }
+        DiscoveryStep::Snapshot(snapshot) => snapshot,
+    };
+    let rows = deletion_candidates(&mut owner, &snapshot, &spec).await?;
+    drop(owner);
+    if rows.is_empty() {
+        restore(DeletionReconciliation::Done);
+        return Ok(false);
+    }
+    restore(DeletionReconciliation::Pending {
+        rows,
+        context: spec.context,
+        since,
+    });
+    Ok(true)
+}
+
+/// Progress of a Local-tier candidate-discovery graph.
+enum DiscoveryStep {
+    /// Still producing its initial snapshot; drain it on a later turn.
+    Cold(LocalMaintainedViewSubscription),
+    /// Complete; the graph has been released.
+    Snapshot(RelationSnapshot),
+}
+
+/// Open the Local-tier discovery graph of `spec`'s query. With `drive`, a
+/// cold opening is driven to completion in this turn.
+async fn open_deletion_discovery<S>(
+    owner: &mut NodeState<S>,
+    spec: &DeletionDiscoverySpec,
+    progress_waker: Option<&Waker>,
+    drive: bool,
+) -> Result<DiscoveryStep, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let (maintained, snapshot) = {
+        let mut scoped =
+            owner.scoped_optional_session_claims(spec.author, Some(spec.claims.clone()));
+        scoped
+            .open_maintained_view_subscription_in_authorization_mode_with_waker(
+                &spec.shape,
+                &spec.binding,
+                spec.author,
+                DurabilityTier::Local,
+                &ReadViewSpec::default(),
+                None,
+                QueryAuthorizationMode::ClientLocal,
+                false,
+                progress_waker,
+            )
+            .await?
+    };
+    if maintained.initial_snapshot_received() {
+        owner.unsubscribe_groove_subscription(maintained.subscription_id());
+        return Ok(DiscoveryStep::Snapshot(snapshot));
+    }
+    if !drive {
+        return Ok(DiscoveryStep::Cold(maintained));
+    }
+    // A cold opening needs only local storage work here: the stream graph
+    // and the runtime are idle, so no chunk demand is outstanding.
+    owner.drive_query_runtime().await?;
+    drain_deletion_discovery(owner, maintained, progress_waker).await
+}
+
+/// Drain a cold discovery graph without blocking on other query work.
+async fn drain_deletion_discovery<S>(
+    owner: &mut NodeState<S>,
+    mut maintained: LocalMaintainedViewSubscription,
+    progress_waker: Option<&Waker>,
+) -> Result<DiscoveryStep, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let drained = async {
+        owner
+            .drive_ready_query_runtime_with_waker(progress_waker)
+            .await?;
+        owner
+            .drain_local_maintained_view_subscription_preserving_rows_with_waker(
+                &mut maintained,
+                None,
+                &BTreeSet::new(),
+                progress_waker,
+            )
+            .await?;
+        Ok::<(), Error>(())
+    }
+    .await;
+    if let Err(error) = drained {
+        owner.unsubscribe_groove_subscription(maintained.subscription_id());
+        return Err(error);
+    }
+    if !maintained.initial_snapshot_received() {
+        return Ok(DiscoveryStep::Cold(maintained));
+    }
+    let materialized = owner
+        .materialize_local_maintained_relation_snapshot_with_occurrences(&maintained)
+        .await;
+    owner.unsubscribe_groove_subscription(maintained.subscription_id());
+    Ok(DiscoveryStep::Snapshot(materialized?.snapshot))
+}
+
+/// Held rows of a discovery snapshot that the authority answer omitted and
+/// whose current local winner is an accepted Global transaction.
+async fn deletion_candidates<S>(
+    owner: &mut NodeState<S>,
+    snapshot: &RelationSnapshot,
+    spec: &DeletionDiscoverySpec,
+) -> Result<Vec<crate::protocol::CurrentRowCoordinate>, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let table = &spec.shape.query().table;
+    let mut rows = Vec::new();
+    for row in snapshot.rows.iter().take(snapshot.root_count) {
+        let row = row.row_uuid();
+        if spec.authoritative.contains(&row) {
+            continue;
+        }
+        let Some(tx) = owner.local_content_winner_tx_id(table, row).await? else {
+            continue;
+        };
+        if owner.transaction_record(tx).await.is_some_and(|record| {
+            matches!(record.fate, crate::tx::Fate::Accepted)
+                && record.durability >= DurabilityTier::Global
+        }) && let Ok(coordinate) = owner.current_row_coordinate(table, row)
+        {
+            rows.push(coordinate);
+        }
+    }
+    Ok(rows)
+}
+
+/// Release the discovery graph of a discovery superseded by an equivalent
+/// runtime-owned one.
+fn release_redundant_discovery<S>(
+    owner: &mut NodeState<S>,
+    redundant: Option<DeletionReconciliation>,
+) where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    if let Some(DeletionReconciliation::Discovering {
+        maintained,
+        runtime_token,
+        ..
+    }) = redundant
+        && owner.groove_runtime_token() == runtime_token
+    {
+        owner.unsubscribe_groove_subscription(maintained.subscription_id());
+    }
+}
+
 pub(super) async fn refresh_subscriptions_in<S>(
     node: &SharedNodeState<S>,
     subscriptions: &SubscriptionList,
@@ -4103,6 +4844,23 @@ where
                 continue;
             }
         }
+        // A settled strict answer may omit rows this client still holds
+        // live. Until those rows are discovered and probed, the stream keeps
+        // draining its graph but must not report settlement.
+        // The first check runs before this refresh drains the stream's own
+        // graph; the check after that drain can then discover candidates.
+        let mut deletion_withheld = match deletion_reconciliation_known(&state) {
+            Some(withheld) => withheld,
+            None => {
+                Box::pin(check_deletion_reconciliation(
+                    node,
+                    &state,
+                    None,
+                    progress_waker,
+                ))
+                .await?
+            }
+        };
         let request_claims = state
             .borrow()
             .request_identity_claims
@@ -4364,17 +5122,18 @@ where
                 .flatten()
                 .cloned()
                 .collect::<Vec<_>>();
-            let settled = subscription_is_settled(
-                &node.borrow(),
-                active_authority_view_receipts,
-                &shape,
-                &binding,
-                settled_tier,
-                read_view.clone(),
-                remote_propagate_upstream,
-                requires_authority_receipt,
-                settled_authority_result.as_ref(),
-            );
+            let settled = !deletion_withheld
+                && subscription_is_settled(
+                    &node.borrow(),
+                    active_authority_view_receipts,
+                    &shape,
+                    &binding,
+                    settled_tier,
+                    read_view.clone(),
+                    remote_propagate_upstream,
+                    requires_authority_receipt,
+                    settled_authority_result.as_ref(),
+                );
             let mut event = subscription_delta_event_with_reset(
                 read_tier,
                 settled,
@@ -4596,17 +5355,18 @@ where
                     retained.push(Rc::downgrade(&state));
                     continue;
                 }
-                let settled = subscription_is_settled(
-                    &node.borrow(),
-                    active_authority_view_receipts,
-                    &shape,
-                    &binding,
-                    settled_tier,
-                    read_view,
-                    remote_propagate_upstream,
-                    requires_authority_receipt,
-                    settled_authority_result.as_ref(),
-                );
+                let settled = !deletion_withheld
+                    && subscription_is_settled(
+                        &node.borrow(),
+                        active_authority_view_receipts,
+                        &shape,
+                        &binding,
+                        settled_tier,
+                        read_view,
+                        remote_propagate_upstream,
+                        requires_authority_receipt,
+                        settled_authority_result.as_ref(),
+                    );
                 (
                     snapshot,
                     SubscriptionSnapshotSource::LocalMaintained,
@@ -4670,6 +5430,15 @@ where
                 } else {
                     (None, false)
                 };
+                if deletion_withheld {
+                    deletion_withheld = Box::pin(check_deletion_reconciliation(
+                        node,
+                        &state,
+                        refresh.maintained.as_ref(),
+                        progress_waker,
+                    ))
+                    .await?;
+                }
                 // A reset claims an authority successor, but it is publishable
                 // only after the receiver has installed that exact closure
                 // and drained the same local graph. `Pending` is not empty:
@@ -4753,17 +5522,18 @@ where
                         .as_ref()
                         .expect("pending initial snapshot restored maintained subscription")
                         .decoded_terminal_records()?;
-                    let settled = subscription_is_settled(
-                        &node.borrow(),
-                        active_authority_view_receipts,
-                        &shape,
-                        &binding,
-                        settled_tier,
-                        read_view,
-                        remote_propagate_upstream,
-                        requires_authority_receipt,
-                        settled_authority_result.as_ref(),
-                    );
+                    let settled = !deletion_withheld
+                        && subscription_is_settled(
+                            &node.borrow(),
+                            active_authority_view_receipts,
+                            &shape,
+                            &binding,
+                            settled_tier,
+                            read_view,
+                            remote_propagate_upstream,
+                            requires_authority_receipt,
+                            settled_authority_result.as_ref(),
+                        );
                     refresh.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                     refresh.settled = settled;
                     {
@@ -4819,17 +5589,18 @@ where
                             terminal_operations,
                         } => {
                             if !terminal_operations.is_empty() {
-                                let settled = subscription_is_settled(
-                                    &node.borrow(),
-                                    active_authority_view_receipts,
-                                    &shape,
-                                    &binding,
-                                    settled_tier,
-                                    read_view,
-                                    remote_propagate_upstream,
-                                    requires_authority_receipt,
-                                    settled_authority_result.as_ref(),
-                                );
+                                let settled = !deletion_withheld
+                                    && subscription_is_settled(
+                                        &node.borrow(),
+                                        active_authority_view_receipts,
+                                        &shape,
+                                        &binding,
+                                        settled_tier,
+                                        read_view,
+                                        remote_propagate_upstream,
+                                        requires_authority_receipt,
+                                        settled_authority_result.as_ref(),
+                                    );
                                 let terminal_layout = refresh
                                     .maintained
                                     .as_ref()
@@ -4951,22 +5722,24 @@ where
                                 None,
                             )?;
                             state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                            let settled = subscription_is_settled(
-                                &node.borrow(),
-                                active_authority_view_receipts,
-                                &shape,
-                                &binding,
-                                settled_tier,
-                                read_view,
-                                remote_propagate_upstream,
-                                requires_authority_receipt,
-                                settled_authority_result.as_ref(),
-                            ) && node
-                                .borrow()
-                                .relation_snapshot_has_materialized_required_cells(
+                            let settled = !deletion_withheld
+                                && subscription_is_settled(
+                                    &node.borrow(),
+                                    active_authority_view_receipts,
                                     &shape,
-                                    &state_ref.snapshot,
-                                )?;
+                                    &binding,
+                                    settled_tier,
+                                    read_view,
+                                    remote_propagate_upstream,
+                                    requires_authority_receipt,
+                                    settled_authority_result.as_ref(),
+                                )
+                                && node
+                                    .borrow()
+                                    .relation_snapshot_has_materialized_required_cells(
+                                        &shape,
+                                        &state_ref.snapshot,
+                                    )?;
                             if authoritative_reset {
                                 event = subscription_delta_event_with_reset(
                                     snapshot_tier,
@@ -5059,17 +5832,18 @@ where
                         };
                         refresh.snapshot = materialized.snapshot;
                     }
-                    let settled = subscription_is_settled(
-                        &node.borrow(),
-                        active_authority_view_receipts,
-                        &shape,
-                        &binding,
-                        settled_tier,
-                        read_view,
-                        remote_propagate_upstream,
-                        requires_authority_receipt,
-                        settled_authority_result.as_ref(),
-                    );
+                    let settled = !deletion_withheld
+                        && subscription_is_settled(
+                            &node.borrow(),
+                            active_authority_view_receipts,
+                            &shape,
+                            &binding,
+                            settled_tier,
+                            read_view,
+                            remote_propagate_upstream,
+                            requires_authority_receipt,
+                            settled_authority_result.as_ref(),
+                        );
                     // A complete closure can be observably unchanged (for
                     // example an empty grouped aggregate). It is still the
                     // exact authority boundary for this receiver and must
@@ -5167,17 +5941,18 @@ where
                         SubscriptionSnapshotSource::LinkSnapshot,
                     )
                 };
-                let settled = subscription_is_settled(
-                    &node.borrow(),
-                    active_authority_view_receipts,
-                    &shape,
-                    &binding,
-                    settled_tier,
-                    read_view,
-                    remote_propagate_upstream,
-                    requires_authority_receipt,
-                    settled_authority_result.as_ref(),
-                );
+                let settled = !deletion_withheld
+                    && subscription_is_settled(
+                        &node.borrow(),
+                        active_authority_view_receipts,
+                        &shape,
+                        &binding,
+                        settled_tier,
+                        read_view,
+                        remote_propagate_upstream,
+                        requires_authority_receipt,
+                        settled_authority_result.as_ref(),
+                    );
                 (
                     snapshot,
                     snapshot_source,

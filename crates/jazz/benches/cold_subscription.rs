@@ -273,13 +273,13 @@ impl ColdSubscriptionBench {
         let mut parent = None;
         // Every measured winner has one parent: `depth` counts ordinary
         // last-seen-style updates after the initial create, rather than making
-        // depth one a structurally different parentless version.
+        // depth one a structurally different parentless version. Each winner's
+        // base names its writer's previous transaction, whose time is a
+        // varint on the wire, so every depth's clock stays within one varint
+        // width.
         for idx in 0..=depth {
             let mut commit =
-                MergeableCommit::new(TABLE, row_uuid, 1_000 + idx as u64).cells(cells(idx));
-            if let Some(parent_tx_id) = parent {
-                commit = commit.parents(vec![parent_tx_id]);
-            }
+                MergeableCommit::new(TABLE, row_uuid, 1_000_000 + idx as u64).cells(cells(idx));
             let (publication, unit) =
                 block_on(self.writer.commit_mergeable_unit(commit)).expect("mergeable commit");
             let tx_id = publication.tx_id();

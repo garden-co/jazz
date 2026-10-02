@@ -924,20 +924,12 @@ fn serving_rows_in_read_view(
 
 fn write_deletion_register(server: &CoreDb, table: &str, row: RowUuid, branch: BranchSelector) {
     let node = server.node();
-    let parents = {
-        let mut state = node.borrow_mut();
-        block_on(state.local_deletion_winner_tx_id_in_branch(table, &branch, row))
-            .unwrap()
-            .into_iter()
-            .collect()
-    };
     let authored_columns = branch.values.keys().cloned().collect::<BTreeSet<_>>();
     let published = block_on(
         node.borrow_mut().commit_mergeable(
             crate::node::MergeableCommit::new(table, row, server.next_now_ms())
                 .made_by(AuthorSubject::SYSTEM)
                 .branch(branch)
-                .parents(parents)
                 .authored_columns(authored_columns)
                 .deletion(crate::tx::DeletionEvent::Deleted),
         ),
@@ -2173,334 +2165,6 @@ fn delayed_row_repair_does_not_replace_a_newer_supporting_snapshot() {
     );
 }
 
-/// Alice reopens a scope whose deduplicated bodies were evicted. Bob's serving
-/// node must repair the whole scope using requests within the wire limit.
-/// bob -- complete references, withheld bodies --> alice
-/// bob <-- bounded repair batches -- alice -- complete local result
-/// The transport tap models eviction after the sender chose payload dedup;
-/// it also verifies the actual request boundary before the server consumes it.
-#[test]
-fn known_state_repair_batches_more_than_one_wire_request() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xd1; 16]);
-    let bob = open_core(0xd2, AuthorSubject::SYSTEM, &schema);
-    let reader = open_db(0xd3, alice, &schema);
-    let count = crate::protocol_limits::MAX_FETCH_ROW_VERSIONS + 1;
-    let expected = (0..count)
-        .map(|index| RowUuid(uuid::Uuid::from_u128(10_000 + index as u128)))
-        .collect::<BTreeSet<_>>();
-    for row in &expected {
-        bob.insert_with_id("todos", *row, cells("repair", false, alice))
-            .unwrap();
-    }
-    let (upstream, downstream, requests, responses) = duplex_with_taps();
-    let _upstream = block_on(reader.connect_upstream(upstream));
-    let subscriber = bob.accept_subscriber(downstream, alice);
-    let mut stream =
-        prepared_subscribe(&reader, &Query::from("todos"), global_subscribe_opts()).unwrap();
-    reader.tick().unwrap();
-    for _ in 0..16 {
-        subscriber.borrow_mut().tick().unwrap();
-        if responses.borrow().iter().any(|message| {
-            matches!(message, SyncMessage::ViewUpdate(payload)
-                if payload.supporting_rows.added_rows().len() == count)
-        }) {
-            break;
-        }
-    }
-    let mut stripped = false;
-    for message in responses.borrow_mut().iter_mut() {
-        if let SyncMessage::ViewUpdate(payload) = message
-            && payload.supporting_rows.added_rows().len() == count
-        {
-            payload.version_carriers.clear();
-            stripped = true;
-        }
-    }
-    assert!(stripped, "serving node produced the complete scope");
-    let mut snapshot = RelationSnapshot::default();
-    let mut repair_batches = 0;
-    for _ in 0..32 {
-        reader.tick().unwrap();
-        for message in requests.borrow().iter() {
-            if let SyncMessage::FetchRowVersions { requests, .. } = message {
-                assert!(
-                    requests.len() <= crate::protocol_limits::MAX_FETCH_ROW_VERSIONS,
-                    "repair request exceeds the wire limit: {}",
-                    requests.len()
-                );
-                repair_batches += 1;
-            }
-        }
-        subscriber.borrow_mut().tick().unwrap();
-        while let Some(event) = stream.try_next_event() {
-            apply_subscription_event(&mut snapshot, event);
-        }
-        if snapshot.rows.len() == count {
-            break;
-        }
-    }
-    assert!(
-        repair_batches >= 2,
-        "the scope needs multiple repair batches"
-    );
-    assert_eq!(
-        row_ids(&snapshot.rows).into_iter().collect::<BTreeSet<_>>(),
-        expected
-    );
-}
-
-/// Alice's receiver keeps only the latest unsent complete snapshot while Core's
-/// first immutable-body repair is delayed. Releasing that response must still
-/// let Alice converge to the newest version, rather than replaying the backlog.
-///
-/// Core ──many complete snapshots──► Alice (one active + one latest repair)
-/// Core ──delayed repair response──► Alice ──latest repair──► Core
-#[test]
-fn newer_supporting_snapshots_coalesce_unsent_repairs() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
-    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xb2, alice, &schema);
-    let row = RowUuid::from_bytes([0xb3; 16]);
-    server
-        .insert_with_id("todos", row, cells("0", false, alice))
-        .unwrap();
-    let (upstream, downstream, _requests, responses) = duplex_with_taps();
-    let upstream = block_on(client.connect_upstream(upstream));
-    let subscriber = server.accept_subscriber(downstream, alice);
-    let mut stream =
-        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
-    let mut held = Vec::new();
-    let mut snapshot = RelationSnapshot::default();
-    for revision in 0..16 {
-        if revision > 0 {
-            server
-                .update(
-                    "todos",
-                    row,
-                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
-                )
-                .unwrap();
-        }
-        for _ in 0..8 {
-            subscriber.borrow_mut().tick().unwrap();
-            // Model a deduplicated body missing at this receiver. Hold only
-            // repair replies; complete snapshots keep arriving normally.
-            responses.borrow_mut().retain_mut(|message| {
-                match message {
-                    SyncMessage::ViewUpdate(payload) => {
-                        // This case exercises independent recovery snapshots, not dependent deltas.
-                        assert_eq!(payload.supporting_rows.added_rows().len(), 1);
-                        payload.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(
-                            payload.supporting_rows.added_rows().to_vec(),
-                        );
-                        payload.version_carriers.clear();
-                    }
-                    SyncMessage::RowVersionPayloads { .. } => {
-                        held.push(message.clone());
-                        return false;
-                    }
-                    _ => {}
-                }
-                true
-            });
-            client.tick().unwrap();
-            while let Some(event) = stream.try_next_event() {
-                apply_subscription_event(&mut snapshot, event);
-            }
-        }
-    }
-    let queued = match &upstream.borrow().link {
-        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
-        _ => unreachable!("client upstream"),
-    };
-    assert!(
-        queued <= 2,
-        "obsolete complete snapshots retained {queued} repairs"
-    );
-    assert!(!held.is_empty(), "the first repair was actually delayed");
-    responses.borrow_mut().extend(held);
-    for _ in 0..24 {
-        subscriber.borrow_mut().tick().unwrap();
-        client.tick().unwrap();
-        while let Some(event) = stream.try_next_event() {
-            apply_subscription_event(&mut snapshot, event);
-        }
-    }
-    assert_eq!(snapshot.rows.len(), 1);
-    assert_eq!(
-        snapshot.rows[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("15".to_owned()))
-    );
-}
-
-// Real transport receipt for an initial missing body followed by 15 dependent
-// deltas whose own bodies are present. Releasing repair must preserve the chain.
-#[test]
-fn dependent_supporting_deltas_wait_for_missing_snapshot_body() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
-    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xb2, alice, &schema);
-    let row = RowUuid::from_bytes([0xb3; 16]);
-    server
-        .insert_with_id("todos", row, cells("0", false, alice))
-        .unwrap();
-    let (upstream, downstream, _requests, responses) = duplex_with_taps();
-    let upstream = block_on(client.connect_upstream(upstream));
-    let subscriber = server.accept_subscriber(downstream, alice);
-    let mut stream =
-        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
-    let mut held = Vec::new();
-    let mut snapshot = RelationSnapshot::default();
-    for revision in 0..16 {
-        if revision > 0 {
-            server
-                .update(
-                    "todos",
-                    row,
-                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
-                )
-                .unwrap();
-        }
-        for _ in 0..8 {
-            subscriber.borrow_mut().tick().unwrap();
-            // Only the first snapshot needs a body fetch. Later deltas carry
-            // their own bodies but must wait behind that predecessor.
-            responses.borrow_mut().retain_mut(|message| {
-                match message {
-                    SyncMessage::ViewUpdate(payload) if payload.supporting_rows.is_snapshot() => {
-                        payload.version_carriers.clear();
-                    }
-                    SyncMessage::RowVersionPayloads { .. } => {
-                        held.push(message.clone());
-                        return false;
-                    }
-                    _ => {}
-                }
-                true
-            });
-            client.tick().unwrap();
-            while let Some(event) = stream.try_next_event() {
-                apply_subscription_event(&mut snapshot, event);
-            }
-        }
-    }
-    let queued = match &upstream.borrow().link {
-        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
-        _ => unreachable!("client upstream"),
-    };
-    assert!(
-        queued == 16,
-        "snapshot and all dependent deltas must remain ordered: {queued}"
-    );
-    assert!(
-        snapshot.rows.is_empty(),
-        "no successor may install before its missing predecessor"
-    );
-    assert!(!held.is_empty(), "the first repair was actually delayed");
-    responses.borrow_mut().extend(held);
-    for _ in 0..24 {
-        subscriber.borrow_mut().tick().unwrap();
-        client.tick().unwrap();
-        while let Some(event) = stream.try_next_event() {
-            apply_subscription_event(&mut snapshot, event);
-        }
-    }
-    assert_eq!(snapshot.rows.len(), 1);
-    assert_eq!(
-        snapshot.rows[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("15".to_owned()))
-    );
-}
-
-// More than one bounded repair window must trigger a fresh authority baseline
-// without losing eventual public rows or accepting a disconnected delta chain.
-#[test]
-fn stalled_supporting_delta_backlog_reopens_with_a_fresh_snapshot() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
-    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xb2, alice, &schema);
-    let row = RowUuid::from_bytes([0xb3; 16]);
-    server
-        .insert_with_id("todos", row, cells("0", false, alice))
-        .unwrap();
-    let (upstream, downstream, _requests, responses) = duplex_with_taps();
-    let upstream = block_on(client.connect_upstream(upstream));
-    let subscriber = server.accept_subscriber(downstream, alice);
-    let mut stream =
-        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
-    let mut held = Vec::new();
-    let mut snapshot = RelationSnapshot::default();
-    let mut received_snapshots = 0;
-    for revision in 0..96 {
-        if revision > 0 {
-            server
-                .update(
-                    "todos",
-                    row,
-                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
-                )
-                .unwrap();
-        }
-        for _ in 0..8 {
-            subscriber.borrow_mut().tick().unwrap();
-            // Only the first snapshot needs a body fetch. Later deltas carry
-            // their own bodies but must wait behind that predecessor.
-            responses.borrow_mut().retain_mut(|message| {
-                match message {
-                    SyncMessage::ViewUpdate(payload) if payload.supporting_rows.is_snapshot() => {
-                        received_snapshots += 1;
-                        payload.version_carriers.clear();
-                    }
-                    SyncMessage::RowVersionPayloads { .. } => {
-                        held.push(message.clone());
-                        return false;
-                    }
-                    _ => {}
-                }
-                true
-            });
-            client.tick().unwrap();
-            while let Some(event) = stream.try_next_event() {
-                apply_subscription_event(&mut snapshot, event);
-            }
-        }
-    }
-    let queued = match &upstream.borrow().link {
-        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
-        _ => unreachable!("client upstream"),
-    };
-    assert!(
-        queued <= 64,
-        "stalled chains must have bounded retained transitions: {queued}"
-    );
-    assert!(
-        snapshot.rows.is_empty(),
-        "no successor may install before its missing predecessor"
-    );
-    assert!(
-        received_snapshots >= 2,
-        "overflow must cause a real fresh subscription snapshot"
-    );
-    assert!(!held.is_empty(), "the first repair was actually delayed");
-    responses.borrow_mut().extend(held);
-    for _ in 0..24 {
-        subscriber.borrow_mut().tick().unwrap();
-        client.tick().unwrap();
-        while let Some(event) = stream.try_next_event() {
-            apply_subscription_event(&mut snapshot, event);
-        }
-    }
-    assert_eq!(snapshot.rows.len(), 1);
-    assert_eq!(
-        snapshot.rows[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("95".to_owned()))
-    );
-}
-
 /// Transport control makes the ordering deterministic: a complete update for
 /// one live query is immediately followed by another query's missing-body
 /// snapshot. Public subscription results must survive yielding for that repair.
@@ -2928,33 +2592,19 @@ fn a_subscriber_joining_a_pending_spilled_install_waits_for_its_rows() {
     }
 }
 
-/// Restores the protocol routed-payload limit when a test that lowered it ends,
-/// including by panic, so later tests on a reused thread see the real limit.
-struct RoutedPayloadLimitGuard;
-
-impl RoutedPayloadLimitGuard {
-    fn lower_to(limit: usize) -> Self {
-        crate::db::routed_messages::set_routed_payload_limit_for_test(Some(limit));
-        Self
-    }
-}
-
-impl Drop for RoutedPayloadLimitGuard {
-    fn drop(&mut self) {
-        crate::db::routed_messages::set_routed_payload_limit_for_test(None);
-    }
-}
-
 /// #3477: a whole-table subscription whose initial snapshot (supporting-row
 /// manifest plus every row's inline version body) exceeds the routed
 /// per-message payload limit still hydrates completely, and so does a later
 /// oversized delta.
 ///
 /// Before the fix the server's publication failed with "semantic message
-/// exceeds routed payload limit" and alice never saw a row. The server now
-/// sends the complete manifest with only as many inline bodies as fit; alice
-/// holds that update, repairs the remaining bodies over the existing
-/// row-version repair lane, and then publishes it in one step.
+/// exceeds routed payload limit" and alice never saw a row. The server's wire
+/// transport now sends such an update as a sequence of bounded parts on the
+/// subscription's delivery stream: `ViewUpdatePart`s followed by a final
+/// ordinary `ViewUpdate`. Alice's transport buffers the parts and yields the
+/// reassembled update only when the final part arrives, so she publishes it
+/// in one step and never sees a prefix. (The name predates the linear-history
+/// wire, which retired per-version body repair.)
 ///
 /// This is a crate-internal test because reproducing the real 256 MiB limit
 /// needs ~110k rows; the thread-local test hook lowers the routed limit (the
@@ -2962,9 +2612,9 @@ impl Drop for RoutedPayloadLimitGuard {
 /// public subscription surface over a real byte transport.
 ///
 /// ```text
-/// server ──ViewUpdate(manifest: all rows, bodies: prefix)──► alice (holds it)
-///        ◄──FetchRowVersions(missing refs)────────────────── alice
-///        ──RowVersionPayloads(missing bodies)──────────────► alice ──► publishes all rows
+/// server ──ViewUpdatePart(rows 1..k, bodies 1..k)──────────► alice (buffers)
+///        ──ViewUpdatePart(rows k+1..m, bodies k+1..m)──────► alice (buffers)
+///        ──ViewUpdate(rows m+1..n, bodies m+1..n, inventory)► alice ──► publishes all rows
 /// ```
 #[test]
 fn oversized_view_updates_hydrate_through_body_repair() {
@@ -3031,4 +2681,181 @@ fn oversized_view_updates_hydrate_through_body_repair() {
         );
         assert_eq!(snapshot.root_count, usize::from(expected));
     }
+}
+
+/// A client and a Core over a real, uncompressed byte link (so queued frame
+/// bytes track encoded message size) whose client-bound frames the
+/// test can withhold, with `BATCH` bulky rows seeded so the whole-table
+/// snapshot must cross as bounded `ViewUpdatePart`s under a lowered limit.
+struct OversizedSnapshotLink {
+    server: CoreDb,
+    client: Db,
+    alice: AuthorSubject,
+    upstream: Rc<LocalMutex<PeerConnection>>,
+    subscriber: Rc<LocalMutex<PeerConnection>>,
+    client_inbound: Rc<RefCell<std::collections::VecDeque<Vec<u8>>>>,
+    expected: BTreeSet<RowUuid>,
+}
+
+const OVERSIZED_SNAPSHOT_ROWS: u16 = 200;
+const OVERSIZED_SNAPSHOT_LIMIT: usize = 512 * 1024;
+
+impl OversizedSnapshotLink {
+    fn open(seed: u8) -> Self {
+        let schema = schema();
+        let alice = AuthorSubject::for_test_bytes([seed; 16]);
+        let server = open_core(seed + 1, AuthorSubject::SYSTEM, &schema);
+        let client = open_db(seed + 2, alice, &schema);
+        let mut expected = BTreeSet::new();
+        for id in 1..=OVERSIZED_SNAPSHOT_ROWS {
+            let mut bytes = [0x78; 16];
+            bytes[..2].copy_from_slice(&id.to_be_bytes());
+            let row = RowUuid::from_bytes(bytes);
+            let title = format!("{id:04}-{}", "x".repeat(1500));
+            server
+                .insert_with_id("todos", row, cells(&title, id % 2 == 0, alice))
+                .unwrap();
+            expected.insert(row);
+        }
+        let (client_raw, server_raw) = byte_duplex_raw();
+        let client_inbound = Rc::clone(&client_raw.inbound);
+        let upstream = block_on(client.connect_upstream(uncompressed_adapter(client_raw)));
+        let subscriber = server.accept_subscriber(uncompressed_adapter(server_raw), alice);
+        Self {
+            server,
+            client,
+            alice,
+            upstream,
+            subscriber,
+            client_inbound,
+            expected,
+        }
+    }
+
+    /// Run turns until the server has queued the oversized snapshot for the
+    /// client, then hand the client every pending frame but the last, which
+    /// completes the final part: the client holds the earlier parts and the
+    /// sequence is incomplete. Returns the withheld frame.
+    fn deliver_all_but_the_final_frame(&self) -> Vec<Vec<u8>> {
+        for _ in 0..16 {
+            self.client.tick().unwrap();
+            self.subscriber.borrow_mut().tick().unwrap();
+            let queued = self
+                .client_inbound
+                .borrow()
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>();
+            if queued > OVERSIZED_SNAPSHOT_LIMIT {
+                let mut frames = std::mem::take(&mut *self.client_inbound.borrow_mut());
+                let withheld = frames.split_off(frames.len() - 1);
+                *self.client_inbound.borrow_mut() = frames;
+                self.client.tick().unwrap();
+                return withheld.into();
+            }
+        }
+        panic!("the server never sent the oversized snapshot");
+    }
+}
+
+/// Drain `stream`, asserting it only ever publishes nothing or every row.
+fn drain_whole_updates(
+    stream: &mut SubscriptionStream,
+    snapshot: &mut RelationSnapshot,
+    expected: &BTreeSet<RowUuid>,
+) {
+    while let Some(event) = stream.try_next_event() {
+        apply_subscription_event(snapshot, event);
+        assert!(
+            [0, expected.len()].contains(&snapshot.root_count),
+            "partial update published: {} rows",
+            snapshot.root_count
+        );
+    }
+}
+
+/// Unsubscribe mid-sequence: the client drops its subscription while holding
+/// some parts of the oversized snapshot. The rest of the sequence still
+/// arrives, is reassembled, and is discarded as a late update for a view the
+/// link no longer serves; nothing partial is published and the link stays
+/// healthy, so a new subscription to the same query hydrates every row.
+#[test]
+fn oversized_view_update_unsubscribed_mid_sequence_is_never_published_partially() {
+    let link = OversizedSnapshotLink::open(0x40);
+    let _limit = RoutedPayloadLimitGuard::lower_to(OVERSIZED_SNAPSHOT_LIMIT);
+    let query = Query::from("todos");
+    let mut first = prepared_subscribe(&link.client, &query, global_subscribe_opts()).unwrap();
+    let withheld = link.deliver_all_but_the_final_frame();
+    let mut first_snapshot = RelationSnapshot::default();
+    drain_whole_updates(&mut first, &mut first_snapshot, &link.expected);
+    assert_eq!(
+        first_snapshot.root_count, 0,
+        "the sequence is still incomplete"
+    );
+    drop(first);
+    link.client.tick().unwrap();
+    link.client_inbound.borrow_mut().extend(withheld);
+
+    let mut second = prepared_subscribe(&link.client, &query, global_subscribe_opts()).unwrap();
+    let mut snapshot = RelationSnapshot::default();
+    for _ in 0..64 {
+        link.client.tick().unwrap();
+        link.subscriber
+            .borrow_mut()
+            .tick()
+            .expect("an unsubscribed sequence must not fail the subscriber link");
+        link.client.tick().unwrap();
+        drain_whole_updates(&mut second, &mut snapshot, &link.expected);
+        if snapshot.root_count == link.expected.len() {
+            break;
+        }
+    }
+    assert_eq!(
+        snapshot
+            .rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        link.expected
+    );
+}
+
+/// Reconnect mid-sequence: the link drops while the client holds only some
+/// parts of the oversized snapshot. The buffered parts go with the dropped
+/// transport, nothing partial is published, and the subscription resumes on a
+/// fresh link with a complete snapshot.
+#[test]
+fn oversized_view_update_interrupted_by_reconnect_restarts_cleanly() {
+    let link = OversizedSnapshotLink::open(0x48);
+    let _limit = RoutedPayloadLimitGuard::lower_to(OVERSIZED_SNAPSHOT_LIMIT);
+    let mut stream =
+        prepared_subscribe(&link.client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    let withheld = link.deliver_all_but_the_final_frame();
+    let mut snapshot = RelationSnapshot::default();
+    drain_whole_updates(&mut stream, &mut snapshot, &link.expected);
+    assert_eq!(snapshot.root_count, 0, "the sequence is still incomplete");
+    drop(withheld);
+    assert!(link.server.server.detach_connection(&link.subscriber));
+    assert!(link.client.detach_connection(&link.upstream));
+
+    let (client_transport, server_transport) = byte_duplex();
+    let _upstream = block_on(link.client.connect_upstream(client_transport));
+    let subscriber = link.server.accept_subscriber(server_transport, link.alice);
+    for _ in 0..64 {
+        link.client.tick().unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        link.client.tick().unwrap();
+        drain_whole_updates(&mut stream, &mut snapshot, &link.expected);
+        if snapshot.root_count == link.expected.len() {
+            break;
+        }
+    }
+    assert_eq!(
+        snapshot
+            .rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        link.expected
+    );
 }

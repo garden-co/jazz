@@ -13,7 +13,7 @@ use jazz::ids::{
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, DelegatedSessionBinding, LensOp,
     MigrationLens, PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest,
-    PhysicalTableIdentity, RegisterShapeOptions, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
+    PhysicalTableIdentity, RegisterShapeOptions, ResultRowLayer, RowVersionRefEntry,
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
     SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
     VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
@@ -624,35 +624,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 },
             })),
         ),
-        (
-            "fetch_row_versions_todos",
-            "FetchRowVersions",
-            SyncMessage::FetchRowVersions {
-                requests: vec![RowVersionRef::new("todos", row, tx_id)],
-                delegated_session: None,
-            },
-        ),
-        (
-            "fetch_row_versions_delegated_session_claim_snapshot",
-            "FetchRowVersions",
-            SyncMessage::FetchRowVersions {
-                requests: vec![RowVersionRef::new("todos", row, tx_id)],
-                delegated_session: Some(DelegatedSessionBinding {
-                    identity: AuthorSubject::for_test_bytes([0x74; 16]),
-                    claims: BTreeMap::from([(
-                        "user_id".to_owned(),
-                        Value::String("delegated-repair-user".to_owned()),
-                    )]),
-                }),
-            },
-        ),
-        (
-            "row_version_payloads_empty",
-            "RowVersionPayloads",
-            SyncMessage::RowVersionPayloads {
-                version_bundles: Vec::new(),
-            },
-        ),
     ]
     .into_iter()
     .map(|(name, family, mut message)| {
@@ -673,6 +644,12 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         .iter()
         .find(|(name, _, _)| *name == "view_update_reset_with_covered_input")
         .unwrap();
+    // A non-final part of an oversized update (tag 34): the update's payload
+    // shape, with the inventory reserved for the final `ViewUpdate`.
+    let SyncMessage::ViewUpdate(mut part) = snapshot.clone() else {
+        unreachable!()
+    };
+    part.peer_payload_inventory = PeerPayloadInventory::default();
     let SyncMessage::ViewUpdate(mut delta) = snapshot.clone() else {
         unreachable!()
     };
@@ -689,6 +666,11 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         "view_update_physical_delta",
         "ViewUpdate",
         SyncMessage::ViewUpdate(delta),
+    ));
+    messages.push((
+        "view_update_part_non_final",
+        "ViewUpdatePart",
+        SyncMessage::ViewUpdatePart(part),
     ));
     messages
 }
@@ -722,7 +704,6 @@ fn mixed_version_carriers(
                         table,
                         schema_version,
                         RowUuid::from_bytes([0x90 + index as u8; 16]),
-                        Vec::new(),
                         author,
                         100 + index,
                         author,
@@ -779,7 +760,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v3",
+        fixture_set: "jazz-wire-message-frames-v4",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -964,6 +945,107 @@ fn retired_wire_tag_12_rejects_decoding() {
     }
 }
 
+/// Wire protocol v4 (linear row-state history) refuses every pre-v4 peer at
+/// the Hello handshake with the typed `UnsupportedProtocolVersion`/`Never`
+/// error, before any payload is decoded.
+///
+/// Actors: `alice` runs a v4 Core; `bob` still runs a v3 build (alpha.54 to
+/// alpha.57) whose frozen Hello and Subscribe frames are replayed verbatim.
+///
+/// ```text
+/// bob(v3) ──Hello 3..=3──► alice(v4) ──✗ UnsupportedProtocolVersion, retry Never
+/// bob(v3) ──Message v3──► alice(v4) ──✗ envelope version mismatch (never decoded)
+/// bob(v3) ──ExactVersionSet (tag 2) in a v4 envelope──► ✗ reserved tag, not a Watermark
+/// ```
+///
+/// Exact frames are not a public database API, so this is a codec-level
+/// receipt: the inputs are the bytes the v3 fixture set froze.
+#[test]
+fn pre_v4_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
+    assert_eq!(WIRE_PROTOCOL_VERSION, 4);
+    let bob_v3_hellos = [
+        // `wire_hello_frames.json` (jazz-wire-hello-frames-v1) at wire v3.
+        "000303000000",
+        "000303010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+        "000303f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+        "00030388020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+    ];
+    for hex_frame in bob_v3_hellos {
+        let WireFrame::Hello(hello) =
+            jazz::wire::decode_frame(&parse_hex(hex_frame)).expect("v3 Hello is a canonical frame")
+        else {
+            panic!("expected a Hello frame");
+        };
+        assert_eq!(
+            (hello.min_protocol_version, hello.max_protocol_version),
+            (3, 3)
+        );
+        let error = jazz::wire::negotiate_wire(&hello, jazz::wire::current_wire_features())
+            .expect_err("alice's v4 Core must refuse bob's v3 Hello");
+        assert_eq!(
+            error.code,
+            jazz::wire::WireErrorCode::UnsupportedProtocolVersion
+        );
+        assert_eq!(error.retry, jazz::wire::WireRetry::Never);
+        assert!(
+            error.message.contains("remote 3..=3, expected 4..=4"),
+            "{}",
+            error.message
+        );
+    }
+
+    // bob's frozen v3 Subscribe frame never reaches the semantic decoder.
+    let bob_v3_subscribe = parse_hex(
+        "0103010048061022222222222222222222222222222222102222222222222222222222222222222210333333333333333333333333333333331000000000000000000000000000000000000000",
+    );
+    let rejection = jazz::wire::validate_frame_for_artifact_corpus(
+        &bob_v3_subscribe,
+        jazz::wire::current_wire_features(),
+    )
+    .expect_err("a v3 envelope must not be admitted on a v4 link");
+    assert!(
+        rejection.contains("protocol version 3 does not match negotiated 4"),
+        "{rejection}"
+    );
+
+    // Even re-wrapped in a v4 envelope, bob's pre-v4 `ExactVersionSet`
+    // declaration (tag 2) is a reserved tag rather than a `Watermark` prefix.
+    let WireFrame::Message(envelope) = jazz::wire::decode_frame(&bob_v3_subscribe).unwrap() else {
+        panic!("expected a message frame");
+    };
+    let mut exact_version_set = envelope.payload;
+    assert_eq!(
+        exact_version_set.split_off(exact_version_set.len() - 2),
+        [0, 0]
+    );
+    exact_version_set.extend_from_slice(&[1, 2, 0, 0]);
+    assert!(decode_sync_message(&exact_version_set).is_err());
+    assert!(jazz::wire::decode_sync_message_trusted(&exact_version_set).is_err());
+    let rewrapped = encode_frame(&WireFrame::Message(WireEnvelope::new(
+        WIRE_PROTOCOL_VERSION,
+        FEATURE_SYNC_MESSAGE_PAYLOAD,
+        exact_version_set,
+    )))
+    .unwrap();
+    assert!(
+        jazz::wire::validate_frame_for_artifact_corpus(
+            &rewrapped,
+            jazz::wire::current_wire_features()
+        )
+        .is_err()
+    );
+    let watermark = jazz::protocol::KnownStateDeclaration::Watermark {
+        position: GlobalTime(7),
+        authorization_progress: None,
+        supporting_revision: [0x51; 16],
+    };
+    assert_eq!(
+        postcard::to_allocvec(&watermark).unwrap(),
+        [&[3, 7, 0][..], &[0x51; 16][..]].concat(),
+        "Watermark is frozen at tag 3"
+    );
+}
+
 #[test]
 fn wire_message_frame_fixtures_are_current() {
     let actual = serde_json::to_string_pretty(&fixture_manifest())
@@ -1064,7 +1146,9 @@ fn supporting_snapshots_reject_duplicate_rows_and_invalid_native_table() {
 #[test]
 fn v1_delegated_policy_fields_reject_old_shapes_and_pin_claim_bytes() {
     let messages = wire_fixture_messages();
-    for name in ["subscribe_empty_todos_binding", "fetch_row_versions_todos"] {
+    // `FetchRowVersions` (tag 15) is retired in wire v4, so `Subscribe` is the
+    // only direct-policy message left to pin; its retired fixtures are gone.
+    for name in ["subscribe_empty_todos_binding"] {
         let (_, _, message) = messages
             .iter()
             .find(|(candidate, _, _)| *candidate == name)
@@ -1558,12 +1642,12 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
                     Row {
                         row_id: todo_one_id,
                         deleted: false,
-                        raw: &todo_one,
+                        raw: std::borrow::Cow::Borrowed(&todo_one),
                     },
                     Row {
                         row_id: todo_two_id,
                         deleted: false,
-                        raw: &todo_two,
+                        raw: std::borrow::Cow::Borrowed(&todo_two),
                     },
                 ],
             },
@@ -1573,7 +1657,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
                 rows: vec![Row {
                     row_id: note_id,
                     deleted: false,
-                    raw: &note,
+                    raw: std::borrow::Cow::Borrowed(&note),
                 }],
             },
             // Batching is contiguous only: returning to `todos` after `notes`
@@ -1584,7 +1668,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
                 rows: vec![Row {
                     row_id: deleted_todo_id,
                     deleted: true,
-                    raw: &deleted_todo,
+                    raw: std::borrow::Cow::Borrowed(&deleted_todo),
                 }],
             },
         ],
@@ -1603,7 +1687,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             rows: vec![Row {
                 row_id: todo_one_id,
                 deleted: false,
-                raw: &todo_one,
+                raw: std::borrow::Cow::Borrowed(&todo_one),
             }],
         }],
         updated: vec![RowBatch {
@@ -1612,7 +1696,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             rows: vec![Row {
                 row_id: note_id,
                 deleted: false,
-                raw: &note,
+                raw: std::borrow::Cow::Borrowed(&note),
             }],
         }],
         removed: vec![RemovedRowPayload {

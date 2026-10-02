@@ -66,9 +66,10 @@ fn run(rows: usize, updates: usize, window: usize, arm: &str) {
         } else {
             parents[i]
         };
-        let commit = MergeableCommit::new("tasks", row(i), 2000 + step as u64)
-            .parents(vec![parent])
-            .cells(values);
+        // Linear history carries no parents; the arm now only varies the
+        // authored cells.
+        let _ = parent;
+        let commit = MergeableCommit::new("tasks", row(i), 2000 + step as u64).cells(values);
         let started = Instant::now();
         let foreground = f.foreground.as_mut().unwrap();
         let publication = measure(phases.entry("author").or_default(), foreground, |node| {

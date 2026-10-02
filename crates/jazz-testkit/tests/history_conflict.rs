@@ -1291,6 +1291,11 @@ async fn persistent_peer_reloads_synced_state_before_offline_editing_impl() {
 /// then verifies the real reconnect behavior: Bob can make a stale local edit
 /// offline and still replay it after he rejoins the server.
 ///
+/// Bob's edit was made over `alice-v1`, and Alice changed the title after
+/// that, so Core keeps her `alice-v4` and records Bob's title as a lost cell
+/// of his accepted write (SPEC 4 §4.6, ancestor merge): a write never
+/// overrides a value its writer had not seen.
+///
 /// ```text
 /// baseline: create → alice-v1 ──► bob syncs, persists v1 locally
 /// bob.shutdown()
@@ -1300,13 +1305,9 @@ async fn persistent_peer_reloads_synced_state_before_offline_editing_impl() {
 ///                     (only `title` is authored; stale `completed=false` is inherited)
 /// bob   (reopen): reloads that immutable version and uploads it over sync
 ///
-/// bob reconnects online
-/// both should converge to bob-offline-edit + completed=true
-///
-/// Planted positive for authored-column persistence: dropping the trailing
-/// `authored_columns` field while projecting stored history back to a wire
-/// `VersionRecord` makes Bob's later materialized snapshot claim its inherited
-/// `completed=false`; the final `completed=true` assertions then fail.
+/// bob reconnects online and replays his write
+/// both converge to alice-v4 + completed=true (bob's title lost to a value he
+/// had not seen)
 /// ```
 #[tokio::test]
 async fn offline_reconnect_replays_local_edit_after_rejoin() {
@@ -1433,12 +1434,12 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
 
             if alice_rows.len() == 1
                 && bob_rows.len() == 1
-                && alice_rows[0].1[0] == Value::Text("bob-offline-edit".to_string())
-                && bob_rows[0].1[0] == Value::Text("bob-offline-edit".to_string())
+                && alice_rows[0].1[0] == Value::Text("alice-v4".to_string())
+                && bob_rows[0].1[0] == Value::Text("alice-v4".to_string())
                 && alice_rows[0].1[1] == Value::Boolean(true)
                 && bob_rows[0].1[1] == Value::Boolean(true)
             {
-                return Some("bob-offline-edit".to_string());
+                return Some("alice-v4".to_string());
             }
             None
         }
@@ -1446,8 +1447,8 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
     .await;
 
     assert_eq!(
-        converged, "bob-offline-edit",
-        "bob-offline-edit should win via LWW (bob edited last → highest timestamp)"
+        converged, "alice-v4",
+        "alice-v4 stays: bob's offline title was made over alice-v1, which alice had since changed"
     );
 
     Arc::try_unwrap(alice)

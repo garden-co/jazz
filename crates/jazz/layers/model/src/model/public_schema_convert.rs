@@ -4294,6 +4294,7 @@ mod tests {
             crate::groove::records::ValueType::U16 => GrooveValue::U16(2),
             crate::groove::records::ValueType::U32 => GrooveValue::U32(3),
             crate::groove::records::ValueType::U64 => GrooveValue::U64(4),
+            crate::groove::records::ValueType::U48 => GrooveValue::U48(4),
             crate::groove::records::ValueType::I32 => GrooveValue::I32(-5),
             crate::groove::records::ValueType::I64 => GrooveValue::I64(-6),
             crate::groove::records::ValueType::F64 => GrooveValue::F64(7.0),

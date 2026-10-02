@@ -1,5 +1,6 @@
 // Test-only snapshot of descriptor codec at 4c6eafaef5ad038a71b4583f650b22ccfd7b71db.
-// Sole source adaptation: DescriptorField construction supplies identity: None.
+// Source adaptations: DescriptorField construction supplies identity: None, and
+// ValueType::U48 (introduced after the snapshot) is rejected as unrepresentable.
 // Preserve this independent writer/reader; it is evidence, not a production fallback.
 use super::super::*;
 
@@ -187,6 +188,9 @@ fn descriptor_codec_push_value_type(
         ValueType::U16 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U16)),
         ValueType::U32 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U32)),
         ValueType::U64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U64)),
+        ValueType::U48 => Err(Error::TypeMismatch {
+            expected: value_type.clone(),
+        }),
         ValueType::I32 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_I32)),
         ValueType::I64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_I64)),
         ValueType::F64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_F64)),

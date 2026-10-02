@@ -2642,22 +2642,10 @@ fn mergeable_tx_coalesces_restore_then_update_for_same_row() {
         panic!("expected commit unit");
     };
     assert_eq!(tx.tx_id, tx_id);
-    assert_eq!(tx.n_total_writes, 2);
-    assert_eq!(versions.len(), 2);
-    assert_eq!(
-        versions
-            .iter()
-            .filter(|version| version.deletion().is_none())
-            .count(),
-        1
-    );
-    assert_eq!(
-        versions
-            .iter()
-            .filter(|version| version.deletion() == Some(DeletionEvent::Restored))
-            .count(),
-        1
-    );
+    // Restore and update of one row coalesce into one restored row image.
+    assert_eq!(tx.n_total_writes, 1);
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].deletion(), Some(DeletionEvent::Restored));
 }
 
 #[test]
@@ -2872,10 +2860,12 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
             Some(Value::Bool(true)),
         ))
     );
+    // One row image per transaction: the insert after the delete is the
+    // later write of the row, so the row is live again.
     assert_eq!(
         builder_state.get(&reinserted),
         Some(&(
-            true,
+            false,
             Some(Value::String("reinserted".to_owned())),
             Some(Value::Bool(true)),
         ))
@@ -3086,7 +3076,7 @@ fn mergeable_read_for_write_is_decided_only_by_the_authority() {
     let bob = AuthorSubject::for_test_bytes([0xd9; 16]);
     let target = row(0xca);
     let server = open_core(0xda, AuthorSubject::SYSTEM, &schema);
-    server
+    let target_write = server
         .insert_with_id(
             "docs",
             target,
@@ -3109,16 +3099,21 @@ fn mergeable_read_for_write_is_decided_only_by_the_authority() {
     alice_client.set_test_provider_claims(alice, test_provider_claims(alice));
     bob_client.set_test_provider_claims(bob, test_provider_claims(bob));
 
-    // Seed only the complete target preimage on each client. Neither client
-    // receives or creates the authority's private `grants` support row.
+    // Seed only the complete target preimage on each client: the authority's
+    // accepted insert of it, so each update is made over Core's image (SPEC 4
+    // §4.6). Neither client receives or creates the authority's private
+    // `grants` support row.
+    let target_unit = server
+        .node()
+        .borrow_mut()
+        .commit_unit_for(target_write.mergeable_tx_id())
+        .unwrap();
     for client in [&alice_client, &bob_client] {
         client
             .node
             .node
             .borrow_mut()
-            .commit_mergeable_settled(MergeableCommit::new("docs", target, 1).cells(
-                BTreeMap::from([("title".to_owned(), Value::String("original".to_owned()))]),
-            ))
+            .apply_sync_message_settled(target_unit.clone())
             .unwrap();
     }
 

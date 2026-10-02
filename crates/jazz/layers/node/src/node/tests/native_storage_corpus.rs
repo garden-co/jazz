@@ -6,7 +6,7 @@
 // producer here makes the semantic shape, backend profile, and reopen contract
 // executable beside the NodeState paths that actually write it.
 
-use crate::storage_codec_profile::epoch_1_storage_codec_profile;
+use crate::storage_codec_profile::{epoch_1_storage_codec_profile, node_storage_codec_profile};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jazz_storage_rocksdb::Durability as RocksDurability;
 use jazz_storage_sqlite::{
@@ -27,9 +27,7 @@ const NATIVE_CORPUS_REQUIRED_STORES: &[&str] = &[
     "jazz_nodes",
     "jazz_schema_versions",
     "jazz_transactions",
-    "jazz_merge_heads",
-    "jazz_global_changes",
-    "jazz_deletion_history",
+    "jazz_tx_touched_rows",
     "jazz_authority_policy_bindings",
     "jazz_known_state_facts",
     "jazz_settled_program_facts",
@@ -45,27 +43,27 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 // this records current fixture wiring and is not used to reinterpret the
 // committed historical binary stores.
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
-    include_str!("../../../../../fixtures/volatile-scope-native-jazz-producer.pack.base64");
+    include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "750cac7560210ab5bf951d29fd1e2d844f1263df9df376881658edc6ff22b6f9";
+    "82d525cee1fb5b194887b93e971b1511a871d65d8a72943ea574be03d01bae53";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "28b3deefe5d9adcc512a999ea454696c9480b3167740ece1d050d28e8f5e9360";
+    "d17d153c3338a3596826b36a68f62e99dc09bdd059de4f2763788bcc939a1a0b";
 // Pinned alongside the physical SQLite/RocksDB images below so their contents
 // are checked independently of a newly produced store.
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
-    "750cac7560210ab5bf951d29fd1e2d844f1263df9df376881658edc6ff22b6f9";
+    "82d525cee1fb5b194887b93e971b1511a871d65d8a72943ea574be03d01bae53";
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "a3606d7045d477dab33d9bf0c60d3a1d1c1608dfd581f9e1bbf1c8abd6447c13";
+    "dd635273be299e5d7cc70aa9a0dc0463962cc9a230945c5ef6eb17db498e6974";
 const CURRENT_NATIVE_SQLITE_SHA256: &str =
-    "28902888353cf33af039811b82c45875a3c2f72a4176e06e3e5d50826b8734bd";
+    "ec77e11c4208049ba63022c098065bdb6f97c28404b1eeb878bdc6b1a9c01c97";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
 const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
-    "21a6c49b90d83f33ba3deba2cfd7605db155e78deeec22f683158037c66d7ba7";
+    "459c168aeec168221d8ccbffc3ea3dc3ab8485280aec6e16d4abca3dfa5ff166";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -919,16 +917,28 @@ where
                 });
             stores.extend([
                 physical_history_table_name(table_id),
-                physical_register_table_name(table_id),
                 physical_global_current_table_name(table_id),
-                physical_register_global_current_table_name(table_id),
                 physical_ahead_current_table_name(table_id),
-                physical_register_ahead_current_table_name(table_id),
                 physical_rejected_versions_table_name(table_id),
             ]);
         }
     }
     stores
+}
+
+/// A subscription watermark v1 names the catch-up revision installed at its
+/// seq. That revision is a fresh random id minted per catch-up, so two
+/// producers (or two adapters) never agree on it. Pin the record's shape, key
+/// and seq, and replace only the nonce with a fixed non-nil placeholder.
+fn normalize_watermark_revision(values: &mut [Value]) {
+    match values {
+        [Value::U8(1), Value::U64(settled_through), Value::Bytes(revision)]
+            if *settled_through != 0 && revision.len() == 16 && revision.iter().any(|b| *b != 0) =>
+        {
+            *revision = vec![0x5e; 16];
+        }
+        other => panic!("corpus subscription watermark is not a v1 record: {other:?}"),
+    }
 }
 
 fn native_corpus_receipt<S>(node: &NodeState<S>, schema: &JazzSchema) -> NativeCorpusReceipt
@@ -961,10 +971,13 @@ where
             .map(|entry| {
                 let key = postcard::to_allocvec(&entry.key)
                     .expect("corpus direct-store key has a canonical semantic fixture");
-                let values = entry
+                let mut values = entry
                     .value
                     .to_values()
                     .expect("corpus direct-store value decodes");
+                if store_name == crate::schema::SUBSCRIPTION_WATERMARKS_STORE {
+                    normalize_watermark_revision(&mut values);
+                }
                 let value = postcard::to_allocvec(&values)
                     .expect("corpus direct-store value has a canonical semantic fixture");
                 (key, value)
@@ -1040,9 +1053,7 @@ fn assert_native_corpus_has_required_families<S>(
         "jazz_nodes",
         "jazz_schema_versions",
         "jazz_transactions",
-        "jazz_merge_heads",
-        "jazz_global_changes",
-        "jazz_deletion_history",
+        "jazz_tx_touched_rows",
         groove::db::LARGE_VALUE_METADATA_CF,
     ] {
         assert!(
@@ -1174,7 +1185,6 @@ where
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 101)
                 .branch(branch)
-                .parents(vec![first])
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v("mixed-write predecessor")),
                     ("attachment".to_owned(), Value::Bytes(vec![3, 4, 5, 6])),
@@ -1396,10 +1406,22 @@ where
     // adapter manifest boundary.  Reopening the right profile immediately
     // afterwards proves that the failed admission did not reinterpret or
     // rewrite any producer bytes before reporting the incompatibility.
-    assert!(
-        open_with_incomplete_profile().is_err(),
-        "a native store must reject an incomplete codec profile before opening Jazz data"
-    );
+    match open_with_incomplete_profile().err() {
+        Some(groove::storage::Error::UnsupportedStorageCodecs {
+            epoch: 1,
+            missing,
+            unknown,
+        }) => {
+            assert!(missing.is_empty(), "{missing:?}");
+            assert!(
+                unknown.iter().any(|codec| codec == "jazz.history-version-current.v4")
+                    && unknown.iter().any(|codec| codec == "groove.durable-index.v2"),
+                "the refusal names the Jazz families the incomplete profile cannot read: {unknown:?}"
+            );
+        }
+        Some(other) => panic!("expected UnsupportedStorageCodecs for an incomplete profile, got {other}"),
+        None => panic!("a native store must reject an incomplete codec profile before opening Jazz data"),
+    }
     let unchanged_after_rejection =
         crate::local_executor::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
             .expect("correct profile reopens after rejected admission");
@@ -1550,7 +1572,9 @@ fn in_memory_native_corpus_receipt(first_title: &str, note_body: &str) -> Native
 fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let schema = native_corpus_schema();
     let snapshot = native_corpus_authority_snapshot(&schema);
-    let profile = epoch_1_storage_codec_profile().expect("closed Jazz profile");
+    // A root that stores Jazz rows opens with the node profile (epoch-one base
+    // plus the durable-index and linear row-history families).
+    let profile = node_storage_codec_profile().expect("closed Jazz node profile");
 
     let rocks_directory = tempfile::tempdir().expect("create RocksDB corpus directory");
     let rocks_path = rocks_directory.path().to_path_buf();
@@ -1815,7 +1839,7 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
 #[test]
 fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
     let schema = native_corpus_schema();
-    let profile = epoch_1_storage_codec_profile().expect("closed Jazz profile");
+    let profile = node_storage_codec_profile().expect("closed Jazz node profile");
 
     let sqlite_directory = tempfile::tempdir().expect("create SQLite fixture directory");
     let sqlite_path = sqlite_directory.path().join("epoch-1-native-jazz.sqlite");
@@ -1939,7 +1963,7 @@ fn retired_result_codec_profiles_reject_historical_native_roots() {
     .err()
     .expect("retired SQLite profile must reject");
     assert!(
-        matches!(sqlite_error, groove::storage::Error::InvalidStorageLayout(ref message) if message.contains("storage manifest is inconsistent")),
+        matches!(sqlite_error, groove::storage::Error::UnsupportedStorageCodecs { ref unknown, .. } if unknown.iter().any(|codec| codec == "jazz.result-member-key.v1")),
         "historical SQLite root must fail closed during manifest admission: {sqlite_error}"
     );
     assert_eq!(std::fs::read(&sqlite_path).unwrap(), sqlite_before);
@@ -2283,7 +2307,7 @@ fn native_jazz_corpus_staged_candidate_survives_live_producer_removal() {
     inspect_native_sqlite_candidate(&verification_path)
         .expect("staged candidate remains physically valid after live source removal");
     let schema = native_corpus_schema();
-    let profile = epoch_1_storage_codec_profile().expect("closed Jazz profile");
+    let profile = node_storage_codec_profile().expect("closed Jazz node profile");
     verify_historical_native_corpus(
         schema.clone(),
         current_physical_native_corpus_pack,
@@ -2361,11 +2385,23 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
     );
 }
 
-/// Current native storage reads and extends bytes written by the actual npm
-/// alpha.54 binary. This internal adapter receipt is needed to inspect immutable
-/// history directly; application-level binding tests cannot expose that history.
+/// The root the published npm alpha.54 binary wrote (DAG history layout) is
+/// refused at manifest admission with the typed codec-inventory error when a
+/// current node opens it, and its bytes are left untouched.
+///
+/// Before linear history this receipt reopened and extended the alpha.54 root.
+/// The history codec is now `jazz.history-version-current.v4` and old roots
+/// are refused rather than migrated, so the receipt pins the refusal instead:
+/// the root lacks exactly the durable-index and row-history families and
+/// declares nothing this build does not read.
+///
+/// ```text
+/// alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
+///                                       missing [groove.durable-index.v2,
+///                                                jazz.history-version-current.v4]
+/// ```
 #[test]
-fn published_alpha54_native_corpus_reopens_and_accepts_current_writes() {
+fn published_alpha54_native_corpus_is_refused_with_the_typed_codec_error() {
     let directory = tempfile::tempdir().unwrap();
     let archive = decode_native_physical_fixture(
         include_str!("../../../../../fixtures/published-alpha54-native-rocksdb.tar.gz.base64"),
@@ -2373,46 +2409,93 @@ fn published_alpha54_native_corpus_reopens_and_accepts_current_writes() {
         "published alpha.54 RocksDB",
     ).unwrap();
     let path = unpack_native_rocksdb_archive(directory.path(), &archive).unwrap();
+    let before = rocksdb_family_entries(&path);
     let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
         PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text),
     ));
-    let table = schema.tables().iter().find(|table| table.name == "notes").unwrap().clone();
-    let open = || {
-        let families = schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        YieldingStorage::wrap(ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-            &path, &refs, RocksDurability::FullSync, &epoch_1_storage_codec_profile().unwrap(),
-        ).expect("current adapter opens published alpha.54 root"))
-    };
-    let check = |state: &mut NodeState<_>| {
-        let versions = state.query_table_versions("notes").unwrap();
-        for body in ["published alpha.54 original", "published alpha.54 current"] {
-            assert!(versions.iter().any(|version| version.row_uuid() == row(43)
-                && version.cell(&table, "body").unwrap() == Some(v(body))),
-                "published history missing {body}");
-        }
-    };
-    let mut reopened = crate::local_executor::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
-    check(&mut reopened);
-    reopened.commit_mergeable_settled(MergeableCommit::new("notes", row(44), 102)
-        .cells(BTreeMap::from([("body".to_owned(), v("current main writer"))])))
-        .unwrap();
-    drop(reopened);
-    let mut reopened = crate::local_executor::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
-    check(&mut reopened);
-    assert!(reopened.query_table_versions("notes").unwrap().iter().any(|version|
-        version.row_uuid() == row(44)
-        && version.cell(&table, "body").unwrap() == Some(v("current main writer"))));
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_refused_as_pre_linear_root(
+        ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
+            &path,
+            &refs,
+            RocksDurability::FullSync,
+            &node_storage_codec_profile().unwrap(),
+        )
+        .map(drop),
+        "published alpha.54 RocksDB",
+    );
+    assert_eq!(
+        rocksdb_family_entries(&path),
+        before,
+        "the refused alpha.54 root is not mutated"
+    );
 }
 
-/// Current storage reads the retired Edge durability tag exactly as the actual
-/// npm alpha.56 binary wrote it. The fixture is the published client's own
-/// RocksDB root after an alpha.56 edge acknowledged a write that Core never
-/// saw; see `published-alpha56-legacy-edge-receipt.md` for how it was made.
-/// This internal adapter receipt is needed because the retired tag cannot be
-/// authored through any current API, and the resend scan is not public.
+/// Every RocksDB family's entries, read below Jazz and read-only.
+fn rocksdb_family_entries(
+    path: &std::path::Path,
+) -> BTreeMap<String, Vec<(Box<[u8]>, Box<[u8]>)>> {
+    let options = rocksdb::Options::default();
+    let families = rocksdb::DB::list_cf(&options, path).expect("list RocksDB families");
+    let db = rocksdb::DB::open_cf_for_read_only(&options, path, &families, false)
+        .expect("open RocksDB root read-only");
+    families
+        .iter()
+        .map(|family| {
+            let handle = db.cf_handle(family).expect("listed family opens");
+            let entries = db
+                .iterator_cf(handle, rocksdb::IteratorMode::Start)
+                .map(|entry| entry.expect("read RocksDB entry"))
+                .collect();
+            (family.clone(), entries)
+        })
+        .collect()
+}
+
+/// A pre-linear (DAG layout, alpha.54 to alpha.59) node root is refused at
+/// manifest admission with the typed error naming exactly the two families
+/// it lacks. It declares no family this build does not read.
+fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>, store: &str) {
+    match result {
+        Err(groove::storage::Error::UnsupportedStorageCodecs {
+            epoch,
+            missing,
+            unknown,
+        }) => {
+            assert_eq!(epoch, 1, "{store}");
+            assert_eq!(
+                missing,
+                vec![
+                    "groove.durable-index.v2".to_owned(),
+                    "jazz.history-version-current.v4".to_owned(),
+                ],
+                "{store}"
+            );
+            assert!(unknown.is_empty(), "{store}: {unknown:?}");
+        }
+        Err(other) => panic!("{store}: expected UnsupportedStorageCodecs, got {other}"),
+        Ok(()) => panic!("{store}: a pre-linear root must not open"),
+    }
+}
+
+/// The published npm alpha.56 client root holding an edge-accepted write that
+/// Core never saw is refused at manifest admission with the typed
+/// codec-inventory error, and its transaction records are left byte-for-byte
+/// unchanged.
+///
+/// Before linear history this receipt reopened the root and resent the
+/// unsynced write. Old roots are now refused rather than migrated, so an
+/// unsynced alpha.56 write cannot be recovered by this build; the receipt pins
+/// that the refusal happens before any record is decoded or rewritten.
+/// `published-alpha56-legacy-edge-receipt.md` records how the root was made.
+///
+/// ```text
+/// bob's alpha.56 root ──open(node profile)──✗ UnsupportedStorageCodecs
+///                                             (edge + core records unchanged)
+/// ```
 #[test]
-fn published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent() {
+fn published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_records() {
     let provenance: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../../fixtures/published-alpha56-legacy-edge-receipt.json"
     ))
@@ -2438,7 +2521,7 @@ fn published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent(
     let core_key = hex_at("/transactionRecords/coreConfirmed/keyHex");
     let core_value = hex_at("/transactionRecords/coreConfirmed/valueHex");
     // Physical, read-only and below Jazz: the alpha.56 bytes are exactly the
-    // pinned transaction records, before and after current code reopens them.
+    // pinned transaction records, before and after the refused open.
     let stored_record = |key: &[u8]| {
         let options = rocksdb::Options::default();
         let families = rocksdb::DB::list_cf(&options, &path).unwrap();
@@ -2448,97 +2531,28 @@ fn published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent(
     };
     assert_eq!(stored_record(&edge_key).as_deref(), Some(edge_value.as_slice()));
     assert_eq!(stored_record(&core_key).as_deref(), Some(core_value.as_slice()));
+    let before = rocksdb_family_entries(&path);
 
     let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
         PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
     ));
-    let table = schema.tables().iter().find(|table| table.name == "todos").unwrap().clone();
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = YieldingStorage::wrap(
+    assert_refused_as_pre_linear_root(
         ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
             &path,
             &refs,
             RocksDurability::FullSync,
-            &epoch_1_storage_codec_profile().unwrap(),
+            &node_storage_codec_profile().unwrap(),
         )
-        .expect("current adapter opens the published alpha.56 client root"),
+        .map(drop),
+        "published alpha.56 RocksDB",
     );
-    let author = AuthorSubject::from_canonical(&text("/receipt/author")).unwrap();
-    let tx_at = |record: &str| {
-        TxId::new(
-            TxTime(
-                provenance
-                    .pointer(&format!("/transactionRecords/{record}/txTime"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap(),
-            ),
-            NodeUuid(text(&format!("/transactionRecords/{record}/txNode")).parse().unwrap()),
-        )
-    };
-    let edge_tx = tx_at("edgeAccepted");
-    let core_tx = tx_at("coreConfirmed");
-    let edge_row = RowUuid(text("/receipt/edgeAccepted/rowId").parse().unwrap());
-    let core_row = RowUuid(text("/receipt/confirmed/rowId").parse().unwrap());
-    {
-        let mut state =
-            crate::local_executor::block_on(NodeState::new(node(0x56), schema.clone(), storage)).unwrap();
-        // The stored fields really are the legacy shape: Accepted, tag 2, no
-        // global time. Decoding, not a migration, turns that into Pending.
-        let unsettled = crate::local_executor::block_on(state.database.index_scan_raw(
-            "jazz_transactions",
-            "by_global_time",
-            &[Value::Nullable(None)],
-        ))
-        .unwrap();
-        assert_eq!(unsettled.len(), 1, "only the edge-accepted write lacks a global time");
-        let record = unsettled[0].record();
-        assert_eq!(record.get_enum(TransactionRowRecord::FIELD_FATE_IDX).unwrap(), 1);
-        assert_eq!(record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX).unwrap(), 2);
-        drop(unsettled);
-
-        let audit = crate::local_executor::block_on(state.transaction_record(edge_tx)).unwrap();
-        assert_eq!(audit.tx_id, edge_tx);
-        assert_eq!(audit.made_by, author);
-        assert_eq!(audit.kind, TxKind::Mergeable);
-        assert_eq!(audit.n_total_writes, 1);
-        assert_eq!(audit.fate, Fate::Pending);
-        assert_eq!(audit.global_time, None);
-        assert_eq!(audit.durability, DurabilityTier::Local);
-        assert_eq!(
-            crate::local_executor::block_on(state.transaction_state(edge_tx)),
-            Some((Fate::Pending, None, DurabilityTier::Local))
-        );
-        let versions = crate::local_executor::block_on(state.query_versions_for_tx(edge_tx)).unwrap();
-        assert_eq!(versions.len(), 1);
-        assert_eq!(versions[0].row_uuid(), edge_row);
-        assert_eq!(
-            versions[0].cell(&table, "title").unwrap(),
-            Some(v("published alpha.56 edge-accepted write"))
-        );
-
-        // Replay is author-scoped: the author's resend scan recovers exactly
-        // the edge-accepted write, and nobody else's scan sees it.
-        assert_eq!(
-            crate::local_executor::block_on(state.pending_transaction_ids_for_author(author)).unwrap(),
-            vec![edge_tx]
-        );
-        assert!(
-            crate::local_executor::block_on(state.pending_transaction_ids_for_author(AuthorSubject::SYSTEM))
-                .unwrap()
-                .is_empty()
-        );
-
-        // The Core-confirmed control keeps its Accepted/Global outcome.
-        let (fate, global_time, durability) =
-            crate::local_executor::block_on(state.transaction_state(core_tx)).unwrap();
-        assert_eq!((fate, durability), (Fate::Accepted, DurabilityTier::Global));
-        assert!(global_time.is_some());
-        let core_versions = crate::local_executor::block_on(state.query_versions_for_tx(core_tx)).unwrap();
-        assert_eq!(core_versions.len(), 1);
-        assert_eq!(core_versions[0].row_uuid(), core_row);
-    }
-    // Reopening only read the records; the alpha.56 bytes are unchanged.
     assert_eq!(stored_record(&edge_key).as_deref(), Some(edge_value.as_slice()));
     assert_eq!(stored_record(&core_key).as_deref(), Some(core_value.as_slice()));
+    assert_eq!(
+        rocksdb_family_entries(&path),
+        before,
+        "the refused alpha.56 root is not mutated"
+    );
 }

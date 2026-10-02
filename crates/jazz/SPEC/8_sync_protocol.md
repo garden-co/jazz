@@ -28,8 +28,8 @@ Invariant digest:
 - `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with `SyncMessage::SubscribeRejected` addressed to the requested `SubscriptionKey`; the rejected subscription MUST NOT become active, `Unsubscribe` for it is a no-op, and the connection MUST keep serving other subscriptions.
 - `INV-SYNC-24`: Known-state payload dedup may omit only native bodies, never required physical snapshot membership or delta additions/removals. Fresh subscriptions and recovery require a full snapshot; retained transport revisions are not durable coverage receipts.
-- `INV-SYNC-25`: A stream served under known-state dedup followed by its repair responses MUST be observationally equivalent to the same stream served without dedup.
-- `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
+- `INV-SYNC-25`: A view served under known-state dedup, followed when needed by the full resend after a known-state miss (`INV-SYNC-26`), MUST leave the reader with the same rows as the same view served without dedup.
+- `INV-SYNC-26`: A receiver that finds an update naming a held row whose body it no longer has MUST reopen that view without known state, and the serving peer MUST then resend every row of the view with its body under ordinary read policy. There is no per-version fetch: rows are identified by `(row, row_seq)` and resent whole. A second such update for the same view before it settles is a protocol error rather than a resend loop.
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams in the current process; eviction invalidates its in-memory cursor, and restart never recovers a declaration.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may affect native-body dedup only when its server-stamped progress matches the serving peer’s current token for that reader and binding view. It MUST NOT replace the complete supporting set or the fresh selected-authority confirmation.
 - `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection. A new settled one-shot requires confirmation for its exact current usage-site `SubscriptionKey`; an update for a detached predecessor cannot satisfy it even when shape, binding, and options are equal. Disconnect, restart, upstream switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
@@ -43,12 +43,13 @@ Invariant digest:
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
-- `INV-TX-5`: The authority MUST park a commit unit with missing parent/schema/content prerequisites and MUST decide it only after all prerequisites are present.
+- `INV-TX-5`: Core MUST park a commit unit authored under a schema version it does not yet know, with no fate, seq or visible rows, parking a resent copy only once, and MUST decide it exactly once after that schema arrives. Linear history has no version parents, so a unit has no parent prerequisites.
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; accepted state and the core committed frontier MUST become durable atomically before publication.
-- `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it MUST NOT accept, assign global timestamp, or create merge versions from that payload.
+- `INV-TX-23`: Fate authority MUST be structurally wired by the host. A node that receives a downstream commit unit as a local receiver (relay) MUST store it through the relay path as `Fate::Pending` at `DurabilityTier::Local`; it MUST NOT emit a fate, assign a seq, or make the write visible at the `Global` tier until Core's fate arrives.
 
 - `INV-SYNC-37`: LocalOnly propagation MUST remain on the calling node. Every remote subscription with propagate_upstream=false MUST be rejected regardless of identity, trust, role or worker transport.
 - `INV-SYNC-38`: An extra local query input absent from a completed selected-authority scope MUST be revalidated; scope absence or Unknown MUST NOT assert deletion or access loss. Bounded batches MUST preserve eventual retry/progression for supported active queries.
+- `INV-SYNC-48`: A fresh strict (Global) read of a current/default single-table scalar query MUST NOT report settled while a row the client holds live, whose local winner is accepted at Global and which matches the query locally, is absent from the settled authority answer: exactly those rows are probed through `CurrentRowsRequest` and the receipt's carriers (deleted images included) are ingested first; access loss does not redact the local copy. Agreeing views settle without a probe. Reconciliation is reliable, not best-effort: settlement may stop waiting after a bounded interval and release on the authority answer alone, but the outstanding reconciliation is never dropped. The runtime keeps discovering and probing, deduplicated per row, independent of the stream that found the row and of whether the query runtime ever idles, retrying Unknown, dropped, timed-out, or disconnected probes with backoff (immediately on a new upstream link, never while none is admitted), until the authority answers each held row as deleted, readable, or unavailable, or the row's local version changes. A deletion answered after settlement is still applied locally and emits the ordinary local change.
 - `INV-SYNC-39`: Confirmed current unavailability MUST be scoped to the exact effective identity/claims and filter current application inputs before joins, counts and limits. It MUST NOT erase shared content, expose the cause, or affect SYSTEM and other contexts.
 - `INV-SYNC-40`: Readmission MUST follow complete authorized native content ingestion and fresh correlated evidence. Durable per-row denial and clear watermarks MUST survive reopen and prevent stale replies from reversing a newer decision; authoritative inclusion MUST be able to revalidate an excluded row.
 - `INV-SYNC-41`: A partial client relay MUST NOT authorize query or exact-version repair bytes using cached policy inputs. Core authorizes disclosure for the admitted reader; delegated client scopes remain client-scoped across local relay links. SYSTEM reconciliation MUST NOT create access-loss markers for an ordinary reader.
@@ -146,7 +147,52 @@ the Rust receipt rejects noncanonical payloads, and TypeScript independently
 encodes the corpus and rejects malformed relation input. It is compatibility
 evidence, not a migration input.
 
-**Deployment boundary, 2026-09-18 — the sole wire protocol is v3.** `ViewUpdate` carries
+**Linear-history boundary, 2026-09-29 — the sole wire protocol is v4.** Wire v4
+replaces the version DAG with linear per-row state (SPEC 4 §4.6). It changes
+payload shapes in place, so every endpoint advertises exactly
+`min_protocol_version=4, max_protocol_version=4` and a v3 (or older) peer fails
+the Hello handshake with `UnsupportedProtocolVersion`/`Never` before any payload
+is decoded; a v3 envelope on a v4 link is rejected by its version field. The v4
+baseline, frozen fresh rather than appended to v3, is:
+
+- the `JVRR` row blob is version `2` (no `parents`; `_deletion` cell), and
+  `VersionRecord` ends with `authored_columns`, `base`, `lost_cells` (SPEC 4
+  §4.6 "Wire layout") then `counter_signs` (SPEC 4 §4.3). Every row version of
+  a `CommitUnit` carries the base of the image its writer made it over (the
+  settled seq it held and its own pending predecessor to that row, each
+  optional; both absent for an insert or a blind update) and empty
+  `lost_cells`; Core resolves the base to the write's ancestor or rejects the
+  write as `MalformedCommit`, and holds the unit without a fate while its
+  pending predecessor has none at Core yet, bounded per writer and in time
+  (SPEC 4 §4.6). Over those bounds Core answers with a **retry-later** fate
+  update: `FateUpdate { fate: Pending, global_time: None, durability: None }`
+  (a relay's local acknowledgement always carries `Local` durability, so the
+  two never collide). It is not a fate: Core stores nothing, and the
+  receiver neither applies nor forwards it. A writer that has the
+  transaction in its upload outbox keeps it pending and uploads it again on
+  the same link after a backoff (1 s, doubling per answer, at most 30 s), in
+  outbox order; a new link uploads every pending transaction again anyway. A
+  peer that does not know the answer treats it as a no-op Pending update and
+  resends on its next reconnect. A history record that a view
+  update or relay forwards carries the base and lost cells Core stored, and
+  takes its seq from the bundle's accepted `GlobalTime`. `FateUpdate` is
+  unchanged;
+- `SyncMessage` tags 15 (`FetchRowVersions`) and 16 (`RowVersionPayloads`) are
+  retired and reserved: rows are resent whole, never fetched per version;
+- `KnownStateDeclaration` tag 2 (`ExactVersionSet`) is retired and reserved;
+  `Watermark` is tag 3, so an old exact declaration fails decoding instead of
+  being read as a watermark prefix;
+- `SupportingRowsUpdate::CatchUp` is tag 2. It is a mandatory v4 variant, not an
+  optional extension, so it has no feature bit.
+- `SyncMessage` tag 34 (`ViewUpdatePart`) is a non-final part of a
+  `ViewUpdate` whose semantic payload exceeds the routed payload limit; the
+  final part is an ordinary `ViewUpdate` (SPEC 13, "Oversized view updates").
+  It is a mandatory v4 variant with no feature bit.
+
+Clients, relays and Core servers must upgrade together; there is no v3 decoder
+or migration. The storage boundary moves with it (SPEC 2 §2.7.1).
+
+**Deployment boundary, 2026-09-18 — wire protocol v3 (superseded by v4).** `ViewUpdate` carries
 settled version payloads only through `version_carriers`; the transitional
 duplicate `version_bundles` field is absent. Every endpoint advertises exactly
 wire-protocol v3 and requires every peer Hello to advertise exactly
@@ -171,8 +217,8 @@ Accountless reader sessions remain distinct from non-null row authors. Large sca
 internal enum/record encoding rather than the former private tagged/postcard
 payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
 milliseconds; the packed HLC is internal ordering state and is not protocol
-data. The wire-v3 golden fixture set is the only supported message layout.
-Wire-protocol v3 is independent of other formats that are also labelled v1,
+data. The wire-v4 golden fixture set is the only supported message layout.
+Wire-protocol v4 is independent of other formats that are also labelled v1,
 including storage, catalogue, migration-lens, and NAPI/WASM binding formats.
 `MigrationLens` payloads in that fixture set are
 their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
@@ -201,7 +247,7 @@ evaluate policy. `SYSTEM` is never a relay transport identity or delegated
 subject. This is a deliberate redefinition of the sole, unreleased v1 layout:
 there is no old-shape decoder or compatibility path.
 
-### 8.1.1 Frozen wire-protocol v3 byte contract
+### 8.1.1 Frozen wire-protocol v4 byte contract
 
 `WireFrame` and its `WireEnvelope.payload` are each **one complete postcard
 value**. A conformant decoder MUST reject a valid prefix followed by any
@@ -231,23 +277,26 @@ endpoint byte as a suffix is malformed framing, not version compatibility. A
 length other than exactly `16` MUST be rejected even when the declared byte
 sequence and the remaining Hello fields are otherwise well formed.
 
-Postcard enum ordinals are wire data. The wire-protocol v3 baseline freezes these permanent
+Postcard enum ordinals are wire data. The wire-protocol v4 baseline freezes these permanent
 discriminants (decimal):
 
-| enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WireFrame`     | `Hello=0`, `Message=1`, `Error=2`, `MessageFragment=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `WirePeerRole`  | `Client=0`, `Core=1`, retired/rejected `2`, `Relay=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `WireErrorCode` | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `WireRetry`     | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `SyncMessage`   | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `reserved=12`, `CatalogueAck=13`, `ViewUpdate=14`, `FetchRowVersions=15`, `RowVersionPayloads=16`, `CatalogueSnapshot=17`, `PermissionAdviceRequest=18`, `PermissionAdviceResponse=19`, `AuthorizationScopeSubscribe=20`, `AuthorizationScopeReceipt=21`, `AuthorizationScopeIntent=22`, `AuthorizationScopeView=23`, `AuthorizationScopeAggregateReceipt=24`, `AuthorizationScopeUnavailable=25`, `AuthorizationScopeDecision=26`, `ChunkUploadStart=27`, `ChunkUploadNodes=28`, `ChunkUploadResult=29`, `reserved=30` |
+| enum                    | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WireFrame`             | `Hello=0`, `Message=1`, `Error=2`, `MessageFragment=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `WirePeerRole`          | `Client=0`, `Core=1`, retired/rejected `2`, `Relay=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `WireErrorCode`         | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `WireRetry`             | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `SyncMessage`           | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `reserved=12`, `CatalogueAck=13`, `ViewUpdate=14`, `reserved=15`, `reserved=16`, `CatalogueSnapshot=17`, `PermissionAdviceRequest=18`, `PermissionAdviceResponse=19`, `AuthorizationScopeSubscribe=20`, `AuthorizationScopeReceipt=21`, `AuthorizationScopeIntent=22`, `AuthorizationScopeView=23`, `AuthorizationScopeAggregateReceipt=24`, `AuthorizationScopeUnavailable=25`, `AuthorizationScopeDecision=26`, `ChunkUploadStart=27`, `ChunkUploadNodes=28`, `ChunkUploadResult=29`, `reserved=30`, `CurrentRowsRequest=31`, `CurrentRowsReceipt=32`, `CurrentRowsCancel=33`, `ViewUpdatePart=34` |
+| `KnownStateDeclaration` | `Fast=0`, `FastWithAuthorizationProgress=1`, `reserved=2`, `Watermark=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `SupportingRowsUpdate`  | `Snapshot=0`, `Delta=1`, `CatchUp=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
-Tag 12 is retired and MUST reject decoding; it has no constructible message.
+Tags 12, 15 and 16 of `SyncMessage` and tag 2 of `KnownStateDeclaration` are
+retired and MUST reject decoding; they have no constructible message.
 
 Future variants MUST append after these values; existing variants, fields, and
 their field order MUST NOT be reordered, inserted before, reused, or decoded
 through a migration path. A new optional semantic variant additionally needs a
-new negotiated feature bit. Wire-protocol v3 intentionally provides neither
+new negotiated feature bit. Wire-protocol v4 intentionally provides neither
 old-version decoding nor migration.
 
 Tag 30 (`AuthorityPublication`) is retired. Its former edge-admission
@@ -275,7 +324,7 @@ its accepted mask is converted to a narrower runtime type. The feature mask
 and authority epoch remain `bigint` through wire decoding, so canonical values
 through `2^64-1` are representable without a JavaScript number conversion. Exactly
 one compression bit may be active on an envelope; when both codecs are
-negotiated, an outbound wire-protocol v3 sender selects LZ4 and emits only its bit. A
+negotiated, an outbound wire-protocol v4 sender selects LZ4 and emits only its bit. A
 receiver rejects an envelope declaring both codecs, a codec change within one
 connection, corrupt compressed bytes, or an encoded payload exceeding `E`
 before fragment admission, or a decompressed payload exceeding `D`.
@@ -304,7 +353,7 @@ new durable storage encoding or compatibility fallback.
 inline/indirect records. Rust checks exact bytes, decoded values, roundtrips,
 and rejection of the old descriptor before storage.
 
-The wire-protocol v3 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
+The wire-protocol v4 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
 `crates/jazz/fixtures/wire_hello_frames.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic
 value to the exact same payload and frame bytes, and TypeScript independently
@@ -359,6 +408,7 @@ The message variants and their payloads are:
 | `SubscribeRejected`                                      | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                     |
 | `Unsubscribe`                                            | up             | `{ subscription: SubscriptionKey }`                                                                                    |
 | `ViewUpdate`                                             | down           | `{ subscription, settled_through, authorization_progress, version_carriers, peer_payload_inventory, supporting_rows }` |
+| `ViewUpdatePart`                                         | down           | `ViewUpdate` payload shape; a non-final part of an update over the routed payload limit                                |
 | `PublishSchemaWithLens` / `PublishLens` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                 |
 
 A `VersionCarrier` in `ViewUpdate.version_carriers` is either one owned
@@ -433,14 +483,15 @@ transaction travels as one atomic commit unit
 Commit-unit delivery is idempotent by `tx_id`. If a known `tx_id` arrives with a
 conflicting payload, the receiver rejects it as `ConflictingCommitUnit`
 (`INV-TX-4`). The transaction's `n_total_writes` must equal the number of version
-records in the unit (`INV-TX-3`). If the unit references parents, schema
-versions, or content that the receiver does not yet know, the receiver parks the
-unit until those dependencies arrive (`INV-TX-5`).
+records in the unit (`INV-TX-3`). If the unit is authored under a schema
+version the authority does not yet know, the authority parks the unit until
+that schema arrives (`INV-TX-5`).
 
-Receiving a bare unfated commit unit is not authority. On a non-authority node,
-`apply_sync_message` stages or parks that commit unit as pending remote fate and
-waits for a `FateUpdate`; it must not accept the unit, assign global timestamp, or
-create merge versions from it (`INV-TX-23`). Only a structurally wired fate
+Receiving a bare unfated commit unit is not authority. A node that the host
+wires as a local receiver (a relay) stores a downstream commit unit through the
+relay path as `Fate::Pending` at `DurabilityTier::Local`, forwards it upstream
+and waits for Core's `FateUpdate`; it must not emit a fate, assign a seq, or make
+the write visible at the `Global` tier (`INV-TX-23`). Only a structurally wired fate
 authority path may decide fate (ch. 3 §3.6, ch. 9).
 
 ### 8.3 Fates downstream
@@ -737,7 +788,13 @@ A subscriber declares its known state per usage-site query in one of two forms:
   in-process resubscribe. Restart requires a fresh scope snapshot.
   Any local eviction touching stored row-version bodies invalidates in-memory
   fast facts before another declaration can be made (`INV-SYNC-27`).
-- **Slow declaration** — an explicit set of row-version identities
+- **Watermark declaration** (`Watermark { position, authorization_progress,
+supporting_revision }`, tag 3): "I have Q at seq `position` with supporting
+  revision `supporting_revision` installed". A serving peer that can answer
+  from its `by_seq` index replies with `SupportingRowsUpdate::CatchUp` against
+  that revision; any other peer treats it as a fast declaration at `position`.
+- **Slow declaration** (retired in wire v4; its tag 2 is reserved) — an
+  explicit set of row-version identities
   `(row_uuid, tx_time, tx_node_id)`: used when no valid fast fact exists
   (fresh store, eviction, corruption). The client evaluates the query locally
   and declares exactly the versions it holds. Oversized exact declarations
@@ -753,6 +810,34 @@ supporting set; any missing bodies must be repaired before applying it. Declarin
 the cursor must not mark the query live or satisfy a settled read. Fresh selected
 upstream confirmation remains required under `INV-SYNC-30`, and client-link
 authorization-progress checks still govern payload suppression.
+
+#### Persisted subscription watermark record v1
+
+A receiver that settled a row-local view (membership depends only on each
+row's own state and on no session claim, under a read policy with the same
+property) persists one record in the direct record store
+`jazz_subscription_watermarks_v1`, so after a reopen it can send a
+`Watermark` declaration instead of starting from nothing. The durable family
+is `jazz.subscription-watermark.v1`. Both halves are Groove typed records:
+
+- key `(shape_id: UUID, binding_id: UUID, read_view_id: UUID, policy_scope:
+U8, policy_binding_digest: Bytes)`, where `policy_scope` is `0` with an
+  empty digest for an unscoped view and `1` with the policy-binding directory
+  digest for a scoped one;
+- value `(format_v1: U8 = 1, settled_through: U64, supporting_revision:
+Bytes)`. For seq `0x0102030405060708` and revision `5a` × 16 the value bytes
+  are `01 0807060504030201 02 5a…5a`.
+
+Reopen accepts exactly format `1`, a nonzero seq and a non-nil revision of
+exactly 16 bytes; anything else is corruption, not a fallback to a full
+resend. The held set is not stored: it is rebuilt from the synced local rows
+that match the query, and Core's `CatchUp` replaces or drops every row whose
+seq moved past the watermark. Local eviction of row bodies purges the store,
+since the held set could no longer be rebuilt. Receipts:
+`subscription_watermarks::tests::subscription_watermark_v1_record_bytes_and_rejection_are_pinned`
+(bytes and rejection) and
+`db::tests::node_runtime::reopened_client_catches_up_from_its_stored_watermark`
+(reopen).
 
 #### Authorization progress
 
@@ -848,21 +933,21 @@ declaration — and, for fast declarations, the version settled at or before
 The complete supporting-row set and inventory refs are never omitted — only
 payload bodies.
 
-The optimism is bounded by two nets. First, the structural integrity check: a
-receiver that encounters a referenced version without holding its body treats
-this as a **known-state miss**, not an error. Second, the precise repair
-request: the receiver requests exactly the missing `(row_uuid, tx_time,
-tx_node_id)` payloads, and the server MUST serve them subject to ordinary read
-policy (`INV-SYNC-26`). Convergence is preserved: a stream served under
-known-state dedup followed by its repairs MUST be observationally equivalent
-to the same stream served without dedup (`INV-SYNC-25`, cf. `INV-SYNC-20`).
-A receiver must not fill a gap from another binding's authority receipt or
-claim settlement while an exact supporting body is unavailable. A superseded
-set is discarded when a newer complete set arrives. The canonical repair-carrying case is
-visibility gained without a new version being minted — a policy/membership
-change admitting rows whose versions settled at or before `p` (ch. 7);
-version-minting scope entry is self-consistent because the entering version
-settles above `p`.
+The optimism is bounded by one net. A receiver that encounters a referenced
+row without holding its body treats this as a **known-state miss**, not an
+error: it forgets the view's declared known state and reopens the view, and
+the serving peer resends every row with its body under ordinary read policy
+(`INV-SYNC-26`). There is no per-version fetch; rows are identified by
+`(row, row_seq)` and resent whole. Convergence is preserved: a stream served
+under known-state dedup followed by that resend MUST be observationally
+equivalent to the same stream served without dedup: the reader ends with the
+same rows (`INV-SYNC-25`, cf.
+`INV-SYNC-20`). A receiver must not fill a gap from another binding's
+authority receipt or claim settlement while a supporting body is unavailable.
+The canonical miss is visibility gained without a new row seq: a policy or
+membership change admitting rows that settled at or before `p` (ch. 7). A
+row-local view has no such case, because its membership changes only with
+the row's own seq.
 
 Holdings from point-in-time reads dedup conservatively: a version is assumed
 held only for rows **unchanged since the declared cut** (current version
@@ -878,8 +963,8 @@ mechanism for non-declared streams, and it is retired rather than extended as
 known-state coverage grows.
 
 _Further invariants._ `INV-SYNC-24` — fast and slow declarations omit only
-eligible version bodies; `INV-SYNC-25` — dedup + repairs converge to the
-undeduped stream; `INV-SYNC-26` — repair requests are exact and policy-checked;
+eligible version bodies; `INV-SYNC-25` — dedup plus miss resends converge to
+the undeduped stream; `INV-SYNC-26` — a known-state miss reopens the view for a full resend;
 `INV-SYNC-27` — process-local fast declarations require contiguous application
 and no eviction; eviction invalidates the in-memory fact. Neither fast cursors
 nor slow exact declarations are persisted; restart restores native data only.
@@ -935,6 +1020,63 @@ value. Revalidating that extra task obtains its readable current native version;
 local IVM then removes it from the unfinished list while an all-tasks query can
 still show the updated task. A live-exit push is an eager optimization; a missed
 push must not be the only opportunity to repair this query after reconnect.
+
+Strict (Global) reads apply the same comparison before their first settlement
+(`INV-SYNC-48`). Query programs carry no deletion witnesses: a deletion reaches
+a receiver only as a row delta on a coverage live when it happened, or through
+that same usage's stored-watermark catch-up. A row retained from an earlier,
+closed read can therefore be live locally while a fresh settled authority
+answer simply omits it. Before a fresh strict stream (and so a `Remote`
+one-shot, which reads through one) first reports `settled`, the receiver
+compares the settled authority input rows with the rows its own local store
+holds live for the same query. The local inventory comes from an ordinary
+Local-tier maintained graph of the same query, opened only after the stream's
+own graph has installed and evaluated the settled closure. It never waits for
+the rest of the query runtime to idle (other streams' continuous fresh reads
+would starve it); while other work is pending the graph is opened without
+driving the runtime and is drained on later turns, so it never blocks behind
+large-value chunk work that the same sync turn must request. Rows whose current local winner is an accepted
+Global transaction and which the authority omitted are probed through the
+ordinary `CurrentRowsRequest` path, in `MAX_CURRENT_ROWS` batches, under the
+stream's admitted policy binding. Settlement is withheld until each receipt's
+carriers are ingested; a deleted image deletes the row locally. A
+`CurrentUnavailable` outcome is access loss, which the settled result already
+omits: it does not redact the local copy (`INV-SYNC-14`). Pending local writes
+are never candidates. Agreeing views settle in the same refresh without any
+round trip; the cost is one local evaluation of the query.
+
+Reconciliation is reliable, not best-effort. The stream withholds its first
+settlement for at most five seconds; past that bound it settles on the
+authority's answer alone, but the reconciliation continues. Omitted rows are
+handed to a runtime-owned set of held-row checks, deduplicated per
+`(table, row)`, that outlives the stream (a `Remote` one-shot closes as soon
+as it settles). A discovery unfinished at the bound, or when its stream
+closes, moves to the runtime as well, keeping the settled authority rows it
+compares against; a later discovery of the same query and policy binding
+supersedes its authority rows instead of running twice. An Unknown outcome,
+a receipt the router drops (stale floor, changed coordinate, unusable Core
+evidence, a relay that cannot forward the probe), a timed-out probe, and a
+disconnect all leave the row held: it is retried with exponential backoff
+(250 ms doubling to 30 s), immediately when a new upstream link is admitted,
+and not at all while no upstream is admitted, so a down connection does not
+spin. A row leaves the set only when the authority answers it `Readable`
+(a deleted image deletes it locally) or `CurrentUnavailable` (access loss, not
+applied), or when its local coordinate changes, in which case later reads
+reconcile the new version. Deletions answered after settlement are applied
+exactly as before settlement and mark local subscriptions dirty, so live
+subscriptions observe the ordinary local change. No outcome asserts access
+loss. The initial scope is the current/default
+single-table scalar query (no joins, includes, projections, aggregates,
+windows, or policy branches), filtered or not; a stream that already opens
+settled on a coverage live before it is not rechecked.
+
+For example, an editor reads an invitation, the read closes, and the owner then
+deletes the invitation while nothing on the editor covers it. The editor's next
+`Remote` read of that invitation receives an empty authority answer, probes the
+held row, ingests its deleted image, and only then settles: both the returned
+rows and later local-only reads omit the invitation. Had the owner instead
+revoked the editor's read access, the probe would answer `CurrentUnavailable`:
+the settled read omits the invitation and the local copy stays readable.
 
 This exchange also crosses local foreground-to-worker links. A default local
 query may read through a durable worker before reaching Core; the
@@ -1056,7 +1198,7 @@ selected scope's deletion witnesses and changes only with its source receipt.
 ### Mandatory current-row availability messages
 
 `CurrentRowsRequest`, `CurrentRowsReceipt`, and `CurrentRowsCancel` are mandatory
-wire-protocol v3 semantic messages. They require no optional feature bit and use
+wire-protocol v4 semantic messages. They require no optional feature bit and use
 the existing named postcard control codec and native `VersionCarrier` encoding;
 the byte corpus pins all three variants. Ordinary version validation and
 authenticated link admission still apply. No compatibility with peers lacking
@@ -1070,9 +1212,12 @@ current-row availability contract for authorization and receipt validation.
 
 - `Snapshot { revision: [u8;16], rows: Vec<SupportingRow> }`.
 - `Delta { predecessor: [u8;16], revision: [u8;16], adds: Vec<SupportingRow>, removes: Vec<SupportingRow> }`.
+- `CatchUp { predecessor: [u8;16], revision: [u8;16], changed: Vec<SupportingRow>, left: Vec<SupportingRow> }`:
+  the answer to a `Watermark` declaration, carrying only rows whose seq moved
+  past the declared watermark (`changed`) or that left the set (`left`).
 
-The named semantic encoding is postcard in the version-3 WireEnvelope. Enum
-discriminants are respectively 0 and 1, followed by fields in declaration order.
+The named semantic encoding is postcard in the version-4 WireEnvelope. Enum
+discriminants are respectively 0, 1 and 2, followed by fields in declaration order.
 Revisions are exactly 16 raw array bytes (no length prefix). Vectors use postcard
 lengths and the existing exact SupportingRow field encoding. Populated snapshots
 and deltas are pinned in wire_message_frames.json; the empty forms, truncation

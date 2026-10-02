@@ -23,7 +23,18 @@ dev/t --exact node::tests::harness::native_jazz_corpus_publication_rejects_exist
 dev/t --exact node::tests::harness::native_jazz_corpus_digest_is_sensitive_to_application_row_bytes
 dev/t --exact node::tests::harness::native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_families
 # Immutable bytes produced by the distributed alpha.54 Linux NAPI artifact.
-dev/t --exact node::tests::harness::published_alpha54_native_corpus_reopens_and_accepts_current_writes
+# The linear row-history format refuses this DAG-layout root at open with the
+# typed UnsupportedStorageCodecs error and leaves every record unchanged.
+dev/t --exact node::tests::harness::published_alpha54_native_corpus_is_refused_with_the_typed_codec_error
 # Immutable client root produced by the distributed alpha.56 NAPI/jazz-tools
 # packages: a retired Edge receipt (Accepted, durability tag 2, no global time).
-dev/t --exact node::tests::harness::published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent
+# Refused the same way, without rewriting the edge or Core records.
+dev/t --exact node::tests::harness::published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_records
+dev/t --exact node::tests::harness::retired_result_codec_profiles_reject_historical_native_roots
+# The same refusals through the public adapter entry points with the node
+# profile, including the pre-linear current corpora and a root that predates
+# the compact durable index.
+dev/t --test integration --exact storage_format_refusal::published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error
+dev/t --test integration --exact storage_format_refusal::published_alpha56_rocksdb_root_is_refused_with_a_typed_format_error
+dev/t --test integration --exact storage_format_refusal::pre_linear_native_corpora_are_refused_before_any_mutation
+dev/t --test integration --exact storage_format_refusal::linear_history_root_without_the_durable_index_family_is_refused

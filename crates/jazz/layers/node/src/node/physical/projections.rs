@@ -22,10 +22,8 @@ where
         &self,
         changed_tables: &std::collections::HashSet<String>,
     ) -> std::collections::HashSet<String> {
-        let shared_deletion_history =
-            changed_tables.contains(SHARED_DELETION_HISTORY_TABLE);
         // Parse each changed name back to its table id once, instead of
-        // formatting seven candidate names for every table of every schema.
+        // formatting every candidate name for every table of every schema.
         let changed_table_ids = changed_tables
             .iter()
             .filter_map(|name| physical_table_id_for_publication_name(name))
@@ -35,8 +33,7 @@ where
             .values()
             .flat_map(|mapping| {
                 mapping.tables.iter().filter_map(|(logical_table, table)| {
-                    let changed =
-                        shared_deletion_history || changed_table_ids.contains(&table.table_id.0);
+                    let changed = changed_table_ids.contains(&table.table_id.0);
                     changed.then_some(logical_table.clone())
                 })
             })
@@ -55,36 +52,16 @@ where
         self.physical_table_id_for_schema(schema_version, version.table())
     }
 
-    pub(super) fn physical_register_table_for_schema(
-        &self,
-        schema_version: SchemaVersionId,
-        logical_table: &str,
-    ) -> Result<String, Error> {
-        let table_id = self.physical_table_id_for_schema(schema_version, logical_table)?;
-        Ok(physical_register_table_name(table_id))
-    }
-
     pub(super) fn physical_current_table_for_schema(
         &self,
         schema_version: SchemaVersionId,
         logical_table: &str,
-        layer: VersionLayer,
-        class: PhysicalCurrentClass,
-    ) -> Result<String, Error> {
+        class: PhysicalCurrentClass,) -> Result<String, Error> {
         let table_id = self.physical_table_id_for_schema(schema_version, logical_table)?;
-        Ok(match (class, layer) {
-            (PhysicalCurrentClass::Global, VersionLayer::Content) => {
-                physical_global_current_table_name(table_id)
-            }
-            (PhysicalCurrentClass::Global, VersionLayer::Deletion) => {
-                physical_register_global_current_table_name(table_id)
-            }
-            (PhysicalCurrentClass::Ahead, VersionLayer::Content) => {
-                physical_ahead_current_table_name(table_id)
-            }
-            (PhysicalCurrentClass::Ahead, VersionLayer::Deletion) => {
-                physical_register_ahead_current_table_name(table_id)
-            }
+        Ok(match class {
+            PhysicalCurrentClass::Global => physical_global_current_table_name(table_id),
+            PhysicalCurrentClass::Ahead => physical_ahead_current_table_name(table_id),
+            PhysicalCurrentClass::AheadShadow => physical_ahead_shadow_table_name(table_id),
         })
     }
 
@@ -113,6 +90,108 @@ where
             storage_table,
             physical_current_projection_target(alias, logical_table),
             shared_branch_scan(None),
+        ))
+    }
+
+    /// Read raw row images of one branch through the physical winner
+    /// projection. Deletion markers need only system fields, so they must not
+    /// pass through the read schema's enum lens: an old schema cannot name a
+    /// newer case, but it can still observe that the row was deleted.
+    pub(super) fn physical_current_marker_source_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        class: PhysicalCurrentClass,
+        branch_key: &BranchKey,
+    ) -> Result<GraphBuilder, Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(logical_table))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current marker mapping missing",
+            ))?;
+        let table = self.table_in_schema_ref(logical_table, schema_version)?;
+        let physical_fields = physical_current_descriptor(table, &mapping)?
+            .fields()
+            .iter()
+            .map(|field| {
+                field.name.clone().ok_or(Error::InvalidStoredValue(
+                    "physical current winner field unnamed",
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let storage_table = physical_current_source_table(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.physical_mappings,
+            schema_version,
+            logical_table,
+            class,
+        )?;
+        Ok(GraphBuilder::variant_source_scan(
+            storage_table,
+            physical_current_winner_projection_target(mapping.table_id, &physical_fields),
+            branch_scan(branch_key, None),
+        ))
+    }
+
+    /// Read the global winners that a capped composite index scan names,
+    /// through the same system-field winner projection as
+    /// `physical_current_marker_source_graph`.
+    pub(crate) fn physical_global_marker_index_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        index: String,
+        scan: groove::ivm::StaticScanSpec,
+    ) -> Result<GraphBuilder, Error> {
+        let (table, target) = self.physical_global_marker_target(schema_version, logical_table)?;
+        Ok(GraphBuilder::variant_index_scan(table, index, target, scan))
+    }
+
+    /// Read the global winners that a capped primary-key scan names, through
+    /// the same system-field winner projection as
+    /// `physical_current_marker_source_graph`.
+    pub(crate) fn physical_global_marker_page_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        scan: groove::ivm::StaticScanSpec,
+    ) -> Result<GraphBuilder, Error> {
+        let (table, target) = self.physical_global_marker_target(schema_version, logical_table)?;
+        Ok(GraphBuilder::variant_source_scan(table, target, scan))
+    }
+
+    /// The global current table and its system-field winner projection target.
+    fn physical_global_marker_target(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+    ) -> Result<(String, String), Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(logical_table))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current marker mapping missing",
+            ))?;
+        let table = self.table_in_schema_ref(logical_table, schema_version)?;
+        let physical_fields = physical_current_descriptor(table, &mapping)?
+            .fields()
+            .iter()
+            .map(|field| {
+                field.name.clone().ok_or(Error::InvalidStoredValue(
+                    "physical current winner field unnamed",
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            physical_global_current_table_name(mapping.table_id),
+            physical_current_winner_projection_target(mapping.table_id, &physical_fields),
         ))
     }
 
@@ -396,10 +475,11 @@ where
             let storage_tables = [
                 physical_global_current_table_name(target_mapping.table_id),
                 physical_ahead_current_table_name(target_mapping.table_id),
+                physical_ahead_shadow_table_name(target_mapping.table_id),
             ];
             for storage_table in &storage_tables {
                 let logical_output =
-                    target_table.global_current_content_storage_table().record_schema();
+                    target_table.global_current_storage_table().record_schema();
                 let physical_names = physical_current_field_names(&target_table, &target_mapping)?;
                 let output = widened_projection_descriptor(
                     &logical_output,
@@ -545,9 +625,10 @@ where
         let storage_tables = [
             physical_global_current_table_name(target_mapping.table_id),
             physical_ahead_current_table_name(target_mapping.table_id),
+            physical_ahead_shadow_table_name(target_mapping.table_id),
         ];
         for storage_table in &storage_tables {
-            let logical_output = target_table.global_current_content_storage_table().record_schema();
+            let logical_output = target_table.global_current_storage_table().record_schema();
             // This query-local target is the semantic read boundary. Unlike
             // the durable all-fields storage target, it must expose the
             // authored descriptor itself: enum tags are translated into that
@@ -648,6 +729,7 @@ where
         let storage_tables = [
             physical_global_current_table_name(target_mapping.table_id),
             physical_ahead_current_table_name(target_mapping.table_id),
+            physical_ahead_shadow_table_name(target_mapping.table_id),
         ];
         let target_table = self.table_in_schema_ref(target_table_name, target_schema)?;
         let authored_output = physical_current_descriptor(&target_table, &target_mapping)?;
@@ -827,55 +909,16 @@ where
         output_name: String,
         output_type: records::ValueType,
     ) -> Result<Option<ProjectField>, Error> {
-        let source_table = self.table_in_schema_ref(source_table_name, source_schema)?;
-        let mut cells = source_table
-            .columns
-            .iter()
-            .map(|column| {
-                let projection = source_mapping
-                    .columns
-                    .get(&column.name)
-                    .and_then(|column_id| {
-                        let name = physical_user_column_field(*column_id);
-                        available
-                            .contains(&name)
-                            .then_some(CurrentWinnerCellProjection::Field {
-                                name,
-                                column_id: *column_id,
-                                column_type: column.column_type.clone(),
-                            })
-                    })
-                    .unwrap_or(CurrentWinnerCellProjection::Null);
-                (column.name.clone(), projection)
-            })
-            .collect::<BTreeMap<_, _>>();
-        if let Some(path) = self.compiled_lens_path(source_schema, target_schema, source_table_name)? {
-            if path.target_table != target_table_name {
-                return Ok(None);
-            }
-            for op in path.ops {
-                match op {
-                    CompiledLensOp::Rename { from, to } => {
-                        if let Some(value) = cells.remove(&from) {
-                            cells.insert(to, value);
-                        }
-                    }
-                    CompiledLensOp::Copy { from, to } => {
-                        if let Some(value) = cells.get(&from).cloned() {
-                            cells.insert(to, value);
-                        }
-                    }
-                    CompiledLensOp::Add { column, default } => {
-                        cells
-                            .entry(column)
-                            .or_insert(CurrentWinnerCellProjection::Literal(default));
-                    }
-                    CompiledLensOp::Drop { column } => {
-                        cells.remove(&column);
-                    }
-                }
-            }
-            return Ok(match cells.remove(target_column) {
+        Ok(
+            match self.lens_current_cell(
+                source_schema,
+                source_table_name,
+                source_mapping,
+                available,
+                target_schema,
+                target_table_name,
+                target_column,
+            )? {
                 Some(CurrentWinnerCellProjection::Field {
                     name: source,
                     column_id: source_column_id,
@@ -937,7 +980,71 @@ where
                     ))
                 }
                 Some(CurrentWinnerCellProjection::Null) | None => None,
-            });
+            },
+        )
+    }
+
+    /// Where a target current-winner user column comes from in one source
+    /// variant along the migration lens path; `None` without a lens path.
+    fn lens_current_cell(
+        &mut self,
+        source_schema: SchemaVersionId,
+        source_table_name: &str,
+        source_mapping: &TablePhysicalMapping,
+        available: &BTreeSet<String>,
+        target_schema: SchemaVersionId,
+        target_table_name: &str,
+        target_column: &str,
+    ) -> Result<Option<CurrentWinnerCellProjection>, Error> {
+        let source_table = self.table_in_schema(source_table_name, source_schema)?;
+        let mut cells = source_table
+            .columns
+            .iter()
+            .map(|column| {
+                let projection = source_mapping
+                    .columns
+                    .get(&column.name)
+                    .and_then(|column_id| {
+                        let name = physical_user_column_field(*column_id);
+                        available
+                            .contains(&name)
+                            .then_some(CurrentWinnerCellProjection::Field {
+                                name,
+                                column_id: *column_id,
+                                column_type: column.column_type.clone(),
+                            })
+                    })
+                    .unwrap_or(CurrentWinnerCellProjection::Null);
+                (column.name.clone(), projection)
+            })
+            .collect::<BTreeMap<_, _>>();
+        if let Some(path) = self.compiled_lens_path(source_schema, target_schema, source_table_name)? {
+            if path.target_table != target_table_name {
+                return Ok(None);
+            }
+            for op in path.ops {
+                match op {
+                    CompiledLensOp::Rename { from, to } => {
+                        if let Some(value) = cells.remove(&from) {
+                            cells.insert(to, value);
+                        }
+                    }
+                    CompiledLensOp::Copy { from, to } => {
+                        if let Some(value) = cells.get(&from).cloned() {
+                            cells.insert(to, value);
+                        }
+                    }
+                    CompiledLensOp::Add { column, default } => {
+                        cells
+                            .entry(column)
+                            .or_insert(CurrentWinnerCellProjection::Literal(default));
+                    }
+                    CompiledLensOp::Drop { column } => {
+                        cells.remove(&column);
+                    }
+                }
+            }
+            return Ok(cells.remove(target_column));
         }
         Ok(None)
     }
@@ -1198,7 +1305,7 @@ where
             Literal(Value),
         }
 
-        let source_table = self.table_in_schema_ref(source_table_name, source_schema)?;
+        let source_table = self.table_in_schema(source_table_name, source_schema)?;
         let target_table = self.table_in_schema(target_table_name, target_schema)?;
         let mut cells = source_table
             .columns
@@ -1250,7 +1357,7 @@ where
         let target_storage = match shape {
             ContentProjectionShape::History => target_table.history_storage_table(),
             ContentProjectionShape::Current => {
-                target_table.global_current_content_storage_table()
+                target_table.global_current_storage_table()
             }
         };
         let target_record = target_storage.record_schema();
@@ -1479,13 +1586,11 @@ fn branch_scan(
 /// The table id of a per-table physical publication name, exactly the inverse
 /// of the `physical_*_table_name` spellings consulted by targeted refresh.
 fn physical_table_id_for_publication_name(name: &str) -> Option<u64> {
-    const SUFFIXES: [&str; 7] = [
+    const SUFFIXES: [&str; 5] = [
         "history",
-        "register",
         "global_current",
-        "register_global_current",
         "ahead_current",
-        "register_ahead_current",
+        "ahead_shadow",
         "rejected_versions",
     ];
     let (table_id, suffix) = split_physical_table_name(name)?;
@@ -1505,24 +1610,22 @@ mod publication_name_tests {
             let table_id = PhysicalTableId(id);
             for name in [
                 physical_history_table_name(table_id),
-                physical_register_table_name(table_id),
                 physical_global_current_table_name(table_id),
-                physical_register_global_current_table_name(table_id),
                 physical_ahead_current_table_name(table_id),
-                physical_register_ahead_current_table_name(table_id),
+                physical_ahead_shadow_table_name(table_id),
                 physical_rejected_versions_table_name(table_id),
             ] {
                 assert_eq!(physical_table_id_for_publication_name(&name), Some(id), "{name}");
             }
             let history = physical_history_table_name(table_id);
-            let register = physical_register_table_name(table_id);
-            assert_eq!(physical_version_table_id(&history, false), Some(table_id));
-            assert_eq!(physical_version_table_id(&register, true), Some(table_id));
-            assert_eq!(physical_version_table_id(&history, true), None);
-            assert_eq!(physical_version_table_id(&register, false), None);
+            assert_eq!(physical_version_table_id(&history), Some(table_id));
+            assert_eq!(
+                physical_version_table_id(&physical_global_current_table_name(table_id)),
+                None
+            );
         }
         for name in [
-            SHARED_DELETION_HISTORY_TABLE,
+            "jazz_deletion_history",
             "jazz_physical_01_history",
             "jazz_physical_+1_history",
             "jazz_physical_1_histories",

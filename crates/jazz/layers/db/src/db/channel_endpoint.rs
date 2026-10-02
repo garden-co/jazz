@@ -147,13 +147,11 @@ pub(super) fn message_class(message: &SyncMessage) -> (ChannelClass, bool) {
         // A preceding delivery may introduce this transaction. Preserve that
         // dependency across independently scheduled delivery/write channels.
         FateUpdate { .. } => (ChannelClass::Writes, true),
-        RowVersionPayloads { .. } => (ChannelClass::Progress, false),
         CommitUnit { .. } => (ChannelClass::Writes, false),
         Reserved30(retired) => match *retired {},
         RegisterShape { .. }
         | Subscribe(_)
         | Unsubscribe { .. }
-        | FetchRowVersions { .. }
         | PermissionAdviceRequest { .. }
         | AuthorizationScopeSubscribe { .. }
         | AuthorizationScopeIntent { .. }
@@ -416,7 +414,7 @@ pub mod tests {
                     settled_through: crate::time::GlobalTime(10_000 + i),
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    // Use current wire-v3 empty supporting-set successors as
+                    // Use current wire-v4 empty supporting-set successors as
                     // independently delivered control-plane messages. This is
                     // a compression roundtrip receipt, not a historical size baseline.
                     supporting_rows: crate::protocol::SupportingRowsUpdate::Delta {
@@ -478,9 +476,8 @@ mod dependency_tests {
         .unwrap()
     }
     fn ordinary() -> SyncMessage {
-        SyncMessage::FetchRowVersions {
-            requests: Vec::new(),
-            delegated_session: None,
+        SyncMessage::CurrentRowsCancel {
+            request_id: crate::protocol::PermissionAdviceRequestId([7; 16]),
         }
     }
     fn barrier() -> SyncMessage {
@@ -540,13 +537,13 @@ mod dependency_tests {
         let (frame, len) = streams.remove(&3).unwrap();
         assert!(matches!(
             receiver.receive(frame, len).unwrap().unwrap().message,
-            SyncMessage::FetchRowVersions { .. }
+            SyncMessage::CurrentRowsCancel { .. }
         ));
         assert!(receiver.pop().is_none());
         let (frame, len) = streams.remove(&1).unwrap();
         assert!(matches!(
             receiver.receive(frame, len).unwrap().unwrap().message,
-            SyncMessage::FetchRowVersions { .. }
+            SyncMessage::CurrentRowsCancel { .. }
         ));
         assert!(matches!(
             receiver.pop().unwrap().message,
@@ -554,7 +551,7 @@ mod dependency_tests {
         ));
         assert!(matches!(
             receiver.pop().unwrap().message,
-            SyncMessage::FetchRowVersions { .. }
+            SyncMessage::CurrentRowsCancel { .. }
         ));
         assert!(receiver.pop().is_none());
     }

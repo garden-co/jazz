@@ -343,7 +343,8 @@ fn current_rows_readable_tombstone_is_not_generic_unavailable() {
         .into_iter()
         .flat_map(|bundle| bundle.versions)
         .collect::<Vec<_>>();
-    assert!(versions.iter().any(|version| version.deletion().is_none()));
+    // The current image is the deleted image, still carrying the readable
+    // pre-delete cells.
     assert!(
         versions
             .iter()
@@ -581,22 +582,16 @@ fn current_rows_reject_deletion_only_readable_receipt() {
         .into_iter()
         .flat_map(|bundle| bundle.versions)
         .collect::<Vec<_>>();
-    assert!(versions.iter().any(|version| version.deletion().is_none()));
+    // The current image is the deleted image, still carrying the readable
+    // pre-delete cells.
     assert!(
         versions
             .iter()
             .any(|version| version.deletion() == Some(crate::tx::DeletionEvent::Deleted))
     );
+    // A Readable outcome without any row-image carrier must be rejected.
     let mut partial = receipt.clone();
-    partial.version_carriers.retain(|carrier| {
-        carrier.bundle_refs().unwrap().iter().all(|bundle| {
-            bundle
-                .versions
-                .iter()
-                .all(|version| version.deletion().is_some())
-        })
-    });
-    assert!(!partial.version_carriers.is_empty());
+    partial.version_carriers.clear();
     let result = block_on(
         client
             .node

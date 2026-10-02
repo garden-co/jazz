@@ -938,7 +938,7 @@ fn lowered_write_policy_does_not_restore_removed_grants_after_table_rename() {
         .unwrap();
     let update = MergeableCommit::new("tasks", existing, 3)
         .cells(candidate.clone())
-        .parents(vec![existing_tx]);
+        ;
     assert!(
         !core
             .advisory_mergeable_write_allows(update.clone().made_by(owner))
@@ -953,7 +953,6 @@ fn lowered_write_policy_does_not_restore_removed_grants_after_table_rename() {
     );
     let delete = MergeableCommit::new("tasks", existing, 4)
         .cells(candidate)
-        .parents(vec![existing_tx])
         .deletion(DeletionEvent::Deleted);
     assert!(
         !core

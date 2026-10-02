@@ -106,7 +106,7 @@ mod variant_case_tests {
         }
         let storage_tables = [
             table.history_storage_table(),
-            table.global_current_storage_tables().remove(0),
+            table.global_current_storage_table(),
             table.rejected_versions_storage_table(),
         ];
         let prefixes = [HistoryRowRecord::USER_CELLS, GlobalCurrentRowRecord::USER_CELLS,
@@ -123,7 +123,8 @@ mod variant_case_tests {
                 expected.extend(table.columns.iter()
                     .filter(|column| present.as_ref().is_none_or(|set| set.contains(&column.name)))
                     .map(|column| physical_user_column_field(mapping.columns[&column.name])));
-                expected.extend(storage.columns[prefix + table.columns.len()..].iter().map(|c| c.name.clone()));
+                let trailing = &storage.columns[prefix + table.columns.len()..];
+                expected.extend(trailing.iter().map(|c| c.name.clone()));
                 assert_eq!(*actual, expected);
             }
         }
@@ -136,6 +137,51 @@ mod variant_case_tests {
         assert!(physical_current_field_names_for_case(table, &mapping, Some(&none)).is_ok());
         assert!(physical_history_field_names_for_case(table, &mapping, Some(&none)).is_ok());
         assert!(physical_rejected_version_field_names_for_case(table, &mapping, Some(&none)).is_ok());
+    }
+
+    // The durable history layout of `jazz.history-version-current.v4` (SPEC 4
+    // §4.6, "Durable layout"): a record ends with the ancestor-merge fields and
+    // is keyed by seq; no row state carries a merge timestamp.
+    #[test]
+    fn history_record_ends_with_merge_fields_and_is_keyed_by_seq() {
+        use groove::schema::{ColumnType as GrooveColumnType, IntegerKeyType, PrimaryKeyColumn};
+        let public = PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("entries").column("body", PublicColumnType::Text))
+            .build();
+        let schema = JazzSchema::new(&public).unwrap();
+        let table = &schema.tables[0];
+        let history = table.history_storage_table();
+        let trailing = history.columns[history.columns.len() - 6..]
+            .iter()
+            .map(|column| (column.name.as_str(), column.column_type.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            trailing,
+            [
+                ("authored_columns", GrooveColumnType::U64.array_of().nullable()),
+                ("counter_signs", GrooveColumnType::Bytes),
+                ("seq", GrooveColumnType::U64),
+                ("base_seq", GrooveColumnType::U64.nullable()),
+                (
+                    "base_pending",
+                    GrooveColumnType::Tuple(vec![GrooveColumnType::U64, GrooveColumnType::Uuid])
+                        .nullable()
+                ),
+                ("lost_cells", GrooveColumnType::Bytes),
+            ]
+        );
+        let key = history.primary_key.as_ref().unwrap();
+        assert_eq!(
+            key.columns.iter().map(|column| column.column.as_str()).collect::<Vec<_>>(),
+            ["branch_key", "row_uuid", "seq", "tx_time", "tx_node_id"]
+        );
+        assert_eq!(key.columns[2], PrimaryKeyColumn::integer("seq", IntegerKeyType::U64));
+        for current in [table.global_current_storage_table(), table.rejected_versions_storage_table()] {
+            assert!(current.columns.iter().all(|column| {
+                !["seq", "base_seq", "base_pending", "lost_cells"].contains(&column.name.as_str())
+                    && !column.name.starts_with("_ts_")
+            }));
+        }
     }
 
     #[test]

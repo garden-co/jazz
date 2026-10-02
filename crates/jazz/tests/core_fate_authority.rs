@@ -12,6 +12,7 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::protocol::{LensOp, MigrationLens, SchemaVersion, TableLens};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession};
@@ -404,16 +405,13 @@ fn core_authority_rejects_write_only_update_and_upsert_and_rolls_back() {
 }
 
 /// Black-box regression for authored-column carriage across the public Db and
-/// sync/wire path. Bob explicitly writes the unchanged base title at the newer
-/// timestamp; that authored write must participate in per-column LWW and beat
-/// Alice's older concurrent title change after both commits cross the wire,
-/// without claiming Alice's independent `completed` edit.
-///
-/// Planted positive: removing `MergeableCommit::authored_columns` from the
-/// partial-update lowering makes Bob's entire materialized row look authored;
-/// Bob still wins `title`, but incorrectly reverts `completed` to false.
+/// sync/wire path. Bob explicitly writes the unchanged base title over the
+/// base image, concurrently with Alice changing both cells. Core sequences
+/// Alice's write first, so Bob's authored title is a cell that changed since
+/// his image and loses (SPEC 4 §4.6); his write must not claim Alice's
+/// independent `completed` edit either.
 #[test]
-fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
+fn explicit_unchanged_partial_write_survives_sync_without_overriding_a_concurrent_edit() {
     let schema = schema();
     let mut core = InMemoryServerShell::start(
         InMemoryServerShellConfig::new(schema.clone(), identity(0xc1, AuthorSubject::SYSTEM))
@@ -427,8 +425,8 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     let alice_session = connect_client_to_core(&mut core, &alice, &alice_wire, author(0xa2));
     let bob_session = connect_client_to_core(&mut core, &bob, &bob_wire, author(0xb2));
 
-    // Keep every transaction identity distinct and the LWW order explicit:
-    // TxId includes each client's already-distinct node id plus this HLC time.
+    // Keep every transaction identity distinct: TxId includes each client's
+    // already-distinct node id plus this HLC time.
     let row = RowUuid::from_bytes([0xd2; 16]);
     block_on(alice.insert(
         "todos",
@@ -496,7 +494,22 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     pump_client_core(&alice, &alice_wire, &mut core, alice_session);
     pump_client_core(&bob, &bob_wire, &mut core, bob_session);
     pump_client_core(&alice, &alice_wire, &mut core, alice_session);
-    assert_eq!(visible_titles(&alice, DurabilityTier::Global), ["base"]);
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    assert!(
+        matches!(
+            bob.write_state(explicit_write.mergeable_tx_id()).unwrap(),
+            jazz::db::WriteState {
+                fate: jazz::tx::Fate::Accepted,
+                durability: DurabilityTier::Global,
+                ..
+            }
+        ),
+        "Bob's write is accepted even though its title lost"
+    );
+    assert_eq!(
+        visible_titles(&alice, DurabilityTier::Global),
+        ["alice-change"]
+    );
     let prepared = alice.prepare_query(&Query::from("todos")).unwrap();
     let rows = block_on(alice.all(
         &prepared,
@@ -512,6 +525,224 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     assert_eq!(
         rows[0].cell(&schema.tables[0], "completed"),
         Some(Value::Bool(true))
+    );
+}
+
+fn merge_columns_schema() -> JazzSchema {
+    use jazz::tools::test_support::AllowAll;
+    use jazz::tools::{ColumnMergeStrategy, RowDescriptor, TableName};
+    let mut schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("docs")
+                .column(
+                    "tags",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                )
+                .column("count", ColumnType::Integer),
+        )
+        .allow_all()
+        .build();
+    let table = schema
+        .get_mut(&TableName::new("docs"))
+        .expect("docs table exists");
+    table.columns = RowDescriptor::new(
+        table
+            .columns
+            .columns
+            .iter()
+            .map(|column| match column.name.as_str() {
+                "tags" => column.clone().merge_strategy(ColumnMergeStrategy::GSet),
+                "count" => column.clone().merge_strategy(ColumnMergeStrategy::Counter),
+                _ => column.clone(),
+            })
+            .collect(),
+    );
+    compile_schema(&schema)
+}
+
+fn tags(values: &[&str]) -> Value {
+    Value::Array(
+        values
+            .iter()
+            .map(|value| Value::String((*value).to_owned()))
+            .collect(),
+    )
+}
+
+/// Concurrent writes to merge columns compose at Core: a counter write adds
+/// its delta over the image it saw, and a set write adds its new elements.
+#[test]
+fn concurrent_merge_column_writes_compose_at_core() {
+    let schema = merge_columns_schema();
+    let mut core = InMemoryServerShell::start(
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc3, AuthorSubject::SYSTEM))
+            .with_role(NodeRole::Core),
+    )
+    .unwrap();
+    let alice = open_db(0xa3, author(0xa3), &schema);
+    let bob = open_db(0xb3, author(0xb3), &schema);
+    let alice_wire = QueuedWireTransport::default();
+    let bob_wire = QueuedWireTransport::default();
+    let alice_session = connect_client_to_core(&mut core, &alice, &alice_wire, author(0xa3));
+    let bob_session = connect_client_to_core(&mut core, &bob, &bob_wire, author(0xb3));
+
+    let row = RowUuid::from_bytes([0xd3; 16]);
+    block_on(alice.insert(
+        "docs",
+        BTreeMap::from([
+            ("tags".to_owned(), tags(&["seed"])),
+            ("count".to_owned(), Value::I32(1)),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            updated_at_ms: Some(100),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+    for db in [&alice, &bob] {
+        let prepared = db.prepare_query(&Query::from("docs")).unwrap();
+        std::mem::forget(block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap());
+    }
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+
+    // Both writes are made over the same base before either reaches Core.
+    for (db, tag, count, at) in [(&alice, "alice", 4, 200), (&bob, "bob", 6, 300)] {
+        block_on(db.update(
+            "docs",
+            row,
+            BTreeMap::from([
+                ("tags".to_owned(), tags(&["seed", tag])),
+                ("count".to_owned(), Value::I32(count)),
+            ]),
+            jazz::db::UpdateOptions {
+                updated_at_ms: Some(at),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    for _ in 0..2 {
+        pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+        pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    }
+
+    for db in [&alice, &bob] {
+        let prepared = db.prepare_query(&Query::from("docs")).unwrap();
+        let rows = block_on(db.all(
+            &prepared,
+            ReadOpts {
+                tier: DurabilityTier::Global,
+                local_updates: LocalUpdates::Deferred,
+                propagation: Propagation::Full,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].cell(&schema.tables[0], "tags"),
+            Some(tags(&["alice", "bob", "seed"]))
+        );
+        // 1 + (4 - 1) + (6 - 1)
+        assert_eq!(
+            rows[0].cell(&schema.tables[0], "count"),
+            Some(Value::I32(9))
+        );
+    }
+}
+
+#[test]
+fn synced_merge_column_change_rebases_pending_local_patch() {
+    let schema = merge_columns_schema();
+    let mut core = InMemoryServerShell::start(
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc4, AuthorSubject::SYSTEM))
+            .with_role(NodeRole::Core),
+    )
+    .unwrap();
+    let alice = open_db(0xa4, author(0xa4), &schema);
+    let bob = open_db(0xb4, author(0xb4), &schema);
+    let alice_wire = QueuedWireTransport::default();
+    let bob_wire = QueuedWireTransport::default();
+    let alice_session = connect_client_to_core(&mut core, &alice, &alice_wire, author(0xa4));
+    let bob_session = connect_client_to_core(&mut core, &bob, &bob_wire, author(0xb4));
+
+    let row = RowUuid::from_bytes([0xd4; 16]);
+    block_on(alice.insert(
+        "docs",
+        BTreeMap::from([
+            ("tags".to_owned(), tags(&["seed"])),
+            ("count".to_owned(), Value::I32(1)),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            updated_at_ms: Some(100),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+    for db in [&alice, &bob] {
+        let prepared = db.prepare_query(&Query::from("docs")).unwrap();
+        std::mem::forget(block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap());
+    }
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+
+    // Alice's write stays pending: its commit never leaves her outbox.
+    block_on(alice.update(
+        "docs",
+        row,
+        BTreeMap::from([
+            ("tags".to_owned(), tags(&["seed", "alice"])),
+            ("count".to_owned(), Value::I32(4)),
+        ]),
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(200),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(alice.tick()).unwrap();
+    let _held = alice_wire.drain_outbound();
+
+    // Bob's write is accepted and reaches Alice as a synced row.
+    block_on(bob.update(
+        "docs",
+        row,
+        BTreeMap::from([
+            ("tags".to_owned(), tags(&["seed", "bob"])),
+            ("count".to_owned(), Value::I32(6)),
+        ]),
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(300),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    core.tick().unwrap();
+    for frame in core.take_frames(alice_session).unwrap() {
+        alice_wire.push_inbound(frame);
+    }
+    block_on(alice.tick()).unwrap();
+    let _held = alice_wire.drain_outbound();
+
+    let prepared = alice.prepare_query(&Query::from("docs")).unwrap();
+    let rows = block_on(alice.all(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "tags"),
+        Some(tags(&["alice", "bob", "seed"]))
+    );
+    // Bob's synced 6, plus Alice's pending +3.
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "count"),
+        Some(Value::I32(9))
     );
 }
 
@@ -673,6 +904,353 @@ fn many_writer_nodes_resolve_authors_and_merge_heads_at_the_core() {
         assert!(
             titles.contains(&format!("shared by {last:02x}")),
             "{titles:?}"
+        );
+    }
+}
+
+/// `schema()` plus one added column, published by the core as a descendant.
+fn schema_with_notes() -> JazzSchema {
+    use jazz::tools::test_support::AllowAll;
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .column("completed", ColumnType::Boolean)
+                    .column("notes", ColumnType::Text),
+            )
+            .allow_all()
+            .build(),
+    )
+}
+
+/// A client still writing an older schema, after the core published a
+/// descendant that adds a column, keeps a synced change underneath its own
+/// pending edits: a second pending edit of the same row builds on the row it
+/// can see, not on the first edit's stale snapshot.
+///
+/// Actors: alice (old-schema client, edits held offline), bob (old-schema
+/// client, edits synced), core (publishes `notes` as a descendant schema).
+///
+/// ```text
+/// core ──publish v2 (+notes)──► alice, bob     (both keep writing v1)
+/// alice ──insert title=seed──► core
+/// alice ──completed=true──╳ (held: pending)
+/// bob ──title=bob──► core ──synced──► alice     alice sees bob + pending
+/// alice ──completed=false──╳ (held: pending)   alice must still see bob
+/// ```
+///
+/// Once the physical table holds both schema layouts, a v1 row's stored
+/// layout is narrower than the table's widest layout. Reading alice's local
+/// row then went through a history lookup keyed by the newest pending write,
+/// which returns that write as it was committed, before bob's synced title
+/// was rebased under it; the second edit carried that stale title forward.
+#[test]
+fn pending_edit_after_synced_rebase_keeps_synced_cells_across_added_column_lineage() {
+    let schema = schema();
+    let mut core = InMemoryServerShell::start(
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc5, AuthorSubject::SYSTEM))
+            .with_role(NodeRole::Core),
+    )
+    .unwrap();
+    let lens = MigrationLens::new(
+        schema.version_id(),
+        SchemaVersion::new(schema_with_notes()).id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "notes".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    )
+    .unwrap();
+    core.publish_runtime_schema_with_lens(schema_with_notes(), lens, Vec::new(), Vec::new())
+        .unwrap();
+
+    let alice = open_db(0xa5, author(0xa5), &schema);
+    let bob = open_db(0xb5, author(0xb5), &schema);
+    let alice_wire = QueuedWireTransport::default();
+    let bob_wire = QueuedWireTransport::default();
+    let alice_session = connect_client_to_core(&mut core, &alice, &alice_wire, author(0xa5));
+    let bob_session = connect_client_to_core(&mut core, &bob, &bob_wire, author(0xb5));
+
+    let row = RowUuid::from_bytes([0xd5; 16]);
+    block_on(alice.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("seed".to_owned())),
+            ("completed".to_owned(), Value::Bool(false)),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            updated_at_ms: Some(100),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+    for db in [&alice, &bob] {
+        let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+        std::mem::forget(block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap());
+    }
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+
+    // Alice's first edit stays pending: its commit never leaves her outbox.
+    block_on(alice.update(
+        "todos",
+        row,
+        BTreeMap::from([("completed".to_owned(), Value::Bool(true))]),
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(200),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(alice.tick()).unwrap();
+    let _held = alice_wire.drain_outbound();
+
+    // Bob's title change is accepted and reaches Alice as a synced row.
+    block_on(bob.update(
+        "todos",
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("bob".to_owned()))]),
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(300),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    core.tick().unwrap();
+    for frame in core.take_frames(alice_session).unwrap() {
+        alice_wire.push_inbound(frame);
+    }
+    block_on(alice.tick()).unwrap();
+    let _held = alice_wire.drain_outbound();
+
+    let alice_row = |alice: &Db| {
+        let prepared = alice.prepare_query(&Query::from("todos")).unwrap();
+        let rows = block_on(alice.all(&prepared, ReadOpts::default())).unwrap();
+        assert_eq!(rows.len(), 1);
+        (
+            rows[0].cell(&schema.tables[0], "title"),
+            rows[0].cell(&schema.tables[0], "completed"),
+        )
+    };
+    assert_eq!(
+        alice_row(&alice),
+        (
+            Some(Value::String("bob".to_owned())),
+            Some(Value::Bool(true))
+        ),
+        "bob's synced title sits under alice's pending edit"
+    );
+
+    // A second pending edit of another column must keep bob's title.
+    block_on(alice.update(
+        "todos",
+        row,
+        BTreeMap::from([("completed".to_owned(), Value::Bool(false))]),
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(400),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(alice.tick()).unwrap();
+    let _held = alice_wire.drain_outbound();
+    assert_eq!(
+        alice_row(&alice),
+        (
+            Some(Value::String("bob".to_owned())),
+            Some(Value::Bool(false))
+        ),
+        "alice's second pending edit must not revert bob's synced title"
+    );
+}
+
+/// The `records` table of the TypeScript concurrent-merge suite: `count`
+/// always merges as a counter; `tags` merges as a grow-only set only when
+/// `gset` is set, and is an ordinary last-writer-wins column otherwise.
+fn records_schema(gset: bool) -> JazzSchema {
+    use jazz::tools::test_support::AllowAll;
+    use jazz::tools::{ColumnMergeStrategy, RowDescriptor, TableName};
+    let mut schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("records")
+                .column("title", ColumnType::Text)
+                .column("archived", ColumnType::Boolean)
+                .column("count", ColumnType::Integer)
+                .column(
+                    "tags",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                ),
+        )
+        .allow_all()
+        .build();
+    let table = schema
+        .get_mut(&TableName::new("records"))
+        .expect("records table exists");
+    table.columns = RowDescriptor::new(
+        table
+            .columns
+            .columns
+            .iter()
+            .map(|column| match column.name.as_str() {
+                "count" => column.clone().merge_strategy(ColumnMergeStrategy::Counter),
+                "tags" if gset => column.clone().merge_strategy(ColumnMergeStrategy::GSet),
+                _ => column.clone(),
+            })
+            .collect(),
+    );
+    compile_schema(&schema)
+}
+
+/// Two apps in one process whose `records` tables differ only in the merge
+/// strategy of `tags` each converge concurrent writes and serve a fresh
+/// editor.
+///
+/// Mirrors `packages/jazz-tools/src/backend/concurrent-merge.integration.test.ts`,
+/// whose Counter-only and GSet-and-Counter cases run one after the other in
+/// one process against in-process servers. The two tables have identical
+/// column names and types; only how Core merges `tags` differs.
+///
+/// ```text
+/// for tags in [LWW, GSet]:            (fresh core, fresh app each round)
+///   writer ──insert──► core ◄──update── observer   (concurrent)
+///   editor ──Global read──► core ──► the one converged row
+///
+/// Both updates are made over the seed, and Core sequences the writer's
+/// first, so it keeps the plain cells both changed (SPEC 4 §4.6).
+/// ```
+#[test]
+fn apps_differing_only_in_a_merge_strategy_each_converge_in_one_process() {
+    for (round, gset) in [false, true].into_iter().enumerate() {
+        let round = round as u8;
+        let schema = records_schema(gset);
+        let mut core = InMemoryServerShell::start(
+            InMemoryServerShellConfig::new(
+                schema.clone(),
+                identity(0xc8 + round, AuthorSubject::SYSTEM),
+            )
+            .with_role(NodeRole::Core),
+        )
+        .unwrap();
+        let writer = open_db(0xa8 + round, author(0xa8 + round), &schema);
+        let observer = open_db(0xb8 + round, author(0xb8 + round), &schema);
+        let writer_wire = QueuedWireTransport::default();
+        let observer_wire = QueuedWireTransport::default();
+        let writer_session =
+            connect_client_to_core(&mut core, &writer, &writer_wire, author(0xa8 + round));
+        let observer_session =
+            connect_client_to_core(&mut core, &observer, &observer_wire, author(0xb8 + round));
+
+        let row = RowUuid::from_bytes([0xd8 + round; 16]);
+        let seed = block_on(writer.insert(
+            "records",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("seed".to_owned())),
+                ("archived".to_owned(), Value::Bool(false)),
+                ("count".to_owned(), Value::I32(0)),
+                ("tags".to_owned(), tags(&["seed"])),
+            ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                updated_at_ms: Some(100),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        for _ in 0..4 {
+            pump_client_core(&writer, &writer_wire, &mut core, writer_session);
+        }
+        assert_eq!(
+            writer
+                .write_state(seed.mergeable_tx_id())
+                .unwrap()
+                .durability,
+            DurabilityTier::Global,
+            "round {round}: the seed settles at Core"
+        );
+        for db in [&writer, &observer] {
+            let prepared = db.prepare_query(&Query::from("records")).unwrap();
+            std::mem::forget(block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap());
+        }
+        for _ in 0..2 {
+            pump_client_core(&observer, &observer_wire, &mut core, observer_session);
+            pump_client_core(&writer, &writer_wire, &mut core, writer_session);
+        }
+
+        for (db, title, at) in [(&writer, "left", 200), (&observer, "right", 300)] {
+            block_on(db.update(
+                "records",
+                row,
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String(title.to_owned())),
+                    ("tags".to_owned(), tags(&[title])),
+                ]),
+                jazz::db::UpdateOptions {
+                    updated_at_ms: Some(at),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        }
+        for _ in 0..4 {
+            pump_client_core(&writer, &writer_wire, &mut core, writer_session);
+            pump_client_core(&observer, &observer_wire, &mut core, observer_session);
+        }
+
+        let editor = open_db(0xe8 + round, author(0xe8 + round), &schema);
+        let editor_wire = QueuedWireTransport::default();
+        let editor_session =
+            connect_client_to_core(&mut core, &editor, &editor_wire, author(0xe8 + round));
+        let prepared = editor.prepare_query(&Query::from("records")).unwrap();
+        let mut subscription = block_on(editor.subscribe(
+            &prepared,
+            ReadOpts {
+                tier: DurabilityTier::Global,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap();
+        for _ in 0..4 {
+            pump_client_core(&editor, &editor_wire, &mut core, editor_session);
+        }
+        let mut settled_rows = None;
+        while let Some(event) = subscription.try_next_event() {
+            if let jazz::db::SubscriptionEvent::Delta {
+                settled: true,
+                added,
+                ..
+            } = event
+            {
+                settled_rows = Some(added);
+            }
+        }
+        let rows = settled_rows
+            .unwrap_or_else(|| panic!("round {round}: the editor's Global read settles"));
+        assert_eq!(rows.len(), 1, "round {round}: one converged row");
+        let table = &schema.tables[0];
+        assert_eq!(
+            rows[0].row.cell(table, "title"),
+            Some(Value::String("left".to_owned())),
+            "round {round}: the first-sequenced title stays"
+        );
+        let expected_tags = if gset {
+            tags(&["left", "right", "seed"])
+        } else {
+            tags(&["left"])
+        };
+        assert_eq!(
+            rows[0].row.cell(table, "tags"),
+            Some(expected_tags),
+            "round {round}"
         );
     }
 }
