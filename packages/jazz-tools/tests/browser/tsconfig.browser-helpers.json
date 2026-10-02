@@ -8,6 +8,7 @@
     "noEmit": true
   },
   "files": [
+    "../../src/types/fs-native-extensions.d.ts",
     "browser-commands.ts",
     "testing-server.ts",
     "topology-harness.ts",
