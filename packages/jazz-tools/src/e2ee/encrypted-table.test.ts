@@ -444,19 +444,16 @@ it.each([
       const committed = tx.commit();
       expect(committed).not.toBeInstanceOf(Promise);
       if (timing === "offline-at-submit") {
-        const localWait = committed.wait({ tier: "local" });
-        localWait.catch(() => {});
-        await expect
-          .poll(async () => (await db!.all(app.projects, { tier: "local" })).length, {
-            timeout: 10_000,
-          })
-          .toBe(1);
-        expect(encrypted).toBeGreaterThan(0);
-        // Physical local visibility is not authoritative acceptance. Give an
-        // incorrectly local-only wait time to settle before checking the floor.
+        await committed.wait({ tier: "local" });
+        expect(await db!.all(app.projects, { tier: "local" })).toEqual([project]);
+        expect(await db!.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+        const globalWait = committed.wait({ tier: "global" });
+        globalWait.catch(() => {});
+        // Durable local ciphertext is not authority acceptance or completed
+        // recipient delivery. Explicit Global must remain pending while offline.
         expect(
           await Promise.race([
-            localWait.then(
+            globalWait.then(
               () => "resolved",
               () => "rejected",
             ),
