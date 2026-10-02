@@ -62,6 +62,7 @@ import {
 import { toValue, toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
+import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
 import {
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
@@ -1622,6 +1623,8 @@ export class Db {
   private readonly authStateStore;
   private connection: ConnectionManager;
   private _localFirstSecret: string | null = null;
+  private localFirstRefreshOwned = false;
+  private readonly localFirstRenewals = new AuthRenewalBackoff();
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private readonly shutdownAbort = new AbortController();
@@ -1763,6 +1766,7 @@ export class Db {
   /** @internal Store the seed used for local-first auth and optionally schedule token refresh. */
   initLocalFirstAuth(seed: string, ttlSeconds: number, refresh = true): void {
     this._localFirstSecret = seed;
+    this.localFirstRefreshOwned = refresh;
     if (refresh) {
       this.scheduleLocalFirstRefresh(ttlSeconds);
     }
@@ -1775,6 +1779,8 @@ export class Db {
     // Refresh at 80% of TTL
     const refreshMs = ttlSeconds * 800; // 80% of TTL in ms
     this.localFirstRefreshTimer = setTimeout(() => {
+      // The token lived to its scheduled refresh, so earlier renewals took.
+      this.localFirstRenewals.reset();
       this.refreshLocalFirstToken();
     }, refreshMs);
   }
@@ -1814,6 +1820,19 @@ export class Db {
 
   protected markUnauthenticated(reason: AuthFailureReason): void {
     this.authStateStore.markUnauthenticated(reason);
+    // A self-minted local-first token can always be reminted, so expiry is
+    // recoverable: renew and let the auth update reconnect.
+    if (reason === "expired" && this.localFirstRefreshOwned) this.renewExpiredLocalFirstToken();
+  }
+
+  private renewExpiredLocalFirstToken(): void {
+    const delay = this.localFirstRenewals.next();
+    if (delay === 0) {
+      this.refreshLocalFirstToken();
+      return;
+    }
+    if (this.localFirstRefreshTimer) clearTimeout(this.localFirstRefreshTimer);
+    this.localFirstRefreshTimer = setTimeout(() => this.refreshLocalFirstToken(), delay);
   }
 
   private publishAuthStateWithInternalSession(

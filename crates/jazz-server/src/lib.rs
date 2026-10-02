@@ -2,6 +2,7 @@
 
 pub mod loopback;
 pub mod middleware;
+pub mod profiling;
 pub mod server;
 mod tcp;
 
@@ -20,6 +21,7 @@ use std::time::Duration;
 
 use axum::serve;
 use jazz::tools::AppId;
+use profiling::DiagnosticsConfig;
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -35,8 +37,10 @@ pub async fn run(
     auth_config: AuthConfig,
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
+    diagnostics: DiagnosticsConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
+    diagnostics.validate()?;
     let app_id_string = app_id.to_string();
     let admin_secret = auth_config.admin_secret.clone();
     info!("Starting Jazz server for app: {}", app_id);
@@ -45,9 +49,12 @@ pub async fn run(
     } else {
         info!("Data directory: {}", data_dir);
     }
-    let builder = ServerBuilder::new(app_id)
+    let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
         .with_shutdown_timeout(shutdown_timeout);
+    if let Some(dump) = diagnostics.heap_profiler {
+        builder = builder.with_heap_profiler(dump);
+    }
     let built = if in_memory {
         builder.with_storage(StorageBackend::InMemory).build().await
     } else {
@@ -64,6 +71,21 @@ pub async fn run(
     .map_err(|error| format!("failed to build server: {error}"))?;
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
     let bound_addr = listener.local_addr()?;
+    // Serves until this function returns, including while the app drains.
+    let _diagnostics_task = match diagnostics.listen {
+        Some(addr) => {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            info!("Diagnostics listening on http://{}", listener.local_addr()?);
+            let router =
+                profiling::diagnostics_router(diagnostics.heap_profiler, diagnostics.token.clone());
+            Some(AbortOnDrop(tokio::spawn(async move {
+                if let Err(error) = serve(listener, router).await {
+                    tracing::warn!("diagnostics listener stopped: {error}");
+                }
+            })))
+        }
+        None => None,
+    };
     let shutdown = built.state.shutdown.clone();
     let mut sigterm_task = install_signal_before_readiness(
         || spawn_sigterm_shutdown_task(shutdown.clone()),
@@ -97,6 +119,21 @@ pub async fn run(
             let shutdown = built.state.shutdown.clone();
             jazz_otel::register_active_websockets_gauge(&meter, move || {
                 shutdown.active_websockets() as u64
+            })
+        });
+    #[cfg(feature = "otel")]
+    let _rocksdb_memory_gauge = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .is_ok()
+        .then(|| {
+            let meter = opentelemetry::global::meter("jazz-server");
+            jazz_otel::register_rocksdb_memory_gauge(&meter, || {
+                let usage = jazz_storage_rocksdb::process_memory_usage()?;
+                Some(vec![
+                    ("block_cache", usage.block_cache_bytes),
+                    ("block_cache_pinned", usage.block_cache_pinned_bytes),
+                    ("memtables", usage.memtable_bytes),
+                    ("table_readers", usage.table_reader_bytes),
+                ])
             })
         });
     let shutdown_budget = shutdown_timeout
@@ -197,6 +234,14 @@ fn spawn_sigterm_shutdown_task(
 fn spawn_sigterm_shutdown_task(_: ShutdownController) -> Result<JoinHandle<()>, std::io::Error> {
     Ok(tokio::spawn(async { std::future::pending::<()>().await }))
 }
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 async fn abort_task<T>(task: &mut JoinHandle<T>) {
     task.abort();
     let _ = tokio::time::timeout(Duration::from_millis(50), task).await;
