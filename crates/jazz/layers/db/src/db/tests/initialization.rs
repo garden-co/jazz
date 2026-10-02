@@ -278,6 +278,134 @@ fn initialization_catalogue_observation_waits_for_owner_and_drains_once() {
     assert!(drained.capture.is_none());
 }
 
+/// Alice retains authenticated schema A, then opens unpublished B without transport.
+/// Stable A table identities do not admit B; reopening A stays ready offline.
+/// A later authenticated A receipt must still drain while B remains unavailable.
+#[test]
+fn initialization_catalogue_readiness_requires_requested_schema_admission() {
+    let base = initialization_schema();
+    let requested = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_insert(PublicPolicyExpr::True)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                            .with_delete(PublicPolicyExpr::True),
+                    )
+                    .column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("controls")
+                    .column("value", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let cache = authenticated_initialization_catalogue(0xf8);
+    let open = |schema: JazzSchema, node: u8| {
+        let families = schema.column_families();
+        let storage = groove::storage::TestStorage::new(
+            &families.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let config = DbConfig::new(
+            schema,
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author: AuthorSubject::for_test_bytes([node; 16]),
+            },
+        );
+        // SAFETY: this fixture captured A over its admitted authority link.
+        block_on(Box::pin(unsafe {
+            Db::open_with_cached_catalogue(config, Some(&cache))
+        }))
+        .unwrap()
+    };
+    let known = open(base.clone(), 0xf9);
+    let known_identity = block_on(known.table_identity("todos")).unwrap().unwrap();
+    assert!(
+        block_on(known.take_authenticated_catalogue_state())
+            .unwrap()
+            .ready
+    );
+    let pending = open(requested, 0xfa);
+    assert_eq!(
+        block_on(pending.table_identity("todos")).unwrap(),
+        Some(known_identity)
+    );
+    let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+    let local_error = block_on(Box::pin(pending.all_serialized_query(
+        &query,
+        ReadOpts::default(),
+        None,
+        None,
+        None,
+        false,
+        || false,
+        |_| {},
+    )))
+    .err()
+    .expect("unpublished requested schema must reject a Local read");
+    assert_eq!(local_error.code, ErrorCode::Schema);
+    let state = block_on(pending.take_authenticated_catalogue_state()).unwrap();
+    assert!(
+        !state.ready,
+        "retained A identities cannot admit requested B"
+    );
+    assert!(
+        state.capture.is_none(),
+        "cache installation is not a new capture"
+    );
+
+    let authority = open_core(0xf8, AuthorSubject::SYSTEM, &base);
+    let (upstream, downstream) = duplex_with_admitted_session_context(
+        pending.identity().author,
+        pending.identity().node,
+        1,
+        NodeUuid::from_bytes([0xf8; 16]),
+        2,
+    );
+    block_on(pending.connect_upstream(upstream));
+    let peer = authority.accept_subscriber(downstream, pending.identity().author);
+    for _ in 0..32 {
+        pending.tick().unwrap();
+        peer.borrow_mut().tick().unwrap();
+    }
+    let state = block_on(pending.take_authenticated_catalogue_state()).unwrap();
+    assert!(!state.ready);
+    let capture = state
+        .capture
+        .expect("unavailable B must not suppress an authenticated A capture");
+    assert_eq!(
+        super::super::initialization::decode_catalogue_capture(&capture)
+            .unwrap()
+            .current_write_schema
+            .schema,
+        base.version_id()
+    );
+    let drained = block_on(pending.take_authenticated_catalogue_state()).unwrap();
+    assert!(!drained.ready);
+    assert!(drained.capture.is_none());
+    let global_error = block_on(Box::pin(pending.all_serialized_query(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..ReadOpts::default()
+        },
+        None,
+        None,
+        None,
+        false,
+        || false,
+        |_| {},
+    )))
+    .err()
+    .expect("the authority's missing requested schema must reject a Global read");
+    assert_eq!(global_error.code, ErrorCode::Schema);
+}
+
 #[test]
 fn initialization_catalogue_installs_authority_identity_before_fresh_bootstrap() {
     let cache = authenticated_initialization_catalogue(0xea);
