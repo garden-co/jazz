@@ -47,9 +47,12 @@ it.skipIf(!hasJazzWasmBuild()).each(["absence", "seal"] as const)(
       }),
     );
     const seal = await db.sealInitializationTransaction(open);
-    await expect(failedWrite.wait("local")).rejects.toThrow(/missing_table|unknown table/i);
+    const failure = expect(failedWrite.wait("local")).rejects.toThrow(
+      /missing_table|unknown table/i,
+    );
     await db.publishInitializationTransaction(seal.token);
     await db.tick();
+    await failure;
 
     const batches = new PostcardReader(db.localCurrentRow("values", row)).readVec(
       readNativeRowBatch,
