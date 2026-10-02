@@ -1,7 +1,7 @@
 import type { useDb } from "jazz-tools/react";
 import * as Y from "yjs";
 import { app } from "../schema.js";
-import { frame, updates } from "./log.js";
+import { HEADER, frame, updates } from "./log.js";
 
 type Db = ReturnType<typeof useDb>;
 
@@ -12,9 +12,12 @@ export function connect(
   ready: () => void,
   onError: (error: unknown) => void,
 ) {
-  const query = app.documents.where({ id });
+  const query = app.documentLogs.where({ documentId: id });
   const origin = Symbol("jazz");
-  let offset = 0;
+  // Each mounted editor owns a fresh log, including tabs using the same account.
+  const logId = crypto.randomUUID();
+  const offsets = new Map<string, number>();
+  let ownLength = 0;
   let closed = false;
   let failed = false;
   let queue = Promise.resolve();
@@ -29,47 +32,59 @@ export function connect(
     queue = queue.then(() => (failed ? undefined : task())).catch(fail);
   }
 
-  function applyLog(contentLog: Uint8Array) {
+  function applyLog(id: string, contentLog: Uint8Array) {
     if (closed) return;
+    const offset = offsets.get(id) ?? 0;
     if (contentLog.length < offset)
       throw new Error("Document log was replaced; reload to reopen it");
     if (contentLog.length === offset) return;
     for (const update of updates(contentLog.subarray(offset), offset === 0)) {
       Y.applyUpdate(doc, update, origin);
     }
-    offset = contentLog.length;
-    ready();
+    offsets.set(id, contentLog.length);
   }
 
   function onUpdate(update: Uint8Array, source: unknown) {
     if (source === origin) return;
     const bytes = frame(update);
     enqueue(async () => {
-      const row = await db.one(query.select("contentLog"));
-      if (!row) throw new Error("Document is unavailable");
-      const end = row.contentLog.length;
+      if (ownLength === 0) {
+        const contentLog = new Uint8Array(HEADER.length + bytes.length);
+        contentLog.set(HEADER);
+        contentLog.set(bytes, HEADER.length);
+        await db
+          .insert(app.documentLogs, { documentId: id, contentLog }, { id: logId })
+          .wait({ tier: "local" });
+        ownLength = contentLog.length;
+        return;
+      }
       await db
         .update(
-          app.documents,
-          id,
+          app.documentLogs,
+          logId,
           {},
           {
             applyDiffs: {
               contentLog: {
-                within: { from: end, to: end },
+                within: { from: ownLength, to: ownLength },
                 splices: [{ at: 0, delete: 0, insert: bytes }],
               },
             },
           },
         )
         .wait({ tier: "local" });
+      ownLength += bytes.length;
     });
   }
 
   doc.on("update", onUpdate);
   const unsubscribe = db.subscribe(query.select("contentLog"), {
     onUpdate: (rows) => {
-      if (rows[0]) enqueue(() => applyLog(rows[0].contentLog));
+      enqueue(() => {
+        if (closed) return;
+        for (const row of rows) applyLog(row.id, row.contentLog);
+        ready();
+      });
     },
     onError: fail,
   });
