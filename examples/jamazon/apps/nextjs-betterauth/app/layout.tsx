@@ -17,9 +17,7 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-export default async function RootLayout({
-  children,
-}: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   const catalogue = await publicCatalogue();
   return (
     <html lang="en" suppressHydrationWarning>

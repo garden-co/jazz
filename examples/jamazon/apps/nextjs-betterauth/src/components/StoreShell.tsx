@@ -19,10 +19,7 @@ import { useShopper } from "./StoreProviders";
 export function StoreShell({ children }: { children: ReactNode }) {
   useStoreBootstrap();
   return (
-    <StoreChrome
-      actions={<TopBarActions />}
-      nav={(pathname) => <StoreNav pathname={pathname} />}
-    >
+    <StoreChrome actions={<TopBarActions />} nav={(pathname) => <StoreNav pathname={pathname} />}>
       {children}
     </StoreChrome>
   );
