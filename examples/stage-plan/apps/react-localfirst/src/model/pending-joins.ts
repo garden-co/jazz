@@ -14,7 +14,7 @@ const listeners = new Set<() => void>();
 function set(showId: string, state: JoinState | undefined) {
   if (state) joins.set(showId, state);
   else joins.delete(showId);
-  for (const listener of [...listeners]) listener();
+  for (const listener of listeners) listener();
 }
 
 export function trackJoin(showId: string, accepted: Promise<void>) {

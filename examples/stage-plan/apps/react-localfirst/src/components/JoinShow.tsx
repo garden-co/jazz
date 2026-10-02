@@ -34,11 +34,7 @@ export function JoinShow({ showId, code }: { showId: string; code: string }) {
 
   return (
     <Page title="Joining the crew">
-      {failed ? (
-        <InviteFailed />
-      ) : (
-        <Loading label="Checking your invite" />
-      )}
+      {failed ? <InviteFailed /> : <Loading label="Checking your invite" />}
     </Page>
   );
 }

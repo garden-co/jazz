@@ -239,12 +239,7 @@ export type JoinedShow = { accepted: Promise<void> };
  * `accepted` rejects when the server turns the membership down (and the local
  * row is rolled back).
  */
-export async function joinShow(
-  db: Db,
-  me: Me,
-  showId: string,
-  code: string,
-): Promise<JoinedShow> {
+export async function joinShow(db: Db, me: Me, showId: string, code: string): Promise<JoinedShow> {
   const existing = await db.one(app.showCrew.where({ showId, account: me.account }));
   if (existing && !existing.inviteCode) return { accepted: Promise.resolve() };
   const inserted = existing
