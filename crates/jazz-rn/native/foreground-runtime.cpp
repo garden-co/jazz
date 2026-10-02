@@ -322,7 +322,7 @@ using facebook::jsi::ArrayBuffer;
 using facebook::jsi::HostObject;
 using facebook::jsi::PropNameID;
 
-constexpr const char *kFactoryGlobal = "__jazzNativeForegroundRuntimeV1";
+constexpr const char *kFactoryGlobal = "__jazzNativeForegroundRuntimeV2";
 constexpr size_t kForegroundCommandMaxBytes = 1024 * 1024;
 
 class VectorMutableBuffer final : public facebook::jsi::MutableBuffer {

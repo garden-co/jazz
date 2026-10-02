@@ -3145,6 +3145,231 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  function openNestedTerminalSubscription() {
+    let controller: ReadableStreamDefaultController<unknown> | undefined;
+    const textColumn = (name: string): ColumnDescriptor => ({
+      name,
+      column_type: { type: "Text" },
+      nullable: false,
+    });
+    const relationSchema = {
+      users: { columns: [textColumn("name")] },
+      todos: { columns: [textColumn("first"), textColumn("second")] },
+      comments: { columns: [textColumn("first"), textColumn("second")] },
+    } satisfies WasmSchema;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            subscribe: () =>
+              new ReadableStream({
+                start(streamController) {
+                  controller = streamController;
+                },
+              }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      relationSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const handle = runtime.createSubscription(
+      JSON.stringify({
+        table: "users",
+        array_subqueries: [
+          {
+            column_name: "todos",
+            table: "todos",
+            inner_column: "user_id",
+            outer_column: "id",
+            select_columns: ["first", "second"],
+            nested_arrays: [
+              {
+                column_name: "comments",
+                table: "comments",
+                inner_column: "todo_id",
+                outer_column: "id",
+                select_columns: ["first", "second"],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const deltas: unknown[] = [];
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      deltas.push(delta);
+    });
+    if (!controller) throw new Error("nested terminal subscription did not open its stream");
+    return {
+      deltas,
+      enqueue(terminalOperations: unknown) {
+        controller!.enqueue({
+          type: "delta",
+          reset: false,
+          delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
+          terminalOperations,
+        });
+      },
+    };
+  }
+
+  it("decodes nested terminal payload fields by descriptor identity", async () => {
+    const { deltas, enqueue } = openNestedTerminalSubscription();
+
+    const todoId = "00000000-0000-0000-0000-000000000021";
+    const commentId = "00000000-0000-0000-0000-000000000022";
+    const todoKey = Uint8Array.from([10, ...uuidBytes(todoId)]);
+    const commentKey = Uint8Array.from([10, ...uuidBytes(commentId)]);
+    const childDescriptor: DescriptorField[] = [
+      { name: "row_uuid", valueType: { tag: 11 } },
+      { name: "second", valueType: { tag: 8 } },
+      { name: "first", valueType: { tag: 8 } },
+    ];
+    const terminalEnvelope = {
+      version: 1 as const,
+      layouts: [
+        {
+          carrier: "Logical" as const,
+          key_slot: 0,
+          fields: [
+            {
+              identity: { kind: "Name" as const, name: "row_uuid" },
+              role: "RowKey" as const,
+              value_type: { tag: 11 },
+            },
+            {
+              identity: { kind: "Name" as const, name: "second" },
+              role: "Value" as const,
+              value_type: { tag: 8 },
+            },
+            {
+              identity: { kind: "Name" as const, name: "first" },
+              role: "Value" as const,
+              value_type: { tag: 8 },
+            },
+          ],
+        },
+      ],
+      operations: [
+        {
+          root_key: Uint8Array.of(3),
+          path: [{ Collection: "todos" }, { Key: todoKey }, { Collection: "comments" }],
+          edit: {
+            Insert: {
+              index: 0,
+              key: commentKey,
+              value: createRecord(childDescriptor, [
+                uuidBytes(commentId),
+                inlineScalar("insert-second"),
+                inlineScalar("insert-first"),
+              ]),
+            },
+          },
+          payload_layout: 0,
+        },
+        {
+          root_key: Uint8Array.of(3),
+          path: [
+            { Collection: "todos" },
+            { Key: todoKey },
+            { Collection: "comments" },
+            { Key: commentKey },
+          ],
+          edit: {
+            Update: {
+              key: commentKey,
+              value: createRecord(childDescriptor, [
+                uuidBytes(commentId),
+                inlineScalar("update-second"),
+                inlineScalar("update-first"),
+              ]),
+            },
+          },
+          payload_layout: 0,
+        },
+      ],
+    };
+
+    enqueue(terminalEnvelope);
+    await vi.waitFor(() => expect(deltas).toHaveLength(1));
+    if (deltas[0] instanceof Error) throw deltas[0];
+
+    const decoded = (deltas[0] as RuntimeSubscriptionDelta).terminalOperations ?? [];
+    expect(
+      decoded.map((operation) =>
+        "Insert" in operation.edit
+          ? operation.edit.Insert.row.values
+          : "Update" in operation.edit
+            ? operation.edit.Update.row.values
+            : [],
+      ),
+    ).toEqual([
+      [
+        { type: "Text", value: "insert-first" },
+        { type: "Text", value: "insert-second" },
+      ],
+      [
+        { type: "Text", value: "update-first" },
+        { type: "Text", value: "update-second" },
+      ],
+    ]);
+
+    const firstOperation = terminalEnvelope.operations[0]!;
+    const firstLayout = terminalEnvelope.layouts[0]!;
+    const invalidEnvelopes: unknown[] = [
+      { ...terminalEnvelope, version: 2 },
+      { layouts: terminalEnvelope.layouts, operations: terminalEnvelope.operations },
+      { version: 1, layouts: terminalEnvelope.layouts },
+      {
+        ...terminalEnvelope,
+        operations: [{ ...firstOperation, payload_layout: 1 }],
+      },
+      {
+        ...terminalEnvelope,
+        operations: [{ ...firstOperation, payload_layout: undefined }],
+      },
+      {
+        ...terminalEnvelope,
+        operations: [{ ...firstOperation, path: [] }],
+      },
+      {
+        ...terminalEnvelope,
+        layouts: [
+          {
+            ...firstLayout,
+            fields: [firstLayout.fields[1]!, firstLayout.fields[0]!, firstLayout.fields[2]!],
+          },
+        ],
+      },
+      {
+        ...terminalEnvelope,
+        operations: [
+          {
+            ...terminalEnvelope.operations[1]!,
+            path: [
+              { Collection: "todos" },
+              { Key: todoKey },
+              { Collection: "comments" },
+              { Key: todoKey },
+            ],
+          },
+        ],
+      },
+    ];
+    for (const invalidEnvelope of invalidEnvelopes) {
+      const invalidSubscription = openNestedTerminalSubscription();
+      invalidSubscription.enqueue(invalidEnvelope);
+      await vi.waitFor(() => expect(invalidSubscription.deltas).toHaveLength(1));
+      expect(invalidSubscription.deltas[0]).toBeInstanceOf(Error);
+    }
+  });
   it("materializes array subquery relation snapshots for reads", async () => {
     const calls: string[] = [];
     const relationSchema = {

@@ -264,6 +264,31 @@ fn structured_live_snapshot_keeps_child_edits_across_parent_reordering() {
 
 #[test]
 fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
+    fn assert_logical_terminal_title_layout(operation: &groove::ivm::TerminalOperation) {
+        let table = crate::binding_codec::terminal_event_layouts(std::slice::from_ref(operation))
+            .expect("terminal operation layout encodes");
+        assert_eq!(table.operation_layouts, vec![Some(0)]);
+        let fields = table.layouts[0]["fields"]
+            .as_array()
+            .expect("terminal layout fields");
+        assert!(
+            fields.iter().any(|field| {
+                field["identity"]["name"].as_str() == Some("title")
+                    && field["role"] == "Value"
+                    && field["value_type"] == serde_json::json!({ "tag": 8 })
+            }),
+            "terminal payload must expose title with its logical string type: {fields:?}"
+        );
+        assert!(
+            !fields.iter().any(|field| {
+                matches!(
+                    field["identity"]["name"].as_str(),
+                    Some("_app_title" | "user_title")
+                )
+            }),
+            "terminal payload must not expose a CurrentRow carrier name: {fields:?}"
+        );
+    }
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     db.insert(
@@ -350,6 +375,46 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
             .any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Insert { .. })),
         "child insertion is delivered as a terminal path insert"
     );
+
+    let inserted_child = terminal_operations
+        .iter()
+        .find(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Insert { .. }))
+        .expect("child insertion has a terminal insert");
+    assert_logical_terminal_title_layout(inserted_child);
+
+    db.update(
+        "todos",
+        row(0x11),
+        BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let mut child_changed = block_on(subscription.next_raw()).unwrap();
+    while let Some(next) = subscription.try_next_event() {
+        child_changed = next;
+    }
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &child_changed
+    else {
+        panic!("expected child update")
+    };
+    let [remove, insert] = terminal_operations.as_slice() else {
+        panic!("a child update must emit a remove/insert replacement: {terminal_operations:#?}");
+    };
+    let groove::ivm::TerminalEdit::Remove { key: removed_key } = &remove.edit else {
+        panic!("a child update replacement must start with Remove: {remove:#?}");
+    };
+    let groove::ivm::TerminalEdit::Insert {
+        key: inserted_key, ..
+    } = &insert.edit
+    else {
+        panic!("a child update replacement must end with Insert: {insert:#?}");
+    };
+    assert_eq!(removed_key, inserted_key);
+    assert_logical_terminal_title_layout(insert);
 
     db.update(
         "todos",

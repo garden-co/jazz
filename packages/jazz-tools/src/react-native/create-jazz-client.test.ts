@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { enrolledAccountConfig } from "../runtime/testing/account-handle-fixtures.js";
 import { accountRegistryUrl, type AccountDbConfig } from "../accounts/context.js";
 import { schema as s } from "../index.js";
-import { NATIVE_RELAY_ABI_V1 } from "jazz-rn";
+import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn";
 import {
   PostcardWriter,
   PostcardReader,
@@ -17,7 +17,7 @@ const nativeForegroundTest = vi.hoisted(() => ({
   close: vi.fn(() => true),
   openAttached: vi.fn(),
   turboModule: {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    getAbiVersion: () => NATIVE_RELAY_ABI_VERSION,
     execute: async () => {
       throw new Error("the read-only foreground path must not use TurboModule execute");
     },
@@ -62,8 +62,8 @@ async function accountConfig(appId: string, subject = "reader") {
 }
 
 function installJsiForegroundFactory() {
-  (globalThis as Record<string, unknown>).__jazzNativeForegroundRuntimeV1 = {
-    abiVersion: NATIVE_RELAY_ABI_V1,
+  (globalThis as Record<string, unknown>).__jazzNativeForegroundRuntimeV2 = {
+    abiVersion: NATIVE_RELAY_ABI_VERSION,
     openAttached: (capability: Uint8Array) => {
       nativeForegroundTest.openAttached(capability);
       return {
@@ -109,7 +109,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
   afterEach(async () => {
     await client?.shutdown();
     client = undefined;
-    delete (globalThis as Record<string, unknown>).__jazzNativeForegroundRuntimeV1;
+    delete (globalThis as Record<string, unknown>).__jazzNativeForegroundRuntimeV2;
   });
 
   it("exports the exact installed-package persistence boundary messages", () => {

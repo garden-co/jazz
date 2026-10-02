@@ -2,9 +2,10 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import type { NativeTerminalOperation } from "../../drivers/types.js";
+import type { ColumnDescriptor, NativeTerminalEventEnvelope } from "../../drivers/types.js";
 import { openConfig, PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
+  decodeNativeTerminalRowByLayout,
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
 } from "./native-row-codec.js";
@@ -18,7 +19,7 @@ type BindingCodecGoldenFixture = {
   terminal: {
     events: Array<{
       type: "delta";
-      terminalOperations: NativeTerminalOperation[];
+      terminalOperations: NativeTerminalEventEnvelope;
     }>;
     rejections: Array<Record<string, unknown>>;
   };
@@ -130,19 +131,64 @@ describe("binding codec golden contract", () => {
 
   it("keeps the terminal JSON codec contract stable", () => {
     const fixture = bindingCodecGoldenFixture();
-    const operationKinds = fixture.terminal.events.flatMap((event) =>
-      event.terminalOperations.map((operation) => Object.keys(operation.edit)[0]),
-    );
+    const envelope = fixture.terminal.events[0]!.terminalOperations;
+    const operationKinds = envelope.operations.map((operation) => Object.keys(operation.edit)[0]);
+    expect(envelope.version).toBe(1);
     expect(operationKinds).toEqual(["Insert", "Insert", "Update", "Move", "Remove"]);
-    expect(
-      fixture.terminal.events.flatMap((event) =>
-        event.terminalOperations.map((operation) => operation.path),
-      ),
-    ).toEqual(Array.from({ length: 5 }, () => [{ Collection: "children" }]));
+    expect(envelope.operations.map((operation) => operation.payload_layout)).toEqual([
+      0,
+      0,
+      0,
+      undefined,
+      undefined,
+    ]);
+    expect(envelope.layouts).toHaveLength(1);
+    expect(envelope.layouts[0]!.fields.map((field) => [field.identity.name, field.role])).toEqual([
+      ["row_uuid", "RowKey"],
+      ["title", "Value"],
+    ]);
+    expect(envelope.operations.slice(0, 2).map((operation) => operation.path)).toEqual([
+      [{ Collection: "children" }],
+      [{ Collection: "children" }],
+    ]);
+    const update = envelope.operations[2]!;
+    if (!("Update" in update.edit)) throw new Error("golden operation 2 is not an update");
+    expect(update.path).toEqual([{ Collection: "children" }, { Key: update.edit.Update.key }]);
+    expect(envelope.operations.slice(3).map((operation) => operation.path)).toEqual([
+      [{ Collection: "children" }],
+      [{ Collection: "children" }],
+    ]);
     expect(fixture.terminal.rejections).toEqual([
       { type: "UnsupportedShapeCapability", detail: "unsupported descendant terminal shape" },
       { type: "ServerFailure", code: "TableNotFound" },
     ]);
+  });
+  it("decodes Rust terminal payloads against their public logical projection", () => {
+    const envelope = bindingCodecGoldenFixture().terminal.events[0]!.terminalOperations;
+    const insert = envelope.operations[0]!;
+    if (!("Insert" in insert.edit)) throw new Error("golden operation 0 is not an insert");
+    const titleColumn: ColumnDescriptor = {
+      name: "title",
+      column_type: { type: "Text" },
+      nullable: false,
+    };
+    const row = decodeNativeTerminalRowByLayout(
+      "11111111-1111-1111-1111-111111111111",
+      envelope.layouts[insert.payload_layout!]!,
+      [titleColumn],
+      Uint8Array.from(insert.edit.Insert.value),
+    );
+    expect(row.values).toEqual([{ type: "Text", value: "first" }]);
+
+    const update = envelope.operations[2]!;
+    if (!("Update" in update.edit)) throw new Error("golden operation 2 is not an update");
+    const updatedRow = decodeNativeTerminalRowByLayout(
+      "11111111-1111-1111-1111-111111111111",
+      envelope.layouts[update.payload_layout!]!,
+      [titleColumn],
+      Uint8Array.from(update.edit.Update.value),
+    );
+    expect(updatedRow.values).toEqual([{ type: "Text", value: "updated" }]);
   });
 
   it("rejects trailing bytes after a complete binding payload", () => {

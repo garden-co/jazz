@@ -1094,7 +1094,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       expect(Array.isArray(event.delta)).toBe(false);
       expect(Buffer.isBuffer(event.delta)).toBe(false);
       expect((event.delta as Uint8Array).byteLength).toBeGreaterThan(0);
-      expect(Array.isArray(event.terminalOperations)).toBe(true);
+      expect(event.terminalOperations).toMatchObject({
+        version: 1,
+        layouts: [],
+        operations: [],
+      });
       return event;
     };
 
@@ -1170,7 +1174,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     await waitFor(async () => rawEvents.length > 0 || undefined, "initial raw snapshot");
     const initialReset = rawEvents.find((event) => event.type === "delta" && event.reset === true);
     const rawReset = expectRawBinaryPayload(initialReset);
-    expect(rawReset.terminalOperations).toEqual([]);
+    expect(rawReset.terminalOperations).toEqual({
+      version: 1,
+      layouts: [],
+      operations: [],
+    });
 
     const eventsBeforeInsert = rawEvents.length;
     const fullByteRange = Uint8Array.from(Array.from({ length: 256 }, (_, index) => index));
@@ -1182,7 +1190,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       .find((event) => event.type === "delta" && event.reset === false);
 
     const rawIncremental = expectRawBinaryPayload(rawDelta);
-    expect(rawIncremental.terminalOperations).toEqual([]);
+    expect(rawIncremental.terminalOperations).toEqual({
+      version: 1,
+      layouts: [],
+      operations: [],
+    });
 
     const delivered = updates[1]?.delta[0];
     expect(delivered?.id).toBe(inserted.id);

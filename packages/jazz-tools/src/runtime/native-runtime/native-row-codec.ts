@@ -3,6 +3,7 @@ import { bytesToHex, formatUuidAt } from "../hex.js";
 import type {
   ColumnDescriptor,
   ColumnType,
+  NativeTerminalPayloadLayout,
   NativeTerminalRootLayout,
   Value,
   WasmRow,
@@ -601,15 +602,106 @@ export function compileNativeTerminalRootDecoder(
         ? ({ type: "Null" } satisfies Value)
         : decodeTerminalColumnBytes(column, bytes, descriptor[slot]?.valueType);
     });
-    const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
-    const row = { id, values };
-    Object.defineProperty(row, "valuesByColumn", {
-      value: valuesByColumn,
-      enumerable: false,
-      configurable: true,
-    });
-    return row;
+    return materializeWasmRow(id, columns, values);
   };
+}
+
+/** Decode a descendant row using the producer's named payload layout. */
+export function decodeNativeTerminalRowByLayout(
+  id: string,
+  layout: NativeTerminalPayloadLayout,
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): WasmRow {
+  if (layout.carrier !== "Logical" || layout.key_slot !== 0) {
+    throw new Error("unsupported terminal payload carrier or row-key slot");
+  }
+  if (layout.fields.length !== columns.length + 1) {
+    throw new Error("terminal payload layout does not match the public projection");
+  }
+  const descriptor = layout.fields.map((field) => {
+    if (
+      field.identity?.kind !== "Name" ||
+      typeof field.identity.name !== "string" ||
+      !field.identity.name ||
+      (field.role !== "RowKey" && field.role !== "Value")
+    ) {
+      throw new Error("terminal payload layout contains an invalid field identity or role");
+    }
+    const valueType = field.value_type as ValueType;
+    if (!isKnownValueType(valueType)) {
+      throw new Error(
+        `terminal payload layout contains an unsupported type for ${field.identity.name}`,
+      );
+    }
+    return { name: field.identity.name, valueType };
+  });
+  const keyField = layout.fields[layout.key_slot];
+  if (
+    keyField?.identity.name !== "row_uuid" ||
+    keyField.role !== "RowKey" ||
+    descriptor[layout.key_slot]?.valueType.tag !== 11
+  ) {
+    throw new Error("terminal payload slot zero must be the row_uuid UUID key");
+  }
+  const fieldsByName = new Map<string, number>();
+  for (let slot = 0; slot < layout.fields.length; slot += 1) {
+    const field = layout.fields[slot]!;
+    const name = field.identity.name;
+    if (
+      fieldsByName.has(name) ||
+      (slot !== layout.key_slot && (field.role !== "Value" || name === "row_uuid"))
+    ) {
+      throw new Error("terminal payload layout contains duplicate or misplaced fields");
+    }
+    fieldsByName.set(name, slot);
+  }
+  const slots = columns.map((column) => {
+    const slot = fieldsByName.get(column.name);
+    const field = slot === undefined ? undefined : layout.fields[slot];
+    const valueType = slot === undefined ? undefined : descriptor[slot]?.valueType;
+    if (
+      slot === undefined ||
+      field?.role !== "Value" ||
+      !terminalLayoutValueTypeMatchesColumn(valueType, column, layout.carrier)
+    ) {
+      throw new Error(`terminal payload layout does not match column ${column.name}`);
+    }
+    return slot;
+  });
+  if (fieldsByName.size !== columns.length + 1) {
+    throw new Error("terminal payload layout contains fields outside the public projection");
+  }
+
+  assertRecordLayoutIsComplete(descriptor, raw);
+  const decodeField = createRecordValueDecoder(descriptor);
+  const key = decodeField(raw, layout.key_slot);
+  if (key == null || formatUuid(key) !== id) {
+    throw new Error("terminal record key does not match addressed key");
+  }
+  const values = columns.map((column, index) => {
+    const slot = slots[index]!;
+    const bytes = decodeField(raw, slot);
+    return bytes == null
+      ? ({ type: "Null" } satisfies Value)
+      : decodeTerminalColumnBytes(column, bytes, descriptor[slot]?.valueType);
+  });
+  return materializeWasmRow(id, columns, values);
+}
+
+function materializeWasmRow(
+  id: string,
+  columns: readonly ColumnDescriptor[],
+  values: Value[],
+): WasmRow {
+  const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
+  const row = { id, values };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: valuesByColumn,
+    enumerable: false,
+    configurable: true,
+  });
+  return row;
 }
 
 function assertTerminalRootLayoutCompatible(

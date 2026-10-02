@@ -1531,12 +1531,24 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             Value::Nullable(Some(Box::new(Value::String("second".to_owned())))),
         ])
         .expect("golden current row encodes");
-    let todo_updated = current_descriptor
+    let logical_todo_one = logical_descriptor
         .create(&[
             Value::Uuid(todo_one_id.0),
-            Value::Nullable(Some(Box::new(Value::String("updated".to_owned())))),
+            Value::String("first".to_owned()),
         ])
-        .expect("golden updated row encodes");
+        .expect("golden logical todo row encodes");
+    let logical_todo_two = logical_descriptor
+        .create(&[
+            Value::Uuid(todo_two_id.0),
+            Value::String("second".to_owned()),
+        ])
+        .expect("golden logical todo row encodes");
+    let logical_todo_updated = logical_descriptor
+        .create(&[
+            Value::Uuid(todo_one_id.0),
+            Value::String("updated".to_owned()),
+        ])
+        .expect("golden updated logical todo row encodes");
     let note = logical_descriptor
         .create(&[Value::Uuid(note_id.0), Value::String("note".to_owned())])
         .expect("golden logical row encodes");
@@ -1628,58 +1640,63 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         removed_indices: vec![3],
     };
 
-    let current_key = std::iter::once(10)
+    let first_key = std::iter::once(10)
         .chain(todo_one_id.0.as_bytes().iter().copied())
         .collect::<Vec<_>>();
-    let logical_key = std::iter::once(10)
-        .chain(note_id.0.as_bytes().iter().copied())
+    let second_key = std::iter::once(10)
+        .chain(todo_two_id.0.as_bytes().iter().copied())
         .collect::<Vec<_>>();
+    let logical_root_descriptor = RecordDescriptor::new([(
+        "children",
+        ValueType::Array(Box::new(ValueType::Record(Box::new(logical_descriptor)))),
+    )]);
     let child_path = vec![TerminalPathSegment::Collection("children".to_owned())];
-    let current_insert = TerminalOperation {
-        root_descriptor: current_descriptor,
-        root_key: current_key.clone(),
+    let logical_insert_first = TerminalOperation {
+        root_descriptor: logical_root_descriptor,
+        root_key: first_key.clone(),
         path: child_path.clone(),
         edit: TerminalEdit::Insert {
             index: 0,
-            key: current_key.clone(),
-            value: todo_one.clone(),
+            key: first_key.clone(),
+            value: logical_todo_one,
         },
     };
-    let logical_insert = TerminalOperation {
-        root_descriptor: logical_descriptor,
-        root_key: logical_key.clone(),
+    let logical_insert_second = TerminalOperation {
+        root_descriptor: logical_root_descriptor,
+        root_key: second_key.clone(),
         path: child_path.clone(),
         edit: TerminalEdit::Insert {
-            index: 0,
-            key: logical_key.clone(),
-            value: note.clone(),
+            index: 1,
+            key: second_key.clone(),
+            value: logical_todo_two,
         },
     };
-    let current_update = TerminalOperation {
-        root_descriptor: current_descriptor,
-        root_key: current_key.clone(),
-        path: child_path.clone(),
+    let logical_update = TerminalOperation {
+        root_descriptor: logical_root_descriptor,
+        root_key: first_key.clone(),
+        path: vec![
+            TerminalPathSegment::Collection("children".to_owned()),
+            TerminalPathSegment::Key(first_key.clone()),
+        ],
         edit: TerminalEdit::Update {
-            key: current_key.clone(),
-            value: todo_updated,
-        },
-    };
-    let logical_remove = TerminalOperation {
-        root_descriptor: logical_descriptor,
-        root_key: logical_key.clone(),
-        path: child_path.clone(),
-        edit: TerminalEdit::Remove {
-            key: logical_key.clone(),
+            key: first_key.clone(),
+            value: logical_todo_updated,
         },
     };
     let logical_move = TerminalOperation {
-        root_descriptor: logical_descriptor,
-        root_key: logical_key.clone(),
-        path: child_path,
+        root_descriptor: logical_root_descriptor,
+        root_key: first_key.clone(),
+        path: child_path.clone(),
         edit: TerminalEdit::Move {
-            key: logical_key,
+            key: first_key,
             index: 1,
         },
+    };
+    let logical_remove = TerminalOperation {
+        root_descriptor: logical_root_descriptor,
+        root_key: second_key.clone(),
+        path: child_path,
+        edit: TerminalEdit::Remove { key: second_key },
     };
     BindingCodecGoldenFixture {
         format: "jazz-binding-codec-golden-v1".to_owned(),
@@ -1706,8 +1723,15 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
                 {
                     "type": "delta",
                     "terminalOperations": jazz::binding_codec::terminal_operations_to_json(
-                        &[current_insert, logical_insert, current_update, logical_move, logical_remove]
-                    ).expect("descendant terminal operations encode")
+                        &[
+                            logical_insert_first,
+                            logical_insert_second,
+                            logical_update,
+                            logical_move,
+                            logical_remove,
+                        ]
+                    )
+                    .expect("descendant terminal operations encode")
                 }
             ]),
             rejections: serde_json::json!([
