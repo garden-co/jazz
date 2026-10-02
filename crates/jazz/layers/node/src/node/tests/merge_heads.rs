@@ -626,6 +626,220 @@ fn positive_row_reachability_stops_at_immediate_predecessor() {
     );
 }
 
+fn ingest_without_current_indexes(
+    node_state: &mut NodeState,
+    schema: &JazzSchema,
+    table: &TableSchema,
+    row_uuid: RowUuid,
+    tx_id: TxId,
+    parents: Vec<TxId>,
+) {
+    let version = VersionRecord::from_cells(
+        table,
+        schema.version_id(),
+        row_uuid,
+        parents,
+        AuthorSubject::system_at(tx_id.node),
+        10,
+        AuthorSubject::system_at(tx_id.node),
+        10,
+        &BTreeMap::from([("title".to_owned(), v("revision"))]),
+        None,
+    )
+    .unwrap();
+    crate::local_executor::block_on(
+        node_state.ingest_transaction_fragment_without_current_indexes(
+            Transaction {
+                tx_id,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(tx_id.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Local,
+        ),
+    )
+    .unwrap();
+}
+
+/// Contract: a same-target merge-head sweep reuses its common row ancestry
+/// and still produces the history-derived head set. This private NodeState
+/// seam is necessary to assert traversal work and compare against the head
+/// oracle; no client actors participate.
+///
+/// ```text
+/// shared row history --> concurrent heads --> incoming version sweep
+///                                                |
+///                                                +--> heads match history
+/// ```
+#[test]
+fn same_target_head_sweep_reuses_common_ancestry() {
+
+    let schema = two_column_schema();
+    let (_dir, mut writer) = open_node_with_schema(node(0xf3), schema.clone());
+    let table = &schema.tables[0];
+    let row_uuid = row(0xf4);
+    let chain_len = 96_u64;
+    let head_count = 54_u64;
+    let mut parent = None;
+    for index in 0..chain_len {
+        let tx_id = TxId::new(TxTime::from(10 + index), node(0xf5));
+        ingest_without_current_indexes(
+            &mut writer,
+            &schema,
+            table,
+            row_uuid,
+            tx_id,
+            parent.into_iter().collect(),
+        );
+        parent = Some(tx_id);
+    }
+    let shared_tip = parent.expect("common row history must have a tip");
+    let incoming_time = 10 + chain_len;
+    for index in 0..head_count {
+        let tx_id = TxId::new(TxTime::from(incoming_time + index + 1), node(0xf6));
+        ingest_without_current_indexes(
+            &mut writer,
+            &schema,
+            table,
+            row_uuid,
+            tx_id,
+            vec![shared_tip],
+        );
+    }
+    writer
+        .rebuild_merge_heads_from_history_for_test("todos", row_uuid)
+        .unwrap();
+    let incoming = TxId::new(TxTime::from(incoming_time), node(0xf7));
+
+    // Model a same-target ingress sweep over 54 incomparable heads. The
+    // measured count covers the actual merge-head updater, not fixture setup.
+    writer.clear_content_version_reachability_cache();
+    writer.reset_merge_head_reachability_walks_for_test();
+    ingest_todos_version(
+        &mut writer,
+        &schema,
+        table,
+        row_uuid,
+        incoming,
+        vec![shared_tip],
+        "incoming",
+    );
+    let visited = writer.merge_head_reachability_nodes_for_test();
+    assert!(
+        visited <= chain_len as usize + head_count as usize * 3,
+        "same-target sweep expanded {visited} row-history nodes for a {}-node prefix and {} heads",
+        chain_len,
+        head_count,
+    );
+    writer
+        .assert_merge_heads_match_history_for_test("todos", row_uuid)
+        .unwrap();
+}
+
+/// Contract: unresolved row ancestry is not settled as a negative; when the
+/// missing parent arrives, a fresh query sees the target, and a proven path
+/// wins over an unknown sibling. This private NodeState seam is needed to
+/// create partial row history; no client actors participate.
+///
+/// ```text
+/// writer --ingest start -> missing--> query(false)
+/// writer --ingest missing -> target--> new query(true)
+/// writer --ingest witnessed -> {missing, target}--> query(true)
+/// ```
+#[test]
+fn shared_reachability_memo_keeps_unknown_history_unsettled() {
+    let schema = two_column_schema();
+    let (_dir, mut writer) = open_node_with_schema(node(0xf8), schema.clone());
+    let table = &schema.tables[0];
+    let row_uuid = row(0xf9);
+    let table_id = writer
+        .physical_table_id_for_schema(writer.catalogue.active_schema.schema, "todos")
+        .unwrap();
+    let target = TxId::new(TxTime::from(20), node(0xfa));
+    let missing = TxId::new(TxTime::from(30), node(0xfb));
+    let start = TxId::new(TxTime::from(40), node(0xfc));
+    ingest_without_current_indexes(
+        &mut writer,
+        &schema,
+        table,
+        row_uuid,
+        start,
+        vec![missing],
+    );
+
+    let first = crate::local_executor::block_on(
+        writer.content_versions_reach_tx_with_shared_memo_for_test(
+            table_id,
+            &BranchKey::default(),
+            row_uuid,
+            &[start],
+            target,
+        ),
+    )
+    .unwrap();
+    assert_eq!(first, vec![false], "missing ancestry remains unresolved");
+
+    // The intermediate transaction arrives with the queried target as its
+    // parent; a new query scope must observe the repaired row history.
+    ingest_without_current_indexes(
+        &mut writer,
+        &schema,
+        table,
+        row_uuid,
+        missing,
+        vec![target],
+    );
+    let second = crate::local_executor::block_on(
+        writer.content_versions_reach_tx_with_shared_memo_for_test(
+            table_id,
+            &BranchKey::default(),
+            row_uuid,
+            &[start],
+            target,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        second,
+        vec![true],
+        "late intermediate history must repair reachability"
+    );
+
+    // A proven target path remains positive even when a sibling parent is
+    // still missing from this row's local history.
+    let missing_sibling = TxId::new(TxTime::from(32), node(0xfd));
+    let witnessed = TxId::new(TxTime::from(42), node(0xfe));
+    ingest_without_current_indexes(
+        &mut writer,
+        &schema,
+        table,
+        row_uuid,
+        witnessed,
+        vec![missing_sibling, target],
+    );
+    let positive_with_unknown = crate::local_executor::block_on(
+        writer.content_versions_reach_tx_with_shared_memo_for_test(
+            table_id,
+            &BranchKey::default(),
+            row_uuid,
+            &[witnessed],
+            target,
+        ),
+    )
+    .unwrap();
+    assert_eq!(positive_with_unknown, vec![true]);
+}
+
 // Internal work-count receipt: transaction fate handling may read the full
 // unit once; exact row matching must not add another transaction-wide read.
 #[test]
@@ -708,4 +922,80 @@ fn ancestry_cache_bounds_entry_count_and_total_transaction_ids() {
     writer.cache_content_version_reachability(key(4), oversized);
     assert_eq!(writer.content_version_reachability_cache.len(), 2);
     assert_eq!(writer.content_version_reachability_cache_tx_ids, 65_536);
+}
+
+/// Contract: finding the incoming transaction through one parent path stops
+/// reachability before exploring a large sibling history. This private
+/// NodeState test exercises the merge-head work counter; no client actors
+/// participate.
+///
+/// ```text
+/// target --> intermediate --+
+///                           +--> current head
+/// sibling history ----------+
+/// incoming target --> head sweep --> retain the current head
+/// ```
+#[test]
+fn positive_head_reachability_stops_before_large_sibling_branch() {
+    let schema = two_column_schema();
+    let (_dir, mut writer) = open_node_with_schema(node(0xec), schema.clone());
+    let table = &schema.tables[0];
+    let row_uuid = row(0xed);
+    let target = TxId::new(TxTime::from(10), node(0xee));
+    let chain_len = 128_u64;
+    let mut parent = None;
+    for index in 0..chain_len {
+        let tx_id = TxId::new(TxTime::from(400 + index), node(0xef));
+        ingest_without_current_indexes(
+            &mut writer,
+            &schema,
+            table,
+            row_uuid,
+            tx_id,
+            parent.into_iter().collect(),
+        );
+        parent = Some(tx_id);
+    }
+    let sibling_tip = parent.expect("sibling history must have a tip");
+    let intermediate = TxId::new(TxTime::from(300), node(0xf0));
+    ingest_without_current_indexes(
+        &mut writer,
+        &schema,
+        table,
+        row_uuid,
+        intermediate,
+        vec![target],
+    );
+    let current_head = TxId::new(TxTime::from(600), node(0xf1));
+    ingest_without_current_indexes(
+        &mut writer,
+        &schema,
+        table,
+        row_uuid,
+        current_head,
+        vec![intermediate, sibling_tip],
+    );
+    writer
+        .rebuild_merge_heads_from_history_for_test("todos", row_uuid)
+        .unwrap();
+
+    writer.clear_content_version_reachability_cache();
+    writer.reset_merge_head_reachability_walks_for_test();
+    ingest_todos_version(
+        &mut writer,
+        &schema,
+        table,
+        row_uuid,
+        target,
+        Vec::new(),
+        "incoming target",
+    );
+    let visited = writer.merge_head_reachability_nodes_for_test();
+    assert!(
+        visited <= 2,
+        "positive ancestry witness expanded {visited} nodes, including a {chain_len}-node sibling branch",
+    );
+    writer
+        .assert_merge_heads_match_history_for_test("todos", row_uuid)
+        .unwrap();
 }
