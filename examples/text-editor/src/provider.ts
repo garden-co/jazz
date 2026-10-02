@@ -1,7 +1,7 @@
 import type { useDb } from "jazz-tools/react";
 import * as Y from "yjs";
 import { app } from "../schema.js";
-import { HEADER, frame, updates } from "./log.js";
+import { applyUpdates } from "./log.js";
 
 type Db = ReturnType<typeof useDb>;
 
@@ -38,24 +38,19 @@ export function connect(
     if (contentLog.length < offset)
       throw new Error("Document log was replaced; reload to reopen it");
     if (contentLog.length === offset) return;
-    for (const update of updates(contentLog.subarray(offset), offset === 0)) {
-      Y.applyUpdate(doc, update, origin);
-    }
+    applyUpdates(doc, contentLog.subarray(offset), origin);
     offsets.set(id, contentLog.length);
   }
 
   function onUpdate(update: Uint8Array, source: unknown) {
     if (source === origin) return;
-    const bytes = frame(update);
+    const bytes = update;
     enqueue(async () => {
       if (ownLength === 0) {
-        const contentLog = new Uint8Array(HEADER.length + bytes.length);
-        contentLog.set(HEADER);
-        contentLog.set(bytes, HEADER.length);
         await db
-          .insert(app.documentLogs, { documentId: id, contentLog }, { id: logId })
+          .insert(app.documentLogs, { documentId: id, contentLog: bytes }, { id: logId })
           .wait({ tier: "local" });
-        ownLength = contentLog.length;
+        ownLength = bytes.length;
         return;
       }
       await db

@@ -1549,6 +1549,9 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
+      lib0:
+        specifier: ^0.2.119
+        version: 0.2.119
       react:
         specifier: 19.2.4
         version: 19.2.4
