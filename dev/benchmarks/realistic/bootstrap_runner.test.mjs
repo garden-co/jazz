@@ -6,6 +6,18 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
+// Node --test isolates this worker; create every fixture after dropping real root privileges.
+if (process.getuid() === 0) {
+  const nobodyGroup = spawnSync("id", ["-g", "nobody"], { encoding: "utf8" });
+  assert.equal(nobodyGroup.status, 0, nobodyGroup.error?.message ?? nobodyGroup.stderr);
+  const gid = nobodyGroup.stdout.trim();
+  assert.match(gid, /^\d+$/, "nobody must have a numeric primary GID");
+  assert.ok(Number.isSafeInteger(Number(gid)), "nobody primary GID must be representable");
+  process.setgroups([]);
+  process.setgid(Number(gid));
+  process.setuid("nobody");
+}
+
 const SCRIPT = path.resolve(new URL("./bootstrap_runner.sh", import.meta.url).pathname);
 const HELPER = path.resolve(new URL("./bootstrap_runner_helper.py", import.meta.url).pathname);
 const ORCHESTRATION = path.resolve(
@@ -630,14 +642,35 @@ esac
   logger("corepack", '[ "$#" -eq 1 ] && [ "$1" = enable ]');
   logger("jq", '[ "$1" = -e ] && [ "\${FAIL_JQ:-}" != 1 ]');
   logger("cargo", '[ "$1" = install ] && [ "\${FAIL_EFFECT:-}" != "cargo:$*" ]');
-  logger(
-    "install",
-    'if [ "$1" = -d ] && [ "$2" = -o ] && [ "$3" = "$RUNNER_USER" ] && [ "$4" = -g ] && [ "$5" = root ]; then shift 5; set -- -d -o "$RUNNER_USER" -g "$(id -gn)" "$@"; fi; for arg in "$@"; do case "$arg" in /*) case "$arg" in "$BOOTSTRAP_TEST_ROOT"/*) ;; *) exit 90 ;; esac ;; esac; done; exec /usr/bin/install "$@"',
-  );
   const sandboxed = (name) =>
     `for arg in "$@"; do case "$arg" in /*) case "$arg" in "$BOOTSTRAP_TEST_ROOT"/*) ;; *) exit 90 ;; esac ;; esac; done; exec /usr/bin/${name} "$@"`;
-  for (const name of ["chown", "chmod", "ln", "mv", "rmdir", "rm", "mktemp"])
-    logger(name, sandboxed(name));
+  // Fixture owners need not have a same-named group (for example, nobody:nogroup).
+  // Translate only that intended group, after logging the original command.
+  logger(
+    "install",
+    `fixture_owner="$(/usr/bin/id -un)"
+directory=0
+if [ "$1" = -d ]; then directory=1; shift; fi
+if [ "$1" = -o ] && [ "$2" = "$fixture_owner" ] && [ "$3" = -g ] && [ "$4" = "$fixture_owner" ]; then
+  shift 4
+  set -- -o "$fixture_owner" -g "${runnerGid}" "$@"
+fi
+if [ "$directory" = 1 ]; then set -- -d "$@"; fi
+${sandboxed("install")}`,
+  );
+  logger(
+    "chown",
+    `fixture_owner="$(/usr/bin/id -un)"
+if [ "$1" = "$fixture_owner:$fixture_owner" ]; then
+  shift
+  set -- "$fixture_owner:${runnerGid}" "$@"
+elif [ "$1" = -R ] && [ "$2" = "$fixture_owner:$fixture_owner" ]; then
+  shift 2
+  set -- -R "$fixture_owner:${runnerGid}" "$@"
+fi
+${sandboxed("chown")}`,
+  );
+  for (const name of ["chmod", "ln", "mv", "rmdir", "rm", "mktemp"]) logger(name, sandboxed(name));
   let entries = fs.readdirSync(root, { recursive: true }).sort();
 
   const invoke = (overrides = {}, allowlist = entries) => {

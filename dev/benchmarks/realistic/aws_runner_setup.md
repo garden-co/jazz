@@ -122,6 +122,15 @@ This script handles the details that bit us on the first live setup:
   is verified against the pinned manifest.
 - applies `dev/benchmarks/realistic/harden_runner.sh` after systemd starts the runner unless `SKIP_HARDENING=1`
 
+Run the sandboxed bootstrap checks with
+`node --test dev/benchmarks/realistic/bootstrap_runner.test.mjs`.
+If started as root, the isolated test worker resolves the existing `nobody`
+account's primary GID, clears supplementary groups, then drops its GID and UID
+before creating fixtures. Missing identity or privilege-drop errors abort the
+worker. Fixtures still require a non-root UID and real ownership operations;
+their adapters map only the fixture owner's same-named group to its primary GID.
+This does not change the production bootstrap's root requirement.
+
 ## 3. Register the GitHub runner
 
 Create a repo registration token from GitHub:

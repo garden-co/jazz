@@ -120,6 +120,15 @@ After a successful bootstrap, it:
 - skips AWS SSM installation on non-AWS hardware
 - applies `dev/benchmarks/realistic/harden_runner.sh` after runner service start unless `SKIP_HARDENING=1`
 
+Run the sandboxed bootstrap checks with
+`node --test dev/benchmarks/realistic/bootstrap_runner.test.mjs`.
+If started as root, the isolated test worker resolves the existing `nobody`
+account's primary GID, clears supplementary groups, then drops its GID and UID
+before creating fixtures. Missing identity or privilege-drop errors abort the
+worker. Fixtures still require a non-root UID and real ownership operations;
+their adapters map only the fixture owner's same-named group to its primary GID.
+This does not change the production bootstrap's root requirement.
+
 ## Hardening choices
 
 Run the hardening script directly if you need to re-apply tuning:
