@@ -3411,6 +3411,14 @@ export class NativeRuntimeAdapter implements Runtime {
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
+      if (this.closed) return;
+      if (this.coreOperation) {
+        this.coreTickAgain = true;
+        return;
+      }
+      // Observe only a tick started here, never a predecessor's completion.
+      const hasServerTransport = this.serverTransport !== null;
+      const generation = this.serverConnectionGeneration;
       void this.runCoreTick().catch((error) => {
         // Native revocation can retire a foreground after its wake crossed
         // into the JS queue. Native liveness distinguishes that stale wake
@@ -3421,7 +3429,11 @@ export class NativeRuntimeAdapter implements Runtime {
           reportAsyncRuntimeError(livenessError);
           return;
         }
-        reportAsyncRuntimeError(error);
+        if (hasServerTransport) {
+          this.handleServerTransportError(error, generation);
+        } else {
+          reportAsyncRuntimeError(error);
+        }
       });
     });
   }
