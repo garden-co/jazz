@@ -330,7 +330,7 @@ fn initialization_catalogue_readiness_requires_requested_schema_admission() {
             .unwrap()
             .ready
     );
-    let pending = open(requested, 0xfa);
+    let pending = open(requested.clone(), 0xfa);
     assert_eq!(
         block_on(pending.table_identity("todos")).unwrap(),
         Some(known_identity)
@@ -367,7 +367,7 @@ fn initialization_catalogue_readiness_requires_requested_schema_admission() {
         NodeUuid::from_bytes([0xf8; 16]),
         2,
     );
-    block_on(pending.connect_upstream(upstream));
+    let connection = block_on(pending.connect_upstream(upstream));
     let peer = authority.accept_subscriber(downstream, pending.identity().author);
     for _ in 0..32 {
         pending.tick().unwrap();
@@ -404,6 +404,86 @@ fn initialization_catalogue_readiness_requires_requested_schema_admission() {
     .err()
     .expect("the authority's missing requested schema must reject a Global read");
     assert_eq!(global_error.code, ErrorCode::Schema);
+
+    block_on(pending.detach_connection_async(&connection)).unwrap();
+    assert!(authority.server.detach_connection(&peer));
+    let lens = MigrationLens::new(
+        base.version_id(),
+        requested.version_id(),
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![],
+        }],
+    )
+    .unwrap();
+    let publication = authority
+        .author_schema_lineage_publication(
+            SchemaVersion::new(requested.clone()),
+            lens,
+            vec!["controls".to_owned()],
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    authority.publish_schema_with_lens(1, publication).unwrap();
+    authority
+        .activate_catalogue_schema_for_test(CurrentWriteSchema {
+            revision: 2,
+            schema: requested.version_id(),
+        })
+        .unwrap();
+    let (upstream, downstream) = duplex_with_admitted_session_context(
+        pending.identity().author,
+        pending.identity().node,
+        3,
+        NodeUuid::from_bytes([0xf8; 16]),
+        4,
+    );
+    let connection = block_on(pending.connect_upstream(upstream));
+    let peer = authority.accept_subscriber(downstream, pending.identity().author);
+    for _ in 0..32 {
+        pending.tick().unwrap();
+        peer.borrow_mut().tick().unwrap();
+    }
+    let state = block_on(pending.take_authenticated_catalogue_state()).unwrap();
+    assert!(
+        state.ready,
+        "the same initially pending B handle must become ready"
+    );
+    let capture = state.capture.expect("admitted B catalogue is captured");
+    assert_eq!(
+        super::super::initialization::decode_catalogue_capture(&capture)
+            .unwrap()
+            .current_write_schema
+            .schema,
+        requested.version_id()
+    );
+    block_on(pending.detach_connection_async(&connection)).unwrap();
+    assert!(authority.server.detach_connection(&peer));
+    assert!(
+        block_on(pending.take_authenticated_catalogue_state())
+            .unwrap()
+            .ready
+    );
+    let controls = postcard::to_allocvec(&Query::from("controls")).unwrap();
+    let result = block_on(Box::pin(pending.all_serialized_query(
+        &controls,
+        ReadOpts::default(),
+        None,
+        None,
+        None,
+        false,
+        || false,
+        |_| {},
+    )))
+    .unwrap();
+    let SerializedReadResult::Rows(rows) = result else {
+        panic!("ordinary admitted B table returns stored rows");
+    };
+    assert!(
+        rows.is_empty(),
+        "new controls table is empty and locally readable offline"
+    );
 }
 
 #[test]

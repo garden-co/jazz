@@ -306,8 +306,10 @@ pub(super) fn decode_catalogue_capture(
     }
 }
 
-/// Atomic single-owner observation of authenticated catalogue availability.
-/// Captured bytes move once; the host must retain them until durable publication.
+/// Atomic single-owner observation of this handle's authenticated schema readiness.
+/// Readiness includes requested-schema admission; stable cached identities alone
+/// cannot admit an unpublished schema. Captured bytes move once even when not ready,
+/// and the host must retain them until durable publication.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct AuthenticatedCatalogueState {
@@ -319,14 +321,23 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    /// Await the catalogue owner, then observe readiness and drain its capture
-    /// under the same lock. Contention is pending, never an empty observation.
+    /// Await the catalogue owner, then qualify readiness for this handle's requested
+    /// schema and drain its capture under the same lock. Contention is pending,
+    /// never an empty observation; pending admission does not suppress a capture.
     #[doc(hidden)]
     pub async fn take_authenticated_catalogue_state(
         &self,
     ) -> Result<AuthenticatedCatalogueState, Error> {
         let mut node = self.node.node.lock().await;
         let (capture, ready) = node.take_authenticated_catalogue_state();
+        let ready = ready
+            && (!self.requires_open_schema_admission
+                || self
+                    .node
+                    .open_schema_admission
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|pending| matches!(pending.result.as_ref(), Some(Ok(())))));
         Ok(AuthenticatedCatalogueState { capture, ready })
     }
 }

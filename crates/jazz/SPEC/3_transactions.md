@@ -547,11 +547,15 @@ the write-pointer revision.
 Validation of an existing root uses the same pure catalogue planner in an explicit
 cached-validation mode, permitting a structurally valid stale write revision
 without installing it. Authority ingestion keeps its monotone revision checks.
-The state's `ready` field reports validated cached identity availability or an
-eligible live ingest; cache validation itself never creates a capture. Hosts must
-persist a live capture before reporting durable cached readiness. Cached stable
-identities do not assert current membership or freshness. Reconnect may reject
-stale writes.
+The state's `ready` field requires validated cached identities or an eligible live
+ingest **and** successful admission of this Db handle's requested open schema.
+Retaining an older authenticated catalogue does not admit a missing requested schema,
+even when shared tables already have stable identities. Already admitted cached schemas
+remain ready offline. Pending or failed admission does not suppress capture draining;
+ordinary Global reads still wait for admission or report its original failure.
+Cache validation itself never creates a capture. Hosts must persist a live capture
+before reporting durable cached readiness. Cached stable identities do not assert
+current membership or freshness. Reconnect may reject stale writes.
 
 The native/WASM identity binding is exactly 16 UUID bytes in RFC UUID byte
 order, or zero bytes for absence. JavaScript renders the bytes as a lowercase
