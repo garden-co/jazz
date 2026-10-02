@@ -518,6 +518,7 @@ function attachBootstrapPort(
         type: "foreground-node-lease-worker-alive",
         attemptId: message.attemptId,
       } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+      if (message.wasmPrefetch) prefetchWorkerWasmModule(message.wasmPrefetch.runtimeSources);
       return;
     }
     if (message?.type === "cancel-foreground-node-lease") {
@@ -1071,7 +1072,8 @@ async function initialize(context: RuntimeContext): Promise<void> {
   try {
     const { options } = context;
     // Opening the page store is also the durable ownership-admission gate for
-    // a derived physical browser root. Keep it before *any* WASM work: a
+    // a derived physical browser root. Keep it before any configuring WASM
+    // work (a lease probe may already have compiled this realm's own asset): a
     // rejected owner must not load or configure the process-wide WASM realm,
     // install telemetry, open a native database, or attach a follower.  In
     // particular, a low-level attempt to open another account's physical root
@@ -1172,6 +1174,20 @@ async function initialize(context: RuntimeContext): Promise<void> {
     }
     throw error;
   }
+}
+
+/**
+ * Fetch and compile this realm's WASM while lease admission, IndexedDB and the
+ * page's setup run. The realm name already fixes its asset source, and this
+ * neither opens a database nor configures tracing or telemetry, so owner
+ * admission still precedes every configuring WASM step in `initialize`.
+ */
+function prefetchWorkerWasmModule(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): void {
+  if (wasmModulePromise || runtimeSources?.wasmModule || runtimeSources?.wasmSource) return;
+  // A failed prefetch clears itself; the runtime connect then loads again.
+  void loadWorkerWasmModule(runtimeSources).catch(() => undefined);
 }
 
 async function loadWorkerWasmModule(

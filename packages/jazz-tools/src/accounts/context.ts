@@ -8,7 +8,13 @@ import {
   onAccountInvalidated,
 } from "./enrollment.js";
 import { accountAppId } from "./local-first.js";
-import { createDbWithRuntimeSource, type Db, type DbConfig } from "../runtime/db.js";
+import {
+  createDbWithRuntimeSource,
+  releaseUnusedLease,
+  startBrowserWorkerLease,
+  type Db,
+  type DbConfig,
+} from "../runtime/db.js";
 import type { RuntimeSource } from "../runtime/runtime-source.js";
 import {
   internalSessionFromVerifiedReservedJwtPayload,
@@ -103,10 +109,24 @@ export async function createAccountDbWithRuntimeSource(
         .catch((error) => console.error("Account context shutdown failed", error));
     }
   });
+  // The browser root is named by the account alone: boot its worker while the
+  // account's credential resolves.
+  const { account: _account, ...scope } = config;
+  let lease = startBrowserWorkerLease(
+    { ...scope, accountId: account.id, accountRegistryAuthority: accountRegistry(account) },
+    runtimeSource,
+  );
   try {
-    const resolved = await resolveAccountRuntimeConfig(config);
+    let resolved: DbConfig;
+    try {
+      resolved = await resolveAccountRuntimeConfig(config);
+    } catch (error) {
+      releaseUnusedLease(lease);
+      lease = undefined;
+      throw error;
+    }
     const jwtToken = resolved.jwtToken!;
-    db = await createDbWithRuntimeSource(resolved, runtimeSource);
+    db = await createDbWithRuntimeSource(resolved, runtimeSource, lease);
     if (invalidated) {
       await db.shutdown();
       throw new AccountAuthError("account_logged_out");

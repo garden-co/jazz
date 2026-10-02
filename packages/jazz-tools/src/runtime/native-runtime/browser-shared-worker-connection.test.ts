@@ -408,6 +408,59 @@ describe("browser SharedWorker realm identity", () => {
     await expect(lease.retire()).resolves.toBeUndefined();
   }, 3_000);
 
+  it("asks a probed worker to prefetch its URL-addressed WASM before lease admission", async () => {
+    const port = new DelayedLeasePort(0);
+    vi.stubGlobal(
+      "SharedWorker",
+      class {
+        readonly port = port;
+      },
+    );
+    const wasmUrl = "https://example.com/assets/jazz_wasm_bg.wasm";
+
+    const lease = await SharedBrowserForegroundNodeLease.acquire({
+      dbName: "prefetching-root",
+      storageOwner: "owner",
+      runtimeSources: { wasmUrl, wasmVersion: "build-1" },
+    });
+
+    expect(port.sent[0]).toEqual({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: expect.any(String),
+      // The worker loads the same resolved, version-pinned URL the runtime connect names.
+      wasmPrefetch: {
+        runtimeSources: expect.objectContaining({
+          wasmUrl: `${wasmUrl}?jazz-runtime-version=build-1`,
+          wasmVersion: "build-1",
+        }),
+      },
+    });
+    expect(port.sent[1]).toMatchObject({ type: "acquire-foreground-node-lease" });
+    await lease.retire();
+  });
+
+  it("does not ask a probed worker to prefetch an in-memory WASM source", async () => {
+    const port = new DelayedLeasePort(0);
+    vi.stubGlobal(
+      "SharedWorker",
+      class {
+        readonly port = port;
+      },
+    );
+
+    const lease = await SharedBrowserForegroundNodeLease.acquire({
+      dbName: "in-memory-root",
+      storageOwner: "owner",
+      runtimeSources: { wasmSource: new Uint8Array([0, 97, 115, 109]) },
+    });
+
+    expect(port.sent[0]).toEqual({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: expect.any(String),
+    });
+    await lease.retire();
+  });
+
   it("returns the public timeout while retaining cancellation cleanup for a wedged worker", async () => {
     vi.useFakeTimers();
     const port = new DelayedLeasePort(10_001, false);
