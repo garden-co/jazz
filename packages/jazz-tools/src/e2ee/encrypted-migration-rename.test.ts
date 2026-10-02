@@ -65,10 +65,17 @@ it("reads and searches existing ciphertext after renaming its column", async () 
     const project = tx.insert(oldApp.projects, { title: "Project" });
     const note = tx.insert(oldApp.notes, { projectId: project.id, title: "Private title" });
     await tx.commit().wait({ tier: "global" });
+    const root = await db.one(oldApp.__e2ee_spaces.where({ identifier: project.id }), {
+      tier: "global",
+    });
+    expect(root).not.toBeNull();
     await db.shutdown();
     db = undefined;
     await deploy({ ...target, schema: newApp, permissions: permissions(newApp), migration });
     db = await createDb({ ...account, e2ee: { app: newApp, store } });
+    expect(
+      await db.one(newApp.__e2ee_spaces.where({ identifier: project.id }), { tier: "global" }),
+    ).toEqual(root);
     expect(await db.all(newApp.notes.where({ projectId: project.id }), { tier: "global" })).toEqual(
       [{ id: note.id, projectId: project.id, body: "Private title" }],
     );
@@ -77,6 +84,25 @@ it("reads and searches existing ciphertext after renaming its column", async () 
         tier: "global",
       }),
     ).toEqual([{ id: note.id, projectId: project.id, body: "Private title" }]);
+    const next = await db
+      .insert(newApp.notes, { projectId: project.id, body: "New private body" })
+      .wait({ tier: "global" });
+    expect(await db.one(newApp.notes.where({ id: next.id }), { tier: "global" })).toEqual(next);
+    expect(
+      await db.all(newApp.notes.where({ projectId: project.id, body: "Private title" }), {
+        tier: "global",
+      }),
+    ).toEqual([{ id: note.id, projectId: project.id, body: "Private title" }]);
+    expect(
+      await db.one(newApp.__e2ee_spaces.where({ identifier: project.id }), { tier: "global" }),
+    ).toEqual(root);
+    await db.disconnect();
+    expect(await db.one(newApp.notes.where({ id: note.id }), { tier: "local" })).toEqual({
+      id: note.id,
+      projectId: project.id,
+      body: "Private title",
+    });
+    expect(await db.one(newApp.notes.where({ id: next.id }), { tier: "local" })).toEqual(next);
   } finally {
     await db?.shutdown();
     await server.stop();
