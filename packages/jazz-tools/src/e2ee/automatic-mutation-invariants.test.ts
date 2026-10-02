@@ -253,6 +253,7 @@ it("uses the public begin snapshot for cold and late initial recipients", async 
   const { app, db } = fixture;
   try {
     const cold = await fixture.openOtherAccount();
+    await cold.client.e2ee.devices.list();
     // Advance the creator's known authority coordinate without loading recipient history.
     await db.insert(app.events, { message: "Recipient enrolment precedes this snapshot" }).wait({
       tier: "global",
@@ -282,6 +283,7 @@ it("uses the public begin snapshot for cold and late initial recipients", async 
       await lateTx.one(app.projects.where({ id: crypto.randomUUID() }), { tier: "global" }),
     ).toBeNull();
     const late = await fixture.openOtherAccount();
+    await late.client.e2ee.devices.list();
     const lateProject = lateTx.insert(
       app.projects,
       { title: "Late recipient scope" },
