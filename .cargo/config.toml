@@ -1,0 +1,6 @@
+# The Linux server's heap sampler walks frame pointers to record stacks
+# (crates/jazz-cli/src/heap_profiling/sampler.rs), and CPU profilers use them
+# too. Rust's prebuilt std already keeps them. A RUSTFLAGS environment
+# variable replaces this, so set the flag there as well when using one.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "force-frame-pointers=yes"]
