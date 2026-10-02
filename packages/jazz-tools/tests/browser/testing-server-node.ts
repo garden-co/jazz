@@ -96,11 +96,7 @@ const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, JazzServerRo
 const browserContextIds = new WeakMap<BrowserContext, number>();
 let nextBrowserContextId = 1;
 
-async function startJazzServer(
-  appId?: string,
-  schema?: ArrayLike<number>,
-  gated = false,
-): Promise<StartedJazzServer> {
+async function startJazzServer(appId?: string, gated = false): Promise<StartedJazzServer> {
   const jwtIssuer = await startTestJwtIssuer();
   const adminSecret = "jazz-browser-test-admin";
   const backendSecret = "jazz-browser-test-backend";
@@ -114,7 +110,6 @@ async function startJazzServer(
       inMemory: true,
       adminSecret,
       backendSecret,
-      schema: schema ? Uint8Array.from(schema) : undefined,
     });
     const transportGate = gated ? await startTransportGate(server.url) : undefined;
     const serverUrl = transportGate?.url ?? server.url;
@@ -133,20 +128,12 @@ async function startJazzServer(
   }
 }
 
-async function getOrStartJazzServer(
-  appId?: string,
-  schema?: ArrayLike<number>,
-  gated = false,
-): Promise<StartedJazzServer> {
-  const key = JSON.stringify([
-    appId ?? DEFAULT_JAZZ_SERVER_KEY,
-    schema ? schemaCacheKey(schema) : null,
-    gated,
-  ]);
+async function getOrStartJazzServer(appId?: string, gated = false): Promise<StartedJazzServer> {
+  const key = JSON.stringify([appId ?? DEFAULT_JAZZ_SERVER_KEY, gated]);
   const existing = jazzServerPromises.get(key);
 
   if (!existing) {
-    const startedServer = startJazzServer(appId, schema, gated).catch((error) => {
+    const startedServer = startJazzServer(appId, gated).catch((error) => {
       jazzServerPromises.delete(key);
       throw error;
     });
@@ -157,25 +144,15 @@ async function getOrStartJazzServer(
   return existing;
 }
 
-function schemaCacheKey(schema: ArrayLike<number>): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < schema.length; index += 1) {
-    hash ^= schema[index] ?? 0;
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return `${schema.length}:${(hash >>> 0).toString(16)}`;
-}
-
 export async function jazzServerInfo(
   appId?: string,
-  schema?: ArrayLike<number>,
   gated = false,
 ): Promise<{
   appId: string;
   serverUrl: string;
   adminSecret: string;
 }> {
-  const started = await getOrStartJazzServer(appId, schema, gated);
+  const started = await getOrStartJazzServer(appId, gated);
   return {
     appId: started.appId,
     serverUrl: started.serverUrl,
