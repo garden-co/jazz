@@ -56,15 +56,15 @@ Configurable via env vars (`JAZZ_JWT_TOKEN` is required):
 
 ## API
 
-| Route        | Method   | Description                       |
-| ------------ | -------- | --------------------------------- |
-| `/todos`     | `GET`    | List all todo items               |
-| `/todos`     | `POST`   | Create new item                   |
-| `/todos/:id` | `GET`    | Get a single item                 |
-| `/todos/:id` | `PUT`    | Update item                       |
-| `/todos/:id` | `DELETE` | Delete item                       |
-| `/todos/live`| `GET`    | SSE stream of full-list snapshots |
-| `/health`    | `GET`    | Liveness probe                    |
+| Route         | Method   | Description                       |
+| ------------- | -------- | --------------------------------- |
+| `/todos`      | `GET`    | List all todo items               |
+| `/todos`      | `POST`   | Create new item                   |
+| `/todos/:id`  | `GET`    | Get a single item                 |
+| `/todos/:id`  | `PUT`    | Update item                       |
+| `/todos/:id`  | `DELETE` | Delete item                       |
+| `/todos/live` | `GET`    | SSE stream of full-list snapshots |
+| `/health`     | `GET`    | Liveness probe                    |
 
 ## Tests
 
