@@ -150,6 +150,9 @@ type SpaceState = {
   state: "ready" | "refused" | "unavailable" | "maintenance-required";
   reason?: string;
 };
+type ReconciliationAttempt = { cancelled: boolean };
+class SupersededReconciliation extends Error {}
+
 // Settlements are internal read metadata, never passed to crypto adapters.
 // Each table wrapper owns its index, even when row IDs overlap across tables.
 const positions = new WeakMap<Settled<unknown>, Map<string, string>>();
@@ -681,38 +684,40 @@ export class Spaces {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(recipientId))
       throw new Error("Invalid E2EE space recipient");
     const address = await this.address(scope, identifier);
-    const roots = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
-    const observed = await this.db.one(roots, { tier: "global" });
-    if (observed) {
-      await this.changeRecipient(address, observed, recipientId, "add");
-      await this.explain(scope, identifier);
-      return;
-    }
-    // A reopened client may not have the existing scope row locally yet.
-    await this.db.one(
-      new TypedTableQueryBuilder(scope._table, scope._schema)
-        .where({ id: identifier })
-        .select("id"),
-      { tier: "global" },
-    );
-    await this.warmInitialRecipients([recipientId]);
-    const device = await this.loadDevice();
-    try {
-      const secret = runtimeRandomBytes(32);
-      try {
-        const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
-          return this.stageInitial(tx, scope, identifier, [recipientId], address, device, secret);
-        });
-        // Global acceptance includes the journal's initial recipient handoff.
-        await proposal.wait({ tier: "global" });
-        this.assertOpen();
+    return this.foregroundMaintenance(address, async () => {
+      const roots = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
+      const observed = await this.db.one(roots, { tier: "global" });
+      if (observed) {
+        await this.changeRecipient(address, observed, recipientId, "add");
         await this.explain(scope, identifier);
-      } finally {
-        secret.fill(0);
+        return;
       }
-    } finally {
-      this.requireDevice().release(device);
-    }
+      // A reopened client may not have the existing scope row locally yet.
+      await this.db.one(
+        new TypedTableQueryBuilder(scope._table, scope._schema)
+          .where({ id: identifier })
+          .select("id"),
+        { tier: "global" },
+      );
+      await this.warmInitialRecipients([recipientId]);
+      const device = await this.loadDevice();
+      try {
+        const secret = runtimeRandomBytes(32);
+        try {
+          const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+            return this.stageInitial(tx, scope, identifier, [recipientId], address, device, secret);
+          });
+          // Global acceptance includes the journal's initial recipient handoff.
+          await proposal.wait({ tier: "global" });
+          this.assertOpen();
+          await this.explain(scope, identifier);
+        } finally {
+          secret.fill(0);
+        }
+      } finally {
+        this.requireDevice().release(device);
+      }
+    });
   }
 
   async warmInitialRecipients(recipientIds: readonly string[] = [this.accountId]): Promise<void> {
@@ -1426,21 +1431,28 @@ export class Spaces {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(recipientId))
       throw new Error("Invalid E2EE space recipient");
     const address = await this.address(scope, identifier);
-    const root = await this.db.one(this.tables.__e2ee_spaces.where({ id: spaceRootId(address) }), {
-      tier: "global",
-    });
-    if (!root) throw new Error("E2EE space not found");
-    await this.changeRecipient(address, root, recipientId, "remove");
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await this.explain(scope, identifier);
-        return;
-      } catch (error) {
-        // The removal is already accepted. Another reader may win follow-up
-        // maintenance; revalidate its result without publishing removal again.
-        if (!isTransactionConflict(error) || attempt >= 2) throw error;
+    return this.foregroundMaintenance(address, async () => {
+      const root = await this.db.one(
+        this.tables.__e2ee_spaces.where({ id: spaceRootId(address) }),
+        { tier: "global" },
+      );
+      if (!root) throw new Error("E2EE space not found");
+      await this.changeRecipient(address, root, recipientId, "remove");
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await this.explain(scope, identifier);
+          return;
+        } catch (error) {
+          // The removal is already accepted. Another reader may win follow-up
+          // maintenance; revalidate its result without publishing removal again.
+          const conflict =
+            (error instanceof PersistedWriteRejectedError &&
+              (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
+            (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
+          if (!conflict || attempt >= 2) throw error;
+        }
       }
-    }
+    });
   }
 
   private async readSnapshot(
@@ -1536,8 +1548,10 @@ export class Spaces {
   private async warm(
     observed: SpaceRoot,
     extraAccounts: string[] = [],
+    reconciliation?: ReconciliationAttempt,
     includeDeliveries = true,
   ): Promise<void> {
+    this.assertCurrentReconciliation(reconciliation);
     const [grants, successors] = await Promise.all([
       this.db.all(this.tables.__e2ee_space_grants.where({ spaceId: observed.id }), {
         tier: "global",
@@ -1551,8 +1565,10 @@ export class Spaces {
           })
         : undefined,
     ]);
+    this.assertCurrentReconciliation(reconciliation);
     const groupIds = this.groupHistoryIds(grants, extraAccounts);
     if (groupIds !== undefined) await this.groups?.warmMembership({ groupIds });
+    this.assertCurrentReconciliation(reconciliation);
     await Promise.all(
       [
         ...this.accounts([observed], grants, [
@@ -2080,7 +2096,7 @@ export class Spaces {
 
   async explain<T, Init>(scope: TableProxy<T, Init>, identifier: string): Promise<SpaceState> {
     const address = await this.address(scope, identifier);
-    return this.explainAddress(address);
+    return this.foregroundMaintenance(address, () => this.explainAddress(address));
   }
 
   /** Package-internal key access backed by authority coverage or accepted local history. */
@@ -2201,19 +2217,43 @@ export class Spaces {
     return state;
   }
 
-  private readonly pendingReconciliation = new Set<string>();
+  private readonly pendingReconciliation = new Map<string, ReconciliationAttempt>();
+  private readonly foregroundMaintenanceCounts = new Map<string, number>();
+
+  private async foregroundMaintenance<T>(address: Address, work: () => Promise<T>): Promise<T> {
+    const key = JSON.stringify([address.scopeId, address.identifier]);
+    this.foregroundMaintenanceCounts.set(key, (this.foregroundMaintenanceCounts.get(key) ?? 0) + 1);
+    const pending = this.pendingReconciliation.get(key);
+    if (pending) pending.cancelled = true;
+    try {
+      return await work();
+    } finally {
+      const remaining = this.foregroundMaintenanceCounts.get(key)! - 1;
+      if (remaining) this.foregroundMaintenanceCounts.set(key, remaining);
+      else this.foregroundMaintenanceCounts.delete(key);
+    }
+  }
+
+  private assertCurrentReconciliation(reconciliation?: ReconciliationAttempt): void {
+    if (reconciliation?.cancelled) throw new SupersededReconciliation();
+  }
 
   private reconcileInBackground(address: Address): void {
     const key = JSON.stringify([address.scopeId, address.identifier]);
-    if (this.pendingReconciliation.has(key)) return;
-    this.pendingReconciliation.add(key);
+    if (this.foregroundMaintenanceCounts.has(key) || this.pendingReconciliation.has(key)) return;
+    const reconciliation: ReconciliationAttempt = { cancelled: false };
+    this.pendingReconciliation.set(key, reconciliation);
     const finished = () => {
-      this.pendingReconciliation.delete(key);
+      if (this.pendingReconciliation.get(key) === reconciliation)
+        this.pendingReconciliation.delete(key);
     };
     // Local key use does not wait for delivery or a disconnected server. A failed
     // attempt can retry on the next affected operation; explicit explain() still
     // reports maintenance errors to its caller. No key-use callback is replayed.
-    this.explainAddress(address).then(finished, finished);
+    this.explainAddress(address, undefined, false, 0, false, false, reconciliation).then(
+      finished,
+      finished,
+    );
   }
 
   private async explainAddress(
@@ -2223,43 +2263,73 @@ export class Spaces {
     conflicts = 0,
     localOnly = false,
     allowStaleWrite = false,
+    reconciliation?: ReconciliationAttempt,
   ): Promise<SpaceState> {
     this.assertOpen();
+    this.assertCurrentReconciliation(reconciliation);
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
     const offline = localOnly || (await this.db.e2eeIsExplicitlyOffline());
+    this.assertCurrentReconciliation(reconciliation);
     const rootQuery = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
     const observed = offline
       ? (await observeE2eeHistory(this.db, (reader) => reader.allSettledForE2ee(rootQuery))).rows[0]
       : await this.db.one(rootQuery, { tier: "global" });
+    this.assertCurrentReconciliation(reconciliation);
     if (!observed) return { state: "unavailable", reason: "space-not-found" };
-    if (!offline) await this.warm(observed);
+    if (!offline) await this.warm(observed, undefined, reconciliation);
+    this.assertCurrentReconciliation(reconciliation);
     const device = await this.loadDevice();
     let secret: Uint8Array | undefined;
     try {
+      this.assertCurrentReconciliation(reconciliation);
       const maintenance =
         !use && !offline && !includeHistory
-          ? await this.readMaintenanceSnapshot(address, observed.id, device)
+          ? await this.readMaintenanceSnapshot(address, observed.id, device, reconciliation)
           : undefined;
       let snapshot =
-        maintenance?.snapshot ?? (await this.readAcceptedSnapshot(address, observed.id, localOnly));
+        maintenance?.snapshot ??
+        (await this.readAcceptedSnapshot(address, observed.id, localOnly, reconciliation));
+      this.assertCurrentReconciliation(reconciliation);
       this.assertOpen();
       if (maintenance?.prepared) {
         const { result, delivery } = maintenance.prepared;
         if (delivery && !delivery.snapshot) {
-          const refreshed = await this.readAcceptedSnapshot(address, observed.id, false);
-          if (!sameSnapshotValue(snapshot, refreshed)) {
+          const refreshed = await this.readAcceptedSnapshot(
+            address,
+            observed.id,
+            false,
+            reconciliation,
+          );
+          this.assertCurrentReconciliation(reconciliation);
+          if (
+            !sameSnapshotValue(snapshot, refreshed) &&
+            !this.onlyOwnAcceptedDeliveries(snapshot, refreshed, {
+              ...delivery,
+              transactionId: maintenance.transactionId,
+            })
+          ) {
             if (conflicts >= 2) return { state: "unavailable", reason: "history-keeps-changing" };
-            return this.explainAddress(address, use, includeHistory, conflicts + 1, false, false);
+            return this.explainAddress(
+              address,
+              use,
+              includeHistory,
+              conflicts + 1,
+              false,
+              false,
+              reconciliation,
+            );
           }
         }
         return result;
       }
+      this.assertCurrentReconciliation(reconciliation);
       this.assertOpen();
       if (!snapshot.state.active.has(device.id))
         return { state: "refused", reason: "device-not-active" };
       if (!snapshot.roots.rows.length)
         return { state: "unavailable", reason: "space-not-accepted" };
       let state = await this.validate(snapshot, address);
+      this.assertCurrentReconciliation(reconciliation);
       if (
         !offline &&
         !state.groupsReady &&
@@ -2269,17 +2339,23 @@ export class Spaces {
       ) {
         for (const id of state.groupRecipients.keys()) {
           const group = state.graph.get(id);
-          if (group?.rotationRequired && !group.sealed && group.members.has(this.accountId))
+          if (group?.rotationRequired && !group.sealed && group.members.has(this.accountId)) {
+            this.assertCurrentReconciliation(reconciliation);
             await this.groups.explain(id);
+            this.assertCurrentReconciliation(reconciliation);
+          }
         }
         // Group maintenance is an ordinary accepted write. Re-read authority
         // coverage and eligibility before opening or distributing any space key.
-        await this.warm(observed);
-        snapshot = await this.readAcceptedSnapshot(address, observed.id);
+        await this.warm(observed, undefined, reconciliation);
+        this.assertCurrentReconciliation(reconciliation);
+        snapshot = await this.readAcceptedSnapshot(address, observed.id, false, reconciliation);
+        this.assertCurrentReconciliation(reconciliation);
         this.assertOpen();
         if (!snapshot.state.active.has(device.id))
           return { state: "refused", reason: "device-not-active" };
         state = await this.validate(snapshot, address);
+        this.assertCurrentReconciliation(reconciliation);
       }
       const { root, keyRoot } = state;
       if (state.sealed) return { state: "refused", reason: "space-sealed" };
@@ -2297,31 +2373,71 @@ export class Spaces {
         return { state: "maintenance-required", reason: "group-epoch-stale" };
       if (offline && state.rotationRequired && !allowStaleWrite)
         return { state: "maintenance-required", reason: "recipient-removed" };
-      secret = await this.openSnapshotKey(snapshot, state, device);
+      secret = await this.openSnapshotKey(snapshot, state, device, reconciliation);
       if (!secret) return { state: "unavailable", reason: "space-key-not-delivered" };
       try {
         if (state.rotationRequired && !offline) {
-          await this.rotate(address, keyRoot, secret, device);
-          return this.explainAddress(address, use, includeHistory, conflicts);
+          this.assertCurrentReconciliation(reconciliation);
+          await this.rotate(address, keyRoot, secret, device, reconciliation);
+          this.assertCurrentReconciliation(reconciliation);
+          return this.explainAddress(
+            address,
+            use,
+            includeHistory,
+            conflicts,
+            false,
+            false,
+            reconciliation,
+          );
         }
         // A verified key read need not wait for envelopes for other devices.
         // Explicit maintenance still delivers and revalidates its changed history.
         if (!use && !offline) {
-          const delivered = await this.deliver(address, keyRoot, secret, device);
+          this.assertCurrentReconciliation(reconciliation);
+          const delivery = await this.deliver(address, keyRoot, secret, device);
+          this.assertCurrentReconciliation(reconciliation);
           // A read-only delivery transaction already accepted fresh authority.
           // Writes require another snapshot so newly published keys are included.
-          const refreshed = delivered ?? (await this.readAcceptedSnapshot(address, observed.id));
+          const refreshed =
+            delivery.snapshot ??
+            (await this.readAcceptedSnapshot(address, observed.id, false, reconciliation));
+          this.assertCurrentReconciliation(reconciliation);
           if (!sameSnapshotValue(snapshot, refreshed)) {
-            if (conflicts >= 2) return { state: "unavailable", reason: "history-keeps-changing" };
-            return this.explainAddress(address, use, includeHistory, conflicts + 1);
+            if (!this.onlyOwnAcceptedDeliveries(snapshot, refreshed, delivery)) {
+              if (conflicts >= 2) return { state: "unavailable", reason: "history-keeps-changing" };
+              return this.explainAddress(
+                address,
+                use,
+                includeHistory,
+                conflicts + 1,
+                false,
+                false,
+                reconciliation,
+              );
+            }
+            snapshot = refreshed;
           }
         }
       } catch (error) {
         // Key preparation may follow another client's completed maintenance.
         // Delivery may race another maintainer. Explicit rotation still reports
         // its losing contender; never retry use() itself.
-        if (isTransactionConflict(error) && (use || !state.rotationRequired) && conflicts < 2)
-          return this.explainAddress(address, use, includeHistory, conflicts + 1);
+        const conflict =
+          (error instanceof PersistedWriteRejectedError &&
+            (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
+          (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
+        if (conflict && (use || !state.rotationRequired) && conflicts < 2) {
+          this.assertCurrentReconciliation(reconciliation);
+          return this.explainAddress(
+            address,
+            use,
+            includeHistory,
+            conflicts + 1,
+            false,
+            false,
+            reconciliation,
+          );
+        }
         if (!(error instanceof PersistedWriteRejectedError) || error.code !== "permission_denied")
           throw error;
         if (state.rotationRequired)
@@ -2329,6 +2445,7 @@ export class Spaces {
       }
       if (!recipient) return { state: "refused", reason: "not-a-space-recipient" };
       this.assertOpen();
+      this.assertCurrentReconciliation(reconciliation);
       if (allowStaleWrite && (!state.groupsReady || state.rotationRequired))
         console.warn(
           "E2EE: writing offline with a known-stale encryption epoch; removed recipients may still decrypt this write.",
@@ -2342,16 +2459,23 @@ export class Spaces {
     }
   }
 
-  private async readMaintenanceSnapshot(address: Address, id: string, device: LocalDevice) {
+  private async readMaintenanceSnapshot(
+    address: Address,
+    id: string,
+    device: LocalDevice,
+    reconciliation?: ReconciliationAttempt,
+  ) {
     for (let attempt = 0; ; attempt++) {
       let inspecting = false;
       let deliveryStarted = false;
+      this.assertCurrentReconciliation(reconciliation);
       try {
         return await prepareAcceptedHistory(
           this.db,
           JSON.stringify(["space", address.scopeId, address.identifier]),
           (tx) => this.readSnapshot(tx, address, id),
           async (tx, snapshot) => {
+            this.assertCurrentReconciliation(reconciliation);
             if (!snapshot.state.active.has(device.id) || !snapshot.roots.rows.length) return;
             inspecting = true;
             const state = await this.validate(snapshot, address);
@@ -2371,15 +2495,16 @@ export class Spaces {
             )
               return;
             inspecting = true;
-            const secret = await this.openSnapshotKey(snapshot, state, device);
+            const secret = await this.openSnapshotKey(snapshot, state, device, reconciliation);
             inspecting = false;
             try {
               if (!secret)
                 return {
                   result: { state: "unavailable", reason: "space-key-not-delivered" } as SpaceState,
                 };
+              this.assertCurrentReconciliation(reconciliation);
               deliveryStarted = true;
-              const deliveredSnapshot = await this.prepareDelivery(
+              const delivery = await this.prepareDelivery(
                 tx,
                 snapshot,
                 address,
@@ -2388,11 +2513,12 @@ export class Spaces {
                 device,
               );
               this.assertOpen();
+              this.assertCurrentReconciliation(reconciliation);
               return {
                 result: (recipient
                   ? { state: "ready" }
                   : { state: "refused", reason: "not-a-space-recipient" }) as SpaceState,
-                delivery: { snapshot: deliveredSnapshot },
+                delivery,
               };
             } finally {
               secret?.fill(0);
@@ -2413,7 +2539,7 @@ export class Spaces {
         // Denied delivery must not deny an otherwise usable key. Establish a
         // separately accepted read before the existing policy-denial path runs.
         return {
-          snapshot: await this.readAcceptedSnapshot(address, id, false),
+          snapshot: await this.readAcceptedSnapshot(address, id, false, reconciliation),
           prepared: undefined,
           transactionId: "",
         };
@@ -2425,6 +2551,7 @@ export class Spaces {
     snapshot: Snapshot & { state: DeviceState },
     state: Awaited<ReturnType<Spaces["validate"]>>,
     device: LocalDevice,
+    reconciliation?: ReconciliationAttempt,
   ): Promise<Uint8Array | undefined> {
     const { root, keyRoot, successor, position } = state;
     let secret: Uint8Array | undefined;
@@ -2435,7 +2562,9 @@ export class Spaces {
           spaceContext(this.accountContext(root.accountId), root, "author", device.id),
           root.authorEnvelope,
         );
+        this.assertCurrentReconciliation(reconciliation);
         await this.confirmHistory(snapshot, root, secret);
+        this.assertCurrentReconciliation(reconciliation);
       } else if (
         successor?.authorAccountId === this.accountId &&
         successor.authorDeviceId === device.id
@@ -2451,9 +2580,12 @@ export class Spaces {
           ),
           successor.authorEnvelope,
         );
+        this.assertCurrentReconciliation(reconciliation);
         await this.confirmHistory(snapshot, root, secret);
+        this.assertCurrentReconciliation(reconciliation);
       } else {
         for (const delivery of snapshot.deliveries.rows) {
+          this.assertCurrentReconciliation(reconciliation);
           if (
             delivery.recipientAccountId !== this.accountId ||
             delivery.recipientDeviceId !== device.id ||
@@ -2467,6 +2599,7 @@ export class Spaces {
             ))
           )
             continue;
+          this.assertCurrentReconciliation(reconciliation);
           const context = spaceDeliveryContext(
             this.accountContext(root.accountId),
             keyRoot,
@@ -2479,7 +2612,9 @@ export class Spaces {
             } catch (error) {
               unavailableSpaceKey(error);
             }
+            this.assertCurrentReconciliation(reconciliation);
             await this.confirmHistory(snapshot, root, opened);
+            this.assertCurrentReconciliation(reconciliation);
             secret = opened;
             opened = undefined;
             break;
@@ -2492,6 +2627,7 @@ export class Spaces {
           }
         }
       }
+      this.assertCurrentReconciliation(reconciliation);
       if (!secret) {
         secret = await loadRecoveredSpaceKey(
           this.requireDevice().store,
@@ -2501,8 +2637,10 @@ export class Spaces {
           this.assertOpen,
           this.requireDevice().keyLifetime,
         );
+        this.assertCurrentReconciliation(reconciliation);
         if (secret) await this.confirmHistory(snapshot, root, secret);
       }
+      this.assertCurrentReconciliation(reconciliation);
       return secret;
     } catch (error) {
       secret?.fill(0);
@@ -2510,8 +2648,14 @@ export class Spaces {
     }
   }
 
-  private async readAcceptedSnapshot(address: Address, id: string, localOnly = false) {
+  private async readAcceptedSnapshot(
+    address: Address,
+    id: string,
+    localOnly = false,
+    reconciliation?: ReconciliationAttempt,
+  ) {
     for (let attempt = 0; ; attempt++) {
+      this.assertCurrentReconciliation(reconciliation);
       try {
         return await readAcceptedHistory(
           this.db,
@@ -2521,6 +2665,7 @@ export class Spaces {
         );
       } catch (error) {
         if (!isTransactionConflict(error) || attempt >= 2) throw error;
+        this.assertCurrentReconciliation(reconciliation);
       }
     }
   }
@@ -2530,6 +2675,7 @@ export class Spaces {
     expected: SpaceRoot,
     previousSecret: Uint8Array,
     device: LocalDevice,
+    reconciliation?: ReconciliationAttempt,
   ) {
     const secret = runtimeRandomBytes(32);
     try {
@@ -2626,6 +2772,7 @@ export class Spaces {
       });
       const accepted = await proposal.wait({ tier: "global" });
       this.assertOpen();
+      this.assertCurrentReconciliation(reconciliation);
       await this.deliver(
         address,
         { ...expected, epochId: accepted.epochId, verification: accepted.verification },
@@ -2743,6 +2890,54 @@ export class Spaces {
     return this.verify(history, row.senderDeviceId, bytes, row.signature);
   }
 
+  private onlyOwnAcceptedDeliveries(
+    before: Snapshot & { state: DeviceState },
+    after: Snapshot & { state: DeviceState },
+    delivery: { rows: SpaceDelivery[]; transactionId: string },
+  ): boolean {
+    if (!delivery.rows.length) return false;
+    const inserted = new Map(delivery.rows.map((row) => [row.id, row]));
+    if (
+      inserted.size !== delivery.rows.length ||
+      before.deliveries.rows.some((row) => inserted.has(row.id)) ||
+      before.deliveries.settlements.some((row) => inserted.has(row.rowId))
+    )
+      return false;
+    const rows: SpaceDelivery[] = [];
+    const settlements: RowSettlement[] = [];
+    const seenRows = new Set<string>();
+    const seenSettlements = new Set<string>();
+    for (const row of after.deliveries.rows) {
+      const own = inserted.get(row.id);
+      if (!own) {
+        rows.push(row);
+        continue;
+      }
+      if (seenRows.has(row.id) || !sameSnapshotValue(own, row)) return false;
+      seenRows.add(row.id);
+    }
+    for (const settlement of after.deliveries.settlements) {
+      if (!inserted.has(settlement.rowId)) {
+        settlements.push(settlement);
+        continue;
+      }
+      if (
+        seenSettlements.has(settlement.rowId) ||
+        settlement.transactionId !== delivery.transactionId
+      )
+        return false;
+      seenSettlements.add(settlement.rowId);
+    }
+    // Only this invocation's accepted append is discounted for comparison.
+    // The full fresh snapshot remains retained; all authority and key-source
+    // records, including their settlements, must otherwise be unchanged.
+    return (
+      seenRows.size === inserted.size &&
+      seenSettlements.size === inserted.size &&
+      sameSnapshotValue(before, { ...after, deliveries: { rows, settlements } })
+    );
+  }
+
   private async deliver(
     address: Address,
     expected: SpaceRoot,
@@ -2759,9 +2954,10 @@ export class Spaces {
         device,
       ),
     );
-    const snapshot = await delivery.wait({ tier: "global" });
+    const result = await delivery.wait({ tier: "global" });
+    const transactionId = await delivery.txId;
     this.assertOpen();
-    return snapshot;
+    return { ...result, transactionId };
   }
 
   private async prepareDelivery(
@@ -2773,6 +2969,7 @@ export class Spaces {
     device: LocalDevice,
   ) {
     let wrote = false;
+    const inserted: SpaceDelivery[] = [];
     const { root, keyRoot, members, rotationRequired, position, sealed, groupsReady } =
       await this.validate(snapshot, address);
     // Initial completion may use only the original author's accepted epoch.
@@ -2929,14 +3126,16 @@ export class Spaces {
           this.assertOpen();
           const { id, ...values } = row;
           wrote = true;
-          tx.insert(
-            this.tables.__e2ee_space_deliveries,
-            { ...values, envelope, signature },
-            { id },
+          inserted.push(
+            tx.insert(
+              this.tables.__e2ee_space_deliveries,
+              { ...values, envelope, signature },
+              { id },
+            ),
           );
         }
       }
-      return wrote ? undefined : snapshot;
+      return { rows: inserted, snapshot: wrote ? undefined : snapshot };
     } finally {
       // Caller-owned keys retain their caller's lifetime.
       if (secret === undefined) deliverySecret.fill(0);
