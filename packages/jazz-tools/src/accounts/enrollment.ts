@@ -275,12 +275,29 @@ export function createAccountManagerWithRuntime(options: {
     if (material) material.primed = token;
     return handle;
   };
-  // The provider token a declined revalidation already fetched, used once by
-  // the ordinary enrollment that follows for the same auth.
-  let pinned: { auth: JWTAuth; token: string } | undefined;
-  const enrollmentToken = (auth: JWTAuth) => {
-    const reuse = pinned?.auth === auth ? pinned.token : undefined;
+  // The provider token a declined revalidation already fetched. Only the
+  // enrollment that immediately follows it, for the same auth, in the same
+  // logout epoch and within a few seconds, may reuse it; any other account
+  // operation discards it first, so a stale identity is never re-enrolled.
+  let pinned: { auth: JWTAuth; token: string; epoch: number; at: number } | undefined;
+  const pin = (auth: JWTAuth, token: string) => {
+    pinned = { auth, token, epoch, at: Date.now() };
+  };
+  const unpin = () => {
+    const taken = pinned;
     pinned = undefined;
+    return taken;
+  };
+  const enrollmentToken = (auth: JWTAuth) => {
+    const taken = unpin();
+    const reuse =
+      taken &&
+      taken.auth === auth &&
+      taken.epoch === epoch &&
+      Date.now() - taken.at < 10_000 &&
+      tokenStillFresh(taken.token)
+        ? taken.token
+        : undefined;
     return reuse !== undefined ? Promise.resolve(reuse) : tokenFor(auth);
   };
   const enroll = async (operation: string, auth: JWTAuth): Promise<AccountHandle> => {
@@ -311,6 +328,7 @@ export function createAccountManagerWithRuntime(options: {
   return new AccountManager(
     {
       logout() {
+        unpin();
         epoch++;
         const listeners: (() => void)[] = [];
         for (const handle of issued) {
@@ -329,18 +347,21 @@ export function createAccountManagerWithRuntime(options: {
         }
       },
       createLocalFirst() {
+        unpin();
         const local = options.localFirst.create();
         return retain(
           mintHandle(registry, local.accountId, local.identity, local.auth, local.secret),
         );
       },
       restoreLocalFirst(secret) {
+        unpin();
         parseAuthSecret(secret);
         const local = options.localFirst.restore?.(secret);
         if (!local) throw new AccountAuthError("local_first_restore_unavailable");
         return retain(mintHandle(registry, local.accountId, local.identity, local.auth, secret));
       },
       async becomeBackend(auth) {
+        unpin();
         const started = epoch;
         if (!options.backend) throw new AccountAuthError("backend_host_unavailable");
         if (typeof auth?.backendSecret !== "string" || !auth.backendSecret)
@@ -371,6 +392,7 @@ export function createAccountManagerWithRuntime(options: {
       revalidateJWT: !options.revalidateInPlace
         ? undefined
         : async (account, operation, auth, isCurrent = () => true) => {
+            unpin();
             // In-place revalidation of the selected external account. Anything
             // other than "the registry still assigns this exact identity to this
             // exact account" returns undefined so the caller performs a full,
@@ -392,7 +414,7 @@ export function createAccountManagerWithRuntime(options: {
             // the ordinary enrollment then reuses this token instead of asking
             // the provider again.
             if (!sameIdentity(identity, account.identity)) {
-              pinned = { auth, token };
+              pin(auth, token);
               return undefined;
             }
             const response = await request(
@@ -401,7 +423,7 @@ export function createAccountManagerWithRuntime(options: {
             );
             assertCurrent(started);
             if (readAccountAssignment(response, identity) !== account.id) {
-              pinned = { auth, token };
+              pin(auth, token);
               return undefined;
             }
             if (credentials.get(account) !== material)
@@ -422,6 +444,7 @@ export function createAccountManagerWithRuntime(options: {
             return account;
           },
       async linkJWT(account, auth) {
+        unpin();
         const started = epoch;
         const approvingToken = await accountToken(account, registry);
         const token = await tokenFor(auth);

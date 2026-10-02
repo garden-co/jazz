@@ -353,6 +353,59 @@ describe("retained accounts in a Jazz session", () => {
     await session.close();
   });
 
+  it("never re-enrolls a token fetched by a revalidation that a logout superseded", async () => {
+    const store = memoryStore();
+    await (await manager(store, registryFetch())).loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
+    const accounts = await manager(store, registryFetch());
+    const teardown = deferred<void>();
+    const session = await createJazzSessionOwner({
+      accounts,
+      async openClient(account: AccountHandle) {
+        return {
+          account,
+          async shutdown() {
+            if (account.identity.subject === "alice") await teardown.promise;
+          },
+        };
+      },
+    });
+    const carol = { issuer: alice.issuer, subject: "carol" };
+    let provider = bob;
+    const auth = { getToken: vi.fn(async () => jwt(provider)) };
+
+    // The provider now yields bob: the in-place revalidation declines, and the
+    // switch is torn down when a logout supersedes it.
+    const login = session.loginJWT(auth);
+    await vi.waitFor(() => expect(auth.getToken).toHaveBeenCalledOnce());
+    await tick();
+    const logout = session.logout();
+    teardown.resolve();
+    await expect(login).rejects.toThrow();
+    await logout;
+    expect(session.getSnapshot().status).toBe("signed-out");
+
+    // Later the same provider signs in as carol; bob's earlier token is gone.
+    provider = carol;
+    await session.loginJWT(auth);
+    expect(session.getSnapshot().account?.identity).toEqual(carol);
+    expect(auth.getToken).toHaveBeenCalledTimes(2);
+    await session.close();
+  });
+
+  it("reuses a declined revalidation's token only for the enrollment that follows", async () => {
+    const store = memoryStore();
+    await (await manager(store, registryFetch())).loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
+    const accounts = await manager(store, registryFetch());
+    const auth = { getToken: vi.fn(async () => jwt(bob)) };
+    await accounts.revalidateJWT("loginJWT", auth);
+    // Any other account operation in between discards the fetched token.
+    accounts.createLocalFirst();
+    await accounts.loginJWT(auth);
+    expect(auth.getToken).toHaveBeenCalledTimes(2);
+  });
+
   it("an auth provider that hydrates signed out closes the retained account", async () => {
     const { session, events, store } = await retainedSession();
     const auth = connectAuthProvider(session, { getToken: async () => jwt(alice) });
