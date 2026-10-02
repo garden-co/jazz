@@ -8,6 +8,10 @@ import { localDevice } from "./local-device.js";
 import { accountEpochContext, confirmAccountEpoch } from "./first-epoch.js";
 import { InitializationJournal, type FounderProposal } from "./provisional-initialization.js";
 
+async function unexpectedSpace(): Promise<void> {
+  throw new Error("Unexpected space initialization in founder fixture");
+}
+
 it("atomically reuses one device-bound sealed founder epoch across competing local claims and reopen", async () => {
   const config = await localAccountConfig("e14-atomic-founder-journal");
   const db = await createDb(config);
@@ -61,6 +65,7 @@ it("atomically reuses one device-bound sealed founder epoch across competing loc
       scope,
       () => {},
       async () => {},
+      unexpectedSpace,
     );
     const right = new InitializationJournal(
       db,
@@ -68,6 +73,7 @@ it("atomically reuses one device-bound sealed founder epoch across competing loc
       scope,
       () => {},
       async () => {},
+      unexpectedSpace,
     );
     const claims = await Promise.all([left.claimFounder(first), right.claimFounder(second)]);
     expect(claims).toEqual([first, first]);
@@ -77,6 +83,7 @@ it("atomically reuses one device-bound sealed founder epoch across competing loc
       scope,
       () => {},
       async () => {},
+      unexpectedSpace,
     );
     expect(await reopened.claimFounder(second)).toEqual(first);
     const secret = await crypto.keyEnvelope.open(
@@ -140,6 +147,7 @@ it("reopens the v1 sealed journal corpus and refuses corruption rather than repl
     "scope",
     () => {},
     async () => {},
+    unexpectedSpace,
   );
   try {
     const [retained] = await journal.entries();

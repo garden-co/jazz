@@ -123,6 +123,7 @@ export class InitializationJournal {
   private wakeRequested = false;
   private readonly reconciledTerminal = new Set<string>();
   private readonly observedStatuses = new Map<ReservedTxId, string>();
+  private readonly promoting = new Map<string, Promise<void>>();
   private readonly completions = new Map<
     string,
     {
@@ -137,6 +138,7 @@ export class InitializationJournal {
     private readonly scope: string,
     private readonly assertOpen: () => void,
     private readonly promote: (proposal: Proposal) => Promise<void>,
+    private readonly completeSpace: (proposal: SpaceProposal) => Promise<void>,
   ) {
     db.onShutdown(() => {
       this.closed = true;
@@ -186,23 +188,60 @@ export class InitializationJournal {
     await this.reconcile();
     const entries = await this.entries();
     for (const entry of entries) {
-      const completion = this.completions.get(entry.proposal.id);
       if (entry.outcome === "rejected" || entry.outcome === "interrupted") {
-        completion?.reject(new Error("E2EE initialization was rejected or interrupted"));
+        this.completions
+          .get(entry.proposal.id)
+          ?.reject(new Error("E2EE initialization was rejected or interrupted"));
         this.completions.delete(entry.proposal.id);
         continue;
       }
       if (entry.outcome !== "accepted") continue;
-      if (!entry.promoted) {
-        await this.promote(entry.proposal);
-        await this.update(entry.proposal.id, (current) => {
-          current.promoted = true;
-        });
+      if (!entry.promoted) await this.promoteAccepted(entry.proposal.id);
+      // Publication can register its completion while promotion is awaiting I/O.
+      // Historical entries have no staged-owner completion to perform.
+      const completion = this.completions.get(entry.proposal.id);
+      if (!completion) continue;
+      this.assertOwnerOpen();
+      if (entry.proposal.kind === "space") await this.completeSpace(entry.proposal);
+      this.assertOwnerOpen();
+      if (this.completions.get(entry.proposal.id) === completion) {
+        completion.resolve();
+        this.completions.delete(entry.proposal.id);
       }
-      completion?.resolve();
-      this.completions.delete(entry.proposal.id);
     }
     return entries.some((entry) => entry.outcome === "pending" && !!entry.reservation);
+  }
+
+  private assertOwnerOpen(): void {
+    this.assertOpen();
+    if (this.closed) throw new Error("E2EE initialization owner closed before settlement");
+  }
+
+  /** Record verified acceptance independently of fallible recipient delivery. */
+  promoteAccepted(id: string): Promise<void> {
+    const existing = this.promoting.get(id);
+    if (existing) return existing;
+    const promotion = this.promoteAcceptedNow(id).finally(() => this.promoting.delete(id));
+    this.promoting.set(id, promotion);
+    return promotion;
+  }
+
+  private async promoteAcceptedNow(id: string): Promise<void> {
+    const entry = (await this.entries()).find((entry) => entry.proposal.id === id);
+    this.assertOwnerOpen();
+    if (!entry || entry.outcome !== "accepted")
+      throw new Error("E2EE initialization must be accepted before promotion");
+    if (entry.promoted) return;
+    await this.promote(entry.proposal);
+    this.assertOwnerOpen();
+    const proposal = encode(entry.proposal);
+    await this.update(id, (current) => {
+      this.assertOwnerOpen();
+      if (current.outcome !== "accepted" || current.proposal !== proposal)
+        throw new Error("E2EE initialization proposal changed during promotion");
+      current.promoted = true;
+    });
+    this.assertOwnerOpen();
   }
 
   private completion(id: string): Promise<void> {
