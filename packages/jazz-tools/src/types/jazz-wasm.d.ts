@@ -234,7 +234,7 @@ declare module "jazz-wasm" {
     tick(): Promise<void>;
     setNonDurableClient(): void;
     /** @internal Foreground node-lease handoff only. */
-    foregroundTxTimeHighWater(): bigint;
+    foregroundTxTimeHighWater(): Promise<bigint>;
     /** @internal Foreground node-lease bootstrap only. */
     seedForegroundTxTimeHighWater(highWater: bigint): void;
     /** Exact wire features compiled into this WASM artifact. */
