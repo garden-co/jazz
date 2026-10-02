@@ -838,7 +838,6 @@ export class Spaces {
 
   private async completeInitialAttempt(expected: SpaceRoot): Promise<void> {
     this.assertOpen();
-    await this.promoteInitial(expected);
     await this.warm(expected);
     const device = await this.loadDevice();
     let secret: Uint8Array | undefined;

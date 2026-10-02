@@ -61,6 +61,9 @@ function fixture() {
     "scope",
     () => {},
     async () => {},
+    async () => {
+      throw new Error("Unexpected space initialization in founder fixture");
+    },
   );
   const pending: readonly InitializationTransactionStatus[] = [
     {
