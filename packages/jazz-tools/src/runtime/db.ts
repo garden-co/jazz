@@ -2349,16 +2349,20 @@ export class Db {
         ),
     };
     try {
-      const settlements = await Promise.all(
-        queries.map((query) =>
-          readTransactionRows(query, { tier: "global" }, true, binding, local),
-        ),
-      );
+      // Each paired read restricts the shared snapshot to accepted versions
+      // before returning rows and their settlement evidence from one evaluation.
+      // Ordinary transactions continue to include their local pending prefix.
       return await Promise.all(
-        queries.map(async (query, index) => {
-          const rows = await readTransactionRows(query, { tier: "global" }, false, binding, local);
-          checkTransactionSettlements(rows, settlements[index]!);
-          return { rows, settlements: settlements[index]! };
+        queries.map(async (query) => {
+          const snapshot = await readTransactionRows(
+            query,
+            { tier: "global" },
+            "with-rows",
+            binding,
+            local,
+          );
+          checkTransactionSettlements(snapshot.rows, snapshot.settlements);
+          return snapshot;
         }),
       );
     } finally {
