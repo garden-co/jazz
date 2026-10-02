@@ -188,13 +188,12 @@ resolve_runner_units() {
   local expected="$1" legacy="$2" unit_dir="$3" runner_user="$4" runner_pkg="$5" legacy_pkg="$6" actions_runner_root="$7" legacy_identity_unambiguous="$8"
   local names=() candidates=() exec_paths=() candidate candidate_pkg legacy_template
   local manager_user manager_working_directory manager_exec_start manager_killmode manager_dropins
-  local manager_exec_path inventory_has_package unit_files active_units listed_line versioned_pkg lifecycle_property lifecycle_command
+  local manager_exec_path inventory_has_package unit_files active_units inventory_remainder versioned_pkg lifecycle_property lifecycle_command
   unit_files="$(systemctl list-unit-files --type=service --no-legend --no-pager)" ||
     fail 'runner manager unit inventory is unknown'
-  active_units="$(systemctl list-units --type=service --all --no-legend --no-pager)" ||
+  active_units="$(systemctl list-units --type=service --all --plain --no-legend --no-pager)" ||
     fail 'runner manager unit inventory is unknown'
-  while IFS= read -r listed_line; do
-    candidate="${listed_line%%[[:space:]]*}"
+  while IFS=$' \t' read -r candidate inventory_remainder; do
     [[ "${candidate}" == *.service ]] && names+=("${candidate}")
   done < <(printf '%s\n%s\n' "${unit_files}" "${active_units}" | sort -u)
   for candidate in "${names[@]}"; do

@@ -55,6 +55,9 @@ empty cgroup-v2 `cgroup.events`. A disable, stop or cgroup-proof failure aborts
 before persistent tools run. If disabling fails, boot activation is uncertain.
 If stopping or proving an empty cgroup fails, a runner may remain active during
 the current boot; bootstrap does not claim that it stopped.
+Units still loaded in systemd remain candidates even if their on-disk files
+have disappeared. A missing unit definition is unverifiable: bootstrap rejects
+it before stopping the runner or running persistent tools.
 
 Unknown or unverified units are left untouched; the runner-writable
 `.service` marker is never authoritative. After a successful disable, a failure
