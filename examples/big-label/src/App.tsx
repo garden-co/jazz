@@ -117,10 +117,10 @@ export function Operations({
             </Center>
           ) : (
             !isLoading && (
-            <EmptyState
-              title="No label yet"
-              description="Your personal label is created when you first sign in. Reload to try again."
-            />
+              <EmptyState
+                title="No label yet"
+                description="Your personal label is created when you first sign in. Reload to try again."
+              />
             )
           )}
         </LayoutContent>
