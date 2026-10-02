@@ -37,6 +37,9 @@ async function fetchJwt(): Promise<string | null> {
  * that makes several server calls fetches it once. Concurrent callers share
  * one request. A token is only ever handed to the user it names: after a
  * sign-out the Jazz session ends, and another user's calls ask for their own.
+ * A token minted for anyone else (Better Auth signed in as a different user
+ * than the open Jazz session) is not used at all: the call fails closed and
+ * resolves null.
  */
 export async function getJwtFromBetterAuth(principal: string): Promise<string | null> {
   const now = Date.now() / 1000;
@@ -49,7 +52,11 @@ export async function getJwtFromBetterAuth(principal: string): Promise<string | 
   try {
     const token = await promise;
     const { sub, exp } = token ? claims(token) : { sub: null, exp: 0 };
-    cached = token && sub === principal ? { principal, token, expiresAt: exp } : null;
+    if (!token || sub !== principal) {
+      cached = null;
+      return null;
+    }
+    cached = { principal, token, expiresAt: exp };
     return token;
   } finally {
     if (inFlight?.promise === promise) inFlight = null;

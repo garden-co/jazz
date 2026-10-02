@@ -66,13 +66,20 @@ export function ensureHomeWorkspace(account: string, principal: string): Promise
  * does not, the id is forgotten, so the next `ensureHomeWorkspace` asks the
  * server to set the workspace up again, and this resolves false. The read is
  * server-confirmed, so it waits while offline instead of guessing.
+ *
+ * A deleted workspace still counts as existing, matching the server's
+ * `ensureDemoWorkspace`, which never recreates one (it answers with the same
+ * id). Treating it as gone would forget, re-bootstrap and get the same id
+ * back on every load. The app shows the account's other workspaces instead.
  */
 export async function confirmHomeWorkspace(
   db: Db,
   account: string,
   workspaceId: string,
 ): Promise<boolean> {
-  const workspace = await db.one(app.workspaces.where({ id: workspaceId }), { tier: "remote" });
+  const workspace = await db.one(app.workspaces.where({ id: workspaceId }).includeDeleted(), {
+    tier: "remote",
+  });
   if (workspace) return true;
   if (rememberedHomeWorkspace(account) === workspaceId) forgetHomeWorkspace(account);
   return false;
