@@ -806,16 +806,26 @@ where
 
     /// Poll the next eligible owner operation, retaining pending read fences.
     pub(super) fn poll_queued_mutation_once(&self) -> bool {
-        use std::task::{Context, Poll, Waker};
+        self.poll_queued_mutation_with_waker(std::task::Waker::noop())
+            .0
+    }
+
+    /// Return the existing pending/deferred state and actual operation progress.
+    pub(super) fn poll_queued_mutation_with_waker(
+        &self,
+        caller_waker: &std::task::Waker,
+    ) -> (bool, bool) {
+        use std::task::{Context, Poll};
 
         if self.queued_mutations.borrow().is_empty() {
-            return false;
+            return (false, false);
         }
         let owned_waker = self.query_runtime_waker();
-        let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
+        let waker = owned_waker.as_ref().unwrap_or(caller_waker);
         let mut context = Context::from_waker(waker);
         let mut deferred_reads: Vec<QueuedMutationOperation> = Vec::new();
         let mut active_operation = None;
+        let mut made_progress = false;
         let pending = loop {
             let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
                 break !deferred_reads.is_empty();
@@ -864,6 +874,7 @@ where
                 }
                 Poll::Ready(result) => {
                     self.finish_queued_mutation(operation, result);
+                    made_progress = true;
                     break !deferred_reads.is_empty();
                 }
             }
@@ -874,7 +885,7 @@ where
         if let Some(operation) = active_operation {
             self.queued_mutations.borrow_mut().push_front(operation);
         }
-        pending
+        (pending, made_progress)
     }
 
     fn finish_queued_mutation(
