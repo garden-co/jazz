@@ -305,6 +305,7 @@ function bootstrapFixture({
   const state = path.join(root, "var", "lib", "actions-runner", runner);
   const pkg = path.join(root, "opt", "actions-runner", "2.337.0");
   const unitDir = path.join(root, "etc", "systemd", "system");
+  const loadedUnitDir = path.join(root, "systemd-loaded");
   const unitName = serviceUnitName(runnerUrl, runnerName);
   const unitFile = path.join(unitDir, unitName);
   const cgroup = path.join(root, "sys", "fs", "cgroup", "system.slice", unitName);
@@ -316,6 +317,8 @@ function bootstrapFixture({
   fs.writeFileSync(unitFile, serviceUnitContents({ user: runner, pkg, runnerName }), {
     mode: 0o644,
   });
+  fs.mkdirSync(loadedUnitDir);
+  fs.copyFileSync(unitFile, path.join(loadedUnitDir, unitName));
   fs.mkdirSync(path.join(home, ".cargo", "bin"), { recursive: true });
   fs.mkdirSync(path.join(root, "var", "tmp"), { recursive: true });
   fs.mkdirSync(path.join(root, "dev"), { recursive: true });
@@ -515,8 +518,27 @@ esac
   logger(
     "systemctl",
     `case "$1" in
-  list-units|list-unit-files)
-    for unit in "$SYSTEMD_UNIT_DIR"/*.service; do [ -f "$unit" ] && basename "$unit"; done
+  list-units)
+    plain=0
+    for arg do [ "$arg" != --plain ] || plain=1; done
+    state="$(cat "$SYSTEMD_ACTIVE_STATE")"
+    case "$state" in
+      active) substate=running; prefix="  " ;;
+      failed) substate=failed; prefix="● " ;;
+      *) substate=dead; prefix="  " ;;
+    esac
+    [ "$plain" != 1 ] || prefix=""
+    for unit in "$SYSTEMD_LOADED_UNIT_DIR"/*.service; do
+      [ -f "$unit" ] || continue
+      printf '%s%s loaded %s %s Jazz benchmark runner\\n' "$prefix" "$(basename "$unit")" "$state" "$substate"
+    done
+    exit 0
+    ;;
+  list-unit-files)
+    for unit in "$SYSTEMD_UNIT_DIR"/*.service; do
+      [ -f "$unit" ] || continue
+      printf '%s enabled enabled\\n' "$(basename "$unit")"
+    done
     exit 0
     ;;
   show)
@@ -534,15 +556,20 @@ esac
       esac
       shift
     done
-    [ -n "$unit" ] && [ -f "$SYSTEMD_UNIT_DIR/$unit" ] || exit 1
+    [ -n "$unit" ] || exit 1
+    definition="$SYSTEMD_LOADED_UNIT_DIR/$unit"
+    if [ ! -f "$definition" ]; then
+      [ -f "$SYSTEMD_UNIT_DIR/$unit" ] || exit 1
+      cp "$SYSTEMD_UNIT_DIR/$unit" "$definition"
+    fi
     old_ifs="$IFS"; IFS=,
     for property in $properties; do
       case "$property" in
         User|WorkingDirectory|KillSignal)
-          result="$(awk -F= -v key="$property" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$SYSTEMD_UNIT_DIR/$unit")"
+          result="$(awk -F= -v key="$property" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$definition")"
           ;;
         ExecStart)
-          executable="$(awk -F= '$1 == "ExecStart" { print substr($0, index($0, "=") + 1); exit }' "$SYSTEMD_UNIT_DIR/$unit")"
+          executable="$(awk -F= '$1 == "ExecStart" { print substr($0, index($0, "=") + 1); exit }' "$definition")"
           if [ -n "$executable" ]; then
             result="{ path=\${executable} ; argv[]=\${executable} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
           else
@@ -557,11 +584,11 @@ esac
           fi
           ;;
         KillMode)
-          result="$(awk -F= -v key="$property" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$SYSTEMD_UNIT_DIR/$unit")"
+          result="$(awk -F= -v key="$property" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$definition")"
           [ -n "$result" ] || result=control-group
           ;;
         TimeoutStopUSec)
-          timeout="$(awk -F= '$1 == "TimeoutStopSec" { print $2; exit }' "$SYSTEMD_UNIT_DIR/$unit")"
+          timeout="$(awk -F= '$1 == "TimeoutStopSec" { print $2; exit }' "$definition")"
           case "$timeout" in 5min) result=300000000 ;; *) result= ;; esac
           ;;
         ControlGroup) result="/system.slice/$unit" ;;
@@ -633,6 +660,7 @@ esac
         BOOTSTRAP_FIXTURE_STATE: state,
         SYSTEMD_ACTIVE_STATE: activeState,
         SYSTEMD_UNIT_DIR: unitDir,
+        SYSTEMD_LOADED_UNIT_DIR: loadedUnitDir,
         CGROUP_ROOT: path.join(root, "sys", "fs", "cgroup"),
         GENERATED_SVC_EXECUTED: path.join(root, "generated-svc-executed"),
         CONFIG_BLOCKED_MARKER: path.join(root, "config-blocked"),
@@ -664,6 +692,7 @@ esac
         BOOTSTRAP_FIXTURE_STATE: state,
         SYSTEMD_ACTIVE_STATE: activeState,
         SYSTEMD_UNIT_DIR: unitDir,
+        SYSTEMD_LOADED_UNIT_DIR: loadedUnitDir,
         CGROUP_ROOT: path.join(root, "sys", "fs", "cgroup"),
         GENERATED_SVC_EXECUTED: path.join(root, "generated-svc-executed"),
         CONFIG_BLOCKED_MARKER: path.join(root, "config-blocked"),
@@ -747,6 +776,7 @@ esac
     invokeAsync,
     invokeOrchestration,
     recordAllowlist,
+    unloadUnit: (name = unitName) => fs.rmSync(path.join(loadedUnitDir, name)),
     cleanup: () => {
       makeRemovable(root);
       fs.rmSync(root, { recursive: true, force: true });
@@ -1170,12 +1200,40 @@ test("bootstrap repairs a missing manager unit for complete current runner state
   const fixture = bootstrapFixture();
   try {
     fs.rmSync(fixture.unitFile);
+    fixture.unloadUnit();
     const result = fixture.invoke({}, fixture.recordAllowlist());
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
     assert.equal(fs.existsSync(fixture.unitFile), true);
     const events = fs.readFileSync(fixture.trace, "utf8");
     assert.match(events, /^systemctl:start /m);
     assert.doesNotMatch(events, /^svc:/m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap rejects a manager-loaded current unit missing from disk without a .service marker", () => {
+  const fixture = bootstrapFixture();
+  try {
+    fs.rmSync(fixture.unitFile);
+    assert.equal(fs.existsSync(path.join(fixture.state, ".service")), false);
+    const registrationBefore = fs.readFileSync(path.join(fixture.state, ".runner"), "utf8");
+    const credentialsBefore = fs.readFileSync(path.join(fixture.state, ".credentials"), "utf8");
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.notEqual(result.status, 0, "a loaded unit without a disk definition must be rejected");
+    const events = fs.readFileSync(fixture.trace, "utf8");
+    assert.doesNotMatch(events, /^systemctl:(disable|stop|enable|start|daemon-reload)(?: |$)/m);
+    assert.doesNotMatch(events, /^(config|svc|curl|apt-get|snap|corepack|cargo):/m);
+    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo|config\.sh)/m);
+    assert.equal(fs.existsSync(path.join(fixture.root, "node-executed")), false);
+    assert.equal(fs.existsSync(fixture.unitFile), false, "the missing disk unit is not repaired");
+    assert.equal(fs.readFileSync(fixture.activeState, "utf8"), "active\n");
+    assert.equal(fs.readFileSync(path.join(fixture.state, ".runner"), "utf8"), registrationBefore);
+    assert.equal(
+      fs.readFileSync(path.join(fixture.state, ".credentials"), "utf8"),
+      credentialsBefore,
+    );
+    assert.equal(fs.existsSync(path.join(fixture.state, ".service")), false);
   } finally {
     fixture.cleanup();
   }
@@ -1270,6 +1328,7 @@ test("bootstrap rejects a path-matching unit name for another runner registratio
   const fixture = bootstrapFixture();
   try {
     fs.rmSync(fixture.unitFile);
+    fixture.unloadUnit();
     const otherUnit = path.join(
       fixture.unitDir,
       serviceUnitName("https://github.com/garden-co/jazz2", "some-other-runner"),
@@ -1328,6 +1387,7 @@ test("bootstrap creates a Jazz-managed unit after configuring an archive without
     fs.rmSync(path.join(fixture.state, ".runner"));
     fs.rmSync(path.join(fixture.state, ".credentials"));
     fs.rmSync(fixture.unitFile);
+    fixture.unloadUnit();
     const result = fixture.invoke(
       { ALLOW_CONFIG: "1", GENERATE_SVC: "1" },
       fixture.recordAllowlist(),
@@ -1469,6 +1529,7 @@ test("bootstrap disables a verified legacy unit before controlled reprovision", 
   });
   try {
     fs.rmSync(fixture.unitFile);
+    fixture.unloadUnit();
     const legacyName = "actions.runner.gardenco-jazz2.fixture-runner.service";
     const legacyUnitFile = path.join(fixture.unitDir, legacyName);
     const legacyPackage = path.join(fixture.root, "home", os.userInfo().username, "actions-runner");
@@ -1508,6 +1569,7 @@ test("bootstrap disables a verified prior-version unit before controlled reprovi
   });
   try {
     fs.rmSync(fixture.unitFile);
+    fixture.unloadUnit();
     const legacyName = "actions.runner.gardenco-jazz2.fixture-runner.service";
     const legacyUnitFile = path.join(fixture.unitDir, legacyName);
     const legacyPackage = path.join(fixture.root, "opt", "actions-runner", "2.336.0");
@@ -1612,6 +1674,7 @@ test("bootstrap leaves legacy services untouched when their names are ambiguous"
     });
     try {
       fs.rmSync(fixture.unitFile);
+      fixture.unloadUnit();
       const legacyUnitFile = path.join(fixture.unitDir, collision.legacyName);
       const legacyPackage = path.join(
         fixture.root,
@@ -1666,6 +1729,7 @@ test("bootstrap rejects a .service marker without a manager unit before tools", 
   const fixture = bootstrapFixture();
   try {
     fs.rmSync(fixture.unitFile);
+    fixture.unloadUnit();
     fs.writeFileSync(path.join(fixture.state, ".service"), "legacy marker\n");
     fs.chmodSync(path.join(fixture.state, ".service"), 0o600);
     const result = fixture.invoke({}, fixture.recordAllowlist());
@@ -1674,25 +1738,6 @@ test("bootstrap rejects a .service marker without a manager unit before tools", 
     const events = fs.readFileSync(fixture.trace, "utf8");
     assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
     assert.doesNotMatch(events, /^systemctl:stop /m);
-  } finally {
-    fixture.cleanup();
-  }
-});
-
-test("bootstrap does not token-reconfigure an incomplete registered runner", () => {
-  const fixture = bootstrapFixture();
-  try {
-    fs.rmSync(path.join(fixture.state, ".credentials"));
-    const result = fixture.invoke(
-      { RUNNER_TOKEN: "must-not-reconfigure" },
-      fixture.recordAllowlist(),
-    );
-    assert.notEqual(result.status, 0, "incomplete registration fails closed");
-    const events = fs.readFileSync(fixture.trace, "utf8");
-    assert.doesNotMatch(events, /^runuser:.*config\.sh/m);
-    assert.doesNotMatch(events, /^config:/m);
-    assert.doesNotMatch(events, /^systemctl:stop /m);
-    assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo)/m);
   } finally {
     fixture.cleanup();
   }
@@ -1898,11 +1943,15 @@ test("bootstrap entry refuses partial runner configuration before configuration 
   const fixture = bootstrapFixture();
   try {
     fs.rmSync(path.join(fixture.state, ".credentials"));
-    const result = fixture.invoke({}, fixture.recordAllowlist());
-    assert.notEqual(result.status, 0);
+    const result = fixture.invoke(
+      { RUNNER_TOKEN: "must-not-reconfigure" },
+      fixture.recordAllowlist(),
+    );
+    assert.notEqual(result.status, 0, "incomplete registration fails closed despite a token");
     const events = fs.readFileSync(fixture.trace, "utf8");
     assert.doesNotMatch(events, /^(systemctl|snap):/m);
     assert.doesNotMatch(events, /^runuser:.*(?:rustup|wasm-pack|cargo|config\.sh)/m);
+    assert.doesNotMatch(events, /^config:/m, "a supplied token cannot reconfigure partial state");
     assert.doesNotMatch(events, /^svc:/m);
     assert.equal(fs.existsSync(path.join(fixture.state, ".credentials")), false);
   } finally {
