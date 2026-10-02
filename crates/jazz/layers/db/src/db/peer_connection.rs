@@ -5289,10 +5289,7 @@ where
                                                 // remote wire handle leaks a
                                                 // settled receipt until a
                                                 // later lifecycle sweep.
-                                                self.node
-                                                    .lock()
-                                                    .await
-                                                    .apply_unsubscribe(upstream_subscription);
+                                                node.apply_unsubscribe(upstream_subscription);
                                                 upstream_subscriptions.borrow_mut().push(
                                                     PendingUpstreamCommand::Unsubscribe(
                                                         upstream_subscription,
