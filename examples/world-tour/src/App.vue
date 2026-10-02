@@ -136,8 +136,10 @@ const session = useSession();
 const userId = computed(() => session.value?.user.account ?? null);
 const { route, goToBand } = useRoute();
 
-// Writes the server rejects later (a permission changed, a conflict) end up here.
-const stopWriteErrors = db.onMutationError(reportWriteError);
+// Writes the server rejects later (a permission changed, a conflict) end up
+// here, unless the code that made the write waits on it and reports the
+// rejection itself (see write-errors.ts): each rejection is reported once.
+const stopWriteErrors = db.onMutationError((event) => reportWriteError(event));
 
 // --- Which band we're looking at, and who we are to it -----------------------
 
@@ -173,7 +175,14 @@ watch([userId, memberships, someBand], async ([id, mine, any]) => {
     return;
   seeding = true;
   try {
-    seedFailed.value = !(await claimDemoBand(db, { userId: id, ownerName: "Tour manager" }));
+    seedFailed.value = !(await claimDemoBand(db, {
+      userId: id,
+      ownerName: "Tour manager",
+      onTourRejected: (error) => {
+        console.error("The server did not accept the demo tour", error);
+        seedFailed.value = true;
+      },
+    }));
   } catch (error) {
     console.error("Could not write the demo tour", error);
     seedFailed.value = true;
@@ -187,7 +196,15 @@ async function startOwnTour() {
   if (!userId.value) return;
   starting.value = true;
   try {
-    goToBand(await startDemoTour(db, { userId: userId.value, ownerName: "Tour manager" }));
+    // Open the new band as soon as it's written locally. `accepted` is the
+    // tour's wait, so it owns a rejection by the server (which rolls the band
+    // back): it is reported here, and not again by onMutationError.
+    const { bandId, accepted } = await startDemoTour(db, {
+      userId: userId.value,
+      ownerName: "Tour manager",
+    });
+    accepted.catch((cause: unknown) => reportWriteError(cause));
+    goToBand(bandId);
   } finally {
     starting.value = false;
   }

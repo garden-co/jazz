@@ -31,7 +31,11 @@ it("writes a band and its demo tour in one transaction", async () => {
     authMode: "external",
   });
 
-  const bandId = await startDemoTour(db, { userId: owner, ownerName: "Tour manager" });
+  const { bandId, accepted } = await startDemoTour(db, {
+    userId: owner,
+    ownerName: "Tour manager",
+  });
+  await accepted;
 
   const fixture = buildTourFixture({ seed: DEFAULT_SEED, start: new Date() });
   const global = { tier: "global" } as const;
