@@ -1,53 +1,64 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
-import { Button } from "@astryxdesign/core";
 import { BandBookApp } from "@/src/components/BandBookApp";
 import { StatusScreen } from "@/components/status-screen";
 import { useSession } from "jazz-tools/react";
-import { bootstrapWorkspace } from "@/src/lib/server-calls";
+import { ensureHomeWorkspace, rememberedHomeWorkspace } from "@/src/lib/home-workspace";
 
 type Bootstrap =
-  | { state: "loading" }
+  | { state: "pending" }
   | { state: "ready"; workspaceId: string }
   | { state: "failed"; message: string };
 
 export default function WorkspacePage() {
   // The Jazz provider renders this page only once the account's client is ready.
   const account = useSession()?.user.account;
-  const [bootstrap, setBootstrap] = useState<Bootstrap>({ state: "loading" });
+  const [bootstrap, setBootstrap] = useState<Bootstrap>(() => {
+    const remembered = account ? rememberedHomeWorkspace(account) : null;
+    return remembered ? { state: "ready", workspaceId: remembered } : { state: "pending" };
+  });
 
-  const run = useCallback(async () => {
-    setBootstrap({ state: "loading" });
-    try {
-      const response = await bootstrapWorkspace();
-      if (!response.ok) throw new Error(`The server answered ${response.status}.`);
-      const { workspaceId } = (await response.json()) as { workspaceId: string };
-      setBootstrap({ state: "ready", workspaceId });
-    } catch (cause) {
-      setBootstrap({
-        state: "failed",
-        message: cause instanceof Error ? cause.message : String(cause),
-      });
-    }
+  // The demo workspace is created by the server once per account. The app
+  // renders from local data meanwhile; this only picks the home workspace and
+  // reports a failure when there is nothing else to show.
+  const run = useCallback((account: string) => {
+    let cancelled = false;
+    ensureHomeWorkspace(account).then(
+      (workspaceId) => !cancelled && setBootstrap({ state: "ready", workspaceId }),
+      (cause: unknown) =>
+        !cancelled &&
+        setBootstrap({
+          state: "failed",
+          message: cause instanceof Error ? cause.message : String(cause),
+        }),
+    );
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
-    if (account) void run();
+    if (account) return run(account);
   }, [account, run]);
 
-  if (bootstrap.state === "failed")
-    return (
-      <StatusScreen
-        label="Could not set up your band"
-        error={bootstrap.message}
-        action={<Button label="Try again" onClick={() => void run()} />}
-      />
-    );
-  if (bootstrap.state === "loading") return <StatusScreen label="Setting up your band" />;
   return (
     <Suspense fallback={<StatusScreen label="Opening BandBook" />}>
-      <BandBookApp homeWorkspaceId={bootstrap.workspaceId} />
+      <BandBookApp
+        homeWorkspaceId={bootstrap.state === "ready" ? bootstrap.workspaceId : null}
+        settingUp={bootstrap.state === "pending"}
+        setupError={
+          bootstrap.state === "failed" && account
+            ? {
+                message: bootstrap.message,
+                retry: () => {
+                  setBootstrap({ state: "pending" });
+                  run(account);
+                },
+              }
+            : null
+        }
+      />
     </Suspense>
   );
 }
