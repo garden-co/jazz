@@ -32,11 +32,7 @@ function browserStore(key: string): AccountStore {
 }
 
 it("automatically creates and reopens a fresh founder's encrypted text and image offline", async () => {
-  const server = await getJazzServerInfo(
-    `e2ee-offline-founder-${crypto.randomUUID()}`,
-    undefined,
-    true,
-  );
+  const server = await getJazzServerInfo(`e2ee-offline-founder-${crypto.randomUUID()}`, true);
   const app = s.defineApp({
     projects: s.table({ title: s.string() }, {}),
     notes: s
