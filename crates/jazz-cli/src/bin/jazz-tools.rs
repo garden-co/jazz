@@ -13,9 +13,9 @@
 // throughput on the server's allocation-heavy paths (query/insert/observer).
 //
 // With the `heap-profiling` feature on Linux, where production servers run,
-// a sampling wrapper records a stack for about one allocation per 512 KiB,
-// so operators can see which code holds memory (see
-// `jazz_cli::heap_profiling`).
+// a sampling wrapper records a stack for about one allocation per 512 KiB
+// (`JAZZ_HEAP_PROFILE_SAMPLE_BYTES`; `0` turns it off), so operators can see
+// which code holds memory (see `jazz_cli::heap_profiling`).
 #[cfg(heap_profiling)]
 #[global_allocator]
 static GLOBAL: jazz_cli::heap_profiling::SamplingAllocator<mimalloc::MiMalloc> =
@@ -217,8 +217,8 @@ enum CreateResource {
 }
 
 fn main() {
-    // Before the runtime starts its worker threads, so that every thread
-    // samples at the configured rate from its first allocation.
+    // Before the runtime starts its worker threads: only threads that start
+    // after sampling is turned on sample.
     #[cfg(heap_profiling)]
     jazz_cli::heap_profiling::configure();
     tokio::runtime::Builder::new_multi_thread()
