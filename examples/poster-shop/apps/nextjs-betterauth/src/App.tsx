@@ -38,11 +38,7 @@ export function PosterShopApp({
   notice?: ReactNode;
 }) {
   return (
-    <PosterStudio
-      initialCanvasId={initialCanvasId ?? null}
-      preparing={preparing}
-      notice={notice}
-    />
+    <PosterStudio initialCanvasId={initialCanvasId ?? null} preparing={preparing} notice={notice} />
   );
 }
 
