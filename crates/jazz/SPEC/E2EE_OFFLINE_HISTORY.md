@@ -54,6 +54,12 @@ Local-only propagation does not wait for a server connection or fail merely
 because that connection failed. The read still uses the globally accepted tier
 of the local snapshot; bypassing transport must not admit pending metadata.
 
+Each observation query MUST return rows and their settlement entries from one
+accepted-row evaluation within the shared frozen transaction. Separate sidecar
+and row evaluations can diverge even at the same cut. The client MUST retain
+strict row-to-settlement validation; a coherent pair does not establish complete
+history or current authority.
+
 ### Initial creation and failure
 
 Atomic creation retains the coherent preparation before staging the signed root
