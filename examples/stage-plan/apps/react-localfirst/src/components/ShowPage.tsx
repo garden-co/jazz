@@ -8,6 +8,8 @@ import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { app } from "../../schema.js";
 import { ensureChiefSetup, updateShow } from "../model/actions.js";
 import { useMe } from "../model/me.js";
+import { useJoinState, type JoinState } from "../model/pending-joins.js";
+import { InviteFailed } from "./JoinShow.js";
 import { href, navigate, type ShowTab } from "../router.js";
 import { ActivityFeed } from "./ActivityFeed.js";
 import { Board } from "./Board.js";
@@ -20,7 +22,20 @@ import { TaskDialog } from "./TaskDialog.js";
 
 type ShowPageProps = { showId: string; tab: ShowTab; taskId?: string };
 
-export function ShowPage({ showId, tab, taskId }: ShowPageProps) {
+export function ShowPage(props: ShowPageProps) {
+  // Set while this tab's invite join waits for the server. The page opens
+  // its queries again once the server has accepted the membership, so they
+  // are answered with the access it grants.
+  const join = useJoinState(props.showId);
+  return <ShowPageContent key={join ?? "member"} join={join} {...props} />;
+}
+
+function ShowPageContent({
+  showId,
+  tab,
+  taskId,
+  join,
+}: ShowPageProps & { join: JoinState | undefined }) {
   const db = useDb();
   const me = useMe();
   const [isEditing, setEditing] = useState(false);
@@ -47,6 +62,13 @@ export function ShowPage({ showId, tab, taskId }: ShowPageProps) {
   }, [db, me, showId, isChiefOfShow]);
 
   if (isLoading) return <Loading label="Opening the show" />;
+  if (!show && join === "pending") return <Loading label="Joining the crew" />;
+  if (!show && join === "failed")
+    return (
+      <Page title="Joining the crew">
+        <InviteFailed />
+      </Page>
+    );
   if (!show) {
     // Outsiders get the same answer as for a show that doesn't exist.
     return (

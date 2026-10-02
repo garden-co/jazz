@@ -3,6 +3,7 @@ import { app, type Crew, type TaskStatus } from "../../schema.js";
 import {
   addComment,
   ensureChiefSetup,
+  nameBasedId,
   stageComment,
   stageShow,
   type Me,
@@ -40,18 +41,29 @@ const DEMO_TASKS: { title: string; status: TaskStatus; mine?: boolean; notes?: s
   },
 ];
 
-/** Finds or creates the crew profile for an account. */
+/**
+ * Finds or creates the crew profile for an account. The account is a
+ * local-first one held by this browser profile, together with its local data,
+ * so its profile is found locally: reading never waits for the server. The
+ * profile's id is derived from the account, so if a profile were ever written
+ * without being found here, both writes land on one row instead of two.
+ */
 export async function ensureProfile(
   db: Db,
   account: string,
 ): Promise<{ profile: Crew; isNew: boolean }> {
-  const existing = await db.one(app.crew.where({ account }), { tier: "local-first-unless-empty" });
+  const existing = await db.one(app.crew.where({ account }));
   if (existing) return { profile: existing, isNew: false };
-  const profile = db.insert(app.crew, {
-    account,
-    name: `Stagehand ${account.slice(-4).toUpperCase()}`,
-  });
+  const profile = db.insert(
+    app.crew,
+    { account, name: `Stagehand ${account.slice(-4).toUpperCase()}` },
+    { id: await profileId(account) },
+  );
   return { profile: profile.value, isNew: true };
+}
+
+export function profileId(account: string) {
+  return nameBasedId(`stage-plan/profile/${account}`);
 }
 
 const DEMO_COMMENT = "Channel 7 crackles. Swapping the DI box before soundcheck.";

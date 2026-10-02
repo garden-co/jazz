@@ -6,6 +6,7 @@ import { HStack } from "@astryxdesign/core/Stack";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { joinShow } from "../model/actions.js";
 import { useMe } from "../model/me.js";
+import { trackJoin } from "../model/pending-joins.js";
 import { href, navigate, parseRoute } from "../router.js";
 import { Loading } from "./Loading.js";
 import { Page } from "./Page.js";
@@ -20,8 +21,13 @@ export function JoinShow({ showId, code }: { showId: string; code: string }) {
   useEffect(() => {
     if (started.current) return;
     started.current = true;
+    // Open the show as soon as the membership applies locally; the server's
+    // answer arrives in the background (see pending-joins).
     joinShow(db, me, showId, code).then(
-      () => navigate(href.show(showId)),
+      ({ accepted }) => {
+        trackJoin(showId, accepted);
+        navigate(href.show(showId));
+      },
       () => setFailed(true),
     );
   }, [db, me, showId, code]);
@@ -29,16 +35,22 @@ export function JoinShow({ showId, code }: { showId: string; code: string }) {
   return (
     <Page title="Joining the crew">
       {failed ? (
-        <Banner
-          status="error"
-          title="This invite link doesn't work any more"
-          description="The crew chief may have made a new link. Ask them to send it again."
-          endContent={<Button label="Back to shows" href={href.shows()} />}
-        />
+        <InviteFailed />
       ) : (
         <Loading label="Checking your invite" />
       )}
     </Page>
+  );
+}
+
+export function InviteFailed() {
+  return (
+    <Banner
+      status="error"
+      title="This invite link doesn't work any more"
+      description="The crew chief may have made a new link. Ask them to send it again."
+      endContent={<Button label="Back to shows" href={href.shows()} />}
+    />
   );
 }
 
