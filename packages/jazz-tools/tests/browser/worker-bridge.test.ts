@@ -74,6 +74,7 @@ import {
   publishSyncServerSchemaAndPermissions,
   replaceStorageManifest,
   rawStorageRecords,
+  requestResult,
   useSharedWorkerBridgeHarness,
 } from "./worker-bridge-harness.js";
 

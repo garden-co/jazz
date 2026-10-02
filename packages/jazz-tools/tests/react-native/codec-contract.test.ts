@@ -171,18 +171,18 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
     expect(
       encodeNativeForegroundCommand({ type: "abortStagedStreamingMutation", staged: 129 }),
     ).toEqual(Uint8Array.of(36, 129, 1));
-    expect(decodeNativeForegroundResponse(Uint8Array.of(25, 129, 1))).toEqual({
+    expect(decodeNativeForegroundResponse(Uint8Array.of(26, 129, 1))).toEqual({
       type: "streamingMutationStaged",
       staged: 129,
     });
-    expect(decodeNativeForegroundResponse(Uint8Array.of(26))).toEqual({
+    expect(decodeNativeForegroundResponse(Uint8Array.of(27))).toEqual({
       type: "stagedStreamingMutationAttached",
     });
-    expect(decodeNativeForegroundResponse(Uint8Array.of(27, 1))).toEqual({
+    expect(decodeNativeForegroundResponse(Uint8Array.of(28, 1))).toEqual({
       type: "stagedStreamingMutationAborted",
       aborted: true,
     });
-    for (const malformed of [[25], [25, 129, 0], [26, 0], [27, 2], [27, 1, 0]])
+    for (const malformed of [[26], [26, 129, 0], [27, 0], [28, 2], [28, 1, 0]])
       expect(() => decodeNativeForegroundResponse(Uint8Array.from(malformed))).toThrow();
   });
   test.each(cases)("%s preserves Rust semantic fields", (_name, command, expected) => {
