@@ -45,12 +45,7 @@ export interface AccountEnrollment<Auth> {
     operation: "loginJWT" | "loginOrRegisterJWT",
     auth: Auth,
     isCurrent?: () => boolean,
-  ): Promise<AccountHandle | AccountRevalidationFallback<Auth>>;
-}
-
-/** @internal The ordinary transition to run instead, with the auth it should use. */
-export interface AccountRevalidationFallback<Auth> {
-  readonly reauth: Auth;
+  ): Promise<AccountHandle | undefined>;
 }
 
 export class AccountOperationSuperseded extends Error {
@@ -154,17 +149,17 @@ export class AccountManager<Auth> {
   /**
    * @internal Session hosts revalidate the selected account without a
    * transition. Resolves to the same handle once the registry re-admits it,
-   * or to the fallback a caller runs as an ordinary transition instead.
+   * or undefined when the caller must run an ordinary transition instead.
    */
   async revalidateJWT(
     operation: "loginJWT" | "loginOrRegisterJWT",
     auth: Auth,
     /** The caller still wants this outcome; checked again just before binding. */
     isCurrent: () => boolean = () => true,
-  ): Promise<AccountHandle | AccountRevalidationFallback<Auth>> {
+  ): Promise<AccountHandle | undefined> {
     const account = this.snapshot.account;
     const revalidate = this.enrollment.revalidateJWT;
-    if (!account || !revalidate) return { reauth: auth };
+    if (!account || !revalidate) return undefined;
     const generation = ++this.generation;
     this.publish({ ...this.snapshot, pending: operation, error: undefined });
     try {
@@ -177,7 +172,7 @@ export class AccountManager<Auth> {
       );
       if (generation !== this.generation) throw new AccountOperationSuperseded();
       this.publish({ account, pending: undefined, error: undefined });
-      return outcome === account ? account : outcome;
+      return outcome === account ? account : undefined;
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       if (generation === this.generation) {

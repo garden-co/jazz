@@ -254,23 +254,15 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
   };
   const login = (operation: "loginJWT" | "loginOrRegisterJWT", auth: JWTAuth): Promise<void> => {
     // Hosts that retain the selected account re-admit the same identity in
-    // place. Anything else is an ordinary transition, reusing the provider
-    // token the revalidation already fetched.
-    let enrollWith = auth;
+    // place. Anything else is an ordinary transition; the enrollment reuses
+    // the provider token the revalidation already fetched.
     const revalidate: InPlaceRevalidation | undefined = accounts.revalidatesInPlace
       ? {
-          check: async (isCurrent) => {
-            const outcome = await accounts.revalidateJWT(operation, auth, isCurrent);
-            if ("reauth" in outcome) {
-              enrollWith = outcome.reauth;
-              return undefined;
-            }
-            return outcome;
-          },
+          check: (isCurrent) => accounts.revalidateJWT(operation, auth, isCurrent),
           retry: () => login(operation, auth),
         }
       : undefined;
-    return run(operation, () => accounts[operation](enrollWith), revalidate);
+    return run(operation, () => accounts[operation](auth), revalidate);
   };
   const session: JazzSession<Client> = {
     getSnapshot: () => snapshot,

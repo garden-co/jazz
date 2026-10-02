@@ -92,22 +92,6 @@ function identityFromToken(token: string): AccountIdentity {
 function sameIdentity(a: AccountIdentity, b: AccountIdentity): boolean {
   return a.issuer === b.issuer && a.subject === b.subject;
 }
-/**
- * The provider token a revalidation already fetched, handed to the enrollment
- * that follows it once; later refreshes ask the provider as usual.
- */
-function pinnedAuth(auth: JWTAuth, token: string): JWTAuth {
-  if (typeof auth === "string") return auth;
-  let pinned: string | undefined = token;
-  return {
-    getToken() {
-      const once = pinned;
-      pinned = undefined;
-      return once !== undefined ? Promise.resolve(once) : auth.getToken();
-    },
-  };
-}
-
 async function tokenFor(auth: JWTAuth): Promise<string> {
   if (typeof auth === "string") return auth;
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -291,9 +275,17 @@ export function createAccountManagerWithRuntime(options: {
     if (material) material.primed = token;
     return handle;
   };
+  // The provider token a declined revalidation already fetched, used once by
+  // the ordinary enrollment that follows for the same auth.
+  let pinned: { auth: JWTAuth; token: string } | undefined;
+  const enrollmentToken = (auth: JWTAuth) => {
+    const reuse = pinned?.auth === auth ? pinned.token : undefined;
+    pinned = undefined;
+    return reuse !== undefined ? Promise.resolve(reuse) : tokenFor(auth);
+  };
   const enroll = async (operation: string, auth: JWTAuth): Promise<AccountHandle> => {
     const started = epoch;
-    const token = await tokenFor(auth);
+    const token = await enrollmentToken(auth);
     assertCurrent(started);
     const identity = identityFromToken(token);
     if (isReservedJazzIssuer(identity.issuer))
@@ -381,7 +373,7 @@ export function createAccountManagerWithRuntime(options: {
         : async (account, operation, auth, isCurrent = () => true) => {
             // In-place revalidation of the selected external account. Anything
             // other than "the registry still assigns this exact identity to this
-            // exact account" returns { reauth } so the caller performs a full,
+            // exact account" returns undefined so the caller performs a full,
             // ordinary transition (shutdown, enrollment, reopen).
             const material = credentials.get(account);
             if (
@@ -391,7 +383,7 @@ export function createAccountManagerWithRuntime(options: {
               material.localFirstSecret !== undefined ||
               isReservedJazzIssuer(account.identity.issuer)
             )
-              return { reauth: auth };
+              return undefined;
             const started = epoch;
             const token = await tokenFor(auth);
             assertCurrent(started);
@@ -399,15 +391,19 @@ export function createAccountManagerWithRuntime(options: {
             // A different provider subject is decided before any registry call;
             // the ordinary enrollment then reuses this token instead of asking
             // the provider again.
-            if (!sameIdentity(identity, account.identity))
-              return { reauth: pinnedAuth(auth, token) };
+            if (!sameIdentity(identity, account.identity)) {
+              pinned = { auth, token };
+              return undefined;
+            }
             const response = await request(
               operation === "loginJWT" ? "login" : "login-or-register",
               token,
             );
             assertCurrent(started);
-            if (readAccountAssignment(response, identity) !== account.id)
-              return { reauth: pinnedAuth(auth, token) };
+            if (readAccountAssignment(response, identity) !== account.id) {
+              pinned = { auth, token };
+              return undefined;
+            }
             if (credentials.get(account) !== material)
               throw new AccountAuthError("account_logged_out");
             // A logout or newer operation that started meanwhile wins: the

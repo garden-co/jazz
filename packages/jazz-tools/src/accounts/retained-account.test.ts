@@ -167,10 +167,7 @@ describe("retained external accounts", () => {
     await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
     const restarted = await manager(store, registryFetch());
     const retained = restarted.getLoggedIn()!;
-    const bobToken = jwt(bob);
-    await expect(restarted.revalidateJWT("loginJWT", bobToken)).resolves.toEqual({
-      reauth: bobToken,
-    });
+    await expect(restarted.revalidateJWT("loginJWT", jwt(bob))).resolves.toBeUndefined();
     expect(isProvisionalAccount(retained)).toBe(true);
 
     const reassigned = vi.fn(
@@ -178,10 +175,7 @@ describe("retained external accounts", () => {
         new Response(JSON.stringify({ account: bobAccount, identity: alice }), { status: 200 }),
     );
     const other = await manager(store, reassigned);
-    const aliceToken = jwt(alice);
-    await expect(other.revalidateJWT("loginJWT", aliceToken)).resolves.toEqual({
-      reauth: aliceToken,
-    });
+    await expect(other.revalidateJWT("loginJWT", jwt(alice))).resolves.toBeUndefined();
     expect(isProvisionalAccount(other.getLoggedIn()!)).toBe(true);
   });
 
