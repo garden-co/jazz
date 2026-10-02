@@ -143,10 +143,9 @@ async function firstWriterRace(grantLoser: boolean) {
         body: "Allowed after winner grant",
       });
       await allowed.wait({ tier: "global" });
-      expect(await winner.all(app.notes.orderBy("body"), { tier: "global" })).toEqual([
-        allowed.value,
-        writes[winnerIndex]!.value,
-      ]);
+      expect(new Set(await winner.all(app.notes, { tier: "global" }))).toEqual(
+        new Set([allowed.value, writes[winnerIndex]!.value]),
+      );
       expect(await winner.all(app.__e2ee_spaces, { tier: "global" })).toEqual(roots);
     } else {
       await expect(
