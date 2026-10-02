@@ -322,6 +322,11 @@ where
                 SyncMessage::CatalogueSnapshot(_) => Err(Error::UnsupportedSyncMessage(
                     "catalogue snapshot requires a trusted upstream link",
                 )),
+                // Only the uploading link acts on a retry-later answer; it
+                // changes nothing in a node's state.
+                SyncMessage::RetryLater { .. } => Err(Error::UnsupportedSyncMessage(
+                    "retry-later answers are handled by the uploading link",
+                )),
                 SyncMessage::Subscribe(subscribe) => {
                     self.apply_subscribe(subscribe)?;
                     Ok(PublicationOutcome::settled(Vec::new()))

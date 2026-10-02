@@ -15,14 +15,6 @@ use crate::schema::ColumnSchema;
 pub(super) const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;
 pub(super) const MAX_SCHEMA_LINEAGE_NAME_BYTES: usize = 1024;
 pub(super) const MAX_SCHEMA_LINEAGE_OPS: usize = 16_384;
-/// How long the fate authority holds a write whose pending predecessor has
-/// no fate here, measured from the write's arrival (SPEC 4 §4.6).
-pub(super) const PREDECESSOR_PARK_TTL_MS: u64 = 5 * 60 * 1000;
-/// Most writes one writer node may have waiting on predecessors at once.
-pub const MAX_PREDECESSOR_PARKED_PER_WRITER_NODE: usize = 256;
-/// Most writes one authenticated session identity may have waiting on
-/// predecessors at once, across the nodes it writes for.
-pub(super) const MAX_PREDECESSOR_PARKED_PER_SESSION: usize = 1024;
 
 fn authority_wall_clock_ms() -> Result<u64, Error> {
     web_time::SystemTime::now()

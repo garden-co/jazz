@@ -368,6 +368,14 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
+            "retry_later_awaiting_predecessor",
+            "RetryLater",
+            SyncMessage::RetryLater {
+                tx_id,
+                awaiting: TxId::new(TxTime(11), node),
+            },
+        ),
+        (
             "register_shape_todos",
             "RegisterShape",
             SyncMessage::RegisterShape {

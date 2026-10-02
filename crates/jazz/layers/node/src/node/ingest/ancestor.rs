@@ -95,9 +95,9 @@ where
                     "its pending predecessor is not older than the write".to_owned(),
                 )));
             }
-            // An unknown or still pending predecessor is parked before
-            // resolution (`park_commit_unit_awaiting_predecessor`); reaching
-            // either here means no fate will come.
+            // An unknown or still pending predecessor is answered with
+            // `RetryLater` before resolution (`commit_unit_awaited_predecessor`);
+            // reaching either here means no fate will come.
             match self.query_transaction(pending).await? {
                 None => {
                     return Ok(Err(not_supported(

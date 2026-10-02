@@ -2977,6 +2977,30 @@ impl UploadOutbox {
         true
     }
 
+    /// Where `tx_id` stands in upload order.
+    fn position(&self, tx_id: TxId) -> Option<usize> {
+        if !self.tx_ids.contains(&tx_id) {
+            return None;
+        }
+        self.entries
+            .iter()
+            .position(|pending| pending.tx_id == tx_id)
+    }
+
+    /// Queue `tx_id` to go up just before `before`: a write a queued upload
+    /// waits for (SPEC 8). Without `before` queued it goes last.
+    fn insert_before(&mut self, tx_id: TxId, before: TxId) -> bool {
+        if !self.tx_ids.insert(tx_id) {
+            return false;
+        }
+        let pending = PendingUpload { tx_id, unit: None };
+        match self.position(before) {
+            Some(index) => self.entries.insert(index, pending),
+            None => self.entries.push_back(pending),
+        }
+        true
+    }
+
     fn iter(&self) -> impl DoubleEndedIterator<Item = &PendingUpload> + ExactSizeIterator {
         self.entries.iter()
     }

@@ -1894,6 +1894,14 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     .unwrap();
                 let updates = settle_outcome(&mut core, outcome).unwrap();
                 for fate in updates {
+                    if let SyncMessage::RetryLater { .. } = &fate {
+                        // Core stored nothing; the uploading writer resends
+                        // the unit after its predecessor, which is still
+                        // queued behind it.
+                        upstream.push_back(message.clone());
+                        message_counts.upstream_enqueued += 1;
+                        continue;
+                    }
                     let SyncMessage::FateUpdate { tx_id, .. } = &fate else {
                         panic!("core should only emit fate updates here");
                     };

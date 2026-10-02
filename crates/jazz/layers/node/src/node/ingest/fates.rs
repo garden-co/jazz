@@ -799,82 +799,10 @@ where
         Ok(true)
     }
 
-    /// Park a commit unit at the fate authority while the pending
-    /// predecessor its base names has no fate here (SPEC 4 §4.6, "Ancestor
-    /// at Core"): Core resolves the write's ancestor only once it knows
-    /// whether that predecessor is in history. The unit re-enters authority
-    /// ingest when the predecessor's fate is stored, or is dropped with a
-    /// retry-later answer (no fate) once [`PREDECESSOR_PARK_TTL_MS`] passes. A base whose predecessor can never
-    /// be resolved (another node's transaction, or one not older than the
-    /// write) is not parked; ancestor resolution refuses it. Callers run the
-    /// unit's cheap admission checks first, so only an admitted writer can
-    /// park, and at most [`MAX_PREDECESSOR_PARKED_PER_WRITER_NODE`] units per
-    /// writer node and [`MAX_PREDECESSOR_PARKED_PER_SESSION`] per session
-    /// identity.
-    pub(super) async fn park_commit_unit_awaiting_predecessor(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        now_ms: u64,
-        mode: CommitUnitParkMode,
-    ) -> Result<PredecessorPark, Error> {
-        let Some(predecessor) = self.commit_unit_awaited_predecessor(tx, versions).await? else {
-            return Ok(PredecessorPark::Ready);
-        };
-        let parking = &mut self.parking.awaiting_predecessor;
-        if let Some(existing) = parking.units.get_mut(&tx.tx_id) {
-            let existing = &mut existing.unit;
-            if existing.tx != *tx || existing.versions != versions {
-                return Err(Error::ConflictingCommitUnit(tx.tx_id));
-            }
-            if !CommitUnitIngestContext::same_parked_authority(
-                existing.ingest_context,
-                mode.ingest_context,
-            ) {
-                return Err(Error::ConflictingCommitUnit(tx.tx_id));
-            }
-            if let (Some(existing), Some(resent)) =
-                (existing.ingest_context.as_mut(), mode.ingest_context)
-            {
-                existing.version_receipts_validated &= resent.version_receipts_validated;
-            }
-            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
-            return Ok(PredecessorPark::Parked);
-        }
-        let session = predecessor_park_session(mode.ingest_context);
-        if parking
-            .per_writer_node
-            .get(&tx.tx_id.node)
-            .is_some_and(|count| *count >= MAX_PREDECESSOR_PARKED_PER_WRITER_NODE)
-            || session.is_some_and(|session| {
-                parking
-                    .per_session
-                    .get(&session)
-                    .is_some_and(|count| *count >= MAX_PREDECESSOR_PARKED_PER_SESSION)
-            })
-        {
-            return Ok(PredecessorPark::Full);
-        }
-        self.sync_metrics.parked_orphans += 1;
-        parking.insert(
-            tx.tx_id,
-            PredecessorParkedUnit {
-                unit: ParkedCommitUnit {
-                    tx: tx.clone(),
-                    versions: versions.to_vec(),
-                    now_ms,
-                    ingest_context: mode.ingest_context,
-                    ingress_role: mode.ingress_role,
-                },
-                predecessor,
-                expires_at_ms: now_ms.saturating_add(PREDECESSOR_PARK_TTL_MS),
-            },
-        );
-        Ok(PredecessorPark::Parked)
-    }
-
     /// The pending predecessor a version of the unit names, of its own
-    /// writer and older than it, that has no fate here yet.
+    /// writer and older than it, that has no fate here yet. The fate
+    /// authority answers such a unit with `RetryLater` and stores nothing
+    /// (SPEC 4 §4.6).
     pub(super) async fn commit_unit_awaited_predecessor(
         &mut self,
         tx: &Transaction,
@@ -896,88 +824,6 @@ where
             }
         }
         Ok(None)
-    }
-
-    /// Release the units parked on a predecessor once fates are stored, and
-    /// drop the units whose wait expired by `now_ms` (when given), answering
-    /// each with a [retry-later fate update](is_retry_later_fate_update)
-    /// rather than a fate. `fates` are the fate updates just produced; every
-    /// fate a released unit gets releases its own successors in turn. A unit
-    /// that already has a fate here (its parked copy is stale) is dropped
-    /// without a second fate.
-    pub(super) async fn release_units_awaiting_predecessors(
-        &mut self,
-        fates: &[SyncMessage],
-        now_ms: Option<u64>,
-    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
-    where
-        S: ReopenableStorage,
-    {
-        let mut updates = PublicationOutcome::settled(Vec::new());
-        let mut fated = decided_fate_tx_ids(fates);
-        if let Some(now_ms) = now_ms {
-            let expired = self
-                .parking
-                .awaiting_predecessor
-                .by_expiry
-                .range(..=(now_ms, TxId::new(TxTime(u64::MAX), NodeUuid::from_bytes([0xff; 16]))))
-                .map(|(_, tx_id)| *tx_id)
-                .collect::<Vec<_>>();
-            for tx_id in expired {
-                let Some(parked) = self.parking.awaiting_predecessor.remove(tx_id) else {
-                    continue;
-                };
-                if self.has_decided_fate(tx_id).await? {
-                    continue;
-                }
-                // The wait ends without a fate: the writer still holds the
-                // write pending and is asked to send it again later.
-                self.sync_metrics.parked_orphans_resolved += 1;
-                updates.extend(PublicationOutcome::settled(vec![retry_later_fate_update(
-                    parked.unit.tx.tx_id,
-                )]));
-            }
-        }
-        while let Some(tx_id) = fated.pop_front() {
-            // A fate for a parked unit itself leaves its parked copy stale.
-            self.parking.awaiting_predecessor.remove(tx_id);
-            let Some(successors) = self
-                .parking
-                .awaiting_predecessor
-                .by_predecessor
-                .get(&tx_id)
-                .cloned()
-            else {
-                continue;
-            };
-            for successor in successors {
-                let Some(parked) = self.parking.awaiting_predecessor.remove(successor) else {
-                    continue;
-                };
-                if self.has_decided_fate(successor).await? {
-                    continue;
-                }
-                self.sync_metrics.parked_orphans_resolved += 1;
-                let unit = parked.unit;
-                let outcome = Box::pin(self.ingest_commit_unit_once(
-                    unit.tx,
-                    unit.versions,
-                    unit.now_ms,
-                    unit.ingest_context,
-                ))
-                .await?;
-                fated.extend(decided_fate_tx_ids(outcome.value()));
-                updates.extend(outcome);
-            }
-        }
-        Ok(updates)
-    }
-
-    async fn has_decided_fate(&mut self, tx_id: TxId) -> Result<bool, Error> {
-        Ok(self
-            .query_transaction(tx_id)
-            .await?
-            .is_some_and(|stored| !matches!(stored.fate, Fate::Pending)))
     }
 
     pub(super) async fn drain_parked_commit_units(
@@ -1019,12 +865,7 @@ where
                     unit.now_ms,
                     unit.ingest_context,
                 ).await?;
-                let released = Box::pin(
-                    self.release_units_awaiting_predecessors(outcome.value(), None),
-                )
-                .await?;
                 updates.extend(outcome);
-                updates.extend(released);
             }
         }
         Ok(updates)
@@ -1194,91 +1035,6 @@ where
 
 }
 
-/// Whether an authority commit unit waits for its pending predecessor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PredecessorPark {
-    /// The unit names no predecessor without a fate: ingest continues.
-    Ready,
-    /// The unit waits for its predecessor's fate.
-    Parked,
-    /// The unit would wait, but its writer node or session has too many
-    /// writes waiting already: it gets a retry-later answer, not a fate.
-    Full,
-}
-
-/// The session identity a parked unit counts against, when it came over an
-/// authenticated end-user session. Trusted links forward many writers under
-/// one identity and are bounded per writer node only.
-fn predecessor_park_session(context: Option<CommitUnitIngestContext>) -> Option<AuthorSubject> {
-    context
-        .filter(|context| context.trust == CommitUnitTrust::Session)
-        .map(|context| context.identity)
-}
-
-/// The transactions the fate updates among `messages` decide.
-fn decided_fate_tx_ids(messages: &[SyncMessage]) -> VecDeque<TxId> {
-    messages
-        .iter()
-        .filter_map(|message| match message {
-            SyncMessage::FateUpdate { tx_id, fate, .. } if !matches!(fate, Fate::Pending) => {
-                Some(*tx_id)
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-impl PredecessorParking {
-    fn insert(&mut self, tx_id: TxId, parked: PredecessorParkedUnit) {
-        self.by_predecessor
-            .entry(parked.predecessor)
-            .or_default()
-            .insert(tx_id);
-        self.by_expiry.insert((parked.expires_at_ms, tx_id));
-        *self.per_writer_node.entry(tx_id.node).or_default() += 1;
-        if let Some(session) = predecessor_park_session(parked.unit.ingest_context) {
-            *self.per_session.entry(session).or_default() += 1;
-        }
-        self.units.insert(tx_id, parked);
-    }
-
-    fn remove(&mut self, tx_id: TxId) -> Option<PredecessorParkedUnit> {
-        let parked = self.units.remove(&tx_id)?;
-        if let Some(successors) = self.by_predecessor.get_mut(&parked.predecessor) {
-            successors.remove(&tx_id);
-            if successors.is_empty() {
-                self.by_predecessor.remove(&parked.predecessor);
-            }
-        }
-        self.by_expiry.remove(&(parked.expires_at_ms, tx_id));
-        decrement_count(&mut self.per_writer_node, &tx_id.node);
-        if let Some(session) = predecessor_park_session(parked.unit.ingest_context)
-            && let Some(count) = self.per_session.get_mut(&session)
-        {
-            *count -= 1;
-            if *count == 0 {
-                self.per_session.remove(&session);
-            }
-        }
-        Some(parked)
-    }
-
-    /// How many units are parked.
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.units.len()
-    }
-}
-
-fn decrement_count(counts: &mut BTreeMap<NodeUuid, usize>, key: &NodeUuid) {
-    if let Some(count) = counts.get_mut(key) {
-        *count -= 1;
-        if *count == 0 {
-            counts.remove(key);
-        }
-    }
-}
-
 /// The cheap identity part of commit-unit admission: the permission subject
 /// write policies evaluate, or the refusal when the connection may not make
 /// the unit at all. `Ok(None)` means no policy evaluation is owed (a trusted
@@ -1325,31 +1081,3 @@ pub(super) fn commit_unit_admission_subject(
     Ok(Some(permission_subject))
 }
 
-/// The authority's transient refusal of a commit unit: a `FateUpdate` with
-/// `Fate::Pending` and neither a global time nor a durability claim. It
-/// stores nothing and decides nothing; the writer keeps the write pending
-/// and uploads it again after a backoff (SPEC 8). Core sends it for a write
-/// over the predecessor-parking caps and for one whose wait expired.
-pub(super) fn retry_later_fate_update(tx_id: TxId) -> SyncMessage {
-    SyncMessage::FateUpdate {
-        tx_id,
-        fate: Fate::Pending,
-        global_time: None,
-        durability: None,
-    }
-}
-
-/// Whether `message` is the authority's retry-later answer to an upload
-/// (see [`retry_later_fate_update`]). No other fate update has this shape: a
-/// relay's local acknowledgement carries `Local` durability.
-pub fn is_retry_later_fate_update(message: &SyncMessage) -> bool {
-    matches!(
-        message,
-        SyncMessage::FateUpdate {
-            fate: Fate::Pending,
-            global_time: None,
-            durability: None,
-            ..
-        }
-    )
-}

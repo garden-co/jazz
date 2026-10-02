@@ -32,6 +32,7 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         }
         SyncMessage::CurrentRowsRequest(_) | SyncMessage::CurrentRowsCancel { .. } => 0,
         SyncMessage::FateUpdate { .. } => tx_id_wire_bytes() + 16,
+        SyncMessage::RetryLater { .. } => 2 * tx_id_wire_bytes(),
         // An authority scope view carries an ordinary settlement-bearing view
         // update. Its row payload is part of the simulated delivery cost.
         SyncMessage::AuthorizationScopeView { view, .. } => scope_view_update_bytes(view),

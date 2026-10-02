@@ -69,13 +69,6 @@ where
             ingest_context,
         ))
         .await?;
-        // Every fate decided here, refusals included, releases the writes
-        // parked on it; the wait of every expired parked write ends too.
-        let released = Box::pin(
-            self.release_units_awaiting_predecessors(updates.value(), Some(now_ms)),
-        )
-        .await?;
-        updates.extend(released);
         updates.extend(self.drain_parked_commit_units().await?);
         Ok(updates)
     }
@@ -551,8 +544,8 @@ where
                 durability: None,
             }]));
         }
-        // The cheap identity checks run before a write may wait below, so
-        // only an admitted writer can hold parking.
+        // The cheap identity checks run before the predecessor check below,
+        // so only an admitted writer is ever asked to retry.
         if let Err(reason) = commit_unit_admission_subject(&tx, ingest_context) {
             let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
@@ -563,30 +556,20 @@ where
                 durability: None,
             }]));
         }
-        // A write chained on its writer's pending predecessor waits for that
-        // predecessor's fate: an ordering race (it may arrive later, or be
-        // held here as a relayed or recovered Pending) is not a refusal.
-        match self
-            .park_commit_unit_awaiting_predecessor(
-                &tx,
-                &versions,
-                now_ms,
-                CommitUnitParkMode {
-                    ingest_context,
-                    ..CommitUnitParkMode::default()
-                },
-            )
-            .await?
-        {
-            PredecessorPark::Ready => {}
-            PredecessorPark::Parked => return Ok(PublicationOutcome::settled(Vec::new())),
-            // Over the caps the write is not refused: nothing is stored, and
-            // the writer is asked to send it again later.
-            PredecessorPark::Full => {
-                return Ok(PublicationOutcome::settled(vec![retry_later_fate_update(
-                    tx.tx_id,
-                )]));
-            }
+        // A unit of an unknown kind is refused before anything else is
+        // looked up for it.
+        if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Exclusive {
+            return Err(Error::UnsupportedCommitUnit("unsupported commit unit kind"));
+        }
+        // A write chained on its writer's pending predecessor is decided only
+        // after that predecessor (SPEC 4 §4.6). Core does not hold it: it
+        // stores nothing and asks the writer to send it again, naming the
+        // predecessor it waits for (SPEC 8).
+        if let Some(awaiting) = self.commit_unit_awaited_predecessor(&tx, &versions).await? {
+            return Ok(PublicationOutcome::settled(vec![SyncMessage::RetryLater {
+                tx_id: tx.tx_id,
+                awaiting,
+            }]));
         }
         if let Some(reason) = Box::pin(self.commit_unit_write_policy_rejection(
             &tx,
@@ -625,9 +608,6 @@ where
                 global_time: None,
                 durability: None,
             }]));
-        }
-        if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Exclusive {
-            return Err(Error::UnsupportedCommitUnit("unsupported commit unit kind"));
         }
         let authority_now_ms =
             GlobalTime::authority_now_ms(now_ms, tx.tx_id.time.physical_ms());
