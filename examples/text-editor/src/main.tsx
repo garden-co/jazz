@@ -65,6 +65,22 @@ function App() {
   const db = useDb();
   const [id, setId] = useState(location.hash.slice(1));
   const [error, setError] = useState("");
+  const [offline, setOffline] = useState(false);
+  const [switching, setSwitching] = useState(false);
+
+  async function toggleOffline() {
+    setSwitching(true);
+    setError("");
+    try {
+      if (offline) await db.reconnect();
+      else await db.disconnect();
+      setOffline(!offline);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setSwitching(false);
+    }
+  }
 
   async function create() {
     try {
@@ -84,6 +100,12 @@ function App() {
     <main>
       <h1>Jazz text editor</h1>
       <p>Open this URL in another browser to share the document. Take turns editing.</p>
+      <p>
+        <label>
+          <input type="checkbox" checked={offline} disabled={switching} onChange={toggleOffline} />{" "}
+          Offline
+        </label>
+      </p>
       {error && <p role="alert">{error}</p>}
       {id ? <Editor id={id} /> : <button onClick={create}>Create document</button>}
     </main>
