@@ -6,12 +6,11 @@
 //! # Running
 //!
 //! ```bash
-//! # First, create an app and start the Jazz server
-//! jazz-tools create app --name todo-app
-//! jazz-tools server <APP_ID> --port 1625
+//! # Start a configured Jazz server with this example's schema and permissions.
+//! # Set JAZZ_APP_ID, JAZZ_SERVER_URL and JAZZ_JWT_TOKEN for an ordinary user.
 //!
 //! # Then run the todo backend
-//! cargo run -p todo-server-docs
+//! cargo run --manifest-path examples/docs/todo-server-rs/Cargo.toml
 //! ```
 //!
 //! # API
@@ -22,7 +21,7 @@
 //! | `/todos` | POST | Create new item |
 //! | `/todos/:id` | PUT | Update item |
 //! | `/todos/:id` | DELETE | Delete item |
-//! | `/updates` | GET | SSE stream of add/remove events |
+//! | `/todos/live` | GET | SSE stream of full-list snapshots |
 
 mod client_worker;
 mod docs_snippets;
@@ -79,6 +78,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_id = std::env::var("JAZZ_APP_ID").unwrap_or_else(|_| "todo-app".to_string());
     let server_url =
         std::env::var("JAZZ_SERVER_URL").unwrap_or_else(|_| "http://localhost:1625".to_string());
+    let jwt_token = std::env::var("JAZZ_JWT_TOKEN")
+        .map_err(|_| "set JAZZ_JWT_TOKEN to a valid ordinary-user JWT")?;
     let data_dir = std::env::var("TODO_DATA_DIR").unwrap_or_else(|_| "./todo-data".to_string());
     let port: u16 = std::env::var("TODO_PORT")
         .ok()
@@ -100,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create Jazz client
     // #region context-setup-rust-backend
     let context = AppContext {
-        app_id: AppId::from_name(&app_id),
+        app_id: AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
         client_id: None,
         schema,
         server_url,
@@ -109,7 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage_factory: Some(std::sync::Arc::new(
             jazz_storage_rocksdb::RocksDbStorageFactory,
         )),
-        jwt_token: None,
+        account_id: None,
+        jwt_token: Some(jwt_token),
         backend_secret: None,
         admin_secret: None,
     };

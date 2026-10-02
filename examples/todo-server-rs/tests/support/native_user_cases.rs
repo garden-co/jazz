@@ -1,11 +1,15 @@
 use std::time::Duration;
 
 use jazz::query::Query;
-use jazz::tools::{AppContext, ClientStorage, ColumnType, SchemaBuilder, TableSchema, Value};
+use jazz::tools::{
+    AppContext, ClientStorage, ColumnType, DurabilityTier, SchemaBuilder, TableSchema, Value,
+};
 use jazz_server::{JazzServer, TestJwtIssuer};
 
 use client_worker::TodoClient;
 
+/// Alice enrols two native devices using only her JWT; a write on the first
+/// device reaches the second through the server with the example's open policies.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_user_enrols_retries_and_syncs_without_privileged_credentials() {
     let schema = SchemaBuilder::new()
@@ -17,6 +21,13 @@ async fn ordinary_user_enrols_retries_and_syncs_without_privileged_credentials()
         .start()
         .await
         .expect("start isolated Jazz server");
+    permissions_support::publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
     let context = AppContext {
         app_id: server.app_id(),
         client_id: None,
@@ -26,7 +37,7 @@ async fn ordinary_user_enrols_retries_and_syncs_without_privileged_credentials()
         storage: ClientStorage::Memory,
         storage_factory: None,
         account_id: None,
-        jwt_token: Some(TestJwtIssuer::jwt_for_user("native-todo-user")),
+        jwt_token: Some(TestJwtIssuer::jwt_for_user("alice")),
         backend_secret: None,
         admin_secret: None,
     };
@@ -44,7 +55,7 @@ async fn ordinary_user_enrols_retries_and_syncs_without_privileged_credentials()
     let rows = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let rows = reader
-                .query(Query::from("todos"), None)
+                .query(Query::from("todos"), Some(DurabilityTier::GlobalServer))
                 .await
                 .expect("query synced rows");
             if !rows.is_empty() {
