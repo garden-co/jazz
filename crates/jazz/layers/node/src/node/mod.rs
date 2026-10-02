@@ -1774,13 +1774,27 @@ pub(super) fn validate_registered_transform(transform: &str) -> Result<(), Error
 }
 
 /// Current-row result backed by an encoded projected record.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct CurrentRow {
     table: groove::Intern<String>,
     record: std::sync::Arc<OwnedRecord>,
     deleted: bool,
     publication_fields: std::sync::Arc<Vec<CurrentRowPublicationField>>,
+    // Lens-projected cells and update provenance do not redefine content authorship.
+    content_witness: Option<(SchemaVersionAlias, TxTime, NodeAlias)>,
 }
+
+impl PartialEq for CurrentRow {
+    fn eq(&self, other: &Self) -> bool {
+        // Witness retention is not an application-visible representation change.
+        self.table == other.table
+            && self.record == other.record
+            && self.deleted == other.deleted
+            && self.publication_fields == other.publication_fields
+    }
+}
+
+impl Eq for CurrentRow {}
 
 /// Work performed by the durable local-write replay lookup.
 ///
@@ -1833,6 +1847,21 @@ pub struct RelationSnapshot {
 }
 
 impl CurrentRow {
+    fn with_content_witness(mut self, content: &VersionRow) -> Self {
+        self.content_witness = (content.layer() == VersionLayer::Content).then(|| {
+            (
+                content.schema_version_alias(),
+                content.tx_time(),
+                content.tx_node_alias(),
+            )
+        });
+        self
+    }
+
+    fn content_witness(&self) -> Option<(SchemaVersionAlias, TxTime, NodeAlias)> {
+        self.content_witness
+    }
+
     /// Construct a current row from an encoded projection record.
     pub fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
         Self::new_with_binding_fields(table, record, CurrentRowBindingRole::PhysicalColumn)
@@ -1946,6 +1975,7 @@ impl CurrentRow {
             record: std::sync::Arc::new(record),
             deleted: false,
             publication_fields: std::sync::Arc::new(publication_fields),
+            content_witness: None,
         }
     }
 
@@ -2318,6 +2348,7 @@ impl CurrentRow {
             binding_fields,
             binding_field_names,
         );
+        projected.content_witness = self.content_witness;
         let fields = std::sync::Arc::make_mut(&mut projected.publication_fields);
         for field in fields {
             let Some(name) = field.application_name() else {

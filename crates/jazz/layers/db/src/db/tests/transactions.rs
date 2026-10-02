@@ -113,6 +113,13 @@ fn renamed_point_read_views_seeded(
     (old, new, pump, authority)
 }
 
+/// Alice's frozen B read retains Bob's A-authored content witness (INV-SYNC-31).
+/// Bob's later matching insert cannot enter that cut and rejects Alice's commit
+/// (INV-READ-3, INV-TX-18); an unchanged exclusive read still commits.
+///
+/// Bob: insert under A -> authority accepts -> rename to B
+/// Alice: frozen B read -> unchanged commit succeeds
+/// Alice: new frozen B read -> Bob's matching insert -> same cut -> commit conflicts
 #[test]
 fn renamed_snapshot_serialized_read_preserves_authored_witness_and_conflicts() {
     let original = row(0x99);
