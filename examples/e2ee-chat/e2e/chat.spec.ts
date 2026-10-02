@@ -132,6 +132,29 @@ test("automatic offline chat survives browser process restart and delivers exact
     await owner.getByLabel("Recipient account ID").fill(recipientId);
     await owner.getByRole("button", { name: "Share chat", exact: true }).click();
     await expect(owner.getByRole("status")).toContainText("Chat shared");
+    // Accepted delivery history must survive without the live authority or
+    // the in-memory snapshot that completed sharing.
+    gate.block();
+    await ownerContext.close();
+    ownerContext = undefined;
+    ownerContext = await chromium.launchPersistentContext(profile, {
+      headless: true,
+      acceptDownloads: true,
+    });
+    owner = await ownerContext.newPage();
+    await owner.goto(`${baseURL}/?chat=${chatId}`);
+    await expect(owner.getByTestId("account-id")).toHaveText(ownerId);
+    await expect(owner.getByText("Only our accounts can read this", { exact: true })).toBeVisible();
+    await expect(owner.getByTestId("message-status")).toHaveText("Local · acceptance unconfirmed");
+    await exactImage(owner);
+    await owner.screenshot({
+      path: test.info().outputPath("offline-post-share-reopen.png"),
+      fullPage: true,
+    });
+    gate.unblock();
+    await owner.getByRole("button", { name: "Reload chat", exact: true }).click();
+    await expect(owner.getByTestId("message-status")).toHaveText("Available from server");
+    await owner.getByLabel("Recipient account ID").fill(recipientId);
     await owner.getByRole("button", { name: "Share chat", exact: true }).click();
     await expect(owner.getByRole("status")).toContainText("Chat shared");
     await recipient.goto(`${baseURL}/?chat=${chatId}`);
