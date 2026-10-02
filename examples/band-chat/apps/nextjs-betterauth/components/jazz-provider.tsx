@@ -101,11 +101,16 @@ function AccountContext({
         await jazz.retry();
       } else if (sessionStorage.getItem(registerIntentKey) === "1") {
         await jazz.registerJWT({ getToken: requireBetterAuthToken });
-      } else {
-        // Every Better Auth session id is a fresh authentication boundary, even
-        // when its subject matches the retained Jazz account.
+      } else if (!retainedAccountMatches(jazz.getSnapshot(), principal)) {
         await jazz.loginJWT({ getToken: requireBetterAuthToken });
       }
+      // Otherwise the Jazz account this browser kept from an earlier sign-in
+      // belongs to the signed-in Better Auth user: its client is already open,
+      // so use it instead of logging in again (which would tear the client
+      // down and reopen it on every load). A JWT login only maps the Better
+      // Auth subject to a Jazz account; the account's own keys authenticate
+      // its sync connection either way, and the server's permission checks
+      // decide what it may read and write.
       if (currentKey.current !== key) return;
       if (key && jazz.getSnapshot().account?.identity.subject !== principal) {
         throw new Error("Jazz selected an account for a different signed-in user.");
@@ -205,6 +210,19 @@ function LoadingScreen({ label }: { label: string }) {
     <StatusScreen>
       <Spinner label={label} />
     </StatusScreen>
+  );
+}
+
+/** The session already has the signed-in user's account open and usable. */
+function retainedAccountMatches(
+  snapshot: ReturnType<JazzSession<JazzClient>["getSnapshot"]>,
+  principal: string | undefined,
+): boolean {
+  return (
+    !!principal &&
+    snapshot.status === "ready" &&
+    !!snapshot.client &&
+    snapshot.account?.identity.subject === principal
   );
 }
 

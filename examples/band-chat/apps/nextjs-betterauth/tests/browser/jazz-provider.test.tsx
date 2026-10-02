@@ -132,21 +132,21 @@ it("does not render A for B and syncs A before replacing its account", async () 
   element.remove();
 });
 
-it("revalidates a new Better Auth session even when the principal is unchanged", async () => {
+it("keeps the open account for a new Better Auth session of the same principal", async () => {
   const element = document.createElement("div");
   const root = createRoot(element);
   await act(async () => root.render(<JazzProvider>rooms</JazzProvider>));
   await waitFor(() => element.textContent === "rooms");
+  const opens = controls.opens;
   controls.session = { session: { id: "new-session-a" }, user: { id: "principal-a" } };
   await act(async () => root.render(<JazzProvider>rooms</JazzProvider>));
-  await waitFor(
-    () => controls.events.filter((event) => event === "login:principal-a").length === 2,
-  );
-  expect(controls.events).toEqual([
-    "login:principal-a",
-    "shutdown:principal-a:true",
-    "login:principal-a",
-  ]);
+  await waitFor(() => element.textContent === "rooms");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  // No second login and no client teardown: the account is already the
+  // signed-in user's, and permissions are enforced by the server either way.
+  expect(controls.events).toEqual(["login:principal-a"]);
+  expect(controls.opens).toBe(opens);
+  expect(element.textContent).toBe("rooms");
   await act(async () => root.unmount());
   await new Promise((resolve) => setTimeout(resolve, 10));
 });
