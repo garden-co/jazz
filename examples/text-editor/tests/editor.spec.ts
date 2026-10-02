@@ -22,10 +22,18 @@ test("persists edits, syncs between browsers, and saves offline", async ({ page,
     await remote.fill("Hello from the other browser");
     await expect(editor).toHaveText("Hello from the other browser");
 
-    await page.context().setOffline(true);
+    const offline = page.getByRole("checkbox", { name: "Offline" });
+    await offline.click();
+    await expect(offline).toBeChecked();
+    await expect(offline).toBeEnabled();
     await editor.fill("An offline edit");
+    await expect(editor).toHaveText("An offline edit");
+    // Give an accidental sync time to arrive before asserting isolation.
+    await reader.waitForTimeout(500);
+    await expect(remote).toHaveText("Hello from the other browser");
     await expect(page.getByRole("alert")).toHaveCount(0);
-    await page.context().setOffline(false);
+    await offline.click();
+    await expect(offline).not.toBeChecked();
     await expect(remote).toHaveText("An offline edit", { timeout: 30_000 });
     await page.reload();
     await expect(editor).toHaveText("An offline edit");

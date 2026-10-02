@@ -6,7 +6,7 @@ export default defineConfig({
   workers: 1,
   use: { baseURL: "http://localhost:5187" },
   webServer: {
-    command: "node node_modules/vite/bin/vite.js --port 5187 --strictPort",
+    command: "node node_modules/vite/bin/vite.js --mode test --port 5187 --strictPort",
     url: "http://localhost:5187",
     timeout: 120_000,
   },
