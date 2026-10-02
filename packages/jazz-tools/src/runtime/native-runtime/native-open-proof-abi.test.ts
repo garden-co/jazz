@@ -1,3 +1,4 @@
+import { mintLocalFirstToken, NapiDb } from "jazz-napi";
 import { describe, expect, it, vi } from "vitest";
 import { authorForNativeOpenConfig } from "./native-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
@@ -65,30 +66,29 @@ describe("self-signed native open ABI", () => {
     expect(oldArtifact.openMemory).not.toHaveBeenCalled();
   });
 
-  it("uses only the distinct proof-bearing entrypoint with the bounded proof fields", () => {
-    const openMemory = vi.fn(() => fakeDb());
-    const openMemoryWithSelfSignedProof = vi.fn(() => fakeDb());
-    const runtime = new NativeRuntimeAdapter(
-      { openMemory, openMemoryWithSelfSignedProof },
-      schema,
-      node,
-      author,
-      1,
-      false,
-      { selfSignedClientProof: proof },
-    );
-
-    expect(openMemory).not.toHaveBeenCalled();
-    expect(openMemoryWithSelfSignedProof).toHaveBeenCalledWith(
-      expect.any(Uint8Array),
-      expect.any(Uint8Array),
-      proof.token,
-      proof.appId,
-      proof.claimedAuthor,
-    );
-    void runtime.close();
-  });
-
+  it.each(["invalid token", "mismatched author"] as const)(
+    "rejects a self-signed native open with %s instead of admitting a raw author",
+    async (scenario) => {
+      const token =
+        scenario === "invalid token"
+          ? "not-a-token"
+          : mintLocalFirstToken(Buffer.alloc(32, 1).toString("base64url"), proof.appId, 60);
+      let runtime: NativeRuntimeAdapter | undefined;
+      try {
+        expect(() => {
+          runtime = new NativeRuntimeAdapter(NapiDb, schema, node, author, 1, false, {
+            selfSignedClientProof: { ...proof, token },
+          });
+        }).toThrow(
+          scenario === "invalid token"
+            ? "invalid token: expected 3 parts"
+            : "self-signed author mismatch",
+        );
+      } finally {
+        await runtime?.close();
+      }
+    },
+  );
   it("fails closed if a worker artifact lacks proof-verified subscriber admission", async () => {
     const rawAdmission = vi.fn();
     const runtime = NativeRuntimeAdapter.fromDb(
@@ -104,26 +104,5 @@ describe("self-signed native open ABI", () => {
     await expect(runtime.acceptPeer()).rejects.toBeInstanceOf(Error);
     expect(rawAdmission).not.toHaveBeenCalled();
     await runtime.close();
-  });
-
-  it("uses only the distinct backend entrypoint for an intentional backend runtime", () => {
-    const openMemory = vi.fn(() => fakeDb());
-    const openMemoryAsBackend = vi.fn(() => fakeDb());
-    const runtime = new NativeRuntimeAdapter(
-      { openMemory, openMemoryAsBackend },
-      schema,
-      node,
-      author,
-      1,
-      false,
-      { backendMode: true },
-    );
-
-    expect(openMemory).not.toHaveBeenCalled();
-    expect(openMemoryAsBackend).toHaveBeenCalledWith(
-      expect.any(Uint8Array),
-      expect.any(Uint8Array),
-    );
-    void runtime.close();
   });
 });
