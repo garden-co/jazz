@@ -139,6 +139,9 @@ pub(super) struct PeerSubscriptionState {
     /// retain a D source without awaiting an upstream handoff.
     pub(super) awaiting_selected_authority_source: bool,
     pub(super) authorization_support_identity: Option<AuthorizationSupportIdentity>,
+    /// Committed cut whose complete authorization support was installed by a
+    /// fresh maintained snapshot. A wire update's cut alone cannot advance it.
+    pub(super) authorization_support_materialized_cut: Option<super::super::time::GlobalTime>,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
     pub(super) supporting_revision: Option<[u8; 16]>,
     /// Shared Local-plus-authority provenance. Receiver/materialization state
@@ -157,6 +160,7 @@ pub(super) struct PeerSubscriptionState {
 
 impl PeerSubscriptionState {
     pub(super) fn clear_groove_runtime_handles(&mut self) {
+        self.authorization_support_materialized_cut = None;
         self.supporting_revision = None;
         self.maintained_subscription_view = None;
         if let Some(prepared_query) = &mut self.prepared_query {

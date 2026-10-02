@@ -9,7 +9,7 @@ mod delivery;
 
 use delivery::*;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::TryRecvError;
 
@@ -46,9 +46,9 @@ pub use subscription_state::PeerRole;
 #[cfg(test)]
 use subscription_state::fast_cursor_membership_mismatch;
 use subscription_state::{
-    CachedPeerQueryPlan, MaintainedRehydrateRequest, MaintainedSubscriptionViewSubscription,
-    MemberIndexKey, MemberSlot, PeerSubscriptionState, RehydratePurpose, RowKey,
-    fast_authorization_progress, fast_current_membership_position,
+    AuthorizationSupportIdentity, CachedPeerQueryPlan, MaintainedRehydrateRequest,
+    MaintainedSubscriptionViewSubscription, MemberIndexKey, MemberSlot, PeerSubscriptionState,
+    RehydratePurpose, RowKey, fast_authorization_progress, fast_current_membership_position,
     fast_cursor_requires_authoritative_reset, member_settle_position,
 };
 
@@ -72,6 +72,10 @@ pub struct PeerState {
     /// coverage outputs and concrete downstream publications. These entries
     /// describe what was evaluated or sent; receiver cursors live separately.
     publication_states: BTreeMap<SubscriptionKey, PeerSubscriptionState>,
+    /// Count-bounded terminal proof receivers keyed by their concrete usage
+    terminal_authorization_support: BTreeMap<SubscriptionKey, AuthorizationSupportIdentity>,
+    terminal_authorization_support_lru: VecDeque<SubscriptionKey>,
+    terminal_authorization_support_context: Option<(u64, u64, u64)>,
     /// Receiver-owned cursors keyed only by the concrete usage subscription
     /// that declared them. A shared canonical coverage output must never adopt
     /// one subscriber's cursor.
@@ -99,12 +103,27 @@ impl Default for PeerState {
             shipped_complete_tx_payloads: BTreeSet::new(),
             ship_complete_exclusive_payloads: false,
             publication_states: BTreeMap::new(),
+            terminal_authorization_support: BTreeMap::new(),
+            terminal_authorization_support_lru: VecDeque::new(),
+            terminal_authorization_support_context: None,
             downstream_known_states: BTreeMap::new(),
-            authority_scope_proofs: 0,
             announced_catalogue_fingerprint: None,
+            authority_scope_proofs: 0,
             metrics: PeerMetrics::default(),
         }
     }
+}
+
+/// Node-aware retirement data for terminal-only proof subscriptions removed
+/// while synchronously transferring a resumable peer cursor.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct TerminalAuthorizationSupportRetirement {
+    publication_owner: u64,
+    subscription: SubscriptionKey,
+    policy_binding: Option<crate::protocol::PolicyBindingKey>,
+    runtime_token: Option<u64>,
+    maintained_subscription_view: Option<MaintainedSubscriptionViewSubscription>,
 }
 
 /// Closed admission capability for a peer transport.

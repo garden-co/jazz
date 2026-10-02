@@ -1937,35 +1937,17 @@ fn normalize_join_via_right(
         current = filter_node;
     }
 
-    if let Some(lookup) = &join.source_lookup {
-        let lookup_source = join_lookup_source_id(lookup, path);
-        auxiliary_sources.insert(lookup_source.clone());
-        let lookup_source_node = RowSetNodeId(format!("{path}:lookup_source"));
-        nodes.insert(
-            lookup_source_node.clone(),
-            RowSetExpr::Source {
-                source: lookup_source.clone(),
-                visibility: RowVisibility::Visible,
-            },
-        );
-        let lookup_join_node = RowSetNodeId(format!("{path}:lookup_join"));
-        nodes.insert(
-            lookup_join_node.clone(),
-            RowSetExpr::Join {
-                left: current,
-                right: lookup_source_node,
-                mode: NormalizedJoinMode::Inner,
-                on: NormalizedPredicateExpr::Compare {
-                    left: join_via_target_key(&join_source, join),
-                    op: NormalizedComparisonOp::Eq,
-                    right: source_column_value(
-                        &lookup_source,
-                        &lookup.value_column,
-                        JoinTarget::Column,
-                    ),
-                },
-            },
-        );
+    let (lookup_input, lookup_source) = normalize_join_source_lookup(
+        nodes,
+        auxiliary_sources,
+        join,
+        &join_source,
+        current,
+        path,
+        &[],
+    );
+    current = lookup_input;
+    if let (Some(lookup_source), Some(lookup)) = (lookup_source, &join.source_lookup) {
         let lookup_project_node = RowSetNodeId(format!("{path}:lookup_project"));
         let mut columns = source_public_field_projections(table, &join_source);
         columns.push(RowProjection {
@@ -1975,7 +1957,7 @@ fn normalize_join_via_right(
         nodes.insert(
             lookup_project_node.clone(),
             RowSetExpr::Project {
-                input: lookup_join_node,
+                input: current,
                 columns,
             },
         );
@@ -2712,14 +2694,74 @@ fn collect_policy_join_group_sources<'a>(
     Ok(())
 }
 
+/// Resolve an inherited join's parent without discarding its source identity.
+/// Grouped witnesses need the parent's columns for outer correlations until the
+/// whole witness tuple has been checked; ordinary joins project afterwards.
+fn normalize_join_source_lookup(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
+    join: &JoinVia,
+    source: &SourceId,
+    input: RowSetNodeId,
+    path: &str,
+    parent_correlations: &[crate::query::JoinCorrelation],
+) -> (RowSetNodeId, Option<SourceId>) {
+    let Some(lookup) = &join.source_lookup else {
+        return (input, None);
+    };
+    let lookup_source = join_lookup_source_id(lookup, path);
+    auxiliary_sources.insert(lookup_source.clone());
+    let lookup_source_node = RowSetNodeId(format!("{path}:lookup_source"));
+    nodes.insert(
+        lookup_source_node.clone(),
+        RowSetExpr::Source {
+            source: lookup_source.clone(),
+            visibility: RowVisibility::Visible,
+        },
+    );
+    let mut predicate = NormalizedPredicateExpr::Compare {
+        left: join_via_target_key(source, join),
+        op: NormalizedComparisonOp::Eq,
+        right: source_column_value(&lookup_source, &lookup.value_column, JoinTarget::Column),
+    };
+    if !parent_correlations.is_empty() {
+        let mut predicates = Vec::with_capacity(1 + parent_correlations.len());
+        predicates.push(predicate);
+        predicates.extend(parent_correlations.iter().map(|correlation| {
+            NormalizedPredicateExpr::Compare {
+                left: source_column_value(source, &correlation.join_column, JoinTarget::Column),
+                op: NormalizedComparisonOp::Eq,
+                right: source_column_value(
+                    &lookup_source,
+                    &correlation.source_column,
+                    JoinTarget::Column,
+                ),
+            }
+        }));
+        predicate = NormalizedPredicateExpr::And(predicates);
+    }
+    let lookup_join_node = RowSetNodeId(format!("{path}:lookup_join"));
+    nodes.insert(
+        lookup_join_node.clone(),
+        RowSetExpr::Join {
+            left: input,
+            right: lookup_source_node,
+            mode: NormalizedJoinMode::Inner,
+            on: predicate,
+        },
+    );
+    (lookup_join_node, Some(lookup_source))
+}
+
 fn policy_join_source_input(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
     schema: &RuntimeSchema,
     join: &JoinVia,
     source: &SourceId,
     prefix: &str,
     occurrence: u32,
-) -> Result<RowSetNodeId, Error> {
+) -> Result<(RowSetNodeId, Option<SourceId>), Error> {
     let source_node = RowSetNodeId(format!("{prefix}:occurrence:{occurrence}:source"));
     nodes.insert(
         source_node.clone(),
@@ -2728,18 +2770,27 @@ fn policy_join_source_input(
             visibility: RowVisibility::Visible,
         },
     );
-    if join.filters.is_empty() {
-        return Ok(source_node);
+    let mut current = source_node;
+    if !join.filters.is_empty() {
+        let filter_node = RowSetNodeId(format!("{prefix}:occurrence:{occurrence}:filter"));
+        nodes.insert(
+            filter_node.clone(),
+            RowSetExpr::Filter {
+                input: current,
+                predicate: normalize_predicates(schema, source, &join.filters, false)?,
+            },
+        );
+        current = filter_node;
     }
-    let filter_node = RowSetNodeId(format!("{prefix}:occurrence:{occurrence}:filter"));
-    nodes.insert(
-        filter_node.clone(),
-        RowSetExpr::Filter {
-            input: source_node,
-            predicate: normalize_predicates(schema, source, &join.filters, false)?,
-        },
-    );
-    Ok(filter_node)
+    Ok(normalize_join_source_lookup(
+        nodes,
+        auxiliary_sources,
+        join,
+        source,
+        current,
+        &format!("{prefix}:occurrence:{occurrence}"),
+        &join.correlated_filters,
+    ))
 }
 
 fn policy_group_equality_predicate(
@@ -2796,14 +2847,6 @@ fn normalize_policy_join_group(
             "policy join group sources do not match their annotation",
         ));
     }
-    if group_sources
-        .values()
-        .any(|(join, _)| join.source_lookup.is_some())
-    {
-        return Err(Error::InvalidStoredValue(
-            "policy join group contains an unsupported source lookup",
-        ));
-    }
 
     let root_occurrence = root_annotation.occurrence;
     let (root_relation_join, root_relation_source) =
@@ -2813,15 +2856,44 @@ fn normalize_policy_join_group(
                 "policy join group root source is missing",
             ))?;
     auxiliary_sources.insert(root_relation_source.clone());
-    let mut relation_current = policy_join_source_input(
+    let (mut relation_current, root_lookup_source) = policy_join_source_input(
         nodes,
+        auxiliary_sources,
         schema,
         root_relation_join,
         root_relation_source,
         prefix,
         root_occurrence,
     )?;
-    let outer_membership = join_via_predicate(root_source, root_relation_source, root_join);
+    let mut lookup_projection = None;
+    let mut outer_membership = if let (Some(lookup_source), Some(lookup)) =
+        (&root_lookup_source, &root_join.source_lookup)
+    {
+        let mut columns = source_public_field_projections(
+            table_schema(schema, &root_relation_join.table)?,
+            root_relation_source,
+        );
+        columns.push(RowProjection {
+            output: typed_output_field(lookup.row_id_source_column.clone(), ColumnType::Uuid),
+            value: NormalizedValueRef::RowId(RowIdRef::Source(lookup_source.clone())),
+        });
+        lookup_projection = Some(columns);
+        NormalizedPredicateExpr::Compare {
+            left: source_column_value(
+                root_source,
+                &lookup.row_id_source_column,
+                JoinTarget::Column,
+            ),
+            op: NormalizedComparisonOp::Eq,
+            right: source_column_value(
+                root_relation_source,
+                &lookup.row_id_source_column,
+                JoinTarget::Column,
+            ),
+        }
+    } else {
+        join_via_predicate(root_source, root_relation_source, root_join)
+    };
 
     let mut included = BTreeSet::from([root_occurrence]);
     let mut remaining = members;
@@ -2847,6 +2919,53 @@ fn normalize_policy_join_group(
                     "policy join group source is missing",
                 ))?;
         auxiliary_sources.insert(next_source.clone());
+        let (next_input, next_lookup_source) = policy_join_source_input(
+            nodes,
+            auxiliary_sources,
+            schema,
+            next_join,
+            next_source,
+            prefix,
+            next_occurrence,
+        )?;
+        if let (Some(lookup_source), Some(lookup)) = (&next_lookup_source, &next_join.source_lookup)
+        {
+            if lookup_projection.is_none() {
+                lookup_projection = Some(source_public_field_projections(
+                    table_schema(schema, &root_relation_join.table)?,
+                    root_relation_source,
+                ));
+            }
+            if let Some(columns) = &mut lookup_projection {
+                columns.push(RowProjection {
+                    output: typed_output_field(
+                        lookup.row_id_source_column.clone(),
+                        ColumnType::Uuid,
+                    ),
+                    value: NormalizedValueRef::RowId(RowIdRef::Source(lookup_source.clone())),
+                });
+            }
+            let membership = NormalizedPredicateExpr::Compare {
+                left: source_column_value(
+                    root_source,
+                    &lookup.row_id_source_column,
+                    JoinTarget::Column,
+                ),
+                op: NormalizedComparisonOp::Eq,
+                right: source_column_value(
+                    root_relation_source,
+                    &lookup.row_id_source_column,
+                    JoinTarget::Column,
+                ),
+            };
+            outer_membership = match outer_membership {
+                NormalizedPredicateExpr::And(mut predicates) => {
+                    predicates.push(membership);
+                    NormalizedPredicateExpr::And(predicates)
+                }
+                predicate => NormalizedPredicateExpr::And(vec![predicate, membership]),
+            };
+        }
         let mut predicates = group
             .equalities
             .iter()
@@ -2858,34 +2977,28 @@ fn normalize_policy_join_group(
             })
             .map(|equality| policy_group_equality_predicate(equality, all_sources))
             .collect::<Result<Vec<_>, _>>()?;
-        predicates.extend(next_join.correlated_filters.iter().map(|correlation| {
-            NormalizedPredicateExpr::Compare {
-                left: source_column_value(
-                    root_source,
-                    &correlation.source_column,
-                    JoinTarget::Column,
-                ),
-                op: NormalizedComparisonOp::Eq,
-                right: source_column_value(
-                    next_source,
-                    &correlation.join_column,
-                    JoinTarget::Column,
-                ),
-            }
-        }));
+        if next_lookup_source.is_none() {
+            predicates.extend(next_join.correlated_filters.iter().map(|correlation| {
+                NormalizedPredicateExpr::Compare {
+                    left: source_column_value(
+                        root_source,
+                        &correlation.source_column,
+                        JoinTarget::Column,
+                    ),
+                    op: NormalizedComparisonOp::Eq,
+                    right: source_column_value(
+                        next_source,
+                        &correlation.join_column,
+                        JoinTarget::Column,
+                    ),
+                }
+            }));
+        }
         if predicates.is_empty() {
             return Err(Error::InvalidStoredValue(
                 "policy join group source has no equality to its witness",
             ));
         }
-        let next_input = policy_join_source_input(
-            nodes,
-            schema,
-            next_join,
-            next_source,
-            prefix,
-            next_occurrence,
-        )?;
         let next_node = RowSetNodeId(format!(
             "{prefix}:group:{}:occurrence:{next_occurrence}:join",
             group.id
@@ -2906,6 +3019,19 @@ fn normalize_policy_join_group(
         relation_current = next_node;
         included.insert(next_occurrence);
         remaining.remove(&next_occurrence);
+    }
+    if let Some(columns) = lookup_projection {
+        // Finish checking the same witness tuple before publishing the looked-up
+        // parent ID as a named right-relation key, as ordinary lookup joins do.
+        let project_node = RowSetNodeId(format!("{prefix}:group:{}:lookup_project", group.id));
+        nodes.insert(
+            project_node.clone(),
+            RowSetExpr::Project {
+                input: relation_current,
+                columns,
+            },
+        );
+        relation_current = project_node;
     }
 
     if record_join_contributions {

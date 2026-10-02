@@ -2854,13 +2854,16 @@ struct AuthorizationScopeLeaseManager {
 }
 
 /// One authority-compiled support hydration retained only while every
-/// authority revision and global cut it represents remains current.  It is
-/// keyed by the support scope rather than the candidate operation, so distinct
-/// rows/patches can reuse hydration but still evaluate their own action.
+/// authority revision, global cut, runtime and physical catalogue generation
+/// it represents remains current. It is keyed by the support scope rather than
+/// the candidate operation, so rows/patches can reuse hydration but still
+/// evaluate their own action.
 #[derive(Clone)]
 struct ServedAuthorizationScopeHydration {
     clauses: Vec<ServedAuthorizationScopeClause>,
     receipt: AuthorizationScopeReceipt,
+    runtime_token: u64,
+    physical_identity_generation: u64,
 }
 
 #[derive(Clone)]

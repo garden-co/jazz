@@ -2885,6 +2885,7 @@ where
                 pending_catalogue_subscriptions: BTreeMap::new(),
                 authority_scope_hydrations: BTreeMap::new(),
                 authority_scope_hydration_count: 0,
+                terminal_support_retirements: Vec::new(),
                 serve_dirty: true,
             }),
             last_resume_bytes: None,
@@ -3162,11 +3163,19 @@ where
                     coverage_groups,
                     shape_registrations,
                     authority_scope_hydrations,
+                    terminal_support_retirements,
                     ..
                 }) => {
                     let retired = retire_relay_upstream_subscriptions_for_connection(
                         &self.relay_upstream_subscription_owners,
                         connection_epoch,
+                    );
+                    let mut terminal_retirements = std::mem::take(terminal_support_retirements);
+                    terminal_retirements
+                        .extend(peer.take_terminal_authorization_support_retirements());
+                    crate::peer::PeerState::retire_terminal_authorization_support_with_node(
+                        &mut node,
+                        terminal_retirements,
                     );
                     // A detached subscriber cannot later send a normal
                     // Unsubscribe. Retire its concrete served usage sites and the

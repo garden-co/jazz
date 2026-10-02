@@ -310,6 +310,17 @@ impl PeerState {
             | RelayTransportCapability::MultiplexedRelay => None,
         }
     }
+    /// The current per-attachment generation for this peer's admitted scope relay.
+    #[doc(hidden)]
+    pub fn admitted_scope_relay_admission_epoch(&self) -> Option<u64> {
+        match &self.transport_capability {
+            RelayTransportCapability::ScopeIsolatedClientRelay {
+                admission_epoch, ..
+            } => Some(*admission_epoch),
+            RelayTransportCapability::OrdinarySession
+            | RelayTransportCapability::MultiplexedRelay => None,
+        }
+    }
 
     /// Replace the per-attachment capability epoch after the server has
     /// detached and resumed this scope-isolated relay. The authenticated

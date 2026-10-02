@@ -1197,13 +1197,22 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
             options,
         )
         .expect("missing policy seed claim must hydrate as an empty authorization proof");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) = update else {
+    let SyncMessage::ViewUpdate(view) = update else {
         panic!("authorization support must return a settled view update");
     };
-    assert_eq!(
-        peer.subscription_policy_binding(subscription),
-        Some((writer, BTreeMap::new())),
-        "the internally allocated authorization support subscription records its proof subject rather than inheriting a transport identity"
+    assert!(
+        view.supporting_rows.added_rows().is_empty(),
+        "a missing seed claim must disclose no protected supporting rows"
+    );
+    assert!(
+        view.version_carriers.is_empty(),
+        "a denied proof must not carry the protected native body"
+    );
+    assert!(
+        !node
+            .dry_run_read_current_allows("resources", resource, writer)
+            .unwrap(),
+        "the complete stored witness cannot authorize a reader without its seed claim"
     );
 }
 

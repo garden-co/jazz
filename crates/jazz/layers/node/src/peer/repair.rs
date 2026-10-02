@@ -170,6 +170,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        self.ensure_terminal_authorization_support_context(node);
         for action in node
             .authorization_actions_for_versions_in_transaction(versions, Some(candidate_tx_id))
             .await?
@@ -229,38 +230,103 @@ impl PeerState {
                 {
                     self.forget_subscription_with_node(node, subscription);
                 }
-                let (cut, progress) = if self
+                let cache_hit = self
                     .publication_states
                     .get(&subscription)
                     .is_some_and(|state| state.maintained_subscription_view.is_some())
                     && retained_support_matches
-                    && self.subscription_policy_binding(subscription) == Some(policy_binding)
-                {
-                    (
-                        node.committed_global_time(),
-                        self.authorization_progress_for_subscription(subscription),
-                    )
+                    && self.subscription_policy_binding(subscription) == Some(policy_binding);
+                let (cut, progress) = if cache_hit {
+                    let target_cut = node.committed_global_time();
+                    let target_runtime = node.groove_runtime_token();
+                    let target_generation = node.physical_identity_generation();
+                    let cache_proves_current_cut = self
+                        .publication_states
+                        .get(&subscription)
+                        .is_some_and(|state| {
+                            state.authorization_support_materialized_cut == Some(target_cut)
+                                && state.groove_runtime_token == Some(target_runtime)
+                                && state.physical_identity_generation == Some(target_generation)
+                                && state
+                                    .maintained_subscription_view
+                                    .as_ref()
+                                    .is_some_and(|view| view.initial_received)
+                        });
+                    let caught_up = if cache_proves_current_cut {
+                        async {
+                            node.drive_query_runtime().await?;
+                            let update = self
+                                .query_update_maintained_subscription_view(
+                                    node,
+                                    &shape,
+                                    &binding,
+                                    subscription,
+                                    None,
+                                    None,
+                                )
+                                .await?;
+                            let update_covers_cut = match update {
+                                Some(SyncMessage::ViewUpdate(view)) => {
+                                    view.settled_through >= target_cut
+                                }
+                                Some(_) => false,
+                                // A no-op drain is valid only because the retained
+                                // complete closure was already proven at this cut.
+                                None => true,
+                            };
+                            Ok::<_, Error>(update_covers_cut)
+                        }
+                        .await
+                        .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if caught_up {
+                        (
+                            target_cut,
+                            self.authorization_progress_for_subscription(subscription),
+                        )
+                    } else {
+                        self.forget_subscription_with_node(node, subscription);
+                        let settled_through = self
+                            .rehydrate_terminal_authorization_support_at_cut(
+                                node,
+                                writer,
+                                claims,
+                                subscription,
+                                &shape,
+                                &binding,
+                                scope.options.clone(),
+                                target_cut,
+                            )
+                            .await?;
+                        self.publication_states
+                            .entry(subscription)
+                            .or_default()
+                            .authorization_support_materialized_cut = Some(target_cut);
+                        (
+                            settled_through,
+                            self.authorization_progress_for_subscription(subscription),
+                        )
+                    }
                 } else {
-                    let update = self
-                        .rehydrate_authorization_support_query_for_identity(
+                    let target_cut = node.committed_global_time();
+                    let settled_through = self
+                        .rehydrate_terminal_authorization_support_at_cut(
                             node,
                             writer,
-                            claims.clone(),
+                            claims,
                             subscription,
                             &shape,
                             &binding,
                             scope.options.clone(),
+                            target_cut,
                         )
-                        .await;
-                    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                        settled_through,
-                        ..
-                    }) = update?
-                    else {
-                        return Err(Error::UnsupportedSyncMessage(
-                            "terminal authority support hydration did not return a view",
-                        ));
-                    };
+                        .await?;
+                    self.publication_states
+                        .entry(subscription)
+                        .or_default()
+                        .authorization_support_materialized_cut = Some(target_cut);
                     (
                         settled_through,
                         self.authorization_progress_for_subscription(subscription),
@@ -269,7 +335,12 @@ impl PeerState {
                 self.publication_states
                     .entry(subscription)
                     .or_default()
-                    .authorization_support_identity = Some(support_identity);
+                    .authorization_support_identity = Some(support_identity.clone());
+                self.retain_terminal_authorization_support(
+                    node,
+                    subscription,
+                    support_identity,
+                );
                 let _ = aggregate.apply(subscription, cut, progress);
             }
             if aggregate.bounds().is_none() {
@@ -281,6 +352,142 @@ impl PeerState {
         }
         Ok(())
     }
+    async fn rehydrate_terminal_authorization_support_at_cut<S: OrderedKvStorage>(
+        &mut self,
+        node: &mut NodeState<S>,
+        writer: AuthorSubject,
+        claims: &BTreeMap<String, Value>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+        target_cut: GlobalTime,
+    ) -> Result<GlobalTime, Error> {
+        let opening = self
+            .rehydrate_authorization_support_query_for_identity(
+                node,
+                writer,
+                claims.clone(),
+                subscription,
+                shape,
+                binding,
+                opts,
+            )
+            .await?;
+        let SyncMessage::ViewUpdate(opening) = opening else {
+            return Err(Error::UnsupportedSyncMessage(
+                "terminal authority support hydration did not return a view",
+            ));
+        };
+        node.drive_query_runtime().await?;
+        let update = self
+            .query_update_maintained_subscription_view(
+                node,
+                shape,
+                binding,
+                subscription,
+                None,
+                None,
+            )
+            .await?;
+        let caught_up_cut = match update {
+            Some(SyncMessage::ViewUpdate(view)) => {
+                opening.settled_through.max(view.settled_through)
+            }
+            Some(_) => {
+                return Err(Error::UnsupportedSyncMessage(
+                    "terminal authority support drain did not return a view",
+                ));
+            }
+            None => opening.settled_through,
+        };
+        let current_runtime = node.groove_runtime_token();
+        let current_generation = node.physical_identity_generation();
+        let current_subscription = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| {
+                (state.groove_runtime_token == Some(current_runtime)
+                    && state.physical_identity_generation == Some(current_generation))
+                .then(|| {
+                    state
+                        .maintained_subscription_view
+                        .as_ref()
+                        .filter(|view| view.initial_received)
+                        .map(|view| view.subscription.id())
+                })
+                .flatten()
+            });
+        if caught_up_cut < target_cut
+            || current_subscription
+                .is_none_or(|id| node.subscription_has_pending_query_runtime(id))
+        {
+            return Err(Error::UnsupportedSyncMessage(
+                "terminal authority support hydration did not materialize through the committed cut",
+            ));
+        }
+        Ok(caught_up_cut)
+    }
+
+    fn retain_terminal_authorization_support<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        identity: AuthorizationSupportIdentity,
+    ) where
+        S: OrderedKvStorage,
+    {
+        if let Some(position) = self
+            .terminal_authorization_support_lru
+            .iter()
+            .position(|candidate| *candidate == subscription)
+        {
+            self.terminal_authorization_support_lru.remove(position);
+        }
+        self.terminal_authorization_support
+            .insert(subscription, identity);
+        self.terminal_authorization_support_lru
+            .push_back(subscription);
+
+        while self.terminal_authorization_support_lru.len()
+            > crate::authorization_scope::MAX_AUTHORIZATION_SCOPES
+        {
+            let Some(evicted) = self.terminal_authorization_support_lru.pop_front() else {
+                break;
+            };
+            let Some(evicted_identity) = self.terminal_authorization_support.remove(&evicted)
+            else {
+                continue;
+            };
+            if self
+                .publication_states
+                .get(&evicted)
+                .is_some_and(|state| {
+                    state.authorization_support_identity.as_ref() == Some(&evicted_identity)
+                })
+            {
+                self.forget_subscription_with_node(node, evicted);
+            }
+        }
+    }
+    fn ensure_terminal_authorization_support_context<S: OrderedKvStorage>(
+        &mut self,
+        node: &mut NodeState<S>,
+    ) {
+        let context = (
+            node.active_catalogue_seq(),
+            node.groove_runtime_token(),
+            node.physical_identity_generation(),
+        );
+        if self.terminal_authorization_support_context == Some(context) {
+            return;
+        }
+        let retirements = self.take_terminal_authorization_support_retirements();
+        Self::retire_terminal_authorization_support_with_node(node, retirements);
+        self.terminal_authorization_support_context = Some(context);
+    }
+
+
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn terminal_authority_scope_proof_count(&self) -> u64 {

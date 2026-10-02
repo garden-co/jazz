@@ -110,7 +110,7 @@ fn empty_policy_filtered_current_source_graph(
 #[cfg_attr(not(test), allow(dead_code))]
 fn compile_permission_scope_policy(
     mut query: JazzQuery,
-    provenance: Option<crate::schema::PolicyRelationProvenance>,
+    mut provenance: Option<crate::schema::PolicyRelationProvenance>,
     claims: Option<&BTreeMap<String, Value>>,
     claim_values: &BTreeMap<String, Value>,
     schema: &RuntimeSchema,
@@ -148,7 +148,7 @@ fn compile_permission_scope_policy(
             reachable
         })
         .collect();
-    prune_session_unsatisfiable_branches(&mut query, claim_values);
+    prune_session_unsatisfiable_branches(&mut query, provenance.as_mut(), claim_values);
     let mut values = BTreeMap::new();
     bind_scope_claim_operands(&mut query, claim_values, &mut values);
     let shape = match provenance {
@@ -169,10 +169,19 @@ fn compile_permission_scope_policy(
 /// The final write-policy evaluation is unaffected: it still evaluates the
 /// complete policy. When every alternative would be dropped, the query is left
 /// unchanged, so an empty branch list is never mistaken for an unrestricted one.
+/// Paired provenance follows the same mask; malformed pairs remain unchanged
+/// for the existing provenance validator to reject.
 fn prune_session_unsatisfiable_branches(
     query: &mut JazzQuery,
+    provenance: Option<&mut crate::schema::PolicyRelationProvenance>,
     claim_values: &BTreeMap<String, Value>,
 ) {
+    if provenance
+        .as_ref()
+        .is_some_and(|provenance| provenance.branches.len() != query.policy_branches.len())
+    {
+        return;
+    }
     let satisfiable = query
         .policy_branches
         .iter()
@@ -186,10 +195,14 @@ fn prune_session_unsatisfiable_branches(
     if satisfiable.iter().all(|keep| *keep) || !satisfiable.iter().any(|keep| *keep) {
         return;
     }
-    let mut keep = satisfiable.into_iter();
+    let mut keep = satisfiable.iter();
     query
         .policy_branches
-        .retain(|_| keep.next().unwrap_or(true));
+        .retain(|_| keep.next().copied().unwrap_or(true));
+    if let Some(provenance) = provenance {
+        let mut keep = satisfiable.into_iter();
+        provenance.branches.retain(|_| keep.next().unwrap_or(true));
+    }
 }
 
 /// The exact value of a predicate that compares only claims and literals, or
@@ -1911,120 +1924,6 @@ mod authorization_scope_compiler_tests {
     }
 
     #[test]
-    fn publisher_support_scope_omits_the_learner_alternative() {
-        use crate::model::public_api::policy::{CmpOp, PolicyValue};
-        let role_is = |role: &str| PublicPolicyExpr::SessionCmp {
-            path: vec!["claims".to_owned(), "role".to_owned()],
-            op: CmpOp::Eq,
-            value: PublicValue::Text(role.to_owned()),
-        };
-        let exists_in = |table: &str, condition: PublicPolicyExpr| PublicPolicyExpr::Exists {
-            table: table.to_owned(),
-            condition: Box::new(condition),
-        };
-        let insert = PublicPolicyExpr::or(vec![
-            PublicPolicyExpr::and(vec![
-                role_is("publisher"),
-                exists_in(
-                    "published_sources",
-                    PublicPolicyExpr::Cmp {
-                        column: "value".to_owned(),
-                        op: CmpOp::Eq,
-                        value: PolicyValue::Literal(PublicValue::Text("public".to_owned())),
-                    },
-                ),
-            ]),
-            PublicPolicyExpr::and(vec![
-                role_is("learner"),
-                exists_in(
-                    "owned_sources",
-                    PublicPolicyExpr::Cmp {
-                        column: "owner".to_owned(),
-                        op: CmpOp::Eq,
-                        value: PolicyValue::SessionRef(vec![
-                            "claims".to_owned(),
-                            "user_id".to_owned(),
-                        ]),
-                    },
-                ),
-            ]),
-        ]);
-        let schema = public_schema(
-            PublicSchemaBuilder::new()
-                .table(
-                    PublicTableSchemaBuilder::new("published_sources")
-                        .column("value", PublicColumnType::Text),
-                )
-                .table(
-                    PublicTableSchemaBuilder::new("owned_sources")
-                        .column("owner", PublicColumnType::Text),
-                )
-                .table(
-                    PublicTableSchemaBuilder::new("protected")
-                        .column("value", PublicColumnType::Text)
-                        .policies(PublicTablePolicies {
-                            select: PublicOperationPolicy::default(),
-                            insert: PublicOperationPolicy::with_check(insert),
-                            update: PublicOperationPolicy::default(),
-                            delete: PublicOperationPolicy::default(),
-                        }),
-                ),
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let cfs = schema.column_families();
-        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-        let mut node = NodeState::new(NodeUuid::from_bytes([0x71; 16]), schema, storage).unwrap();
-        let support = |node: &mut NodeState<_>, identity: AuthorSubject, role: &str| {
-            node.set_test_provider_claims(
-                identity,
-                BTreeMap::from([
-                    (
-                        crate::query::provider_claim_key("role"),
-                        Value::String(role.to_owned()),
-                    ),
-                    (
-                        crate::query::provider_claim_key("user_id"),
-                        Value::String("owner".to_owned()),
-                    ),
-                ]),
-            );
-            let scope = node
-                .authorization_support_scope(
-                    identity,
-                    &PermissionAdviceAction::Insert {
-                        table: "protected".to_owned(),
-                        cells: BTreeMap::from([(
-                            "value".to_owned(),
-                            Value::String("next".to_owned()),
-                        )]),
-                    },
-                )
-                .unwrap();
-            assert_eq!(scope.subscriptions.len(), 1);
-            format!("{:?}", scope.subscriptions[0].shape.query())
-        };
-        let publisher = support(
-            &mut node,
-            AuthorSubject::for_test_bytes([0x72; 16]),
-            "publisher",
-        );
-        let learner = support(
-            &mut node,
-            AuthorSubject::for_test_bytes([0x73; 16]),
-            "learner",
-        );
-        assert!(publisher.contains("published_sources"));
-        assert!(
-            !publisher.contains("owned_sources"),
-            "a publisher's insert support must not hydrate the learner alternative"
-        );
-        assert!(learner.contains("owned_sources"));
-        assert!(!learner.contains("published_sources"));
-    }
-
-    #[test]
     fn support_compiles_only_the_alternatives_the_session_claims_can_satisfy() {
         use crate::query::PolicyBranch;
         let role = || Operand::Claim(crate::query::provider_claim_key("role"));
@@ -2064,6 +1963,7 @@ mod authorization_scope_compiler_tests {
         let mut publisher = policy.clone();
         prune_session_unsatisfiable_branches(
             &mut publisher,
+            None,
             &claims(Value::String("publisher".to_owned())),
         );
         assert_eq!(
@@ -2077,6 +1977,7 @@ mod authorization_scope_compiler_tests {
         let mut learner = policy.clone();
         prune_session_unsatisfiable_branches(
             &mut learner,
+            None,
             &claims(Value::Nullable(Some(Box::new(Value::String(
                 "learner".to_owned(),
             ))))),
@@ -2092,7 +1993,7 @@ mod authorization_scope_compiler_tests {
         // A differently typed or missing claim is left to the runtime comparison.
         for claims in [claims(Value::Bool(true)), BTreeMap::new()] {
             let mut unchanged = policy.clone();
-            prune_session_unsatisfiable_branches(&mut unchanged, &claims);
+            prune_session_unsatisfiable_branches(&mut unchanged, None, &claims);
             assert_eq!(unchanged.policy_branches, policy.policy_branches);
         }
 
@@ -2102,48 +2003,10 @@ mod authorization_scope_compiler_tests {
         let expected = only_learner.policy_branches.clone();
         prune_session_unsatisfiable_branches(
             &mut only_learner,
+            None,
             &claims(Value::String("publisher".to_owned())),
         );
         assert_eq!(only_learner.policy_branches, expected);
-    }
-
-    #[test]
-    fn action_selects_exact_policy_dependencies() {
-        let table = table();
-        assert_eq!(
-            authorization_policy_queries(&table, AuthorizationScopeOperation::Read),
-            vec![(
-                crate::schema::PolicySlot::SelectUsing,
-                authorization_query_from_read_policy(&table)
-            )]
-        );
-        assert_eq!(
-            authorization_policy_queries(&table, AuthorizationScopeOperation::Insert),
-            vec![(
-                crate::schema::PolicySlot::InsertWithCheck,
-                JazzQuery::from("insert_support")
-            )]
-        );
-        assert_eq!(
-            authorization_policy_queries(&table, AuthorizationScopeOperation::Update),
-            vec![
-                (
-                    crate::schema::PolicySlot::UpdateUsing,
-                    JazzQuery::from("old_support")
-                ),
-                (
-                    crate::schema::PolicySlot::UpdateWithCheck,
-                    JazzQuery::from("new_support")
-                )
-            ]
-        );
-        assert_eq!(
-            authorization_policy_queries(&table, AuthorizationScopeOperation::Delete),
-            vec![(
-                crate::schema::PolicySlot::DeleteUsing,
-                JazzQuery::from("delete_support")
-            )]
-        );
     }
 
     #[test]

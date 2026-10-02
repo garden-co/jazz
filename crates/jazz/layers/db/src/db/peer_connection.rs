@@ -513,6 +513,10 @@ pub(super) enum PendingSubscriberControlResponse {
     Direct(SyncMessage),
     WithSyncContext(SyncMessage),
     AuthorizationScopeSequence(PendingAuthorizationScopeSequence),
+    AuthorizationScopeResponse {
+        message: SyncMessage,
+        context: PendingAuthorizationScopeContext,
+    },
 }
 
 /// Lazily emits one authorization-scope proof sequence. The clauses are the
@@ -524,11 +528,59 @@ pub(super) struct PendingAuthorizationScopeSequence {
     request_id: PermissionAdviceRequestId,
     key: crate::protocol::AuthorizationSupportScopeKey,
     hydration: ServedAuthorizationScopeHydration,
+    context: PendingAuthorizationScopeContext,
     next_step: usize,
+    invalidated_cleanup: Option<(Vec<SubscriptionKey>, usize)>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum AuthorizationScopeClaimSource {
+    DirectSession,
+    DelegatedRequest,
+    ScopeIsolatedRelay {
+        identity: AuthorSubject,
+        admission_epoch: u64,
+    },
+}
+
+#[derive(Clone)]
+pub(super) struct PendingAuthorizationScopeContext {
+    claims: BTreeMap<String, Value>,
+    claim_source: AuthorizationScopeClaimSource,
+    connection_epoch: u64,
+    claims_revision: u64,
+    policy_epoch: u64,
+    cut: crate::time::GlobalTime,
+    runtime_token: u64,
+    physical_identity_generation: u64,
 }
 
 impl PendingAuthorizationScopeSequence {
+    fn invalidate(&mut self) {
+        let accepted_subscriptions = self
+            .hydration
+            .clauses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, clause)| {
+                (self.next_step > index * 3 + 1).then_some(clause.subscription)
+            })
+            .collect();
+        self.invalidated_cleanup = Some((accepted_subscriptions, 0));
+    }
+
     fn next_message(&self) -> Option<SyncMessage> {
+        if let Some((subscriptions, cleanup_step)) = &self.invalidated_cleanup {
+            if *cleanup_step == 0 {
+                return Some(SyncMessage::AuthorizationScopeUnavailable {
+                    request_id: self.request_id,
+                });
+            }
+            return subscriptions
+                .get(cleanup_step - 1)
+                .copied()
+                .map(|subscription| SyncMessage::Unsubscribe { subscription });
+        }
         let clause_count = self.hydration.clauses.len();
         let proof_steps = clause_count.checked_mul(3)?;
         if self.next_step < proof_steps {
@@ -563,7 +615,22 @@ impl PendingAuthorizationScopeSequence {
     }
 
     fn advance(&mut self) {
-        self.next_step = self.next_step.saturating_add(1);
+        if let Some((subscriptions, cleanup_step)) = &mut self.invalidated_cleanup {
+            *cleanup_step = cleanup_step.saturating_add(1);
+            if *cleanup_step > subscriptions.len() {
+                self.invalidated_cleanup = None;
+                self.next_step = usize::MAX;
+            }
+        } else {
+            self.next_step = self.next_step.saturating_add(1);
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        if let Some((subscriptions, cleanup_step)) = &self.invalidated_cleanup {
+            return *cleanup_step > subscriptions.len();
+        }
+        self.next_message().is_none()
     }
 }
 
@@ -580,6 +647,7 @@ impl PendingSubscriberControlResponse {
     pub(super) fn message(&self) -> &SyncMessage {
         match self {
             Self::Direct(message) | Self::WithSyncContext(message) => message,
+            Self::AuthorizationScopeResponse { message, .. } => message,
             Self::AuthorizationScopeSequence(_) => {
                 panic!("scope sequences generate messages lazily")
             }
@@ -606,6 +674,7 @@ fn queue_authorization_scope_sequence(
     request_id: PermissionAdviceRequestId,
     key: crate::protocol::AuthorizationSupportScopeKey,
     hydration: ServedAuthorizationScopeHydration,
+    context: PendingAuthorizationScopeContext,
 ) {
     pending.push_back(
         PendingSubscriberControlResponse::AuthorizationScopeSequence(
@@ -613,20 +682,25 @@ fn queue_authorization_scope_sequence(
                 request_id,
                 key,
                 hydration,
+                context,
                 next_step: 0,
+                invalidated_cleanup: None,
             },
         ),
     );
 }
 
 macro_rules! flush_subscriber_controls_or_stop {
-    ($connection:expr, $peer:expr) => {
+    ($connection:expr, $peer:expr, $session_claims:expr, $session_claim_revision:expr) => {
         if !flush_pending_control_responses(
             &$connection.node,
             $peer,
             $connection.transport.as_mut(),
             &mut $connection.pending_control_responses,
             &$connection.scheduler,
+            $connection.connection_epoch,
+            $session_claims,
+            $session_claim_revision,
         )? {
             return Ok(true);
         }
@@ -789,6 +863,8 @@ pub(super) struct SubscriberConnectionState {
     pub(super) authority_scope_hydrations:
         BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ServedAuthorizationScopeHydration>,
     pub(super) authority_scope_hydration_count: u64,
+    pub(super) terminal_support_retirements:
+        Vec<crate::peer::TerminalAuthorizationSupportRetirement>,
     pub(super) serve_dirty: bool,
 }
 
@@ -984,6 +1060,7 @@ where
             served,
             coverage_groups,
             upstream_subscriptions,
+            authority_scope_hydrations,
             serve_dirty,
             ..
         }) = &mut self.link
@@ -1074,6 +1151,15 @@ where
         // new key has never been opened; retire the old key explicitly before
         // scheduling a fresh group. Otherwise its PeerState cursor and
         // Groove subscription remain live under the old policy snapshot.
+        authority_scope_hydrations.clear();
+        let terminal_retirements = peer.take_terminal_authorization_support_retirements();
+        if !terminal_retirements.is_empty() {
+            let mut node = self.node.borrow_mut();
+            crate::peer::PeerState::retire_terminal_authorization_support_with_node(
+                &mut node,
+                terminal_retirements,
+            );
+        }
         for stale_subscription in stale_maintained_subscriptions {
             peer.note_claim_refresh_full_diff(stale_subscription);
             let mut node = self.node.borrow_mut();
@@ -1501,11 +1587,20 @@ where
             ingest_context,
             session_claims,
             session_claim_revision,
+            terminal_support_retirements,
             ..
         }) = &mut self.link
         else {
             return None;
         };
+        terminal_support_retirements.extend(peer.take_terminal_authorization_support_retirements());
+        self.pending_control_responses.retain(|response| {
+            !matches!(
+                response,
+                PendingSubscriberControlResponse::AuthorizationScopeSequence(_)
+                    | PendingSubscriberControlResponse::AuthorizationScopeResponse { .. }
+            )
+        });
         let replacement = match peer.role() {
             PeerRole::Relay => PeerState::relay(),
             PeerRole::ClientLink { identity } => PeerState::client_link(identity),
@@ -3689,8 +3784,8 @@ where
             ConnectionLink::Subscriber(SubscriberConnectionState {
                 peer,
                 ingest_context,
-                session_claims: _,
-                session_claim_revision: _,
+                session_claims,
+                session_claim_revision,
                 local_receiver,
                 outbox,
                 upstream_subscriptions,
@@ -3701,6 +3796,7 @@ where
                 pending_catalogue_subscriptions,
                 authority_scope_hydrations,
                 authority_scope_hydration_count,
+                terminal_support_retirements: _,
                 serve_dirty,
             }) => {
                 let stop = Box::pin(async {
@@ -3824,6 +3920,9 @@ where
                     self.transport.as_mut(),
                     &mut self.pending_control_responses,
                     &self.scheduler,
+                    self.connection_epoch,
+                    session_claims,
+                    *session_claim_revision,
                 )? {
                     return Ok(true);
                 }
@@ -4001,7 +4100,12 @@ where
                                 }
                             }
                             schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                            flush_subscriber_controls_or_stop!(self, peer);
+                            flush_subscriber_controls_or_stop!(
+                                self,
+                                peer,
+                                session_claims,
+                                *session_claim_revision
+                            );
                             continue;
                         }
                         SyncMessage::AuthorizationScopeIntent {
@@ -4020,6 +4124,7 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            let delegated_request = delegated_session.is_some();
                             let Some((scope_identity, scope_claims)) = admitted_request_policy_binding(
                                 *ingest_context,
                                 peer,
@@ -4029,13 +4134,28 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             };
-                            serve_authorization_scope_intent(
+                            let claim_source = match (
+                                delegated_request,
+                                peer.admitted_scope_relay_admission_epoch(),
+                            ) {
+                                (false, _) => AuthorizationScopeClaimSource::DirectSession,
+                                (true, Some(admission_epoch)) => {
+                                    AuthorizationScopeClaimSource::ScopeIsolatedRelay {
+                                        identity: scope_identity,
+                                        admission_epoch,
+                                    }
+                                }
+                                (true, None) => AuthorizationScopeClaimSource::DelegatedRequest,
+                            };
+                            serve_authorization_scope_intent_with_claim_revision(
                                 &self.node,
                                 peer,
                                 &mut self.pending_control_responses,
                                 scope_identity,
                                 scope_claims,
                                 connection_epoch,
+                                *session_claim_revision,
+                                claim_source,
                                 request_id,
                                 action,
                                 ingest_context.trust,
@@ -4047,7 +4167,12 @@ where
                             .await?;
                             if !self.pending_control_responses.is_empty() {
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                flush_subscriber_controls_or_stop!(self, peer);
+                                flush_subscriber_controls_or_stop!(
+                                    self,
+                                    peer,
+                                    session_claims,
+                                    *session_claim_revision
+                                );
                             }
                             continue;
                         }
@@ -4102,7 +4227,12 @@ where
                                     ),
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                flush_subscriber_controls_or_stop!(self, peer);
+                                flush_subscriber_controls_or_stop!(
+                                    self,
+                                    peer,
+                                    session_claims,
+                                    *session_claim_revision
+                                );
                                 return Ok(true);
                             }
                             if let Err(error) = ensure_supported_register_shape_options(
@@ -4127,7 +4257,12 @@ where
                                     ),
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                flush_subscriber_controls_or_stop!(self, peer);
+                                flush_subscriber_controls_or_stop!(
+                                    self,
+                                    peer,
+                                    session_claims,
+                                    *session_claim_revision
+                                );
                                 return Ok(true);
                             }
                             let shape_validation = {
@@ -4149,7 +4284,12 @@ where
                                             ),
                                         );
                                         schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                        flush_subscriber_controls_or_stop!(self, peer);
+                                        flush_subscriber_controls_or_stop!(
+                                            self,
+                                            peer,
+                                            session_claims,
+                                            *session_claim_revision
+                                        );
                                         return Ok(true);
                                     } else {
                                         drop_peer_request(&self.node);
@@ -4213,7 +4353,12 @@ where
                                             ),
                                         );
                                         schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                        flush_subscriber_controls_or_stop!(self, peer);
+                                        flush_subscriber_controls_or_stop!(
+                                            self,
+                                            peer,
+                                            session_claims,
+                                            *session_claim_revision
+                                        );
                                         return Ok(true);
                                     } else if let Err(error) = supported {
                                         queue_direct_control(&mut self.pending_control_responses,
@@ -4227,7 +4372,12 @@ where
                                             ),
                                         );
                                         schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                        flush_subscriber_controls_or_stop!(self, peer);
+                                        flush_subscriber_controls_or_stop!(
+                                            self,
+                                            peer,
+                                            session_claims,
+                                            *session_claim_revision
+                                        );
                                         return Ok(true);
                                     }
                                 }
@@ -4255,7 +4405,12 @@ where
                                             ),
                                         );
                                         schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                        flush_subscriber_controls_or_stop!(self, peer);
+                                        flush_subscriber_controls_or_stop!(
+                                            self,
+                                            peer,
+                                            session_claims,
+                                            *session_claim_revision
+                                        );
                                         return Ok(true);
                                     }
                                     _ => {}
@@ -4281,7 +4436,12 @@ where
                                     ),
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                flush_subscriber_controls_or_stop!(self, peer);
+                                flush_subscriber_controls_or_stop!(
+                                    self,
+                                    peer,
+                                    session_claims,
+                                    *session_claim_revision
+                                );
                                 return Ok(true);
                             }
                             let registration = if awaiting_catalogue_admission {
@@ -4501,14 +4661,24 @@ where
                                     ),
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                flush_subscriber_controls_or_stop!(self, peer);
+                                flush_subscriber_controls_or_stop!(
+                                    self,
+                                    peer,
+                                    session_claims,
+                                    *session_claim_revision
+                                );
                                 return Ok(true);
                             } else if let Err(error) = supported {
                                 queue_direct_control(&mut self.pending_control_responses,
                                     server_subscription_failure_rejection_message(subscription, &error),
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                flush_subscriber_controls_or_stop!(self, peer);
+                                flush_subscriber_controls_or_stop!(
+                                    self,
+                                    peer,
+                                    session_claims,
+                                    *session_claim_revision
+                                );
                                 return Ok(true);
                             }
                             let group_subscription = coverage_group_subscription_key(&coverage);
@@ -4806,20 +4976,6 @@ where
                                     .or_insert(owner);
                             }
                             served.insert(subscription, coverage);
-                            if let Some(mut update) = opening_pending {
-                                stamp_view_update_authorization_progress_from(
-                                    peer,
-                                    group_subscription,
-                                    &mut update,
-                                );
-                                #[cfg(feature = "sync-autopsy")]
-                                sync_autopsy::record(format!(
-                                    "subscriber send rehydrate {}",
-                                    summarize_sync_message(&update)
-                                ));
-                                self.last_resume_bytes = Some(serialized_sync_message_len(&update));
-                                sent_view_update = true;
-                            }
                             if first_subscriber && group.upstream_opts.propagate_upstream {
                                 upstream_subscriptions.borrow_mut().push(
                                     PendingUpstreamCommand::Subscribe(
@@ -4844,11 +5000,47 @@ where
                             // initial hydration is attempted.
                             schedule_tick_in(&self.scheduler, TickUrgency::AfterCurrentTurn);
                             scheduled_follow_up = true;
+                            if let Some(mut update) = opening_pending {
+                                stamp_view_update_authorization_progress_from(
+                                    peer,
+                                    group_subscription,
+                                    &mut update,
+                                );
+                                #[cfg(feature = "sync-autopsy")]
+                                sync_autopsy::record(format!(
+                                    "subscriber send rehydrate {}",
+                                    summarize_sync_message(&update)
+                                ));
+                                let resume_bytes = serialized_sync_message_len(&update);
+                                if let Some(update) = try_send_prepared_subscriber_with_sync_context(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    &self.local_fate_routes,
+                                    &self.downstream_fates,
+                                    update,
+                                )? {
+                                    // Pending progress is a one-shot delivery obligation,
+                                    // not a settled opening. Retry it before the ordinary
+                                    // permissions-ready hydration gate.
+                                    queue_sync_context_control(
+                                        &mut self.pending_control_responses,
+                                        update,
+                                    );
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                                } else {
+                                    self.last_resume_bytes = Some(resume_bytes);
+                                    sent_view_update = true;
+                                }
+                            }
                             Ok::<bool, Error>(false)
                             })
                             .await?;
                             if should_continue {
                                 continue;
+                            }
+                            if !self.pending_control_responses.is_empty() {
+                                return Ok(true);
                             }
                         }
                         SyncMessage::Unsubscribe { subscription } => {
@@ -5743,6 +5935,9 @@ where
                         self.transport.as_mut(),
                         &mut self.pending_control_responses,
                         &self.scheduler,
+                        self.connection_epoch,
+                        session_claims,
+                        *session_claim_revision,
                     )? {
                         return Ok(true);
                     }
@@ -6261,12 +6456,7 @@ pub struct AuthorizationScopeTestHook {
     pub reached_second_clause: bool,
 }
 
-/// Compile and serve an authorization scope entirely at the serving authority.
-///
-/// This intentionally does not reuse the subscriber's shape registry or any
-/// caller-provided subscription.  The authority allocates opaque usage-site
-/// keys, registers canonical shapes in the receiver, and only then sends the
-/// ordinary view updates in authority-scope envelopes.
+#[cfg(test)]
 pub async fn serve_authorization_scope_intent<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
@@ -6282,11 +6472,61 @@ pub async fn serve_authorization_scope_intent<S>(
         ServedAuthorizationScopeHydration,
     >,
     hydration_count: &mut u64,
+    #[cfg(test)] test_hook: Option<&mut AuthorizationScopeTestHook>,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let session_claim_revision = node.borrow().session_claim_revision(identity);
+    serve_authorization_scope_intent_with_claim_revision(
+        node,
+        peer,
+        pending_control_responses,
+        identity,
+        session_claims,
+        connection_epoch,
+        session_claim_revision,
+        AuthorizationScopeClaimSource::DirectSession,
+        request_id,
+        action,
+        trust,
+        hydrations,
+        hydration_count,
+        #[cfg(test)]
+        test_hook,
+    )
+    .await
+}
+
+/// Compile and serve an authorization scope entirely at the serving authority.
+///
+/// This intentionally does not reuse the subscriber's shape registry or any
+/// caller-provided subscription.  The authority allocates opaque usage-site
+/// keys, registers canonical shapes in the receiver, and only then sends the
+/// ordinary view updates in authority-scope envelopes.
+pub(super) async fn serve_authorization_scope_intent_with_claim_revision<S>(
+    node: &SharedNodeState<S>,
+    peer: &mut PeerState,
+    pending_control_responses: &mut VecDeque<PendingSubscriberControlResponse>,
+    identity: AuthorSubject,
+    session_claims: BTreeMap<String, Value>,
+    connection_epoch: u64,
+    session_claim_revision: u64,
+    claim_source: AuthorizationScopeClaimSource,
+    request_id: PermissionAdviceRequestId,
+    action: PermissionAdviceAction,
+    trust: CommitUnitTrust,
+    hydrations: &mut BTreeMap<
+        crate::protocol::AuthorizationSupportScopeKey,
+        ServedAuthorizationScopeHydration,
+    >,
+    hydration_count: &mut u64,
     #[cfg(test)] mut test_hook: Option<&mut AuthorizationScopeTestHook>,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    let current_claims_revision = session_claim_revision;
     if !node.borrow().is_history_complete()
         || !subscriber_permissions_ready(node.borrow().permissions_ready(), trust)
     {
@@ -6322,34 +6562,73 @@ where
             "authorization scope has too many clauses",
         )
     })?;
+    // Capture provenance before any lock/evaluation await. A generation
+    // change during hydration must invalidate its first pending frame.
+    let (
+        current_policy_epoch,
+        current_cut,
+        current_runtime_token,
+        current_physical_identity_generation,
+    ) = {
+        let node = node.borrow();
+        (
+            node.active_catalogue_seq(),
+            node.committed_global_time(),
+            node.groove_runtime_token(),
+            node.physical_identity_generation(),
+        )
+    };
     if clause_count == 0 {
         let advice = {
             let mut node = node.lock().await;
             let mut node = node.scoped_active_session_claims(identity, session_claims.clone());
             evaluate_authoritative_permission_advice(&mut node, identity, action).await
         };
-        queue_direct_control(
-            pending_control_responses,
-            SyncMessage::AuthorizationScopeDecision { request_id, advice },
+        let context = PendingAuthorizationScopeContext {
+            claims: session_claims,
+            claim_source,
+            connection_epoch,
+            claims_revision: current_claims_revision,
+            cut: current_cut,
+            policy_epoch: current_policy_epoch,
+            runtime_token: current_runtime_token,
+            physical_identity_generation: current_physical_identity_generation,
+        };
+        pending_control_responses.push_back(
+            PendingSubscriberControlResponse::AuthorizationScopeResponse {
+                message: SyncMessage::AuthorizationScopeDecision { request_id, advice },
+                context,
+            },
         );
         return Ok(());
     }
-    let current_claims_revision = node.borrow().session_claim_revision(identity);
-    let current_policy_epoch = node.borrow().active_catalogue_seq();
-    let current_cut = node.borrow().committed_global_time();
     // A cache entry is evidence, not a generic response cache.  Prune every
-    // revision/cut mismatch before looking up this compiled support key.
+    // revision/cut/generation mismatch before looking up this support key.
     hydrations.retain(|_, hydration| {
-        hydration.receipt.claims_revision == current_claims_revision
+        hydration.receipt.authority_epoch == connection_epoch
+            && hydration.receipt.claims_revision == current_claims_revision
             && hydration.receipt.policy_epoch == current_policy_epoch
             && hydration.receipt.settled_through == current_cut
+            && hydration.runtime_token == current_runtime_token
+            && hydration.physical_identity_generation == current_physical_identity_generation
     });
     if let Some(hydration) = hydrations.get(&scope.key) {
+        let context = PendingAuthorizationScopeContext {
+            claims: session_claims,
+            claim_source,
+            connection_epoch,
+            claims_revision: hydration.receipt.claims_revision,
+            cut: hydration.receipt.settled_through,
+            policy_epoch: hydration.receipt.policy_epoch,
+            runtime_token: hydration.runtime_token,
+            physical_identity_generation: hydration.physical_identity_generation,
+        };
         queue_authorization_scope_sequence(
             pending_control_responses,
             request_id,
             scope.key.clone(),
             hydration.clone(),
+            context,
         );
         return Ok(());
     }
@@ -6474,9 +6753,8 @@ where
         let progress = receivers
             .peer
             .authorization_progress_for_subscription(subscription);
-        if aggregate.apply(subscription, *cut, progress).is_none()
-            && index + 1 == support_clauses.len()
-        {
+        let aggregate_bounds = aggregate.apply(subscription, *cut, progress);
+        if aggregate_bounds.is_none() && index + 1 == support_clauses.len() {
             queue_direct_control(
                 pending_control_responses,
                 SyncMessage::AuthorizationScopeUnavailable { request_id },
@@ -6510,6 +6788,8 @@ where
     let hydration = ServedAuthorizationScopeHydration {
         clauses: served_clauses,
         receipt,
+        runtime_token: current_runtime_token,
+        physical_identity_generation: current_physical_identity_generation,
     };
     if hydrations.len() < MAX_AUTHORIZATION_SCOPES {
         hydrations.insert(scope.key.clone(), hydration.clone());
@@ -6518,7 +6798,24 @@ where
     // lifetime ends after the receipt; FIFO keeps the receiver's local
     // evaluation ahead of this cleanup.
     drop(receivers);
-    queue_authorization_scope_sequence(pending_control_responses, request_id, scope.key, hydration);
+    drop(node_owner);
+    let context = PendingAuthorizationScopeContext {
+        claims: session_claims,
+        claim_source,
+        connection_epoch,
+        claims_revision: hydration.receipt.claims_revision,
+        cut: hydration.receipt.settled_through,
+        policy_epoch: hydration.receipt.policy_epoch,
+        runtime_token: hydration.runtime_token,
+        physical_identity_generation: hydration.physical_identity_generation,
+    };
+    queue_authorization_scope_sequence(
+        pending_control_responses,
+        request_id,
+        scope.key,
+        hydration,
+        context,
+    );
     Ok(())
 }
 
@@ -7224,12 +7521,47 @@ fn flush_pending_chunk_response(
 /// a rejected byte admission as a completed reply would otherwise leave the
 /// requester waiting forever. One retained message bounds a stalled link; the
 /// subscriber tick stops as soon as it creates one.
+fn authorization_scope_context_is_current<S: OrderedKvStorage>(
+    node: &SharedNodeState<S>,
+    peer: &PeerState,
+    context: &PendingAuthorizationScopeContext,
+    connection_epoch: u64,
+    session_claims: &BTreeMap<String, Value>,
+    session_claim_revision: u64,
+) -> bool {
+    let claims_are_current = match context.claim_source {
+        AuthorizationScopeClaimSource::DirectSession => {
+            context.claims_revision == session_claim_revision && &context.claims == session_claims
+        }
+        AuthorizationScopeClaimSource::DelegatedRequest => true,
+        AuthorizationScopeClaimSource::ScopeIsolatedRelay {
+            identity,
+            admission_epoch,
+        } => {
+            peer.admitted_scope_relay_binding().is_some_and(|binding| {
+                binding.identity == identity && binding.claims == context.claims
+            }) && peer.admitted_scope_relay_admission_epoch() == Some(admission_epoch)
+        }
+    };
+    if context.connection_epoch != connection_epoch || !claims_are_current {
+        return false;
+    }
+    let node = node.borrow();
+    context.policy_epoch == node.active_catalogue_seq()
+        && context.cut == node.committed_global_time()
+        && context.runtime_token == node.groove_runtime_token()
+        && context.physical_identity_generation == node.physical_identity_generation()
+}
+
 fn flush_pending_control_responses<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
     pending: &mut VecDeque<PendingSubscriberControlResponse>,
     scheduler: &SharedTickScheduler,
+    connection_epoch: u64,
+    session_claims: &BTreeMap<String, Value>,
+    session_claim_revision: u64,
 ) -> Result<bool, Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -7238,12 +7570,64 @@ where
         let Some(response) = pending.front() else {
             return Ok(true);
         };
+        let sequence_stale = matches!(
+            response,
+            PendingSubscriberControlResponse::AuthorizationScopeSequence(sequence)
+                if sequence.invalidated_cleanup.is_none()
+                    && !authorization_scope_context_is_current(
+                        node,
+                        peer,
+                        &sequence.context,
+                        connection_epoch,
+                        session_claims,
+                        session_claim_revision,
+                    )
+        );
+        if sequence_stale {
+            if let Some(PendingSubscriberControlResponse::AuthorizationScopeSequence(sequence)) =
+                pending.front_mut()
+            {
+                sequence.invalidate();
+            }
+            continue;
+        }
+        let stale_scope = match response {
+            PendingSubscriberControlResponse::AuthorizationScopeResponse { message, context }
+                if !authorization_scope_context_is_current(
+                    node,
+                    peer,
+                    context,
+                    connection_epoch,
+                    session_claims,
+                    session_claim_revision,
+                ) =>
+            {
+                let SyncMessage::AuthorizationScopeDecision { request_id, .. } = message else {
+                    return Err(Error::new(
+                        ErrorCode::Protocol,
+                        "validated authorization scope response has the wrong message",
+                    ));
+                };
+                Some(SyncMessage::AuthorizationScopeUnavailable {
+                    request_id: *request_id,
+                })
+            }
+            _ => None,
+        };
+        if let Some(message) = stale_scope {
+            *pending.front_mut().expect("scope response remains queued") =
+                PendingSubscriberControlResponse::Direct(message);
+            continue;
+        }
         let send_result = match response {
             PendingSubscriberControlResponse::Direct(response) => {
                 transport.send(response.clone()).map_err(transport_error)
             }
             PendingSubscriberControlResponse::WithSyncContext(response) => {
                 send_with_sync_context(node, peer, transport, response.clone())
+            }
+            PendingSubscriberControlResponse::AuthorizationScopeResponse { message, .. } => {
+                transport.send(message.clone()).map_err(transport_error)
             }
             PendingSubscriberControlResponse::AuthorizationScopeSequence(sequence) => {
                 let Some(response) = sequence.next_message() else {
@@ -7263,10 +7647,13 @@ where
                         sequence,
                     )) => {
                         sequence.advance();
-                        sequence.next_message().is_none()
+                        sequence.is_finished()
                     }
                     Some(PendingSubscriberControlResponse::Direct(_))
-                    | Some(PendingSubscriberControlResponse::WithSyncContext(_)) => true,
+                    | Some(PendingSubscriberControlResponse::WithSyncContext(_))
+                    | Some(PendingSubscriberControlResponse::AuthorizationScopeResponse {
+                        ..
+                    }) => true,
                     None => unreachable!("accepted control operation remains queued"),
                 };
                 if finished {
