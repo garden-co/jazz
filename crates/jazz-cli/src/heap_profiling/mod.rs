@@ -1,12 +1,11 @@
-//! Opt-in sampled heap profiling for the Linux server binary.
+//! Sampled heap profiling for the Linux server binary.
 //!
-//! `jazz-tools` on Linux wraps mimalloc in [`SamplingAllocator`]. With
-//! [`SAMPLE_INTERVAL_ENV`] set, it records the stack of one allocation per
-//! that many bytes allocated on average, which shows which code holds memory
-//! when a server grows. Sampling is off otherwise: each sample unwinds the
-//! stack, and LLVM libunwind in the static musl build searches `.eh_frame`
-//! linearly for frames without unwind info, which made default-on sampling
-//! cost about 3x the CPU per write (#3940). It only sees Rust's allocations:
+//! `jazz-tools` on Linux wraps mimalloc in [`SamplingAllocator`], which
+//! records the stack of one allocation per [`DEFAULT_SAMPLE_INTERVAL`] bytes
+//! allocated on average (or per [`SAMPLE_INTERVAL_ENV`] bytes; `0` turns
+//! sampling off), which shows which code holds memory when a server grows.
+//! Stacks come from frame pointers, so a write-heavy load costs about the
+//! same CPU with sampling as without. It only sees Rust's allocations:
 //! memory that bundled C/C++ such as RocksDB takes from `malloc` directly is
 //! not in the profile.
 //!
@@ -31,25 +30,30 @@ pub use sampler::{
 };
 use symbols::ExecutableSymbols;
 
-/// Environment variable that turns sampling on, with the mean bytes
-/// allocated between samples (for example 524288).
+/// Environment variable with the mean bytes allocated between samples;
+/// `0` turns sampling off.
 pub const SAMPLE_INTERVAL_ENV: &str = "JAZZ_HEAP_PROFILE_SAMPLE_BYTES";
 
 /// Value of [`SAMPLE_INTERVAL_ENV`] that [`configure`] could not use.
 static INVALID_SAMPLE_INTERVAL: OnceLock<String> = OnceLock::new();
 
-/// Turn sampling on when [`SAMPLE_INTERVAL_ENV`] is set. Call it at the
+/// Turn sampling on, every [`SAMPLE_INTERVAL_ENV`] bytes when it is set and
+/// [`DEFAULT_SAMPLE_INTERVAL`] otherwise, unless it is `0`. Call it at the
 /// start of `main`, before any other thread starts: threads that already
 /// allocated never sample.
 pub fn configure() {
-    if let Ok(bytes) = std::env::var(SAMPLE_INTERVAL_ENV) {
-        match bytes.parse::<u64>() {
-            Ok(bytes) if bytes > 0 => enable_sampling(bytes),
-            _ => {
+    let mean = match std::env::var(SAMPLE_INTERVAL_ENV) {
+        Err(_) => DEFAULT_SAMPLE_INTERVAL,
+        Ok(bytes) => match bytes.parse::<u64>() {
+            Ok(0) => return,
+            Ok(bytes) => bytes,
+            Err(_) => {
                 let _ = INVALID_SAMPLE_INTERVAL.set(bytes);
+                DEFAULT_SAMPLE_INTERVAL
             }
-        }
-    }
+        },
+    };
+    enable_sampling(mean);
 }
 
 /// Report the sampling configuration and return the profile dumper for the
@@ -57,7 +61,7 @@ pub fn configure() {
 /// allocator and [`configure`] ran first.
 pub fn activate() -> HeapProfileDump {
     if let Some(bytes) = INVALID_SAMPLE_INTERVAL.get() {
-        tracing::warn!("Ignoring {SAMPLE_INTERVAL_ENV}={bytes}: expected a positive byte count");
+        tracing::warn!("Ignoring {SAMPLE_INTERVAL_ENV}={bytes}: expected a byte count");
     }
     if sampling_enabled() {
         tracing::info!(
@@ -71,9 +75,9 @@ pub fn activate() -> HeapProfileDump {
 fn dump_heap_profile() -> Result<Vec<u8>, HeapProfileError> {
     if !sampling_enabled() {
         return Err(HeapProfileError::NotEnabled(format!(
-            "Heap profiling is not enabled on this server. Restart it with \
-             {SAMPLE_INTERVAL_ENV} set to the mean bytes between samples \
-             (for example 524288) to sample the heap."
+            "Heap profiling is turned off on this server ({SAMPLE_INTERVAL_ENV}=0). \
+             Restart it without {SAMPLE_INTERVAL_ENV}, or with the mean bytes \
+             between samples, to sample the heap."
         )));
     }
     let mut samples = Vec::new();

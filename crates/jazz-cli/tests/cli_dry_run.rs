@@ -1370,16 +1370,16 @@ fn jazz_tools_server_serves_a_symbolized_heap_profile_to_admins() {
     wait_for_successful_exit(&mut server, Duration::from_secs(10));
 }
 
-/// Sampling is opt-in: without `JAZZ_HEAP_PROFILE_SAMPLE_BYTES` alice, the
-/// admin, gets an explicit "not enabled" answer instead of an empty profile.
+/// With sampling turned off (`JAZZ_HEAP_PROFILE_SAMPLE_BYTES=0`) alice, the
+/// admin, gets an explicit "turned off" answer instead of an empty profile.
 #[cfg(heap_profiling)]
 #[test]
-fn jazz_tools_server_without_heap_sampling_says_it_is_not_enabled() {
+fn jazz_tools_server_with_heap_sampling_off_says_so() {
     let temp_dir = tempfile::tempdir().expect("create server temp dir");
     let data_dir = temp_dir.path().join("data");
     let port_file = temp_dir.path().join("port");
     let mut command = jazz_tools_command_at(cargo_binary("jazz-tools"));
-    command.env_remove("JAZZ_HEAP_PROFILE_SAMPLE_BYTES");
+    command.env("JAZZ_HEAP_PROFILE_SAMPLE_BYTES", "0");
     let (mut server, port) = start_jazz_tools_server_with(command, &data_dir, &port_file);
 
     let (status, body) = http_get(port, "/debug/pprof/heap", Some("sigterm-test-secret"));

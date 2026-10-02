@@ -111,9 +111,11 @@ jobs:
             --header 'Authorization: Bearer heap-scrape' \
             http://127.0.0.1:6060/debug/pprof/heap
           for profile in public.pb.gz diagnostics.pb.gz; do
-            # Function names come from the stripped binary's symbol table.
+            # Function names come from the stripped binary's symbol table,
+            # and frame-pointer stacks reach the threads' entry points.
             gzip --decompress --stdout "$profile" > profile.pb
             grep --quiet --text 'jazz_server' profile.pb
+            grep --quiet --text '__rust_begin_short_backtrace' profile.pb
           done
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
