@@ -312,6 +312,8 @@ export interface BrowserSharedWorkerBootstrapCancelRequest {
 export interface BrowserForegroundNodeLeaseProbeRequest {
   type: "probe-foreground-node-lease-worker";
   attemptId: string;
+  /** Start loading this realm's WASM now; the later runtime connect reuses it. */
+  wasmPrefetch?: { runtimeSources?: RuntimeSourcesConfig };
 }
 
 /** Lease-only bootstrap that runs before the foreground schema is known. */

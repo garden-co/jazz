@@ -1958,6 +1958,65 @@ describe("broker worker context initialization", () => {
     );
   });
 
+  it("starts the WASM fetch on a lease probe and reuses it for the runtime connect", async () => {
+    const wasmLoad = deferred<typeof mocks.wasmModule>();
+    mocks.loadWasmModule.mockReturnValueOnce(wasmLoad.promise);
+    const runtimeSources = { wasmUrl: "http://vite.test/assets/jazz_wasm_bg.wasm" };
+    const { port } = connectLeaseProbe();
+    const probeOutcome = port.waitForLeaseProbeOutcome();
+    port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: "prefetching-probe",
+      wasmPrefetch: { runtimeSources },
+    });
+
+    await expect(probeOutcome).resolves.toEqual({
+      type: "foreground-node-lease-worker-alive",
+      attemptId: "prefetching-probe",
+    });
+    // The fetch is under way before any durable root is admitted.
+    expect(mocks.loadWasmModule).toHaveBeenCalledExactlyOnceWith(runtimeSources);
+    expect(mocks.openPageStore).not.toHaveBeenCalled();
+
+    const connection = connect({ ...options("prefetched-wasm"), runtimeSources }, "tab");
+    wasmLoad.resolve(mocks.wasmModule);
+    expect((await connection).outcome).toEqual({ type: "runtime-ready" });
+    expect(mocks.loadWasmModule).toHaveBeenCalledOnce();
+  });
+
+  it("lets the runtime connect reload after a failed probe prefetch", async () => {
+    mocks.loadWasmModule.mockRejectedValueOnce(new Error("prefetch failed"));
+    const runtimeSources = { wasmUrl: "http://vite.test/assets/jazz_wasm_bg.wasm" };
+    const { port } = connectLeaseProbe();
+    const probeOutcome = port.waitForLeaseProbeOutcome();
+    port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: "failed-prefetch",
+      wasmPrefetch: { runtimeSources },
+    });
+    await probeOutcome;
+    await vi.waitFor(() => expect(mocks.loadWasmModule).toHaveBeenCalledOnce());
+
+    const { outcome } = await connect(
+      { ...options("after-failed-prefetch"), runtimeSources },
+      "tab",
+    );
+    expect(outcome).toEqual({ type: "runtime-ready" });
+    expect(mocks.loadWasmModule).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not prefetch in-memory WASM sources on a probe", async () => {
+    const { port } = connectLeaseProbe();
+    const probeOutcome = port.waitForLeaseProbeOutcome();
+    port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: "in-memory-probe",
+      wasmPrefetch: { runtimeSources: { wasmSource: new Uint8Array([0, 97, 115, 109]) } },
+    });
+    await probeOutcome;
+    expect(mocks.loadWasmModule).not.toHaveBeenCalled();
+  });
+
   it("does not let a second context repoint the process-wide WASM realm at another origin", async () => {
     const firstOptions = {
       ...options("first-origin"),
