@@ -2577,6 +2577,11 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             reason: SubscribeRejectReason::InvalidAuthoritySourceClosure { .. },
         })
     ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(
+        matches!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Pending),
+        "a rejected authority frame must leave the low-level stream live"
+    );
     assert_eq!(
         relay
             .node

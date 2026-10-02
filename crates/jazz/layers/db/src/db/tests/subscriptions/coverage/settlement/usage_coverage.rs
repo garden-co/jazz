@@ -707,6 +707,11 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
         ),
         "missing payload must be reported to its public subscription"
     );
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(
+        matches!(Pin::new(&mut first).poll_next(&mut cx), Poll::Pending),
+        "a rejected opening must await a valid authority frame, not end the stream"
+    );
     let mut duplicate = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(
         duplicate.try_next_event().is_none(),
