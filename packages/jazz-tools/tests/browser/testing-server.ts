@@ -14,21 +14,14 @@ export interface JazzServerNetworkDebugState {
 }
 
 /**
+ * Start an empty authority; fixtures deploy their schema and permissions explicitly.
  * Opt into a TCP gate when the test must interrupt existing worker connections.
  * The advertised URL stays fixed across block/unblock and database reopen.
  */
-export function getJazzServerInfo(
-  appId?: string,
-  schema?: Uint8Array,
-  gated = false,
-): Promise<JazzServerInfo> {
-  // Null placeholders keep the optional arguments in position during command
-  // serialization, which otherwise elides undefined array entries.
-  return jazzServerBrowserCommands().jazzServerInfo(
-    appId ?? null,
-    schema ? [...schema] : null,
-    gated,
-  );
+export function getJazzServerInfo(appId?: string, gated = false): Promise<JazzServerInfo> {
+  // Preserve the optional app ID's position during command serialization,
+  // which otherwise elides undefined array entries.
+  return jazzServerBrowserCommands().jazzServerInfo(appId ?? null, gated);
 }
 
 export function stopJazzServer(serverUrl: string): Promise<void> {
