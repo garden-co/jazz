@@ -428,8 +428,8 @@ export class InitializationJournal {
       (entry) => entry.proposal.kind === "space" && entry.proposal.id === id,
     );
     if (!entry) return undefined;
-    if (entry.outcome === "rejected" || entry.outcome === "interrupted")
-      throw new E2eeInitializationNotReady("The space initialization was rejected or interrupted");
+    // Terminal losing material cannot veto independently accepted winning history.
+    if (entry.outcome === "rejected" || entry.outcome === "interrupted") return undefined;
     if (!entry.local)
       throw new E2eeInitializationNotReady("Space initialization is not locally durable");
     // Accepted roots must use normal accepted-history verification and revocation.
