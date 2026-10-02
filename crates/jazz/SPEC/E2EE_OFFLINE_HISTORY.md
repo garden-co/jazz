@@ -100,6 +100,14 @@ scan every persisted space or cover every automatic transport-recovery event.
 Background failure does not fail the completed local operation; a later use or
 explicit reconnect can retry, and explicit explanation exposes maintenance state.
 
+Explicit grant, revoke and explanation take priority over background maintenance
+for that exact space. An already-started background read, transaction or
+acceptance wait finishes normally; a superseded attempt stops before its next
+maintenance phase or retry. Foreground operations retain their own fresh
+authority checks and release this priority even when they fail or return a
+non-ready state. No automatic retry queue is promised: after the old attempt
+settles, a later affected use or explicit reconnect can schedule another attempt.
+
 An online refusal is reconciled before returning it: a newer grant may now
 permit access. Local key preparation can use local catalogue IDs as candidates,
 but they establish neither catalogue coverage nor membership. Retained accepted
