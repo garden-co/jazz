@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { loadCompiledSchema } from "./schema-loader.js";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { schema as s } from "./schema-namespace.js";
+import { migration as m } from "./migration-namespace.js";
 import { analyzeRelations } from "./codegen/relation-analyzer.js";
 import { schemaDefinitionToAst } from "./migrations.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
@@ -151,12 +152,12 @@ describe("explicit relationships", () => {
       ...from,
       posts: s.table({ owner: s.uuid() }, { author: s.rel("teams", "owner") }),
     };
-    expect(() => (s.defineMigration as any)({ from, to })).toThrow(/match|type|reference/);
+    expect(() => (m.defineMigration as any)({ from, to })).toThrow(/match|type|reference/);
     const renamed = {
       ...from,
       posts: s.table({ owner: s.uuid() }, { writer: s.rel("users", "owner") }),
     };
-    expect(s.defineMigration({ from, to: renamed }).forward).toEqual([]);
+    expect(m.defineMigration({ from, to: renamed }).forward).toEqual([]);
   });
   it("loads definition-only and Wasm-only schema exports without losing relations", async () => {
     const directory = await mkdtemp(join(tmpdir(), "jazz-explicit-relations-"));
@@ -164,7 +165,7 @@ describe("explicit relationships", () => {
       const source = fileURLToPath(new URL("./schema-namespace.ts", import.meta.url));
       await writeFile(
         join(directory, "schema.ts"),
-        `import { schema as s } from ${JSON.stringify(source)}; export const schema = s.defineSchema({ posts: s.table({ owner: s.uuid() }, { author: s.rel("users", "owner") }), users: s.table({ name: s.string() }, { authored: s.reverse("posts", "author") }) });`,
+        `import { schema as s, migration as m } from ${JSON.stringify(source)}; export const schema = s.defineSchema({ posts: s.table({ owner: s.uuid() }, { author: s.rel("users", "owner") }), users: s.table({ name: s.string() }, { authored: s.reverse("posts", "author") }) });`,
       );
       const loaded = await loadCompiledSchema(directory);
       expect(loaded.wasmSchema.posts!.columns[0]!.references).toBe("users");

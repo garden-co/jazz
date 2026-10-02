@@ -1,14 +1,14 @@
-import { col } from "../../../dsl.js";
+import { schema as s } from "../../../schema-namespace.js";
 import { defineApp } from "../../../typed-app.js";
 
 const generatedApp = defineApp({
   records: {
-    state: col
+    state: s
       .enum({
         ready: {
-          count: col.int().default(3),
-          label: col.string().default("queued"),
-          note: col.string().optional().default(null),
+          count: s.int().default(3),
+          label: s.string().default("queued"),
+          note: s.string().optional().default(null),
         },
       })
       .default({ type: "ready", count: 7, label: "live", note: "unused" }),

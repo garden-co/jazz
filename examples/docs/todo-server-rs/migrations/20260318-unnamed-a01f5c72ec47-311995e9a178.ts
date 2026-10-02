@@ -1,11 +1,11 @@
-import { schema as s } from "jazz-tools";
+import { schema as s, migration as m } from "jazz-tools";
 
 // Rust apps use the same TypeScript migration files and push them with the same CLI.
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     todos: {
-      priority: s.add.int({ default: null }),
-      description: s.add.string({ default: null }),
+      priority: m.add.int({ default: null }),
+      description: m.add.string({ default: null }),
     },
   },
   fromHash: "a01f5c72ec47",
