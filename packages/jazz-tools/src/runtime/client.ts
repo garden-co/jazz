@@ -191,7 +191,7 @@ export interface Runtime extends Partial<InitializationRuntime> {
   onRemoteLinkStateChange?(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void;
   /** @internal Report the host's view of the server link to the core read gate. */
   setRemoteLinkHint?(state: RemoteLinkState): void;
-  /** @internal Validated authentic stable identities, not current remote membership. */
+  /** @internal Authenticated stable identities and admitted requested schema, not current membership. */
   hasAuthenticatedCatalogue?(): Promise<boolean>;
   /** @internal Portable accepted catalogue identity; never a locally allocated alias. */
   tableIdentity?(table: string): Promise<string | null>;
@@ -1429,7 +1429,7 @@ export class JazzClient {
     await operation.call(this.runtime, seal);
   }
 
-  /** @internal Cached readiness includes the host's durable publication barrier. */
+  /** @internal Requested-schema readiness includes the host's durable cache publication barrier. */
   async hasAuthenticatedCatalogue(): Promise<boolean> {
     const operation = this.runtime.hasAuthenticatedCatalogue;
     if (!operation) throw new InitializationCapabilityError("hasAuthenticatedCatalogue");
