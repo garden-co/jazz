@@ -7,7 +7,6 @@ import { defaultKeymap } from "@codemirror/commands";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import * as Y from "yjs";
 import { app } from "../schema.js";
-import { HEADER } from "./log.js";
 import { connect } from "./provider.js";
 import "./style.css";
 
@@ -84,11 +83,7 @@ function App() {
 
   async function create() {
     try {
-      const row = await db
-        .insert(app.documents, {
-          contentLog: HEADER,
-        })
-        .wait({ tier: "local" });
+      const row = await db.insert(app.documents, { title: "Untitled" }).wait({ tier: "local" });
       history.replaceState(null, "", `#${row.id}`);
       setId(row.id);
     } catch (cause) {
@@ -99,7 +94,7 @@ function App() {
   return (
     <main>
       <h1>Jazz text editor</h1>
-      <p>Open this URL in another browser to share the document. Take turns editing.</p>
+      <p>Open this URL in another browser to edit together.</p>
       <p>
         <label>
           <input type="checkbox" checked={offline} disabled={switching} onChange={toggleOffline} />{" "}
