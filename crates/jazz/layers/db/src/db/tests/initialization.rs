@@ -281,6 +281,9 @@ fn initialization_catalogue_observation_waits_for_owner_and_drains_once() {
 /// Alice retains authenticated schema A, then opens unpublished B without transport.
 /// Stable A table identities do not admit B; reopening A stays ready offline.
 /// A later authenticated A receipt must still drain while B remains unavailable.
+///
+/// Alice: cached A -> open B -> not ready, even after another A receipt
+/// Authority: admit B -> Alice's same B handle ready -> disconnect -> still ready
 #[test]
 fn initialization_catalogue_readiness_requires_requested_schema_admission() {
     let base = initialization_schema();
