@@ -10,16 +10,57 @@ import { useAll } from "jazz-tools/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
-import { app } from "@/schema";
+import { app, type Category } from "@/schema";
+import { useCatalogueSnapshot } from "@/src/catalogue/snapshot";
 import { useCart } from "@/src/store/cart";
 import { useShopper } from "./StoreProviders";
 
 /** The storefront frame: top bar with the cart, category navigation, content. */
 export function StoreShell({ children }: { children: ReactNode }) {
+  useStoreBootstrap();
+  return (
+    <StoreChrome
+      actions={<TopBarActions />}
+      nav={(pathname) => <StoreNav pathname={pathname} />}
+    >
+      {children}
+    </StoreChrome>
+  );
+}
+
+/**
+ * The same frame before the shopper's Jazz client has opened: categories from
+ * the server-rendered catalogue, and no account-specific actions yet.
+ */
+export function StoreFrame({
+  categories,
+  children,
+}: {
+  categories: Category[];
+  children: ReactNode;
+}) {
+  return (
+    <StoreChrome
+      actions={<Button label="Cart" variant="secondary" size="lg" href="/cart" as={Link} />}
+      nav={(pathname) => <NavSections pathname={pathname} categories={categories} />}
+    >
+      {children}
+    </StoreChrome>
+  );
+}
+
+function StoreChrome({
+  actions,
+  nav,
+  children,
+}: {
+  actions: ReactNode;
+  nav: (pathname: string) => ReactNode;
+  children: ReactNode;
+}) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
   useEffect(() => setMenuOpen(false), [pathname]);
-  useStoreBootstrap();
   return (
     <AppShell
       height="auto"
@@ -31,10 +72,10 @@ export function StoreShell({ children }: { children: ReactNode }) {
         <TopNav
           label="Jamazon"
           heading={<TopNavHeading heading="Jamazon" headingHref="/" as={Link} />}
-          endContent={<TopBarActions />}
+          endContent={actions}
         />
       }
-      sideNav={<StoreNav pathname={pathname} />}
+      sideNav={nav(pathname)}
     >
       {children}
     </AppShell>
@@ -62,7 +103,27 @@ function TopBarActions() {
 
 function StoreNav({ pathname }: { pathname: string }) {
   const shopper = useShopper();
-  const { data: categories = [] } = useAll(app.categories.orderBy("position", "asc"));
+  const snapshot = useCatalogueSnapshot();
+  const { data: categories } = useAll(app.categories.orderBy("position", "asc"));
+  return (
+    <NavSections
+      pathname={pathname}
+      categories={categories?.length ? categories : (snapshot?.categories ?? [])}
+      shopper={shopper}
+    />
+  );
+}
+
+function NavSections({
+  pathname,
+  categories,
+  shopper,
+}: {
+  pathname: string;
+  categories: Category[];
+  /** Absent while the shopper's Jazz client opens. */
+  shopper?: ReturnType<typeof useShopper>;
+}) {
   return (
     <SideNav>
       <SideNavSection title="Shop">
@@ -77,7 +138,7 @@ function StoreNav({ pathname }: { pathname: string }) {
           />
         ))}
       </SideNavSection>
-      <SideNavSection title={shopper.isSignedIn ? (shopper.name ?? "Account") : "Account"}>
+      <SideNavSection title={shopper?.isSignedIn ? (shopper.name ?? "Account") : "Account"}>
         <SideNavItem label="Cart" href="/cart" as={Link} isSelected={pathname === "/cart"} />
         <SideNavItem
           label="Orders"
@@ -85,7 +146,7 @@ function StoreNav({ pathname }: { pathname: string }) {
           as={Link}
           isSelected={pathname.startsWith("/orders")}
         />
-        {shopper.isSignedIn ? (
+        {!shopper ? null : shopper.isSignedIn ? (
           <SideNavItem label="Sign out" onClick={() => void shopper.signOut()} />
         ) : (
           <SideNavItem

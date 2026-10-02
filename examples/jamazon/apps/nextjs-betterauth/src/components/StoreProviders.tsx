@@ -13,7 +13,10 @@ import { authClient, requireBetterAuthToken } from "@/src/lib/auth-client";
 import { LOCAL_DEFAULTS } from "@/src/lib/build-config.mjs";
 import { jazzEnv } from "@/src/lib/jazz-env";
 import { claimGuestCart, readGuestCart, type GuestCartLine } from "@/src/store/cart";
-import { StoreShell } from "./StoreShell";
+import { usePathname } from "next/navigation";
+import { CatalogueSnapshotProvider, type CatalogueSnapshot } from "@/src/catalogue/snapshot";
+import { SnapshotCatalogue } from "./Catalogue";
+import { StoreFrame, StoreShell } from "./StoreShell";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_DEFAULTS.appId;
 const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL || LOCAL_DEFAULTS.serverUrl;
@@ -48,23 +51,52 @@ async function changeAccount(run: () => Promise<void>) {
  * - signing in to an existing account switches accounts, and the guest cart's
  *   lines are claimed into the account's cart.
  */
-export function StoreProviders({ children }: { children: ReactNode }) {
+export function StoreProviders({
+  catalogue,
+  children,
+}: {
+  /** The public catalogue, server-rendered for the first paint. */
+  catalogue: CatalogueSnapshot | null;
+  children: ReactNode;
+}) {
+  // While the guest's Jazz client opens, the store frame and (on catalogue
+  // pages) the server's copy of the catalogue render straight away.
+  const opening = <OpeningStore catalogue={catalogue} />;
   return (
     <Theme theme={jazzTheme} mode="system">
-      <JazzProvider
-        appId={appId}
-        serverUrl={serverUrl}
-        env={jazzEnv}
-        initial="local-first"
-        loading={<Opening />}
-        error={(state) => <OpenFailed error={state.error} retry={state.retry} />}
-        signedOut={<Opening />}
-      >
-        <ShopperProvider>
-          <StoreShell>{children}</StoreShell>
-        </ShopperProvider>
-      </JazzProvider>
+      <CatalogueSnapshotProvider snapshot={catalogue}>
+        <JazzProvider
+          appId={appId}
+          serverUrl={serverUrl}
+          env={jazzEnv}
+          initial="local-first"
+          loading={opening}
+          error={(state) => <OpenFailed error={state.error} retry={state.retry} />}
+          signedOut={opening}
+        >
+          <ShopperProvider>
+            <StoreShell>{children}</StoreShell>
+          </ShopperProvider>
+        </JazzProvider>
+      </CatalogueSnapshotProvider>
     </Theme>
+  );
+}
+
+function OpeningStore({ catalogue }: { catalogue: CatalogueSnapshot | null }) {
+  const pathname = usePathname();
+  const categorySlug = pathname.startsWith("/category/")
+    ? decodeURIComponent(pathname.slice("/category/".length))
+    : undefined;
+  const showsCatalogue = catalogue && (pathname === "/" || categorySlug);
+  return (
+    <StoreFrame categories={catalogue?.categories ?? []}>
+      {showsCatalogue ? (
+        <SnapshotCatalogue snapshot={catalogue} categorySlug={categorySlug} />
+      ) : (
+        <Opening />
+      )}
+    </StoreFrame>
   );
 }
 
@@ -188,7 +220,7 @@ function takeGuestCart(): GuestCartLine[] {
 
 function Opening() {
   return (
-    <Center height="100vh">
+    <Center height="60vh">
       <Spinner size="lg" label="Opening Jamazon" />
     </Center>
   );

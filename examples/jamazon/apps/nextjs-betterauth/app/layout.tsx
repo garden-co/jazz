@@ -5,6 +5,10 @@ import "@garden-co/design/jazz/components.css";
 import "@garden-co/design/jazz/fonts.css";
 import "./globals.css";
 import { StoreProviders } from "@/src/components/StoreProviders";
+import { publicCatalogue } from "@/src/server/public-catalogue";
+
+// The first paint carries the current public catalogue, read per request.
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Jamazon",
@@ -13,11 +17,14 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
+  const catalogue = await publicCatalogue();
   return (
     <html lang="en" suppressHydrationWarning>
       <body>
-        <StoreProviders>{children}</StoreProviders>
+        <StoreProviders catalogue={catalogue}>{children}</StoreProviders>
       </body>
     </html>
   );
