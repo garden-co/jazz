@@ -58,8 +58,12 @@ export async function enrollAndBootstrap(options: {
   /** Whether the server still has to bootstrap this account (default: yes). */
   needsBootstrap?: (accountId: string) => boolean;
   bootstrap: (token: string, accountId: string) => Promise<void>;
-  /** Called before this attempt resolves when a background bootstrap starts. */
-  onBootstrapStart?: () => void;
+  /**
+   * Called before this attempt resolves when a background bootstrap starts,
+   * with the account it is for, so a failed attempt (token or bootstrap) can
+   * be retried.
+   */
+  onBootstrapStart?: (accountId: string) => void;
   onBootstrapError?: (error: unknown) => void;
   isCurrent: () => boolean;
 }): Promise<boolean> {
@@ -82,7 +86,7 @@ export async function enrollAndBootstrap(options: {
   if (!isCurrent()) return false;
   const account = lifecycle.selectedAccount();
   if (account && (options.needsBootstrap?.(account.id) ?? true)) {
-    options.onBootstrapStart?.();
+    options.onBootstrapStart?.(account.id);
     void getToken()
       .then((token) => options.bootstrap(token, account.id))
       .catch((error: unknown) => options.onBootstrapError?.(error));

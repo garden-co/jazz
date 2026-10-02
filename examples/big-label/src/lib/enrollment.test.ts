@@ -139,4 +139,35 @@ describe("BigLabel enrollment", () => {
     expect(manager.registerJWT).not.toHaveBeenCalled();
     expect(bootstrap).not.toHaveBeenCalled();
   });
+
+  it("names the account before fetching the token, so a failed token fetch can be retried", async () => {
+    const { manager, lifecycle } = accounts();
+    await manager.registerJWT();
+    const started = vi.fn();
+    const failed = vi.fn();
+    const bootstrap = vi.fn(async () => {});
+    let tokens = 0;
+
+    await expect(
+      enrollAndBootstrap({
+        lifecycle,
+        storage: memoryStorage(),
+        email,
+        identityId,
+        // The open account needs no token; only the bootstrap asks, and fails.
+        getToken: async () => {
+          tokens += 1;
+          throw new Error("token unavailable");
+        },
+        bootstrap,
+        onBootstrapStart: started,
+        onBootstrapError: failed,
+        isCurrent: () => true,
+      }),
+    ).resolves.toBe(true);
+    expect(started).toHaveBeenCalledWith("A");
+    await vi.waitFor(() => expect(failed).toHaveBeenCalledTimes(1));
+    expect(tokens).toBe(1);
+    expect(bootstrap).not.toHaveBeenCalled();
+  });
 });

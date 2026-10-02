@@ -240,9 +240,13 @@ function AccountApp({
       // again only when the sign-in email changes). The app renders from local
       // data meanwhile.
       needsBootstrap: (accountId) => readBootstrapped(accountId) !== email,
-      onBootstrapStart: () => setBootstrapping(true),
-      bootstrap: async (token, accountId) => {
+      onBootstrapStart: (accountId) => {
+        // Recorded before the token is fetched, so "Try again" also works when
+        // fetching the token is what failed.
         bootstrapAccount.current = accountId;
+        setBootstrapping(true);
+      },
+      bootstrap: async (token, accountId) => {
         try {
           await bootstrapOnce(accountId, token, email);
         } finally {
@@ -250,7 +254,9 @@ function AccountApp({
         }
       },
       onBootstrapError: (cause) => {
-        if (current) setBootstrapError(toError(cause));
+        if (!current) return;
+        setBootstrapping(false);
+        setBootstrapError(toError(cause));
       },
       isCurrent: () => current,
     }).then(
