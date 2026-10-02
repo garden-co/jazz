@@ -73,8 +73,9 @@ thread_local! {
     /// Set while this thread is inside the sampler, whose own allocations
     /// are never sampled and whose own frees never touch the table.
     static IN_SAMPLER: Cell<bool> = const { Cell::new(false) };
-    /// This thread's stack bounds once a sample needed them.
-    static STACK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    /// This thread's stack bounds once a sample needed them, and whether
+    /// they are final: only the main thread's stack grows.
+    static STACK: Cell<(usize, usize, bool)> = const { Cell::new((0, 0, false)) };
 }
 
 /// A sampled allocation that has not been freed.
@@ -197,8 +198,9 @@ fn crossed_interval(ptr: usize, size: usize) {
 /// switched to, is read through `process_vm_readv`, which reports unmapped
 /// memory instead of faulting. So a frame without a frame pointer ends the
 /// stack early (or adds a wrong frame) but never crashes. Each record must
-/// lie above the last, and thread entry points zero the frame pointer, which
-/// ends the walk.
+/// lie above the last, so a stack segment mapped above the stack it was
+/// entered from would end the walk at the switch; thread entry points zero
+/// the frame pointer, which ends it at the root.
 #[inline(always)]
 fn walk_frame_pointers(frames: &mut [usize; MAX_FRAMES]) -> usize {
     let local = 0u8;
@@ -300,13 +302,15 @@ fn frame_pointer() -> usize {
 /// on, or `None` when `here` is not on it (a `stacker` segment or a signal
 /// stack) or the bounds can't be told.
 fn stack_top(here: usize) -> Option<usize> {
-    let (low, high) = STACK.get();
+    let (low, high, last) = STACK.get();
     if (low..high).contains(&here) {
         return Some(high);
     }
-    // First sample on this thread, the main thread's stack has grown since
-    // (musl reports only the part mapped so far), or `here` is on another
-    // stack.
+    if last {
+        return None;
+    }
+    // First sample on this thread, or on the main thread, whose stack may
+    // have grown since (musl reports only the part mapped so far).
     // SAFETY: `attr` is initialised by `pthread_getattr_np` before it is
     // read, and destroyed once.
     let (low, high) = unsafe {
@@ -323,7 +327,9 @@ fn stack_top(here: usize) -> Option<usize> {
         }
         (base as usize, base as usize + size)
     };
-    STACK.set((low, high));
+    // SAFETY: plain syscalls.
+    let main = unsafe { libc::syscall(libc::SYS_gettid) == libc::getpid() as libc::c_long };
+    STACK.set((low, high, !main));
     (low..high).contains(&here).then_some(high)
 }
 
@@ -412,7 +418,7 @@ mod tests {
         let local = 0u8;
         let here = std::hint::black_box(&local) as *const u8 as usize;
         let high = stack_top(here).expect("a test thread knows its stack");
-        STACK.set((here + 1, high));
+        STACK.set((here + 1, high, false));
         assert_eq!(stack_top(here), Some(high));
         assert!(walk_at_depth(10) > 10);
     }
