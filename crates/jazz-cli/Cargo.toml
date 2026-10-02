@@ -6,7 +6,7 @@ autobins = false
 autotests = true
 
 [features]
-default = ["rocksdb", "transport-compression-zstd"]
+default = ["rocksdb", "transport-compression-zstd", "heap-profiling"]
 rocksdb = ["dep:jazz-storage-rocksdb"]
 sqlite = []
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
@@ -14,16 +14,19 @@ transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
 otel = ["dep:jazz-otel", "dep:opentelemetry", "dep:opentelemetry_sdk", "jazz-server/otel"]
 test = ["jazz/testing", "jazz-server/test"]
+# On Linux, sample `jazz-tools`'s heap all the time and serve it as a pprof
+# profile; see `src/heap_profiling/`. No effect on other platforms.
+heap-profiling = ["dep:backtrace", "dep:flate2", "dep:mappings", "dep:prost", "dep:rustc-demangle"]
 
 [dependencies]
 jazz = { workspace = true, default-features = false, features = ["runtime"] }
 jazz-server = { path = "../jazz-server" }
+mimalloc = { version = "0.1", default-features = false }
 jazz-native-transport.workspace = true
 jazz-storage-rocksdb = { workspace = true, optional = true }
 jazz-otel = { workspace = true, optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4", features = ["derive", "env"] }
-mimalloc = { version = "0.1", default-features = false }
 opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", features = ["logs", "metrics"], optional = true }
 postcard = { version = "1.1.3", features = ["alloc"] }
@@ -40,8 +43,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = "1.18.1"
 
+# Used only on Linux with the `heap-profiling` feature.
+[target.'cfg(target_os = "linux")'.dependencies]
+backtrace = { version = "0.3", optional = true }
+flate2 = { version = "1", optional = true }
+mappings = { version = "0.7", optional = true }
+prost = { version = "0.14", optional = true }
+rustc-demangle = { version = "0.1", optional = true }
+
 [dev-dependencies]
 base64 = "0.22"
+flate2 = "1"
 jazz-testkit = { path = "../jazz-testkit" }
 futures-util = "0.3"
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
