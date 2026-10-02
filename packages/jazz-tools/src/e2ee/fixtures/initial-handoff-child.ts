@@ -100,6 +100,10 @@ async function main() {
         reason: "not-a-space-recipient",
       });
     }
+    assert.deepEqual(await db.one(app.projects.where({ id: projectId }), { tier: "global" }), {
+      id: projectId,
+      title: "Restart handoff",
+    });
     const roots = await db.all(app.__e2ee_spaces, { tier: "global" });
     assert.equal(roots.length, 1);
     const grants = await db.all(app.__e2ee_space_grants, { tier: "global" });
