@@ -44,9 +44,13 @@ const DEMO_TASKS: { title: string; status: TaskStatus; mine?: boolean; notes?: s
 /**
  * Finds or creates the crew profile for an account. The account is a
  * local-first one held by this browser profile, together with its local data,
- * so its profile is found locally: reading never waits for the server. The
- * profile's id is derived from the account, so if a profile were ever written
- * without being found here, both writes land on one row instead of two.
+ * so its profile is found locally: reading never waits for the server.
+ *
+ * This is an insert, not an upsert, on purpose. The profile's id is derived
+ * from the account, and an insert of an id the local store already holds is
+ * refused rather than applied, so a name the user has changed is never reset
+ * to the default. That covers two tabs opening a new account at once: the
+ * later insert is refused and that tab reads the profile the other one wrote.
  */
 export async function ensureProfile(
   db: Db,
@@ -54,12 +58,19 @@ export async function ensureProfile(
 ): Promise<{ profile: Crew; isNew: boolean }> {
   const existing = await db.one(app.crew.where({ account }));
   if (existing) return { profile: existing, isNew: false };
-  const profile = db.insert(
-    app.crew,
-    { account, name: `Stagehand ${account.slice(-4).toUpperCase()}` },
-    { id: await profileId(account) },
-  );
-  return { profile: profile.value, isNew: true };
+  const id = await profileId(account);
+  try {
+    const profile = db.insert(
+      app.crew,
+      { account, name: `Stagehand ${account.slice(-4).toUpperCase()}` },
+      { id },
+    );
+    return { profile: profile.value, isNew: true };
+  } catch (error) {
+    const written = await db.one(app.crew.where({ account }));
+    if (written) return { profile: written, isNew: false };
+    throw error;
+  }
 }
 
 export function profileId(account: string) {
