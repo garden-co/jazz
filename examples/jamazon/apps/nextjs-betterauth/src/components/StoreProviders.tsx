@@ -13,7 +13,10 @@ import { authClient, requireBetterAuthToken } from "@/src/lib/auth-client";
 import { LOCAL_DEFAULTS } from "@/src/lib/build-config.mjs";
 import { jazzEnv } from "@/src/lib/jazz-env";
 import { claimGuestCart, readGuestCart, type GuestCartLine } from "@/src/store/cart";
-import { StoreShell } from "./StoreShell";
+import { usePathname } from "next/navigation";
+import { isCataloguePath, useCatalogueSnapshot } from "@/src/catalogue/snapshot";
+import { SnapshotCatalogue } from "./Catalogue";
+import { StoreFrame, StoreShell } from "./StoreShell";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_DEFAULTS.appId;
 const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL || LOCAL_DEFAULTS.serverUrl;
@@ -49,6 +52,10 @@ async function changeAccount(run: () => Promise<void>) {
  *   lines are claimed into the account's cart.
  */
 export function StoreProviders({ children }: { children: ReactNode }) {
+  // While the guest's Jazz client opens, the store frame renders straight
+  // away, and on catalogue pages the server's copy of the catalogue as soon
+  // as it arrives.
+  const opening = <OpeningStore />;
   return (
     <Theme theme={jazzTheme} mode="system">
       <JazzProvider
@@ -56,15 +63,33 @@ export function StoreProviders({ children }: { children: ReactNode }) {
         serverUrl={serverUrl}
         env={jazzEnv}
         initial="local-first"
-        loading={<Opening />}
+        loading={opening}
         error={(state) => <OpenFailed error={state.error} retry={state.retry} />}
-        signedOut={<Opening />}
+        signedOut={opening}
       >
         <ShopperProvider>
           <StoreShell>{children}</StoreShell>
         </ShopperProvider>
       </JazzProvider>
     </Theme>
+  );
+}
+
+function OpeningStore() {
+  const catalogue = useCatalogueSnapshot();
+  const pathname = usePathname();
+  const categorySlug = pathname.startsWith("/category/")
+    ? decodeURIComponent(pathname.slice("/category/".length))
+    : undefined;
+  const showsCatalogue = catalogue && isCataloguePath(pathname);
+  return (
+    <StoreFrame categories={catalogue?.categories ?? []}>
+      {showsCatalogue ? (
+        <SnapshotCatalogue snapshot={catalogue} categorySlug={categorySlug} />
+      ) : (
+        <Opening />
+      )}
+    </StoreFrame>
   );
 }
 
@@ -188,7 +213,7 @@ function takeGuestCart(): GuestCartLine[] {
 
 function Opening() {
   return (
-    <Center height="100vh">
+    <Center height="60vh">
       <Spinner size="lg" label="Opening Jamazon" />
     </Center>
   );
