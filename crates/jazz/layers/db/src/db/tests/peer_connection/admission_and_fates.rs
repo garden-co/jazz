@@ -2311,6 +2311,337 @@ fn row_seeded_update_and_delete_advice_follow_the_patched_row() {
     );
 }
 
+/// Alice's stable provider subject is admitted independently at the client
+/// and at a fresh Core connection. Their claim revisions need not agree:
+/// matching Text-owner inserts are Allowed and other owners are Denied.
+#[test]
+fn direct_text_owner_advice_accepts_independent_authority_claim_revision() {
+    let owner = || public_session_eq("owner", &["claims", "sub"]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(owner())
+                        .with_insert(owner()),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("alice".to_owned()),
+    )]);
+    let client = open_db(0xa1, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    client.set_test_provider_claims(alice, claims.clone());
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    // Initial admission is not a refresh of the serving connection's claims.
+    let _subscriber = server.accept_subscriber_with_claims(server_transport, alice, claims);
+    let insert = |owner: &str| PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: BTreeMap::from([
+            ("title".to_owned(), Value::String("candidate".to_owned())),
+            ("owner".to_owned(), Value::String(owner.to_owned())),
+        ]),
+    };
+    let mut allowed = Box::pin(client.request_permission_advice(insert("alice")));
+    let mut denied = Box::pin(client.request_permission_advice(insert("mallory")));
+    for _ in 0..16 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(
+        allowed.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Allowed),
+        "a stable local claim revision must not be used as the authority revision"
+    );
+    assert_eq!(
+        denied.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Denied),
+        "independent revisions must not hide a definitive owner mismatch"
+    );
+    assert!(server.read(&Query::from("todos")).unwrap().is_empty());
+}
+
+/// Alice changes A→B→A after Core completes a read proof but before receiving
+/// it. The old future is Unknown; a fresh identical action must not coalesce
+/// with the old request and receives its own Allowed proof.
+///
+/// alice ──A request──► Core ──buffered support + receipt──► alice
+/// alice ──B then A; fresh request────────────────────────► Core
+///
+/// The transport seam controls receive ordering; assertions use public advice.
+#[test]
+fn direct_scope_receipt_aba_retires_old_request_without_coalescing_fresh_a() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("owner", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "sub"])),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let a_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("alice".to_owned()),
+    )]);
+    let b_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("bob".to_owned()),
+    )]);
+    let client = open_db(0xa1, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let target = server
+        .insert(
+            "todos",
+            BTreeMap::from([("owner".to_owned(), Value::String("alice".to_owned()))]),
+        )
+        .unwrap()
+        .row_uuid();
+    client.set_test_provider_claims(alice, a_claims.clone());
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber_with_claims(server_transport, alice, BTreeMap::new());
+    // Core has independently refreshed this link before Alice's request.
+    // Its revision happens to equal Alice's later ABA revision, so comparing
+    // counters from the two domains cannot accidentally reject the old proof.
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(a_claims.clone());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(b_claims.clone());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(a_claims.clone());
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    };
+    let mut old = Box::pin(client.request_permission_advice(action.clone()));
+    client.tick().unwrap();
+    for _ in 0..4 {
+        server.tick().unwrap();
+    }
+    // No client receive occurs until the A proof is already buffered.
+    client.set_test_provider_claims(alice, b_claims);
+    client.set_test_provider_claims(alice, a_claims);
+    let mut fresh = Box::pin(client.request_permission_advice(action));
+    for _ in 0..16 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(
+        old.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Unknown),
+        "equal claim values after ABA must not revive a completed old proof"
+    );
+    assert_eq!(
+        fresh.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Allowed),
+        "fresh A must not inherit the stale request's retirement through coalescing"
+    );
+}
+
+/// Core denies Alice's read without a select policy using a real zero-clause
+/// decision. An A→B→A change while that decision is buffered invalidates the
+/// old future even though there are no support views or aggregate receipt.
+///
+/// alice ──A read──► Core ──buffered Denied──► alice changes B→A
+/// alice ──fresh A read──► Core ──Denied──► fresh future only
+///
+/// The transport seam controls receive ordering; assertions use public advice.
+#[test]
+fn direct_zero_clause_decision_aba_retires_old_request() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("owner", PublicColumnType::Text)),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let a_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("alice".to_owned()),
+    )]);
+    let b_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("bob".to_owned()),
+    )]);
+    let client = open_db(0xa1, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let target = server
+        .insert(
+            "todos",
+            BTreeMap::from([("owner".to_owned(), Value::String("alice".to_owned()))]),
+        )
+        .unwrap()
+        .row_uuid();
+    client.set_test_provider_claims(alice, a_claims.clone());
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let _subscriber =
+        server.accept_subscriber_with_claims(server_transport, alice, a_claims.clone());
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    };
+    let mut old = Box::pin(client.request_permission_advice(action.clone()));
+    client.tick().unwrap();
+    for _ in 0..4 {
+        server.tick().unwrap();
+    }
+    client.set_test_provider_claims(alice, b_claims);
+    client.set_test_provider_claims(alice, a_claims);
+    let mut fresh = Box::pin(client.request_permission_advice(action));
+    for _ in 0..16 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(
+        old.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Unknown),
+        "zero-clause decisions have the same direct-session freshness contract"
+    );
+    assert_eq!(
+        fresh.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Denied),
+        "the missing select policy remains a definitive denial for a fresh request"
+    );
+}
+
+/// Alice's first read intent is backpressured, then its link detaches. An ABA
+/// while disconnected must retire the captured request rather than recapture
+/// A on replay; a fresh A read still receives Allowed from the successor.
+///
+/// alice ──A intent (backpressure)──► detach ──B→A──► reconnect
+/// alice ──old: Unknown; fresh A intent──► Core ──Allowed──► alice
+///
+/// The transport seam supplies one bounded send refusal, not an advice mock.
+#[test]
+fn direct_backpressured_scope_aba_during_detach_preserves_original_stamp() {
+    struct BackpressureScopeIntent {
+        inner: Box<dyn Transport>,
+    }
+
+    impl Transport for BackpressureScopeIntent {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::AuthorizationScopeIntent { .. }) {
+                return Err(TransportError::Backpressure);
+            }
+            self.inner.send(message)
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+
+        fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+            self.inner.connection_session_context()
+        }
+    }
+
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("owner", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "sub"])),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let a_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("alice".to_owned()),
+    )]);
+    let b_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String("bob".to_owned()),
+    )]);
+    let client = open_db(0xa1, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let target = server
+        .insert(
+            "todos",
+            BTreeMap::from([("owner".to_owned(), Value::String("alice".to_owned()))]),
+        )
+        .unwrap()
+        .row_uuid();
+    client.set_test_provider_claims(alice, a_claims.clone());
+    let (first_transport, _first_server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let upstream = block_on(client.connect_upstream(Box::new(BackpressureScopeIntent {
+        inner: first_transport,
+    })));
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    };
+    let mut old = Box::pin(client.request_permission_advice(action.clone()));
+    client.tick().unwrap();
+    assert!(client.detach_connection(&upstream));
+    client.set_test_provider_claims(alice, b_claims);
+    client.set_test_provider_claims(alice, a_claims.clone());
+    let (retry_transport, retry_server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        2,
+        NodeUuid::from_bytes([0x5e; 16]),
+        2,
+    );
+    let _retry_upstream = block_on(client.connect_upstream(retry_transport));
+    let _subscriber = server.accept_subscriber_with_claims(retry_server_transport, alice, a_claims);
+    let mut fresh = Box::pin(client.request_permission_advice(action));
+    for _ in 0..16 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(
+        old.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Unknown),
+        "detach replay must preserve the pre-backpressure local stamp"
+    );
+    assert_eq!(
+        fresh.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Allowed),
+        "the successor authority must answer a newly captured A request"
+    );
+}
+
 /// This stays at the peer/transport seam because the public advice future
 /// cannot hold an authority's completed proof between its wire receipt and
 /// the local callback. It proves that the request owns the claims it observed
