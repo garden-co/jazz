@@ -27,6 +27,7 @@ import { useDb } from "jazz-tools/vue";
 import { app } from "../../schema.js";
 import Button from "./ui/Button.vue";
 import Dialog from "./ui/Dialog.vue";
+import { writeError } from "../lib/write-errors.js";
 
 const props = defineProps<{ bandId: string; bandName: string; code: string; userId: string }>();
 const emit = defineEmits<{ done: [] }>();
@@ -38,23 +39,31 @@ const error = ref("");
 
 // The members policy only accepts this row while the code matches the band's
 // current invite, so the server is what decides whether the link still works.
-async function join() {
+// The membership applies locally at once and the band opens; the server's
+// answer comes in the background, and a rejection rolls the row back and
+// says why.
+function join() {
   joining.value = true;
   error.value = "";
+  let write;
   try {
-    await db
-      .insert(app.members, {
-        bandId: props.bandId,
-        userId: props.userId,
-        name: name.value.trim(),
-        inviteCode: props.code,
-      })
-      .wait({ tier: "global" });
-    emit("done");
+    write = db.insert(app.members, {
+      bandId: props.bandId,
+      userId: props.userId,
+      name: name.value.trim(),
+      inviteCode: props.code,
+    });
   } catch {
-    error.value = "This invite link no longer works. Ask the band owner for a new one.";
-  } finally {
+    error.value = rejected;
     joining.value = false;
+    return;
   }
+  write.wait({ tier: "global" }).catch(() => {
+    writeError.value = rejected;
+  });
+  joining.value = false;
+  emit("done");
 }
+
+const rejected = "This invite link no longer works. Ask the band owner for a new one.";
 </script>

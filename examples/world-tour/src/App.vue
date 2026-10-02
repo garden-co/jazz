@@ -173,7 +173,14 @@ watch([userId, memberships, someBand], async ([id, mine, any]) => {
     return;
   seeding = true;
   try {
-    seedFailed.value = !(await claimDemoBand(db, { userId: id, ownerName: "Tour manager" }));
+    seedFailed.value = !(await claimDemoBand(db, {
+      userId: id,
+      ownerName: "Tour manager",
+      onTourRejected: (error) => {
+        console.error("The server did not accept the demo tour", error);
+        seedFailed.value = true;
+      },
+    }));
   } catch (error) {
     console.error("Could not write the demo tour", error);
     seedFailed.value = true;
@@ -187,7 +194,14 @@ async function startOwnTour() {
   if (!userId.value) return;
   starting.value = true;
   try {
-    goToBand(await startDemoTour(db, { userId: userId.value, ownerName: "Tour manager" }));
+    // Open the new band as soon as it's written locally; a rejection by the
+    // server rolls it back and shows the write-error toast.
+    const { bandId, accepted } = await startDemoTour(db, {
+      userId: userId.value,
+      ownerName: "Tour manager",
+    });
+    accepted.catch(reportWriteError);
+    goToBand(bandId);
   } finally {
     starting.value = false;
   }
