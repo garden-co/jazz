@@ -5174,12 +5174,14 @@ impl SubscriptionSender {
         &self,
         event: SubscriptionEvent,
     ) -> Result<(), futures_channel::mpsc::TrySendError<SubscriptionEvent>> {
-        let terminal = matches!(&event, SubscriptionEvent::Closed)
+        let releases_opening = matches!(&event, SubscriptionEvent::Closed)
             || matches!(&event, SubscriptionEvent::Rejected { reason }
                 if !matches!(reason, SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission));
-        if terminal {
+        if releases_opening {
             let mut publication = self.publication.borrow_mut();
-            publication.deferred = None;
+            if subscription_event_is_terminal(&event) {
+                publication.deferred = None;
+            }
             // A rejection releases a withheld local-first opening: the
             // caller sees the (empty) local result, then the rejection.
             if let Some(gate) = publication.opening_gate.take()
@@ -5643,6 +5645,7 @@ fn subscription_event_is_terminal(event: &SubscriptionEvent) -> bool {
         SubscriptionEvent::Rejected { reason } => !matches!(
             reason,
             SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission
+                | SubscribeRejectReason::InvalidAuthoritySourceClosure { .. }
                 | SubscribeRejectReason::ServerFailure {
                     code: SubscribeServerFailureCode::Internal,
                 }

@@ -612,9 +612,20 @@ without the feature receive the existing `Internal` code. The client delivers
 the typed rejection and terminates only that query stream. For a legacy
 `Internal` rejection, the server route is still retired but the client stream
 remains nonterminal; the application must detach it and issue a fresh
-`Subscribe` to recover the committed current result. The retryable
-`ShapeRegistrationPendingCatalogueAdmission` and `ServerFailure::Internal`
-reasons do not terminate a stream.
+`Subscribe` to recover the committed current result. At the low-level
+`Db::SubscriptionStream` interface, the retryable
+`ShapeRegistrationPendingCatalogueAdmission`, `InvalidAuthoritySourceClosure`,
+and `ServerFailure::Internal` reasons do not terminate the stream.
+
+`InvalidAuthoritySourceClosure` rejects the local authority frame atomically,
+not the live low-level `Db::SubscriptionStream`. A later valid authority frame
+may publish on that same stream. If a non-reset change was withheld before
+rejection, its publication baseline remains the last emitted result, so the
+valid completion's row and occurrence movements are relative to that result.
+Rejection or close still releases a withheld `LocalFirstUnlessEmpty` opening
+as specified in ch. 13, except pending catalogue admission; that local reset is
+published before the rejection. This low-level continuity does not change
+runtime-client or binding teardown and does not promise relay recovery.
 
 `Unsubscribe` detaches one usage-site subscription. When the last usage-site
 subscription for a canonical program instance detaches, the serving side may drop
