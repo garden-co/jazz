@@ -193,8 +193,7 @@ export interface Runtime extends Partial<InitializationRuntime> {
   setRemoteLinkHint?(state: RemoteLinkState): void;
   /** @internal Obtain fresh global catalogue coverage without returning row bodies. */
   coverCatalogue?(table: string, sessionJson?: string | null): Promise<void>;
-
-  /** @internal Validated authentic stable identities, not current remote membership. */
+  /** @internal Authenticated stable identities and admitted requested schema, not current membership. */
   hasAuthenticatedCatalogue?(): Promise<boolean>;
   /** @internal Portable accepted catalogue identity; never a locally allocated alias. */
   tableIdentity?(table: string): Promise<string | null>;
@@ -1432,7 +1431,7 @@ export class JazzClient {
     await operation.call(this.runtime, seal);
   }
 
-  /** @internal Cached readiness includes the host's durable publication barrier. */
+  /** @internal Requested-schema readiness includes the host's durable cache publication barrier. */
   async hasAuthenticatedCatalogue(): Promise<boolean> {
     const operation = this.runtime.hasAuthenticatedCatalogue;
     if (!operation) throw new InitializationCapabilityError("hasAuthenticatedCatalogue");
