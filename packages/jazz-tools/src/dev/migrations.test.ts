@@ -304,7 +304,10 @@ describe("migration stub generation", () => {
             rootDir: "/",
             typeRoots: [new URL("../../node_modules/@types", import.meta.url).pathname],
           },
-          include: [join(root, "migration.ts")],
+          include: [
+            join(root, "migration.ts"),
+            new URL("../types/fs-native-extensions.d.ts", import.meta.url).pathname,
+          ],
           exclude: [],
         }),
       );
