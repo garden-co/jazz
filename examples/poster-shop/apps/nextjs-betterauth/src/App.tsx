@@ -14,7 +14,7 @@ import {
   VStack,
 } from "@astryxdesign/core";
 import { useAll, useSession } from "jazz-tools/react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { app } from "@/schema";
 import { AssetShelf } from "@/src/components/AssetShelf";
 import { CanvasSurface } from "@/src/components/CanvasSurface";
@@ -78,10 +78,13 @@ export function PosterStudio({
   const { data: authSession } = authClient.useSession();
   const { data: canvases, error: canvasesError } = useAll(app.canvases);
   const author = session?.user.account ?? null;
-  // A reload reopens the poster that was open, not whichever syncs first.
-  const [activeId, setActiveId] = useState<string | null>(
-    () => initialCanvasId ?? (author ? rememberedCanvas(author) : null),
-  );
+  // The poster the user picked in this visit; until then the invited poster,
+  // else the one open before a reload (not whichever syncs first). The
+  // remembered poster is read once the account is known, which can be after
+  // the first render, and a rejected invite falls back to it.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const remembered = useMemo(() => (author ? rememberedCanvas(author) : null), [author]);
+  const activeId = selectedId ?? initialCanvasId ?? remembered;
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null);
   const [previewCheckpointId, setPreviewCheckpointId] = useState<string | null>(null);
@@ -121,7 +124,7 @@ export function PosterStudio({
     );
 
   const selectCanvas = (id: string) => {
-    setActiveId(id);
+    setSelectedId(id);
     setSelectedShapeId(null);
     setActiveLayerId(null);
     setPreviewCheckpointId(null);

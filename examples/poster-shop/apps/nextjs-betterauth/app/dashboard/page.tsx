@@ -24,6 +24,7 @@ export default function Dashboard() {
   const [preparation, setPreparation] = useState<Preparation>("pending");
   const [attempt, setAttempt] = useState(0);
   const [inviteRejected, setInviteRejected] = useState(false);
+  const [rejectionDismissed, setRejectionDismissed] = useState(false);
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
@@ -73,17 +74,17 @@ export default function Dashboard() {
     <PosterShopApp
       // An invited poster opens as soon as it syncs, while the invite is
       // redeemed in the background; an invalid link falls back to your own.
-      initialCanvasId={invite?.canvasId ?? null}
+      initialCanvasId={inviteRejected ? null : (invite?.canvasId ?? null)}
       preparing={preparation === "pending"}
       notice={
         failure ??
-        (inviteRejected ? (
+        (inviteRejected && !rejectionDismissed ? (
           <Banner
             status="info"
             title="This invite link is no longer valid"
             description="It may have been used already or revoked. Ask the poster's admin for a new link. Meanwhile, here is your own studio."
             isDismissable
-            onDismiss={() => setInviteRejected(false)}
+            onDismiss={() => setRejectionDismissed(true)}
           />
         ) : undefined)
       }
