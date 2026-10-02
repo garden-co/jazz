@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFile, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { dirname, join, relative, resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
 import * as catalogueProject from "./catalogue-project.js";
@@ -161,22 +163,95 @@ describe("withJazz", () => {
     expect(resolved.turbopack?.resolveAlias?.["jazz-napi"]).toBe("./custom-napi.js");
   });
 
-  it("keeps the runtime jazz-napi stand-in's exports in step with jazz-napi", async () => {
-    const exportedNames = (source: string) =>
-      /export const \{([^}]*)\}/
-        .exec(source)?.[1]
-        ?.split(",")
-        .map((name) => name.trim())
-        .filter(Boolean)
-        .sort();
-    const napiEntry = createRequire(import.meta.url).resolve("jazz-napi");
-    const napiEsm = await readFile(join(dirname(napiEntry), "index.mjs"), "utf8");
-    const standIn = await readFile(new URL("./napi-runtime.ts", import.meta.url), "utf8");
+  it("publishes staged bytes atomically through the workspace native alias", async () => {
+    const root = await tempRoots.create("jazz-next-native-upload-");
+    const facade = join(root, "napi-runtime.mjs");
+    const consumer = join(root, "consumer.mjs");
+    await build({
+      entryPoints: [fileURLToPath(new URL("./napi-runtime.ts", import.meta.url))],
+      outfile: facade,
+      format: "esm",
+      platform: "node",
+    });
+    await build({
+      stdin: {
+        resolveDir: fileURLToPath(new URL(".", import.meta.url)),
+        contents: `
+          import assert from "node:assert/strict";
+          import { randomBytes } from "node:crypto";
+          import { NapiDb, StagedStreamingMutation } from ${JSON.stringify(facade)};
+          import { schema as s } from "../index.js";
+          import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
+          import {
+            openConfig, encodedCells, queryFromTable, PostcardReader, readNativeRowBatch,
+          } from "../runtime/native-runtime/native-codec.js";
+          import { rowsFromBatches } from "../runtime/native-runtime/native-runtime-adapter.js";
+          import { createOpenTransactionId } from "../runtime/client.js";
 
-    expect(exportedNames(napiEsm)?.length).toBeGreaterThan(0);
-    expect(exportedNames(standIn)).toEqual(exportedNames(napiEsm));
-    expect(standIn).toContain("export default napi;");
-  });
+          const app = s.defineApp({ files: s.table({ payload: s.bytes() }, {}) });
+          const author = new TextEncoder().encode(JSON.stringify(["https://fixture.invalid", "fixture"]));
+          const db = NapiDb.openMemoryAsBackend(encodeSchema(app.wasmSchema), openConfig(randomBytes(16), author, 1, true));
+          const payload = Uint8Array.from({ length: 196731 }, (_, i) => (i * 29 + 7) & 255);
+          const rowId = randomBytes(16);
+          const idHex = rowId.toString("hex");
+          const expectedId = [idHex.slice(0,8), idHex.slice(8,12), idHex.slice(12,16), idHex.slice(16,20), idHex.slice(20)].join("-");
+          async function rows() {
+            let result = db.all(queryFromTable("files"), { tier: "local", propagation: "local_only" });
+            if (!(result instanceof Uint8Array)) {
+              const pending = result;
+              const deadline = Date.now() + 10000;
+              while (!(result = pending.poll())) {
+                assert.ok(Date.now() < deadline, "local native read settles");
+                db.tick();
+                await new Promise(resolve => setTimeout(resolve, 1));
+              }
+            }
+            return rowsFromBatches(new PostcardReader(result).readVec(readNativeRowBatch), app.wasmSchema);
+          }
+          let write;
+          const ticker = setInterval(() => db.tick(), 1);
+          try {
+            const upload = db.beginStreamingMutation("files", rowId, encodedCells([], []), "payload");
+            for (let i = 0; i < payload.length; i += 16384) upload.push(payload.subarray(i, i + 16384));
+            const staged = upload.stage();
+            assert.ok(staged instanceof StagedStreamingMutation);
+            assert.deepEqual(await rows(), []);
+            const transaction = createOpenTransactionId();
+            db.beginTransaction(transaction, "exclusive");
+            staged.attach(transaction);
+            assert.deepEqual(await rows(), []);
+            write = db.commitTransaction(transaction, "exclusive");
+            await write.wait("local");
+            const published = await rows();
+            assert.equal(published.length, 1);
+            assert.equal(published[0].id, expectedId);
+            assert.deepEqual(published[0].valuesByColumn.get("payload"), { type: "Bytea", value: payload });
+            assert.throws(() => staged.attach(transaction));
+            assert.equal(staged.abort(), false);
+            assert.deepEqual(await rows(), published);
+          } finally {
+            clearInterval(ticker);
+            write?.close();
+            await db.close();
+          }
+        `,
+      },
+      outfile: consumer,
+      bundle: true,
+      packages: "external",
+      external: [facade],
+      format: "esm",
+      platform: "node",
+    });
+    await promisify(execFile)(process.execPath, [consumer], {
+      timeout: 20_000,
+      env: {
+        ...process.env,
+        JAZZ_CORRECTNESS_ARTIFACT_RUN: originalCorrectnessRun,
+        JAZZ_CORRECTNESS_WASM_PACKAGE: originalCorrectnessWasmPackage,
+      },
+    });
+  }, 30_000);
 
   it("does not inject Jazz env vars outside the development phase", async () => {
     const resolved = await resolveWrappedConfig(withJazz({}), PRODUCTION_BUILD_PHASE);
