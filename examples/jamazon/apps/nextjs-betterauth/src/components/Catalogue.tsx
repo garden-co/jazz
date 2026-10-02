@@ -12,6 +12,7 @@ import { useState } from "react";
 import { app, type Category, type Product, type Stock } from "@/schema";
 import {
   snapshotProducts,
+  UNTIL_SERVER_ANSWERS,
   useCatalogueSnapshot,
   type CatalogueSnapshot,
 } from "@/src/catalogue/snapshot";
@@ -21,15 +22,18 @@ import { Page } from "./Page";
 /**
  * The product grid. Search is a live Jazz query: every keystroke narrows the
  * subscription, and it runs against the local copy of the catalogue, so it
- * also works offline. Until that local copy has the catalogue (a first visit
- * syncs it), the grid shows the server-rendered snapshot instead of a
- * skeleton.
+ * also works offline. Until each live query has delivered (a first visit
+ * syncs the catalogue), the grid shows the server's snapshot instead of a
+ * skeleton; after that, the live result alone (see UNTIL_SERVER_ANSWERS).
  */
 export function Catalogue({ categorySlug }: { categorySlug?: string }) {
   const snapshot = useCatalogueSnapshot();
   const [search, setSearch] = useState("");
-  const { data: liveCategories } = useAll(app.categories.orderBy("position", "asc"));
-  const categories = liveCategories?.length ? liveCategories : snapshot?.categories;
+  const { data: liveCategories } = useAll(
+    app.categories.orderBy("position", "asc"),
+    UNTIL_SERVER_ANSWERS,
+  );
+  const categories = liveCategories ?? snapshot?.categories;
   const category = categorySlug ? categories?.find((c) => c.slug === categorySlug) : undefined;
   const term = search.trim().toLowerCase();
 
@@ -37,20 +41,22 @@ export function Catalogue({ categorySlug }: { categorySlug?: string }) {
   if (category) query = query.where({ categoryId: category.id });
   if (term) query = query.where({ searchText: { contains: term } });
   const waitingForCategory = categorySlug !== undefined && !category;
-  const { data: liveProducts } = useAll(waitingForCategory ? undefined : query);
-  // An empty local result on a first visit means "not synced yet" while the
-  // snapshot has products; show those until the catalogue arrives.
-  const fromSnapshot =
-    snapshot && (!liveCategories?.length || !liveProducts?.length) && !waitingForCategory
+  const { data: liveProducts } = useAll(
+    waitingForCategory ? undefined : query,
+    UNTIL_SERVER_ANSWERS,
+  );
+  const products =
+    liveProducts ??
+    (snapshot && !waitingForCategory
       ? snapshotProducts(snapshot, { categoryId: category?.id, term })
-      : undefined;
-  const products = fromSnapshot?.length ? fromSnapshot : liveProducts;
+      : undefined);
   // Stock for the products on screen only, not the whole table.
   const shownIds = products?.map((product) => product.id) ?? [];
   const { data: liveStock } = useAll(
     shownIds.length ? app.stock.where({ productId: { in: shownIds } }) : undefined,
+    UNTIL_SERVER_ANSWERS,
   );
-  const stock = liveStock?.length ? liveStock : (snapshot?.stock ?? []);
+  const stock = liveStock ?? snapshot?.stock ?? [];
 
   return (
     <CatalogueView

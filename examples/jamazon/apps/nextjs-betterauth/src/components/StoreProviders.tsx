@@ -14,7 +14,7 @@ import { LOCAL_DEFAULTS } from "@/src/lib/build-config.mjs";
 import { jazzEnv } from "@/src/lib/jazz-env";
 import { claimGuestCart, readGuestCart, type GuestCartLine } from "@/src/store/cart";
 import { usePathname } from "next/navigation";
-import { CatalogueSnapshotProvider, type CatalogueSnapshot } from "@/src/catalogue/snapshot";
+import { isCataloguePath, useCatalogueSnapshot } from "@/src/catalogue/snapshot";
 import { SnapshotCatalogue } from "./Catalogue";
 import { StoreFrame, StoreShell } from "./StoreShell";
 
@@ -51,44 +51,37 @@ async function changeAccount(run: () => Promise<void>) {
  * - signing in to an existing account switches accounts, and the guest cart's
  *   lines are claimed into the account's cart.
  */
-export function StoreProviders({
-  catalogue,
-  children,
-}: {
-  /** The public catalogue, server-rendered for the first paint. */
-  catalogue: CatalogueSnapshot | null;
-  children: ReactNode;
-}) {
-  // While the guest's Jazz client opens, the store frame and (on catalogue
-  // pages) the server's copy of the catalogue render straight away.
-  const opening = <OpeningStore catalogue={catalogue} />;
+export function StoreProviders({ children }: { children: ReactNode }) {
+  // While the guest's Jazz client opens, the store frame renders straight
+  // away, and on catalogue pages the server's copy of the catalogue as soon
+  // as it arrives.
+  const opening = <OpeningStore />;
   return (
     <Theme theme={jazzTheme} mode="system">
-      <CatalogueSnapshotProvider snapshot={catalogue}>
-        <JazzProvider
-          appId={appId}
-          serverUrl={serverUrl}
-          env={jazzEnv}
-          initial="local-first"
-          loading={opening}
-          error={(state) => <OpenFailed error={state.error} retry={state.retry} />}
-          signedOut={opening}
-        >
-          <ShopperProvider>
-            <StoreShell>{children}</StoreShell>
-          </ShopperProvider>
-        </JazzProvider>
-      </CatalogueSnapshotProvider>
+      <JazzProvider
+        appId={appId}
+        serverUrl={serverUrl}
+        env={jazzEnv}
+        initial="local-first"
+        loading={opening}
+        error={(state) => <OpenFailed error={state.error} retry={state.retry} />}
+        signedOut={opening}
+      >
+        <ShopperProvider>
+          <StoreShell>{children}</StoreShell>
+        </ShopperProvider>
+      </JazzProvider>
     </Theme>
   );
 }
 
-function OpeningStore({ catalogue }: { catalogue: CatalogueSnapshot | null }) {
+function OpeningStore() {
+  const catalogue = useCatalogueSnapshot();
   const pathname = usePathname();
   const categorySlug = pathname.startsWith("/category/")
     ? decodeURIComponent(pathname.slice("/category/".length))
     : undefined;
-  const showsCatalogue = catalogue && (pathname === "/" || categorySlug);
+  const showsCatalogue = catalogue && isCataloguePath(pathname);
   return (
     <StoreFrame categories={catalogue?.categories ?? []}>
       {showsCatalogue ? (

@@ -11,7 +11,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { app, type Category } from "@/schema";
-import { useCatalogueSnapshot } from "@/src/catalogue/snapshot";
+import { UNTIL_SERVER_ANSWERS, useCatalogueSnapshot } from "@/src/catalogue/snapshot";
 import { useCart } from "@/src/store/cart";
 import { useShopper } from "./StoreProviders";
 
@@ -101,11 +101,14 @@ function TopBarActions() {
 function StoreNav({ pathname }: { pathname: string }) {
   const shopper = useShopper();
   const snapshot = useCatalogueSnapshot();
-  const { data: categories } = useAll(app.categories.orderBy("position", "asc"));
+  const { data: categories } = useAll(
+    app.categories.orderBy("position", "asc"),
+    UNTIL_SERVER_ANSWERS,
+  );
   return (
     <NavSections
       pathname={pathname}
-      categories={categories?.length ? categories : (snapshot?.categories ?? [])}
+      categories={categories ?? snapshot?.categories ?? []}
       shopper={shopper}
     />
   );
