@@ -2795,6 +2795,34 @@ describe("broker worker context initialization", () => {
     }
   });
 
+  it("keeps a sibling tab's credential when a tab joins without one, but takes any real credential", async () => {
+    const base = { ...options("retained-tab-credential"), serverUrl: "ws://server.test" };
+    const signedIn = await connect(
+      { ...base, authJson: '{"jwt_token":"sibling"}' },
+      "signed-in-tab",
+    );
+    await initializeFollower(signedIn.port, 1);
+    const runtime = mocks.runtimes[0]!;
+    await vi.waitFor(() =>
+      expect(runtime.connect).toHaveBeenCalledWith("ws://server.test", '{"jwt_token":"sibling"}'),
+    );
+    runtime.updateAuth.mockClear();
+
+    // A tab reopening a retained account before its provider answers.
+    await connect({ ...base, authJson: '{"jwt_token":null}' }, "retained-tab");
+    expect(runtime.updateAuth).not.toHaveBeenCalled();
+
+    for (const authJson of [
+      '{"jwt_token":null,"admin_secret":"admin"}',
+      '{"jwt_token":null,"backend_secret":"backend"}',
+      '{"jwt_token":"fresh"}',
+    ]) {
+      await connect({ ...base, authJson }, `credential-tab-${authJson.length}`);
+      expect(runtime.updateAuth).toHaveBeenLastCalledWith(authJson);
+    }
+    expect(runtime.updateAuth).toHaveBeenCalledTimes(3);
+  });
+
   it("publishes reconnected claims to every tab only after upstream admission", async () => {
     const initOptions = { ...options("reconnect-shared-claims"), serverUrl: "ws://server.test" };
     const owner = await connect(initOptions, "owner-tab");

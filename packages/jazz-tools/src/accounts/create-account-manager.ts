@@ -9,7 +9,11 @@ export interface AccountManagerConfig {
   serverUrl: string;
   env?: string;
   runtimeSources?: RuntimeSourcesConfig;
-  /** Supply durable storage on native/server hosts; browser defaults to localStorage. */
+  /**
+   * Supply durable storage on native/server hosts; browser defaults to
+   * localStorage. Only that browser default reopens the last external account
+   * before its provider confirms it.
+   */
   store?: AccountStore;
 }
 
@@ -23,7 +27,10 @@ export async function createAccountManager(config: AccountManagerConfig) {
     appId: config.appId,
     registry,
     store,
-    retainAccountAssignment: true,
+    // Only the browser's own selection store reopens a retained account
+    // before the provider answers. A host-supplied store (Node, SSR, tests)
+    // keeps the ordinary per-login transition.
+    retainAccountAssignment: config.store === undefined,
     mintToken(secret, audience) {
       return source.mintLocalFirstToken({
         secret: authSecretSeedForMinting(secret),

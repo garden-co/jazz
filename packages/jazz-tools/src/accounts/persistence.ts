@@ -85,8 +85,9 @@ export async function prepareAccountManager(options: {
   backend?: BackendAccountHost;
   /**
    * Retain the selected external account's assignment so the next start
-   * reopens it before the provider answers. Hosts opt in once their runtime
-   * can open an account context before its first credential.
+   * reopens it before the provider answers, and re-admit it in place on a
+   * same-identity login. Hosts opt in once their runtime can open an account
+   * context before its first credential.
    */
   retainAccountAssignment?: boolean;
 }) {
@@ -122,6 +123,7 @@ export async function prepareAccountManager(options: {
     backend: options.backend,
     restoredLocalFirstSecret: stored.selected === null ? undefined : stored.roots[stored.selected],
     restoredAccount: stored.selected === null ? (stored.assignment ?? undefined) : undefined,
+    revalidateInPlace: options.retainAccountAssignment === true,
     localFirst: localFirstFactory({
       appId: options.appId,
       mintToken: options.mintToken,

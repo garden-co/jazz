@@ -7,7 +7,12 @@ import {
 export { AccountAuthError } from "./registry-client.js";
 import { isReservedJazzIssuer, parseJwtPayload } from "../runtime/client-session.js";
 import { isPortableAuthorComponent } from "../runtime/author-id.js";
-import { AccountManager, type AccountHandle, type AccountIdentity } from "./state.js";
+import {
+  AccountManager,
+  AccountOperationSuperseded,
+  type AccountHandle,
+  type AccountIdentity,
+} from "./state.js";
 
 /** A refresh callback must continue to authenticate the same exact identity. */
 export type JWTAuth = string | { getToken(): Promise<string> };
@@ -87,6 +92,22 @@ function identityFromToken(token: string): AccountIdentity {
 function sameIdentity(a: AccountIdentity, b: AccountIdentity): boolean {
   return a.issuer === b.issuer && a.subject === b.subject;
 }
+/**
+ * The provider token a revalidation already fetched, handed to the enrollment
+ * that follows it once; later refreshes ask the provider as usual.
+ */
+function pinnedAuth(auth: JWTAuth, token: string): JWTAuth {
+  if (typeof auth === "string") return auth;
+  let pinned: string | undefined = token;
+  return {
+    getToken() {
+      const once = pinned;
+      pinned = undefined;
+      return once !== undefined ? Promise.resolve(once) : auth.getToken();
+    },
+  };
+}
+
 async function tokenFor(auth: JWTAuth): Promise<string> {
   if (typeof auth === "string") return auth;
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -181,7 +202,8 @@ export function getBackendAuth(
 
 /**
  * @internal True while a retained external handle has no provider credential.
- * Its context is open locally; the server admits nothing until revalidation.
+ * Its context is open locally and presents no credential upstream until
+ * revalidation binds one.
  */
 export function isProvisionalAccount(handle: AccountHandle): boolean {
   return credentials.get(handle)?.provisional === true;
@@ -242,6 +264,12 @@ export function createAccountManagerWithRuntime(options: {
   restoredLocalFirstSecret?: string;
   /** A retained external assignment, reopened without credentials until revalidated. */
   restoredAccount?: RetainedAccountAssignment;
+  /**
+   * Re-admit the selected external account in place on a same-identity
+   * login. Only hosts that retain assignments across reloads opt in; others
+   * keep the ordinary teardown-and-reopen transition.
+   */
+  revalidateInPlace?: boolean;
   fetch?: typeof fetch;
 }): AccountManager<JWTAuth> {
   const registry = options.registry.replace(/\/$/, "");
@@ -348,44 +376,55 @@ export function createAccountManagerWithRuntime(options: {
       registerJWT: (auth) => enroll("register", auth),
       loginJWT: (auth) => enroll("login", auth),
       loginOrRegisterJWT: (auth) => enroll("login-or-register", auth),
-      async revalidateJWT(account, operation, auth) {
-        // In-place revalidation of the selected external account. Anything
-        // other than "the registry still assigns this exact identity to this
-        // exact account" returns undefined so the caller performs a full,
-        // ordinary transition (shutdown, enrollment, reopen).
-        const material = credentials.get(account);
-        if (
-          !material ||
-          material.registry !== registry ||
-          material.backend ||
-          material.localFirstSecret !== undefined ||
-          isReservedJazzIssuer(account.identity.issuer)
-        )
-          return undefined;
-        const started = epoch;
-        const token = await tokenFor(auth);
-        assertCurrent(started);
-        const identity = identityFromToken(token);
-        if (!sameIdentity(identity, account.identity)) return undefined;
-        const response = await request(
-          operation === "loginJWT" ? "login" : "login-or-register",
-          token,
-        );
-        assertCurrent(started);
-        if (readAccountAssignment(response, identity) !== account.id) return undefined;
-        if (credentials.get(account) !== material) throw new AccountAuthError("account_logged_out");
-        material.auth = auth;
-        material.provisional = false;
-        material.primed = token;
-        for (const listener of [...material.bound]) {
-          try {
-            listener();
-          } catch (error) {
-            console.error("Account credential listener failed", error);
-          }
-        }
-        return account;
-      },
+      revalidateJWT: !options.revalidateInPlace
+        ? undefined
+        : async (account, operation, auth, isCurrent = () => true) => {
+            // In-place revalidation of the selected external account. Anything
+            // other than "the registry still assigns this exact identity to this
+            // exact account" returns { reauth } so the caller performs a full,
+            // ordinary transition (shutdown, enrollment, reopen).
+            const material = credentials.get(account);
+            if (
+              !material ||
+              material.registry !== registry ||
+              material.backend ||
+              material.localFirstSecret !== undefined ||
+              isReservedJazzIssuer(account.identity.issuer)
+            )
+              return { reauth: auth };
+            const started = epoch;
+            const token = await tokenFor(auth);
+            assertCurrent(started);
+            const identity = identityFromToken(token);
+            // A different provider subject is decided before any registry call;
+            // the ordinary enrollment then reuses this token instead of asking
+            // the provider again.
+            if (!sameIdentity(identity, account.identity))
+              return { reauth: pinnedAuth(auth, token) };
+            const response = await request(
+              operation === "loginJWT" ? "login" : "login-or-register",
+              token,
+            );
+            assertCurrent(started);
+            if (readAccountAssignment(response, identity) !== account.id)
+              return { reauth: pinnedAuth(auth, token) };
+            if (credentials.get(account) !== material)
+              throw new AccountAuthError("account_logged_out");
+            // A logout or newer operation that started meanwhile wins: the
+            // account stays unconfirmed rather than syncing as it is torn down.
+            if (!isCurrent()) throw new AccountOperationSuperseded();
+            material.auth = auth;
+            material.provisional = false;
+            material.primed = token;
+            for (const listener of [...material.bound]) {
+              try {
+                listener();
+              } catch (error) {
+                console.error("Account credential listener failed", error);
+              }
+            }
+            return account;
+          },
       async linkJWT(account, auth) {
         const started = epoch;
         const approvingToken = await accountToken(account, registry);

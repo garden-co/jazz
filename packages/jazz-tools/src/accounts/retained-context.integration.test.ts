@@ -1,7 +1,8 @@
 import { expect, it, vi } from "vitest";
 import { createDb, schema } from "../index.js";
 import { getDbInternalSession } from "../runtime/db-internal-session.js";
-import { createAccountManager } from "./create-account-manager.js";
+import { accountRegistryUrl } from "./context.js";
+import { prepareAccountManager } from "./persistence.js";
 import { isProvisionalAccount } from "./enrollment.js";
 
 const alice = { issuer: "https://issuer.example", subject: "alice" };
@@ -24,9 +25,15 @@ it("opens a retained account's local data before its credential, then adopts the
     async () => new Response(JSON.stringify({ account: aliceAccount, identity: alice })),
   );
   vi.stubGlobal("fetch", fetch);
-  const accounts = await createAccountManager({
+  // The browser host retains assignments; this is its account manager over
+  // an in-memory store.
+  const accounts = await prepareAccountManager({
     appId,
-    serverUrl: "http://127.0.0.1:1",
+    registry: accountRegistryUrl("http://127.0.0.1:1", appId),
+    retainAccountAssignment: true,
+    mintToken: () => {
+      throw new Error("a retained external account mints no local-first token");
+    },
     store: {
       async read() {
         return stored;
@@ -69,6 +76,68 @@ it("opens a retained account's local data before its credential, then adopts the
       expect.objectContaining({ id: row.id, text: "before revalidation" }),
     ]);
   } finally {
+    await db.shutdown();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("does not loop renewing a retained account's missing credential before revalidation", async () => {
+  const { Db } = await import("../runtime/db.js");
+  const appId = "retained-account-backoff";
+  let stored: string | null = JSON.stringify({
+    format: "jazz-account-selection-v1",
+    roots: [],
+    selected: null,
+    assignment: { account: aliceAccount, ...alice },
+  });
+  const fetch = vi.fn(
+    async () => new Response(JSON.stringify({ account: aliceAccount, identity: alice })),
+  );
+  vi.stubGlobal("fetch", fetch);
+  // The browser host retains assignments; this is its account manager over
+  // an in-memory store.
+  const accounts = await prepareAccountManager({
+    appId,
+    registry: accountRegistryUrl("http://127.0.0.1:1", appId),
+    retainAccountAssignment: true,
+    mintToken: () => {
+      throw new Error("a retained external account mints no local-first token");
+    },
+    store: {
+      async read() {
+        return stored;
+      },
+      async update(transform) {
+        stored = transform(stored);
+      },
+    },
+  });
+  const account = accounts.getLoggedIn()!;
+  const authListeners: ((state: { error?: string }) => void)[] = [];
+  const onAuthChanged = Db.prototype.onAuthChanged;
+  vi.spyOn(Db.prototype, "onAuthChanged").mockImplementation(function (this: never, listener) {
+    authListeners.push(listener as never);
+    return onAuthChanged.call(this, listener);
+  });
+  const refreshAccountAuth = vi.spyOn(Db.prototype, "refreshAccountAuth");
+  const db = await createDb({ appId, account, driver: { type: "memory" } });
+  vi.useFakeTimers();
+  try {
+    // A tokenless link reports a missing credential; nothing can renew it yet.
+    for (let i = 0; i < 20; i++) {
+      for (const listener of authListeners) listener({ error: "missing" });
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+    expect(refreshAccountAuth).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+    await accounts.revalidateJWT("loginJWT", { getToken: async () => jwt() });
+    await vi.waitFor(() => expect(refreshAccountAuth).toHaveBeenCalledOnce());
+    expect(fetch).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     await db.shutdown();
     vi.unstubAllGlobals();
   }

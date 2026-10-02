@@ -167,7 +167,10 @@ describe("retained external accounts", () => {
     await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
     const restarted = await manager(store, registryFetch());
     const retained = restarted.getLoggedIn()!;
-    await expect(restarted.revalidateJWT("loginJWT", jwt(bob))).resolves.toBeUndefined();
+    const bobToken = jwt(bob);
+    await expect(restarted.revalidateJWT("loginJWT", bobToken)).resolves.toEqual({
+      reauth: bobToken,
+    });
     expect(isProvisionalAccount(retained)).toBe(true);
 
     const reassigned = vi.fn(
@@ -175,8 +178,21 @@ describe("retained external accounts", () => {
         new Response(JSON.stringify({ account: bobAccount, identity: alice }), { status: 200 }),
     );
     const other = await manager(store, reassigned);
-    await expect(other.revalidateJWT("loginJWT", jwt(alice))).resolves.toBeUndefined();
+    const aliceToken = jwt(alice);
+    await expect(other.revalidateJWT("loginJWT", aliceToken)).resolves.toEqual({
+      reauth: aliceToken,
+    });
     expect(isProvisionalAccount(other.getLoggedIn()!)).toBe(true);
+  });
+
+  it("decides a changed subject before calling the registry", async () => {
+    const store = memoryStore();
+    await (await manager(store, registryFetch())).loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
+    const fetch = registryFetch();
+    const restarted = await manager(store, fetch);
+    await restarted.revalidateJWT("loginJWT", jwt(bob));
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
 
@@ -261,6 +277,85 @@ describe("retained accounts in a Jazz session", () => {
     );
     expect(events).toEqual(["open:alice:true"]);
     auth.dispose();
+    await session.close();
+  });
+
+  it("asks the provider once and the registry once when the identity changed", async () => {
+    const fetch = registryFetch();
+    const { session, events } = await retainedSession(fetch);
+    const getToken = vi.fn(async () => jwt(bob));
+    await session.loginJWT({ getToken });
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: { id: bobAccount } });
+    expect(getToken).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(events).toEqual(["open:alice:true", "shutdown:alice:false", "open:bob:false"]);
+    await session.close();
+  });
+
+  it("stops showing the old account as ready once a different subject is known", async () => {
+    const { session } = await retainedSession();
+    const statuses: string[] = [];
+    session.subscribe(() => statuses.push(session.getSnapshot().status));
+    await session.loginJWT(jwt(bob));
+    expect(statuses[0]).toBe("transitioning");
+    await session.close();
+  });
+
+  it("retry after a registry rejection revalidates again instead of reopening", async () => {
+    const revoked = new Set(["alice"]);
+    const fetch = registryFetch(revoked);
+    const { session, events } = await retainedSession(fetch);
+    await expect(session.loginJWT(jwt(alice))).rejects.toThrow("identity_not_authorized");
+    const failed = session.getSnapshot();
+
+    // Still rejected: retry fails the same way and never publishes a clean "ready".
+    await expect(session.retry()).rejects.toThrow("identity_not_authorized");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(session.getSnapshot()).toMatchObject({
+      status: "ready",
+      client: failed.client,
+      error: expect.objectContaining({ message: "identity_not_authorized" }),
+    });
+    expect(isProvisionalAccount(failed.account!)).toBe(true);
+
+    revoked.delete("alice");
+    await session.retry();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", client: failed.client });
+    expect(session.getSnapshot().error).toBeUndefined();
+    expect(isProvisionalAccount(failed.account!)).toBe(false);
+    expect(events).toEqual(["open:alice:true"]);
+    await session.close();
+  });
+
+  it("retry without a failed revalidation still reopens the selected account", async () => {
+    const { session, events } = await retainedSession();
+    await session.retry();
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: { id: aliceAccount } });
+    expect(events).toEqual(["open:alice:true", "shutdown:alice:false", "open:alice:true"]);
+    await session.close();
+  });
+
+  it("a logout racing an in-place revalidation wins and never binds the account", async () => {
+    const gate = deferred<void>();
+    const inner = registryFetch();
+    const fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
+      await gate.promise;
+      return inner(input, init);
+    });
+    const { session, events, store } = await retainedSession(fetch);
+    const retained = session.getSnapshot().account!;
+    const login = session.loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    const logout = session.logout();
+    gate.resolve();
+    await expect(login).rejects.toThrow();
+    await logout;
+    expect(session.getSnapshot().status).toBe("signed-out");
+    expect(isProvisionalAccount(retained)).toBe(false);
+    await expect(accountToken(retained, registry)).rejects.toThrow();
+    expect(events).toEqual(["open:alice:true", "shutdown:alice:false"]);
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).toBeNull());
     await session.close();
   });
 

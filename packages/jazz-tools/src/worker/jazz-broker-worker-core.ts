@@ -1251,7 +1251,10 @@ async function configureServer(
   const requestedUrl = options.serverUrl ?? null;
   if (context.serverUrl === requestedUrl) {
     // A tab reopening a retained account has no credential yet. It must not
-    // replace a sibling tab's working credential for the same principal.
+    // replace a sibling tab's working credential: a worker context belongs to
+    // one storage owner (one account), so that credential authenticates the
+    // same account's upstream connection, which already carries this tab's
+    // local writes for that account.
     if (!carriesCredential(options.authJson) && carriesCredential(context.serverAuthJson)) return;
     context.serverAuthJson = options.authJson;
     if (context.serverConnectionStarted) await requireRuntime(context).updateAuth(options.authJson);
@@ -1268,10 +1271,17 @@ async function configureServer(
   context.serverAuthJson = options.authJson;
 }
 
+/** Whether an upstream auth payload authenticates anything at all. */
 function carriesCredential(authJson: string): boolean {
   try {
     const auth = JSON.parse(authJson) as Record<string, unknown> | null;
-    return !!auth && (typeof auth.jwt_token === "string" || auth.backend_session != null);
+    return (
+      !!auth &&
+      (typeof auth.jwt_token === "string" ||
+        typeof auth.admin_secret === "string" ||
+        typeof auth.backend_secret === "string" ||
+        auth.backend_session != null)
+    );
   } catch {
     return false;
   }

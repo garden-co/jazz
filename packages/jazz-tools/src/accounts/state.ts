@@ -44,7 +44,13 @@ export interface AccountEnrollment<Auth> {
     account: AccountHandle,
     operation: "loginJWT" | "loginOrRegisterJWT",
     auth: Auth,
-  ): Promise<AccountHandle | undefined>;
+    isCurrent?: () => boolean,
+  ): Promise<AccountHandle | AccountRevalidationFallback<Auth>>;
+}
+
+/** @internal The ordinary transition to run instead, with the auth it should use. */
+export interface AccountRevalidationFallback<Auth> {
+  readonly reauth: Auth;
 }
 
 export class AccountOperationSuperseded extends Error {
@@ -140,21 +146,38 @@ export class AccountManager<Auth> {
     });
   }
 
-  /** @internal Session hosts revalidate the selected account without a transition. */
+  /** @internal Whether a same-identity login re-admits the selected account in place. */
+  get revalidatesInPlace(): boolean {
+    return this.enrollment.revalidateJWT !== undefined;
+  }
+
+  /**
+   * @internal Session hosts revalidate the selected account without a
+   * transition. Resolves to the same handle once the registry re-admits it,
+   * or to the fallback a caller runs as an ordinary transition instead.
+   */
   async revalidateJWT(
     operation: "loginJWT" | "loginOrRegisterJWT",
     auth: Auth,
-  ): Promise<AccountHandle | undefined> {
+    /** The caller still wants this outcome; checked again just before binding. */
+    isCurrent: () => boolean = () => true,
+  ): Promise<AccountHandle | AccountRevalidationFallback<Auth>> {
     const account = this.snapshot.account;
     const revalidate = this.enrollment.revalidateJWT;
-    if (!account || !revalidate) return undefined;
+    if (!account || !revalidate) return { reauth: auth };
     const generation = ++this.generation;
     this.publish({ ...this.snapshot, pending: operation, error: undefined });
     try {
-      const same = await revalidate.call(this.enrollment, account, operation, auth);
+      const outcome = await revalidate.call(
+        this.enrollment,
+        account,
+        operation,
+        auth,
+        () => generation === this.generation && isCurrent(),
+      );
       if (generation !== this.generation) throw new AccountOperationSuperseded();
       this.publish({ account, pending: undefined, error: undefined });
-      return same === account ? account : undefined;
+      return outcome === account ? account : outcome;
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       if (generation === this.generation) {
