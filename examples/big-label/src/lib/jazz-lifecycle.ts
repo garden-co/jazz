@@ -15,6 +15,11 @@ export class JazzLifecycle {
     private readonly publish: (client: JazzClient | undefined) => void,
   ) {}
 
+  /** The account the manager has selected (retained from an earlier sign-in, or just enrolled). */
+  selectedAccount(): AccountHandle | undefined {
+    return this.accounts.getLoggedIn();
+  }
+
   attach(isCurrent: () => boolean = () => true) {
     return this.enqueue(() => this.openSelected(isCurrent));
   }

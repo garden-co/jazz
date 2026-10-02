@@ -205,6 +205,7 @@ function AccountApp({
 }) {
   const [client, setClient] = React.useState<JazzClient>();
   const [ready, setReady] = React.useState(false);
+  const [bootstrapping, setBootstrapping] = React.useState(false);
   const [error, setError] = React.useState<Error>();
   const [retry, setRetry] = React.useState(0);
   const active = React.useRef(true);
@@ -230,12 +231,20 @@ function AccountApp({
       email,
       identityId,
       getToken: requireJazzToken,
-      bootstrap: async (token) => {
-        const response = await fetch("/api/bootstrap", {
-          method: "POST",
-          headers: { authorization: `Bearer ${token}` },
-        });
-        if (!response.ok) throw new Error(`bootstrap failed (${response.status})`);
+      // The personal label is created by the server once per account (and
+      // again only when the sign-in email changes). The app renders from local
+      // data meanwhile.
+      needsBootstrap: (accountId) => readBootstrapped(accountId) !== email,
+      onBootstrapStart: () => setBootstrapping(true),
+      bootstrap: async (token, accountId) => {
+        try {
+          await bootstrapOnce(accountId, token, email);
+        } finally {
+          if (current) setBootstrapping(false);
+        }
+      },
+      onBootstrapError: (cause) => {
+        if (current) setError(toError(cause));
       },
       isCurrent: () => current,
     }).then(
@@ -272,9 +281,47 @@ function AccountApp({
   if (!client || !ready) return <Waiting message="Preparing your personal label…" />;
   return (
     <JazzClientProvider client={client}>
-      <Operations email={email} onSignOut={() => void signOut().catch(() => {})} />
+      <Operations
+        email={email}
+        preparing={bootstrapping}
+        onSignOut={() => void signOut().catch(() => {})}
+      />
     </JazzClientProvider>
   );
+}
+
+const bootstrappedKey = (accountId: string) => `big-label-bootstrapped:${accountId}`;
+const bootstrapRequests = new Map<string, Promise<void>>();
+
+/** The sign-in email the account was last bootstrapped with, if any. */
+function readBootstrapped(accountId: string): string | null {
+  try {
+    return localStorage.getItem(bootstrappedKey(accountId));
+  } catch {
+    return null;
+  }
+}
+
+/** One bootstrap request per account and email at a time (StrictMode, Retry). */
+function bootstrapOnce(accountId: string, token: string, email: string): Promise<void> {
+  const key = `${accountId}:${email}`;
+  let request = bootstrapRequests.get(key);
+  if (!request) {
+    request = (async () => {
+      const response = await fetch("/api/bootstrap", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error(`bootstrap failed (${response.status})`);
+      try {
+        localStorage.setItem(bootstrappedKey(accountId), email);
+      } catch {
+        // Storage unavailable: the next load asks the (idempotent) server again.
+      }
+    })().finally(() => bootstrapRequests.delete(key));
+    bootstrapRequests.set(key, request);
+  }
+  return request;
 }
 
 async function requireJazzToken() {

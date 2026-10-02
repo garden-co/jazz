@@ -33,8 +33,15 @@ export function claimsSignupIntent(storage: IntentStorage, email: string, identi
 }
 
 /**
- * One attempt to enroll the signed-in identity with Jazz and bootstrap its
- * personal label. Resolves true when the attempt finished and is still current.
+ * One attempt to enroll the signed-in identity with Jazz. Resolves true when
+ * the attempt finished and is still current, as soon as the account's client
+ * is open; the personal label bootstrap then runs in the background.
+ *
+ * A Jazz account this browser kept from an earlier sign-in of the same
+ * identity is opened directly. Logging in again would only map the same
+ * Better Auth subject to the same account, after closing and reopening its
+ * client. The account's keys authenticate its sync connection either way, and
+ * the server's permission checks decide what it may read and write.
  *
  * `isCurrent` must belong to this attempt alone. React strict mode (and Retry)
  * abandon an attempt and start the next one straight away; a flag shared
@@ -48,21 +55,37 @@ export async function enrollAndBootstrap(options: {
   email: string;
   identityId: string;
   getToken: () => Promise<string>;
-  bootstrap: (token: string) => Promise<void>;
+  /** Whether the server still has to bootstrap this account (default: yes). */
+  needsBootstrap?: (accountId: string) => boolean;
+  bootstrap: (token: string, accountId: string) => Promise<void>;
+  /** Called before this attempt resolves when a background bootstrap starts. */
+  onBootstrapStart?: () => void;
+  onBootstrapError?: (error: unknown) => void;
   isCurrent: () => boolean;
 }): Promise<boolean> {
   const { lifecycle, storage, email, identityId, getToken, isCurrent } = options;
   const registering = claimsSignupIntent(storage, email, identityId);
   let registered = false;
-  await lifecycle.transition(async (manager) => {
-    if (!registering) return manager.loginJWT({ getToken });
-    await manager.registerJWT({ getToken });
-    registered = true;
-  }, isCurrent);
+  const retained = lifecycle.selectedAccount();
+  if (!registering && retained?.identity.subject === identityId) {
+    await lifecycle.attach(isCurrent);
+  } else {
+    await lifecycle.transition(async (manager) => {
+      if (!registering) return manager.loginJWT({ getToken });
+      await manager.registerJWT({ getToken });
+      registered = true;
+    }, isCurrent);
+  }
   // A registration consumes the intent even when its attempt was abandoned
   // meanwhile: the identity now has an account, so every later attempt logs in.
   if (registered) clearSignupIntent(storage);
   if (!isCurrent()) return false;
-  await options.bootstrap(await getToken());
+  const account = lifecycle.selectedAccount();
+  if (account && (options.needsBootstrap?.(account.id) ?? true)) {
+    options.onBootstrapStart?.();
+    void getToken()
+      .then((token) => options.bootstrap(token, account.id))
+      .catch((error: unknown) => options.onBootstrapError?.(error));
+  }
   return isCurrent();
 }

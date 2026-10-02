@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   AppShell,
   Button,
+  Center,
   EmptyState,
   LayoutContent,
   NavHeadingMenu,
@@ -12,6 +13,7 @@ import {
   SideNavHeading,
   SideNavItem,
   SideNavSection,
+  Spinner,
   Text,
   TopNav,
   TopNavHeading,
@@ -41,7 +43,16 @@ const navigation = [
   { label: "Settings", href: href.settings, pages: ["settings"] },
 ] as const;
 
-export function Operations({ email, onSignOut }: { email: string; onSignOut: () => void }) {
+export function Operations({
+  email,
+  preparing = false,
+  onSignOut,
+}: {
+  email: string;
+  /** The server is still creating the personal label. */
+  preparing?: boolean;
+  onSignOut: () => void;
+}) {
   const session = useSession();
   const route = useRoute();
   const account = session?.user.account;
@@ -100,11 +111,17 @@ export function Operations({ email, onSignOut }: { email: string; onSignOut: () 
     return (
       <AppShell topNav={topNav} height="auto" variant="section">
         <LayoutContent padding={8}>
-          {!isLoading && (
+          {preparing ? (
+            <Center>
+              <Spinner label="Preparing your personal label…" />
+            </Center>
+          ) : (
+            !isLoading && (
             <EmptyState
               title="No label yet"
               description="Your personal label is created when you first sign in. Reload to try again."
             />
+            )
           )}
         </LayoutContent>
       </AppShell>
