@@ -29,6 +29,8 @@ proofless durable exclusive retries fail closed. Revocation does not erase
 previously uploaded ciphertext or previously held keys.
 
 Extend native, WASM and foreground stage/attach capabilities and codec contracts.
+Keep the Next workspace native-runtime alias's staged-upload capability available
+through the same real native constructor, including atomic attachment and commit.
 Dropped or rejected raw streaming uploads queue exact cleanup on their live
 originating runtime, including foreign-runtime or schema rejection. Cleanup
 resolves the original upload's pending journal or promoted receipt, including
