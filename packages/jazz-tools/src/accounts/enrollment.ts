@@ -25,9 +25,39 @@ interface HandleCredentials {
   auth?: JWTAuth;
   backend?: Readonly<BackendAuth & { nodeId: string }>;
   localFirstSecret?: string;
+  /** A retained external assignment awaiting its first provider credential. */
+  provisional?: boolean;
+  /** The JWT the registry just accepted, offered once to the next context token request. */
+  primed?: string;
   invalidated: Set<() => void>;
+  bound: Set<() => void>;
 }
 const credentials = new WeakMap<AccountHandle, HandleCredentials>();
+
+/** Non-secret assignment a manager may persist to reopen an external account locally. */
+export interface RetainedAccountAssignment {
+  readonly account: string;
+  readonly issuer: string;
+  readonly subject: string;
+}
+
+const ACCOUNT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** @internal Validate a stored assignment; never trust persisted text as an identity proof. */
+export function isRetainedAccountAssignment(value: unknown): value is RetainedAccountAssignment {
+  if (!value || typeof value !== "object") return false;
+  const { account, issuer, subject } = value as Record<string, unknown>;
+  return (
+    typeof account === "string" &&
+    ACCOUNT_ID_PATTERN.test(account) &&
+    account !== "00000000-0000-0000-0000-000000000000" &&
+    typeof issuer === "string" &&
+    typeof subject === "string" &&
+    isPortableAuthorComponent(issuer) &&
+    isPortableAuthorComponent(subject) &&
+    !isReservedJazzIssuer(issuer)
+  );
+}
 
 /** @internal Native key derivation stays in Rust; hosts prepare it before use. */
 export interface LocalFirstAccountFactory {
@@ -89,12 +119,25 @@ function mintHandle(
   registry: string,
   id: string,
   identity: AccountIdentity,
-  auth: JWTAuth,
+  auth: JWTAuth | undefined,
   localFirstSecret?: string,
 ): AccountHandle {
   const handle = new EnrolledAccount(id, identity) as AccountHandle;
-  credentials.set(handle, { registry, auth, localFirstSecret, invalidated: new Set() });
+  credentials.set(handle, {
+    registry,
+    auth,
+    localFirstSecret,
+    provisional: auth === undefined,
+    invalidated: new Set(),
+    bound: new Set(),
+  });
   return handle;
+}
+
+function tokenStillFresh(token: string): boolean {
+  const expires = parseJwtPayload(token)?.exp;
+  // Leave headroom for transport admission; an expiring token is refetched.
+  return typeof expires === "number" && expires * 1000 > Date.now() + 60_000;
 }
 
 /** Export a local signing root for passphrase/passkey backup. Never store it in UI snapshots. */
@@ -111,9 +154,14 @@ export async function accountToken(handle: AccountHandle, registry: string): Pro
   const material = credentials.get(handle);
   if (!material || material.registry !== registry)
     throw new AccountAuthError("invalid_account_handle");
+  if (material.provisional) throw new AccountAuthError("account_credential_pending");
   if (material.backend || !material.auth)
     throw new AccountAuthError("backend_account_requires_backend_host");
-  const token = await tokenFor(material.auth);
+  const primed = material.primed;
+  material.primed = undefined;
+  // Reuse the JWT the registry accepted moments ago instead of asking the
+  // provider again; its identity was checked against this handle then.
+  const token = primed && tokenStillFresh(primed) ? primed : await tokenFor(material.auth);
   if (credentials.get(handle) !== material) throw new AccountAuthError("account_logged_out");
   if (!sameIdentity(identityFromToken(token), handle.identity))
     throw new AccountAuthError("credential_identity_changed");
@@ -129,6 +177,42 @@ export function getBackendAuth(
   if (!material || material.registry !== registry)
     throw new AccountAuthError("invalid_account_handle");
   return material.backend;
+}
+
+/**
+ * @internal True while a retained external handle has no provider credential.
+ * Its context is open locally; the server admits nothing until revalidation.
+ */
+export function isProvisionalAccount(handle: AccountHandle): boolean {
+  return credentials.get(handle)?.provisional === true;
+}
+
+/** @internal The non-secret assignment to persist for a JWT-enrolled external handle. */
+export function retainedAccountAssignment(
+  handle: AccountHandle,
+): RetainedAccountAssignment | undefined {
+  const material = credentials.get(handle);
+  if (
+    !material ||
+    material.backend ||
+    material.localFirstSecret !== undefined ||
+    isReservedJazzIssuer(handle.identity.issuer)
+  )
+    return undefined;
+  const assignment = {
+    account: handle.id,
+    issuer: handle.identity.issuer,
+    subject: handle.identity.subject,
+  };
+  return isRetainedAccountAssignment(assignment) ? assignment : undefined;
+}
+
+/** @internal Notify a context when revalidation binds a fresh credential to its handle. */
+export function onAccountCredentialBound(handle: AccountHandle, listener: () => void): () => void {
+  const material = credentials.get(handle);
+  if (!material) return () => {};
+  material.bound.add(listener);
+  return () => material.bound.delete(listener);
 }
 
 /** @internal Stop contexts when their owning manager logs out. */
@@ -156,6 +240,8 @@ export function createAccountManagerWithRuntime(options: {
   localFirst: LocalFirstAccountFactory;
   backend?: BackendAccountHost;
   restoredLocalFirstSecret?: string;
+  /** A retained external assignment, reopened without credentials until revalidated. */
+  restoredAccount?: RetainedAccountAssignment;
   fetch?: typeof fetch;
 }): AccountManager<JWTAuth> {
   const registry = options.registry.replace(/\/$/, "");
@@ -172,6 +258,11 @@ export function createAccountManagerWithRuntime(options: {
     requestAccountRegistry(registry, path, token, body, options.fetch);
   const readHandle = (value: unknown, auth: JWTAuth, expected: AccountIdentity): AccountHandle =>
     retain(mintHandle(registry, readAccountAssignment(value, expected), expected, auth));
+  const prime = (handle: AccountHandle, token: string) => {
+    const material = credentials.get(handle);
+    if (material) material.primed = token;
+    return handle;
+  };
   const enroll = async (operation: string, auth: JWTAuth): Promise<AccountHandle> => {
     const started = epoch;
     const token = await tokenFor(auth);
@@ -181,7 +272,7 @@ export function createAccountManagerWithRuntime(options: {
       throw new AccountAuthError("external_identity_required");
     const response = await request(operation, token);
     assertCurrent(started);
-    return readHandle(response, auth, identity);
+    return prime(readHandle(response, auth, identity), token);
   };
   if (options.restoredLocalFirstSecret !== undefined)
     parseAuthSecret(options.restoredLocalFirstSecret);
@@ -191,6 +282,12 @@ export function createAccountManagerWithRuntime(options: {
       : options.localFirst.restore?.(options.restoredLocalFirstSecret);
   if (options.restoredLocalFirstSecret !== undefined && !restored)
     throw new AccountAuthError("local_first_restore_unavailable");
+  if (
+    options.restoredAccount !== undefined &&
+    (restored || !isRetainedAccountAssignment(options.restoredAccount))
+  )
+    throw new AccountAuthError("invalid_retained_account");
+  const retainedAccount = options.restoredAccount;
   return new AccountManager(
     {
       logout() {
@@ -244,12 +341,51 @@ export function createAccountManagerWithRuntime(options: {
           registry,
           backend: Object.freeze({ backendSecret, nodeId }),
           invalidated: new Set(),
+          bound: new Set(),
         });
         return retain(handle);
       },
       registerJWT: (auth) => enroll("register", auth),
       loginJWT: (auth) => enroll("login", auth),
       loginOrRegisterJWT: (auth) => enroll("login-or-register", auth),
+      async revalidateJWT(account, operation, auth) {
+        // In-place revalidation of the selected external account. Anything
+        // other than "the registry still assigns this exact identity to this
+        // exact account" returns undefined so the caller performs a full,
+        // ordinary transition (shutdown, enrollment, reopen).
+        const material = credentials.get(account);
+        if (
+          !material ||
+          material.registry !== registry ||
+          material.backend ||
+          material.localFirstSecret !== undefined ||
+          isReservedJazzIssuer(account.identity.issuer)
+        )
+          return undefined;
+        const started = epoch;
+        const token = await tokenFor(auth);
+        assertCurrent(started);
+        const identity = identityFromToken(token);
+        if (!sameIdentity(identity, account.identity)) return undefined;
+        const response = await request(
+          operation === "loginJWT" ? "login" : "login-or-register",
+          token,
+        );
+        assertCurrent(started);
+        if (readAccountAssignment(response, identity) !== account.id) return undefined;
+        if (credentials.get(account) !== material) throw new AccountAuthError("account_logged_out");
+        material.auth = auth;
+        material.provisional = false;
+        material.primed = token;
+        for (const listener of [...material.bound]) {
+          try {
+            listener();
+          } catch (error) {
+            console.error("Account credential listener failed", error);
+          }
+        }
+        return account;
+      },
       async linkJWT(account, auth) {
         const started = epoch;
         const approvingToken = await accountToken(account, registry);
@@ -273,7 +409,7 @@ export function createAccountManagerWithRuntime(options: {
         assertCurrent(started);
         const linked = readHandle(response, auth, identity);
         if (linked.id !== account.id) throw new AccountAuthError("linked_account_mismatch");
-        return linked;
+        return prime(linked, token);
       },
     },
     restored
@@ -286,6 +422,15 @@ export function createAccountManagerWithRuntime(options: {
             options.restoredLocalFirstSecret,
           ),
         )
-      : undefined,
+      : retainedAccount
+        ? retain(
+            mintHandle(
+              registry,
+              retainedAccount.account,
+              { issuer: retainedAccount.issuer, subject: retainedAccount.subject },
+              undefined,
+            ),
+          )
+        : undefined,
   );
 }

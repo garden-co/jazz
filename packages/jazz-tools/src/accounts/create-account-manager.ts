@@ -23,6 +23,7 @@ export async function createAccountManager(config: AccountManagerConfig) {
     appId: config.appId,
     registry,
     store,
+    retainAccountAssignment: true,
     mintToken(secret, audience) {
       return source.mintLocalFirstToken({
         secret: authSecretSeedForMinting(secret),

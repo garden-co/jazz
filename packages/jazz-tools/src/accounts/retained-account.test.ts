@@ -1,0 +1,289 @@
+import { describe, expect, it, vi } from "vitest";
+import { prepareAccountManager, type AccountStore } from "./persistence.js";
+import {
+  accountToken,
+  isProvisionalAccount,
+  onAccountCredentialBound,
+  retainedAccountAssignment,
+} from "./enrollment.js";
+import type { AccountHandle } from "./state.js";
+import { createJazzSessionOwner } from "../session/state.js";
+import { connectAuthProvider } from "../session/auth-provider.js";
+
+const registry = "https://core.example/apps/test/accounts";
+const alice = { issuer: "https://issuer.example", subject: "alice" };
+const bob = { issuer: "https://issuer.example", subject: "bob" };
+const aliceAccount = "00000000-0000-4000-8000-00000000000a";
+const bobAccount = "00000000-0000-4000-8000-00000000000b";
+const mintToken = () =>
+  `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`;
+
+function jwt(identity: { issuer: string; subject: string }, extra: Record<string, unknown> = {}) {
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  return `e30.${btoa(JSON.stringify({ iss: identity.issuer, sub: identity.subject, exp, ...extra }))}.sig`;
+}
+
+function memoryStore(): AccountStore & { value: string | null } {
+  const store = {
+    value: null as string | null,
+    async read() {
+      return store.value;
+    },
+    async update(transform: (current: string | null) => string) {
+      store.value = transform(store.value);
+    },
+  };
+  return store;
+}
+
+/** A registry that assigns alice and bob to fixed accounts, unless revoked. */
+function registryFetch(revoked = new Set<string>()) {
+  return vi.fn(async (input: unknown, init?: RequestInit) => {
+    const bearer = String((init?.headers as Record<string, string>).Authorization).slice(7);
+    const payload = JSON.parse(atob(bearer.split(".")[1]!)) as { iss: string; sub: string };
+    if (revoked.has(payload.sub)) return new Response("identity_not_authorized", { status: 403 });
+    const account = payload.sub === "alice" ? aliceAccount : bobAccount;
+    expect(String(input)).toMatch(/\/(login|login-or-register|register)$/);
+    return new Response(
+      JSON.stringify({ account, identity: { issuer: payload.iss, subject: payload.sub } }),
+    );
+  });
+}
+
+async function manager(store: AccountStore, fetch: typeof globalThis.fetch) {
+  return prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken,
+    fetch,
+    retainAccountAssignment: true,
+  });
+}
+
+const tick = async () => {
+  for (let i = 0; i < 60; i++) await Promise.resolve();
+};
+
+describe("retained external accounts", () => {
+  it("persists only the non-secret assignment and reopens it without credentials", async () => {
+    const store = memoryStore();
+    const first = await manager(store, registryFetch());
+    const token = jwt(alice);
+    const handle = await first.loginJWT({ getToken: async () => token });
+    await vi.waitFor(() =>
+      expect(JSON.parse(store.value!).assignment).toEqual({
+        account: aliceAccount,
+        issuer: alice.issuer,
+        subject: alice.subject,
+      }),
+    );
+    expect(store.value).not.toContain(token);
+    expect(retainedAccountAssignment(handle)).toEqual({
+      account: aliceAccount,
+      ...alice,
+    });
+
+    const restarted = await manager(store, registryFetch());
+    const retained = restarted.getLoggedIn()!;
+    expect(retained).toMatchObject({ id: aliceAccount, identity: alice });
+    expect(isProvisionalAccount(retained)).toBe(true);
+    await expect(accountToken(retained, registry)).rejects.toMatchObject({
+      code: "account_credential_pending",
+    });
+
+    restarted.logout();
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).toBeNull());
+    expect((await manager(store, registryFetch())).getLoggedIn()).toBeUndefined();
+  });
+
+  it("hosts that do not opt in neither persist nor restore an assignment", async () => {
+    const store = memoryStore();
+    const plain = () =>
+      prepareAccountManager({ appId: "test", registry, store, mintToken, fetch: registryFetch() });
+    await (await plain()).loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(store.value).not.toBeNull());
+    expect(JSON.parse(store.value!).assignment).toBeNull();
+    store.value = JSON.stringify({
+      format: "jazz-account-selection-v1",
+      roots: [],
+      selected: null,
+      assignment: { account: aliceAccount, ...alice },
+    });
+    expect((await plain()).getLoggedIn()).toBeUndefined();
+  });
+
+  it("ignores a malformed or reserved stored assignment", async () => {
+    for (const assignment of [
+      { account: "not-a-uuid", ...alice },
+      { account: aliceAccount, issuer: "urn:jazz:local-first", subject: "alice" },
+      { account: aliceAccount, issuer: alice.issuer },
+    ]) {
+      const store = memoryStore();
+      store.value = JSON.stringify({
+        format: "jazz-account-selection-v1",
+        roots: [],
+        selected: null,
+        assignment,
+      });
+      expect((await manager(store, registryFetch())).getLoggedIn()).toBeUndefined();
+    }
+  });
+
+  it("selecting a local-first account clears the retained assignment", async () => {
+    const store = memoryStore();
+    const first = await manager(store, registryFetch());
+    await first.loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
+    first.createLocalFirst();
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).toBeNull());
+    const restarted = await manager(store, registryFetch());
+    expect(restarted.getLoggedIn()?.identity.issuer).toBe("urn:jazz:local-first");
+  });
+
+  it("revalidation binds a credential to the same handle and reuses the accepted JWT once", async () => {
+    const store = memoryStore();
+    await (await manager(store, registryFetch())).loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
+    const restarted = await manager(store, registryFetch());
+    const retained = restarted.getLoggedIn()!;
+    const bound = vi.fn();
+    onAccountCredentialBound(retained, bound);
+    const token = jwt(alice, { role: "editor" });
+    const getToken = vi.fn(async () => token);
+    await expect(restarted.revalidateJWT("loginJWT", { getToken })).resolves.toBe(retained);
+    expect(restarted.getLoggedIn()).toBe(retained);
+    expect(isProvisionalAccount(retained)).toBe(false);
+    expect(bound).toHaveBeenCalledOnce();
+    await expect(accountToken(retained, registry)).resolves.toBe(token);
+    expect(getToken).toHaveBeenCalledOnce();
+    await expect(accountToken(retained, registry)).resolves.toBe(token);
+    expect(getToken).toHaveBeenCalledTimes(2);
+  });
+
+  it("revalidation declines a changed identity or reassigned account", async () => {
+    const store = memoryStore();
+    await (await manager(store, registryFetch())).loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
+    const restarted = await manager(store, registryFetch());
+    const retained = restarted.getLoggedIn()!;
+    await expect(restarted.revalidateJWT("loginJWT", jwt(bob))).resolves.toBeUndefined();
+    expect(isProvisionalAccount(retained)).toBe(true);
+
+    const reassigned = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ account: bobAccount, identity: alice }), { status: 200 }),
+    );
+    const other = await manager(store, reassigned);
+    await expect(other.revalidateJWT("loginJWT", jwt(alice))).resolves.toBeUndefined();
+    expect(isProvisionalAccount(other.getLoggedIn()!)).toBe(true);
+  });
+});
+
+describe("retained accounts in a Jazz session", () => {
+  async function retainedSession(fetch = registryFetch()) {
+    const store = memoryStore();
+    await (await manager(store, registryFetch())).loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
+    const accounts = await manager(store, fetch);
+    const events: string[] = [];
+    const session = await createJazzSessionOwner({
+      accounts,
+      async openClient(account: AccountHandle) {
+        events.push(`open:${account.identity.subject}:${isProvisionalAccount(account)}`);
+        return {
+          account,
+          async shutdown(options?: { waitForSync?: boolean }) {
+            events.push(`shutdown:${account.identity.subject}:${!!options?.waitForSync}`);
+          },
+        };
+      },
+    });
+    return { session, accounts, events, store };
+  }
+
+  it("opens the retained account at once and does not tear it down for the same subject", async () => {
+    const { session, events } = await retainedSession();
+    const opened = session.getSnapshot();
+    expect(opened).toMatchObject({ status: "ready", account: { id: aliceAccount } });
+    expect(events).toEqual(["open:alice:true"]);
+
+    await session.loginJWT(jwt(alice));
+    expect(session.getSnapshot().client).toBe(opened.client);
+    expect(session.getSnapshot().account).toBe(opened.account);
+    expect(isProvisionalAccount(opened.account!)).toBe(false);
+    // Logging in again keeps the same client as well.
+    await session.loginOrRegisterJWT(jwt(alice));
+    expect(session.getSnapshot().client).toBe(opened.client);
+    expect(events).toEqual(["open:alice:true"]);
+    await session.close();
+  });
+
+  it("switches accounts when the provider identity changed", async () => {
+    const { session, events } = await retainedSession();
+    await session.loginJWT(jwt(bob));
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: { id: bobAccount } });
+    // The never-admitted retained client cannot reach the core; do not wait on sync.
+    expect(events).toEqual(["open:alice:true", "shutdown:alice:false", "open:bob:false"]);
+    await session.close();
+  });
+
+  it("keeps the retained client and reports the failure when the registry revokes it", async () => {
+    const { session, events } = await retainedSession(registryFetch(new Set(["alice"])));
+    const before = session.getSnapshot();
+    await expect(session.loginJWT(jwt(alice))).rejects.toThrow("identity_not_authorized");
+    expect(session.getSnapshot()).toMatchObject({
+      status: "ready",
+      client: before.client,
+      error: expect.objectContaining({ message: "identity_not_authorized" }),
+    });
+    expect(isProvisionalAccount(before.account!)).toBe(true);
+    await session.logout();
+    expect(session.getSnapshot().status).toBe("signed-out");
+    expect(events).toEqual(["open:alice:true", "shutdown:alice:false"]);
+    await session.close();
+  });
+
+  it("an auth provider keeps the retained account ready while hydrating and revalidating", async () => {
+    const { session, events } = await retainedSession();
+    const token = deferred<string>();
+    const auth = connectAuthProvider(session, { getToken: () => token.promise });
+    auth.update({ key: null, isPending: true });
+    await tick();
+    expect(auth.getSnapshot()).toMatchObject({ ready: true, isPending: true });
+    auth.update({ key: "alice:session-2" });
+    await tick();
+    expect(auth.getSnapshot()).toMatchObject({ ready: true, isPending: true });
+    token.resolve(jwt(alice));
+    await tick();
+    await vi.waitFor(() =>
+      expect(auth.getSnapshot()).toMatchObject({ ready: true, isPending: false }),
+    );
+    expect(events).toEqual(["open:alice:true"]);
+    auth.dispose();
+    await session.close();
+  });
+
+  it("an auth provider that hydrates signed out closes the retained account", async () => {
+    const { session, events, store } = await retainedSession();
+    const auth = connectAuthProvider(session, { getToken: async () => jwt(alice) });
+    auth.update({ key: null, isPending: true });
+    await tick();
+    expect(auth.getSnapshot().ready).toBe(true);
+    auth.update({ key: null });
+    await vi.waitFor(() => expect(session.getSnapshot().status).toBe("signed-out"));
+    expect(auth.getSnapshot().ready).toBe(true);
+    expect(events).toEqual(["open:alice:true", "shutdown:alice:false"]);
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).toBeNull());
+    auth.dispose();
+    await session.close();
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((yes) => {
+    resolve = yes;
+  });
+  return { promise, resolve };
+}

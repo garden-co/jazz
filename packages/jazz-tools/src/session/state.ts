@@ -1,7 +1,7 @@
 import { settleAccountSelection } from "../accounts/selection-durability.js";
 import { ensureAutomaticLocalFirst } from "../accounts/persistence.js";
 import type { AccountHandle, AccountManager } from "../accounts/state.js";
-import type { JWTAuth, BackendAuth } from "../accounts/enrollment.js";
+import { isProvisionalAccount, type JWTAuth, type BackendAuth } from "../accounts/enrollment.js";
 import {
   GracefulShutdownSyncError,
   SharedClientShutdownError,
@@ -120,14 +120,48 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     operation: JazzSessionOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
     token: number,
+    revalidate?: () => Promise<AccountHandle | undefined>,
   ) => {
     if (token !== generation) throw superseded();
+    if (revalidate && client && selected) {
+      // Logging in again as the selected identity re-admits it in place: the
+      // open client and its subscriptions stay. A changed provider identity
+      // or registry assignment falls through to the ordinary transition.
+      const current = client;
+      const account = selected;
+      let same: AccountHandle | undefined;
+      try {
+        same = await revalidate();
+      } catch (cause) {
+        if (token === generation)
+          publish({
+            status: "ready",
+            account,
+            client: current,
+            error: asError(cause),
+            recovery: "action",
+          });
+        throw cause;
+      }
+      if (token !== generation) throw superseded();
+      if (same === account && selected === account && client === current) {
+        // Clear an earlier failure; an unchanged ready snapshot stays as is.
+        if (snapshot.error || snapshot.status !== "ready" || snapshot.client !== current)
+          publish({ status: "ready", account, client: current });
+        return;
+      }
+    }
     const previous = selected;
     await detach({ status: "transitioning", account: selected, pending: operation }).done;
     if (token !== generation) throw superseded();
     try {
       if (client) {
-        await client.shutdown({ waitForSync: true });
+        // A retained account that never received a credential cannot reach
+        // the core; its unsynchronized writes stay durable in its own local
+        // store and sync the next time that identity signs in.
+        await client.shutdown(
+          selected && isProvisionalAccount(selected) ? {} : { waitForSync: true },
+        );
         client = undefined;
       }
     } catch (cause) {
@@ -192,12 +226,13 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
   const run = (
     operation: JazzSessionOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
+    revalidate?: () => Promise<AccountHandle | undefined>,
   ): Promise<void> => {
     if (closed) return Promise.reject(new Error("Jazz session is closed"));
     if (busy || loggingOut)
       return Promise.reject(new Error("A Jazz session operation is already pending"));
     const token = ++generation;
-    const task = Promise.resolve().then(() => perform(operation, mutate, token));
+    const task = Promise.resolve().then(() => perform(operation, mutate, token, revalidate));
     busy = task;
     void task
       .finally(() => {
@@ -219,9 +254,18 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),
     becomeBackend: (auth) => run("becomeBackend", () => accounts.becomeBackend(auth)),
     registerJWT: (auth) => run("registerJWT", () => accounts.registerJWT(auth)),
-    loginJWT: (auth) => run("loginJWT", () => accounts.loginJWT(auth)),
+    loginJWT: (auth) =>
+      run(
+        "loginJWT",
+        () => accounts.loginJWT(auth),
+        () => accounts.revalidateJWT("loginJWT", auth),
+      ),
     loginOrRegisterJWT: (auth) =>
-      run("loginOrRegisterJWT", () => accounts.loginOrRegisterJWT(auth)),
+      run(
+        "loginOrRegisterJWT",
+        () => accounts.loginOrRegisterJWT(auth),
+        () => accounts.revalidateJWT("loginOrRegisterJWT", auth),
+      ),
     linkJWT: (auth) => run("linkJWT", () => accounts.linkJWT(auth)),
     retry: () => run("retry", () => selected),
     logout: () => {

@@ -1250,6 +1250,9 @@ async function configureServer(
 ): Promise<void> {
   const requestedUrl = options.serverUrl ?? null;
   if (context.serverUrl === requestedUrl) {
+    // A tab reopening a retained account has no credential yet. It must not
+    // replace a sibling tab's working credential for the same principal.
+    if (!carriesCredential(options.authJson) && carriesCredential(context.serverAuthJson)) return;
     context.serverAuthJson = options.authJson;
     if (context.serverConnectionStarted) await requireRuntime(context).updateAuth(options.authJson);
     return;
@@ -1263,6 +1266,15 @@ async function configureServer(
   }
   context.serverUrl = requestedUrl;
   context.serverAuthJson = options.authJson;
+}
+
+function carriesCredential(authJson: string): boolean {
+  try {
+    const auth = JSON.parse(authJson) as Record<string, unknown> | null;
+    return !!auth && (typeof auth.jwt_token === "string" || auth.backend_session != null);
+  } catch {
+    return false;
+  }
 }
 
 function ensureServerConnection(context: RuntimeContext): void {

@@ -35,6 +35,16 @@ export interface AccountEnrollment<Auth> {
   loginJWT(auth: Auth): Promise<AccountHandle>;
   loginOrRegisterJWT(auth: Auth): Promise<AccountHandle>;
   linkJWT(account: AccountHandle, auth: Auth): Promise<AccountHandle>;
+  /**
+   * Re-admit the selected account in place. Resolves to that same handle with
+   * a fresh credential bound, or undefined when the provider identity or the
+   * registry assignment changed and an ordinary transition is required.
+   */
+  revalidateJWT?(
+    account: AccountHandle,
+    operation: "loginJWT" | "loginOrRegisterJWT",
+    auth: Auth,
+  ): Promise<AccountHandle | undefined>;
 }
 
 export class AccountOperationSuperseded extends Error {
@@ -128,6 +138,30 @@ export class AccountManager<Auth> {
       if (!account) throw new Error("Linking requires a logged-in account");
       return this.enrollment.linkJWT(account, auth);
     });
+  }
+
+  /** @internal Session hosts revalidate the selected account without a transition. */
+  async revalidateJWT(
+    operation: "loginJWT" | "loginOrRegisterJWT",
+    auth: Auth,
+  ): Promise<AccountHandle | undefined> {
+    const account = this.snapshot.account;
+    const revalidate = this.enrollment.revalidateJWT;
+    if (!account || !revalidate) return undefined;
+    const generation = ++this.generation;
+    this.publish({ ...this.snapshot, pending: operation, error: undefined });
+    try {
+      const same = await revalidate.call(this.enrollment, account, operation, auth);
+      if (generation !== this.generation) throw new AccountOperationSuperseded();
+      this.publish({ account, pending: undefined, error: undefined });
+      return same === account ? account : undefined;
+    } catch (cause) {
+      const error = cause instanceof Error ? cause : new Error(String(cause));
+      if (generation === this.generation) {
+        this.publish({ ...this.snapshot, pending: undefined, error });
+      }
+      throw error;
+    }
   }
 
   logout(): void {

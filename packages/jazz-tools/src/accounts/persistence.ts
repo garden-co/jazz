@@ -1,8 +1,11 @@
 import { setAccountSelectionBarrier } from "./selection-durability.js";
 import {
   createAccountManagerWithRuntime,
+  isRetainedAccountAssignment,
+  retainedAccountAssignment,
   type BackendAccountHost,
   type JWTAuth,
+  type RetainedAccountAssignment,
 } from "./enrollment.js";
 import type { AccountHandle, AccountManager } from "./state.js";
 import { localFirstFactory } from "./local-first.js";
@@ -25,9 +28,16 @@ interface StoredAccounts {
   format: "jazz-account-selection-v1";
   roots: string[];
   selected: number | null;
+  /**
+   * The selected external account's non-secret registry assignment, when no
+   * local root is selected. It lets the next start open that account's local
+   * data immediately; credentials still come only from the provider.
+   */
+  assignment?: RetainedAccountAssignment | null;
 }
 function decode(value: string | null): StoredAccounts {
-  if (value === null) return { format: "jazz-account-selection-v1", roots: [], selected: null };
+  if (value === null)
+    return { format: "jazz-account-selection-v1", roots: [], selected: null, assignment: null };
   const parsed = JSON.parse(value) as StoredAccounts;
   if (
     parsed?.format !== "jazz-account-selection-v1" ||
@@ -41,7 +51,16 @@ function decode(value: string | null): StoredAccounts {
     throw new Error("Invalid persisted account selection");
   }
   for (const root of parsed.roots) parseAuthSecret(root);
-  return { format: parsed.format, roots: [...parsed.roots], selected: parsed.selected };
+  // Older writers omit the assignment; an invalid one is ignored, never trusted.
+  const assignment =
+    parsed.selected === null && isRetainedAccountAssignment(parsed.assignment)
+      ? {
+          account: parsed.assignment.account,
+          issuer: parsed.assignment.issuer,
+          subject: parsed.assignment.subject,
+        }
+      : null;
+  return { format: parsed.format, roots: [...parsed.roots], selected: parsed.selected, assignment };
 }
 
 const automaticInitializers = new WeakMap<AccountManager<JWTAuth>, () => Promise<AccountHandle>>();
@@ -64,13 +83,21 @@ export async function prepareAccountManager(options: {
   generateSecret?(): string;
   fetch?: typeof fetch;
   backend?: BackendAccountHost;
+  /**
+   * Retain the selected external account's assignment so the next start
+   * reopens it before the provider answers. Hosts opt in once their runtime
+   * can open an account context before its first credential.
+   */
+  retainAccountAssignment?: boolean;
 }) {
   const stored = decode(await options.store.read());
+  if (!options.retainAccountAssignment) stored.assignment = null;
   let writes = Promise.resolve();
   let adoptingSecret: string | undefined;
   const save = () => {
     const roots = [...stored.roots];
     const selected = stored.selected === null ? null : stored.roots[stored.selected]!;
+    const assignment = selected === null ? (stored.assignment ?? null) : null;
     // Serialize snapshots even for an asynchronous native secure store. A
     // rejected save does not prevent a later explicit selection from retrying.
     writes = writes
@@ -82,6 +109,7 @@ export async function prepareAccountManager(options: {
           // replace their key inventory with this manager's older snapshot.
           for (const root of roots) if (!latest.roots.includes(root)) latest.roots.push(root);
           latest.selected = selected === null ? null : latest.roots.indexOf(selected);
+          latest.assignment = assignment;
           return JSON.stringify(latest);
         }),
       );
@@ -93,12 +121,14 @@ export async function prepareAccountManager(options: {
     fetch: options.fetch,
     backend: options.backend,
     restoredLocalFirstSecret: stored.selected === null ? undefined : stored.roots[stored.selected],
+    restoredAccount: stored.selected === null ? (stored.assignment ?? undefined) : undefined,
     localFirst: localFirstFactory({
       appId: options.appId,
       mintToken: options.mintToken,
       generateSecret: options.generateSecret,
       isSecretRetained: async (secret) => decode(await options.store.read()).roots.includes(secret),
       retainSecret(secret) {
+        stored.assignment = null;
         if (adoptingSecret === secret) {
           // Suppress only the one retention callback caused by adoption. Any
           // re-entrant explicit selection must retain and persist normally.
@@ -143,6 +173,7 @@ export async function prepareAccountManager(options: {
             if (selected === undefined) {
               const index = latest.roots.indexOf(candidate);
               latest.selected = index >= 0 ? index : latest.roots.push(candidate) - 1;
+              latest.assignment = null;
               winner = candidate;
             } else {
               winner = selected;
@@ -185,6 +216,9 @@ export async function prepareAccountManager(options: {
     // External credentials are owned by the provider and never serialized here.
     if (next?.identity.issuer === "urn:jazz:local-first") return;
     stored.selected = null;
+    // Keep only the assignment of a provider-admitted account, never its token.
+    stored.assignment =
+      next && options.retainAccountAssignment ? (retainedAccountAssignment(next) ?? null) : null;
     void save().catch((error) => manager.reportPersistenceError(error));
   });
   setAccountSelectionBarrier(manager, (retry) => (retry ? writes.catch(() => save()) : writes));
