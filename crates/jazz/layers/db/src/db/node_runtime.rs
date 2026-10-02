@@ -5055,6 +5055,7 @@ where
                                     added,
                                     updated,
                                     removed,
+                                    terminal_operations,
                                     ..
                                 } = &mut event
                                 {
@@ -5062,7 +5063,8 @@ where
                                     *publishable = settled
                                         || !added.is_empty()
                                         || !updated.is_empty()
-                                        || !removed.is_empty();
+                                        || !removed.is_empty()
+                                        || !terminal_operations.is_empty();
                                 }
                                 let materialized =
                                     refresh.sender.materialized(&node_ref, &shape, &event)?;
