@@ -3,11 +3,18 @@ use std::thread;
 
 use jazz::query::Query;
 use jazz::tools::{
-    AppContext, TransactionId, DurabilityTier, JazzClient, JazzError, ObjectId, Value,
+    AppContext, DurabilityTier, JazzClient, JazzError, ObjectId, ReadTier, TransactionId, Value,
 };
 use tokio::sync::{mpsc, oneshot};
 
-async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> {
+type TodoRows = Vec<(ObjectId, Vec<Value>)>;
+type InsertedRow = (ObjectId, Vec<Value>, Option<TransactionId>);
+
+#[path = "native_account.rs"]
+mod native_account;
+
+pub(super) async fn connect_native(mut context: AppContext) -> jazz::tools::Result<JazzClient> {
+    native_account::enrol(&mut context).await?;
     JazzClient::connect_with_native_transport(
         context,
         std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
@@ -22,14 +29,14 @@ pub struct TodoClient {
 
 enum ClientCommand {
     Query {
-        query: Query,
+        query: Box<Query>,
         durability_tier: Option<DurabilityTier>,
-        reply: oneshot::Sender<jazz::tools::Result<Vec<(ObjectId, Vec<Value>)>>>,
+        reply: oneshot::Sender<jazz::tools::Result<TodoRows>>,
     },
     Insert {
         table: String,
         values: HashMap<String, Value>,
-        reply: oneshot::Sender<jazz::tools::Result<(ObjectId, Vec<Value>, Option<TransactionId>)>>,
+        reply: oneshot::Sender<jazz::tools::Result<InsertedRow>>,
     },
     Update {
         object_id: ObjectId,
@@ -45,14 +52,14 @@ enum ClientCommand {
 impl TodoClient {
     pub async fn connect(context: AppContext) -> jazz::tools::Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
 
         thread::Builder::new()
             .name("todo-jazz-client".to_string())
             .spawn(move || run_client_worker(context, rx, ready_tx))
             .map_err(JazzError::Io)?;
 
-        ready_rx.recv().map_err(|_| JazzError::ChannelClosed)??;
+        ready_rx.await.map_err(|_| JazzError::ChannelClosed)??;
         Ok(Self { tx })
     }
 
@@ -60,11 +67,11 @@ impl TodoClient {
         &self,
         query: Query,
         durability_tier: Option<DurabilityTier>,
-    ) -> jazz::tools::Result<Vec<(ObjectId, Vec<Value>)>> {
+    ) -> jazz::tools::Result<TodoRows> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Query {
-                query,
+                query: Box::new(query),
                 durability_tier,
                 reply,
             })
@@ -76,7 +83,7 @@ impl TodoClient {
         &self,
         table: &str,
         values: HashMap<String, Value>,
-    ) -> jazz::tools::Result<(ObjectId, Vec<Value>, Option<TransactionId>)> {
+    ) -> jazz::tools::Result<InsertedRow> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Insert {
@@ -116,7 +123,7 @@ impl TodoClient {
 fn run_client_worker(
     context: AppContext,
     mut rx: mpsc::UnboundedReceiver<ClientCommand>,
-    ready_tx: std::sync::mpsc::Sender<jazz::tools::Result<()>>,
+    ready_tx: oneshot::Sender<jazz::tools::Result<()>>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -151,7 +158,23 @@ fn run_client_worker(
                     durability_tier,
                     reply,
                 } => {
-                    let _ = reply.send(client.query(query, durability_tier).await);
+                    let tier = match durability_tier {
+                        Some(DurabilityTier::GlobalServer) => ReadTier::Remote,
+                        _ => ReadTier::LocalFirst,
+                    };
+                    let rows = client.query(*query, tier).await.and_then(|rows| {
+                        rows.into_iter()
+                            .map(|row| {
+                                let id = row.key.row_id().ok_or_else(|| {
+                                    JazzError::Query(
+                                        "todo worker requires single-row query results".into(),
+                                    )
+                                })?;
+                                Ok((id, row.into_values()))
+                            })
+                            .collect()
+                    });
+                    let _ = reply.send(rows);
                 }
                 ClientCommand::Insert {
                     table,
@@ -165,10 +188,10 @@ fn run_client_worker(
                     updates,
                     reply,
                 } => {
-                    let _ = reply.send(client.update(object_id, updates));
+                    let _ = reply.send(client.update("todos", object_id, updates));
                 }
                 ClientCommand::Delete { object_id, reply } => {
-                    let _ = reply.send(client.delete(object_id));
+                    let _ = reply.send(client.delete("todos", object_id));
                 }
             }
         }

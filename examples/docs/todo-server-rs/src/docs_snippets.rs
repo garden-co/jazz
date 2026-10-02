@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
-use jazz::db::{Db, ExclusiveTxOps, MergeableTxOps};
+use jazz::db::{Db, ExclusiveTxOps, InsertOptions, MergeableTxOps, UpdateOptions};
 use jazz::groove::records::Value as DbValue;
 use jazz::ids::RowUuid;
 use jazz::query::{
@@ -12,20 +12,21 @@ use jazz::query::{
     gte, is_null, lit, lt, ne, not,
 };
 use jazz::tools::{
-    DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, Session, TablePolicies, Value,
+    JazzClient, ObjectId, Operation, PolicyExpr, ReadTier, Session, TablePolicies, Value,
 };
-use serde_json::json;
 
 fn verify_jwt_and_extract_claims(_token: &str) -> (String, String, serde_json::Value) {
-    // Replace with your auth provider's JWT verification logic.
-    ("replace-with-verified-sub".to_string(), json!({}))
+    unimplemented!("replace with your auth provider's JWT verification logic")
 }
 
 fn todo_values(
     title: impl Into<String>,
     description: impl Into<String>,
 ) -> std::collections::HashMap<String, Value> {
-    jazz::row_input!("title" => title.into(), "done" => false, "description" => description.into())
+    jazz::row_input!(
+        "title" => title.into(), "done" => false, "description" => description.into(),
+        "parent" => Value::Null, "project" => Value::Null,
+    )
 }
 
 fn transaction_todo_values(title: impl Into<String>) -> jazz::db::RowCells {
@@ -66,7 +67,7 @@ pub async fn list_todos_for_request(
     let user_client = client.for_session(requester_session_from_headers(headers)?);
     let query = Query::from("todos");
     let rows = user_client
-        .query(query, None)
+        .query(query, ReadTier::LocalFirst)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(rows.len())
@@ -118,7 +119,7 @@ pub fn recursive_inherits_policy() -> TablePolicies {
 // #region reading-oneshot-rust
 pub async fn read_todos_oneshot(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = Query::from("todos");
-    let rows = client.query(query, None).await?;
+    let rows = client.query(query, ReadTier::LocalFirst).await?;
     Ok(rows.len())
 }
 // #endregion reading-oneshot-rust
@@ -135,9 +136,7 @@ pub async fn subscribe_todos(
 // #region reading-durability-tier-rust
 pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = Query::from("todos");
-    let rows = client
-        .query(query, Some(DurabilityTier::GlobalServer))
-        .await?;
+    let rows = client.query(query, ReadTier::Remote).await?;
     Ok(rows.len())
 }
 // #endregion reading-durability-tier-rust
@@ -146,7 +145,7 @@ pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz::tools::
 pub async fn read_todos_with_filters(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = Query::from("todos").filter(eq(col("done"), lit(false)));
 
-    let rows = client.query(query, None).await?;
+    let rows = client.query(query, ReadTier::LocalFirst).await?;
     Ok(rows.len())
 }
 // #endregion reading-filters-rust
@@ -157,7 +156,7 @@ pub async fn read_todos_sorted(client: &JazzClient) -> jazz::tools::Result<usize
         .filter(eq(col("done"), lit(false)))
         .order_by("title", OrderDirection::Asc);
 
-    let rows = client.query(query, None).await?;
+    let rows = client.query(query, ReadTier::LocalFirst).await?;
     Ok(rows.len())
 }
 // #endregion reading-sorting-rust
@@ -176,7 +175,7 @@ pub async fn read_todo_page(
         .limit(page_size)
         .offset(offset);
 
-    let rows = client.query(query, None).await?;
+    let rows = client.query(query, ReadTier::LocalFirst).await?;
     Ok(rows.len())
 }
 // #endregion reading-pagination-rust
@@ -187,7 +186,7 @@ pub async fn read_todos_with_project(client: &JazzClient) -> jazz::tools::Result
         .filter(eq(col("done"), lit(false)))
         .flat_join("projects", "todos.project_id", "projects.id");
 
-    let rows = client.query_results(query, None).await?;
+    let rows = client.query(query, ReadTier::LocalFirst).await?;
     Ok(rows.len())
 }
 // #endregion reading-includes-rust
@@ -216,7 +215,7 @@ pub fn build_todos_with_required_project() -> Query {
 pub async fn read_todo_titles(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = Query::from("todos").select(["title", "done"]);
 
-    let rows = client.query(query, None).await?;
+    let rows = client.query(query, ReadTier::LocalFirst).await?;
     Ok(rows.len())
 }
 // #endregion reading-select-rust
@@ -243,10 +242,11 @@ pub async fn write_todo_crud(
 
     let _new_row = client.insert("todos", values)?;
     client.update(
+        "todos",
         existing_id,
         vec![("done".to_string(), Value::Boolean(true))],
     )?;
-    client.delete(existing_id)?;
+    client.delete("todos", existing_id)?;
     Ok(())
 }
 // #endregion writing-crud-rust
@@ -267,41 +267,50 @@ pub async fn write_todo_with_default_durability(
 // #endregion writing-durability-tier-rust
 
 // #region writing-transaction-rust
-pub fn group_todo_writes(
+pub async fn group_todo_writes(
     db: &Db,
     existing_todo_id: RowUuid,
 ) -> Result<RowUuid, jazz::db::Error> {
-    let (created_id, _transaction_id) = db.transaction(|tx| {
-        let created_id = tx.insert("todos", transaction_todo_values("Write transaction docs"))?;
-        tx.update(
-            "todos",
-            existing_todo_id,
-            BTreeMap::from([("done".to_string(), DbValue::Bool(true))]),
-        )?;
+    let (created_id, _transaction_id) = db
+        .transaction(async |tx| {
+            let created_id = tx
+                .insert(
+                    "todos",
+                    transaction_todo_values("Write transaction docs"),
+                    InsertOptions::default(),
+                )
+                .await?;
+            tx.update(
+                "todos",
+                existing_todo_id,
+                BTreeMap::from([("done".to_string(), DbValue::Bool(true))]),
+                UpdateOptions::default(),
+            )
+            .await?;
 
-        let _staged = tx.read("todos", created_id)?;
+            let _staged = tx.read("todos", created_id).await?;
 
-        Ok(created_id)
-    })?;
+            Ok(created_id)
+        })
+        .await?;
 
     Ok(created_id)
 }
 // #endregion writing-transaction-rust
 
 // #region writing-exclusive-transaction-rust
-pub fn finish_todo_exclusively(
-    db: &Db,
-    todo_id: RowUuid,
-) -> Result<(), jazz::db::Error> {
-    let tx = db.exclusive_tx()?;
-    let _todo = tx.read("todos", todo_id)?;
+pub async fn finish_todo_exclusively(db: &Db, todo_id: RowUuid) -> Result<(), jazz::db::Error> {
+    let tx = db.exclusive_tx().await?;
+    let _todo = tx.read("todos", todo_id).await?;
 
     tx.update(
         "todos",
         todo_id,
         BTreeMap::from([("done".to_string(), DbValue::Bool(true))]),
-    )?;
-    let _transaction_id = tx.commit()?;
+        UpdateOptions::default(),
+    )
+    .await?;
+    let _transaction_id = tx.commit().await?;
     Ok(())
 }
 // #endregion writing-exclusive-transaction-rust
@@ -312,11 +321,11 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result
     // #region where-eq-ne-rust
     // Exact match
     let query = Query::from("todos").filter(eq(col("done"), lit(false)));
-    let incomplete_todos = client.query(query, None).await?;
+    let incomplete_todos = client.query(query, ReadTier::LocalFirst).await?;
 
     // Not equal
     let query = Query::from("todos").filter(ne(col("title"), lit("Draft")));
-    let non_draft_todos = client.query(query, None).await?;
+    let non_draft_todos = client.query(query, ReadTier::LocalFirst).await?;
     // #endregion where-eq-ne-rust
 
     // #region where-numeric-rust
@@ -327,29 +336,29 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result
     let one_week_ago = now_ms - 7 * 24 * 60 * 60 * 1000;
 
     let query = Query::from("todos").filter(gt(col("$createdAt"), lit(one_week_ago)));
-    let recent_todos = client.query(query, None).await?;
+    let recent_todos = client.query(query, ReadTier::LocalFirst).await?;
 
     let query = Query::from("todos").filter(gte(col("priority"), lit(3)));
-    let high_priority = client.query(query, None).await?;
+    let high_priority = client.query(query, ReadTier::LocalFirst).await?;
 
     let query = Query::from("todos").filter(lt(col("priority"), lit(10)));
-    let low_priority = client.query(query, None).await?;
+    let low_priority = client.query(query, ReadTier::LocalFirst).await?;
     // #endregion where-numeric-rust
 
     // #region where-contains-rust
     // Substring match (case-sensitive)
     let query = Query::from("todos").filter(contains(col("title"), lit(search_term)));
-    let matches = client.query(query, None).await?;
+    let matches = client.query(query, ReadTier::LocalFirst).await?;
     // #endregion where-contains-rust
 
     // #region where-null-rust
     // Rows where the optional ref is not set
     let query = Query::from("todos").filter(is_null(col("parent")));
-    let unlinked_todos = client.query(query, None).await?;
+    let unlinked_todos = client.query(query, ReadTier::LocalFirst).await?;
 
     // Rows where it is set
     let query = Query::from("todos").filter(not(is_null(col("parent"))));
-    let linked_todos = client.query(query, None).await?;
+    let linked_todos = client.query(query, ReadTier::LocalFirst).await?;
     // #endregion where-null-rust
 
     // #region where-and-rust
@@ -357,7 +366,7 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result
     let query = Query::from("todos")
         .filter(eq(col("done"), lit(true)))
         .filter(not(is_null(col("project"))));
-    let done_with_project = client.query(query, None).await?;
+    let done_with_project = client.query(query, ReadTier::LocalFirst).await?;
     // #endregion where-and-rust
 
     // #region where-order-limit-rust
@@ -365,7 +374,7 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result
         .filter(eq(col("done"), lit(false)))
         .order_by("$createdAt", OrderDirection::Asc)
         .limit(50);
-    let recent_incomplete = client.query(query, None).await?;
+    let recent_incomplete = client.query(query, ReadTier::LocalFirst).await?;
     // #endregion where-order-limit-rust
 
     // #region where-subscription-rust
@@ -410,7 +419,11 @@ pub async fn clear_nullable_fields(
     todo_id: ObjectId,
 ) -> jazz::tools::Result<()> {
     // Set a nullable column to null
-    client.update(todo_id, vec![("owner_id".to_string(), Value::Null)])?;
+    client.update(
+        "todos",
+        todo_id,
+        vec![("owner_id".to_string(), Value::Null)],
+    )?;
 
     // Only the specified columns are changed; omitted columns are left as-is.
     Ok(())
@@ -468,14 +481,14 @@ pub async fn load_file_bytes(
             Query::from("uploads")
                 .select(["fileId"])
                 .filter(eq(col("id"), lit(*upload_id.uuid()))),
-            Some(DurabilityTier::GlobalServer),
+            ReadTier::Remote,
         )
         .await?;
 
-    let Some((_, row)) = uploads.first() else {
+    let Some(row) = uploads.first() else {
         return Ok(None);
     };
-    let Value::Uuid(file_id) = &row[0] else {
+    let Some(Value::Uuid(file_id)) = row.get("fileId") else {
         return Ok(None);
     };
 
@@ -484,16 +497,16 @@ pub async fn load_file_bytes(
             Query::from("files")
                 .select(["data"])
                 .filter(eq(col("id"), lit(*file_id.uuid()))),
-            Some(DurabilityTier::GlobalServer),
+            ReadTier::Remote,
         )
         .await?;
 
-    let Some((_, row)) = files.first() else {
+    let Some(row) = files.first() else {
         return Ok(None);
     };
 
-    match &row[0] {
-        Value::Bytea(data) => Ok(Some(data.clone())),
+    match row.get("data") {
+        Some(Value::Bytea(data)) => Ok(Some(data.clone())),
         _ => Ok(None),
     }
 }
@@ -509,20 +522,20 @@ pub async fn delete_upload_with_file(
             Query::from("uploads")
                 .select(["fileId"])
                 .filter(eq(col("id"), lit(*upload_id.uuid()))),
-            Some(DurabilityTier::GlobalServer),
+            ReadTier::Remote,
         )
         .await?;
 
-    let Some((_, row)) = uploads.first() else {
+    let Some(row) = uploads.first() else {
         return Ok(());
     };
-    let Value::Uuid(file_id) = &row[0] else {
+    let Some(Value::Uuid(file_id)) = row.get("fileId") else {
         return Ok(());
     };
 
-    client.delete(*file_id)?;
+    client.delete("files", *file_id)?;
 
-    client.delete(upload_id)?;
+    client.delete("uploads", upload_id)?;
     Ok(())
 }
 // #endregion files-delete-rust

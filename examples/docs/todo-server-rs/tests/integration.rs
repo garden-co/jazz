@@ -22,17 +22,9 @@ use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
 use http_body_util::BodyExt;
 use jazz::tools::{
-    AppContext, AppId, ClientStorage, ColumnType, DurabilityTier, JazzClient, SchemaBuilder,
-    TableSchema,
+    AppContext, AppId, ClientStorage, ColumnType, ReadTier, SchemaBuilder, TableSchema,
 };
 
-async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> {
-    JazzClient::connect_with_native_transport(
-        context,
-        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
-    )
-    .await
-}
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -41,7 +33,7 @@ use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-use client_worker::TodoClient;
+use client_worker::{TodoClient, connect_native};
 
 /// Todo item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +79,25 @@ fn test_schema() -> jazz::tools::Schema {
         .build()
 }
 
+fn with_offline_account(mut context: AppContext) -> AppContext {
+    let audience = context.app_id.to_string();
+    let token = jazz::identity::mint_jazz_self_signed_token(
+        &[1; 32],
+        jazz::identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        3600,
+    )
+    .expect("mint Alice's offline proof");
+    let proof = jazz::identity::verify_jazz_self_signed_proof(&token, &audience)
+        .expect("verify Alice's offline proof");
+    context.account_id = Some(jazz::account_registry::local_first_account_id(
+        *context.app_id.uuid(),
+        &proof.user_id,
+    ));
+    context.jwt_token = Some(token);
+    context
+}
+
 async fn setup_test_app(temp_dir: &TempDir) -> Router {
     setup_test_app_with_path(temp_dir.path().to_path_buf()).await
 }
@@ -102,12 +113,15 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         storage_factory: Some(std::sync::Arc::new(
             jazz_storage_rocksdb::RocksDbStorageFactory,
         )),
+        account_id: None,
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
     };
 
-    let client = TodoClient::connect(context).await.unwrap();
+    let client = TodoClient::connect(with_offline_account(context))
+        .await
+        .unwrap();
     let (sse_tx, _) = broadcast::channel::<Vec<Todo>>(16);
     let state = Arc::new(AppState { client, sse_tx });
 
@@ -158,7 +172,10 @@ fn todo_values(
     title: impl Into<String>,
     description: impl Into<String>,
 ) -> std::collections::HashMap<String, Value> {
-    jazz::row_input!("title" => title.into(), "done" => false, "description" => description.into())
+    jazz::row_input!(
+        "title" => title.into(), "done" => false, "description" => description.into(),
+        "parent" => Value::Null, "project" => Value::Null,
+    )
 }
 
 /// Broadcast current todos to all SSE connections.
@@ -457,6 +474,12 @@ async fn test_crud_operations() {
 
 #[tokio::test]
 async fn test_local_persistence() {
+    tokio::task::LocalSet::new()
+        .run_until(local_persistence())
+        .await;
+}
+
+async fn local_persistence() {
     let temp_dir = TempDir::new().unwrap();
     let data_path = temp_dir.path().to_path_buf();
 
@@ -472,11 +495,12 @@ async fn test_local_persistence() {
             storage_factory: Some(std::sync::Arc::new(
                 jazz_storage_rocksdb::RocksDbStorageFactory,
             )),
+            account_id: None,
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
         };
-        let client = connect_native(context).await.unwrap();
+        let client = connect_native(with_offline_account(context)).await.unwrap();
 
         // Create a todo
         let values = todo_values("Persist me", "");
@@ -484,11 +508,14 @@ async fn test_local_persistence() {
 
         // Verify it exists
         let query = Query::from("todos");
-        let results = client.query(query, None).await.unwrap();
+        let results = client.query(query, ReadTier::LocalFirst).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1[0], Value::Text("Persist me".to_string()));
+        assert_eq!(
+            results[0].get("title"),
+            Some(&Value::Text("Persist me".to_string()))
+        );
 
-        // Shutdown client to release Fjall file handles
+        // Shutdown client to release RocksDB file handles
         client.shutdown().await.unwrap();
         row_id
     };
@@ -505,23 +532,31 @@ async fn test_local_persistence() {
             storage_factory: Some(std::sync::Arc::new(
                 jazz_storage_rocksdb::RocksDbStorageFactory,
             )),
+            account_id: None,
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
         };
-        let client = connect_native(context).await.unwrap();
+        let client = connect_native(with_offline_account(context)).await.unwrap();
 
         // Query todos - should have the one we created
         let query = Query::from("todos");
-        let results = client.query(query, None).await.unwrap();
+        let results = client.query(query, ReadTier::LocalFirst).await.unwrap();
 
         assert_eq!(
             results.len(),
             1,
             "Todo should persist across client restarts"
         );
-        assert_eq!(results[0].0, created_id, "Should be the same row");
-        assert_eq!(results[0].1[0], Value::Text("Persist me".to_string()));
+        assert_eq!(
+            results[0].key.row_id(),
+            Some(created_id),
+            "Should be the same row"
+        );
+        assert_eq!(
+            results[0].get("title"),
+            Some(&Value::Text("Persist me".to_string()))
+        );
 
         client.shutdown().await.unwrap();
     }
@@ -545,6 +580,8 @@ const TEST_ADMIN_SECRET: &str = "test-admin-secret-12345";
 /// Test HMAC secret for JWT validation via JWKS.
 const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
 const TEST_JWT_KID: &str = "test-jwks-kid";
+const TEST_JWT_ISSUER: &str = "todo-test-issuer";
+const TEST_JWT_AUDIENCE: &str = "todo-test-audience";
 
 #[derive(Clone)]
 struct JwksState {
@@ -595,6 +632,8 @@ fn make_test_jwt(user_id: &str) -> String {
 
     #[derive(serde::Serialize)]
     struct Claims {
+        iss: &'static str,
+        aud: &'static str,
         sub: String,
         claims: serde_json::Value,
         exp: u64,
@@ -605,6 +644,8 @@ fn make_test_jwt(user_id: &str) -> String {
         .as_secs()
         + 3600;
     let claims = Claims {
+        iss: TEST_JWT_ISSUER,
+        aud: TEST_JWT_AUDIENCE,
         sub: user_id.to_string(),
         claims: serde_json::json!({}),
         exp,
@@ -658,6 +699,8 @@ impl TestServer {
                 TEST_ADMIN_SECRET,
             ])
             .env("JAZZ_JWKS_URL", &jwks_server.url)
+            .env("JAZZ_JWT_ISSUER", TEST_JWT_ISSUER)
+            .env("JAZZ_JWT_AUDIENCE", TEST_JWT_AUDIENCE)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
@@ -678,6 +721,9 @@ impl TestServer {
 
     /// Find the jazz-tools binary in cargo's target directory.
     fn find_jazz_binary() -> PathBuf {
+        if let Some(path) = std::env::var_os("JAZZ_TOOLS_BIN") {
+            return PathBuf::from(path);
+        }
         // Get the path to the test binary, which gives us the target directory
         let exe = std::env::current_exe().expect("get current exe");
         let target_dir = exe
@@ -751,7 +797,7 @@ async fn jwks_handler(
 /// Test that data syncs through server between clients via subscribe.
 ///
 /// This test verifies the subscribe-driven sync model:
-/// 1. Client syncs schema to server via catalogue
+/// 1. Fixture setup publishes the schema and permissions on the server
 /// 2. Client syncs row data to server
 /// 3. Server stores data
 /// 4. New client subscribes and receives data from server via sync
@@ -766,6 +812,12 @@ async fn jwks_handler(
 /// end-to-end client-server sync with persistent client IDs.
 #[tokio::test]
 async fn test_server_resync() {
+    tokio::task::LocalSet::new()
+        .run_until(server_resync())
+        .await;
+}
+
+async fn server_resync() {
     // 1. Start jazz-tools server
     let port = get_free_port();
     let server = TestServer::start(port).await;
@@ -777,7 +829,7 @@ async fn test_server_resync() {
     let test_app_id = AppId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
 
     // 2. Create a normal JWT client with todos schema, then add data.
-    // User-scoped WS sync is what publishes the initial schema and rows here.
+    // Publish schema and policies before admitting the ordinary user's transport.
     // Adding admin_secret would now force backend mode and reject catalogue writes.
     {
         let context = AppContext {
@@ -790,11 +842,11 @@ async fn test_server_resync() {
             storage_factory: Some(std::sync::Arc::new(
                 jazz_storage_rocksdb::RocksDbStorageFactory,
             )),
+            account_id: None,
             jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
             admin_secret: None,
         };
-        let client = connect_native(context).await.unwrap();
         let permissions_schema = test_schema();
         publish_test_schema(&server.base_url(), test_app_id).await;
         permissions_support::publish_allow_all_permissions(
@@ -804,6 +856,7 @@ async fn test_server_resync() {
             &permissions_schema,
         )
         .await;
+        let client = connect_native(context).await.unwrap();
 
         // Create a todo
         let values = todo_values("Synced todo", "");
@@ -811,7 +864,7 @@ async fn test_server_resync() {
 
         // Verify it exists locally
         let query = Query::from("todos");
-        let results = client.query(query, None).await.unwrap();
+        let results = client.query(query, ReadTier::LocalFirst).await.unwrap();
         assert_eq!(results.len(), 1, "Todo should exist locally");
 
         // Wait for sync to server
@@ -840,6 +893,7 @@ async fn test_server_resync() {
             storage_factory: Some(std::sync::Arc::new(
                 jazz_storage_rocksdb::RocksDbStorageFactory,
             )),
+            account_id: None,
             jwt_token: Some(make_test_jwt("client2-user")),
             backend_secret: None,
             admin_secret: None, // Intentionally no admin - server already has schema
@@ -851,7 +905,7 @@ async fn test_server_resync() {
         let query = Query::from("todos");
         let results = tokio::time::timeout(
             Duration::from_secs(10),
-            client.query(query, Some(DurabilityTier::GlobalServer)),
+            client.query(query, ReadTier::Remote),
         )
         .await
         .expect("Query with GlobalServer tier should resolve within 10s")
