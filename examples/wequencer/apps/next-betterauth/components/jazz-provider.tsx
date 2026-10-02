@@ -89,6 +89,12 @@ function ensureProfileOnce(accountId: string, displayName: string) {
   profileRequests.set(requestKey, request);
   request.catch((cause) => {
     profileRequests.delete(requestKey);
+    // Console only, on purpose. The profile is just the display name bandmates
+    // see beside the presence avatars; without it they see "Bandmate" and
+    // everything else (the account, the grid, sync) works as before. The
+    // server call is idempotent and nothing was remembered, so the next load
+    // asks again. An error screen or banner would interrupt a working session
+    // over a cosmetic, self-healing failure.
     console.error("Wequencer profile setup failed", cause);
   });
 }
