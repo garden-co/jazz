@@ -48,9 +48,12 @@ const DEMO_TASKS: { title: string; status: TaskStatus; mine?: boolean; notes?: s
  *
  * This is an insert, not an upsert, on purpose. The profile's id is derived
  * from the account, and an insert of an id the local store already holds is
- * refused rather than applied, so a name the user has changed is never reset
- * to the default. That covers two tabs opening a new account at once: the
- * later insert is refused and that tab reads the profile the other one wrote.
+ * rejected rather than applied, so a name the user has changed is never reset
+ * to the default. The rejection arrives through the write handle, so the
+ * insert is awaited to local durability (a local write, no server round
+ * trip). That covers two tabs opening a new account at once: the later
+ * insert is rejected, and that tab reads the profile the other one wrote and
+ * reports it as existing, so it does not seed a second demo show.
  */
 export async function ensureProfile(
   db: Db,
@@ -59,13 +62,14 @@ export async function ensureProfile(
   const existing = await db.one(app.crew.where({ account }));
   if (existing) return { profile: existing, isNew: false };
   const id = await profileId(account);
+  const insert = db.insert(
+    app.crew,
+    { account, name: `Stagehand ${account.slice(-4).toUpperCase()}` },
+    { id },
+  );
   try {
-    const profile = db.insert(
-      app.crew,
-      { account, name: `Stagehand ${account.slice(-4).toUpperCase()}` },
-      { id },
-    );
-    return { profile: profile.value, isNew: true };
+    await insert.wait({ tier: "local" });
+    return { profile: insert.value, isNew: true };
   } catch (error) {
     const written = await db.one(app.crew.where({ account }));
     if (written) return { profile: written, isNew: false };
