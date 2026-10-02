@@ -5,6 +5,13 @@ use super::*;
 // Use the public Db point-read API here: client query handles record predicates,
 // which cannot exercise the name-only RowRead/AbsentRead migration boundary.
 fn renamed_point_read_views(reuse_name: bool) -> (Db, Db, impl Fn(), CoreDb) {
+    renamed_point_read_views_seeded(reuse_name, None)
+}
+
+fn renamed_point_read_views_seeded(
+    reuse_name: bool,
+    pre_rename_row: Option<RowUuid>,
+) -> (Db, Db, impl Fn(), CoreDb) {
     let before = build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
@@ -22,6 +29,16 @@ fn renamed_point_read_views(reuse_name: bool) -> (Db, Db, impl Fn(), CoreDb) {
     }))
     .unwrap();
     let authority = open_core(0x95, AuthorSubject::SYSTEM, &before);
+    if let Some(row) = pre_rename_row {
+        let inserted = authority
+            .insert_with_id(
+                "todos",
+                row,
+                BTreeMap::from([("title".to_owned(), Value::String("existing".to_owned()))]),
+            )
+            .unwrap();
+        block_on(inserted.wait(DurabilityTier::Global)).unwrap();
+    }
     let (upstream, downstream) = duplex();
     block_on(owner.connect_upstream(upstream));
     let peer = authority.accept_subscriber_with_trust(
@@ -94,6 +111,95 @@ fn renamed_point_read_views(reuse_name: bool) -> (Db, Db, impl Fn(), CoreDb) {
     };
     pump();
     (old, new, pump, authority)
+}
+
+#[test]
+fn renamed_snapshot_serialized_read_preserves_authored_witness_and_conflicts() {
+    let original = row(0x99);
+    let (_old, alice, pump, bob) = renamed_point_read_views_seeded(false, Some(original));
+    let query = postcard::to_allocvec(&Query::from("tasks")).unwrap();
+    let run = |open_tx, tier, require_coverage| {
+        let polls = Cell::new(0);
+        let mut read = Box::pin(alice.all_serialized_query(
+            &query,
+            ReadOpts {
+                tier,
+                ..ReadOpts::default()
+            },
+            open_tx,
+            None,
+            None,
+            require_coverage,
+            || polls.get() >= 64,
+            |attachment| alice.detach_query(attachment),
+        ));
+        loop {
+            match read.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+                Poll::Ready(Ok(SerializedReadResult::Rows(rows))) => {
+                    return rows
+                        .into_iter()
+                        .map(|row| (row.table().to_owned(), row.row_uuid(), row.cell_at(0)))
+                        .collect::<Vec<_>>();
+                }
+                Poll::Ready(Ok(SerializedReadResult::Relation(_))) => {
+                    panic!("ordinary stored-row query expected")
+                }
+                Poll::Ready(Err(error)) => panic!("renamed snapshot query failed: {error}"),
+                Poll::Pending => {
+                    polls.set(polls.get() + 1);
+                    pump();
+                }
+            }
+        }
+    };
+    let expected = vec![(
+        "tasks".to_owned(),
+        original,
+        Some(Value::String("existing".to_owned())),
+    )];
+    assert_eq!(run(None, DurabilityTier::Global, true), expected);
+    let stable = OpenTransactionId::new();
+    alice.begin_exclusive(stable).unwrap();
+    assert_eq!(run(Some(stable), DurabilityTier::Local, false), expected);
+    let accepted = alice.commit_exclusive_handle(stable).unwrap();
+    pump();
+    assert_eq!(alice.write_state(accepted).unwrap().fate, Fate::Accepted);
+
+    let changed = OpenTransactionId::new();
+    alice.begin_exclusive(changed).unwrap();
+    assert_eq!(run(Some(changed), DurabilityTier::Local, false), expected);
+    let concurrent = row(0x9a);
+    let inserted = bob
+        .insert_with_id(
+            "tasks",
+            concurrent,
+            BTreeMap::from([("title".to_owned(), Value::String("concurrent".to_owned()))]),
+        )
+        .unwrap();
+    block_on(inserted.wait(DurabilityTier::Global)).unwrap();
+    pump();
+    assert_eq!(run(Some(changed), DurabilityTier::Local, false), expected);
+    let rejected = alice.commit_exclusive_handle(changed).unwrap();
+    pump();
+    assert_eq!(
+        alice.write_state(rejected).unwrap().fate,
+        Fate::Rejected(RejectionReason::ExclusiveConflict)
+    );
+    assert_eq!(
+        run(None, DurabilityTier::Global, true),
+        vec![
+            (
+                "tasks".to_owned(),
+                original,
+                Some(Value::String("existing".to_owned())),
+            ),
+            (
+                "tasks".to_owned(),
+                concurrent,
+                Some(Value::String("concurrent".to_owned())),
+            ),
+        ]
+    );
 }
 
 #[test]
