@@ -2173,6 +2173,7 @@ where
                                     request_id,
                                     action,
                                     session_claim_binding: pending_session_claim_binding,
+                                    local_claim_revision: pending_local_claim_revision,
                                     delegated_session,
                                 } => {
                                     // An old or unauthenticated upstream must never receive a
@@ -2214,29 +2215,24 @@ where
                                         let Some(expected) = expected_scope_authority else {
                                             continue;
                                         };
-                                        let session_claim_binding = pending_session_claim_binding
-                                            .clone()
-                                            .or_else(|| {
-                                                scope_lease_manager
-                                                    .requests
-                                                    .get(request_id)
-                                                    .map(|request| {
-                                                        request.session_claim_binding.clone()
-                                                    })
-                                            })
-                                            .unwrap_or_else(|| {
+                                        let (session_claim_binding, local_claim_revision) =
+                                            if let Some(binding) = pending_session_claim_binding.as_ref() {
+                                                (binding.clone(), *pending_local_claim_revision)
+                                            } else if let Some(request) =
+                                                scope_lease_manager.requests.get(request_id)
+                                            {
+                                                (
+                                                    request.session_claim_binding.clone(),
+                                                    request.local_claim_revision,
+                                                )
+                                            } else {
+                                                let node = self.node.borrow();
                                                 let identity = expected.link;
-                                                let claims = self
-                                                    .node
-                                                    .borrow()
-                                                    .session_claims_with_revisions()
-                                                    .into_iter()
-                                                    .find_map(|(subject, claims, _)| {
-                                                        (subject == identity).then_some(claims)
-                                                    })
-                                                    .unwrap_or_default();
-                                                (identity, claims)
-                                            });
+                                                (
+                                                    (identity, node.session_claims_for(identity)),
+                                                    Some(node.session_claim_revision(identity)),
+                                                )
+                                            };
                                         // Allocation establishes the immutable
                                         // request binding before the first wire
                                         // send. A backpressured command remains
@@ -2244,19 +2240,13 @@ where
                                         // same binding on a later turn.
                                         *pending_session_claim_binding =
                                             Some(session_claim_binding.clone());
-                                        let claims_still_bound = self
-                                            .node
-                                            .borrow()
-                                            .session_claims_with_revisions()
-                                            .into_iter()
-                                            .find_map(|(identity, claims, _)| {
-                                                (identity == session_claim_binding.0)
-                                                    .then_some(claims)
-                                            });
-                                        let claims_still_bound = claims_still_bound
-                                            .unwrap_or_default()
-                                            == session_claim_binding.1;
-                                        if delegated_session.is_none() && !claims_still_bound {
+                                        *pending_local_claim_revision = local_claim_revision;
+                                        if !authorization_scope_claim_binding_is_current(
+                                            &self.node.borrow(),
+                                            &session_claim_binding,
+                                            local_claim_revision,
+                                            delegated_session.is_some(),
+                                        ) {
                                             if let Some(request) =
                                                 scope_lease_manager.requests.remove(request_id)
                                             {
@@ -2287,6 +2277,8 @@ where
                                                 request.action == *action
                                                     && request.session_claim_binding
                                                         == session_claim_binding
+                                                    && request.local_claim_revision
+                                                        == local_claim_revision
                                                     && request.delegated_session == *delegated_session
                                             })
                                             .map(|(wire_request_id, request)| {
@@ -2323,6 +2315,7 @@ where
                                                 AuthorizationScopeLeaseRequest {
                                                     action: action.clone(),
                                                     session_claim_binding,
+                                                    local_claim_revision,
                                                     delegated_session: delegated_session.clone(),
                                                     waiters: BTreeSet::from([*request_id]),
                                                     intent_sent: false,
@@ -3170,12 +3163,13 @@ where
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
-                                let Some((session_claim_binding, delegated_session, key_mismatch, needs_acquire)) = scope_lease_manager
+                                let Some((session_claim_binding, local_claim_revision, delegated_session, key_mismatch, needs_acquire)) = scope_lease_manager
                                     .requests
                                     .get(&request_id)
                                     .map(|prior| {
                                         (
                                             prior.session_claim_binding.clone(),
+                                            prior.local_claim_revision,
                                             prior.delegated_session.is_some(),
                                             prior.key.as_ref().is_some_and(|known| known != &key)
                                                 || prior
@@ -3197,17 +3191,12 @@ where
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
-                                let claims_still_bound = self
-                                    .node
-                                    .borrow()
-                                    .session_claims_with_revisions()
-                                    .into_iter()
-                                    .find_map(|(identity, claims, _)| {
-                                        (identity == session_claim_binding.0).then_some(claims)
-                                    })
-                                    .unwrap_or_default()
-                                    == session_claim_binding.1;
-                                if !delegated_session && !claims_still_bound {
+                                if !authorization_scope_claim_binding_is_current(
+                                    &self.node.borrow(),
+                                    &session_claim_binding,
+                                    local_claim_revision,
+                                    delegated_session,
+                                ) {
                                     if let Some(request) =
                                         scope_lease_manager.requests.remove(&request_id)
                                     {
@@ -3294,24 +3283,14 @@ where
                                     .requests
                                     .get(&request_id)
                                     .is_none_or(|request| {
-                                        request.delegated_session.is_some() ||
-                                        self.node
-                                            .borrow()
-                                            .session_claims_with_revisions()
-                                            .into_iter()
-                                            .find_map(|(identity, claims, _)| {
-                                                (identity == request.session_claim_binding.0)
-                                                    .then_some(claims)
-                                            })
-                                            .unwrap_or_default()
-                                            == request.session_claim_binding.1
+                                        authorization_scope_claim_binding_is_current(
+                                            &self.node.borrow(),
+                                            &request.session_claim_binding,
+                                            request.local_claim_revision,
+                                            request.delegated_session.is_some(),
+                                        )
                                     });
-                                if scope_lease_manager
-                                    .requests
-                                    .get(&request_id)
-                                    .is_none_or(|request| request.delegated_session.is_none())
-                                    && !claims_still_bound
-                                {
+                                if !claims_still_bound {
                                     if let Some(request) =
                                         scope_lease_manager.requests.remove(&request_id)
                                     {
@@ -3359,6 +3338,29 @@ where
                                 else {
                                     continue;
                                 };
+                                // Applying queued views can await the node owner.
+                                // Recheck the direct stamp before admitting a receipt.
+                                if !authorization_scope_claim_binding_is_current(
+                                    &self.node.borrow(),
+                                    &request.session_claim_binding,
+                                    request.local_claim_revision,
+                                    request.delegated_session.is_some(),
+                                ) {
+                                    let retired = scope_lease_manager
+                                        .requests
+                                        .remove(&request_id)
+                                        .expect("the stale request is still allocated");
+                                    for waiter_id in retired.waiters {
+                                        if let Some(waiter) = self
+                                            .permission_advice_waiters
+                                            .borrow_mut()
+                                            .remove(&waiter_id)
+                                        {
+                                            let _ = waiter.send(PermissionAdvice::Unknown);
+                                        }
+                                    }
+                                    continue;
+                                }
                                 // An empty compiled support set is a valid public
                                 // policy proof.  It has no views by construction;
                                 // the authority receipt itself supplies the
@@ -3380,17 +3382,7 @@ where
                                         .map(|(_, cut, _)| *cut)
                                         .min()
                                 };
-                                let observed = self.node.borrow();
-                                let observed_claims = if request.delegated_session.is_some() {
-                                    // Delegated subjects have independent local and authority
-                                    // claim counters. Only the admitted authority receipt can
-                                    // advance the remote revision for this immutable snapshot.
-                                    0
-                                } else {
-                                    observed.session_claim_revision(expected.link)
-                                };
-                                let observed_policy = observed.active_catalogue_seq();
-                                drop(observed);
+                                let observed_policy = self.node.borrow().active_catalogue_seq();
                                 // Context components are monotonic per admitted
                                 // connection. A receipt may advance an otherwise
                                 // opaque authority revision, but it can never
@@ -3407,56 +3399,32 @@ where
                                     || receipt.authorization_progress
                                         < expected.authorization_progress
                                     || receipt.settled_through.0 < expected.settled_through;
-                                if observed_claims > expected.claims_revision {
-                                    expected.claims_revision = observed_claims;
-                                } else if observed_claims == 0 {
-                                    expected.claims_revision = receipt.claims_revision;
-                                }
-                                if observed_policy > expected.policy_epoch {
-                                    expected.policy_epoch = observed_policy;
+                                // Local claim revisions are only request freshness
+                                // stamps. This candidate uses the serving connection's
+                                // revision and cannot publish a floor until registry
+                                // admission succeeds.
+                                let mut candidate = *expected;
+                                candidate.claims_revision = receipt.claims_revision;
+                                if observed_policy > candidate.policy_epoch {
+                                    candidate.policy_epoch = observed_policy;
                                 } else if observed_policy == 0 {
-                                    expected.policy_epoch = receipt.policy_epoch;
+                                    candidate.policy_epoch = receipt.policy_epoch;
                                 }
-                                expected.authorization_progress =
-                                    expected.authorization_progress.max(applied_progress);
-                                expected.settled_through =
-                                    expected.settled_through.max(receipt.settled_through.0);
+                                candidate.authorization_progress =
+                                    candidate.authorization_progress.max(applied_progress);
+                                candidate.settled_through =
+                                    candidate.settled_through.max(receipt.settled_through.0);
                                 let receipt_current =
                                     request.key.as_ref().is_some_and(|key| key == &receipt.key)
                                         && all_current
                                         && !receipt_decreased
                                         && authorization_scope_receipt_matches_transport_context(
                                             &receipt,
-                                            *expected,
+                                            candidate,
                                             request.session_claim_binding.0,
                                             applied_cut,
                                         );
                                 if !receipt_current {
-                                    let claims_still_bound = self
-                                        .node
-                                        .borrow()
-                                        .session_claims_with_revisions()
-                                        .into_iter()
-                                        .find_map(|(identity, claims, _)| {
-                                            (identity == request.session_claim_binding.0)
-                                                .then_some(claims)
-                                        })
-                                        .unwrap_or_default()
-                                        == request.session_claim_binding.1;
-                                    if request.delegated_session.is_none() && !claims_still_bound {
-                                        let waiter_ids = request.waiters.clone();
-                                        scope_lease_manager.requests.remove(&request_id);
-                                        for waiter_id in waiter_ids {
-                                            if let Some(waiter) = self
-                                                .permission_advice_waiters
-                                                .borrow_mut()
-                                                .remove(&waiter_id)
-                                            {
-                                                let _ = waiter.send(PermissionAdvice::Unknown);
-                                            }
-                                        }
-                                        continue;
-                                    }
                                     // A claim/catalogue/progress transition can
                                     // race a just-completed hydration.  Retire its
                                     // lease and allocate a new opaque wire id so
@@ -3467,6 +3435,7 @@ where
                                         PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
                                     let action = request.action.clone();
                                     let session_claim_binding = request.session_claim_binding.clone();
+                                    let local_claim_revision = request.local_claim_revision;
                                     let delegated_session = request.delegated_session.clone();
                                     let waiters = request.waiters.clone();
                                     scope_lease_manager.requests.remove(&request_id);
@@ -3475,6 +3444,7 @@ where
                                         AuthorizationScopeLeaseRequest {
                                             action: action.clone(),
                                             session_claim_binding: session_claim_binding.clone(),
+                                            local_claim_revision,
                                             delegated_session: delegated_session.clone(),
                                             waiters,
                                             intent_sent: false,
@@ -3490,6 +3460,7 @@ where
                                             request_id: retry_id,
                                             action,
                                             session_claim_binding: Some(session_claim_binding),
+                                            local_claim_revision,
                                             delegated_session,
                                         },
                                     );
@@ -3502,7 +3473,7 @@ where
                                 // by the request and receipt.
                                 let scope_authority = AuthorityContext {
                                     link: request.session_claim_binding.0,
-                                    ..*expected
+                                    ..candidate
                                 };
                                 let admitted = match (request.lease.as_ref(), request.owner.take())
                                 {
@@ -3529,6 +3500,7 @@ where
                                 if !admitted {
                                     continue;
                                 }
+                                *expected = candidate;
                                 let action = request.action.clone();
                                 let session_claim_binding = request.session_claim_binding.clone();
                                 let waiter_ids = request.waiters.clone();
@@ -3579,6 +3551,16 @@ where
                                 if let Some(request) =
                                     scope_lease_manager.requests.remove(&request_id)
                                 {
+                                    let advice = if authorization_scope_claim_binding_is_current(
+                                        &self.node.borrow(),
+                                        &request.session_claim_binding,
+                                        request.local_claim_revision,
+                                        request.delegated_session.is_some(),
+                                    ) {
+                                        advice
+                                    } else {
+                                        PermissionAdvice::Unknown
+                                    };
                                     for waiter_id in request.waiters {
                                         if let Some(waiter) = self
                                             .permission_advice_waiters

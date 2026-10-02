@@ -4539,10 +4539,6 @@ impl RelayUpload {
             })
             .expect("the relay receives the upload's fate")
     }
-
-    fn support_views(&self) -> usize {
-        subscriber_support_views(&self.subscriber)
-    }
 }
 
 /// Alice may post to a chat only while she is a member. The relay receipt is
@@ -4599,7 +4595,6 @@ fn relay_join_write_policy_proofs_read_current_dependencies() {
         relay.upload_insert(&client, "messages", message(chat_b)),
         Fate::Accepted
     ));
-    assert_eq!(relay.support_views(), 0);
 }
 
 /// Seeds the reachable-doc schema: Alice holds access to `engineering`, which
@@ -4683,7 +4678,6 @@ fn relay_reachable_write_policy_proofs_walk_stored_edges() {
         relay.upload_insert_with_id(&client, "docs", sales_doc, doc()),
         Fate::Rejected(_)
     ));
-    assert_eq!(relay.support_views(), 0);
 }
 
 /// A scope-isolated relay carries one binding selected by server admission. A

@@ -32,4 +32,5 @@ First-class Solid.js support is now available in `jazz-tools` (`createSolidJazzC
 - Fix `deleteClientStorage()` hanging when called on a persistent browser Db before any table or query has been used.
 - Compound `ExistsRel` policy joins enforce every equality against one witness tuple across reads, writes, inherited policies, and maintained subscriptions. Public-schema conversion rejects unknown or incompatible secondary ON columns.
 - Authorization support hydration now identifies clauses by policy slot as well as shape and binding, preserving provenance-distinct USING/CHECK clauses and reopening terminal support when its scope identity changes.
+- Direct permission advice now keeps local claim revisions separate from serving-authority revisions. Stable admitted claims receive definitive answers, while claim changes (including A→B→A) retire old requests as `Unknown` across buffered responses, backpressure, and reconnects.
 - Removed `TestingServer` and `pushSchemaCatalogue` — use `startLocalJazzServer` and `deploy` instead.

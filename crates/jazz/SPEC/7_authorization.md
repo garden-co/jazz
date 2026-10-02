@@ -793,6 +793,15 @@ verified route/request correlation precede this internal receipt application.
   capability and admission epoch. A stale sequence returns `Unknown` without
   emitting its old aggregate receipt. Terminal-only proof subscriptions never
   enter resume cursors; their old node owner releases them on detach.
+  Direct advice also retains its first-dispatch canonical claim values and
+  local revision through backpressure, retry, coalescing and reconnect. Both
+  must remain current before accepting support or a decision, including a
+  zero-clause decision; an A→B→A transition retires the original request as
+  `Unknown`. Delegated snapshots do not consult the local author-keyed map.
+  Local and serving-connection claim revisions are independent domains.
+  Authority receipt revisions advance the admitted authority floor only after
+  same-authority/epoch, support and monotonic-context registry admission; the
+  Core-owned active catalogue sequence remains a shared freshness check.
   Claim-specific pruning keeps each alternative paired with its provenance;
   it never turns an unsatisfiable OR policy into an unrestricted one.
   Inherited compound witnesses resolve the referenced parent's row and column

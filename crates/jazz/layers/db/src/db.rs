@@ -2691,6 +2691,10 @@ enum PendingUpstreamCommand {
         /// A fresh request binds its claims when its selected authority admits
         /// it; a reconnect must preserve the original immutable binding.
         session_claim_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        /// Captured with direct claim values at first dispatch, then preserved
+        /// across backpressure/reconnect. None is also used before allocation
+        /// and for delegated immutable snapshots.
+        local_claim_revision: Option<u64>,
         /// A backend-selected snapshot which must cross the upstream boundary.
         /// This remains separate from the locally captured lease binding: direct
         /// sessions authenticate at transport admission and never self-delegate.
@@ -2829,6 +2833,10 @@ struct AuthorizationScopeLeaseRequest {
     /// operation is allocated. Receipts are evaluated on an Upstream link,
     /// which has no subscriber-side ambient claims to consult.
     session_claim_binding: (AuthorSubject, BTreeMap<String, Value>),
+    /// Some for direct claims, captured in the local Node revision domain.
+    /// None means a delegated immutable snapshot, not unchecked direct claims.
+    /// This stamp never supplies an authority receipt revision.
+    local_claim_revision: Option<u64>,
     /// Present only for a host-admitted backend or scope-isolated relay request.
     delegated_session: Option<crate::protocol::DelegatedSessionBinding>,
     /// Every local caller sharing this authority hydration.  The first id is
@@ -2844,6 +2852,22 @@ struct AuthorizationScopeLeaseRequest {
     owner: Option<AuthorizationScopeOwnerToken>,
     clause_count: Option<u16>,
     applied_clauses: BTreeMap<u16, (SubscriptionKey, crate::time::GlobalTime, u64)>,
+}
+
+/// NodeState's monotone setter advances the revision on every global claim
+/// value change. Values and revision are captured under one borrow at first
+/// dispatch, so revision equality also proves those values remain unchanged.
+/// A missing stamp is valid only for an immutable delegated request.
+fn authorization_scope_claim_binding_is_current<S: OrderedKvStorage>(
+    node: &NodeState<S>,
+    binding: &(AuthorSubject, BTreeMap<String, Value>),
+    local_claim_revision: Option<u64>,
+    delegated_session: bool,
+) -> bool {
+    match local_claim_revision {
+        Some(revision) => !delegated_session && node.session_claim_revision(binding.0) == revision,
+        None => delegated_session,
+    }
 }
 
 /// Per-upstream admission manager for scope receipts and their retained leases.
