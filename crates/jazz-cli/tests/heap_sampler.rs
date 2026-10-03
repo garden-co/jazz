@@ -5,7 +5,7 @@
 
 use std::alloc::System;
 
-use jazz_cli::heap_profiling::{SamplingAllocator, for_each_live_sample};
+use jazz_cli::heap_profiling::{SamplingAllocator, for_each_live_sample, set_sample_interval};
 
 #[global_allocator]
 static ALLOCATOR: SamplingAllocator<System> = SamplingAllocator::new(System);
@@ -31,6 +31,10 @@ fn allocate(count: usize, size: usize) -> Vec<Vec<u8>> {
 /// that memory is freed.
 #[test]
 fn estimates_live_bytes_and_forgets_freed_memory() {
+    // At a one-byte mean, every fixture allocation exceeds the largest possible
+    // interval from the 53-bit uniform draw. Keep this lifecycle test deterministic
+    // without changing production sampling or relaxing its accuracy assertions.
+    set_sample_interval(1);
     let (baseline, _) = live_estimate();
     let mut kept = Vec::new();
     for round in 0..64 {
