@@ -34,6 +34,14 @@ pub struct TableSourceOp {
     pub variant_projection: Option<VariantProjectionTarget>,
 }
 
+/// A primary-key lookup driven by a live key relation. Runtime-local only.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TableLookupOp {
+    pub table: String,
+    pub key_fields: Vec<usize>,
+    pub target_key_fields: Vec<usize>,
+}
+
 /// Runtime registry namespace selected by a heterogeneous table source.
 ///
 /// Named projections are caller-defined query boundaries. Schema-index
@@ -66,6 +74,24 @@ pub struct IndexSourceOp {
     pub append_value_to_key: bool,
     pub store_value: bool,
     pub scan: Option<StaticScanSpec>,
+    pub window: Option<Box<IndexWindowOp>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexWindowOp {
+    pub limit: usize,
+    pub order_field: usize,
+    pub exclusion: Option<IndexWindowExclusionOp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexWindowExclusionOp {
+    pub table: String,
+    pub descriptor: RecordDescriptor,
+    pub key_prefix: Vec<u8>,
+    pub key_fields: Vec<usize>,
+    pub target_key_fields: Vec<usize>,
+    pub predicate: PredicateExpr,
 }
 
 /// Static ordered-key scan supplied at graph construction.
@@ -75,18 +101,16 @@ pub enum StaticScanSpec {
     Prefix(Vec<LiteralValue>),
     /// A prefix scan whose physical source is proven to need no more than this
     /// many entries. This is deliberately distinct from cursor batching: it is
-    /// only emitted by one-shot lowering when downstream operations cannot
-    /// change the page, or by a bounded probe that proves the page after
-    /// applying those operations and falls back if proof fails.
+    /// emitted when downstream operations cannot change the page, or by a
+    /// bounded probe that proves the page after applying those operations.
+    /// A maintained window must refill and prove completeness on each tick.
     PrefixLimit {
         prefix: Vec<LiteralValue>,
         max_items: usize,
     },
     /// Read the last `max_items` entries under a prefix, in descending key
-    /// order, bounded before row decoding. Jazz emits this (and an ordered
-    /// `PrefixLimit`) only for a one-shot ordered-page probe whose caller
-    /// re-proves the page after every downstream filter, and falls back to an
-    /// unbounded source when it cannot.
+    /// order, bounded before row decoding. As with `PrefixLimit`, page
+    /// completeness must account for every downstream filter and boundary tie.
     ReversePrefixLimit {
         prefix: Vec<LiteralValue>,
         max_items: usize,

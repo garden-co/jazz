@@ -33,7 +33,7 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// canonical enum/schema boundary.
     pub(super) covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
-    /// A one-shot ordered page can restrict deletion checks to its bounded
+    /// A one-shot page can restrict deletion checks to its bounded
     /// content candidates. Other sources retain the complete register.
     pub(super) bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     /// Whether access-path metrics should account for this logical graph
@@ -304,8 +304,7 @@ pub(super) enum CurrentAccessPath {
         /// When set, `prefix` addresses that composite index rather than the
         /// single-column index on `column`.
         order_column: Option<String>,
-        /// Scan the (composite) index prefix from its last key. Only a bounded
-        /// one-shot ordered-page probe sets this, together with `source_limit`.
+        /// Scan an ordered page from the composite index's last key.
         reverse: bool,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
@@ -318,8 +317,9 @@ pub(super) enum CurrentAccessPath {
         /// is snapshot-only and cannot observe later transitions through a
         /// secondary equality index.
         maintained: bool,
-        /// A proved physical source cap for an ordinary one-shot read. This is
-        /// never selected by policy compilation or subscriptions.
+        /// Initial physical source cap. A maintained ordered window expands
+        /// this bounded probe until it has proved the page; a first-result
+        /// caller proves its snapshot before publishing it.
         source_limit: Option<usize>,
     },
 }
@@ -2335,10 +2335,12 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
         Box::pin(async move {
             let exclusion_scope = self.local_exclusion_scope(request);
-            // A physical limit is valid only when no later source filter can
-            // remove candidates. Unavailability is a mutable anti-join, so
-            // retain the logical query limit after it instead.
+            // Unavailability is a mutable anti-join, so a retained view must
+            // keep its logical limit after that filter. A bounded first-result
+            // probe instead proves completeness after the complete graph and
+            // widens if necessary; its content and deletion caps must agree.
             if exclusion_scope.is_some()
+                && !self.has_bounded_page_deletion_register(&request.source)
                 && let Some(CurrentAccessPath::Index { source_limit, .. }) =
                     self.access_paths.get_mut(&request.source)
             {
@@ -2778,7 +2780,7 @@ where
             )
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let deleted_winners = self
-            .projected_deletion_register_current_source_graph(request, deletion_tier)?
+            .projected_deletion_register_current_source_graph(request, table, deletion_tier)?
             .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project(["row_uuid"]);
         Ok(GraphBuilder::anti_join(
@@ -2857,6 +2859,7 @@ where
                     return Ok(None);
                 }
                 let source_limit = (order_column.is_some()
+                    || self.has_bounded_page_deletion_register(&request.source)
                     || request.visibility == RowVisibility::IncludeDeleted)
                     .then_some(source_limit)
                     .flatten();
@@ -2943,7 +2946,8 @@ where
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(DeletionRegisterSource {
-                graph: self.projected_deletion_register_current_source_graph(request, tier)?,
+                graph: self
+                    .projected_deletion_register_current_source_graph(request, table, tier)?,
                 row_uuid_field: "row_uuid".to_owned(),
             }));
         }
@@ -3225,9 +3229,12 @@ where
                         maintained,
                         candidate_filter,
                     }) => {
-                        // An ordered-page probe re-proves its page after the
-                        // deletion anti-join, so its cap survives it.
-                        let source_limit = (order_column.is_some() || !exclude_deleted)
+                        // A bounded page probe re-proves its page after the
+                        // deletion anti-join. Its content cap must agree with
+                        // the candidates whose registers were loaded.
+                        let source_limit = (order_column.is_some()
+                            || self.has_bounded_page_deletion_register(&request.source)
+                            || !exclude_deleted)
                             .then_some(source_limit)
                             .flatten();
                         self.node.query_engine_read_metrics.source_index_probes +=
@@ -3266,7 +3273,7 @@ where
                     return Ok(content.project(fields));
                 }
                 let deleted_winners = self
-                    .projected_deletion_register_current_source_graph(request, tier)?
+                    .projected_deletion_register_current_source_graph(request, read_table, tier)?
                     .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
                     .project(["row_uuid"]);
                 return Ok(GraphBuilder::anti_join(
@@ -3437,7 +3444,7 @@ where
                 return Ok(content.project(fields));
             }
             let deleted_winners = self
-                .projected_deletion_register_current_source_graph(request, tier)?
+                .projected_deletion_register_current_source_graph(request, read_table, tier)?
                 .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
                 .project(["row_uuid"]);
             Ok(GraphBuilder::anti_join(
@@ -3449,9 +3456,16 @@ where
         })
     }
 
+    fn has_bounded_page_deletion_register(&self, source: &SourceId) -> bool {
+        self.bounded_deletion_register
+            .as_ref()
+            .is_some_and(|(bounded_source, _)| bounded_source == source)
+    }
+
     pub fn projected_deletion_register_current_source_graph(
         &mut self,
         request: &SourceRequest,
+        table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, SourceResolutionError> {
         if tier == DurabilityTier::Global
@@ -3464,13 +3478,76 @@ where
             .node
             .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        if tier == DurabilityTier::Global
+            && let Some(CurrentAccessPath::Index {
+                column,
+                order_column,
+                reverse,
+                prefix,
+                intersections,
+                maintained: true,
+                source_limit,
+                ..
+            }) = self.access_paths.get(&request.source).cloned()
+        {
+            // Follow the live indexed candidate relation, including keys that
+            // enter it after opening. A frozen opening UUID set would miss an
+            // existing deletion when a row moves into the selected prefix.
+            let projection_target = self.current_projection_target(request, table)?;
+            let candidates = self
+                .node
+                .physical_global_current_source_for_index_scan(
+                    table,
+                    self.read_view.read_schema,
+                    &column,
+                    order_column.as_deref(),
+                    reverse,
+                    &prefix,
+                    &intersections,
+                    true,
+                    source_limit,
+                    None,
+                    &projection_target,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let keys = candidates.project_fields([
+                ProjectField::literal(
+                    "branch_key",
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                ),
+                ProjectField::named("row_uuid"),
+            ]);
+            return Ok(GraphBuilder::table_lookup(
+                keys,
+                physical_register_global_current_table_name(table_id),
+                ["branch_key", "row_uuid"],
+            ));
+        }
         let fields = register_storage_fields_for_query_engine("");
-        let global = GraphBuilder::table(physical_register_global_current_table_name(table_id));
+        // The content access path fixes this source occurrence to one UUID.
+        // Keep its deletion inputs live, but read only that same key. Other
+        // policy/source occurrences retain their independently selected paths.
+        let point = match self.access_paths.get(&request.source) {
+            Some(CurrentAccessPath::PrimaryKey(prefix))
+                if matches!(prefix.as_slice(), [Value::Uuid(_)]) =>
+            {
+                Some(prefix)
+            }
+            _ => None,
+        };
+        let register_source = |table, full_key_len| match point {
+            Some(prefix) => GraphBuilder::table_scan(
+                table,
+                shared_branch_scan(Some(static_scan_for_prefix(prefix.clone(), full_key_len))),
+            ),
+            None => GraphBuilder::table(table),
+        };
+        let global = register_source(physical_register_global_current_table_name(table_id), 1);
         if tier == DurabilityTier::Global {
             return Ok(global);
         }
         let global = global.project_fields(fields.clone());
-        let ahead = GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
+        let ahead = register_source(physical_register_ahead_current_table_name(table_id), 3);
         let ahead = { ahead.project_fields(fields.clone()) };
         Ok(GraphBuilder::arg_max_by(
             GraphBuilder::union([global, ahead]),
@@ -3513,7 +3590,7 @@ where
                 table, true, false,
             ));
         let deleted_winners = self
-            .projected_deletion_register_current_source_graph(request, tier)?
+            .projected_deletion_register_current_source_graph(request, table, tier)?
             .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project_fields([
                 ProjectField::named("row_uuid"),
@@ -4770,6 +4847,9 @@ where
                 .into_iter()
                 .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
         );
+        if matches!(lifetime, HydrationLifetime::Retained) {
+            self.narrow_maintained_ordered_window(request, shape, binding, &mut paths)?;
+        }
         if matches!(lifetime, HydrationLifetime::FirstResult) {
             let query = shape.query();
             let root = root_source_id(&query.table);
@@ -4983,9 +5063,9 @@ where
         let equalities = root_literal_equalities(query, binding)?;
         self.table_in_schema_ref(&query.table, shape.schema_version())?;
         // Policy-bearing roots take the point path too (#3511). The point
-        // narrows only the content source: the deletion register stays a full
-        // maintained source anti-joined after it, and policy proofs keep their
-        // own sources, so deletion and grant changes still retract the row.
+        // narrows the content and deletion sources to the same UUID. Both stay
+        // maintained, and policy proofs keep their own source occurrences, so
+        // deletion and grant changes still retract the row.
         if let Some(value) = equalities.get("id").cloned() {
             access_paths.insert(
                 root_source_id(&query.table),
@@ -5054,6 +5134,117 @@ where
         {
             access_paths.insert(source.clone(), access_path);
         }
+        Ok(())
+    }
+
+    /// Narrow only an already-admitted root index, with no post-source row
+    /// filtering other than deletion winners. Permission evaluation remains in
+    /// the ordinary graph; policy-bearing shapes keep their existing source.
+    fn narrow_maintained_ordered_window(
+        &self,
+        request: &QueryProgramRequest,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        paths: &mut BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<(), Error> {
+        let query = shape.query();
+        let Some(limit) = query
+            .limit
+            .filter(|limit| *limit > 0 && *limit < usize::MAX)
+        else {
+            return Ok(());
+        };
+        let root = root_source_id(&query.table);
+        if request.authorization_mode != QueryAuthorizationMode::TrustedServing
+            || request.reads.primary.source_current_tier(&root) != Some(DurabilityTier::Global)
+            || !matches!(
+                request.reads.primary.sources.get(&root),
+                Some(SourceExpr::VisibleCurrent { .. })
+            )
+            || request.reads.primary.read_schema != request.reads.primary.policy_schema
+            || query.offset != 0
+            || query.order_by.len() != 1
+            || query.filters.len() != 1
+            || !query.joins.is_empty()
+            || query.flat_join.is_some()
+            || !query.policy_branches.is_empty()
+            || !query.reachable.is_empty()
+            || !query.inherits.is_empty()
+            || !query.includes.is_empty()
+            || !query.array_subqueries.is_empty()
+            || query.aggregate.is_some()
+            || query.relation.is_some()
+        {
+            return Ok(());
+        }
+        // An equality by itself is exactly the source prefix. Decline every
+        // conjunction/extra predicate until its filtering is part of refill.
+        if !matches!(
+            &query.filters[0],
+            Predicate::Eq(Operand::Column(_), Operand::Literal(_) | Operand::Param(_))
+                | Predicate::Eq(Operand::Literal(_) | Operand::Param(_), Operand::Column(_))
+        ) {
+            return Ok(());
+        }
+        let table = self.table_in_schema_ref(&query.table, shape.schema_version())?;
+        if !table.branch_by.is_empty()
+            || table
+                .read_policy
+                .as_ref()
+                .is_some_and(|policy| policy != &JazzQuery::from(query.table.clone()))
+        {
+            return Ok(());
+        }
+        let order = &query.order_by[0];
+        if !table.columns.iter().any(|column| {
+            column.name == order.column
+                && matches!(
+                    column.column_type,
+                    ColumnType::U8
+                        | ColumnType::U16
+                        | ColumnType::U32
+                        | ColumnType::U64
+                        | ColumnType::I32
+                        | ColumnType::I64
+                        | ColumnType::Bool
+                        | ColumnType::String
+                        | ColumnType::Bytes
+                        | ColumnType::Uuid
+                )
+        }) {
+            return Ok(());
+        }
+        let equalities = root_literal_equalities(query, binding)?;
+        let Some(CurrentAccessPath::Index {
+            column,
+            order_column,
+            reverse,
+            prefix,
+            intersections,
+            candidate_filter,
+            maintained,
+            source_limit,
+        }) = paths.get_mut(&root)
+        else {
+            return Ok(());
+        };
+        if !*maintained
+            || order_column.is_some()
+            || source_limit.is_some()
+            || prefix.len() != 1
+            || !intersections.is_empty()
+            || candidate_filter.is_some()
+            || equalities.len() != 1
+            || !equalities.contains_key(column)
+            || !table
+                .composite_indexes
+                .contains(&vec![column.clone(), order.column.clone()])
+        {
+            return Ok(());
+        }
+        *order_column = Some(order.column.clone());
+        *reverse = order.direction == OrderDirection::Desc;
+        *source_limit = Some(limit + 1);
         Ok(())
     }
 
@@ -5192,12 +5383,33 @@ where
             // source.  Model each equality as an index source and express the
             // intersection in IVM so table deltas which enter or leave either
             // prefix drive ordinary semi-join updates.
-            let mut graph = GraphBuilder::variant_index_scan(
-                storage_table.clone(),
-                primary_index,
-                projection_target,
-                scan,
-            );
+            let mut graph = if let (Some(order_column), Some(cap)) = (order_column, source_limit) {
+                GraphBuilder::variant_index_window(
+                    storage_table.clone(),
+                    primary_index,
+                    projection_target,
+                    scan,
+                    groove::ivm::IndexWindow {
+                        limit: cap.saturating_sub(1),
+                        order_field: crate::schema::app_storage_column_name(order_column),
+                        exclusion: Some(groove::ivm::IndexWindowExclusion {
+                            table: physical_register_global_current_table_name(mapping.table_id),
+                            key_prefix: vec![LiteralValue::from(Value::Bytes(
+                                BranchKey::default().canonical_bytes(),
+                            ))],
+                            key_fields: vec!["row_uuid".to_owned()],
+                            predicate: PredicateExpr::eq("_deletion", Value::EnumTag(0)),
+                        }),
+                    },
+                )
+            } else {
+                GraphBuilder::variant_index_scan(
+                    storage_table.clone(),
+                    primary_index,
+                    projection_target,
+                    scan,
+                )
+            };
             for (index, scan) in intersections {
                 let right = GraphBuilder::variant_index_scan(
                     storage_table.clone(),

@@ -2148,6 +2148,89 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
     }
 }
 
+/// Alice's large transaction is already complete at Bob. A later one-row
+/// view replay must check that row without loading the other transaction rows.
+/// This receiver-level test needs storage counters and forged peer payloads,
+/// which the public client API intentionally does not expose.
+///
+/// alice --complete transaction--> bob --reopen--> bob
+/// alice --one-row view replay------------------> bob
+/// mallory --changed or absent row--------------> rejected
+#[test]
+fn scoped_replay_of_complete_transaction_reads_only_incoming_coordinates() {
+    use crate::protocol::VersionBundleScope::{CompleteTransaction, ViewScoped};
+
+    let (bob_dir, mut bob) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut bob, "todos");
+    let subscription = bob.whole_table_subscription_key("todos").unwrap();
+    let alice_tx = TxId::new(TxTime::from(10), node(1));
+    let versions = (0_u8..128)
+        .map(|index| version_record(row(index), Vec::new(), title_cells("original"), None))
+        .collect::<Vec<_>>();
+    bob.apply_view_update(reset_scope_update(
+        subscription,
+        vec![reset_scope_bundle(
+            reset_scope_tx(alice_tx, 128),
+            CompleteTransaction,
+            versions.clone(),
+        )],
+    ))
+    .unwrap();
+    drop(bob);
+
+    let mut bob = reopen_node_at(&bob_dir, node(3), schema());
+    register_whole_table_receiver(&mut bob, "todos");
+    let subscription = bob.whole_table_subscription_key("todos").unwrap();
+    // Reopen can hydrate transaction caches during recovery. Start the receipt
+    // with a cold cache so the assertion also covers durable point reads.
+    bob.query.tx_versions_cache.clear();
+    bob.reset_storage_read_metrics();
+    bob.apply_view_update(reset_scope_update(
+        subscription,
+        vec![reset_scope_bundle(
+            reset_scope_tx(alice_tx, 1),
+            ViewScoped,
+            vec![versions[0].clone()],
+        )],
+    ))
+    .unwrap();
+    let reads = bob.take_storage_read_metrics();
+    assert!(
+        reads.history_rows.reads < 16,
+        "one returned version must not read its 128-row transaction: {reads:?}"
+    );
+    let stored = bob.query_transaction(alice_tx).unwrap().unwrap();
+    assert!(!stored.view_scoped_cardinality);
+    assert_eq!(stored.tx.n_total_writes, 128);
+
+    for conflicting in [
+        version_record(row(0), Vec::new(), title_cells("changed"), None),
+        version_record(row(200), Vec::new(), title_cells("absent"), None),
+    ] {
+        let result = bob
+            .apply_view_update(reset_scope_update(
+                subscription,
+                vec![reset_scope_bundle(
+                    reset_scope_tx(alice_tx, 1),
+                    ViewScoped,
+                    vec![conflicting],
+                )],
+            ))
+            .resolve();
+        assert!(matches!(result, Err(Error::ConflictingCommitUnit(tx)) if tx == alice_tx));
+    }
+    let stored_versions = bob.query_versions_for_tx(alice_tx).unwrap();
+    assert_eq!(stored_versions.len(), 128);
+    let mut actual = stored_versions
+        .iter()
+        .map(|version| bob.version_record_from_row(version).unwrap())
+        .collect::<Vec<_>>();
+    let mut expected = versions;
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
 fn reset_scope_tx(tx_id: TxId, n_total_writes: u32) -> Transaction {
     Transaction {
         tx_id,

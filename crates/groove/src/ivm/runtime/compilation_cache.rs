@@ -45,7 +45,8 @@ fn eligible(graph: &GraphBuilder) -> bool {
     match graph {
         // Source validation must run for every install. Recursive/collector
         // compilation has additional context validation and stays explicit.
-        GraphBuilder::Table { .. }
+        GraphBuilder::TableLookup { .. }
+        | GraphBuilder::Table { .. }
         | GraphBuilder::TemplateInput { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::InlineRecords { .. }

@@ -33,9 +33,9 @@ use crate::ivm::{
     IndexSourceOp, InlineRecordsOp, InputSourceId, IvmGraph, JoinOp, JoinOpKind, LiteralValue,
     MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor, NodeDurability, NodeId, NodeOutput,
     OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr,
-    RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec, StreamingChecksumOp, TableSourceOp,
-    TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
-    ValueComparison, VariantProjectOp, VariantProjectionTarget,
+    RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec, StreamingChecksumOp, TableLookupOp,
+    TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp,
+    UnwrapNullableOp, ValueComparison, VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, PreparedProjection,
@@ -51,12 +51,14 @@ mod compilation_cache;
 mod counted_map;
 mod evaluation_memo;
 pub(crate) mod evaluation_session;
+mod index_window;
 mod join;
 mod persist;
 pub(crate) mod pipeline;
 mod rank_index;
 mod recursion;
 mod state;
+mod table_lookup;
 mod terminal;
 mod typed_template;
 
@@ -566,6 +568,10 @@ pub enum IvmRuntimeError {
     UnsupportedIndexIntersectionScan,
     #[error("candidate-filtered index sources require snapshot row projection and prefix scans")]
     UnsupportedIndexCandidateFilter,
+    #[error("Primary-key lookup into heterogeneous table {0} is not supported yet")]
+    UnsupportedTableLookup(String),
+    #[error("Reading {0} with a maintained index window is not supported yet")]
+    UnsupportedIndexWindow(&'static str),
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]

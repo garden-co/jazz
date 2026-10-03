@@ -101,7 +101,8 @@ fn collect_binding_source_descriptor_fields(
         GraphBuilder::RecursiveStepWitness { recursive } => {
             collect_binding_source_descriptor_fields(recursive, descriptors_by_shape);
         }
-        GraphBuilder::Filter { input, .. }
+        GraphBuilder::TableLookup { input, .. }
+        | GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::Unnest { input, .. }
@@ -172,7 +173,8 @@ fn collect_binding_source_projected_fields(
         GraphBuilder::RecursiveStepWitness { recursive } => {
             collect_binding_source_projected_fields(recursive, projected_by_shape);
         }
-        GraphBuilder::Filter { input, .. }
+        GraphBuilder::TableLookup { input, .. }
+        | GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::Unnest { input, .. }

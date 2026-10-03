@@ -212,6 +212,23 @@ impl EvaluationInputs {
         }
     }
 
+    pub(super) fn value(
+        &mut self,
+        key: StorageRequestKey,
+    ) -> Result<Option<&[u8]>, super::IvmRuntimeError> {
+        let key = EvaluationRequestKey::Storage(key);
+        if !self.loaded.contains_key(&key) {
+            self.missing.insert(key);
+            return Err(super::IvmRuntimeError::EvaluationBlocked);
+        }
+        match self.loaded.get(&key).expect("loaded key checked") {
+            EvaluationRequestOutput::Storage(StorageRequestOutput::Value(value)) => {
+                Ok(value.as_deref())
+            }
+            _ => Err(super::IvmRuntimeError::UnsupportedOperator),
+        }
+    }
+
     pub(super) fn rows(
         &mut self,
         key: StorageRequestKey,

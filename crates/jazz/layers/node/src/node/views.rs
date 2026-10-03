@@ -400,6 +400,37 @@ where
             if !known_transaction_payload_matches(&stored_identity, &incoming_identity) {
                 return Err(Error::ConflictingCommitUnit(*tx_id));
             }
+            if !stored.view_scoped_cardinality
+                && bundle.scope == crate::protocol::VersionBundleScope::ViewScoped
+            {
+                // A complete stored transaction already fixes its entire version
+                // set. A view-scoped replay only needs to prove that each incoming
+                // version is an identical member of that set. Loading unrelated
+                // versions makes a point read scale with its original write batch.
+                for incoming in &bundle.versions {
+                    let Ok(physical_table_id) = self
+                        .physical_table_id_for_schema(incoming.schema_version(), incoming.table())
+                    else {
+                        return Err(Error::ConflictingCommitUnit(*tx_id));
+                    };
+                    let coordinate = ParentCoordinate {
+                        physical_table_id,
+                        branch_key: incoming.branch_key().clone(),
+                        row_uuid: incoming.row_uuid(),
+                        layer: VersionLayer::for_record(incoming),
+                    };
+                    let Some(existing) = self
+                        .query_exact_parent_version(*tx_id, stored.node_alias, &coordinate)
+                        .await?
+                    else {
+                        return Err(Error::ConflictingCommitUnit(*tx_id));
+                    };
+                    if self.version_record_from_row(&existing)? != *incoming {
+                        return Err(Error::ConflictingCommitUnit(*tx_id));
+                    }
+                }
+                continue;
+            }
             let stored_versions = self.query_versions_for_tx(*tx_id).await?;
             let mut stored_by_key = BTreeMap::new();
             for stored_version in &stored_versions {

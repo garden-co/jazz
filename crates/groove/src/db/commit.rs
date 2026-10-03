@@ -734,11 +734,12 @@ impl Database {
                 })
             }
             BatchOperation::Delete { table, key } => {
-                let table_schema = self.table(table)?;
+                self.ensure_not_poisoned()?;
+                let descriptor = self.table_storage_descriptor(table)?;
                 Ok(PendingTableWrite::Delete {
                     table: table.clone(),
                     key: key.clone().into_bytes(),
-                    descriptor: table_schema.record_schema(),
+                    descriptor,
                 })
             }
         }
@@ -828,7 +829,8 @@ impl Database {
                 })
             }
             BatchOperation::Delete { table, key } => {
-                let descriptor = self.table(&table)?.record_schema();
+                self.ensure_not_poisoned()?;
+                let descriptor = self.table_storage_descriptor(&table)?;
                 Ok(PendingTableWrite::Delete {
                     table,
                     key: key.into_bytes(),

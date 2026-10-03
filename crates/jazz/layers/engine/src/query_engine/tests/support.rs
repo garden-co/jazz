@@ -75,7 +75,8 @@ pub(super) fn collect_binding_source_fingerprint(
         GraphBuilder::RecursiveStepWitness { recursive } => {
             collect_binding_source_fingerprint(recursive, sources);
         }
-        GraphBuilder::Filter { input, .. }
+        GraphBuilder::TableLookup { input, .. }
+        | GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::Unnest { input, .. }
@@ -142,7 +143,8 @@ pub(super) fn graph_any(graph: &GraphBuilder, predicate: &impl Fn(&GraphBuilder)
             graph_any(seed, predicate) || graph_any(step, predicate)
         }
         GraphBuilder::RecursiveStepWitness { recursive } => graph_any(recursive, predicate),
-        GraphBuilder::Filter { input, .. }
+        GraphBuilder::TableLookup { input, .. }
+        | GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::Unnest { input, .. }

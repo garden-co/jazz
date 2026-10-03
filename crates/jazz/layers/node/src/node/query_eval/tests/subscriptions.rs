@@ -424,7 +424,8 @@ fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
             graph_contains_point_scan(seed) || graph_contains_point_scan(step)
         }
         GraphBuilder::RecursiveStepWitness { recursive } => graph_contains_point_scan(recursive),
-        GraphBuilder::Filter { input, .. }
+        GraphBuilder::TableLookup { input, .. }
+        | GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::VariantProject { input, .. }
@@ -2260,6 +2261,58 @@ impl ServedPointSubscription {
     }
 }
 
+/// Bob serves Alice's one-row subscription after deleting unrelated rows.
+/// Opening must read only the target's deletion register while its later
+/// delete and restore still reach Alice. This receiver seam exposes serving
+/// storage counters that the public client API does not expose.
+///
+/// bob --unrelated deletes--> bob --point subscription--> alice
+/// bob --target delete / restore------------------------> alice
+#[test]
+fn served_policy_point_subscription_bounds_unrelated_deletion_reads() {
+    let alice = author(0x72);
+    let bob = author(0x73);
+    let target = row(0x72);
+    let mut probe = ServedPointSubscription::new(owner_policy_schema(), "issues", target, alice);
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        target,
+        served_issue("target", alice),
+        1,
+        1,
+    );
+    for index in 0..64_u8 {
+        let time = u64::from(index) * 2 + 2;
+        commit_global_cells(
+            &mut probe.server,
+            "issues",
+            row(usize::from(index)),
+            served_issue("unrelated", bob),
+            time,
+            time,
+        );
+        delete_global(
+            &mut probe.server,
+            "issues",
+            row(usize::from(index)),
+            time + 1,
+            time + 1,
+        );
+    }
+    probe.server.reset_storage_read_metrics();
+    probe.step(&[target], "Alice receives only her target");
+    let reads = probe.server.take_storage_read_metrics();
+    assert!(
+        reads.register_global_current_rows.reads <= 8,
+        "one UUID must not hydrate 64 unrelated deletion registers: {reads:?}"
+    );
+    delete_global(&mut probe.server, "issues", target, 130, 130);
+    probe.step(&[], "target deletion still retracts the row");
+    restore_global(&mut probe.server, "issues", target, 131, 131);
+    probe.step(&[target], "target restore still republishes the row");
+}
+
 #[test]
 fn served_policy_point_subscription_follows_transfer_delete_and_restore() {
     let owner = author(0x72);
@@ -2477,4 +2530,372 @@ fn served_policy_point_subscription_follows_same_table_inherited_grant() {
         9,
     );
     probe.step(&[], "child detached from parent");
+}
+
+/// Bob serves Alice's indexed page while unrelated rows have deletion history.
+/// Deletion lookup work must follow the live candidate keys, including a row
+/// deleted before it enters the filter. Receiver-visible rows also prove that
+/// ownership checks, later insertion, delete, restore, and page refill survive.
+/// This serving seam exposes storage read counters unavailable in the client API.
+///
+/// bob --indexed page + deletion state--> alice
+/// bob --move / restore / transfer-----> alice
+#[test]
+fn served_indexed_subscription_bounds_deletions_and_tracks_new_keys() {
+    let alice = author(0x72);
+    let bob = author(0x73);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("issues")
+                .column("title", PublicColumnType::Text)
+                .column("assignee", PublicColumnType::Uuid)
+                .column("requiresAdmin", PublicColumnType::Boolean)
+                .index_only(["title", "assignee"])
+                .policies(
+                    PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                        "assignee",
+                        vec!["claims".to_owned(), "sub".to_owned()],
+                    )),
+                ),
+        ),
+    );
+    let (server_dir, mut server) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe1; 16]), schema.clone());
+    let (reader_dir, mut reader) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe2; 16]), schema.clone());
+    server.set_test_provider_claims(
+        alice,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.test_uuid()))]),
+    );
+    let shape = Query::from("issues")
+        .filter(eq(col("title"), lit(Value::String("selected".into()))))
+        .limit(2)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    register_query_shape(&mut reader, &shape, RegisterShapeOptions::default());
+    subscribe_query_binding(&mut reader, &shape, &binding);
+    let mut probe = ServedPointSubscription {
+        _server_dir: server_dir,
+        server,
+        _reader_dir: reader_dir,
+        reader,
+        shape,
+        binding,
+        peer: PeerState::client_link(alice),
+        started: false,
+    };
+    let first = row(0x70);
+    let moved = row(0x71);
+    let late = row(0x72);
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        first,
+        served_issue("selected", alice),
+        1,
+        1,
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("outside", alice),
+        2,
+        2,
+    );
+    delete_global(&mut probe.server, "issues", moved, 3, 3);
+    for index in 0..64_u8 {
+        let time = u64::from(index) * 2 + 4;
+        let unrelated = row(usize::from(index));
+        commit_global_cells(
+            &mut probe.server,
+            "issues",
+            unrelated,
+            served_issue("outside", bob),
+            time,
+            time,
+        );
+        delete_global(&mut probe.server, "issues", unrelated, time + 1, time + 1);
+    }
+    probe.server.reset_storage_read_metrics();
+    probe.step(&[first], "initial indexed page");
+    let reads = probe.server.take_storage_read_metrics();
+    assert!(
+        reads.register_global_current_rows.reads <= 8,
+        "one matching key must not load unrelated deletion history: {reads:?}"
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("selected", alice),
+        140,
+        140,
+    );
+    probe.step(
+        &[first],
+        "a previously deleted row enters the filter but stays deleted",
+    );
+    restore_global(&mut probe.server, "issues", moved, 141, 141);
+    probe.step(&[first, moved], "restore publishes the newly admitted key");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        late,
+        served_issue("selected", alice),
+        142,
+        142,
+    );
+    probe.step(
+        &[first, moved],
+        "the page still has its original first two rows",
+    );
+    delete_global(&mut probe.server, "issues", first, 143, 143);
+    probe.step(&[moved, late], "deletion refills the limited page");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("selected", bob),
+        144,
+        144,
+    );
+    probe.step(&[late], "policy transfer retracts a candidate");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("selected", alice),
+        145,
+        145,
+    );
+    probe.step(&[moved, late], "policy transfer back republishes it");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("outside", alice),
+        146,
+        146,
+    );
+    probe.step(&[late], "moving out removes the candidate");
+    delete_global(&mut probe.server, "issues", moved, 147, 147);
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("selected", alice),
+        148,
+        148,
+    );
+    probe.step(&[late], "re-entry checks deletion state again");
+    restore_global(&mut probe.server, "issues", moved, 149, 149);
+    probe.step(&[moved, late], "restore after re-entry");
+}
+
+/// Bob serves Alice an indexed ordered page without loading the full bucket.
+/// Alice's received rows track insertion, order changes, bucket moves, deletion
+/// and restoration. This serving seam exposes storage counts unavailable at
+/// the public client API, while assertions use the ordinary sync receiver.
+/// bob --bounded page / changes--> alice
+#[test]
+fn served_ordered_window_refills_without_hydrating_the_matching_bucket() {
+    let alice = author(0x74);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("entries")
+                .column("bucket", PublicColumnType::Text)
+                .column("rank", PublicColumnType::BigInt)
+                .index_only(["bucket", "rank"])
+                .composite_index(["bucket", "rank"])
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    );
+    let (server_dir, mut server) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe3; 16]), schema.clone());
+    let (reader_dir, mut reader) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe4; 16]), schema.clone());
+    let values = |bucket: &str, rank: i64| {
+        BTreeMap::from([
+            ("bucket".to_owned(), Value::String(bucket.to_owned())),
+            ("rank".to_owned(), Value::I64(rank)),
+        ])
+    };
+    for i in 0..160 {
+        commit_global_cells(
+            &mut server,
+            "entries",
+            row(i),
+            values("selected", i as i64),
+            i as u64 + 1,
+            i as u64 + 1,
+        );
+    }
+    let shape = Query::from("entries")
+        .filter(eq(col("bucket"), lit(Value::String("selected".into()))))
+        .order_by("rank", OrderDirection::Asc)
+        .limit(3)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        ..Default::default()
+    };
+    register_query_shape(&mut reader, &shape, opts.clone());
+    subscribe_query_binding_as_system_with_opts(&mut reader, &shape, &binding, opts);
+    let mut probe = ServedPointSubscription {
+        _server_dir: server_dir,
+        server,
+        _reader_dir: reader_dir,
+        reader,
+        shape,
+        binding,
+        peer: PeerState::client_link(alice),
+        started: false,
+    };
+    probe.server.reset_storage_read_metrics();
+    probe.step(&[row(0), row(1), row(2)], "initial ordered page");
+    let reads = probe.server.take_storage_read_metrics();
+    assert!(
+        reads.global_current_rows.reads < 60,
+        "three-row page must not hydrate 160 matching rows: {reads:?}"
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "entries",
+        row(159),
+        values("selected", -1),
+        200,
+        200,
+    );
+    probe.step(
+        &[row(159), row(0), row(1)],
+        "a distant row moves ahead of the window",
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "entries",
+        row(159),
+        values("outside", -1),
+        201,
+        201,
+    );
+    probe.step(&[row(0), row(1), row(2)], "moving out refills the page");
+    delete_global(&mut probe.server, "entries", row(0), 202, 202);
+    probe.step(
+        &[row(1), row(2), row(3)],
+        "deletion refills past the source cap",
+    );
+    restore_global(&mut probe.server, "entries", row(0), 203, 203);
+    probe.step(
+        &[row(0), row(1), row(2)],
+        "restoration re-enters the window",
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "entries",
+        row(161),
+        values("selected", -2),
+        204,
+        204,
+    );
+    probe.step(&[row(161), row(0), row(1)], "insertion shifts the window");
+}
+
+/// Bob serves an ordered page to Alice whose permitted rows come after a
+/// long prefix owned by Mallory. Applying a source cap before permission
+/// filtering must never shorten Alice's page or reveal Mallory's rows.
+/// The direct serving seam exercises the same policy graph as peer sync.
+#[test]
+fn served_ordered_window_keeps_conditional_permissions_before_limit() {
+    let alice = author(0x75);
+    let mallory = author(0x76);
+    let schema =
+        public_query_eval_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("entries")
+                    .column("bucket", PublicColumnType::Text)
+                    .column("rank", PublicColumnType::BigInt)
+                    .column("owner", PublicColumnType::Uuid)
+                    .index_only(["bucket", "rank"])
+                    .composite_index(["bucket", "rank"])
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session("owner", vec!["claims".into(), "sub".into()]),
+                    )),
+            ),
+        );
+    let (server_dir, mut server) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe5; 16]), schema.clone());
+    let (reader_dir, mut reader) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe6; 16]), schema.clone());
+    server.set_test_provider_claims(
+        alice,
+        BTreeMap::from([("sub".into(), Value::Uuid(alice.test_uuid()))]),
+    );
+    let values = |rank: i64, owner: AuthorSubject| {
+        BTreeMap::from([
+            ("bucket".into(), Value::String("selected".into())),
+            ("rank".into(), Value::I64(rank)),
+            ("owner".into(), Value::Uuid(owner.test_uuid())),
+        ])
+    };
+    for i in 0..40 {
+        commit_global_cells(
+            &mut server,
+            "entries",
+            row(i),
+            values(i as i64, if i < 36 { mallory } else { alice }),
+            i as u64 + 1,
+            i as u64 + 1,
+        );
+    }
+    let shape = Query::from("entries")
+        .filter(eq(col("bucket"), lit(Value::String("selected".into()))))
+        .order_by("rank", OrderDirection::Asc)
+        .limit(3)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    register_query_shape(&mut reader, &shape, RegisterShapeOptions::default());
+    subscribe_query_binding(&mut reader, &shape, &binding);
+    let mut probe = ServedPointSubscription {
+        _server_dir: server_dir,
+        server,
+        _reader_dir: reader_dir,
+        reader,
+        shape,
+        binding,
+        peer: PeerState::client_link(alice),
+        started: false,
+    };
+    probe.step(
+        &[row(36), row(37), row(38)],
+        "permission filtering precedes pagination",
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "entries",
+        row(0),
+        values(0, alice),
+        100,
+        100,
+    );
+    probe.step(
+        &[row(0), row(36), row(37)],
+        "new permission changes the ordered page",
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "entries",
+        row(36),
+        values(36, mallory),
+        101,
+        101,
+    );
+    probe.step(
+        &[row(0), row(37), row(38)],
+        "revocation refills from permitted rows",
+    );
 }
