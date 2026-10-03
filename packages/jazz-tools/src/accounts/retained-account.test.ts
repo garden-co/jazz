@@ -179,6 +179,56 @@ describe("retained external accounts", () => {
     expect(isProvisionalAccount(other.getLoggedIn()!)).toBe(true);
   });
 
+  it("a manager login as the retained identity binds its credential to the same handle", async () => {
+    // Hosts that drive the AccountManager themselves (no JazzSession) have
+    // only the public login to give a retained account its credential.
+    const store = memoryStore();
+    await (await manager(store, registryFetch())).loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
+    for (const operation of ["loginJWT", "loginOrRegisterJWT"] as const) {
+      const fetch = registryFetch();
+      const restarted = await manager(store, fetch);
+      const retained = restarted.getLoggedIn()!;
+      const bound = vi.fn();
+      onAccountCredentialBound(retained, bound);
+      await expect(restarted[operation](jwt(alice))).resolves.toBe(retained);
+      expect(restarted.getLoggedIn()).toBe(retained);
+      expect(isProvisionalAccount(retained)).toBe(false);
+      expect(bound).toHaveBeenCalledOnce();
+      expect(fetch).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("a manager login as a different identity enrolls it, asking the provider once", async () => {
+    const store = memoryStore();
+    await (await manager(store, registryFetch())).loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
+    const fetch = registryFetch();
+    const restarted = await manager(store, fetch);
+    const retained = restarted.getLoggedIn()!;
+    const getToken = vi.fn(async () => jwt(bob));
+    const switched = await restarted.loginJWT({ getToken });
+    expect(switched).not.toBe(retained);
+    expect(switched).toMatchObject({ id: bobAccount, identity: bob });
+    expect(isProvisionalAccount(retained)).toBe(true);
+    expect(getToken).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("a logout racing a manager login of the retained account wins", async () => {
+    const store = memoryStore();
+    await (await manager(store, registryFetch())).loginJWT(jwt(alice));
+    await vi.waitFor(() => expect(JSON.parse(store.value!).assignment).not.toBeNull());
+    const restarted = await manager(store, registryFetch());
+    const bound = vi.fn();
+    onAccountCredentialBound(restarted.getLoggedIn()!, bound);
+    const login = restarted.loginJWT(jwt(alice));
+    restarted.logout();
+    await expect(login).rejects.toThrow();
+    expect(restarted.getLoggedIn()).toBeUndefined();
+    expect(bound).not.toHaveBeenCalled();
+  });
+
   it("decides a changed subject before calling the registry", async () => {
     const store = memoryStore();
     await (await manager(store, registryFetch())).loginJWT(jwt(alice));

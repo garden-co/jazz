@@ -84,12 +84,16 @@ retain the selected external account's non-secret assignment,
 (Node, SSR, React Native) do not, and keep the ordinary teardown-and-reopen
 login. On the next browser start `getLoggedIn()` returns that account at once,
 and a context opens its local data before the provider answers. Until a
-provider JWT arrives the context presents no credential upstream and local
+provider JWT arrives the context does not connect upstream (the server would
+reject a connection without a credential and end its subscriptions), and local
 policies see an empty `session.claims`: rules that depend on provider claims
-deny until revalidation. In a shared browser worker, another tab's credential
+deny until revalidation. The app must still log in: nothing else gives the
+retained account a credential. In a shared browser worker, another tab's credential
 for the same account may sync this tab's writes sooner. Logging in again as the
 same identity (`loginJWT`, `loginOrRegisterJWT`, or the auth provider
-connection) revalidates that account in place, without closing the context. A
+connection) revalidates that account in place, without closing the context:
+`AccountManager.loginJWT` then resolves to the very handle already open, and
+the first credential starts the context's sync connection. A
 different provider subject is detected before any registry call and switches
 accounts as before, reusing the provider token already fetched; a provider that
 hydrates signed out logs the retained account out. If the registry rejects the

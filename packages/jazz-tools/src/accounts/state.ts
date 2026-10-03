@@ -125,12 +125,41 @@ export class AccountManager<Auth> {
     return this.run("registerJWT", () => this.enrollment.registerJWT(auth));
   }
 
+  /**
+   * Log in with a provider JWT. On a manager that retains the selected
+   * account across reloads, logging in again as that account's identity
+   * re-admits it in place: the same handle is returned and contexts already
+   * open for it adopt the fresh credential. Until then a retained account's
+   * context has no credential and does not sync.
+   */
   loginJWT(auth: Auth): Promise<AccountHandle> {
-    return this.run("loginJWT", () => this.enrollment.loginJWT(auth));
+    return this.login("loginJWT", auth);
   }
 
+  /** Like {@link loginJWT}, registering an account when the identity has none. */
   loginOrRegisterJWT(auth: Auth): Promise<AccountHandle> {
-    return this.run("loginOrRegisterJWT", () => this.enrollment.loginOrRegisterJWT(auth));
+    return this.login("loginOrRegisterJWT", auth);
+  }
+
+  private login(operation: "loginJWT" | "loginOrRegisterJWT", auth: Auth): Promise<AccountHandle> {
+    if (!this.snapshot.account || !this.enrollment.revalidateJWT)
+      return this.enrollJWT(operation, auth);
+    const revalidation = this.revalidateJWT(operation, auth);
+    // Any account operation that starts meanwhile (a logout) supersedes this one.
+    const generation = this.generation;
+    return revalidation.then((same) => {
+      if (same) return same;
+      if (generation !== this.generation) throw new AccountOperationSuperseded();
+      return this.enrollJWT(operation, auth);
+    });
+  }
+
+  /**
+   * @internal The ordinary login: always enrolls a fresh handle. Session hosts
+   * call it after their own in-place attempt declined.
+   */
+  enrollJWT(operation: "loginJWT" | "loginOrRegisterJWT", auth: Auth): Promise<AccountHandle> {
+    return this.run(operation, () => this.enrollment[operation](auth));
   }
 
   linkJWT(auth: Auth): Promise<AccountHandle> {
@@ -147,9 +176,9 @@ export class AccountManager<Auth> {
   }
 
   /**
-   * @internal Session hosts revalidate the selected account without a
-   * transition. Resolves to the same handle once the registry re-admits it,
-   * or undefined when the caller must run an ordinary transition instead.
+   * @internal Revalidate the selected account without a transition. Resolves
+   * to the same handle once the registry re-admits it, or undefined when the
+   * caller must run an ordinary transition instead.
    */
   async revalidateJWT(
     operation: "loginJWT" | "loginOrRegisterJWT",

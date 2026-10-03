@@ -1291,6 +1291,10 @@ function ensureServerConnection(context: RuntimeContext): void {
   const requestedUrl = context.serverUrl;
   if (!requestedUrl || context.explicitlyDisconnected) return;
   if (context.serverConnectionStarted) return;
+  // A retained account's tabs open before the provider supplies a credential.
+  // The server rejects a credential-less connection as a terminal failure
+  // that ends every remote subscription, so the first credential dials.
+  if (!carriesCredential(context.serverAuthJson)) return;
   requireRuntime(context).connect(requestedUrl, context.serverAuthJson);
   context.serverConnectionStarted = true;
 }
@@ -1679,7 +1683,13 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         const authFailureEpoch = peer.context.authFailureEpoch;
         try {
           if (!peer.context.explicitlyDisconnected) {
-            await activeRuntime.updateAuth(message.authJson);
+            if (peer.context.serverConnectionStarted) {
+              await activeRuntime.updateAuth(message.authJson);
+            } else {
+              // Nothing has dialled yet: the context opened without a credential.
+              peer.context.serverAuthJson = message.authJson;
+              ensureServerConnection(peer.context);
+            }
             await activeRuntime.waitForUpstreamServerConnection();
           }
         } catch (error) {
@@ -1751,12 +1761,21 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       const serverUrl = peer.context.serverUrl;
       if (!serverUrl) throw new Error("Browser runtime reconnect requires a serverUrl");
       await enqueueTransportTransition(peer.context, async () => {
-        activeRuntime.connect(serverUrl, message.authJson);
-        await activeRuntime.waitForUpstreamServerConnection();
-        peer.context.serverAuthJson = message.authJson;
-        await publishWorkerSessionClaims(peer.context, message.sessionClaims);
+        // As in configureServer, a tab without a credential never replaces a
+        // sibling's; with none at all there is nothing to dial yet, and the
+        // first credential-bearing update connects (see ensureServerConnection).
+        const own =
+          carriesCredential(message.authJson) || !carriesCredential(peer.context.serverAuthJson);
+        const authJson = own ? message.authJson : peer.context.serverAuthJson;
+        const dial = carriesCredential(authJson);
+        if (dial) {
+          activeRuntime.connect(serverUrl, authJson);
+          await activeRuntime.waitForUpstreamServerConnection();
+        }
+        peer.context.serverAuthJson = authJson;
+        if (own) await publishWorkerSessionClaims(peer.context, message.sessionClaims);
         peer.context.explicitlyDisconnected = false;
-        peer.context.serverConnectionStarted = true;
+        peer.context.serverConnectionStarted = dial;
         publishExplicitOffline(peer.context);
       });
       result(peer, message.id);

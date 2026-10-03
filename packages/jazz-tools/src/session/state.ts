@@ -262,7 +262,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
           retry: () => login(operation, auth),
         }
       : undefined;
-    return run(operation, () => accounts[operation](auth), revalidate);
+    return run(operation, () => accounts.enrollJWT(operation, auth), revalidate);
   };
   const session: JazzSession<Client> = {
     getSnapshot: () => snapshot,

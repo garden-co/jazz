@@ -70,11 +70,11 @@ export async function resolveAccountRuntimeConfig(config: AccountDbConfig): Prom
   const registry = accountContextScope(config);
   const { account, ...runtimeConfig } = config;
   if (isProvisionalAccount(account)) {
-    // Open the retained account's local data now. This tab presents no
-    // credential upstream, so the server never admits it as this account and
-    // its writes stay local until the first provider JWT replaces this session. In a shared browser worker another
-    // tab's credential for the same account may sync them sooner. Local
-    // policies see no provider claims until then.
+    // Open the retained account's local data now. With no credential this
+    // context does not connect upstream, and its writes stay local until the
+    // first provider JWT replaces this session and starts its connection. In a
+    // shared browser worker another tab's credential for the same account may
+    // sync them sooner. Local policies see no provider claims until then.
     const retained: DbConfig = {
       ...runtimeConfig,
       accountId: account.id,
