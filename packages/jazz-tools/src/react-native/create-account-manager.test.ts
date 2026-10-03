@@ -133,4 +133,34 @@ describe("React Native account preparation", () => {
     expect(native.releaseAccountSession).toHaveBeenCalledExactlyOnceWith(capability);
     expect(manager.getLoggedIn()).toBe(account);
   });
+
+  it("neither retains an external assignment nor revalidates it in place", async () => {
+    const identity = { issuer: "https://issuer.example", subject: "alice" };
+    const account = "00000000-0000-4000-8000-00000000000a";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ account, identity }))),
+    );
+    mocks.install.mockReturnValue({
+      abiVersion: 2,
+      accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
+      mintLocalFirstToken: vi.fn(() => "unused"),
+      openAttached: vi.fn(),
+    });
+    const accountStore = store();
+    const config = {
+      appId: "native-retention",
+      serverUrl: "https://core.example",
+      store: accountStore,
+    };
+    const manager = await createAccountManager(config);
+    expect(manager.revalidatesInPlace).toBe(false);
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    await manager.loginJWT(
+      `e30.${btoa(JSON.stringify({ iss: identity.issuer, sub: identity.subject, exp }))}.sig`,
+    );
+    await vi.waitFor(async () => expect(await accountStore.read()).not.toBeNull());
+    expect(JSON.parse((await accountStore.read())!).assignment).toBeNull();
+    expect((await createAccountManager(config)).getLoggedIn()).toBeUndefined();
+  });
 });
