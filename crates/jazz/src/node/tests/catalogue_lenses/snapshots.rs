@@ -2596,3 +2596,32 @@ fn trusted_identity_rebind_updates_live_peer_support_coordinates() {
         "forget must release the replacement without waiting for another runtime tick"
     );
 }
+
+#[test]
+fn derived_catalogue_caches_keep_the_announcement_fingerprint() {
+    let (_dir, mut writer) = open_node_with_schema(node(0x3a), schema());
+    let (fingerprint, _) = writer
+        .catalogue_snapshot_if_changed(None)
+        .expect("announce the catalogue")
+        .expect("a first announcement");
+    // Writes and reads fill the derived write-plan and lens caches.
+    let commit = MergeableCommit::new("todos", row(0x4a), 1_000)
+        .made_by(AuthorSubject::SYSTEM)
+        .cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("cached plan".to_owned()),
+        )]));
+    writer.commit_mergeable_unit_settled(commit).unwrap();
+    assert_eq!(writer.query_all_versions().unwrap().len(), 1);
+    assert_eq!(
+        writer.catalogue.announcement_fingerprint(),
+        Some(fingerprint),
+        "filling derived caches must not discard the announced fingerprint"
+    );
+    assert!(
+        writer
+            .catalogue_snapshot_if_changed(Some(fingerprint))
+            .expect("re-check the catalogue")
+            .is_none()
+    );
+}

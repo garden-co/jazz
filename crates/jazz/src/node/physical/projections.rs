@@ -803,7 +803,7 @@ where
         // Publish only after every source variant and both storage layers have
         // been registered. Failed registration must not become a cache hit.
         self.catalogue
-            .physical_current_winner_projections
+            .physical_current_winner_projections_mut()
             .entry(target_schema)
             .or_default()
             .insert(target_table_name.to_owned(), prepared.clone());
@@ -985,7 +985,7 @@ where
         // The registry can evolve without changing a logical schema key (for
         // example, an old reader gains a new physical enum case). Rebuild all
         // successful metadata with the new registry, not only the new schema.
-        self.catalogue.physical_current_winner_projections.clear();
+        self.catalogue.physical_current_winner_projections_mut().clear();
         // A physical schema is a coupled registry: tables, variants, enum
         // registries, indices, and projection cases all become observable by
         // the same live runtime.  Do not leave a prefix behind if any later
@@ -998,7 +998,7 @@ where
             self.database.restore_runtime_registry(checkpoint);
             // A later target may have failed after earlier targets succeeded.
             // None of those successes describe the restored registry.
-            self.catalogue.physical_current_winner_projections.clear();
+            self.catalogue.physical_current_winner_projections_mut().clear();
         }
         result
     }

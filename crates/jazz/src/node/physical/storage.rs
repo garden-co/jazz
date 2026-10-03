@@ -398,7 +398,7 @@ where
             enum_remaps,
         });
         self.catalogue
-            .physical_write_plan_cache
+            .physical_write_plan_cache_mut()
             .entry(schema_version)
             .or_default()
             .entry(logical_table.to_owned())

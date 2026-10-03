@@ -66,7 +66,7 @@ where
             return path.clone();
         }
         let path = self.shortest_lens_path(source, target);
-        self.catalogue.lens_path_cache.insert(key, path.clone());
+        self.catalogue.lens_path_cache_mut().insert(key, path.clone());
         path
     }
 
@@ -118,7 +118,7 @@ where
         }
 
         let Some(steps) = self.shortest_lens_path_cached(source, target) else {
-            self.catalogue.compiled_lens_cache.insert(key, None);
+            self.catalogue.compiled_lens_cache_mut().insert(key, None);
             return Ok(None);
         };
         let mut current_table = table.to_owned();
@@ -140,7 +140,7 @@ where
                     .find(|candidate| candidate.target_table == current_table),
             };
             let Some(table_lens) = table_lens else {
-                self.catalogue.compiled_lens_cache.insert(key, None);
+                self.catalogue.compiled_lens_cache_mut().insert(key, None);
                 return Ok(None);
             };
             match direction {
@@ -162,7 +162,7 @@ where
             target_table: current_table,
             ops,
         });
-        self.catalogue.compiled_lens_cache.insert(key, path.clone());
+        self.catalogue.compiled_lens_cache_mut().insert(key, path.clone());
         Ok(path)
     }
 
