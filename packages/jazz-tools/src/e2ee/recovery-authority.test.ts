@@ -82,7 +82,7 @@ it("retains previously registered recovery authority but rejects registration af
       const result = await membership();
       expect(result.recoveryRoots.map((root) => root.id)).toEqual([accepted]);
       expect(result.recoveryRoots.map((root) => root.id)).not.toContain(rejected);
-      expect(await observer.all(app.__e2ee_account_identities, { tier: "edge" })).toEqual([]);
+      expect(await observer.all(app.__e2ee_account_identities, { tier: "remote" })).toEqual([]);
     } finally {
       signingKey.fill(0);
     }

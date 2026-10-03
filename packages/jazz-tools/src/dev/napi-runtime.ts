@@ -7,7 +7,7 @@
 // Loading through `process.getBuiltinModule` keeps the require out of reach of
 // Turbopack's static analysis (it follows `createRequire(import.meta.url)`), so
 // Node loads the real package at runtime. Keep the named exports in step with
-// jazz-napi's index.mjs; next.test.ts checks that they match.
+// jazz-napi's index.mjs.
 import type * as JazzNapi from "jazz-napi";
 
 const nodeModule = process.getBuiltinModule("module") as typeof import("node:module");
@@ -28,6 +28,7 @@ export const {
   e2eeSodiumVerify,
   JazzServer,
   NapiDb,
+  StagedStreamingMutation,
   StreamingMutation,
   Subscription,
   TestJwtIssuer,

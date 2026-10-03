@@ -1,7 +1,7 @@
 # E2EE large-value stream format
 
-This companion specifies the standalone built-in `LargeValueCipher`, not a
-new storage or transport protocol.
+This companion specifies the built-in `LargeValueCipher` and its common
+encrypted BYTEA cell record. It adds no storage or transport protocol.
 Browser and native Node use pinned libsodium 1.0.22 secretstream
 XChaCha20-Poly1305. A custom `largeValueCipher` replaces this adapter independently
 of the other BYOC adapters.
@@ -70,6 +70,70 @@ the WASM state allocation. JavaScript buffer clearing reduces lifetime but
 does not guarantee erasure of VM copies. Each replacement starts a fresh
 secretstream and does not read, diff or merge the previous plaintext.
 
+## Encrypted BYTEA stream record, version 1
+
+The common layer stores the `jazz.e2ee.stream-record`, version 1 envelope
+header, followed by the canonical epoch UUID as 36 lowercase ASCII bytes,
+then the selected `LargeValueCipher` mechanism's common envelope header
+(without payload), followed by the adapter's complete output. The mechanism
+header is mandatory even for custom adapters whose output has no envelope.
+The built-in adapter therefore retains its own inner header as well.
+
+The outer header bytes are
+`4a45324501176a617a7a2e653265652e73747265616d2d7265636f726400000001`.
+The UUID encoding is identical to [cell records](E2EE_CELL_FORMAT.md).
+`stream-record.test.ts` pins this header, UUID and an independent BYOC
+mechanism/version header against literal bytes.
+
+Authenticated context is a u32be-length frame of two fields:
+the complete two-field cell context with policy replaced by
+`jazz.e2ee.stream-record.v1`, and the exact adapter mechanism header.
+Thus application, scope, space identifier, stable table/column identity,
+row, epoch, logical type and adapter mechanism are authenticated. The
+plaintext is raw logical BYTEA bytes, not a packed native row. Empty files
+are not null. Legacy cell records remain readable; ordinary and streamed
+whole-value replacements may use either record format.
+
+Ordinary row reads dispatch centrally by the outer record mechanism.
+They parse headers with views rather than copying the complete ciphertext,
+consume decryption through final authentication and EOF, and only then
+return the assembled BYTEA value. Failed or truncated reads clear owned
+plaintext chunks and expose no partial row. This complete-value read may
+allocate the plaintext value; upload encryption remains bounded streaming.
+
+Uploads support root-view logical BYTEA only. Explicit branches, implicit
+branch coordinates, encrypted indexed streamed columns, Text/JSON streams,
+streamed scope-row values and incremental editing are rejected. Plaintext
+streaming remains unchanged.
+
+## Publication and key lifetime
+
+Source consumption happens before the final exclusive transaction. A
+private plan borrows a ready existing epoch key, or owns an unpublished
+initial-space secret and signed root/grants. New scopes and legacy first
+files publish the exact planned seed with their owner rows atomically.
+Initial explicit recipient sets do not implicitly include the creator.
+The accepted initial write then awaits the narrow original-author recipient
+handoff described in [space lifecycle formats](E2EE_SPACE_FORMAT.md).
+Delivery uses a later authority transaction; failed delivery preserves the
+accepted owner receipt with a bounded maintenance warning. Explicit
+`db.e2ee.explain()` can retry; acceptance alone is not delivery readiness.
+
+Final preparation replays space, account/device and effective group
+membership through the transaction-backed history reader. Epoch or
+membership changes reject publication, including when ordinary writes use
+`staleWrites: "warn"`. Initial plans revalidate author and recipient epochs
+and exact root absence. Seeds are Db/scope-bound and single-use, and their
+secret is cleared after handoff or disposal. No source or encryption replay
+is performed. Authority rejection retains ordinary rejected-version bytes
+for retry/discard; retry must retain these strict read preconditions.
+
+Caller source/staging failures retain their original identity. Key-adapter
+failures during preparation or final plan validation are bounded to
+`key-unavailable`; stream-cipher failures (including synchronous construction
+and later iteration) are bounded to `encryption-failed`. Raw adapter
+diagnostics may contain secrets and are not attached as error causes.
+
 ## Qualification and integration boundary
 
 `packages/jazz-tools/src/e2ee/large-value-cipher.test.ts` covers native/browser
@@ -86,22 +150,10 @@ random stream header is pinned in `src/e2ee/fixtures/vectors.ts`; regenerating
 it produces another valid ciphertext. This is independent format evidence,
 not an independent cryptographic implementation or security audit.
 
-This stage implements the cipher contract only. Generic large-value staging,
-atomic owner-row publication, wait completion, locator delivery and storage
-remain governed by [chapter 19](19_large_values.md). Their streaming/replacement
-integration is not established by these cipher tests. No whole-value buffering
-fallback, storage backend, range-read or incremental-edit API is introduced.
-
-### Extraction qualification boundary
-
-The regression suites and independent byte corpus above are carried from the
-repaired source snapshot. No build, formatter, linter or test was run during
-this extraction. The integrating checkout must build its own native/WASM
-artifacts and run the Node, Chromium and package qualification commands; no
-artifact or qualification receipt from another checkout is inherited.
-
-This is the standalone cipher contract, not full landing or security approval.
-Generic large-value publication/transport integration remains separate; no
-claim of end-to-end encrypted file upload readiness is made here.
-Release-level qualification and the remaining generic large-value integration
-boundary are tracked in [#3125](https://github.com/garden-co/jazz2/issues/3125).
+Generic large-value staging, atomic owner-row publication, wait completion,
+locator delivery and storage remain governed by [chapter 19](19_large_values.md).
+Cipher tests alone do not qualify publication. The encrypted upload and
+streaming-space integration tests exercise the shared lifecycle and public
+write path. No new storage backend, range-read or incremental-edit interface
+is introduced. Release-level qualification and independent security review
+remain tracked in [#3125](https://github.com/garden-co/jazz2/issues/3125).

@@ -5174,3 +5174,1123 @@ fn session_partial_update_of_unloaded_row_is_not_observed_rather_than_read_denie
         );
     }
 }
+
+async fn streamed_todo<S: OrderedKvStorage + ReopenableStorage + 'static>(
+    db: &Db<S>,
+    row: RowUuid,
+) -> Result<Option<CurrentRow>, Error> {
+    let query =
+        db.prepare_query(&Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row.0)))))?;
+    let mut rows = db.all(&query, ReadOpts::default()).await?;
+    db.hydrate_rows_for_binding(&mut rows).await?;
+    Ok(rows.pop())
+}
+
+async fn stage_todo<S: OrderedKvStorage + ReopenableStorage + 'static>(
+    db: &Db<S>,
+    row: RowUuid,
+    text: &[u8],
+    identity: WriteIdentity,
+) -> StagedStreamingValue {
+    let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+    let mut upload = db
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .unwrap();
+    for chunk in text.chunks(64 * 1024) {
+        db.push_streaming_value_upload(&mut upload, chunk)
+            .await
+            .unwrap();
+    }
+    db.stage_streaming_value_upload(
+        upload,
+        StreamingMutationKind::Insert,
+        "todos",
+        row,
+        cells,
+        "title",
+        identity,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+/// Alice's live owner reclaims a consumed upload when Bob's foreign Db, or
+/// another schema view on Alice's runtime, rejects finish, stage, or abort.
+/// Cleanup must not depend on TTL or on closing the owner. Reopening only
+/// checks that the already-serviced cleanup and chunk release were durable.
+///
+/// alice ──push durable chunks──► upload ──consume on wrong owner/schema──► Schema
+///   └──ordinary live ticks──► pending eviction ──reopen / reclaim──► no bytes
+#[test]
+fn streaming_wrong_owner_consumption_releases_durable_pending_uploads() {
+    block_on(async {
+        let schema = doctest_support::schema();
+        let dir = tempfile::tempdir().unwrap();
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xf1; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        // TestRocksOpen admits the maintained node codec profile; Db::open
+        // erases its concrete carrier rather than returning Db<TestStorage>.
+        let alice = Db::open(DbConfig {
+            schema: schema.clone(),
+            storage: RocksDbStorage::open(dir.path(), &refs).unwrap(),
+            identity: identity.clone(),
+            id_source: None,
+        })
+        .await
+        .unwrap();
+        let authority = open_core(0xf2, AuthorSubject::SYSTEM, &schema);
+        let (up, down) = duplex();
+        let upstream = alice.connect_upstream(up).await;
+        let peer = authority.accept_subscriber_with_trust(
+            down,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::TrustedBackend,
+        );
+        for _ in 0..32 {
+            alice.tick().await.unwrap();
+            peer.lock().await.tick().await.unwrap();
+        }
+        alice.set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            max_age_ms: u64::MAX,
+            ..Default::default()
+        });
+        let bob = doctest_support::open_todos_db().await.unwrap();
+        // Use the existing public schema-view seam, not a fabricated schema
+        // identifier or a second runtime masquerading as Alice's owner.
+        let other_schema = alice
+            .register_schema_view(JazzSchema::empty())
+            .await
+            .unwrap();
+        assert_ne!(schema.version_id(), other_schema.schema.version_id());
+        let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+        // Exceed the frozen maximum leaf size so push emits durable nodes
+        // rather than leaving all bytes in the preparation's unfinished tail.
+        let payload = vec![b'a'; 2 * groove::large_values::V1_FASTCDC_LEAF_MAX_BYTES];
+        let mut nodes = BTreeSet::new();
+        for (owner_name, consumer) in [("foreign runtime", &bob), ("other schema", &other_schema)] {
+            for operation in ["finish", "stage", "abort"] {
+                let mut upload = alice
+                    .begin_streaming_value_upload("todos", &cells, "title")
+                    .unwrap();
+                alice
+                    .push_streaming_value_upload(&mut upload, &payload)
+                    .await
+                    .unwrap();
+                // Pending-journal retention is itself a storage contract:
+                // unpublished bytes have no visible-row observation surface.
+                assert_eq!(
+                    alice
+                        .node
+                        .node
+                        .lock()
+                        .await
+                        .pending_upload_count_for_test()
+                        .await
+                        .unwrap(),
+                    1,
+                    "{owner_name}/{operation}: push must establish the pending journal"
+                );
+                let pending = alice
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .pending_uploads_for_test()
+                    .await
+                    .unwrap();
+                nodes.extend(pending.into_iter().flat_map(|upload| upload.chunks));
+                let error = match operation {
+                    "finish" => match consumer
+                        .finish_streaming_value_upload(
+                            upload,
+                            StreamingMutationKind::Insert,
+                            "todos",
+                            row(0xf1),
+                            cells.clone(),
+                            "title",
+                            WriteIdentity::Database,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(_) => panic!("wrong-owner finish must reject"),
+                        Err(error) => error,
+                    },
+                    "stage" => match consumer
+                        .stage_streaming_value_upload(
+                            upload,
+                            StreamingMutationKind::Insert,
+                            "todos",
+                            row(0xf1),
+                            cells.clone(),
+                            "title",
+                            WriteIdentity::Database,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(_) => panic!("wrong-owner stage must reject"),
+                        Err(error) => error,
+                    },
+                    "abort" => consumer
+                        .abort_streaming_value_upload(upload)
+                        .await
+                        .unwrap_err(),
+                    _ => unreachable!(),
+                };
+                assert_eq!(error.code, ErrorCode::Schema, "{owner_name}/{operation}");
+                // Service the originating live owner, never the consuming Db.
+                // No expiry pass or wall-clock advancement is involved.
+                for _ in 0..16 {
+                    alice.tick().await.unwrap();
+                }
+                assert_eq!(
+                    alice
+                        .node
+                        .node
+                        .lock()
+                        .await
+                        .pending_upload_count_for_test()
+                        .await
+                        .unwrap(),
+                    0,
+                    "{owner_name}/{operation}: consumed upload leaked its pending journal"
+                );
+                assert_eq!(
+                    alice
+                        .node
+                        .node
+                        .lock()
+                        .await
+                        .staged_large_value_count_for_test()
+                        .await
+                        .unwrap(),
+                    0,
+                    "{owner_name}/{operation}: rejection must not promote a staged root"
+                );
+            }
+        }
+        assert!(streamed_todo(&alice, row(0xf1)).await.unwrap().is_none());
+        assert!(streamed_todo(&bob, row(0xf1)).await.unwrap().is_none());
+        drop(other_schema);
+        alice.detach_connection_async(&upstream).await.unwrap();
+        drop(upstream);
+        alice.close().await.unwrap();
+        drop(alice);
+        drop(peer);
+        drop(authority);
+
+        // Lower-level storage evidence is required here: visible-row absence
+        // cannot distinguish prompt cleanup from permanently retained pending
+        // journals or upload chunks. Reopen the normal admitted node, then
+        // cross Groove's existing storage inspection/reclamation seam. Do not
+        // decode or pin the private reference-count record encoding.
+        let database = crate::node::NodeState::new_client(
+            identity.node,
+            schema,
+            RocksDbStorage::open(dir.path(), &refs).unwrap(),
+            false,
+        )
+        .await
+        .unwrap()
+        .into_database();
+        assert!(
+            database
+                .pending_large_value_uploads()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(database.staged_large_values().await.unwrap().is_empty());
+        let first = nodes
+            .first()
+            .expect("the pushed payload must have a durable chunk identity");
+        database
+            .local_chunk_reader()
+            .get(first.locator, first.object_hash)
+            .await
+            .unwrap();
+        let reader = database.local_chunk_reader();
+        for node in &nodes {
+            reader.get(node.locator, node.object_hash).await.unwrap();
+        }
+        assert_eq!(
+            database
+                .reclaim_orphaned_large_value_chunks(usize::MAX)
+                .await
+                .unwrap(),
+            nodes.len(),
+            "every unpublished chunk must be released without TTL"
+        );
+        for node in &nodes {
+            assert_eq!(
+                reader.get(node.locator, node.object_hash).await,
+                Err(groove::chunks::ChunkStorageError::Unavailable),
+                "ordinary reclamation must remove the durable upload bytes"
+            );
+        }
+        assert!(
+            database
+                .large_value_metadata_entries_for_compatibility()
+                .await
+                .unwrap()
+                .is_empty(),
+            "no pending journal, staged root, node retainer, or reclaim entry may remain"
+        );
+    });
+}
+
+/// Alice's origin owner must reclaim an unpublished promoted receipt when the
+/// atomic pending-to-staged write commits but its acknowledgement is lost.
+/// alice upload -> durable promotion / lost ack -> origin ticks -> no retainers
+/// Receipt inspection is necessary: unpublished bytes have no row-read surface.
+#[test]
+fn streaming_promotion_ack_loss_releases_the_original_upload_receipt() {
+    block_on(async {
+        let schema = doctest_support::schema();
+        let families = schema.column_families();
+        let (storage, control) = groove::storage::TestStorage::controlled(
+            &families.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let alice = Db::open(DbConfig::new(
+            schema,
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xf3; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .await
+        .unwrap();
+        alice.set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            max_age_ms: u64::MAX,
+            ..Default::default()
+        });
+        let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+        let mut upload = alice
+            .begin_streaming_value_upload("todos", &cells, "title")
+            .unwrap();
+        alice
+            .push_streaming_value_upload(&mut upload, b"unpublished receipt")
+            .await
+            .unwrap();
+        // Target the irreversible receipt transition, not an incidental batch
+        // number. This lower-level fault seam must commit before reporting loss.
+        let promotion_committed = Rc::new(std::cell::Cell::new(false));
+        let observe_promotion = Rc::clone(&promotion_committed);
+        control.lose_write_many_acknowledgement_matching(move |operations| {
+            let promoted = operations.iter().any(|operation| {
+                matches!(
+                    operation,
+                    groove::storage::OwnedWriteOperation::Set { cf, key, .. }
+                        if cf == groove::db::LARGE_VALUE_METADATA_CF
+                            && key.starts_with(b"staged/")
+                )
+            });
+            observe_promotion.set(promoted);
+            promoted
+        });
+        match alice
+            .stage_streaming_value_upload(
+                upload,
+                StreamingMutationKind::Insert,
+                "todos",
+                row(0xf3),
+                cells,
+                "title",
+                WriteIdentity::Database,
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("the committed promotion must report its lost acknowledgement"),
+            Err(_) => {}
+        };
+        assert!(
+            promotion_committed.get(),
+            "the injected failure must follow durable promotion"
+        );
+        assert_eq!(
+            alice
+                .node
+                .node
+                .lock()
+                .await
+                .pending_upload_count_for_test()
+                .await
+                .unwrap(),
+            0,
+            "promotion committed and consumed its original pending journal",
+        );
+        for _ in 0..16 {
+            alice.tick().await.unwrap();
+        }
+        assert_eq!(
+            alice
+                .node
+                .node
+                .lock()
+                .await
+                .staged_large_value_count_for_test()
+                .await
+                .unwrap(),
+            0,
+            "the live origin must retire the promoted receipt, not only its absent pending key",
+        );
+        assert!(streamed_todo(&alice, row(0xf3)).await.unwrap().is_none());
+    });
+}
+
+/// Alice cancels a direct streamed replacement after durable staging but before
+/// the cold row read needed for publication. The live owner reclaims the receipt.
+/// alice push -> promoted receipt -> cold publication / cancel -> owner cleanup
+/// Retainer inspection distinguishes prompt cleanup from invisible leaked bytes.
+#[test]
+fn streaming_finish_cancellation_after_promotion_releases_unpublished_receipt() {
+    use std::task::{Context, Poll, Waker};
+
+    block_on(async {
+        let schema = doctest_support::schema();
+        let families = schema.column_families();
+        let (storage, control) = groove::storage::TestStorage::controlled(
+            &families.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let eviction = storage.clone();
+        let alice = Db::open(DbConfig::new(
+            schema,
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xf4; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .await
+        .unwrap();
+        alice.set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            max_age_ms: u64::MAX,
+            ..Default::default()
+        });
+        let target = row(0xf4);
+        alice
+            .insert(
+                "todos",
+                doctest_support::todo_cells("before", false),
+                InsertOptions {
+                    row_id: Some(target),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let cells = BTreeMap::from([("done".to_owned(), Value::Bool(true))]);
+        let mut upload = alice
+            .begin_streaming_value_upload("todos", &cells, "title")
+            .unwrap();
+        alice
+            .push_streaming_value_upload(&mut upload, b"unpublished replacement")
+            .await
+            .unwrap();
+        eviction.evict_all();
+        let scans_before = control.poll_count(groove::storage::TestStorageOperation::ScanOpen);
+        control.pause_on(groove::storage::TestStorageOperation::ScanOpen);
+        let mut finish = Box::pin(alice.finish_streaming_value_upload(
+            upload,
+            StreamingMutationKind::Update,
+            "todos",
+            target,
+            cells,
+            "title",
+            WriteIdentity::Database,
+            None,
+            None,
+            None,
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        let mut suspended_on_publication = false;
+        for _ in 0..512 {
+            assert!(
+                matches!(finish.as_mut().poll(&mut context), Poll::Pending),
+                "the cold publication must remain cancellable"
+            );
+            if control.poll_count(groove::storage::TestStorageOperation::ScanOpen) > scans_before {
+                suspended_on_publication = true;
+                break;
+            }
+        }
+        assert!(
+            suspended_on_publication,
+            "the replacement must reach its cold row read"
+        );
+        drop(finish);
+        control.resume_operation(groove::storage::TestStorageOperation::ScanOpen);
+        assert_eq!(
+            alice
+                .node
+                .node
+                .lock()
+                .await
+                .staged_large_value_count_for_test()
+                .await
+                .unwrap(),
+            1,
+            "publication was cancelled only after promotion produced a receipt",
+        );
+        for _ in 0..16 {
+            alice.tick().await.unwrap();
+        }
+        assert_eq!(
+            alice
+                .node
+                .node
+                .lock()
+                .await
+                .staged_large_value_count_for_test()
+                .await
+                .unwrap(),
+            0,
+            "cancellation must retain origin cleanup ownership through publication",
+        );
+        let visible = streamed_todo(&alice, target).await.unwrap().unwrap();
+        assert_eq!(
+            visible.cell(&alice.schema.tables[0], "title"),
+            Some(Value::String("before".to_owned())),
+        );
+    });
+}
+
+/// A resident publication owns Groove's lifecycle guard while another upload
+/// is abandoned. Close must return retryable failure, not wait behind itself
+/// or retire storage; a normal owner tick settles publication and cleanup.
+#[test]
+fn streaming_cleanup_deferred_by_publication_keeps_close_retryable() {
+    use std::task::{Context, Poll, Waker};
+
+    block_on(async {
+        let alice = doctest_support::open_todos_db().await.unwrap();
+        alice.set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            max_age_ms: u64::MAX,
+            ..Default::default()
+        });
+        let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+        let mut abandoned = alice
+            .begin_streaming_value_upload("todos", &cells, "title")
+            .unwrap();
+        alice
+            .push_streaming_value_upload(&mut abandoned, b"abandoned")
+            .await
+            .unwrap();
+        let mut published = alice
+            .begin_streaming_value_upload("todos", &cells, "title")
+            .unwrap();
+        alice
+            .push_streaming_value_upload(&mut published, b"published")
+            .await
+            .unwrap();
+        alice.set_deferred_local_persistence(true);
+        let write = alice
+            .finish_streaming_value_upload(
+                published,
+                StreamingMutationKind::Insert,
+                "todos",
+                row(0xf5),
+                cells,
+                "title",
+                WriteIdentity::Database,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            alice
+                .write_state(write.mergeable_tx_id())
+                .unwrap()
+                .durability,
+            DurabilityTier::None
+        );
+        drop(abandoned);
+
+        let mut closing = Box::pin(alice.close());
+        let mut context = Context::from_waker(Waker::noop());
+        let mut outcome = None;
+        for _ in 0..512 {
+            if let Poll::Ready(result) = closing.as_mut().poll(&mut context) {
+                outcome = Some(result);
+                break;
+            }
+        }
+        drop(closing);
+        let error = outcome
+            .expect("close must not wait behind a resident publication")
+            .expect_err("unresolved upload cleanup must keep storage open");
+        assert_eq!(error.code, ErrorCode::WriteRejected);
+        alice.tick().await.unwrap();
+        assert_eq!(
+            alice
+                .write_state(write.mergeable_tx_id())
+                .unwrap()
+                .durability,
+            DurabilityTier::Local
+        );
+        assert_eq!(
+            streamed_todo(&alice, row(0xf5))
+                .await
+                .unwrap()
+                .unwrap()
+                .cell(&alice.schema.tables[0], "title"),
+            Some(Value::String("published".to_owned())),
+        );
+        alice.close().await.unwrap();
+    });
+}
+
+/// Alice stages bytes without a visible row, then publishes the file and its
+/// companion row in one exclusive commit. Reusing the capability is rejected.
+#[test]
+fn staged_streaming_attaches_atomically_and_only_once() {
+    block_on(async {
+        let db = doctest_support::open_todos_db().await.unwrap();
+        let text = "streamed-".repeat(32_768);
+        let mut staged = stage_todo(&db, row(0xd1), text.as_bytes(), WriteIdentity::Database).await;
+        assert!(streamed_todo(&db, row(0xd1)).await.unwrap().is_none());
+        let tx = OpenTransactionId::new();
+        db.begin_exclusive(tx).await.unwrap();
+        db.exclusive_tx_ref(tx)
+            .insert(
+                "todos",
+                doctest_support::todo_cells("companion", true),
+                InsertOptions {
+                    row_id: Some(row(0xd2)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        db.attach_staged_streaming_value(tx, &mut staged)
+            .await
+            .unwrap();
+        assert!(
+            db.attach_staged_streaming_value(tx, &mut staged)
+                .await
+                .is_err()
+        );
+        assert!(streamed_todo(&db, row(0xd1)).await.unwrap().is_none());
+        db.commit_exclusive_handle(tx).await.unwrap();
+        let file = streamed_todo(&db, row(0xd1)).await.unwrap().unwrap();
+        assert_eq!(
+            file.cell(&db.schema.tables[0], "title"),
+            Some(Value::String(text))
+        );
+        let companion = streamed_todo(&db, row(0xd2)).await.unwrap().unwrap();
+        assert_eq!(
+            companion.cell(&db.schema.tables[0], "title"),
+            Some(Value::String("companion".into()))
+        );
+    });
+}
+
+/// Alice's upload cannot be attached by another runtime, by another trusted
+/// identity on her runtime, or to a mergeable transaction.
+#[test]
+fn staged_streaming_rejects_foreign_runtime_identity_and_mergeable_transaction() {
+    block_on(async {
+        let alice = doctest_support::open_todos_db().await.unwrap();
+        let bob = doctest_support::open_todos_db().await.unwrap();
+        let foreign = OpenTransactionId::new();
+        bob.begin_exclusive(foreign).await.unwrap();
+        let mut staged = stage_todo(&alice, row(0xd3), b"private", WriteIdentity::Database).await;
+        assert!(
+            bob.attach_staged_streaming_value(foreign, &mut staged)
+                .await
+                .is_err()
+        );
+        bob.abandon_transaction_handle(foreign).unwrap();
+        let other_identity = OpenTransactionId::new();
+        alice
+            .begin_exclusive_with_identity(
+                other_identity,
+                WriteIdentity::Session(AuthorSubject::for_test_bytes([0xb2; 16])),
+            )
+            .await
+            .unwrap();
+        let mut staged = stage_todo(&alice, row(0xd3), b"private", WriteIdentity::Database).await;
+        assert!(
+            alice
+                .attach_staged_streaming_value(other_identity, &mut staged)
+                .await
+                .is_err()
+        );
+        alice.abandon_transaction_handle(other_identity).unwrap();
+        let mergeable = OpenTransactionId::new();
+        alice.begin_mergeable(mergeable).await.unwrap();
+        let mut staged = stage_todo(&alice, row(0xd3), b"private", WriteIdentity::Database).await;
+        assert!(
+            alice
+                .attach_staged_streaming_value(mergeable, &mut staged)
+                .await
+                .is_err()
+        );
+        alice.abandon_transaction_handle(mergeable).unwrap();
+        assert!(streamed_todo(&alice, row(0xd3)).await.unwrap().is_none());
+    });
+}
+
+/// Alice can abandon or overwrite an attached upload without publishing its
+/// payload. A dropped unattached capability is also reclaimed by the owner.
+#[test]
+fn staged_streaming_rollback_drop_and_overwrite_release_claims() {
+    block_on(async {
+        let db = doctest_support::open_todos_db().await.unwrap();
+        let tx = OpenTransactionId::new();
+        let mut staged = stage_todo(&db, row(0xd4), b"abandoned", WriteIdentity::Database).await;
+        db.begin_exclusive(tx).await.unwrap();
+        db.attach_staged_streaming_value(tx, &mut staged)
+            .await
+            .unwrap();
+        db.abandon_transaction_handle(tx).unwrap();
+        assert!(streamed_todo(&db, row(0xd4)).await.unwrap().is_none());
+        let dropped = stage_todo(&db, row(0xd5), b"dropped", WriteIdentity::Database).await;
+        drop(dropped);
+        let tx = OpenTransactionId::new();
+        let mut staged = stage_todo(&db, row(0xd6), b"overwritten", WriteIdentity::Database).await;
+        db.begin_exclusive(tx).await.unwrap();
+        db.attach_staged_streaming_value(tx, &mut staged)
+            .await
+            .unwrap();
+        db.exclusive_tx_ref(tx)
+            .update(
+                "todos",
+                row(0xd6),
+                BTreeMap::from([("title".into(), Value::String("replacement".into()))]),
+                UpdateOptions::default(),
+            )
+            .await
+            .unwrap();
+        db.commit_exclusive_handle(tx).await.unwrap();
+        // A host tick deliberately services only one queued owner operation.
+        // Rollback, capability drop and overwrite enqueue separate cleanups;
+        // drive normal owner progress rather than assuming one tick drains all.
+        for _ in 0..16 {
+            db.tick().await.unwrap();
+            if db
+                .node
+                .node
+                .lock()
+                .await
+                .staged_large_value_count_for_test()
+                .await
+                .unwrap()
+                == 0
+            {
+                break;
+            }
+        }
+        let value = streamed_todo(&db, row(0xd6)).await.unwrap().unwrap();
+        assert_eq!(
+            value.cell(&db.schema.tables[0], "title"),
+            Some(Value::String("replacement".into()))
+        );
+        // Internal receipt assertion: staging retainers have no public read
+        // surface; inspect their owner store without changing expiry clocks.
+        assert_eq!(
+            db.node
+                .node
+                .lock()
+                .await
+                .staged_large_value_count_for_test()
+                .await
+                .unwrap(),
+            0
+        );
+    });
+}
+
+/// Alice's authority rejects the whole publication after Bob changes a read
+/// dependency. Bytes remain readable in Alice's retry store across reopening;
+/// replay cannot erase the exclusive preconditions, and explicit discard is
+/// the only operation in this flow that removes the retained payload.
+///
+/// Alice: stage -> read absence -> Bob: insert -> Alice: commit -> rejection
+///       -> reopen -> proofless retry rejected -> discard
+#[test]
+fn staged_streaming_rejection_retains_payload_across_reopen_and_retry() {
+    block_on(async {
+        // The live exclusive envelope belongs to the upload outbox, not the
+        // durable transaction row. Observe the actual protocol send while
+        // forwarding every message unchanged to the real authority.
+        struct CaptureExclusiveUnit {
+            inner: Box<dyn Transport>,
+            unit: Rc<RefCell<Option<SyncMessage>>>,
+        }
+        impl Transport for CaptureExclusiveUnit {
+            fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+                let captured = match &message {
+                    SyncMessage::CommitUnit { tx, .. }
+                        if tx.kind == crate::tx::TxKind::Exclusive =>
+                    {
+                        Some(message.clone())
+                    }
+                    _ => None,
+                };
+                self.inner.send(message)?;
+                if let Some(captured) = captured {
+                    *self.unit.borrow_mut() = Some(captured);
+                }
+                Ok(())
+            }
+
+            fn try_recv(&mut self) -> Option<SyncMessage> {
+                self.inner.try_recv()
+            }
+
+            fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+                self.inner.connection_session_context()
+            }
+        }
+        let schema = doctest_support::schema();
+        let dir = tempfile::tempdir().unwrap();
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xd7; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let open = || {
+            Db::open(DbConfig {
+                schema: schema.clone(),
+                storage: RocksDbStorage::open(dir.path(), &refs).unwrap(),
+                identity: identity.clone(),
+                id_source: None,
+            })
+        };
+        let db = open().await.unwrap();
+        let server = open_core(0xd8, AuthorSubject::SYSTEM, &schema);
+        let (up, down) = duplex();
+        let sent_unit = Rc::new(RefCell::new(None));
+        let upstream = db
+            .connect_upstream(Box::new(CaptureExclusiveUnit {
+                inner: up,
+                unit: Rc::clone(&sent_unit),
+            }))
+            .await;
+        let peer = server.accept_subscriber_with_trust(
+            down,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::TrustedBackend,
+        );
+        for _ in 0..32 {
+            db.tick().await.unwrap();
+            peer.lock().await.tick().await.unwrap();
+        }
+        let text = "retained ciphertext ".repeat(16_384);
+        let mut staged = stage_todo(&db, row(0xd7), text.as_bytes(), WriteIdentity::Database).await;
+        let tx = OpenTransactionId::new();
+        db.begin_exclusive(tx).await.unwrap();
+        assert!(
+            db.exclusive_tx_ref(tx)
+                .read("todos", row(0xd8))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server
+            .insert_with_id(
+                "todos",
+                row(0xd8),
+                doctest_support::todo_cells("concurrent", false),
+            )
+            .unwrap();
+        db.exclusive_tx_ref(tx)
+            .insert(
+                "todos",
+                doctest_support::todo_cells("atomic companion", true),
+                InsertOptions {
+                    row_id: Some(row(0xd9)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        db.attach_staged_streaming_value(tx, &mut staged)
+            .await
+            .unwrap();
+        let committed = db.commit_exclusive_handle(tx).await.unwrap();
+        for _ in 0..128 {
+            db.tick().await.unwrap();
+            peer.lock().await.tick().await.unwrap();
+        }
+        let original = sent_unit
+            .borrow_mut()
+            .take()
+            .expect("live exclusive commit reached authority");
+        assert!(matches!(
+            db.write_state(committed).unwrap().fate,
+            Fate::Rejected(RejectionReason::ExclusiveConflict)
+        ));
+        assert!(streamed_todo(&db, row(0xd7)).await.unwrap().is_none());
+        assert!(streamed_todo(&db, row(0xd9)).await.unwrap().is_none());
+        // Rejected payloads have no public Db read surface; these assertions
+        // cross the existing node retry-store interface, not staging internals.
+        let retained = db
+            .node
+            .node
+            .lock()
+            .await
+            .rejected_transaction(committed)
+            .unwrap();
+        assert_eq!(retained.kind(), crate::tx::TxKind::Exclusive);
+        let descriptor = retained
+            .versions()
+            .iter()
+            .find(|v| v.row_uuid() == row(0xd7))
+            .unwrap()
+            .cell(&schema.tables[0], "title")
+            .unwrap();
+        let Value::Large(descriptor) = descriptor else {
+            panic!("stream must stay indirect")
+        };
+        assert_eq!(
+            db.node
+                .node
+                .lock()
+                .await
+                .read_large_value_range(&descriptor, 0..text.len() as u64)
+                .await
+                .unwrap(),
+            text.as_bytes()
+        );
+        assert!(!db.abort_staged_streaming_value(&mut staged).await.unwrap());
+        let SyncMessage::CommitUnit { mut tx, versions } = original.clone() else {
+            panic!("expected original unit")
+        };
+        assert!(tx.base_snapshot.is_some());
+        assert!(
+            tx.absent_read_set
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|read| read.row_uuid == row(0xd8))
+        );
+        tx.tx_id = TxId::new(TxTime(tx.tx_id.time.0 + 1), tx.tx_id.node);
+        let live_retry = tx.tx_id;
+        let outcomes = server
+            .node()
+            .borrow_mut()
+            .apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions })
+            .unwrap();
+        assert!(outcomes.iter().any(|outcome| matches!(outcome,
+            SyncMessage::FateUpdate { tx_id, fate: Fate::Rejected(_), .. } if *tx_id == live_retry)));
+        db.detach_connection(&upstream);
+        drop(upstream);
+        drop(peer);
+        drop(db);
+
+        let reopened = open().await.unwrap();
+        assert_eq!(
+            reopened
+                .node
+                .node
+                .lock()
+                .await
+                .rejected_transaction(committed)
+                .unwrap()
+                .versions(),
+            retained.versions()
+        );
+        assert_eq!(
+            reopened
+                .node
+                .node
+                .lock()
+                .await
+                .read_large_value_range(&descriptor, 0..text.len() as u64)
+                .await
+                .unwrap(),
+            text.as_bytes()
+        );
+        let SyncMessage::CommitUnit { mut tx, .. } = reopened
+            .node
+            .node
+            .lock()
+            .await
+            .commit_unit_for(committed)
+            .await
+            .unwrap()
+        else {
+            panic!("expected reconstructed transaction")
+        };
+        assert_eq!(tx.kind, crate::tx::TxKind::Exclusive);
+        assert!(tx.base_snapshot.is_none());
+        let SyncMessage::CommitUnit { versions, .. } = original else {
+            panic!("expected original unit")
+        };
+        // A fresh retry identity must not turn missing restart evidence into
+        // an empty, apparently valid read set or a mergeable write.
+        tx.tx_id = TxId::new(TxTime(tx.tx_id.time.0 + 2), tx.tx_id.node);
+        let retry_id = tx.tx_id;
+        let outcomes = server
+            .node()
+            .borrow_mut()
+            .apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions })
+            .unwrap();
+        assert!(outcomes.iter().any(|outcome| matches!(outcome,
+            SyncMessage::FateUpdate { tx_id, fate: Fate::Rejected(_), .. } if *tx_id == retry_id)));
+        assert!(
+            reopened
+                .node
+                .node
+                .lock()
+                .await
+                .rejected_transaction(committed)
+                .is_some()
+        );
+        reopened
+            .node
+            .node
+            .lock()
+            .await
+            .discard_rejection(committed)
+            .await
+            .unwrap();
+        assert!(
+            reopened
+                .node
+                .node
+                .lock()
+                .await
+                .rejected_transaction(committed)
+                .is_none()
+        );
+    });
+}
+
+/// Mallory may stage an upload but cannot publish it or its companion row when
+/// the real authority denies insert policy. Local retry storage keeps the bytes.
+#[test]
+fn staged_streaming_policy_denial_retains_bytes_without_accepted_rows() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::False),
+                ),
+        ),
+    );
+    let mallory = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let db = open_db(0xe1, mallory, &schema);
+    let server = open_core(0xe2, AuthorSubject::SYSTEM, &schema);
+    let (up, down) = duplex();
+    let _upstream = block_on(db.connect_upstream(up));
+    let peer = server.accept_subscriber(down, mallory);
+    for _ in 0..32 {
+        block_on(db.tick()).unwrap();
+        block_on(block_on(peer.lock()).tick()).unwrap();
+    }
+    let text = "denied ciphertext".repeat(16_384);
+    let mut staged = block_on(stage_todo(
+        &db,
+        row(0xe3),
+        text.as_bytes(),
+        WriteIdentity::Database,
+    ));
+    let tx = OpenTransactionId::new();
+    block_on(db.begin_exclusive(tx)).unwrap();
+    block_on(db.exclusive_tx_ref(tx).insert(
+        "todos",
+        doctest_support::todo_cells("companion", true),
+        InsertOptions {
+            row_id: Some(row(0xe4)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(db.attach_staged_streaming_value(tx, &mut staged)).unwrap();
+    let committed = block_on(db.commit_exclusive_handle(tx)).unwrap();
+    for _ in 0..128 {
+        block_on(db.tick()).unwrap();
+        block_on(block_on(peer.lock()).tick()).unwrap();
+    }
+    assert!(matches!(
+        db.write_state(committed).unwrap().fate,
+        Fate::Rejected(RejectionReason::AuthorizationDenied)
+    ));
+    assert!(server.read(&server.table("todos")).unwrap().is_empty());
+    assert!(block_on(streamed_todo(&db, row(0xe3))).unwrap().is_none());
+    assert!(block_on(streamed_todo(&db, row(0xe4))).unwrap().is_none());
+    // The rejected store is intentionally outside ordinary readable history.
+    let retained = block_on(db.node.node.lock())
+        .rejected_transaction(committed)
+        .unwrap();
+    let Value::Large(descriptor) = retained
+        .versions()
+        .iter()
+        .find(|version| version.row_uuid() == row(0xe3))
+        .unwrap()
+        .cell(&schema.tables[0], "title")
+        .unwrap()
+    else {
+        panic!("retained stream descriptor")
+    };
+    assert_eq!(
+        block_on(
+            block_on(db.node.node.lock()).read_large_value_range(&descriptor, 0..text.len() as u64)
+        )
+        .unwrap(),
+        text.as_bytes()
+    );
+}
+
+/// Alice can attach an empty stream when the stream is the only supplied cell.
+#[test]
+fn staged_streaming_empty_stream_only_row_publishes() {
+    block_on(async {
+        let db = doctest_support::open_todos_db().await.unwrap();
+        let upload = db
+            .begin_streaming_value_upload("todos", &BTreeMap::new(), "title")
+            .unwrap();
+        let mut staged = db
+            .stage_streaming_value_upload(
+                upload,
+                StreamingMutationKind::Insert,
+                "todos",
+                row(0xe5),
+                BTreeMap::new(),
+                "title",
+                WriteIdentity::Database,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let tx = OpenTransactionId::new();
+        db.begin_exclusive(tx).await.unwrap();
+        db.attach_staged_streaming_value(tx, &mut staged)
+            .await
+            .unwrap();
+        db.commit_exclusive_handle(tx).await.unwrap();
+        let value = streamed_todo(&db, row(0xe5)).await.unwrap().unwrap();
+        assert_eq!(
+            value.cell(&db.schema.tables[0], "title"),
+            Some(Value::String(String::new()))
+        );
+    });
+}

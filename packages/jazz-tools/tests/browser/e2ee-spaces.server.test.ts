@@ -87,7 +87,7 @@ it("shares a space with another browser account and retains access after reopeni
     expect(await pending.e2ee.explain(target)).toMatchObject({ state: "refused" });
     expect(
       await creator.all(app.__e2ee_space_deliveries.where({ recipientDeviceId: request!.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual([]);
     await recipient.shutdown();

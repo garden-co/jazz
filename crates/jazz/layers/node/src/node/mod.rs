@@ -351,6 +351,8 @@ pub mod terminal_record;
 pub mod terminal_root;
 mod views;
 
+#[doc(hidden)]
+pub use open_tx::StagedTransactionCell;
 pub use open_tx::{TransactionBranchRowState, TransactionInsertTargetState};
 pub use query_engine::{
     CurrentRowBindingRole, CurrentRowPublicationField, CurrentRowResultVisibility,

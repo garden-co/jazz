@@ -198,7 +198,9 @@ jobs:
 
   test-ts:
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 20
+    # Allow complete artifact preparation and bounded consumer suites.
+    # This outer cap does not change individual test deadlines or concurrency.
+    timeout-minutes: 90
     # JAZZ_NAPI_RELEASE=0 (debug builds) removed 2026-07-19: debug-profile
     # jazz-napi .node files fail dlopen on the Linux runners deterministically
     # (root cause TBD; see dev/CI_NOTES.md). Release builds load fine.

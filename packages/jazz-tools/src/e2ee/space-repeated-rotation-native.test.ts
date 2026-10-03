@@ -89,7 +89,7 @@ it("replays native Node space rotations and delivers complete history to a newly
     expect(await removed.e2ee.explain(target)).toEqual({ state: "ready" });
     expect(await remaining.e2ee.explain(target)).toEqual({ state: "ready" });
     const root = await creator.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     const revoke = creator.e2ee.spaces.revoke(app.projects, project.id, bob.account.id);
     expect(revoke).not.toBeInstanceOf(Promise);
@@ -98,14 +98,14 @@ it("replays native Node space rotations and delivers complete history to a newly
     expect(await creator.e2ee.explain(target)).toEqual({ state: "ready" });
     expect(await remaining.e2ee.explain(target)).toEqual({ state: "ready" });
     const successors = await creator.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     expect(successors).toHaveLength(1);
     expect(successors[0]!.predecessor).toBe(root!.epochId);
     expect(successors[0]!.epochId).not.toBe(root!.epochId);
     const deliveries = await creator.all(
       app.__e2ee_space_deliveries.where({ spaceId: root!.id, epochId: successors[0]!.epochId }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     expect(deliveries.map((row) => row.recipientDeviceId).sort()).toEqual(
       [first!.id, request.id].sort(),
@@ -117,7 +117,7 @@ it("replays native Node space rotations and delivers complete history to a newly
     expect(await removed.e2ee.explain(target)).toEqual({ state: "ready" });
     expect(
       await creator.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toHaveLength(1);
 
@@ -129,7 +129,7 @@ it("replays native Node space rotations and delivers complete history to a newly
     });
     expect(await creator.e2ee.explain(target)).toEqual({ state: "ready" });
     const history = await creator.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     expect(history).toHaveLength(2);
     const latest = history.find((row) => row.predecessor === successors[0]!.epochId)!;
@@ -138,7 +138,7 @@ it("replays native Node space rotations and delivers complete history to a newly
     expect(new Set([root!.epochId, ...history.map((row) => row.epochId)]).size).toBe(3);
     const latestDeliveries = await creator.all(
       app.__e2ee_space_deliveries.where({ spaceId: root!.id, epochId: latest.epochId }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     expect(latestDeliveries.map((row) => row.recipientDeviceId).sort()).toEqual(
       [first!.id, request.id].sort(),
@@ -165,7 +165,7 @@ it("replays native Node space rotations and delivers complete history to a newly
     expect(await newcomer.e2ee.explain(target)).toEqual({ state: "ready" });
     const newcomerDeliveries = await creator.all(
       app.__e2ee_space_deliveries.where({ spaceId: root!.id, recipientDeviceId: newRequest.id }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     expect(newcomerDeliveries.map((row) => row.epochId)).toEqual([latest.epochId]);
     expect(await removed.e2ee.explain(target)).toMatchObject({ state: "refused" });

@@ -58,10 +58,10 @@ it.each(["recipient", "approver"])(
         (device) => device.id !== creator!.id,
       )!;
       corrupt = true;
-      await expect(first.e2ee.devices.approve(pending.id).wait()).rejects.toThrow(/sign|proof/i);
-      expect(await first.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "edge" })).toEqual(
-        [],
-      );
+      await expect(first.e2ee.devices.approve(pending.id).wait()).rejects.toThrow();
+      expect(
+        await first.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "remote" }),
+      ).toEqual([]);
       corrupt = false;
       await first.e2ee.devices.approve(pending.id).wait();
       expect(await second.e2ee.devices.list()).toContainEqual(

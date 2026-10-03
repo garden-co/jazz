@@ -46,6 +46,14 @@ where
         Ok(self.database.pending_large_value_uploads().await?.len())
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn pending_uploads_for_test(
+        &self,
+    ) -> Result<Vec<groove::large_values::PendingLargeValueUpload>, Error> {
+        Ok(self.database.pending_large_value_uploads().await?)
+    }
+
 }
 
 /// Constructors erase the concrete storage into [`BoxedStorage`] at the
@@ -1402,6 +1410,12 @@ where
         true
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn staged_large_value_count_for_test(&self) -> Result<usize, Error> {
+        Ok(self.database.staged_large_values().await?.len())
+    }
+
     pub(super) async fn ensure_large_value_stages_current(
         &self,
         ids: &BTreeSet<groove::large_values::StagedLargeValueId>,
@@ -1566,6 +1580,16 @@ where
             .evict_pending_large_value_upload(upload_id)
             .await?;
         Ok(())
+    }
+
+    /// Retire the pending or promoted claim owned by one original upload.
+    /// A resident publication defers cleanup without changing storage.
+    #[doc(hidden)]
+    pub async fn cancel_large_value_upload(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+    ) -> Result<bool, Error> {
+        Ok(self.database.cancel_large_value_upload(upload_id).await?)
     }
 
     #[doc(hidden)]

@@ -98,7 +98,7 @@ it("shares a space through a parent group and follows later child-group addition
     expect(await pending.e2ee.explain(target)).toMatchObject({ state: "refused" });
     expect(
       await creator.all(app.__e2ee_space_deliveries.where({ recipientDeviceId: request!.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual([]);
     // An explicit account grant adds an independent path, even for an existing group member.
@@ -106,7 +106,7 @@ it("shares a space through a parent group and follows later child-group addition
     expect(
       await creator.all(
         app.__e2ee_space_grants.where({ recipientKind: "account", recipientId: bob.account.id }),
-        { tier: "edge" },
+        { tier: "remote" },
       ),
     ).toHaveLength(1);
   } finally {

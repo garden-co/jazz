@@ -446,6 +446,63 @@ fn streaming_mutation_closed() -> JsValue {
     JsValue::from_str("streaming mutation is closed")
 }
 
+#[wasm_bindgen(js_name = StagedStreamingMutation)]
+pub struct WasmStagedStreamingMutation {
+    db: WasmDbInner,
+    staged: RefCell<Option<jazz::db::StagedStreamingValue>>,
+}
+
+#[wasm_bindgen]
+impl WasmStagedStreamingMutation {
+    pub fn attach(&self, open_transaction_id: String) -> js_sys::Promise {
+        let Some(mut staged) = self.staged.borrow_mut().take() else {
+            return js_sys::Promise::reject(&streaming_mutation_closed());
+        };
+        let tx = match open_transaction_id.parse::<OpenTransactionId>() {
+            Ok(tx) => tx,
+            Err(error) => return js_sys::Promise::reject(&JsValue::from_str(&error)),
+        };
+        let db = self.db.clone();
+        future_to_promise(async move {
+            match db {
+                WasmDbInner::Memory(db) => db
+                    .attach_staged_streaming_value(tx, &mut staged)
+                    .await
+                    .map_err(to_js_error)?,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db
+                    .attach_staged_streaming_value(tx, &mut staged)
+                    .await
+                    .map_err(to_js_error)?,
+                WasmDbInner::Closed => return Err(streaming_mutation_closed()),
+            }
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn abort(&self) -> js_sys::Promise {
+        let Some(mut staged) = self.staged.borrow_mut().take() else {
+            return js_sys::Promise::resolve(&JsValue::FALSE);
+        };
+        let db = self.db.clone();
+        future_to_promise(async move {
+            let aborted = match db {
+                WasmDbInner::Memory(db) => db
+                    .abort_staged_streaming_value(&mut staged)
+                    .await
+                    .map_err(to_js_error)?,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db
+                    .abort_staged_streaming_value(&mut staged)
+                    .await
+                    .map_err(to_js_error)?,
+                WasmDbInner::Closed => return Err(streaming_mutation_closed()),
+            };
+            Ok(JsValue::from_bool(aborted))
+        })
+    }
+}
+
 #[wasm_bindgen]
 impl WasmStreamingMutation {
     pub fn push(&self, chunk: Vec<u8>) -> js_sys::Promise {
@@ -549,6 +606,60 @@ impl WasmStreamingMutation {
                 WasmDbInner::Closed => Err(streaming_mutation_closed()),
             }?;
             Ok(write.into())
+        })
+    }
+
+    pub fn stage(&self) -> js_sys::Promise {
+        let state = {
+            let mut lifecycle = self.state.borrow_mut();
+            let current =
+                std::mem::replace(&mut *lifecycle, WasmStreamingMutationLifecycle::Closed);
+            let WasmStreamingMutationLifecycle::Open(state) = current else {
+                *lifecycle = current;
+                return js_sys::Promise::reject(&streaming_mutation_closed());
+            };
+            *state
+        };
+        future_to_promise(async move {
+            let staged = match &state.db {
+                WasmDbInner::Memory(db) => db
+                    .stage_streaming_value_upload(
+                        state.upload,
+                        state.mutation,
+                        &state.table,
+                        state.row_id,
+                        state.cells,
+                        &state.column,
+                        state.identity,
+                        state.updated_at_ms,
+                        state.head,
+                        state.base,
+                    )
+                    .await
+                    .map_err(to_js_error)?,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db
+                    .stage_streaming_value_upload(
+                        state.upload,
+                        state.mutation,
+                        &state.table,
+                        state.row_id,
+                        state.cells,
+                        &state.column,
+                        state.identity,
+                        state.updated_at_ms,
+                        state.head,
+                        state.base,
+                    )
+                    .await
+                    .map_err(to_js_error)?,
+                WasmDbInner::Closed => return Err(streaming_mutation_closed()),
+            };
+            Ok(WasmStagedStreamingMutation {
+                db: state.db,
+                staged: RefCell::new(Some(staged)),
+            }
+            .into())
         })
     }
 
@@ -689,9 +800,9 @@ impl WasmWrite {
 
 #[wasm_bindgen]
 pub struct WasmDb {
-    // The runtime leaves this slot synchronously at close admission.  The
-    // close future owns the removed handle, while every later binding call
-    // observes `None` and fails before touching native state.
+    // Close owns the removed runtime until terminal completion. Only deferred
+    // upload cleanup restores it for tick/retry; core mutation admission stays
+    // closed throughout that retryable state.
     inner: Rc<RefCell<Option<WasmDbInner>>>,
     owns_runtime: bool,
     non_durable_client: Rc<Cell<bool>>,
@@ -2746,31 +2857,31 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = close)]
     pub fn close(&self) -> js_sys::Promise {
-        // A close failure still consumes the binding. Retrying a partially
-        // failed storage close would re-enter an indeterminate runtime; this
-        // matches the previous eager Closed transition and keeps physical
-        // close exactly once.
+        // A physical storage-close failure remains terminal. Only a deferred
+        // upload claim leaves storage open and permits owner tick/close retry.
         let Some(inner) = self.inner.borrow_mut().take() else {
             return js_sys::Promise::resolve(&JsValue::from_bool(false));
         };
+        let binding_inner = Rc::clone(&self.inner);
         let owns_runtime = self.owns_runtime;
         future_to_promise(async move {
             if !owns_runtime {
                 return Ok(JsValue::from_bool(!matches!(inner, WasmDbInner::Closed)));
             }
-            let closed = match inner {
-                WasmDbInner::Memory(db) => {
-                    db.close().await.map_err(to_js_error)?;
-                    true
-                }
+            let db = match &inner {
+                WasmDbInner::Memory(db) => db,
                 #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => {
-                    db.close().await.map_err(to_js_error)?;
-                    true
-                }
-                WasmDbInner::Closed => false,
+                WasmDbInner::Browser(db) => db,
+                WasmDbInner::Closed => return Ok(JsValue::from_bool(false)),
             };
-            Ok(JsValue::from_bool(closed))
+            let result = db.close().await;
+            if result.as_ref().is_err_and(|error| {
+                error.code == ErrorCode::WriteRejected && db.close_has_deferred_upload_cleanup()
+            }) {
+                *binding_inner.borrow_mut() = Some(inner);
+            }
+            result.map_err(to_js_error)?;
+            Ok(JsValue::from_bool(true))
         })
     }
 }
@@ -5006,6 +5117,104 @@ mod dynamic_schema_view_tests {
         ))
         .unwrap();
         block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn deferred_upload_close_preserves_wasm_tick_and_retry() {
+        let source = SchemaBuilder::new()
+            .table(TableSchema::builder("files").column("body", ColumnType::Text))
+            .build();
+        let schema = JazzSchema::new(&source).unwrap();
+        let families = schema.column_families();
+        let owner = Rc::new(
+            Db::open(DbConfig::new(
+                schema,
+                MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>())
+                    .unwrap(),
+                DbIdentity {
+                    node: jazz::ids::NodeUuid::from_bytes([0xf7; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            ))
+            .await
+            .unwrap(),
+        );
+        let mut abandoned = owner
+            .begin_streaming_value_upload("files", &BTreeMap::new(), "body")
+            .unwrap();
+        owner
+            .push_streaming_value_upload(&mut abandoned, b"abandoned")
+            .await
+            .unwrap();
+        let mut published = owner
+            .begin_streaming_value_upload("files", &BTreeMap::new(), "body")
+            .unwrap();
+        owner
+            .push_streaming_value_upload(&mut published, b"published")
+            .await
+            .unwrap();
+        owner.set_deferred_local_persistence(true);
+        let write = owner
+            .finish_streaming_value_upload(
+                published,
+                jazz::db::StreamingMutationKind::Insert,
+                "files",
+                RowUuid::from_bytes([0xf7; 16]),
+                BTreeMap::new(),
+                "body",
+                jazz::db::WriteIdentity::Database,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        drop(abandoned);
+        let binding = WasmDb {
+            inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&owner))))),
+            owns_runtime: true,
+            non_durable_client: Rc::new(Cell::new(false)),
+            trusted_backend: false,
+        };
+        wasm_bindgen_futures::JsFuture::from(binding.close())
+            .await
+            .expect_err("unresolved cleanup must reject close");
+        wasm_bindgen_futures::JsFuture::from(binding.tick())
+            .await
+            .expect("deferred close must retain a WASM tick route");
+        assert_eq!(
+            owner
+                .write_state(write.mergeable_tx_id())
+                .unwrap()
+                .durability,
+            DurabilityTier::Local
+        );
+        assert!(
+            owner
+                .insert(
+                    "files",
+                    BTreeMap::from([("body".to_owned(), Value::String("late".to_owned()))]),
+                    Default::default()
+                )
+                .await
+                .is_err(),
+            "close must not reopen mutation admission"
+        );
+        assert_eq!(
+            wasm_bindgen_futures::JsFuture::from(binding.close())
+                .await
+                .unwrap()
+                .as_bool(),
+            Some(true),
+        );
+        assert_eq!(
+            wasm_bindgen_futures::JsFuture::from(binding.close())
+                .await
+                .unwrap()
+                .as_bool(),
+            Some(false),
+        );
     }
 
     /// Transaction reads cross the WASM boundary as promises: a valid

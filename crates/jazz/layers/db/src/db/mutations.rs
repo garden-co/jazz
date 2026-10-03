@@ -114,6 +114,12 @@ pub(super) fn validate_updated_at_ms(updated_at_ms: Option<u64>) -> Result<(), E
 
 /// Resumable host-driven upload used by asynchronous bindings such as WASM.
 pub struct StreamingValueUpload {
+    owner: *const (),
+    owner_alive: Box<dyn Fn() -> bool>,
+    cleanup: Option<Box<dyn FnOnce(groove::large_values::StagedLargeValueId)>>,
+    schema: SchemaVersionId,
+    table: String,
+    column: String,
     id: groove::large_values::StagedLargeValueId,
     kind: groove::large_values::LargeValueKind,
     initialized: bool,
@@ -125,8 +131,40 @@ impl StreamingValueUpload {
     #[doc(hidden)]
     pub fn cleanup_id(mut self) -> groove::large_values::StagedLargeValueId {
         self.preparation.take();
+        self.cleanup.take();
         self.id
     }
+}
+
+impl Drop for StreamingValueUpload {
+    fn drop(&mut self) {
+        self.preparation.take();
+        if self.initialized
+            && let Some(cleanup) = self.cleanup.take()
+        {
+            cleanup(self.id);
+        }
+    }
+}
+
+/// Opaque, single-use upload capability. Dropping it before attachment releases
+/// its staged receipt through the originating runtime's cleanup queue.
+pub struct StagedStreamingValue {
+    owner: *const (),
+    schema: SchemaVersionId,
+    pending: Option<StagedStreamingMutation>,
+}
+
+struct StagedStreamingMutation {
+    stage: Rc<crate::node::StagedTransactionCell>,
+    mutation: StreamingMutationKind,
+    table: String,
+    row: RowUuid,
+    cells: RowCells,
+    column: String,
+    made_by: AuthorSubject,
+    permission_subject: AuthorSubject,
+    now_ms: Option<u64>,
 }
 
 fn large_value_cell_type_error(table: &str, column: &str) -> Error {
@@ -1780,11 +1818,11 @@ where
                 .await
             }
             Ok(Err(error)) => {
-                self.abort_streaming_value_upload(upload).await?;
+                let _ = self.abort_streaming_value_upload(upload).await;
                 Err(crate::node::Error::from(error).into())
             }
             Err(_) => {
-                self.abort_streaming_value_upload(upload).await?;
+                let _ = self.abort_streaming_value_upload(upload).await;
                 Err(crate::node::Error::from(groove::large_values::Error::MalformedScalar).into())
             }
         }
@@ -1809,6 +1847,22 @@ where
             }) as Box<dyn FnMut(_) -> _>,
         );
         Ok(StreamingValueUpload {
+            owner: Rc::as_ptr(&self.node).cast(),
+            owner_alive: {
+                let owner = Rc::downgrade(&self.node);
+                Box::new(move || owner.strong_count() != 0)
+            },
+            cleanup: {
+                let owner = Rc::downgrade(&self.node);
+                Some(Box::new(move |id| {
+                    if let Some(owner) = owner.upgrade() {
+                        owner.enqueue_large_value_upload_cleanup(id, None);
+                    }
+                }))
+            },
+            schema: self.schema_version_id,
+            table: table.to_owned(),
+            column: column.to_owned(),
             id: groove::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes()),
             kind,
             initialized: false,
@@ -1824,14 +1878,15 @@ where
         bytes: &[u8],
     ) -> Result<(), Error> {
         self.ensure_mutation_operation_admitted()?;
+        self.check_streaming_upload_owner(upload)?;
         let initialized_now = !upload.initialized;
         if !upload.initialized {
-            self.node
-                .lock_for_large_value_staging()
-                .await?
-                .begin_streaming_large_value_upload(upload.id, upload.kind)
-                .await?;
+            let node = self.node.lock_for_large_value_staging().await?;
+            // Beginning may persist the journal before its future completes.
+            // Arm Drop's exact cleanup before the first cancellable write.
             upload.initialized = true;
+            node.begin_streaming_large_value_upload(upload.id, upload.kind)
+                .await?;
         }
         let push_result = upload
             .preparation
@@ -1840,11 +1895,11 @@ where
             .push(bytes);
         if let Err(error) = push_result {
             upload.preparation.take();
-            self.node
-                .lock_for_large_value_staging()
-                .await?
-                .evict_pending_large_value_upload(upload.id)
-                .await?;
+            if let Ok(node) = self.node.lock_for_large_value_staging().await
+                && matches!(node.cancel_large_value_upload(upload.id).await, Ok(true))
+            {
+                upload.cleanup.take();
+            }
             return Err(crate::node::Error::from(error).into());
         }
         let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
@@ -1861,8 +1916,10 @@ where
         };
         if let Err(error) = stage_result {
             upload.preparation.take();
-            if let Ok(node) = self.node.lock_for_large_value_staging().await {
-                let _ = node.evict_pending_large_value_upload(upload.id).await;
+            if let Ok(node) = self.node.lock_for_large_value_staging().await
+                && matches!(node.cancel_large_value_upload(upload.id).await, Ok(true))
+            {
+                upload.cleanup.take();
             }
             return Err(error.into());
         }
@@ -1875,12 +1932,20 @@ where
         mut upload: StreamingValueUpload,
     ) -> Result<(), Error> {
         self.ensure_mutation_operation_admitted()?;
+        self.check_streaming_upload_owner(&upload)?;
         upload.preparation.take();
-        self.node
-            .lock_for_large_value_staging()
+        if self
+            .node
+            .node
+            .lock()
+            .await
+            .cancel_large_value_upload(upload.id)
             .await?
-            .evict_pending_large_value_upload(upload.id)
-            .await?;
+        {
+            upload.cleanup.take();
+        } else {
+            return Err(Node::<S>::deferred_upload_cleanup_error());
+        }
         Ok(())
     }
 
@@ -1888,7 +1953,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub async fn finish_streaming_value_upload(
         &self,
-        mut upload: StreamingValueUpload,
+        upload: StreamingValueUpload,
         mutation: StreamingMutationKind,
         table: &str,
         row: RowUuid,
@@ -1903,7 +1968,7 @@ where
         if let Err(error) =
             self.reject_attributed_branch_target(identity, head.is_some() || base.is_some())
         {
-            self.abort_streaming_value_upload(upload).await?;
+            let _ = self.abort_streaming_value_upload(upload).await;
             return Err(error);
         }
         let ResolvedWriteIdentity {
@@ -1912,77 +1977,24 @@ where
         } = match self.resolve_write_identity(identity) {
             Ok(identity) => identity,
             Err(error) => {
-                self.abort_streaming_value_upload(upload).await?;
+                let _ = self.abort_streaming_value_upload(upload).await;
                 return Err(error);
             }
         };
-        if !upload.initialized {
-            self.node
-                .lock_for_large_value_staging()
-                .await?
-                .begin_streaming_large_value_upload(upload.id, upload.kind)
-                .await?;
-            upload.initialized = true;
-        }
-        let preparation = upload
-            .preparation
-            .take()
-            .ok_or_else(|| Error::new(ErrorCode::Schema, "streaming upload is closed"))?;
-        let (value_ref, _) = match preparation.finish() {
-            Ok(finished) => finished,
-            Err(error) => {
-                if let Ok(node) = self.node.lock_for_large_value_staging().await {
-                    let _ = node.evict_pending_large_value_upload(upload.id).await;
-                }
-                return Err(crate::node::Error::from(error).into());
-            }
-        };
-        let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
-        let staged_result = {
-            let node = self.node.lock_for_large_value_staging().await?;
-            match node
-                .stage_large_value_chunk_batch(upload.id, upload.kind, chunks)
-                .await
-            {
-                Ok(()) => node.finalize_large_value_upload(upload.id, value_ref).await,
-                Err(error) => Err(error),
-            }
-        };
-        let staged = match staged_result {
-            Ok(staged) => staged,
-            Err(error) => {
-                // Cleanup is best-effort here so the terminal operation reports
-                // its original staging/finalization failure.
-                if let Ok(node) = self.node.lock_for_large_value_staging().await {
-                    let _ = node.evict_pending_large_value_upload(upload.id).await;
-                }
-                return Err(error.into());
-            }
-        };
+        let (staged, mut upload) = self
+            .finalize_streaming_value_upload(upload, table, column)
+            .await?;
         let nullable = match self.validate_streaming_column(table, &cells, column) {
             Ok((expected_kind, nullable)) if expected_kind == staged.value_ref.kind => nullable,
             Ok(_) => {
-                let _ = self
-                    .node
-                    .node
-                    .lock()
-                    .await
-                    .evict_staged_large_value(staged.id)
-                    .await;
+                let _ = self.abort_streaming_value_upload(upload).await;
                 return Err(large_value_cell_type_error(table, column));
             }
             Err(error) => {
-                let _ = self
-                    .node
-                    .node
-                    .lock()
-                    .await
-                    .evict_staged_large_value(staged.id)
-                    .await;
+                let _ = self.abort_streaming_value_upload(upload).await;
                 return Err(error);
             }
         };
-        let staged_id = staged.id;
         let published = self
             .publish_streaming_value_with_id(
                 mutation,
@@ -1999,20 +2011,239 @@ where
                 base,
             )
             .await;
-        if published.is_err() {
-            // Finalization transfers the pending journal into a staged root,
-            // but publication is still fallible (for example a duplicate
-            // insert or an invalid branch view). Do not make cleanup mask the
-            // caller-visible admission error.
-            let _ = self
-                .node
-                .node
-                .lock()
-                .await
-                .evict_staged_large_value(staged_id)
-                .await;
+        if published.is_ok() {
+            // Publication now owns the receipt, including deferred persistence.
+            upload.cleanup.take();
+        } else {
+            // Keep the original publication error even if cleanup is deferred
+            // or fails. The origin-bound guard retains unfinished cleanup.
+            let _ = self.abort_streaming_value_upload(upload).await;
         }
         published
+    }
+
+    fn check_streaming_upload_owner(&self, upload: &StreamingValueUpload) -> Result<(), Error> {
+        if !(upload.owner_alive)()
+            || upload.owner != Rc::as_ptr(&self.node).cast()
+            || upload.schema != self.schema_version_id
+        {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "streaming upload belongs to another database or schema",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn finalize_streaming_value_upload(
+        &self,
+        mut upload: StreamingValueUpload,
+        table: &str,
+        column: &str,
+    ) -> Result<(groove::large_values::StagedLargeValue, StreamingValueUpload), Error> {
+        self.check_streaming_upload_owner(&upload)?;
+        if upload.table != table || upload.column != column {
+            let _ = self.abort_streaming_value_upload(upload).await;
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "streaming upload target cannot change",
+            ));
+        }
+        if !upload.initialized {
+            let node = self.node.lock_for_large_value_staging().await?;
+            // As in push, cancellation may leave a partially persisted journal.
+            upload.initialized = true;
+            node.begin_streaming_large_value_upload(upload.id, upload.kind)
+                .await?;
+        }
+        let preparation = upload
+            .preparation
+            .take()
+            .ok_or_else(|| Error::new(ErrorCode::Schema, "streaming upload is closed"))?;
+        let result: Result<groove::large_values::StagedLargeValue, Error> = async {
+            let (value_ref, _) = preparation.finish().map_err(crate::node::Error::from)?;
+            let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
+            let node = self.node.lock_for_large_value_staging().await?;
+            node.stage_large_value_chunk_batch(upload.id, upload.kind, chunks)
+                .await?;
+            node.finalize_large_value_upload(upload.id, value_ref)
+                .await
+                .map_err(Into::into)
+        }
+        .await;
+        match result {
+            Ok(staged) => Ok((staged, upload)),
+            Err(error) => {
+                let _ = self.abort_streaming_value_upload(upload).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Complete bounded staging without publishing a row. The capability binds
+    /// the original mutation and trusted identity to an exclusive root write.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stage_streaming_value_upload(
+        &self,
+        upload: StreamingValueUpload,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        column: &str,
+        identity: WriteIdentity,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<StagedStreamingValue, Error> {
+        self.ensure_mutation_operation_admitted()?;
+        self.check_streaming_upload_owner(&upload)?;
+        let admission = (|| {
+            if head.is_some() || base.is_some() || !self.table_schema(table)?.branch_by.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "staged streaming requires a root-view target",
+                ));
+            }
+            validate_updated_at_ms(now_ms)?;
+            let (_, nullable) = self.validate_streaming_column(table, &cells, column)?;
+            Ok((self.resolve_write_identity(identity)?, nullable))
+        })();
+        let (identity, nullable) = match admission {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = self.abort_streaming_value_upload(upload).await;
+                return Err(error);
+            }
+        };
+        let (staged, mut upload) = self
+            .finalize_streaming_value_upload(upload, table, column)
+            .await?;
+        let upload_id = upload.id;
+        let owner = Rc::downgrade(&self.node);
+        let stage = Rc::new(crate::node::StagedTransactionCell::new(
+            staged,
+            nullable,
+            Box::new(move |_| {
+                if let Some(owner) = owner.upgrade() {
+                    owner.enqueue_large_value_upload_cleanup(upload_id, None);
+                }
+            }),
+        ));
+        upload.cleanup.take();
+        Ok(StagedStreamingValue {
+            owner: Rc::as_ptr(&self.node).cast(),
+            schema: self.schema_version_id,
+            pending: Some(StagedStreamingMutation {
+                stage,
+                mutation,
+                table: table.to_owned(),
+                row,
+                cells,
+                column: column.to_owned(),
+                made_by: identity.made_by,
+                permission_subject: identity.permission_subject.unwrap_or(self.identity.author),
+                now_ms,
+            }),
+        })
+    }
+
+    /// Transfer one opaque upload into an already-open exclusive transaction.
+    /// Every attach attempt consumes the capability, including rejected ones.
+    pub async fn attach_staged_streaming_value(
+        &self,
+        tx: OpenTransactionId,
+        staged: &mut StagedStreamingValue,
+    ) -> Result<(), Error> {
+        let pending = staged
+            .pending
+            .take()
+            .ok_or_else(|| Error::new(ErrorCode::Schema, "staged streaming upload is closed"))?;
+        self.ensure_mutation_operation_admitted()?;
+        if staged.owner != Rc::as_ptr(&self.node).cast() || staged.schema != self.schema_version_id
+        {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "staged upload belongs to another database or schema",
+            ));
+        }
+        self.lock_for_transaction_operation(tx)
+            .await?
+            .check_staged_transaction_identity(tx, pending.made_by, pending.permission_subject)?;
+        let cells = match pending.mutation {
+            StreamingMutationKind::Insert => {
+                if self
+                    .transaction_read_raw(tx, &pending.table, pending.row)
+                    .await?
+                    .is_some()
+                {
+                    return Err(Error::new(
+                        ErrorCode::WriteRejected,
+                        "streaming insert row already exists",
+                    ));
+                }
+                self.apply_insert_defaults(&pending.table, pending.cells)?
+            }
+            StreamingMutationKind::Update | StreamingMutationKind::Upsert => {
+                let upsert = pending.mutation == StreamingMutationKind::Upsert;
+                let mut cells = self
+                    .exclusive_transaction_target_for_write(
+                        tx,
+                        &pending.table,
+                        pending.row,
+                        if upsert { "UPSERT" } else { "UPDATE" },
+                        upsert,
+                    )
+                    .await?
+                    .unwrap_or_default();
+                cells.extend(pending.cells);
+                if upsert {
+                    self.apply_insert_defaults(&pending.table, cells)?
+                } else {
+                    cells
+                }
+            }
+        };
+        let mut node = self.lock_for_transaction_operation(tx).await?;
+        node.check_staged_transaction_identity(tx, pending.made_by, pending.permission_subject)?;
+        node.tx_write_staged_cell(
+            tx,
+            self.schema_version_id,
+            &pending.table,
+            pending.row,
+            pending.column,
+            pending.stage,
+            cells,
+            Some(pending.now_ms.unwrap_or_else(|| self.next_now_ms())),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Explicitly release an unattached capability. Already-consumed handles
+    /// are harmless; no descriptor retained by history can be evicted here.
+    pub async fn abort_staged_streaming_value(
+        &self,
+        staged: &mut StagedStreamingValue,
+    ) -> Result<bool, Error> {
+        if staged.owner != Rc::as_ptr(&self.node).cast() || staged.schema != self.schema_version_id
+        {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "staged upload belongs to another database or schema",
+            ));
+        }
+        let Some(pending) = staged.pending.take() else {
+            return Ok(false);
+        };
+        self.node
+            .node
+            .lock()
+            .await
+            .evict_staged_large_value(pending.stage.staged.id)
+            .await?;
+        pending.stage.transfer_to_history();
+        Ok(true)
     }
 
     fn validate_streaming_column(

@@ -28,9 +28,19 @@ import { Groups } from "./group-lifecycle.js";
 import type { GroupRecoveryPath } from "./group-lifecycle.js";
 import type { GroupTables } from "./groups.js";
 import { Spaces, SpaceInitialisationRequired } from "./space-lifecycle.js";
-import type { SpaceRecoveryPath } from "./space-lifecycle.js";
-import type { SpaceTables } from "./spaces.js";
-import type { JazzCrypto, CellCipher, EqualityIndex } from "./types.js";
+import type {
+  SpaceRecoveryPath,
+  InitialSpaceSeed,
+  StreamingSpacePlan,
+  StreamingSpaceOptions,
+} from "./space-lifecycle.js";
+export type {
+  InitialSpaceSeed,
+  StreamingSpacePlan,
+  StreamingSpaceOptions,
+} from "./space-lifecycle.js";
+import type { SpaceTables, SpaceRoot } from "./spaces.js";
+import type { JazzCrypto, CellCipher, EqualityIndex, LargeValueCipher } from "./types.js";
 
 const equalityCrypto = new WeakMap<Db, () => Promise<EqualityIndex>>();
 
@@ -76,6 +86,77 @@ export async function cellCryptoForDb(
 ): Promise<{ cipher: CellCipher; application: string }> {
   e2eeForDb(db);
   return cellCrypto.get(db)!();
+}
+
+const streamingCrypto = new WeakMap<
+  Db,
+  () => Promise<{ cipher: LargeValueCipher; application: string }>
+>();
+export async function streamingCryptoForDb(db: Db) {
+  e2eeForDb(db);
+  return streamingCrypto.get(db)!();
+}
+
+const streamingSpacePreparers = new WeakMap<Db, Spaces["prepareStreaming"]>();
+export async function prepareStreamingSpace<T, Init, R>(
+  db: Db,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  options: StreamingSpaceOptions,
+  stage: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<R>,
+): Promise<{ value: R; plan: StreamingSpacePlan }> {
+  e2eeForDb(db);
+  let stageFailure: { error: unknown } | undefined;
+  try {
+    const prepared = await streamingSpacePreparers.get(db)!(
+      scope,
+      identifier,
+      options,
+      async (secret, root) => {
+        try {
+          return await stage(secret, root);
+        } catch (error) {
+          stageFailure = { error };
+          throw error;
+        }
+      },
+    );
+    const plan = prepared.plan;
+    return {
+      value: prepared.value,
+      plan: {
+        initialSeed: plan.initialSeed,
+        async validate(tx) {
+          try {
+            await plan.validate(tx);
+          } catch (error) {
+            if (error instanceof E2eeDataError) throw error;
+            throw new E2eeDataError("key-unavailable");
+          }
+        },
+        dispose() {
+          plan.dispose();
+        },
+      },
+    };
+  } catch (error) {
+    if (error instanceof E2eeDataError || (stageFailure && stageFailure.error === error))
+      throw error;
+    throw new E2eeDataError("key-unavailable");
+  }
+}
+
+const initialSpaceCompletions = new WeakMap<Db, Spaces["completeInitial"]>();
+/** The owner transaction is already accepted; later key delivery cannot reject its receipt. */
+export async function completeInitialSpace(db: Db, root: SpaceRoot): Promise<void> {
+  try {
+    e2eeForDb(db);
+    await initialSpaceCompletions.get(db)!(root);
+  } catch {
+    console.warn(
+      "E2EE: initial data was accepted, but recipient key delivery requires maintenance. Retry with db.e2ee.explain().",
+    );
+  }
 }
 const configuredSchemas = new WeakMap<Db, WasmSchema>();
 const configuredAccounts = new WeakMap<Db, string>();
@@ -162,11 +243,12 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
   identifier: string,
   prepareData: Parameters<Spaces["prepareInitial"]>[3],
   recipientIds?: readonly string[],
+  seed?: InitialSpaceSeed,
 ): Promise<void> {
   const recipients = recipientIds?.slice();
   try {
     await prepareDbTransaction(tx, async (prepared) => {
-      await prepareInitialSpaceRows(db, prepared, scope, identifier, prepareData, recipients);
+      await prepareInitialSpaceRows(db, prepared, scope, identifier, prepareData, recipients, seed);
     });
   } catch (error) {
     try {
@@ -184,17 +266,23 @@ export async function prepareMissingSpaceWrite(
   ...args: Parameters<Spaces["prepareMissing"]>
 ): Promise<boolean> {
   e2eeForDb(db);
-  const [tx, scope, identifier, prepareData] = args;
+  const [tx, scope, identifier, prepareData, seed] = args;
   let callbackFailure: { error: unknown } | undefined;
   try {
-    return await missingSpacePreparers.get(db)!(tx, scope, identifier, async (...values) => {
-      try {
-        await prepareData(...values);
-      } catch (error) {
-        callbackFailure = { error };
-        throw error;
-      }
-    });
+    return await missingSpacePreparers.get(db)!(
+      tx,
+      scope,
+      identifier,
+      async (...values) => {
+        try {
+          await prepareData(...values);
+        } catch (error) {
+          callbackFailure = { error };
+          throw error;
+        }
+      },
+      seed,
+    );
   } catch (error) {
     // As with ordinary key lookup, adapter exceptions may contain key material.
     // Preserve the internal retry signal and the caller's own operation errors.
@@ -216,9 +304,10 @@ export async function prepareInitialSpaceRows<T, Init>(
   identifier: string,
   prepareData: Parameters<Spaces["prepareInitial"]>[3],
   recipientIds?: readonly string[],
+  seed?: InitialSpaceSeed,
 ): Promise<void> {
   e2eeForDb(db);
-  await initialSpacePreparers.get(db)!(tx, scope, identifier, prepareData, recipientIds);
+  await initialSpacePreparers.get(db)!(tx, scope, identifier, prepareData, recipientIds, seed);
 }
 
 export type RecoveryStatus = Readonly<{
@@ -600,6 +689,20 @@ export class E2ee {
     });
     let cellCipher: Promise<CellCipher> | undefined;
     let equalityIndex: Promise<EqualityIndex> | undefined;
+    let largeValueCipher: Promise<LargeValueCipher> | undefined;
+    streamingCrypto.set(db, async () => {
+      this.assertOpen();
+      largeValueCipher ??= this.config.crypto?.largeValueCipher
+        ? Promise.resolve(this.config.crypto.largeValueCipher)
+        : import("./browser.js").then((module) => module.createBrowserLargeValueCipher());
+      const cipher = await largeValueCipher;
+      this.assertOpen();
+      return { cipher, application: JSON.stringify([accountRegistry(this.account), this.env]) };
+    });
+    streamingSpacePreparers.set(db, async (scope, identifier, options, stage) => {
+      await this.prepare();
+      return this.requireSpaces().prepareStreaming(scope, identifier, options, stage);
+    });
     equalityCrypto.set(db, async () => {
       this.assertOpen();
       equalityIndex ??= this.config.crypto?.equalityIndex
@@ -625,6 +728,10 @@ export class E2ee {
     initialSpacePreparers.set(db, async (...args) => {
       await this.prepare();
       await this.requireSpaces().prepareInitial(...args);
+    });
+    initialSpaceCompletions.set(db, async (root) => {
+      this.assertOpen();
+      await this.requireSpaces().completeInitial(root);
     });
     missingSpacePreparers.set(db, async (...args) => {
       await this.prepare();

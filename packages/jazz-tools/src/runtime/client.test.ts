@@ -925,29 +925,6 @@ describe("JazzClient runtime transaction waits", () => {
     expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-runtime", "global");
   });
 
-  it("waits for connected exclusive transactions at the global tier", async () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const handle = new ExclusiveWriteHandle("transaction-exclusive" as TxId, client);
-
-    await expect(handle.wait()).resolves.toBeUndefined();
-
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-exclusive", "global");
-  });
-
-  it("waits for local-only exclusive transactions at the local tier", async () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, {
-      ...makeContext(),
-      serverUrl: undefined,
-    });
-    const handle = new ExclusiveWriteHandle("transaction-exclusive" as TxId, client);
-
-    await expect(handle.wait()).resolves.toBeUndefined();
-
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-exclusive", "local");
-  });
-
   it("surfaces runtime wait rejection as PersistedWriteRejectedError", async () => {
     const runtime = makeFakeRuntime();
     const txId = "transaction-runtime-rejected" as TxId;

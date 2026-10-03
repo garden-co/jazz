@@ -3209,7 +3209,7 @@ mod mutation_errors;
 mod mutations;
 pub use mutations::{
     JsonSetEdit, LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice,
-    StreamingMutationKind, StreamingValueUpload,
+    StagedStreamingValue, StreamingMutationKind, StreamingValueUpload,
 };
 mod reads;
 #[doc(hidden)]

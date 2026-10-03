@@ -100,7 +100,7 @@ it("accepts recovery registration when immutable public projections are publishe
       crypto.deviceSigner,
     );
     expect(result.recoveryRoots.map((row) => row.id)).toEqual([id]);
-    expect(await observer.all(app.__e2ee_account_identities, { tier: "edge" })).toEqual([]);
+    expect(await observer.all(app.__e2ee_account_identities, { tier: "remote" })).toEqual([]);
   } finally {
     signer.privateKey.fill(0);
     await Promise.all(clients.map((client) => client.shutdown()));

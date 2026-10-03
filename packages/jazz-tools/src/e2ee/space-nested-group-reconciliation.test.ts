@@ -89,7 +89,7 @@ it("reconciles a stale nested recipient group when a remaining member loads the 
     const target = { scope: app.projects, identifier: project.id };
     expect(await recipient.e2ee.explain(target)).toEqual({ state: "ready" });
     const root = await creator.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "edge",
+      tier: "remote",
     });
 
     // The departing account can record its departure but cannot receive or
@@ -101,12 +101,12 @@ it("reconciles a stale nested recipient group when a remaining member loads the 
     });
     expect(
       await creator.all(app.__e2ee_group_successors.where({ groupId: group.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual([]);
     expect(
       await creator.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual([]);
 
@@ -115,17 +115,17 @@ it("reconciles a stale nested recipient group when a remaining member loads the 
     // The unrequested child lineage does not have to rotate as a side effect.
     expect(await creator.e2ee.explain(target)).toEqual({ state: "ready" });
     const groups = await creator.all(app.__e2ee_group_successors.where({ groupId: group.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     const spaces = await creator.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), {
-      tier: "edge",
+      tier: "remote",
     });
     expect(groups).toHaveLength(1);
     expect(spaces).toHaveLength(1);
     expect(spaces[0]!.predecessor).toBe(root!.epochId);
     const deliveries = await creator.all(
       app.__e2ee_space_deliveries.where({ spaceId: root!.id, epochId: spaces[0]!.epochId }),
-      { tier: "edge" },
+      { tier: "remote" },
     );
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]!.recipientAccountId).toBe(alice.account.id);

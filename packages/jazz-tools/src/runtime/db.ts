@@ -1,14 +1,21 @@
 import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
+import { streamingBytes } from "./streaming-source.js";
+import { parseUuid, formatUuid } from "./uuid.js";
+import { assertRequiredRowColumnsPresent } from "./row-validation.js";
 import { initialRecipientIds, SpaceInitialisationRequired } from "../e2ee/space-lifecycle.js";
 import { acceptInitialHistory, discardInitialHistory } from "../e2ee/accepted-history.js";
 import {
   e2eeForDb,
   e2eeSchemaForDb,
+  completeInitialSpace,
   prepareInitialSpaceForTransaction,
   prepareInitialSpaceRows,
   prepareMissingSpaceWrite,
+  prepareStreamingSpace,
+  type StreamingSpacePlan,
+  type InitialSpaceSeed,
   withSpaceKeys,
   type E2ee,
 } from "../e2ee/lifecycle.js";
@@ -75,6 +82,7 @@ import {
   type PermissionAdvice,
   type StreamingValueSource,
   type TransactionPreparationIO,
+  type StagedStreamingMutation,
 } from "./client.js";
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
@@ -87,7 +95,12 @@ import {
 } from "./row-transformer.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
 import { encryptedSchemas, encryptedRowSpaces } from "../e2ee/encrypted-schema.js";
-import { encryptCell, decryptCellRows, decryptedIndexBytes } from "../e2ee/cell-data.js";
+import {
+  encryptCell,
+  encryptStreamingCell,
+  decryptCellRows,
+  decryptedIndexBytes,
+} from "../e2ee/cell-data.js";
 import { TypedTableQueryBuilder, type AnyTableMeta } from "../typed-app.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
@@ -349,6 +362,28 @@ export interface InsertOptions extends TimestampOverrideOptions {
   initialRecipients?: readonly string[];
 }
 export type StreamingInsertOptions = Omit<InsertOptions, "branch" | "initialRecipients">;
+
+/** A declaration-only plan. Sources are consumed after the callback, before any transaction opens. */
+export interface StreamingWritePlan {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): { id: string };
+  insertStreaming<T, Init, Stream>(
+    table: TableProxy<T, Init, Stream>,
+    data: Stream,
+    options?: StreamingInsertOptions,
+  ): { id: string };
+  updateStreaming<T, Init, Stream, Patch>(
+    table: TableProxy<T, Init, Stream, Patch>,
+    id: string,
+    data: Patch,
+    options?: UpdateOptions,
+  ): { id: string };
+  upsertStreaming<T, Init, Stream, Patch>(
+    table: TableProxy<T, Init, Stream, Patch>,
+    id: string,
+    data: Patch,
+    options?: UpdateOptions,
+  ): { id: string };
+}
 
 export interface RestoreOptions extends TimestampOverrideOptions {
   branch?: Branch;
@@ -1053,6 +1088,25 @@ type DbTransactionHandleBinding = {
 
 const dbTxHandleBindings = new WeakMap<Transaction, DbTransactionHandleBinding>();
 const initialisingTransactions = new WeakSet<Transaction>();
+const streamingInitialSeeds = new WeakMap<
+  Transaction,
+  Map<WasmSchema, Map<string, InitialSpaceSeed>>
+>();
+const streamingInitialRetainers = new WeakMap<
+  Transaction,
+  (secret: Uint8Array, root: SpaceRoot) => Promise<void>
+>();
+
+function streamingInitialSeed(
+  tx: Transaction,
+  table: TableProxy<any, any>,
+  id: string,
+): InitialSpaceSeed | undefined {
+  return streamingInitialSeeds
+    .get(tx)
+    ?.get(table._schema)
+    ?.get(`${table._table}:${id.toLowerCase()}`);
+}
 const standaloneWriteRetries = new WeakMap<
   Transaction,
   { prepare: (tx: Transaction) => void; branch: boolean } | null
@@ -1122,18 +1176,10 @@ function splitStreamingMutation(
   }
   const record = data as Record<string, unknown>;
   const encryption = encryptedSchemas.get(table._schema);
-  if (operation !== "update" && encryption?.scopes.has(table._table)) {
-    throw new Error("Encryption scope streaming creation is not supported");
+  if (encryption?.scopes.has(table._table)) {
+    throw new Error("Encryption scope streaming values are not supported");
   }
   const declaration = encryption?.tables.get(table._table);
-  if (
-    declaration &&
-    (operation !== "update" ||
-      Object.hasOwn(record, declaration.space) ||
-      declaration.columns.some((column) => Object.hasOwn(record, column)))
-  ) {
-    throw new Error("Encrypted streaming is not supported");
-  }
   const streamableColumns = table._schema[table._table]?.columns.filter((column) =>
     ["Text", "Json", "Bytea"].includes(column.column_type.type),
   );
@@ -1144,6 +1190,20 @@ function splitStreamingMutation(
     throw new Error("Streaming insert requires exactly one streamed Text, Json, or Bytea column");
   }
   const column = streamed[0]!.name;
+  if (
+    declaration &&
+    (operation !== "update" ||
+      Object.hasOwn(record, declaration.space) ||
+      declaration.columns.some((name) => Object.hasOwn(record, name)))
+  ) {
+    const logicalColumn = encryption!.logical[table._table]?.columns.find(
+      (entry) => entry.name === column,
+    );
+    if (!declaration.columns.includes(column) || logicalColumn?.column_type.type !== "Bytea")
+      throw new Error("Encrypted streaming requires an encrypted Bytea column");
+    if (declaration.indexes?.[column])
+      throw new Error("Equality-indexed encrypted streaming is not supported");
+  }
   if (table._schema[table._table]?.branchBy?.includes(column)) {
     throw new Error(`Streaming a branchBy column is not supported: ${table._table}.${column}`);
   }
@@ -1347,6 +1407,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     private readonly e2ee?: { db: Db },
   ) {
     if (ownerClient) this.bindOwnerClient(ownerClient);
+    streamingInitialRetainers.set(this, (secret, root) => this.retainInitialSpaceKey(secret, root));
   }
 
   private bindTable<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
@@ -1430,9 +1491,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         .then(async (id) => {
           if (requiresInitialAcceptance || initialRoots.length)
             await ownerClient.waitForExclusiveTransaction(id, "global");
-          // Cache preparation with its accepted identity. The cache cannot reject
-          // this receipt and does not perform another authority read.
-          for (const root of initialRoots) await acceptInitialHistory(this.e2ee!.db, root, id);
+          // Cache the accepted identity before the later initial-recipient handoff.
+          // Handoff failures cannot revoke this already accepted receipt.
+          for (const root of initialRoots) {
+            await acceptInitialHistory(this.e2ee!.db, root, id);
+            await completeInitialSpace(this.e2ee!.db, root);
+          }
           return id;
         })
         .catch((error) => {
@@ -1520,6 +1584,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         row.id,
         (secret, root) => this.retainInitialSpaceKey(secret, root),
         recipients,
+        streamingInitialSeed(this, table, row.id),
       );
       // The transaction's pending preparation and wait handle own this failure.
       preparation.catch(() => {});
@@ -1718,10 +1783,17 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       const prepared =
         this.kind === "exclusive" ? preparedTransactionScope(binding, io) : undefined;
       if (
-        !(await prepareMissingSpaceWrite(db, prepared, scope, identifier, async (secret, root) => {
-          await this.retainInitialSpaceKey(secret, root);
-          await stage(secret, root);
-        }))
+        !(await prepareMissingSpaceWrite(
+          db,
+          prepared,
+          scope,
+          identifier,
+          async (secret, root) => {
+            await this.retainInitialSpaceKey(secret, root);
+            await stage(secret, root);
+          },
+          streamingInitialSeed(this, scope, identifier),
+        ))
       )
         throw error;
     }
@@ -1856,6 +1928,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             id,
             (secret, root) => this.retainInitialSpaceKey(secret, root),
             recipients,
+            streamingInitialSeed(this, table, id),
           );
           this.encryptedScopes.set(
             encryptedRowScopeKey(table._table, id, updateOptions?.branch),
@@ -3024,7 +3097,6 @@ export class Db {
     );
   }
 
-
   private handleMutationError(event: MutationErrorEvent): void {
     if (this.mutationErrorListeners.size === 0) {
       console.error("Unhandled Jazz mutation error", event);
@@ -3361,6 +3433,416 @@ export class Db {
   }
 
   /**
+   * Declare a root-view write plan, stage each source once, then publish it atomically.
+   * No database transaction is open during declaration or source consumption.
+   * Successful waits require authoritative acceptance, including key-history preconditions.
+   */
+  async streamingTransaction<TResult>(
+    callback: (plan: StreamingWritePlan) => TResult | Promise<TResult>,
+  ): Promise<ExclusiveWriteResult<Awaited<TResult>>> {
+    const context = this.getAccessContext();
+    type Declaration = {
+      table: TableProxy<any, any>;
+      id: string;
+      operation: "insert" | "update" | "upsert";
+      data: Record<string, unknown>;
+      values: Record<string, Value>;
+      options: InsertOptions & UpdateOptions;
+      stream?: { column: string; source: StreamingValueSource };
+      identifier?: string;
+      existing?: boolean;
+      tableId?: string;
+      columnId?: string;
+      staged?: StagedStreamingMutation;
+    };
+    const declarations: Declaration[] = [];
+    let declaring = true;
+    const declare = (
+      operation: Declaration["operation"],
+      table: TableProxy<any, any>,
+      data: unknown,
+      options: InsertOptions & UpdateOptions = {},
+      streaming = false,
+      id?: string,
+    ): { id: string } => {
+      if (!declaring) throw new Error("Streaming write plan declaration is closed");
+      if (
+        options.branch !== undefined ||
+        options.base !== undefined ||
+        table._schema[table._table]?.branchBy?.length
+      )
+        throw new Error("Streaming transactions require root-view tables and targets");
+      if (
+        options.updatedAt !== undefined &&
+        (!Number.isSafeInteger(options.updatedAt) || options.updatedAt < 0)
+      )
+        throw new Error("updatedAt must be a non-negative safe integer");
+      const snapshot = structuredClone(options);
+      scopeRecipients(table, snapshot);
+      const split = streaming ? splitStreamingMutation(table, data, operation) : undefined;
+      const copied = structuredClone(
+        split?.values ?? requireRecord(data, "Insert data must be an object"),
+      );
+      const metadata = encryptedSchemas.get(table._schema);
+      const encryption = metadata?.tables.get(table._table);
+      if (split && encryption) e2eeForDb(this);
+      const values = structuredClone(
+        toWriteRecord(
+          transformInputColumns(table, copied),
+          metadata?.logical ?? table._schema,
+          table._table,
+        ),
+      );
+      if (operation === "insert")
+        assertRequiredRowColumnsPresent(
+          (metadata?.logical ?? table._schema)[table._table]!.columns.filter(
+            (column) => column.name !== split?.column,
+          ),
+          values,
+          table._table,
+        );
+      const physical = { ...values };
+      if (split) {
+        const kind = table._schema[table._table]!.columns.find(
+          (column) => column.name === split.column,
+        )!.column_type.type;
+        physical[split.column] =
+          kind === "Text"
+            ? { type: "Text", value: "" }
+            : kind === "Json"
+              ? { type: "Text", value: "{}" }
+              : { type: "Bytea", value: new Uint8Array() };
+      }
+      for (const name of encryption?.columns ?? []) {
+        if (operation === "insert" && name !== split?.column && !values[name]) {
+          if (
+            !metadata!.logical[table._table]!.columns.find((column) => column.name === name)!
+              .nullable
+          )
+            throw new Error(`Missing encrypted column "${name}"`);
+          values[name] = { type: "Null" };
+        }
+        if (values[name] || name === split?.column) {
+          physical[name] = { type: "Bytea", value: new Uint8Array() };
+          if (encryption!.indexes?.[name])
+            physical[equalityIndexColumn(name)] = { type: "Bytea", value: new Uint8Array() };
+        }
+      }
+      const client = this.getClient(table._schema);
+      const rowId = formatUuid(
+        parseUuid(id ?? snapshot.id ?? client.previewInsertInternal(table._table, physical).id),
+      );
+      if (operation === "insert") client.previewInsertInternal(table._table, physical, rowId);
+      else normalizeUpdateOptions(table._schema, table._table, snapshot);
+      declarations.push({
+        table,
+        id: rowId,
+        operation,
+        data: copied,
+        values,
+        options: { ...snapshot, id: rowId },
+        ...(split && { stream: { column: split.column, source: split.source } }),
+      });
+      return { id: rowId };
+    };
+    let value: Awaited<TResult>;
+    try {
+      value = await callback({
+        insert: (table, data, options) => declare("insert", table, data, options),
+        insertStreaming: (table, data, options) => declare("insert", table, data, options, true),
+        updateStreaming: (table, id, data, options) =>
+          declare("update", table, data, options, true, id),
+        upsertStreaming: (table, id, data, options) =>
+          declare("upsert", table, data, options, true, id),
+      });
+    } finally {
+      declaring = false;
+    }
+    const streams = declarations.filter((entry) => entry.stream);
+    if (!streams.length) throw new Error("Streaming transactions require at least one stream");
+    type Group = {
+      scope: TableProxy<any, any>;
+      identifier: string;
+      initial?: Declaration;
+      entries: Declaration[];
+      plan?: StreamingSpacePlan;
+    };
+    const groups: Group[] = [];
+    const priorDeclarations = new Map<Declaration, Declaration>();
+    const latestRows = new Map<WasmSchema, Map<string, Declaration>>();
+    const initialScopes = new Map<WasmSchema, Map<string, Declaration>>();
+    const groupsBySchema = new Map<WasmSchema, Map<string, Group>>();
+    for (const entry of declarations) {
+      const schema = entry.table._schema;
+      const key = `${entry.table._table}\0${entry.id}`;
+      let rows = latestRows.get(schema);
+      if (!rows) latestRows.set(schema, (rows = new Map()));
+      const prior = rows.get(key);
+      if (prior) priorDeclarations.set(entry, prior);
+      rows.set(key, entry);
+      if (!entry.stream) {
+        let scopes = initialScopes.get(schema);
+        if (!scopes) initialScopes.set(schema, (scopes = new Map()));
+        if (!scopes.has(key)) scopes.set(key, entry);
+      }
+    }
+    const staged: StagedStreamingMutation[] = [];
+    try {
+      for (const entry of streams) {
+        const { table, stream } = entry;
+        entry.tableId = (await this.tableIdentity(table)) ?? undefined;
+        entry.columnId = (await this.columnIdentity(table, stream!.column)) ?? undefined;
+        if (!entry.tableId || !entry.columnId)
+          throw new Error("Streaming writes require accepted table and column identities");
+        const encryption = encryptedSchemas.get(table._schema)?.tables.get(table._table);
+        const prior = priorDeclarations.get(entry);
+        if (entry.operation !== "insert") {
+          const row = (await this.one(
+            new TypedTableQueryBuilder<
+              AnyTableMeta & { row: { id: string } & Record<string, unknown> }
+            >(table._table, table._schema)
+              .includeDeleted()
+              .where({ id: entry.id })
+              .select(encryption?.space ?? "id"),
+            { tier: "global" },
+          )) as Record<string, unknown> | null;
+          entry.existing = row !== null;
+          if (row && encryption) {
+            if (typeof row[encryption.space] !== "string")
+              throw new Error("Encrypted mutation cannot resolve the stored space");
+            entry.identifier = row[encryption.space] as string;
+          } else if (!row && !prior && entry.operation === "update") {
+            throw new Error("Streaming update requires an existing row");
+          }
+        }
+        if (entry.operation === "upsert" && !entry.existing && !prior)
+          assertRequiredRowColumnsPresent(
+            (encryptedSchemas.get(table._schema)?.logical ?? table._schema)[
+              table._table
+            ]!.columns.filter((column) => column.name !== stream!.column),
+            entry.values,
+            table._table,
+          );
+        if (!encryption) continue;
+        const requested = entry.values[encryption.space];
+        if (prior) {
+          const previousScope = prior.values[encryption.space];
+          const identifier =
+            prior.identifier ?? (previousScope?.type === "Uuid" ? previousScope.value : undefined);
+          if (
+            entry.identifier &&
+            identifier &&
+            entry.identifier.toLowerCase() !== identifier.toLowerCase()
+          )
+            throw new Error("The encryption space of a row is immutable");
+          entry.identifier ??= identifier;
+        }
+        if (!entry.identifier && requested?.type === "Uuid") entry.identifier = requested.value;
+        if (!entry.identifier) throw new Error("Encrypted writes require a space identifier");
+        if (
+          requested &&
+          (requested.type !== "Uuid" ||
+            requested.value.toLowerCase() !== entry.identifier.toLowerCase())
+        )
+          throw new Error("The encryption space of a row is immutable");
+        entry.identifier = entry.identifier.toLowerCase();
+        if (entry.operation === "upsert" && !entry.existing && !prior) {
+          const metadata = encryptedSchemas.get(table._schema)!;
+          for (const name of encryption.columns) {
+            if (name === stream!.column || entry.values[name]) continue;
+            if (
+              !metadata.logical[table._table]!.columns.find((column) => column.name === name)!
+                .nullable
+            )
+              throw new Error(`Missing encrypted column "${name}"`);
+            entry.values[name] = { type: "Null" };
+          }
+        }
+        let scopeGroups = groupsBySchema.get(table._schema);
+        if (!scopeGroups) groupsBySchema.set(table._schema, (scopeGroups = new Map()));
+        const groupKey = `${encryption.scope}\0${entry.identifier}`;
+        let group = scopeGroups.get(groupKey);
+        if (!group) {
+          group = {
+            scope: new TypedTableQueryBuilder(encryption.scope, table._schema),
+            identifier: entry.identifier,
+            initial: initialScopes.get(table._schema)?.get(groupKey),
+            entries: [],
+          };
+          groups.push(group);
+          scopeGroups.set(groupKey, group);
+        }
+        group.entries.push(entry);
+      }
+      const stage = async (
+        entry: Declaration,
+        source: StreamingValueSource,
+        physical: Record<string, Value>,
+      ) => {
+        entry.staged = await this.getClient(entry.table._schema).stageStreamingMutation(
+          entry.operation,
+          entry.table._table,
+          physical,
+          entry.stream!.column,
+          source,
+          entry.operation === "insert"
+            ? normalizeInsertOptions(entry.table._schema, entry.table._table, entry.options)
+            : normalizeUpdateOptions(entry.table._schema, entry.table._table, entry.options),
+          context?.writeSession,
+          context?.attribution,
+          entry.id,
+        );
+        staged.push(entry.staged);
+      };
+      const preparedSources: Array<() => Promise<void>> = [];
+      // Nest borrowed-key callbacks so every space is eligible before the first source is pulled.
+      const prepareGroup = async (index: number): Promise<void> => {
+        const group = groups[index];
+        if (!group) {
+          for (const consume of preparedSources) await consume();
+          return;
+        }
+        const prepared = await prepareStreamingSpace(
+          this,
+          group.scope,
+          group.identifier,
+          {
+            newScope: !!group.initial,
+            initialRecipients: group.initial?.options.initialRecipients,
+          },
+          async (secret, root) => {
+            for (const entry of group.entries) {
+              const encryption = encryptedSchemas
+                .get(entry.table._schema)!
+                .tables.get(entry.table._table)!;
+              const physical = { ...entry.values };
+              for (const name of encryption.columns) {
+                if (name === entry.stream!.column || !entry.values[name]) continue;
+                if (encryption.indexes?.[name])
+                  physical[equalityIndexColumn(name)] = {
+                    type: "Bytea",
+                    value: await equalityToken(
+                      this,
+                      entry.table,
+                      name,
+                      entry.values[name]!,
+                      secret,
+                      root,
+                    ),
+                  };
+                physical[name] = {
+                  type: "Bytea",
+                  value: await encryptCell(
+                    this,
+                    entry.table,
+                    entry.id,
+                    name,
+                    entry.values[name]!,
+                    secret,
+                    root,
+                  ),
+                };
+              }
+              const source = await encryptStreamingCell(
+                this,
+                entry.table,
+                entry.id,
+                entry.stream!.column,
+                secret,
+                root,
+                streamingBytes(entry.stream!.source),
+              );
+              preparedSources.push(() => stage(entry, source, physical));
+            }
+            await prepareGroup(index + 1);
+          },
+        );
+        group.plan = prepared.plan;
+      };
+      await prepareGroup(0);
+      for (const entry of streams)
+        if (!entry.staged) await stage(entry, entry.stream!.source, entry.values);
+      const transaction = this.createTransaction("exclusive", context);
+      const seeds = new Map<WasmSchema, Map<string, InitialSpaceSeed>>();
+      for (const group of groups) {
+        if (!group.plan!.initialSeed) continue;
+        let schemaSeeds = seeds.get(group.scope._schema);
+        if (!schemaSeeds) seeds.set(group.scope._schema, (schemaSeeds = new Map()));
+        schemaSeeds.set(`${group.scope._table}:${group.identifier}`, group.plan!.initialSeed);
+      }
+      streamingInitialSeeds.set(transaction, seeds);
+      return await runInTransaction(
+        transaction,
+        async () => {
+          await prepareDbTransaction(transaction, async (tx) => {
+            for (const group of groups) await group.plan!.validate(tx);
+            for (const entry of streams) {
+              if (
+                (await this.tableIdentity(entry.table)) !== entry.tableId ||
+                (await this.columnIdentity(entry.table, entry.stream!.column)) !== entry.columnId
+              )
+                throw new Error("Streaming upload schema identity changed");
+              const encryption = encryptedSchemas
+                .get(entry.table._schema)
+                ?.tables.get(entry.table._table);
+              if (!encryption || entry.operation === "insert") continue;
+              const row = (await tx.one(
+                new TypedTableQueryBuilder<
+                  AnyTableMeta & { row: { id: string } & Record<string, unknown> }
+                >(entry.table._table, entry.table._schema)
+                  .includeDeleted()
+                  .where({ id: entry.id })
+                  .select(encryption.space),
+                { tier: "global" },
+              )) as Record<string, unknown> | null;
+              if (
+                !!row !== !!entry.existing ||
+                (row &&
+                  (typeof row[encryption.space] !== "string" ||
+                    (row[encryption.space] as string).toLowerCase() !== entry.identifier))
+              )
+                throw new Error("Streaming upload target changed");
+            }
+          });
+          for (const group of groups) {
+            if (group.initial || !group.plan!.initialSeed) continue;
+            await prepareInitialSpaceForTransaction(
+              this,
+              transaction,
+              group.scope,
+              group.identifier,
+              streamingInitialRetainers.get(transaction)!,
+              undefined,
+              group.plan!.initialSeed,
+            );
+          }
+          for (const entry of declarations) {
+            if (!entry.stream) transaction.insert(entry.table, entry.data, entry.options);
+            else
+              await prepareDbTransaction(transaction, async (_tx, io) => {
+                await io.attachStreamingMutation(entry.staged!);
+              });
+          }
+          return value;
+        },
+        () => getDbTxHandleBinding(transaction, "streamingTransaction").ownerClient,
+      );
+    } finally {
+      // Consumed capabilities cannot evict committed/rejected-version payloads.
+      await Promise.all(
+        staged.map(async (entry) => {
+          try {
+            await entry.abort();
+          } catch {
+            /* Preserve the publication/source failure. */
+          }
+        }),
+      );
+      for (const group of groups) group.plan?.dispose();
+    }
+  }
+
+  /**
    * Stream one Text, Json, or Bytea column into a new row. The column's runtime
    * schema determines encoding; callers never pass a large-value kind.
    *
@@ -3373,6 +3855,12 @@ export class Db {
     data: StreamingInit,
     options?: StreamingInsertOptions,
   ): Promise<WriteHandle<{ id: string }>> {
+    if (encryptedSchemas.get(table._schema)?.tables.has(table._table)) {
+      const result = await this.streamingTransaction((plan) =>
+        plan.insertStreaming(table, data, options),
+      );
+      return new WriteHandle(result.txId, this.getClient(table._schema), result.value);
+    }
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data, "insert");
     const transformedData = transformInputColumns(table, ordinaryData);
@@ -3405,6 +3893,19 @@ export class Db {
     data: StreamingUpdate,
     options?: UpdateOptions,
   ): Promise<WriteHandle<{ id: string }>> {
+    const encryption = encryptedSchemas.get(table._schema)?.tables.get(table._table);
+    if (
+      encryption &&
+      typeof data === "object" &&
+      data !== null &&
+      (Object.hasOwn(data, encryption.space) ||
+        encryption.columns.some((name) => Object.hasOwn(data, name)))
+    ) {
+      const result = await this.streamingTransaction((plan) =>
+        plan.updateStreaming(table, id, data, options),
+      );
+      return new WriteHandle(result.txId, this.getClient(table._schema), result.value);
+    }
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data, "update");
     const transformedData = transformInputColumns(table, ordinaryData);
@@ -3433,6 +3934,12 @@ export class Db {
     data: StreamingUpdate,
     options?: UpdateOptions,
   ): Promise<WriteHandle<{ id: string }>> {
+    if (encryptedSchemas.get(table._schema)?.tables.has(table._table)) {
+      const result = await this.streamingTransaction((plan) =>
+        plan.upsertStreaming(table, id, data, options),
+      );
+      return new WriteHandle(result.txId, this.getClient(table._schema), result.value);
+    }
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data, "upsert");
     const transformedData = transformInputColumns(table, ordinaryData);
@@ -3699,14 +4206,7 @@ export class Db {
       return withTransactionAdmission(
         ownerClient,
         prerequisite,
-        () =>
-          new Transaction(
-            kind,
-            (schema) => this.getClient(schema),
-            context,
-            ownerClient,
-            e2ee,
-          ),
+        () => new Transaction(kind, (schema) => this.getClient(schema), context, ownerClient, e2ee),
       );
     return new Transaction(
       kind,
@@ -3836,11 +4336,7 @@ export class Db {
       await this.ensureReady(readinessTier(effectiveTier));
       const rows =
         context || usesRelationTraversal
-          ? await client.queryInternal(
-              wasmQuery,
-              queryOptions,
-              context?.readSession,
-            )
+          ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
           : await client.queryInternal(wasmQuery, queryOptions);
       if (equality && !(await equality.isCurrent())) {
         // Bound work under continuous rotation; never present incomplete history as exhaustion.

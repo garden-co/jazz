@@ -420,7 +420,7 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
             ],
         )
         .unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     if let Some(grant) = grant {
         jazz_testkit::collect_stream_deltas(&mut remote, &mut log, Duration::from_millis(250))
             .await;
@@ -447,7 +447,7 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
                 vec![("owner".into(), Value::Text("alice".into()))],
             )
             .unwrap();
-        jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+        jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     }
 
     wait_for_subscription_update(

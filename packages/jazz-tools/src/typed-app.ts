@@ -34,7 +34,6 @@ import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "
 import type { StreamingValueSource } from "./runtime/client.js";
 import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
-
 declare const tableRelationsBrand: unique symbol;
 
 type TableSource<TColumns extends TableDefinition = any> = TColumns | DefinedTable<TColumns>;

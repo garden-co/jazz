@@ -316,6 +316,7 @@ enum NapiDbInnerStorage {
 enum StreamingOwnerState {
     Open,
     Closing,
+    CloseDeferred,
     Closed,
 }
 
@@ -583,6 +584,11 @@ impl StreamingOwnerLifecycle {
     }
 
     fn close_owner(&self) {
+        if self.state.get() == StreamingOwnerState::CloseDeferred {
+            self.state.set(StreamingOwnerState::Closing);
+            self.close_result.borrow_mut().take();
+            return;
+        }
         if self.state.get() != StreamingOwnerState::Open {
             return;
         }
@@ -1840,6 +1846,61 @@ pub struct StreamingMutation {
     base: Option<CoreBranchViewBase>,
 }
 
+#[napi(js_name = "StagedStreamingMutation")]
+pub struct StagedStreamingMutation {
+    db: NapiDbInner,
+    staged: Option<jazz::db::StagedStreamingValue>,
+}
+
+#[napi]
+impl StagedStreamingMutation {
+    #[napi]
+    pub fn attach(&mut self, open_transaction_id: String) -> js::Result<()> {
+        let mut staged = self
+            .staged
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("staged streaming mutation is closed"))?;
+        let tx = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
+            .map_err(napi::Error::from_reason)?;
+        let db = self.db.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.attach_staged_streaming_value(tx, &mut staged))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.attach_staged_streaming_value(tx, &mut staged))
+            }
+        }
+        .map_err(napi_error)
+        .map_err(BindingError::from)
+    }
+
+    #[napi]
+    pub fn abort(&mut self) -> js::Result<bool> {
+        let Some(mut staged) = self.staged.take() else {
+            return Ok(false);
+        };
+        let db = self.db.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.abort_staged_streaming_value(&mut staged))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.abort_staged_streaming_value(&mut staged))
+            }
+        }
+        .map_err(napi_error)
+        .map_err(BindingError::from)
+    }
+}
+
 #[napi]
 impl StreamingMutation {
     #[napi]
@@ -1933,6 +1994,59 @@ impl StreamingMutation {
             )
             .map_err(BindingError::from),
         }
+    }
+
+    #[napi]
+    pub fn stage(&mut self) -> js::Result<StagedStreamingMutation> {
+        self.lifecycle.ensure_stream_active(self.stream_id)?;
+        if self
+            .lifecycle
+            .streams
+            .borrow()
+            .get(&self.stream_id)
+            .is_some_and(|stream| stream.borrow().cleanup_only)
+        {
+            return Err(napi::Error::from_reason("streaming insert is closed").into());
+        }
+        let cells = self
+            .cells
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
+        let (storage, upload) = self
+            .lifecycle
+            .take_stream(self.stream_id)
+            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
+        let staged = match storage {
+            NapiDbInnerStorage::Memory(db) => core_block_on(db.stage_streaming_value_upload(
+                upload,
+                self.mutation,
+                &self.table,
+                self.row_id,
+                cells,
+                &self.column,
+                self.identity,
+                self.updated_at_ms,
+                self.head.clone(),
+                self.base.clone(),
+            )),
+            NapiDbInnerStorage::Persistent(db) => core_block_on(db.stage_streaming_value_upload(
+                upload,
+                self.mutation,
+                &self.table,
+                self.row_id,
+                cells,
+                &self.column,
+                self.identity,
+                self.updated_at_ms,
+                self.head.clone(),
+                self.base.clone(),
+            )),
+        }
+        .map_err(napi_error)?;
+        Ok(StagedStreamingMutation {
+            db: Rc::clone(&self.db),
+            staged: Some(staged),
+        })
     }
 
     #[napi]
@@ -3857,40 +3971,50 @@ impl NapiDb {
             .map_err(BindingError::from);
         }
         let inner = self.inner.borrow_mut().take();
+        let binding_inner = Rc::clone(&self.inner);
         if owns_runtime {
             lifecycle.close_owner();
         } else {
             lifecycle.close_view(view_id);
         }
         native_read_or_pending(Box::pin(async move {
-            let result = if owns_runtime {
-                if let Some(inner) = inner {
-                    match inner {
-                        NapiDbInnerStorage::Memory(db) => {
-                            close_owned_napi_runtime(db, Rc::clone(&lifecycle)).await
+            let (result, deferred) = if owns_runtime {
+                if let Some(inner) = inner.as_ref() {
+                    let outcome = match inner {
+                        NapiDbInnerStorage::Memory(db) | NapiDbInnerStorage::Persistent(db) => {
+                            close_owned_napi_runtime(db, &lifecycle).await
                         }
-                        NapiDbInnerStorage::Persistent(db) => {
-                            close_owned_napi_runtime(db, Rc::clone(&lifecycle)).await
-                        }
-                    }
+                    };
+                    (outcome.result, outcome.deferred)
                 } else {
                     lifecycle.drain_cleanups().await;
-                    lifecycle
-                        .take_cleanup_error()
-                        .map_or(Ok(()), |error| Err(napi::Error::from_reason(error)))
+                    (
+                        lifecycle
+                            .take_cleanup_error()
+                            .map_or(Ok(()), |error| Err(napi::Error::from_reason(error))),
+                        false,
+                    )
                 }
             } else {
                 lifecycle.drain_cleanups().await;
                 let cleanup_error = lifecycle.take_cleanup_error_for_view(view_id);
                 lifecycle.views.borrow_mut().remove(&view_id);
-                cleanup_error.map_or(Ok(()), |error| Err(napi::Error::from_reason(error)))
+                (
+                    cleanup_error.map_or(Ok(()), |error| Err(napi::Error::from_reason(error))),
+                    false,
+                )
             };
             let stored = result
                 .as_ref()
                 .copied()
                 .map_err(|error| error.reason.clone());
             if owns_runtime {
-                lifecycle.state.set(StreamingOwnerState::Closed);
+                if deferred {
+                    *binding_inner.borrow_mut() = inner;
+                    lifecycle.state.set(StreamingOwnerState::CloseDeferred);
+                } else {
+                    lifecycle.state.set(StreamingOwnerState::Closed);
+                }
                 *lifecycle.close_result.borrow_mut() = Some(stored);
             } else if !lifecycle.take_orphaned_closing_view(view_id) {
                 lifecycle
@@ -3904,25 +4028,33 @@ impl NapiDb {
         .map_err(BindingError::from)
     }
 }
+struct OwnedNapiCloseOutcome {
+    result: napi::Result<()>,
+    deferred: bool,
+}
+
 async fn close_owned_napi_runtime<S>(
-    db: Rc<CoreDb<S>>,
-    lifecycle: Rc<StreamingOwnerLifecycle>,
-) -> napi::Result<()>
+    db: &CoreDb<S>,
+    lifecycle: &StreamingOwnerLifecycle,
+) -> OwnedNapiCloseOutcome
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    let cleanup_db = Rc::clone(&db);
     lifecycle.drain_cleanups().await;
     let cleanup_error = lifecycle.take_cleanup_error();
-    let close_result = close_after_cleanup(
-        move || {
-            cleanup_db.set_tick_scheduler(None);
-            cleanup_db.clear_mutation_error_callback();
-        },
-        async move { db.close().await.map_err(napi_error) },
-    )
-    .await;
-    compose_close_result(close_result, cleanup_error)
+    let close_result = db.close().await;
+    // Classify before secondary cleanup errors can replace the code carrier.
+    let deferred = close_result.as_ref().is_err_and(|error| {
+        error.code == jazz::db::ErrorCode::WriteRejected && db.close_has_deferred_upload_cleanup()
+    });
+    if !deferred {
+        db.set_tick_scheduler(None);
+        db.clear_mutation_error_callback();
+    }
+    OwnedNapiCloseOutcome {
+        result: compose_close_result(close_result.map_err(napi_error), cleanup_error),
+        deferred,
+    }
 }
 
 fn compose_close_result(
@@ -3930,25 +4062,15 @@ fn compose_close_result(
     cleanup_error: Option<String>,
 ) -> napi::Result<()> {
     match close_result {
-        Err(error) => match cleanup_error {
-            Some(cleanup) => Err(napi::Error::from_reason(format!(
-                "{}; secondary: {cleanup}",
-                error.reason
-            ))),
-            None => Err(error),
-        },
+        Err(mut error) => {
+            if let Some(cleanup) = cleanup_error {
+                error.reason.push_str("; secondary: ");
+                error.reason.push_str(&cleanup);
+            }
+            Err(error)
+        }
         Ok(()) => cleanup_error.map_or(Ok(()), |error| Err(napi::Error::from_reason(error))),
     }
-}
-
-async fn close_after_cleanup<F>(cleanup: impl FnOnce(), close: F) -> napi::Result<()>
-where
-    F: Future<Output = napi::Result<()>>,
-{
-    // JS resources must not remain retained merely because durable close
-    // fails. Detach them before entering the fallible storage lifecycle.
-    cleanup();
-    close.await
 }
 
 fn unknown_transaction_kind_message(kind: &str) -> String {
@@ -5374,7 +5496,7 @@ mod tests {
         NapiDb, NapiDbInnerStorage, NapiWrite, NativeAuthorAdmissions, ParsedUpsertOptions,
         PendingNativeRead, PendingNativeSubscriptionBatch, PendingSubscriptionBatchOutcome,
         PendingSubscriptionBatchPoll, RestoreOptions, StreamingOwnerLifecycle, UpdateOptions,
-        authority_epoch_from_bigint, close_after_cleanup, core_author_id_from_bytes, core_block_on,
+        authority_epoch_from_bigint, core_author_id_from_bytes, core_block_on,
         core_claim_value_from_json, core_drive_direct_mutation_once, core_insert_options,
         core_open_backend_identity, core_open_identity, core_read_opts_from_json,
         core_read_tier_from_str, core_restore_options, core_subscription_event_to_napi,
@@ -5405,27 +5527,136 @@ mod tests {
     }
 
     #[test]
-    fn failing_close_releases_scheduler_and_mutation_callback() {
-        let scheduler = Rc::new(());
-        let scheduler_weak = Rc::downgrade(&scheduler);
-        let callback = Rc::new(());
-        let callback_weak = Rc::downgrade(&callback);
-        let result = core_block_on(close_after_cleanup(
-            move || {
-                drop(scheduler);
-                drop(callback);
-            },
-            async { Err(napi::Error::from_reason("injected close failure")) },
-        ));
-        assert!(result.is_err());
-        assert!(
-            scheduler_weak.upgrade().is_none(),
-            "a failed storage close must not retain the JS scheduler"
-        );
-        assert!(
-            callback_weak.upgrade().is_none(),
-            "a failed storage close must not retain the JS mutation callback"
-        );
+    fn deferred_upload_close_preserves_native_tick_and_retry() {
+        use crate::{
+            CoreAuthorSubject, CoreDb, CoreDbConfig, CoreDbIdentity, CoreMemoryStorage,
+            CoreNodeUuid, CoreRowUuid, CoreValue,
+        };
+        use napi::bindgen_prelude::Either;
+
+        core_block_on(async {
+            let source = SchemaBuilder::new()
+                .table(TableSchema::builder("files").column("body", ColumnType::Text))
+                .build();
+            let schema = jazz::schema::JazzSchema::new(&source).unwrap();
+            let families = schema.column_families();
+            let owner = Rc::new(
+                CoreDb::open(CoreDbConfig::new(
+                    schema,
+                    CoreMemoryStorage::new(
+                        &families.iter().map(String::as_str).collect::<Vec<_>>(),
+                    )
+                    .unwrap(),
+                    CoreDbIdentity {
+                        node: CoreNodeUuid::from_bytes([0xf6; 16]),
+                        author: CoreAuthorSubject::SYSTEM,
+                    },
+                ))
+                .await
+                .unwrap(),
+            );
+            let mut abandoned = owner
+                .begin_streaming_value_upload("files", &BTreeMap::new(), "body")
+                .unwrap();
+            owner
+                .push_streaming_value_upload(&mut abandoned, b"abandoned")
+                .await
+                .unwrap();
+            let mut published = owner
+                .begin_streaming_value_upload("files", &BTreeMap::new(), "body")
+                .unwrap();
+            owner
+                .push_streaming_value_upload(&mut published, b"published")
+                .await
+                .unwrap();
+            owner.set_deferred_local_persistence(true);
+            let write = owner
+                .finish_streaming_value_upload(
+                    published,
+                    jazz::db::StreamingMutationKind::Insert,
+                    "files",
+                    CoreRowUuid::from_bytes([0xf6; 16]),
+                    BTreeMap::new(),
+                    "body",
+                    jazz::db::WriteIdentity::Database,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let lifecycle = StreamingOwnerLifecycle::new();
+            lifecycle.enqueue_cleanup(0, NapiDbInnerStorage::Memory(Rc::clone(&owner)), abandoned);
+            let binding = NapiDb {
+                inner: Rc::new(std::cell::RefCell::new(Some(NapiDbInnerStorage::Memory(
+                    Rc::clone(&owner),
+                )))),
+                owns_runtime: true,
+                non_durable_client: Rc::new(Cell::new(false)),
+                view_id: 0,
+                streaming: lifecycle,
+                trusted_backend: false,
+                author_admissions: NativeAuthorAdmissions::default(),
+            };
+            match binding.close() {
+                Err(error) => assert_eq!(error.status.as_ref(), "write_rejected"),
+                Ok(Either::A(_)) => panic!("unresolved cleanup must reject close"),
+                Ok(Either::B(pending)) => {
+                    let mut rejected = false;
+                    for _ in 0..512 {
+                        match pending.poll() {
+                            Err(error) => {
+                                assert_eq!(error.status.as_ref(), "write_rejected");
+                                rejected = true;
+                                break;
+                            }
+                            Ok(Some(_)) => panic!("unresolved cleanup must reject close"),
+                            Ok(None) => {}
+                        }
+                    }
+                    assert!(rejected, "close must return the deferred cleanup failure");
+                }
+            }
+            for _ in 0..16 {
+                binding
+                    .tick()
+                    .expect("deferred close must retain a native tick route");
+            }
+            assert_eq!(
+                owner
+                    .write_state(write.mergeable_tx_id())
+                    .unwrap()
+                    .durability,
+                DurabilityTier::Local
+            );
+            assert!(
+                owner
+                    .insert(
+                        "files",
+                        BTreeMap::from([("body".to_owned(), CoreValue::String("late".to_owned()))]),
+                        Default::default()
+                    )
+                    .await
+                    .is_err(),
+                "close must not reopen mutation admission"
+            );
+            match binding
+                .close()
+                .expect("settled cleanup permits close retry")
+            {
+                Either::A(_) => {}
+                Either::B(pending) => {
+                    let mut complete = false;
+                    for _ in 0..512 {
+                        if pending.poll().unwrap().is_some() {
+                            complete = true;
+                            break;
+                        }
+                    }
+                    assert!(complete, "close retry completes after publication settles");
+                }
+            }
+        });
     }
 
     #[test]

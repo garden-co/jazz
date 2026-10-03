@@ -97,6 +97,29 @@ one denied or ineligible recipient rejects the entire initial transaction.
 `fixtures/e2ee-space.c` independently emits the three initial
 transcripts; the TypeScript format test compares literals and checks tampering.
 
+Encrypted first-file uploads may prepare these exact signed root/grant
+records privately before source consumption. The seed's secret and epoch
+remain fixed and unpublished until one final exclusive transaction validates
+root absence, the active author/device/account epoch and explicit recipient
+epochs again, then publishes controls and data together. The seed is bound to
+its originating Db, schema, scope table and identifier; disposal or one handoff
+prevents reuse. This adds no durable encoding or implicit creator grant.
+
+After the initial owner transaction is authoritatively accepted and its history
+retained, automatic scope creation awaits an original-author key handoff.
+This authenticates the accepted original root and exact active author device,
+reopens the author envelope, and uses ordinary later-position delivery with a
+fresh epoch/membership check. It does not reconcile or rotate, add creator
+membership, or deliver inside the root transaction. Secret/device buffers are
+cleared on every exit.
+
+Later delivery denial, stale eligibility or adapter failure preserves the
+already-accepted scope/data receipt and emits only a fixed maintenance warning.
+Acceptance does not promise successful delivery to every recipient.
+`db.e2ee.explain({ scope, identifier })` may explicitly retry maintenance.
+The denied-handoff regression in `initial-space-handoff.test.ts` observes
+accepted data and explicit recipient grants while the recipient lacks a key.
+
 ## Space recovery delivery transcript, version 1
 
 `__e2ee_space_recovery_deliveries` contains `id`, `spaceId`, `epochId`,
