@@ -323,11 +323,43 @@ pub(super) struct CurrentPayloadEncodePlan {
     descriptor: Vec<u8>,
 }
 
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static CORRUPT_NEXT_CURRENT_RESULT_SCHEMA: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn corrupt_next_current_result_schema_for_test() {
+    CORRUPT_NEXT_CURRENT_RESULT_SCHEMA.with(|next| next.set(true));
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn take_current_result_schema_corruption_for_test() -> bool {
+    CORRUPT_NEXT_CURRENT_RESULT_SCHEMA.with(|next| next.replace(false))
+}
+
 impl CurrentPayloadEncodePlan {
     pub(super) fn new(
         descriptor: RecordDescriptor,
         schema: &super::query_engine::ResultMembershipSchema,
     ) -> Result<Self, Error> {
+        Self::new_inner(descriptor, schema).map_err(|_| Error::QueryResultProtocol)
+    }
+
+    fn new_inner(
+        descriptor: RecordDescriptor,
+        schema: &super::query_engine::ResultMembershipSchema,
+    ) -> Result<Self, Error> {
+        #[cfg(any(test, feature = "testing"))]
+        let malformed_schema = take_current_result_schema_corruption_for_test().then(|| {
+            let mut malformed = schema.clone();
+            malformed.row_field = "__missing_current_result_row_uuid".to_owned();
+            malformed
+        });
+        #[cfg(any(test, feature = "testing"))]
+        let schema = malformed_schema.as_ref().unwrap_or(schema);
+
         let selected = std::iter::once(schema.row_field.as_str())
             .chain(
                 schema
@@ -395,10 +427,11 @@ impl CurrentPayloadEncodePlan {
     pub(super) fn encode(&self, record: BorrowedRecord<'_>) -> Result<(Vec<u8>, Vec<u8>), Error> {
         // Both descriptors are trusted compiled schemas. Copy the selected
         // encoded fields; do not decode and re-encode our own encoder's output.
-        Ok((
-            self.descriptor.clone(),
-            self.projector.project(record)?.into_raw(),
-        ))
+        let projected = self
+            .projector
+            .project(record)
+            .map_err(|_| Error::QueryResultProtocol)?;
+        Ok((self.descriptor.clone(), projected.into_raw()))
     }
 }
 
@@ -678,7 +711,10 @@ mod tests {
             ("row_uuid", ValueType::Uuid),
             ("payload", ValueType::String),
         ]);
-        assert!(plan.encode(wrong_source.bind(&[])).is_err());
+        assert!(matches!(
+            plan.encode(wrong_source.bind(&[])),
+            Err(crate::node::Error::QueryResultProtocol)
+        ));
     }
 
     // Malformed member/schema pairings cannot be authored through the public

@@ -3585,6 +3585,31 @@ fn server_subscription_failure_rejection_message(
     subscription: SubscriptionKey,
     error: &crate::node::Error,
 ) -> SyncMessage {
+    server_subscription_failure_rejection_message_with_feature(
+        subscription,
+        error,
+        crate::wire::FEATURE_NONE,
+    )
+}
+
+fn server_failure_code_for_features(
+    code: SubscribeServerFailureCode,
+    negotiated_features: crate::wire::WireFeatures,
+) -> SubscribeServerFailureCode {
+    if code == SubscribeServerFailureCode::QueryResultProtocol
+        && negotiated_features & crate::wire::FEATURE_QUERY_RESULT_PROTOCOL == 0
+    {
+        SubscribeServerFailureCode::Internal
+    } else {
+        code
+    }
+}
+
+fn server_subscription_failure_rejection_message_with_feature(
+    subscription: SubscriptionKey,
+    error: &crate::node::Error,
+    negotiated_features: crate::wire::WireFeatures,
+) -> SyncMessage {
     // Keep the complete error on the serving process only. Subscription keys
     // provide a correlation handle without disclosing schema, policy, or
     // storage details to the peer.
@@ -3592,12 +3617,19 @@ fn server_subscription_failure_rejection_message(
         "jazz subscription rejected: shape={} binding={} read_view={} server_error={error}",
         subscription.shape_id.0, subscription.binding_id.0, subscription.read_view.id,
     );
-    subscription_rejection_message(
-        subscription,
-        SubscribeRejectReason::ServerFailure {
-            code: server_failure_code(error),
+    let code = server_failure_code_for_features(server_failure_code(error), negotiated_features);
+    subscription_rejection_message(subscription, SubscribeRejectReason::ServerFailure { code })
+}
+fn relay_subscription_rejection_reason_with_feature(
+    reason: SubscribeRejectReason,
+    negotiated_features: crate::wire::WireFeatures,
+) -> SubscribeRejectReason {
+    match reason {
+        SubscribeRejectReason::ServerFailure { code } => SubscribeRejectReason::ServerFailure {
+            code: server_failure_code_for_features(code, negotiated_features),
         },
-    )
+        reason => reason,
+    }
 }
 
 fn subscription_rejection_message(
@@ -3623,6 +3655,7 @@ fn server_failure_code(error: &crate::node::Error) -> SubscribeServerFailureCode
         | crate::node::Error::InvalidCatalogueUpdate(_) => {
             SubscribeServerFailureCode::SchemaResolution
         }
+        crate::node::Error::QueryResultProtocol => SubscribeServerFailureCode::QueryResultProtocol,
         _ => SubscribeServerFailureCode::Internal,
     }
 }
@@ -5141,12 +5174,14 @@ impl SubscriptionSender {
         &self,
         event: SubscriptionEvent,
     ) -> Result<(), futures_channel::mpsc::TrySendError<SubscriptionEvent>> {
-        let terminal = matches!(&event, SubscriptionEvent::Closed)
+        let releases_opening = matches!(&event, SubscriptionEvent::Closed)
             || matches!(&event, SubscriptionEvent::Rejected { reason }
                 if !matches!(reason, SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission));
-        if terminal {
+        if releases_opening {
             let mut publication = self.publication.borrow_mut();
-            publication.deferred = None;
+            if subscription_event_is_terminal(&event) {
+                publication.deferred = None;
+            }
             // A rejection releases a withheld local-first opening: the
             // caller sees the (empty) local result, then the rejection.
             if let Some(gate) = publication.opening_gate.take()
@@ -5507,9 +5542,11 @@ impl SubscriptionStream {
                 // Anything before the window's opening reset (its link wake,
                 // receipt-only transitions) describes no published view.
                 Poll::Ready(Some(SubscriptionEvent::Delta { .. })) => continue,
-                // A rejected window is reported like any rejected read; the
-                // fallback keeps serving the cached page afterwards.
+                // A non-retryable rejection terminates this exact query stream.
                 Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. })) => {
+                    if subscription_event_is_terminal(&event) {
+                        self.mark_terminated();
+                    }
                     return Poll::Ready(Some(event));
                 }
                 // A closed window leaves the fallback serving.
@@ -5552,6 +5589,20 @@ impl SubscriptionStream {
         materialized_subscription_snapshot(&state.snapshot, &state.snapshot_index)
     }
 
+    fn mark_terminated(&mut self) {
+        self.terminated = true;
+        self.window_fallback = None;
+        self._state
+            .borrow()
+            .sender
+            .publication
+            .borrow_mut()
+            .deferred = None;
+        if let Some(cleanup) = self.cleanup.take() {
+            drop(cleanup(None));
+        }
+    }
+
     /// Return the next queued materialized subscription event without waiting.
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
         if self.terminated {
@@ -5567,12 +5618,15 @@ impl SubscriptionStream {
                 };
             }
             let event = self.receiver.try_recv().ok()?;
-            if subscription_event_is_publishable(&event) {
-                return Some(event);
+            if !subscription_event_is_publishable(&event) {
+                continue;
             }
+            if subscription_event_is_terminal(&event) {
+                self.mark_terminated();
+            }
+            return Some(event);
         }
     }
-
     #[cfg(test)]
     fn compiled_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
         let state = self._state.borrow();
@@ -5583,6 +5637,20 @@ impl SubscriptionStream {
         maintained_subscription
             .as_ref()
             .and_then(LocalMaintainedViewSubscription::compiled_authorization_mode)
+    }
+}
+fn subscription_event_is_terminal(event: &SubscriptionEvent) -> bool {
+    match event {
+        SubscriptionEvent::Closed => true,
+        SubscriptionEvent::Rejected { reason } => !matches!(
+            reason,
+            SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission
+                | SubscribeRejectReason::InvalidAuthoritySourceClosure { .. }
+                | SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::Internal,
+                }
+        ),
+        SubscriptionEvent::Delta { .. } => false,
     }
 }
 
@@ -5611,6 +5679,9 @@ impl Stream for SubscriptionStream {
             }
             match Pin::new(&mut this.receiver).poll_next(cx) {
                 Poll::Ready(Some(event)) if subscription_event_is_publishable(&event) => {
+                    if subscription_event_is_terminal(&event) {
+                        this.mark_terminated();
+                    }
                     return Poll::Ready(Some(event));
                 }
                 Poll::Ready(Some(_)) => continue,

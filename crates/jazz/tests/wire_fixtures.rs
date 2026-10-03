@@ -465,6 +465,16 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
+            "subscribe_rejected_query_result_protocol",
+            "SubscribeRejected",
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::QueryResultProtocol,
+                },
+            },
+        ),
+        (
             "view_update_reset_with_covered_input",
             "ViewUpdate",
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
@@ -1037,6 +1047,55 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
             "{name}: a canonical payload must reject a suffix"
         );
     }
+}
+
+/// A sender and receiver agree on the frozen rejection bytes only after
+/// negotiating `QueryResultProtocol`; older peers cannot encode that code.
+///
+/// ```text
+/// sender ──negotiated fixture bytes──► receiver
+/// sender ──without feature───────────► rejected
+/// ```
+#[test]
+fn query_result_protocol_rejection_has_frozen_bytes_and_requires_negotiation() {
+    let (_, _, message) = wire_fixture_messages()
+        .into_iter()
+        .find(|(name, _, _)| *name == "subscribe_rejected_query_result_protocol")
+        .expect("the query-result protocol rejection fixture exists");
+    let negotiated = jazz::wire::current_wire_features();
+    let feature = jazz::wire::FEATURE_QUERY_RESULT_PROTOCOL;
+    assert_ne!(negotiated & feature, 0);
+
+    let encoded = jazz::wire::encode_sync_message_for_features(&message, negotiated)
+        .expect("the negotiated rejection encodes");
+    let fixtures: Manifest =
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames.json"))
+            .expect("wire fixture manifest deserializes");
+    let frozen = fixtures
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.name == "subscribe_rejected_query_result_protocol")
+        .expect("the query-result protocol byte fixture exists");
+    assert_eq!(hex(&encoded), frozen.payload_hex);
+    assert_eq!(
+        jazz::wire::decode_sync_message_for_features(&encoded, negotiated)
+            .expect("the negotiated rejection decodes"),
+        message
+    );
+
+    let older_features = negotiated & !feature;
+    assert_eq!(
+        jazz::wire::encode_sync_message_for_features(&message, older_features)
+            .expect_err("an older peer cannot encode the new failure code")
+            .code,
+        jazz::wire::WireErrorCode::UnsupportedFeature
+    );
+    assert_eq!(
+        jazz::wire::decode_sync_message_for_features(&encoded, older_features)
+            .expect_err("an older peer cannot decode the new failure code")
+            .code,
+        jazz::wire::WireErrorCode::UnsupportedFeature
+    );
 }
 
 /// Untrusted admission rejects malformed references; the trusted encoder does not validate.
