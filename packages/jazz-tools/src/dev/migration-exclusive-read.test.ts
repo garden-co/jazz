@@ -83,6 +83,8 @@ it("preserves exclusive conflict detection after renaming the queried table", as
     await stable.commit().wait();
     const changed = db.beginExclusiveTransaction();
     expect(await changed.all(newApp.initiatives, { tier: "local" })).toEqual([project]);
+    // Admit the fresh writer's B schema without changing the existing reader cut.
+    expect(await writer.all(newApp.initiatives, { tier: "global" })).toEqual([project]);
     await writer
       .insert(newApp.initiatives, { title: "Concurrent project" })
       .wait({ tier: "global" });

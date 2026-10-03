@@ -4408,10 +4408,10 @@ pub(super) fn current_row_from_version_projection(
     let mut values = current_row_prefix_and_cells_from_version(table, version)?;
     append_current_row_provenance(&mut values, version);
     let raw = descriptor.create(&values)?;
-    Ok(CurrentRow::new(
-        table.name.clone(),
-        OwnedRecord::new(raw, descriptor),
-    ))
+    Ok(
+        CurrentRow::new(table.name.clone(), OwnedRecord::new(raw, descriptor))
+            .with_content_witness(version),
+    )
 }
 
 pub(super) fn current_row_from_materialized_cells(
@@ -4460,10 +4460,10 @@ pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
     values.push(Value::U64(updated.tx_time().0));
     values.push(Value::U64(updated.tx_node_alias().0));
     let raw = descriptor.create(&values)?;
-    Ok(CurrentRow::new(
-        table.name.clone(),
-        OwnedRecord::new(raw, descriptor),
-    ))
+    Ok(
+        CurrentRow::new(table.name.clone(), OwnedRecord::new(raw, descriptor))
+            .with_content_witness(content),
+    )
 }
 
 pub(super) fn current_row_from_cells_with_explicit_provenance(
