@@ -17,6 +17,10 @@ const controls = vi.hoisted(() => ({
   opens: 0,
   /** The account this browser retained from an earlier sign-in, opened at start. */
   retained: undefined as string | undefined,
+  /** Whether a login as the selected identity keeps its client (as the browser host does). */
+  revalidates: false,
+  /** Holds the provider's answer to an in-place login until resolved. */
+  providerAnswer: undefined as Promise<void> | undefined,
 }));
 
 vi.mock("@/src/lib/auth-client", () => ({
@@ -59,6 +63,17 @@ vi.mock("jazz-tools/react", async () => {
             loginJWT: () => select(),
             registerJWT: () => select("register"),
             linkJWT: () => select("link"),
+            ...(controls.revalidates
+              ? {
+                  revalidateJWT: async (account: { identity: { subject: string } }) => {
+                    const subject = controls.session!.user.id;
+                    controls.events.push(`revalidate:${subject}`);
+                    await controls.providerAnswer;
+                    if (controls.loginError) throw controls.loginError;
+                    return account.identity.subject === subject ? account : undefined;
+                  },
+                }
+              : {}),
             logout: () => {
               controls.events.push("logout");
             },
@@ -117,6 +132,8 @@ afterEach(() => {
   controls.openError = undefined;
   controls.opens = 0;
   controls.retained = undefined;
+  controls.revalidates = false;
+  controls.providerAnswer = undefined;
   sessionStorage.removeItem("band-chat-register-jwt");
 });
 
@@ -141,15 +158,56 @@ it("does not render A for B and syncs A before replacing its account", async () 
   element.remove();
 });
 
-it("logs in again when the session opened the signed-in user's retained account", async () => {
+it("shows the signed-in user's retained account while logging it in again", async () => {
   // The retained account opens before Better Auth answers, with no
-  // credential: only a login gives it the one it syncs with.
+  // credential: only a login gives it the one it syncs with. Its local data
+  // is this user's, so it renders while that login runs.
   controls.retained = "principal-a";
+  controls.revalidates = true;
+  let answer!: () => void;
+  controls.providerAnswer = new Promise((resolve) => (answer = resolve));
   const element = document.createElement("div");
   const root = createRoot(element);
   await act(async () => root.render(<JazzProvider>rooms</JazzProvider>));
-  await waitFor(() => controls.events.includes("login:principal-a"));
+  await waitFor(() => controls.events.includes("revalidate:principal-a"));
   await waitFor(() => element.textContent === "rooms");
+  await act(async () => answer());
+  await waitFor(() => element.textContent === "rooms");
+  expect(controls.events).toEqual(["revalidate:principal-a"]);
+  expect(controls.opens).toBe(1);
+  await act(async () => root.unmount());
+  await new Promise((resolve) => setTimeout(resolve, 10));
+});
+
+it("hides the retained account when logging it in again fails", async () => {
+  controls.retained = "principal-a";
+  controls.revalidates = true;
+  let answer!: () => void;
+  controls.providerAnswer = new Promise((resolve) => (answer = resolve));
+  const element = document.createElement("div");
+  const root = createRoot(element);
+  await act(async () => root.render(<JazzProvider>rooms</JazzProvider>));
+  await waitFor(() => element.textContent === "rooms");
+  controls.loginError = new Error("provider rejected the session");
+  await act(async () => answer());
+  await waitFor(() => element.textContent!.includes("provider rejected the session"));
+  expect(element.textContent).not.toContain("rooms");
+  await act(async () => root.unmount());
+  await new Promise((resolve) => setTimeout(resolve, 10));
+});
+
+it("does not show a retained account of another user while logging in", async () => {
+  controls.retained = "principal-z";
+  controls.revalidates = true;
+  let answer!: () => void;
+  controls.providerAnswer = new Promise((resolve) => (answer = resolve));
+  const element = document.createElement("div");
+  const root = createRoot(element);
+  await act(async () => root.render(<JazzProvider>rooms</JazzProvider>));
+  await waitFor(() => controls.events.includes("revalidate:principal-a"));
+  expect(element.textContent).not.toContain("rooms");
+  await act(async () => answer());
+  await waitFor(() => element.querySelector("[data-account='principal-a']") !== null);
   await act(async () => root.unmount());
   await new Promise((resolve) => setTimeout(resolve, 10));
 });
