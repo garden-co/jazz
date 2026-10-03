@@ -1,0 +1,166 @@
+---
+title: End-to-end encryption
+description: "Encrypt table values and image uploads while keeping Jazz permissions and sync."
+reviewedAt: "17d2f3b86"
+---
+
+End-to-end encryption (E2EE) keeps selected logical values encrypted on the server. Jazz still checks ordinary row permissions. A recipient needs both permission to receive a row and a verified encryption key to read its protected values.
+
+This is experimental browser and native Node functionality. It is not a claim of independent security audit, production qualification or React Native support. The [encrypted chat example](https://github.com/garden-co/jazz/tree/main/examples/e2ee-chat) demonstrates two-account messaging and encrypted image uploads using the existing chat UI.
+
+## Declare an encryption space
+
+An encryption space belongs to a stable scope row. In this example, each chat has its own space; messages reference it through `chatId`:
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/e2ee-chat/schema.ts#e2ee-chat-schema
+</include>
+
+The application sees the declared logical types. Jazz stores ciphertext for the protected columns. References, sender IDs, row IDs, timestamps, row provenance, ciphertext sizes and access patterns are not hidden. Keep fields needed for permissions outside the encrypted column list. The server cannot validate encrypted message text or image contents.
+
+Declaring encrypted columns adds the managed schema and package-owned device policies. Applications still define permissions for their rows and space administration. Do not replace the package-owned device policies or use a blanket allow-all space mutation policy. The example constrains chat membership and key grants to the chat owner.
+
+The example creates an immutable `chatOwners` binding in the same exclusive
+transaction as the chat. Its declared references let the root-insertion policy
+prove that the current account owns the specific chat. The managed space's
+`identifier` is not itself a declared chat reference; do not replace this check
+with a creator-only root policy, which would let other accounts insert conflicting
+roots for an existing chat.
+
+## Keep account and key storage separate
+
+Configure `e2ee: { app, store }` when creating the authenticated Db. The store implements `AccountStore`, but must use a different value from account-selection storage. Its `update(transform)` operation must be atomic across concurrent callers; the synchronous transform can run more than once. The browser example uses IndexedDB read/write transactions and scopes the record by registry, environment and account.
+
+Do not use an in-memory closure when keys must survive reload. Do not use a localStorage read/modify/write sequence as an atomic store. Losing key storage is not equivalent to logging in again: another device requires approval or recovery. Protect stored keys against browser-profile theft and cross-site scripting. E2EE cannot protect plaintext from compromised application code running on a recipient device.
+
+The store contains private device decryption and signing keys; the SDK does not
+encrypt that store at rest. Native hosts must provide appropriately protected
+storage. Browser IndexedDB remains accessible to same-origin code.
+
+## Start automatically, including offline
+
+Creating the Db prepares its local encryption state automatically. Do not gate
+the interface on `devices.list()`, an explicit initialisation call or a successful
+server connection. Creating a scope also prepares its initial space and grants.
+
+A newly generated local account can initialise offline once this browser profile
+has cached an authenticated catalogue for the same server, application and
+environment. The catalogue contains schema information, not account keys or
+membership. A first visit without that catalogue still needs a connection.
+Imported accounts and recipients without accepted public keys cannot be treated
+as fresh local founders.
+
+Account-selection storage reserves one original device for each account and
+application before publishing an offline founder. Its v3 inventory keeps v1/v2
+roots and selection readable, but ordinary legacy provenance does not prove
+first-device ownership. A missing bound founder journal cannot regenerate an
+epoch; the exact original journal can resume after an account recovery import.
+Independent account stores still rely on Global authority to select one winner.
+
+Use `wait({ tier: "local" })` to wait for the persistent local owner before
+clearing a draft or reporting “Saved on this device”. This is not server
+acceptance, verified membership or delivery to another person. Keep the original
+write handle and observe `wait({ tier: "global" })` separately when the interface
+needs accepted completion. For initialisation, that wait also covers accepted
+history verification and the permitted initial key handoff.
+
+The SDK journals the original device, epoch, transaction and encrypted material
+before publication. Persistent restart and reconnect reuse that work; they do
+not rerun your callback or consume an upload stream again. Retain both the Jazz
+database and private key store. Clearing either is not a recovery mechanism.
+
+## Share with another account
+
+Use application-scoped Jazz account IDs, not provider subjects or device IDs.
+
+The example's sharing helper updates ordinary membership and then grants the key:
+
+<include cwd lang="ts" meta='title="src/chat.ts"'>
+  ../examples/e2ee-chat/src/chat.ts#e2ee-chat-share
+</include>
+
+The recipient must have usable, accepted device history. A key grant does not add an application membership row, and an application membership row does not grant a key. If an app performs those operations separately, report success only after both finish. Use a stable membership-row identity so retrying does not create duplicate memberships. Show failures and allow explicit retry rather than claiming atomic sharing.
+
+Creating a scope row prepares its initial space and creator grant automatically. Explicit initial recipients can exclude the creator; do not assume the initialiser becomes a member. Use an exclusive transaction when initial scope, membership and encrypted data must share one accepted outcome. Keep `existsIncludingCreated` on the relevant INSERT-policy source occurrences. It does not change read, update or delete policies, or let created rows substitute for accepted history during later administration.
+
+Initial recipient delivery follows in a later accepted transaction. Local completion does not wait for it. An explicit Global wait includes the permitted handoff, but failure cannot roll back data that the server has already accepted. The SDK retries rejected maintenance conflicts at most twice, revalidating accepted eligibility each time, without replaying your original write. Report other failures and inspect the state with `db.e2ee.explain({ scope: app.chats, identifier: chatId })`; do not describe accepted data as rolled back.
+
+For a pre-existing scope without an encryption space, the first encrypted write
+initialises the space for that writer, not automatically for the original scope
+row's creator. Explicitly grant other intended recipients.
+
+## Upload an encrypted image
+
+Pass the file's byte stream to the ordinary streaming API. This is the example's
+message helper; its `IMAGE_TYPES` and `MAX_IMAGE_BYTES` constants allow PNG, JPEG,
+WebP and GIF images up to 10 MiB:
+
+<include cwd lang="ts" meta='title="src/chat.ts"'>
+  ../examples/e2ee-chat/src/chat.ts#e2ee-chat-upload
+</include>
+
+Image bytes and protected metadata use the same space and are published in one mutation. Do not convert the image to a DataURL or encrypt it in a component. The SDK handles authenticated stream framing and ordinary large-value storage. The example limits accepted image types and size for usability; client validation is not a server-enforced security boundary.
+
+Uploads consume bounded chunks with backpressure. They stage ciphertext before opening the final exclusive transaction. Immediately before publication, Jazz checks the selected epoch, writer/device and effective membership against transaction-backed accepted history. A change during the upload rejects publication, even if ordinary stale writes are configured to warn. Present that failure and require explicit resubmission; the SDK must not replay a one-shot source or weaken the retry's transaction checks.
+
+For a new scope and its first file, `db.streamingTransaction(callback)` collects mutation declarations, stages their streams and publishes them together. Its callback receives a mutation-only plan, not an open database transaction: there are no reads or manual commit. It supports ordinary `insert` and streaming `insertStreaming`, `updateStreaming` and `upsertStreaming`; declaration methods return row IDs. All declarations are validated before any source is pulled. Do not hold an ordinary transaction open while waiting for file input.
+
+### Upload limits
+
+- Encrypted streaming supports logical byte columns in the root view. Explicit branch targets and implicit `branchBy` targets are rejected before source consumption.
+- Encrypted text/JSON streams, equality-indexed streamed columns, scope-row streams and partial file edits are unsupported.
+- Missing keys or unsupported declarations fail before source consumption. Ordinary row authorisation is checked at final acceptance, so a denied write may already have uploaded ciphertext.
+- A source failure releases stages not committed locally. Once a local transaction is committed, rejected-version storage retains its payload for normal retry/discard handling.
+- Persistent restart retains the original exclusive transaction and its validation evidence. Missing or incompatible evidence fails closed; it must not become a mergeable write or silently create another transaction. Do not automatically resubmit a source after a lost connection.
+
+## Read and render
+
+Use ordinary typed queries and React hooks. The central decoder returns logical values only after authentication. An image stream must pass final authentication and end-of-stream checks before any complete value is exposed. Encrypted decoding and key failures throw `E2eeDataError`, with codes including `key-unavailable`, `key-not-shared`, `maintenance-required` and `invalid-ciphertext`; ordinary transport, authorisation and query failures retain their own error types. The `refused` state belongs to `db.e2ee.explain`, not the query error-code contract. An active device with usable account keys can still lack membership in the row's space. Never display ciphertext as plaintext or replace an authentication failure with an empty successful result.
+
+The example uses `ReadTier.LocalFirst` for retained messages and separate ID-only `ReadTier.Remote` queries for server availability. `Remote` reads use the Global tier and exclude pending local writes. After a browser restart, “Available from server” means the server query observed the row; it does not recover the original write handle's Global completion or prove recipient delivery. If a server-backed query ends with a connection error, choose **Reload chat** after reconnecting. The example does not automatically retry terminal query errors or install a service worker.
+
+Ordinary queries materialise the entire image in memory. Bounded upload memory is not a bounded-memory download guarantee. Create a Blob/object URL only after successful decryption and revoke the URL when replacing or unmounting it. Download from those authenticated bytes, not from an exposed raw ciphertext locator.
+
+## Devices, groups and recovery
+
+`db.e2ee.devices.list()` distinguishes verified membership (`state`) from this caller's key-delivery readiness (`keyReadiness`). Approve a pending device from an already authorised device with `devices.approve(deviceId).wait()`; revoke through `devices.revoke(deviceId).wait()`. Do not infer remote key possession merely from an active ledger entry.
+
+Groups contain accounts or other groups. To use them, add the exported `groupSchema` from `jazz-tools/e2ee` to the application schema and define its administration permissions. The chat example does not include groups. `db.e2ee.groups.create()`, `groups.add(groupId, recipientId)` and `groups.remove(groupId, recipientId)` have wait handles. A space grant can target a group ID. Accepted topology and epoch history, not a client-supplied member list, determine effective membership.
+
+`recovery.create().wait()` returns recovery material. Treat it as a credential: do not put it in logs, normal UI state or ordinary rows. `recovery.status(material?)` reports coverage and validation; `recovery.use(material?).wait()` performs recovery. Account recovery and complete coverage of every group/space are different outcomes. The chat example does not provide a device/recovery administration UI; retain browser storage or implement that flow before depending on another device.
+
+The example deliberately keeps grants, successors and device-key deliveries
+owner-controlled. Other recipients can send/read messages and reload retained
+keys, but cannot publish their own device deliveries under its ordinary policies.
+Later device-key redistribution therefore requires an available owner. This is
+not a general multi-device administration example.
+
+## Revocation, offline use and retained history
+
+`spaces.revoke(scope, identifier, recipientId).wait()` changes membership and triggers the required key transition. Remove ordinary application access separately when the app uses its own membership policies. Removal cannot erase plaintext, ciphertext or secrets that a former recipient already retained. A malicious server colluding with an old keyholder may retain staged or historical ciphertext; rotation does not promise retroactive secrecy.
+
+Accepted spaces can read and write offline using retained rows, keys and complete accepted history. Newly generated local founders can use their own provisional spaces before server acceptance, but that state is not verified membership. An explicit initial recipient still needs accepted public keys; possession of an author envelope does not make the author a recipient.
+
+Encrypted uploads into an accepted space validate locally retained acceptance,
+signatures, device eligibility and membership before pulling the source. Missing
+history may be fetched online before staging. A missing root on an existing
+scope is not proof that the scope is unencrypted; if the client is explicitly
+offline, that case fails before source consumption. Storage or verification
+failures are not cache misses.
+
+The final exclusive transaction rechecks the selected epoch and membership.
+An offline Local receipt promises local durability, not eventual authority
+acceptance. Reconnect can reject the original write; show that outcome without
+replaying the source or inventing a new identity.
+
+Known stale membership warns before writes by default. Set
+`e2ee.staleWrites: "reject"` to refuse those writes locally. Warning mode can
+expose new content to removed recipients who retain an old key; it never restores
+access to a proven revoked device or removed member. A membership change while a
+file source is being consumed rejects publication even in warning mode.
+
+## Querying and schema changes
+
+Encrypted predicates require an opt-in equality index and an equality constraint on the plaintext space column. The SDK rejects unindexed encrypted predicates and unsupported operators; it does not silently filter plaintext on the client. `orderBy` on encrypted columns is unsupported, including equality-indexed columns. Deterministic index tokens disclose equality information. Keep permission and routing fields plaintext, and choose searchable protected fields deliberately. File streams cannot target an equality-indexed encrypted column.
+
+Encryption contexts bind stable application, scope, row, table and column identities and logical types. Use supported schema migrations; do not copy ciphertext between rows/columns or relabel logical types as a shortcut. A schema migration does not encrypt existing plaintext values: conversion requires an explicit authorised client read, re-encrypt and write workflow. A rename and a value conversion are different operations. Test migrations with authorised readers and retained history before deployment.
