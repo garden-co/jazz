@@ -14,8 +14,11 @@ import { encryptedRowSpaces, encryptedSchemas } from "./encrypted-schema.js";
 import { frameCryptoRecord } from "./record-frame.js";
 import { cellCryptoForDb, withSpaceKeys } from "./lifecycle.js";
 import type { SpaceRoot } from "./spaces.js";
+import { equalityValue } from "./equality-data.js";
 
 const RECORD = { id: "jazz.e2ee.cell-record", version: 1 } as const;
+// Owned comparison bytes: public decoding may discard JSON spelling or expose mutable arrays.
+export const decryptedIndexBytes = new WeakMap<object, Map<string, Uint8Array>>();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function storedCell(epoch: string, ciphertext: Uint8Array): Uint8Array {
@@ -146,6 +149,11 @@ export async function decryptCellRows(
             new Uint8Array(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength),
           )[0]!;
           decoded[name] = unwrapValue(value, column.column_type, name);
+          if (declaration.indexes?.[name]) {
+            let indexed = decryptedIndexBytes.get(decoded);
+            if (!indexed) decryptedIndexBytes.set(decoded, (indexed = new Map()));
+            indexed.set(name, equalityValue(table, name, value));
+          }
           pending.delete(name);
         } catch {
           throw new E2eeDataError("invalid-ciphertext");

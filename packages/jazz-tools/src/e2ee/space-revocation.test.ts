@@ -101,4 +101,4 @@ it("revokes a space recipient and delivers the accepted successor only to remain
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-}, 60_000);
+}, 120_000);

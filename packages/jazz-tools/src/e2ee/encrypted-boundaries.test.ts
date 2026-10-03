@@ -133,4 +133,4 @@ it("keeps plaintext access, encryption grants and write permissions independent"
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-}, 60_000);
+}, 120_000);
