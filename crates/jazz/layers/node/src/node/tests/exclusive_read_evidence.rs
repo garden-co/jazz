@@ -19,18 +19,10 @@ fn stored_exclusive_evidence_slots(node: &NodeState, tx_id: TxId) -> Vec<Value> 
     .collect()
 }
 
-/// Internal because the contract is the durable audit row: a pending
-/// exclusive transaction keeps its read evidence, the unit rebuilt from
-/// storage after a reopen is the unit that was published, and the evidence
-/// is dropped once the authority settles the fate.
-///
-/// ```
-/// client ──read / query / absent / write──► commit (pending, evidence stored)
-///    │ reopen                                          │
-///    └── commit_unit_for == published unit ──► core ──accepted──► evidence cleared
-/// ```
+/// Reopening before and after authority settlement must recover the exact
+/// published exclusive commit unit, including its captured read evidence.
 #[test]
-fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
+fn exclusive_evidence_survives_reopen_before_and_after_settlement() {
     let (client_dir, mut client) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     commit_mergeable_global(
@@ -81,6 +73,18 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
             .all(|slot| matches!(slot, Value::Nullable(Some(_))))
     );
 
+    // The previous modern producer wrote these same canonical four slots in
+    // epoch-one stores. Admission must accept them without rewriting evidence.
+    let alias = client.node_aliases[&tx_id.node];
+    let raw = crate::local_executor::block_on(client.database.primary_key_get_raw(
+        "jazz_transactions",
+        &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
+    ))
+    .unwrap()
+    .unwrap();
+    super::super::exclusive_read_evidence::validate_epoch_one_transaction_record(raw.record())
+        .unwrap();
+
     // A duplicate of the same pending unit without evidence must not erase
     // the evidence this node still needs to retransmit.
     let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
@@ -104,7 +108,7 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
     let mut client = reopen_node_at(&client_dir, node(1), schema());
     assert_eq!(client.commit_unit_for(tx_id).unwrap(), unit);
 
-    let updates = core.apply_sync_message_settled(unit).unwrap();
+    let updates = core.apply_sync_message_settled(unit.clone()).unwrap();
     let [
         fate @ SyncMessage::FateUpdate {
             fate: Fate::Accepted,
@@ -119,15 +123,14 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
         client.transaction_state_settled(tx_id).unwrap().0,
         Fate::Accepted
     );
-    assert!(
-        stored_exclusive_evidence_slots(&client, tx_id)
-            .iter()
-            .all(|slot| *slot == Value::Nullable(None))
+    assert_eq!(client.commit_unit_for(tx_id).unwrap(), unit);
+    drop(client);
+    let mut settled = reopen_node_at(&client_dir, node(1), schema());
+    assert_eq!(settled.commit_unit_for(tx_id).unwrap(), unit);
+    assert_eq!(
+        settled.transaction_state_settled(tx_id).unwrap().0,
+        Fate::Accepted
     );
-    let SyncMessage::CommitUnit { tx, .. } = client.commit_unit_for(tx_id).unwrap() else {
-        panic!("expected commit unit");
-    };
-    assert_eq!(tx.base_snapshot, None);
 }
 
 /// Internal fixture: no current writer can put evidence on a mergeable row,
@@ -157,7 +160,7 @@ fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
     exclusive.kind = TxKind::Exclusive;
     exclusive.base_snapshot = Some(snapshot);
     let [base, ..] =
-        super::super::exclusive_read_evidence::evidence_slot_values(&exclusive, true).unwrap();
+        super::super::exclusive_read_evidence::evidence_slot_values(&exclusive).unwrap();
     values[TransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX] = base;
     let mut batch = writer.database.open_batch();
     batch.update("jazz_transactions", values);
@@ -347,9 +350,13 @@ fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart() {
         relay.apply_sync_message_settled(fate).unwrap();
         assert_eq!(relay.transaction_state_settled(tx_id).unwrap().0, expected);
         assert!(
-            stored_exclusive_evidence_slots(&relay, tx_id)
-                .iter()
-                .all(|slot| *slot == Value::Nullable(None))
+            stored_exclusive_evidence_slots(&relay, tx_id).iter().all(|slot| {
+                if expected == Fate::Accepted {
+                    matches!(slot, Value::Nullable(Some(_)))
+                } else {
+                    *slot == Value::Nullable(None)
+                }
+            })
         );
     }
 }

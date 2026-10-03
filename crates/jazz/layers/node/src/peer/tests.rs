@@ -25,7 +25,7 @@ use crate::model::public_schema::{
 use crate::tx::DeletionEvent;
 use crate::tx::{DurabilityTier, Fate, TxKind};
 use groove::records::Value;
-use jazz_storage_rocksdb::RocksDbStorage;
+use groove::storage::{BoxedStorage, OrderedKvStorage, ReopenableStorage};
 
 fn node(byte: u8) -> NodeUuid {
     NodeUuid::from_bytes([byte; 16])
@@ -1294,6 +1294,9 @@ fn session_seed_write_policy_schema() -> JazzSchema {
     )
 }
 
+/// A trusted SYSTEM upload bypasses claim-and-join policies at terminal ingest;
+/// Alice's unseeded session must not inherit that capability.
+/// SYSTEM -> Core -> Accepted; alice -> local policy preview -> Denied
 #[test]
 fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
     let schema = session_seed_write_policy_schema();
@@ -1312,15 +1315,24 @@ fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
         panic!("mergeable unit must carry a CommitUnit");
     };
 
-    let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
-    peer.prove_terminal_commit_authorization(
-        &mut node_state,
-        AuthorSubject::SYSTEM,
-        BTreeMap::new(),
-        &versions,
-        tx.tx_id,
-    )
-    .expect("SYSTEM must not bind session claims for a bypassed write");
+    let candidate_tx_id = tx.tx_id;
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0xa4), schema.clone());
+    let outcome = crate::local_executor::block_on(receiver.ingest_commit_unit_with_context(
+        tx,
+        versions,
+        u64::MAX,
+        Some(crate::node::CommitUnitIngestContext {
+            identity: AuthorSubject::SYSTEM,
+            trust: crate::node::CommitUnitTrust::TrustedBackend,
+            version_receipts_validated: false,
+        }),
+    ))
+    .expect("SYSTEM ingest does not need session claims or join evidence");
+    assert!(outcome.value.iter().any(|message| matches!(
+        message,
+        SyncMessage::FateUpdate { tx_id, fate: crate::tx::Fate::Accepted, .. }
+            if *tx_id == candidate_tx_id
+    )));
 
     let denied = crate::local_executor::block_on(
         node_state.dry_run_mergeable_write_allows_in_schema(
@@ -1380,16 +1392,20 @@ fn public_peer_schema(builder: PublicSchemaBuilder) -> JazzSchema {
 fn open_node_with_schema(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState) {
+) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let storage = crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        temp_dir.path().to_path_buf(),
+        cfs,
+    ))
+    .unwrap();
     let node = NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).unwrap();
     (temp_dir, node)
 }
 
-fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState) {
+fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let schema = schema();
     open_node_with_schema(node_uuid, schema)
 }
@@ -1404,7 +1420,7 @@ fn accept_global(core: &mut NodeState, tx_id: TxId, seq: u64) {
     .unwrap();
 }
 
-fn accept_confirmed(core: &mut NodeState, tx_id: TxId) {
+fn accept_confirmed<S: OrderedKvStorage + ReopenableStorage>(core: &mut NodeState<S>, tx_id: TxId) {
     core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
 }
 
@@ -1548,7 +1564,7 @@ fn subscription_key_with_opts(
 }
 
 fn register_shape_binding_for_receiver(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
 ) {
@@ -1561,7 +1577,7 @@ fn register_shape_binding_for_receiver(
 }
 
 fn register_shape_binding_for_receiver_with_opts(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
     opts: RegisterShapeOptions,
@@ -1600,7 +1616,7 @@ fn register_shape_binding_for_receiver_with_opts(
 /// Register the canonical source identity used by the direct whole-table peer
 /// fixture before accepting its covered-input update.  This deliberately
 /// preserves the ordinary SYSTEM-scoped admission used by these tests.
-fn register_whole_table_receiver(node: &mut NodeState, table: &str) {
+fn register_whole_table_receiver(node: &mut NodeState<BoxedStorage>, table: &str) {
     let (shape, binding) = node.whole_table_shape_binding(table).unwrap();
     register_shape_binding_for_receiver(node, &shape, &binding);
 }

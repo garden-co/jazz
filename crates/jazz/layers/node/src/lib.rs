@@ -25,9 +25,9 @@ pub use groove;
 #[cfg(test)]
 use jazz_model::test_public_schema;
 use jazz_model::{model, query, schema, tx};
-use jazz_protocol::{authorization_scope, protocol, protocol_limits};
 #[cfg(test)]
-use jazz_protocol::{storage_codec_profile, wire};
+use jazz_protocol::wire;
+use jazz_protocol::{authorization_scope, protocol, protocol_limits, storage_codec_profile};
 #[cfg(test)]
 use jazz_types::account_registry;
 #[cfg(any(test, feature = "testing"))]

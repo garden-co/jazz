@@ -28,14 +28,16 @@ where
             "a global timestamp requires Global durability"
         );
         let mut terminal_fate_persisted = false;
-        let result = self.apply_fate_update_once(
-            tx_id,
-            fate,
-            global_time,
-            durability,
-            &mut terminal_fate_persisted,
-            cascade_descendants,
-        ).await;
+        let result = self
+            .apply_fate_update_once(
+                tx_id,
+                fate,
+                global_time,
+                durability,
+                &mut terminal_fate_persisted,
+                cascade_descendants,
+            )
+            .await;
         if terminal_fate_persisted {
             self.open_tx.local_permission_subjects.remove(&tx_id);
         }
@@ -55,7 +57,8 @@ where
             self.open_tx.pending_foreign_transactions.remove(&tx_id);
         }
         let mut stored = self
-            .query_transaction(tx_id).await?
+            .query_transaction(tx_id)
+            .await?
             .ok_or(Error::MissingTransaction(tx_id))?;
         let already_accepted = matches!(stored.fate, Fate::Accepted);
         let previous_global_time = stored.global_time;
@@ -113,14 +116,19 @@ where
             .cloned()
             .collect::<Vec<_>>();
         if matches!(stored.fate, Fate::Accepted) && stored.global_time.is_some() {
-            global_current_updates =
-                self.global_current_updates_for_versions(tx_id, &tx_versions).await?;
+            global_current_updates = self
+                .global_current_updates_for_versions(tx_id, &tx_versions)
+                .await?;
         }
         if let Some(child_alias) = self.node_aliases.get(&tx_id.node).copied() {
-            for raw in self.database.primary_key_scan_raw(
-                "jazz_pending_edges",
-                &[Value::U64(tx_id.time.0), Value::U64(child_alias.0)],
-            ).await? {
+            for raw in self
+                .database
+                .primary_key_scan_raw(
+                    "jazz_pending_edges",
+                    &[Value::U64(tx_id.time.0), Value::U64(child_alias.0)],
+                )
+                .await?
+            {
                 let record = raw.record();
                 let parent_alias =
                     NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
@@ -134,13 +142,18 @@ where
                 let coordinate = pending_edge_coordinate_from_record(record)?;
                 batch.delete(
                     "jazz_pending_edges",
-                    pending_edge_primary_key(child_alias, tx_id, parent_alias, parent, &coordinate)?,
+                    pending_edge_primary_key(
+                        child_alias,
+                        tx_id,
+                        parent_alias,
+                        parent,
+                        &coordinate,
+                    )?,
                 );
             }
         }
-        let contribution_merge = self.contribution_merge_storage_value(
-            stored.tx.contribution_merge.as_ref(),
-        )?;
+        let contribution_merge =
+            self.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())?;
         batch.update(
             "jazz_transactions",
             transaction_values_with_cardinality_scope(
@@ -190,7 +203,8 @@ where
                 .await?;
         }
         let rejected_payload = if cleanup_rejected_versions {
-            self.remove_rejected_local_versions(tx_id, &stored, &mut batch).await?
+            self.remove_rejected_local_versions(tx_id, &stored, &mut batch)
+                .await?
         } else {
             None
         };
@@ -266,7 +280,12 @@ where
         tx: &Transaction,
         versions: &[VersionRecord],
     ) -> Result<bool, Error> {
-        let Some(base_snapshot) = &tx.base_snapshot else {
+        let (Some(base_snapshot), Some(row_reads), Some(absent_reads), Some(predicate_reads)) = (
+            &tx.base_snapshot,
+            tx.row_read_set.as_deref(),
+            tx.absent_read_set.as_deref(),
+            tx.predicate_read_set.as_deref(),
+        ) else {
             return Ok(false);
         };
         // Point-read records carry names, not schema IDs. A retained alias is
@@ -274,19 +293,10 @@ where
         // ponytail: scans retained schemas per distinct read table; index alias
         // agreement at catalogue activation if this becomes a measured cost.
         let mut read_schemas = BTreeMap::new();
-        for table in tx
-            .row_read_set
-            .as_deref()
-            .unwrap_or(&[])
+        for table in row_reads
             .iter()
             .map(|read| read.table.as_str())
-            .chain(
-                tx.absent_read_set
-                    .as_deref()
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(|read| read.table.as_str()),
-            )
+            .chain(absent_reads.iter().map(|read| read.table.as_str()))
         {
             if read_schemas.contains_key(table) {
                 continue;
@@ -314,24 +324,28 @@ where
         let mut visible_row_memo = BTreeMap::<(String, RowUuid), Option<TxId>>::new();
         let mut visible_layer_memo =
             BTreeMap::<(PhysicalTableId, RowUuid, VersionLayer), Option<TxId>>::new();
-        for read in tx.row_read_set.as_deref().unwrap_or(&[]) {
-            let current = self.visible_global_row_tx_id_now_memoized(
-                read_schemas[read.table.as_str()],
-                &read.table,
-                read.row_uuid,
-                &mut visible_row_memo,
-            ).await;
+        for read in row_reads {
+            let current = self
+                .visible_global_row_tx_id_now_memoized(
+                    read_schemas[read.table.as_str()],
+                    &read.table,
+                    read.row_uuid,
+                    &mut visible_row_memo,
+                )
+                .await;
             if current != Some(read.version) {
                 return Ok(false);
             }
         }
-        for absent in tx.absent_read_set.as_deref().unwrap_or(&[]) {
-            let current = self.visible_global_row_tx_id_now_memoized(
-                read_schemas[absent.table.as_str()],
-                &absent.table,
-                absent.row_uuid,
-                &mut visible_row_memo,
-            ).await;
+        for absent in absent_reads {
+            let current = self
+                .visible_global_row_tx_id_now_memoized(
+                    read_schemas[absent.table.as_str()],
+                    &absent.table,
+                    absent.row_uuid,
+                    &mut visible_row_memo,
+                )
+                .await;
             if current.is_some() {
                 return Ok(false);
             }
@@ -343,14 +357,14 @@ where
         // (garden-co/jazz#3694). The row proofs above are all still current.
         let identity = tx.permission_subject.unwrap_or(tx.made_by);
         let mut proven = BTreeMap::<&str, BTreeSet<RowUuid>>::new();
-        for read in tx.row_read_set.as_deref().unwrap_or(&[]) {
+        for read in row_reads {
             proven
                 .entry(read.table.as_str())
                 .or_default()
                 .insert(read.row_uuid);
         }
         let no_rows = BTreeSet::new();
-        for predicate in tx.predicate_read_set.as_deref().unwrap_or(&[]) {
+        for predicate in predicate_reads {
             let proven = proven.get(predicate.table.as_str()).unwrap_or(&no_rows);
             if self
                 .predicate_read_differs_from_proven(predicate, base_snapshot, identity, proven)
@@ -363,12 +377,14 @@ where
             self.table_in_schema_ref(version.table(), version.schema_version())?;
             let table_id =
                 self.physical_table_id_for_schema(version.schema_version(), version.table())?;
-            let current = self.visible_global_layer_tx_id_now_memoized(
-                table_id,
-                version.row_uuid(),
-                VersionLayer::for_record(version),
-                &mut visible_layer_memo,
-            ).await;
+            let current = self
+                .visible_global_layer_tx_id_now_memoized(
+                    table_id,
+                    version.row_uuid(),
+                    VersionLayer::for_record(version),
+                    &mut visible_layer_memo,
+                )
+                .await;
             let parents = version.parents();
             let parent = match parents.as_slice() {
                 [] => None,
@@ -587,10 +603,7 @@ where
         Ok(at_base != at_now)
     }
 
-    fn aggregate_query_outputs_equivalent(
-        left: &[CurrentRow],
-        right: &[CurrentRow],
-    ) -> bool {
+    fn aggregate_query_outputs_equivalent(left: &[CurrentRow], right: &[CurrentRow]) -> bool {
         if left.len() != right.len() {
             return false;
         }
@@ -664,9 +677,9 @@ where
                 .snapshot_content_witness(shape.schema_version(), &table, row_uuid, snapshot)
                 .await
             else {
-                    return Err(Error::InvalidStoredValue(
-                        "historical query output row must have visible content",
-                    ));
+                return Err(Error::InvalidStoredValue(
+                    "historical query output row must have visible content",
+                ));
             };
             set.insert((row_uuid, tx_id));
         }
@@ -680,9 +693,11 @@ where
         versions: &[VersionRecord],
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<bool, Error> {
-        Ok(Box::pin(self.commit_unit_write_policy_rejection(tx, versions, ingest_context))
-            .await?
-            .is_none())
+        Ok(
+            Box::pin(self.commit_unit_write_policy_rejection(tx, versions, ingest_context))
+                .await?
+                .is_none(),
+        )
     }
 
     /// The rejection a commit unit's write policies call for, if any:
@@ -710,9 +725,18 @@ where
                     // topology-owned admission path; it cannot borrow SYSTEM
                     // or the transport identity here.
                     CommitUnitTrust::Relay => {
-                        return Ok((!context.admitted_write_authorization).then_some(RejectionReason::AuthorizationDenied));
+                        if self
+                            .active_session_claims
+                            .as_ref()
+                            .is_none_or(|(identity, _)| *identity != context.identity)
+                        {
+                            return Ok(Some(RejectionReason::AuthorizationDenied));
+                        }
+                        context.identity
                     }
-                    CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => tx.permission_subject.unwrap_or(tx.made_by),
+                    CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
+                        tx.permission_subject.unwrap_or(tx.made_by)
+                    }
                     CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
                 }
             }
@@ -745,8 +769,8 @@ where
             // require exactly one canonical intent per physical row/head.
             let mut branch_coordinates = BTreeSet::new();
             for version in &branch_versions {
-                let Ok(table_id) = self
-                    .physical_table_id_for_schema(version.schema_version(), version.table())
+                let Ok(table_id) =
+                    self.physical_table_id_for_schema(version.schema_version(), version.table())
                 else {
                     return Ok(Some(RejectionReason::AuthorizationDenied));
                 };
@@ -765,13 +789,16 @@ where
                     .iter()
                     .copied()
                     .filter(|version| {
-                    version.schema_version() == intent.authored_schema
-                        && version.row_uuid() == intent.row_uuid
-                        && version.branch_key() == &intent.head
-                        && self
-                            .physical_table_id_for_schema(version.schema_version(), version.table())
-                            .ok()
-                            == Some(intent.physical_table_id)
+                        version.schema_version() == intent.authored_schema
+                            && version.row_uuid() == intent.row_uuid
+                            && version.branch_key() == &intent.head
+                            && self
+                                .physical_table_id_for_schema(
+                                    version.schema_version(),
+                                    version.table(),
+                                )
+                                .ok()
+                                == Some(intent.physical_table_id)
                     })
                     .collect::<Vec<_>>();
                 if matching_versions.is_empty() {
@@ -782,15 +809,14 @@ where
                         if matching_versions.iter().any(|version| {
                             !version.parents().is_empty()
                                 || version.deletion() == Some(DeletionEvent::Deleted)
-                        })
-                            || !self
-                                .branch_view_copy_satisfies_read_for_write_visibility(
-                                    evidence,
-                                    intent.authored_schema,
-                                    permission_subject,
-                                    Some(tx.tx_id),
-                                )
-                                .await?
+                        }) || !self
+                            .branch_view_copy_satisfies_read_for_write_visibility(
+                                evidence,
+                                intent.authored_schema,
+                                permission_subject,
+                                Some(tx.tx_id),
+                            )
+                            .await?
                         {
                             return Ok(Some(RejectionReason::AuthorizationDenied));
                         }
@@ -834,40 +860,17 @@ where
             }
         }
         Ok(
-            match Box::pin(self.commit_unit_write_policies_allow(
-                versions,
-                permission_subject,
-                tx.tx_id,
-            ))
-            .await?
+            match Box::pin(self.commit_unit_write_policies_allow(versions, permission_subject, tx))
+                .await?
             {
                 crate::node::policy::UnitWritePolicyDecision::Allowed => None,
-                crate::node::policy::UnitWritePolicyDecision::Denied => Some(RejectionReason::AuthorizationDenied),
+                crate::node::policy::UnitWritePolicyDecision::Denied => {
+                    Some(RejectionReason::AuthorizationDenied)
+                }
                 crate::node::policy::UnitWritePolicyDecision::Unsupported(reason) => {
                     Some(RejectionReason::MalformedCommit(reason))
                 }
             },
-        )
-    }
-
-    /// Evaluate every write policy of one candidate commit unit under the
-    /// active exact session scope, each write seeing the unit's other writes
-    /// (`INV-RLS-9`). Terminal relay admission uses this, under the
-    /// connection's admitted claims, before it may issue a non-wire
-    /// authorization receipt, so a relay and the fate authority decide the
-    /// unit alike.
-    pub async fn commit_unit_satisfies_write_policy(
-        &mut self,
-        versions: &[VersionRecord],
-        author: AuthorSubject,
-        candidate_tx_id: TxId,
-    ) -> Result<bool, Error> {
-        // Boxed so fate and relay admission frames stay as small as they
-        // were with one policy evaluation per version.
-        Ok(
-            Box::pin(self.commit_unit_write_policies_allow(versions, author, candidate_tx_id))
-                .await?
-                == crate::node::policy::UnitWritePolicyDecision::Allowed,
         )
     }
 
@@ -891,9 +894,14 @@ where
         memo: &mut IngestMemo,
         mode: CommitUnitParkMode,
     ) -> Result<bool, Error> {
-        if self.missing_parent_refs_memo(versions, memo).await?.is_empty() {
-            return Ok(false);
-        }
+        let missing_parents = !self
+            .missing_parent_refs_memo(versions, memo)
+            .await?
+            .is_empty();
+        let session_claim_binding = match mode.ingress_role {
+            ParkedIngressRole::Authority => self.active_session_claims.as_ref(),
+            ParkedIngressRole::Relay => None,
+        };
         if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
             if existing.tx != *tx || existing.versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -901,7 +909,10 @@ where
             if !CommitUnitIngestContext::same_parked_authority(
                 existing.ingest_context,
                 mode.ingest_context,
-            ) {
+            ) || (existing.ingress_role == ParkedIngressRole::Authority
+                && mode.ingress_role == ParkedIngressRole::Authority
+                && existing.session_claim_binding.as_ref() != session_claim_binding)
+            {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             if let (Some(existing), Some(resent)) =
@@ -909,8 +920,16 @@ where
             {
                 existing.version_receipts_validated &= resent.version_receipts_validated;
             }
+            if existing.ingress_role == ParkedIngressRole::Relay
+                && mode.ingress_role == ParkedIngressRole::Authority
+            {
+                existing.session_claim_binding = session_claim_binding.cloned();
+            }
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
+        }
+        if !missing_parents {
+            return Ok(false);
         }
         self.sync_metrics.parked_orphans += 1;
         self.parking.parked_commit_units.insert(
@@ -921,6 +940,7 @@ where
                 now_ms,
                 ingest_context: mode.ingest_context,
                 ingress_role: mode.ingress_role,
+                session_claim_binding: session_claim_binding.cloned(),
             },
         );
         Ok(true)
@@ -933,13 +953,16 @@ where
         now_ms: u64,
         mode: CommitUnitParkMode,
     ) -> Result<bool, Error> {
-        if versions.iter().all(|version| {
-            self.catalogue
+        let missing_schema = versions.iter().any(|version| {
+            !self
+                .catalogue
                 .catalogue_schemas
                 .contains_key(&version.schema_version())
-        }) {
-            return Ok(false);
-        }
+        });
+        let session_claim_binding = match mode.ingress_role {
+            ParkedIngressRole::Authority => self.active_session_claims.as_ref(),
+            ParkedIngressRole::Relay => None,
+        };
         if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
             if existing.tx != *tx || existing.versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -947,7 +970,10 @@ where
             if !CommitUnitIngestContext::same_parked_authority(
                 existing.ingest_context,
                 mode.ingest_context,
-            ) {
+            ) || (existing.ingress_role == ParkedIngressRole::Authority
+                && mode.ingress_role == ParkedIngressRole::Authority
+                && existing.session_claim_binding.as_ref() != session_claim_binding)
+            {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             if let (Some(existing), Some(resent)) =
@@ -955,8 +981,16 @@ where
             {
                 existing.version_receipts_validated &= resent.version_receipts_validated;
             }
+            if existing.ingress_role == ParkedIngressRole::Relay
+                && mode.ingress_role == ParkedIngressRole::Authority
+            {
+                existing.session_claim_binding = session_claim_binding.cloned();
+            }
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
+        }
+        if !missing_schema {
+            return Ok(false);
         }
         self.sync_metrics.parked_orphans += 1;
         self.sync_metrics.parked_catalogue_orphans += 1;
@@ -969,6 +1003,7 @@ where
                 now_ms,
                 ingest_context: mode.ingest_context,
                 ingress_role: mode.ingress_role,
+                session_claim_binding: session_claim_binding.cloned(),
             },
         );
         Ok(true)
@@ -1004,7 +1039,8 @@ where
     ) -> Result<bool, Error> {
         for version in versions {
             for parent in version.parents() {
-                let Some(parent_made_at) = self.transaction_made_at_memo(parent, memo).await? else {
+                let Some(parent_made_at) = self.transaction_made_at_memo(parent, memo).await?
+                else {
                     return Ok(false);
                 };
                 if tx.tx_id.time <= parent_made_at {
@@ -1052,12 +1088,16 @@ where
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
-                updates.extend(self.ingest_commit_unit_once(
-                    unit.tx,
-                    unit.versions,
-                    unit.now_ms,
-                    unit.ingest_context,
-                ).await?);
+                let mut node = self.scoped_session_claim_binding(unit.session_claim_binding);
+                updates.extend(
+                    node.ingest_commit_unit_once(
+                        unit.tx,
+                        unit.versions,
+                        unit.now_ms,
+                        unit.ingest_context,
+                    )
+                    .await?,
+                );
             }
         }
         Ok(updates)
@@ -1110,7 +1150,8 @@ where
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
-                self.ingest_relay_commit_unit_once(unit.tx, unit.versions).await?;
+                self.ingest_relay_commit_unit_once(unit.tx, unit.versions)
+                    .await?;
             }
         }
         Ok(())
@@ -1324,5 +1365,4 @@ where
         let _ = affected;
         Ok(rejected_payload)
     }
-
 }

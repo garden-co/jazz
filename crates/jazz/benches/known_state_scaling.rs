@@ -6,6 +6,7 @@ mod support;
 
 use support::BenchFutureExt as _;
 
+use groove::storage::BoxedStorage;
 use jazz::groove::records::Value;
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
@@ -17,7 +18,7 @@ use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{Fate, TxId};
 use jazz::wire::encode_sync_message;
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::Durability;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use support::{csv_usizes, emit_json_line, env_usize, phase_fields};
@@ -138,8 +139,8 @@ fn main() {
 }
 
 struct Fixture {
-    writer: NodeState,
-    core: NodeState,
+    writer: NodeState<BoxedStorage>,
+    core: NodeState<BoxedStorage>,
     _dirs: Vec<tempfile::TempDir>,
 }
 
@@ -199,7 +200,11 @@ fn membership_digest<T: serde::Serialize>(members: &T) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn core_ingest(core: &mut NodeState, message: &SyncMessage, now_ms: u64) -> SyncMessage {
+fn core_ingest(
+    core: &mut NodeState<BoxedStorage>,
+    message: &SyncMessage,
+    now_ms: u64,
+) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -219,16 +224,18 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
+fn open_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
-            .expect("open RocksDB");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        temp_dir.path().to_path_buf(),
+        column_families,
+    ))
+    .expect("open RocksDB");
     let node =
         NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).expect("open node");
     (temp_dir, node)

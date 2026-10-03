@@ -37,7 +37,12 @@ where
         schema_version: SchemaVersionId,
     ) -> Result<&TableSchema, Error> {
         if schema_version == self.catalogue.active_schema.schema {
-            return self.catalogue.active_schema.compiled.tables.iter()
+            return self
+                .catalogue
+                .active_schema
+                .compiled
+                .tables
+                .iter()
                 .find(|candidate| candidate.name == table)
                 .ok_or_else(|| Error::TableNotFound(table.to_owned()));
         }
@@ -420,6 +425,8 @@ where
         version_bundles: Vec<VersionBundle>,
     ) -> Result<Vec<VersionBundle>, Error> {
         for bundle in &version_bundles {
+            self.validate_incoming_exclusive_evidence(&bundle.tx)
+                .await?;
             crate::protocol::validate_version_records(&bundle.versions)
                 .map_err(|_| Error::MalformedViewUpdate("malformed version receipt"))?;
         }
@@ -637,7 +644,19 @@ where
                 None
             };
             #[cfg(any(test, feature = "testing"))]
-            crate::delivery_diagnostics::record(|| format!("repair_body_lookup runtime={} subscription={subscription:?} physical={:?} row_hash={} tx_hash={} layer={:?} table_known={} alias_known={} resident={} transaction_exists={transaction_exists:?}", self.groove_runtime_token(), row.physical_table, crate::delivery_diagnostics::opaque_hash(&row.row), crate::delivery_diagnostics::opaque_hash(&tx_id), row.version.layer, table_names.contains_key(&row.physical_table), self.node_aliases.contains_key(&tx_id.node), resident.is_some()));
+            crate::delivery_diagnostics::record(|| {
+                format!(
+                    "repair_body_lookup runtime={} subscription={subscription:?} physical={:?} row_hash={} tx_hash={} layer={:?} table_known={} alias_known={} resident={} transaction_exists={transaction_exists:?}",
+                    self.groove_runtime_token(),
+                    row.physical_table,
+                    crate::delivery_diagnostics::opaque_hash(&row.row),
+                    crate::delivery_diagnostics::opaque_hash(&tx_id),
+                    row.version.layer,
+                    table_names.contains_key(&row.physical_table),
+                    self.node_aliases.contains_key(&tx_id.node),
+                    resident.is_some()
+                )
+            });
             if resident.is_none() || transaction_exists == Some(false) {
                 missing.insert(version_ref);
             }

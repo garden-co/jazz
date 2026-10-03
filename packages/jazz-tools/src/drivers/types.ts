@@ -161,6 +161,7 @@ export type PolicyExpr =
   | { type: "InList"; column: string; values: PolicyValue[] }
   | { type: "SessionInList"; path: string[]; values: PolicyLiteralValue[] }
   | { type: "Exists"; table: string; condition: PolicyExpr }
+  | { type: "ExistsIncludingCreated"; table: string; condition: PolicyExpr }
   | { type: "ExistsRel"; rel: unknown }
   | { type: "Inherits"; operation: PolicyOperation; via_column: string; max_depth?: number }
   | {

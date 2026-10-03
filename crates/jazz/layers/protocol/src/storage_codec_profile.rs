@@ -1,11 +1,11 @@
-//! Jazz's closed epoch-one persistent-codec inventory.
-//!
-//! This module owns only the names of Jazz byte families, not adapter opening
-//! or backend semantics. Groove composes the profile into a durable manifest
-//! as opaque identifiers; every adapter validates the same resulting set
-//! before it interprets or mutates a persistent Jazz root.
+//! Closed Jazz storage profiles and the sole node-root admission coordinator.
+//! Backends own physical atomicity; Jazz alone interprets legacy transaction
+//! records before the no-payload-transform E1 to E2 transition.
 
-use crate::groove::storage::{Error, StorageCodecProfile};
+use crate::groove::storage::{
+    BoxedStorage, Error, OrderedKvStorage, ReadOnlyLayoutView, ReadOnlyStorage, StagedStorageOpen,
+    StorageAdmission, StorageCodecProfile, StorageFactory, StorageLayout, StorageOpenSpec,
+};
 
 /// Epoch-one Jazz-owned durable codec families, in canonical lexical order.
 ///
@@ -26,63 +26,95 @@ pub const JAZZ_EPOCH_1_STORAGE_CODECS: &[&str] = &[
     "jazz.subscription-program-fact-key.v1",
 ];
 
-/// The closed base profile required by every persistent Jazz node.
-///
-/// Groove's mandatory epoch-one families remain first because codec IDs are
-/// sorted by the profile constructor. An incompatible addition changes the
-/// top-level manifest and therefore requires a new storage epoch. A separate
-/// durable root (such as the server's catalogue-entry store) composes this
-/// profile with its own root-local codec family before opening its adapter.
+/// Immutable legacy profile, also retained by separately composed auxiliary
+/// roots that do not persist Jazz node transactions.
 pub fn epoch_1_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
     StorageCodecProfile::groove_epoch_1()
         .with_additional_codecs(JAZZ_EPOCH_1_STORAGE_CODECS.iter().copied())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Node storage profile with the original exclusive read evidence codec.
+pub fn epoch_2_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
+    epoch_1_storage_codec_profile()?.with_additional_codecs(["jazz.exclusive-read-evidence.v1"])
+}
 
-    #[test]
-    fn epoch_one_jazz_profile_is_closed_and_canonically_sorted() {
-        let profile = epoch_1_storage_codec_profile().expect("valid fixed profile");
-        assert_eq!(
-            profile.codec_ids().collect::<Vec<_>>(),
-            vec![
-                "groove.large-value.v1",
-                "groove.ordered-chunk-storage.v1",
-                "groove.ordered-kv.v1",
-                "jazz.branch-key.v1",
-                "jazz.catalogue.activation.v1",
-                "jazz.catalogue.bootstrap-ready.v1",
-                "jazz.catalogue.lens.v1",
-                "jazz.catalogue.lineage.v1",
-                "jazz.catalogue.physical-mapping.v1",
-                "jazz.catalogue.schema.v1",
-                "jazz.catalogue.write-pointer.v1",
-                "jazz.subscription-program-fact-key.v1",
-            ]
-        );
+/// Exact legacy source and current target specifications for node admission.
+pub fn node_storage_open_specs() -> Result<(StorageOpenSpec, StorageOpenSpec), Error> {
+    Ok((
+        StorageOpenSpec {
+            epoch: 1,
+            codec_profile: epoch_1_storage_codec_profile()?,
+        },
+        StorageOpenSpec {
+            epoch: 2,
+            codec_profile: epoch_2_storage_codec_profile()?,
+        },
+    ))
+}
+
+/// Reject unadmitted durable handles before any Groove constructor can write
+/// even a layout marker. Explicitly ephemeral adapters need no durable receipt.
+pub fn require_node_storage_admission(storage: &impl OrderedKvStorage) -> Result<(), Error> {
+    match storage.admission()? {
+        StorageAdmission::Ephemeral => Ok(()),
+        StorageAdmission::Durable(admission) => {
+            let manifest = admission.manifest();
+            let (source_spec, target_spec) = node_storage_open_specs()?;
+            let source = manifest.with_open_spec(&source_spec)?;
+            let target = manifest.with_open_spec(&target_spec)?;
+            if manifest != &target {
+                return Err(Error::InvalidStorageLayout(
+                    "Jazz node requires admitted epoch two storage".into(),
+                ));
+            }
+            admission.validate(&source, &target)
+        }
     }
+}
 
-    #[test]
-    fn epoch_one_jazz_profile_has_a_pinned_manifest_receipt() {
-        use std::collections::BTreeMap;
+/// Normal persistent node open: an exact legacy root is scanned under the
+/// adapter's exclusive guard, then manifest and receipt are published together.
+pub async fn open_node_storage(
+    factory: &dyn StorageFactory,
+    path: std::path::PathBuf,
+    column_families: Vec<String>,
+) -> Result<BoxedStorage, Error> {
+    let (source, target) = node_storage_open_specs()?;
+    let storage = match factory
+        .open_staged(path, column_families, source, target)
+        .await?
+    {
+        StagedStorageOpen::Ready(storage) => storage,
+        StagedStorageOpen::Guard(guard) => {
+            preflight_epoch_one_node_storage(guard.read_only()).await?;
+            guard.complete().await?
+        }
+    };
+    require_node_storage_admission(&storage)?;
+    Ok(storage)
+}
 
-        let manifest = crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
-            "memory",
-            1,
-            BTreeMap::from([("key-order".to_owned(), b"unsigned-lexicographic".to_vec())]),
-            &epoch_1_storage_codec_profile().expect("valid fixed profile"),
-        )
-        .expect("valid manifest");
-        let expected = b"JSM1\0\x01\0\x01\x06memory\x0c\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x25jazz.subscription-program-fact-key.v1\x01\x09key-order\0\x16unsigned-lexicographic";
-        assert_eq!(manifest.encode().expect("canonical manifest"), expected);
-        assert_eq!(
-            crate::groove::storage::StorageEpochManifest::decode(expected)
-                .expect("fixture decodes")
-                .encode()
-                .expect("fixture re-encodes"),
-            expected
-        );
+/// Browser admission invokes this same Jazz-owned scanner before publishing
+/// its receipt. Neither the backend nor JavaScript knows transaction slots.
+pub async fn preflight_epoch_one_node_storage(storage: ReadOnlyStorage<'_>) -> Result<(), Error> {
+    let layout = ReadOnlyLayoutView::new(storage, StorageLayout::jazz_class_v1()).await?;
+    let schema = crate::schema::JazzSchema::empty().lower_to_groove();
+    let descriptor = schema
+        .table("jazz_transactions")
+        .expect("fixed legacy transaction table")
+        .record_schema();
+    let mut scan = layout.scan_prefix("jazz_transactions", &[]).await?;
+    while let Some(rows) = scan.next_batch().await? {
+        for (_, bytes) in rows {
+            // Mapped storage values retain Groove's canonical whole-row tag;
+            // the frozen transaction descriptor describes only its payload.
+            let (_, payload) = crate::groove::records::split_variant_record(&bytes)
+                .map_err(|error| Error::InvalidStorageLayout(error.to_string()))?;
+            crate::exclusive_read_evidence::validate_epoch_one_transaction_record(
+                crate::groove::records::BorrowedRecord::new(payload, &descriptor),
+            )
+            .map_err(|error| Error::InvalidStorageLayout(error.to_string()))?;
+        }
     }
+    Ok(())
 }

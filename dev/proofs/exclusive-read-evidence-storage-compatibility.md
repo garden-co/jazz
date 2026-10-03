@@ -47,16 +47,17 @@ applies to a Local relay that restarts while holding unfated exclusive units.
 
 ## Decision
 
-While an exclusive transaction's fate is `Pending`, its audit row stores the
-evidence in the four existing slots. The transaction is read back with its
-evidence, so `commit_unit_for` (outbox recovery, local replay) retransmits
-exactly the unit that was originally committed. The authority validates it
-with the unchanged §3.7 rules.
+An exclusive transaction's audit row stores its original evidence in the four
+existing slots. The transaction is read back with its evidence, so
+`commit_unit_for` (outbox recovery, local replay) retransmits exactly the unit
+that was originally committed. The authority validates it with the unchanged
+§3.7 rules.
 
-Once the fate is known (`Accepted` or `Rejected`), the same full-row rewrite
-that records the fate writes the slots back to null. Evidence is kept only
-while it can still matter, so storage cost is bounded by in-flight exclusive
-transactions, not by history. It is not an audit log and never becomes one.
+Fate rewrites, duplicate delivery and redacted repairs retain this original
+proof, including its original absence. They do not backfill proof from later
+observations. Retention now lasts with transaction history rather than only
+until settlement; this supports exact replay of accepted units after reopen.
+The four-slot encoding and codec-family identity are unchanged.
 
 Evidence is written only for `TxKind::Exclusive` rows. Mergeable rows keep all
 four slots null. SPEC 2 §2.8 still holds that mergeable rows never confer
@@ -156,7 +157,7 @@ a property of every Groove record, not of this family: the ordered-KV store
 owns value integrity. Cuts into fixed-width fields, and into the nested query
 and binding bytes, are structural and are rejected.
 
-The implementation is `crates/jazz/layers/node/src/node/exclusive_read_evidence.rs`.
+The implementation is `crates/jazz/layers/protocol/src/exclusive_read_evidence.rs`.
 It is written by `transaction_values_with_cardinality_scope` (`node/codec.rs`)
 and read by `stored_transaction_from_record` (`node/currency.rs`). Maintained
 view bundles (`node/views.rs`) set `base_snapshot` to `None` explicitly.
@@ -247,9 +248,9 @@ tolerates evidence being present or absent on duplicates.
     byte fixtures and codec registry, so the registry row added here lands
     first and carries over.
   - If #3473 later moves exclusive validation to "base seq + read set", the
-    snapshot record becomes a `v2` family (`format_v1` → a new record). v1 rows
-    only live while a transaction is pending, so no long-lived data needs
-    migrating.
+    snapshot record becomes a `v2` family (`format_v1` → a new record).
+    Retained v1 evidence would need an explicit storage transition; it cannot
+    be reinterpreted using the later grammar.
 - **#3673 (4-byte author aliases, stacked on #3281).** Changes
   `jazz_transactions.made_by` to a `U32` alias and decodes it in
   `stored_transaction_from_record`. This is a textual conflict only, in the
@@ -268,8 +269,9 @@ tolerates evidence being present or absent on duplicates.
   later `v2` can add the descriptor half of `jazz-binding-v0` tag 16.
 - **Pending transactions from before the upgrade.** Old rows cannot be
   recovered. They were written without evidence.
-- **No history audit.** Evidence is cleared at settlement. Nothing reads it
-  except outbox or relay recovery and local replay.
+- **Evidence lifetime.** Original evidence remains with the transaction history,
+  including settled units. This increases retained history size; it does not
+  reconstruct proof or make absence of proof authorisation evidence.
 - **Wire and binding ABI.** No wire, binding ABI or Groove schema changes.
 
 ## Evidence

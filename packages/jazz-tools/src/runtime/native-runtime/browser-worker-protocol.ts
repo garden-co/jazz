@@ -317,6 +317,7 @@ export interface BrowserForegroundNodeLeaseProbeRequest {
 /** Lease-only bootstrap that runs before the foreground schema is known. */
 export interface BrowserForegroundNodeLeaseAcquireRequest {
   type: "acquire-foreground-node-lease";
+  runtimeSources?: RuntimeSourcesConfig;
   /** Correlates this durable operation with its preceding liveness probe. */
   attemptId?: string;
   dbName: string;
@@ -456,9 +457,7 @@ export type BrowserFollowerPortRequest =
   | { type: "flush-local"; id: number }
   | { type: "flush-pending-writes"; id: number }
   | { type: "flush-local-observed" }
-  | { type: "prepare-storage-reset"; id: number }
-  | { type: "finish-storage-reset"; id: number }
-  | { type: "abort-storage-reset"; id: number }
+  | { type: "delete-storage"; id: number }
   | { type: "storage-reset-observed"; resetId: number }
   | { type: "open-inspector-control"; id: number; port: MessagePort }
   | {

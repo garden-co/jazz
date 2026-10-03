@@ -40,7 +40,7 @@ use jazz::wire::{
 use jazz_sim::public_schema_fixture::{compile_public_schema, seeded_recursive_access_policy};
 use jazz_sim::view_accounting::version_bundle_refs;
 use jazz_sim::{emit_json_line, metadata_fields};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::{Durability, RocksDbStorageFactory};
 use serde_json::{Value as JsonValue, json};
 
 #[cfg(not(any(feature = "bench-alloc-metrics", feature = "bench-alloc-sites")))]
@@ -1450,7 +1450,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         }
         fs::create_dir_all(&tmp_cache).expect("create temporary customer seed cache");
         {
-            let storage = BoxedStorage::new(open_storage(&tmp_cache, schema));
+            let storage = open_storage(&tmp_cache, schema);
             let state = block_on(jazz::node::NodeState::new_history_complete(
                 node(1),
                 schema.clone(),
@@ -1471,7 +1471,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     let storage = if storage_mode() == "all-memory" {
         BoxedStorage::new(copy_seed_to_memory(&rocks))
     } else {
-        BoxedStorage::new(rocks)
+        rocks
     };
     let storage = work_budget::wrap(storage, "core");
     let state = block_on(jazz::node::NodeState::new_history_complete(
@@ -2663,7 +2663,7 @@ fn storage_mode() -> String {
 
 fn open_receiver_storage(path: &Path, schema: &JazzSchema) -> BoxedStorage {
     if storage_mode() == "rocks" {
-        BoxedStorage::new(open_storage(path, schema))
+        open_storage(path, schema)
     } else {
         let families = schema.column_families();
         let names = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2673,7 +2673,7 @@ fn open_receiver_storage(path: &Path, schema: &JazzSchema) -> BoxedStorage {
 
 // Preload identical physical seed state, including aliases and acceptance
 // metadata. This is setup, not measured synchronization or reseeding work.
-fn copy_seed_to_memory(source: &RocksDbStorage) -> MemoryStorage {
+fn copy_seed_to_memory(source: &impl OrderedKvStorage) -> MemoryStorage {
     let families = source
         .column_family_names()
         .expect("RocksDB enumerates families");
@@ -2705,10 +2705,13 @@ fn copy_seed_to_memory(source: &RocksDbStorage) -> MemoryStorage {
     memory
 }
 
-fn open_storage(path: &std::path::Path, schema: &JazzSchema) -> RocksDbStorage {
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    RocksDbStorage::open_with_durability(path, &refs, Durability::WalNoSync).unwrap()
+fn open_storage(path: &std::path::Path, schema: &JazzSchema) -> BoxedStorage {
+    block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        path.to_path_buf(),
+        schema.column_families(),
+    ))
+    .unwrap()
 }
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {

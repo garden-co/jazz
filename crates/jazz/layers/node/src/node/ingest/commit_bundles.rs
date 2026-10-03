@@ -31,7 +31,8 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
-        self.ingest_commit_unit_with_context(tx, versions, now_ms, None).await
+        self.ingest_commit_unit_with_context(tx, versions, now_ms, None)
+            .await
     }
 
     /// Ingest a commit unit as fate authority with an optional authenticated
@@ -48,6 +49,7 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         // A session or relay transport may not select a durable policy
         // capability. Its authenticated context is evaluated separately; only
         // trusted local/backend paths retain an explicit permission subject.
@@ -73,14 +75,17 @@ where
         }
         if let Some(reason) = commit_unit_limit_violation(&versions) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
-            self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
+            self.ingest_rejected_transaction(tx.clone(), fate.clone())
+                .await?;
             let mut updates = PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
                 global_time: None,
                 durability: None,
             }]);
-            updates.value.extend(self.cascade_rejections_from(tx.tx_id).await?);
+            updates
+                .value
+                .extend(self.cascade_rejections_from(tx.tx_id).await?);
             return Ok(updates);
         }
         if commit_unit_write_count_matches(&tx, versions.len())
@@ -94,9 +99,13 @@ where
         let clock_before_ingest = self.clock.clone();
         // One admission attempt includes policy evaluation and storage repair.
         // Its future must not be embedded in this outer retry/clock owner.
-        let mut updates = match Box::pin(self
-            .ingest_commit_unit_once(tx, versions, now_ms, ingest_context))
-            .await
+        let mut updates = match Box::pin(self.ingest_commit_unit_once(
+            tx,
+            versions,
+            now_ms,
+            ingest_context,
+        ))
+        .await
         {
             Ok(updates) => updates,
             Err(error) => {
@@ -118,7 +127,8 @@ where
     /// restoration preserves retryability for a definitely-uncommitted batch.
     fn restore_clock_after_failed_authority_ingest(&mut self, before: Clock) {
         if self.clock.committed_global_time == before.committed_global_time
-            && self.clock.applied_global_times_after_frontier == before.applied_global_times_after_frontier
+            && self.clock.applied_global_times_after_frontier
+                == before.applied_global_times_after_frontier
         {
             self.clock = before;
             return;
@@ -153,7 +163,8 @@ where
     ) -> Result<PublicationOutcome<()>, Error> {
         self.require_catalogue_ready()?;
         let stored = self
-            .query_transaction(tx_id).await?
+            .query_transaction(tx_id)
+            .await?
             .ok_or(Error::MissingTransaction(tx_id))?;
         if stored.tx.kind != TxKind::Mergeable {
             return Err(Error::UnsupportedCommitUnit(
@@ -164,7 +175,8 @@ where
             return Ok(PublicationOutcome::settled(()));
         }
         let records = self
-            .query_versions_for_tx(tx_id).await?
+            .query_versions_for_tx(tx_id)
+            .await?
             .into_iter()
             .map(|stored| self.version_record_from_row(&stored))
             .collect::<Result<Vec<_>, Error>>()?;
@@ -189,15 +201,14 @@ where
             self.ingest_rejected_transaction(stored.tx, fate).await?;
             return Ok(PublicationOutcome::settled(()));
         }
-        let global_time = self
-            .clock
-            .allocate_global_time(tx_id.time.physical_ms())?;
+        let global_time = self.clock.allocate_global_time(tx_id.time.physical_ms())?;
         self.apply_fate_update(
             tx_id,
             Fate::Accepted,
             Some(global_time),
             Some(DurabilityTier::Global),
-        ).await?;
+        )
+        .await?;
         let merges = self.create_merge_versions_for(&records).await?;
         Ok(PublicationOutcome {
             value: (),
@@ -209,12 +220,9 @@ where
     /// Finalize a locally-authored pending exclusive commit as the global
     /// authority, returning the accepted or rejected fate.
     ///
-    /// Validation runs against the in-memory commit unit (`tx` + `versions`),
-    /// the evidence the author captured. The stored row keeps the same
-    /// evidence only while the fate is pending, for retransmission after a
-    /// restart (`jazz.exclusive-read-evidence.v1`). This mirrors the foreign
-    /// authority path, which validates the arriving commit unit before it is
-    /// ingested.
+    /// Validation uses the exact captured commit unit (`tx` + `versions`).
+    /// Durable recovery retains the same immutable evidence; neither path
+    /// replaces the original observations with current-state reads.
     pub async fn finalize_local_exclusive_commit(
         &mut self,
         tx: Transaction,
@@ -228,7 +236,8 @@ where
             ));
         }
         let stored = self
-            .query_transaction(tx_id).await?
+            .query_transaction(tx_id)
+            .await?
             .ok_or(Error::MissingTransaction(tx_id))?;
         if !matches!(stored.fate, Fate::Pending) {
             return Ok(PublicationOutcome::settled(stored.fate));
@@ -251,15 +260,14 @@ where
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
-        let global_time = self
-            .clock
-            .allocate_global_time(tx_id.time.physical_ms())?;
+        let global_time = self.clock.allocate_global_time(tx_id.time.physical_ms())?;
         self.apply_fate_update(
             tx_id,
             Fate::Accepted,
             Some(global_time),
             Some(DurabilityTier::Global),
-        ).await?;
+        )
+        .await?;
         let merges = self.create_merge_versions_for(&versions).await?;
         Ok(PublicationOutcome {
             value: Fate::Accepted,
@@ -277,7 +285,8 @@ where
     where
         S: ReopenableStorage,
     {
-        self.ingest_relay_commit_unit_with_encoder_trust(tx, versions, false).await
+        self.ingest_relay_commit_unit_with_encoder_trust(tx, versions, false)
+            .await
     }
 
     #[doc(hidden)]
@@ -287,9 +296,11 @@ where
         versions: Vec<VersionRecord>,
         trusted_encoder: bool,
     ) -> Result<(), Error>
-    where S: ReopenableStorage,
+    where
+        S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         let tx = Transaction {
             permission_subject: None,
             ..tx
@@ -344,7 +355,8 @@ where
         let versions = canonical_versions(versions);
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
             let mut existing_versions = self
-                .query_versions_for_tx(tx.tx_id).await?
+                .query_versions_for_tx(tx.tx_id)
+                .await?
                 .into_iter()
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -374,16 +386,20 @@ where
         )? {
             return Ok(());
         }
-        self.prepare_authored_schema_variants_for_commit(&versions).await?;
+        self.prepare_authored_schema_variants_for_commit(&versions)
+            .await?;
 
         let mut memo = IngestMemo::default();
-        if self.park_commit_unit_if_missing_parents_with_mode(
-            &tx,
-            &versions,
-            u64::MAX - SKEW_TOLERANCE_MS,
-            &mut memo,
-            relay_mode,
-        ).await? {
+        if self
+            .park_commit_unit_if_missing_parents_with_mode(
+                &tx,
+                &versions,
+                u64::MAX - SKEW_TOLERANCE_MS,
+                &mut memo,
+                relay_mode,
+            )
+            .await?
+        {
             return Ok(());
         }
         self.ingest_transaction_and_versions(
@@ -392,7 +408,8 @@ where
             Fate::Pending,
             None,
             DurabilityTier::Local,
-        ).await
+        )
+        .await
     }
 
     pub(super) async fn ingest_commit_unit_once(
@@ -412,7 +429,8 @@ where
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(
                 "commit unit version count does not match transaction n_total_writes".to_owned(),
             ));
-            self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
+            self.ingest_rejected_transaction(tx.clone(), fate.clone())
+                .await?;
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
@@ -438,6 +456,18 @@ where
                 if !matches {
                     return Err(Error::ConflictingCommitUnit(tx.tx_id));
                 }
+                if tx.kind == TxKind::Exclusive && !matches!(existing.fate, Fate::Rejected(_)) {
+                    let mut existing_versions = self
+                        .query_versions_for_tx(tx.tx_id)
+                        .await?
+                        .into_iter()
+                        .map(|stored| self.version_record_from_row(&stored))
+                        .collect::<Result<Vec<_>, Error>>()?;
+                    existing_versions.sort();
+                    if existing_versions != versions {
+                        return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                    }
+                }
                 return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                     tx_id: tx.tx_id,
                     fate: existing.fate.clone(),
@@ -446,7 +476,8 @@ where
                 }]));
             }
             let mut existing_versions = self
-                .query_versions_for_tx(tx.tx_id).await?
+                .query_versions_for_tx(tx.tx_id)
+                .await?
                 .into_iter()
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -484,7 +515,8 @@ where
         )? {
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
-        self.prepare_authored_schema_variants_for_commit(&versions).await?;
+        self.prepare_authored_schema_variants_for_commit(&versions)
+            .await?;
         // Validate untrusted metadata before a missing ordinary history parent
         // can park the unit. Otherwise malformed provenance would leave an
         // inert parked receipt instead of producing its terminal fate.
@@ -497,21 +529,28 @@ where
                 .await
                 .map(PublicationOutcome::settled);
         }
-        if self.park_commit_unit_if_missing_parents_with_mode(
-            &tx,
-            &versions,
-            now_ms,
-            &mut memo,
-            CommitUnitParkMode {
-                ingest_context,
-                ..CommitUnitParkMode::default()
-            },
-        ).await? {
+        if self
+            .park_commit_unit_if_missing_parents_with_mode(
+                &tx,
+                &versions,
+                now_ms,
+                &mut memo,
+                CommitUnitParkMode {
+                    ingest_context,
+                    ..CommitUnitParkMode::default()
+                },
+            )
+            .await?
+        {
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
-        if !self.commit_unit_satisfies_clock_condition(&tx, &versions, &mut memo).await? {
+        if !self
+            .commit_unit_satisfies_clock_condition(&tx, &versions, &mut memo)
+            .await?
+        {
             let fate = Fate::Rejected(RejectionReason::CausalityViolation);
-            self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
+            self.ingest_rejected_transaction(tx.clone(), fate.clone())
+                .await?;
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
@@ -523,7 +562,8 @@ where
         }
         if tx.tx_id.time.physical_ms() > now_ms.saturating_add(SKEW_TOLERANCE_MS) {
             let fate = Fate::Rejected(RejectionReason::ClientClockTooFarAhead);
-            self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
+            self.ingest_rejected_transaction(tx.clone(), fate.clone())
+                .await?;
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
@@ -536,7 +576,8 @@ where
 
         if let Some(root) = self.cascade_root_for_versions(&versions).await {
             let fate = Fate::Rejected(RejectionReason::Cascade { root });
-            self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
+            self.ingest_rejected_transaction(tx.clone(), fate.clone())
+                .await?;
             return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
                 fate,
@@ -566,7 +607,8 @@ where
             && !self.validate_exclusive_commit_unit(&tx, &versions).await?
         {
             let fate = Fate::Rejected(RejectionReason::ExclusiveConflict);
-            self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
+            self.ingest_rejected_transaction(tx.clone(), fate.clone())
+                .await?;
             // This is a newly observed authority-side rejection. No stored
             // descendant can already point at it: descendants delivered before
             // the parent would park on the missing parent instead of entering
@@ -582,8 +624,7 @@ where
         if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Exclusive {
             return Err(Error::UnsupportedCommitUnit("unsupported commit unit kind"));
         }
-        let authority_now_ms =
-            GlobalTime::authority_now_ms(now_ms, tx.tx_id.time.physical_ms());
+        let authority_now_ms = GlobalTime::authority_now_ms(now_ms, tx.tx_id.time.physical_ms());
         let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
@@ -604,7 +645,9 @@ where
             global_time: Some(global_time),
             durability: Some(durability),
         }]);
-        outcome.append_outcome(Box::pin(self.create_merge_versions_for_rows(merge_rows)).await?);
+        outcome.append_outcome(
+            Box::pin(self.create_merge_versions_for_rows(merge_rows)).await?,
+        );
         Ok(outcome)
     }
 
@@ -617,15 +660,20 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.require_catalogue_ready()?;
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         debug_assert!(
             global_time.is_none() || durability == DurabilityTier::Global,
             "a global timestamp requires Global durability"
         );
         self.merge_tx_time(tx.tx_id.time);
         let versions = canonical_versions(versions);
-        self.prepare_authored_schema_variants_for_commit(&versions).await?;
+        self.prepare_authored_schema_variants_for_commit(&versions)
+            .await?;
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
-            if !(known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
+            if !(known_transaction_payload_matches(
+                &transaction_without_permission_subject(&existing.tx),
+                &transaction_without_permission_subject(&tx),
+            )
                 || existing.view_scoped_cardinality
                     && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
             {
@@ -637,7 +685,11 @@ where
                 return self.ingest_transaction_and_versions(tx, versions, fate, global_time, durability).await;
             }
             // Normalize aliases before establishing the batch's resident base.
-            for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
+            for schema in versions
+                .iter()
+                .map(VersionRecord::schema_version)
+                .collect::<BTreeSet<_>>()
+            {
                 self.ensure_schema_version_alias(schema).await?;
             }
             for parent in versions.iter().flat_map(VersionRecord::parents) {
@@ -647,10 +699,15 @@ where
             let mut version_bundles = Vec::new();
             let mut previously_stored = Vec::new();
             for version in versions {
-                let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, &version).await?;
+                let stored = self
+                    .prepare_exact_history_version(existing.node_alias, tx.tx_id.time, &version)
+                    .await?;
                 let (table, record) = self.version_storage_write_binding(&stored)?;
                 let key = self.version_storage_primary_key(&stored)?;
-                match batch.ensure_exact(&self.database, table.as_ref(), key, record).await? {
+                match batch
+                    .ensure_exact(&self.database, table.as_ref(), key, record)
+                    .await?
+                {
                     groove::db::EnsureExactOutcome::Inserted => version_bundles.push(version),
                     groove::db::EnsureExactOutcome::AlreadyIdentical => previously_stored.push(stored),
                     groove::db::EnsureExactOutcome::Conflict => return Err(Error::ConflictingCommitUnit(tx.tx_id)),
@@ -689,6 +746,7 @@ where
         staged_content_versions: &mut Vec<VersionRow>,
         staged_rejections: &mut Vec<RejectedTransaction>,
     ) -> Result<(), Error> {
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         debug_assert!(
             global_time.is_none() || durability == DurabilityTier::Global,
             "a global timestamp requires Global durability"
@@ -705,13 +763,11 @@ where
                 .ingest_known_transaction(tx, versions, fate, global_time, durability)
                 .await;
         }
-        if let Some(complete_parent_versions) = self.complete_parent_versions(&tx, &versions).await?
+        if let Some(complete_parent_versions) =
+            self.complete_parent_versions(&tx, &versions).await?
         {
-            self.preflight_complete_parent_batch(
-                batch,
-                &[(tx.tx_id, complete_parent_versions)],
-            )
-            .await?;
+            self.preflight_complete_parent_batch(batch, &[(tx.tx_id, complete_parent_versions)])
+                .await?;
         }
         let (staged_versions, fate, global_time, rejected_payload) = self.stage_transaction_and_versions_with_current_indexes(
             batch,
@@ -738,7 +794,10 @@ where
         .await
     }
 
-    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.ingest"))]
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.ingest")
+    )]
     pub(super) async fn ingest_reset_view_bundle_refs_in_bulk(
         &mut self,
         bundles: &[VersionBundleRef<'_>],
@@ -746,6 +805,7 @@ where
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
         for bundle in bundles {
+            self.validate_incoming_exclusive_evidence(bundle.tx).await?;
             // This helper is also called directly by reset fast paths; do not
             // rely on their outer ViewUpdate preflight for durable admission.
             self.admit_contribution_merge_for_storage(bundle.tx)?;
@@ -791,7 +851,13 @@ where
                 continue;
             }
             let mut unique_versions = BTreeMap::<
-                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
+                (
+                    String,
+                    BranchKey,
+                    RowUuid,
+                    crate::ids::SchemaVersionId,
+                    bool,
+                ),
                 &VersionRecord,
             >::new();
             for bundle in &tx_bundles {
@@ -852,11 +918,10 @@ where
         }
         let eligible_versions = eligible
             .iter()
-            .flat_map(|(tx_bundles, _, _)| {
-                tx_bundles.iter().flat_map(|bundle| bundle.versions)
-            })
+            .flat_map(|(tx_bundles, _, _)| tx_bundles.iter().flat_map(|bundle| bundle.versions))
             .collect::<Vec<_>>();
-        self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
+        self.prepare_authored_schema_variants_for_commit(&eligible_versions)
+            .await?;
 
         let mut complete_parents = Vec::new();
         for (tx_bundles, tx, _) in &eligible {
@@ -884,13 +949,10 @@ where
             .map(|bundle| bundle.versions.len())
             .sum::<usize>();
         batch.reserve(eligible.len() + version_count.saturating_mul(2));
-        let mut current_updates = BTreeMap::<
-            (String, BranchKey, RowUuid, VersionLayer),
-            (VersionRow, GlobalTime),
-        >::new();
+        let mut current_updates =
+            BTreeMap::<(String, BranchKey, RowUuid, VersionLayer), (VersionRow, GlobalTime)>::new();
         let mut content_versions = Vec::new();
-        let mut content_rows =
-            BTreeSet::<(PhysicalTableId, String, BranchKey, RowUuid)>::new();
+        let mut content_rows = BTreeSet::<(PhysicalTableId, String, BranchKey, RowUuid)>::new();
         let mut applied_global_times = Vec::with_capacity(eligible.len());
 
         for (tx_bundles, local_tx, view_scoped) in eligible {
@@ -903,9 +965,8 @@ where
             let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
             let global_time = first.global_time.expect("checked above");
             applied_global_times.push(global_time);
-            let contribution_merge = self.contribution_merge_storage_value(
-                tx.contribution_merge.as_ref(),
-            )?;
+            let contribution_merge =
+                self.contribution_merge_storage_value(tx.contribution_merge.as_ref())?;
             batch.insert(
                 "jazz_transactions",
                 // A reset may bulk-load only the view-authorized rows of an
@@ -924,7 +985,13 @@ where
             );
 
             let mut unique_versions = BTreeMap::<
-                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
+                (
+                    String,
+                    BranchKey,
+                    RowUuid,
+                    crate::ids::SchemaVersionId,
+                    bool,
+                ),
                 &VersionRecord,
             >::new();
             for bundle in &tx_bundles {
@@ -946,7 +1013,8 @@ where
                 let author_schema = version.schema_version();
                 self.table_in_schema_ref(version.table(), author_schema)?;
                 let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
-                let source_table_schema = self.table_in_schema_ref(version.table(), author_schema)?;
+                let source_table_schema =
+                    self.table_in_schema_ref(version.table(), author_schema)?;
                 let authored_column_ids = self.authored_column_ids_for_names(
                     author_schema,
                     version.table(),
@@ -1048,7 +1116,11 @@ where
         for (table_id, _, _, _) in &content_rows {
             if probed_history_tables.insert(*table_id) {
                 self.sync_metrics.receiver_history_table_probes += 1;
-                if !self.database.table_has_stored_rows(&physical_history_table_name(*table_id)).await? {
+                if !self
+                    .database
+                    .table_has_stored_rows(&physical_history_table_name(*table_id))
+                    .await?
+                {
                     empty_history_tables.insert(*table_id);
                 }
             }
@@ -1057,7 +1129,8 @@ where
             &mut batch,
             &content_versions,
             &empty_history_tables,
-        ).await?;
+        )
+        .await?;
 
         #[cfg(test)]
         let current_update_versions = current_updates
@@ -1067,7 +1140,8 @@ where
         let applied = self.database.apply_batch(batch).await?;
         let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
-        let rebuild_rows = content_rows.iter()
+        let rebuild_rows = content_rows
+            .iter()
             .filter(|(table_id, _, _, _)| !empty_history_tables.contains(table_id))
             .cloned()
             .collect::<BTreeSet<_>>();
@@ -1088,16 +1162,12 @@ where
             if std::env::var_os("JAZZ_SKIP_BULK_INGEST_ASSERTS").is_none() {
                 for (_, table, branch_key, row_uuid) in &content_rows {
                     self.assert_merge_heads_match_history_in_branch_for_test(
-                        table,
-                        branch_key,
-                        *row_uuid,
+                        table, branch_key, *row_uuid,
                     )
                     .await?;
                 }
-                self.assert_global_current_updates_match_history_for_test(
-                    &current_update_versions,
-                )
-                .await?;
+                self.assert_global_current_updates_match_history_for_test(&current_update_versions)
+                    .await?;
             }
         }
         for tx_id in &loaded_tx_ids {

@@ -5,6 +5,46 @@ use crate::node::legacy_test_future::FutureResolveExt as _;
 use crate::peer::PeerState;
 use crate::protocol::{DelegatedSessionBinding, PolicyBindingKey, ReadViewSourceSpec, SnapshotRef};
 
+/// Mallory forges an INSERT-only candidate source into a wire query shape.
+/// Registration must reject it even though the query is structurally valid
+/// for trusted policy compilation. This protocol seam is needed because the
+/// public query builder already rejects this capability before transmission.
+///
+/// mallory -- forged RegisterShape --> authority -- unsupported capability
+#[test]
+fn forged_query_shape_cannot_register_authorized_created_sources() {
+    let mut marked = Query::from("issues").join_via_row_id("users", "assignee", []);
+    marked.joins[0].source_mode = crate::query::CandidateSourceMode::IncludeAuthorizedCreatedV1;
+    let mut branch = Query::from("issues");
+    branch
+        .policy_branches
+        .push(crate::query::PolicyBranch::single_alternative_from_query(
+            marked.clone(),
+        ));
+    let mut nested = Query::from("issue_members").join_via_row_id("issues", "issue", []);
+    nested.joins[0].nested_joins = marked.joins.clone();
+
+    for (location, query) in [("root", marked), ("branch", branch), ("nested", nested)] {
+        let (_dir, mut node) = open_node();
+        // The forged sender can use the same structural compiler as INSERT
+        // policies, bypassing the ordinary public Query::validate guard.
+        let shape = query
+            .validate_runtime(&schema())
+            .expect("candidate source has a valid declared-reference correlation");
+        let error = node
+            .apply_sync_message_settled(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: ShapeAst::from_validated(&shape),
+                opts: RegisterShapeOptions::default(),
+            })
+            .expect_err("wire query registration must reject the INSERT-only capability");
+        assert!(
+            matches!(error, Error::UnsupportedSyncMessage(_)),
+            "{location} candidate source must be rejected at ingress: {error:?}",
+        );
+    }
+}
+
 /// Internal compiler boundary: public rows cannot reveal whether two logical
 /// witness roles have one executable payload producer. Alice's maintained
 /// program must retain both contracts while sharing their proven execution.
@@ -294,7 +334,7 @@ fn cold_receiver_window_is_exact_shape_bound_and_retains_limit() {
         )]))
         .unwrap();
     let view = BindingViewKey::new(shape.shape_id(), binding.binding_id(), Default::default());
-    let window = |node: &NodeState, selected| {
+    let window = |node: &NodeState<BoxedStorage>, selected| {
         let request = node
             .current_query_program_request(
                 &shape,
@@ -341,7 +381,7 @@ fn cold_receiver_window_is_exact_shape_bound_and_retains_limit() {
 /// execution path, never the trusted-serving path that expects complete
 /// current-table capabilities.
 fn receiver_rows(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
     tier: DurabilityTier,
@@ -352,7 +392,7 @@ fn receiver_rows(
 }
 
 fn receiver_rows_in_read_view(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
     tier: DurabilityTier,
@@ -368,7 +408,7 @@ fn receiver_rows_in_read_view(
 /// subscription must record that same immutable reader scope; an unscoped
 /// `Subscribe` models neither a direct peer nor a multiplexed relay.
 fn subscribe_query_binding_as_system_with_opts(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
     opts: RegisterShapeOptions,
@@ -1266,7 +1306,7 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_global_frontiers(
             subscribe_query_binding_as_system_with_opts(node, &shape, &binding, opts.clone());
         }
 
-        let commit = |node: &mut NodeState, now_ms, deletion| {
+        let commit = |node: &mut NodeState<BoxedStorage>, now_ms, deletion| {
             let mut write =
                 MergeableCommit::new("notes", row(0), now_ms).made_by(AuthorSubject::SYSTEM);
             if let Some(deletion) = deletion {

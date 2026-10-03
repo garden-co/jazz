@@ -18,7 +18,7 @@ use jazz::db::{
     block_on,
 };
 use jazz::groove::records::Value;
-use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
+use jazz::groove::storage::{BoxedStorage, MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
@@ -32,7 +32,7 @@ use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireSession,
     WireTransport,
 };
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::{Durability, RocksDbStorageFactory};
 use tempfile::TempDir;
 
 const USERS: usize = 10;
@@ -518,15 +518,17 @@ fn fresh_task_snapshot_bytes(tasks: usize, comments: usize, activity_events: usi
         .expect("W1 fresh post-update bytes")
 }
 
-impl Fixture<RocksDbStorage> {
+impl Fixture<BoxedStorage> {
     pub fn rocksdb(tasks: usize, comments: usize, activity_events: usize) -> (TempDir, Self) {
         let schema = schema(false);
         let families = schema.column_families();
-        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let dir = tempfile::tempdir().expect("create W1 RocksDB benchmark directory");
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &family_refs, Durability::WalNoSync)
-                .expect("open W1 RocksDB benchmark storage");
+        let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+            &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+            dir.path().to_path_buf(),
+            families,
+        ))
+        .expect("open W1 RocksDB benchmark storage");
         (
             dir,
             Self::new(

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
+use jazz::groove::storage::BoxedStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::protocol::{SyncMessage, VersionRecord};
@@ -18,7 +19,7 @@ use jazz_sim::fixture::{
     ingest_commit_unit_settled,
 };
 use jazz_sim::{emit_json_line, metadata_fields};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::Durability;
 use serde_json::{Map, Value as JsonValue, json};
 
 const TABLE: &str = "items";
@@ -414,7 +415,7 @@ fn run_validation_entries(config: &Config) {
     );
 }
 
-fn seed_local_rows(node_: &mut NodeState, rows: usize) {
+fn seed_local_rows(node_: &mut NodeState<BoxedStorage>, rows: usize) {
     for idx in 0..rows {
         let _ = commit_mergeable_unit_settled(
             node_,
@@ -461,7 +462,7 @@ fn commit_deletion_unit(
     .1
 }
 
-fn core_ingest(core: &mut NodeState, unit: &SyncMessage) -> SyncMessage {
+fn core_ingest(core: &mut NodeState<BoxedStorage>, unit: &SyncMessage) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
@@ -525,17 +526,27 @@ fn table_schema() -> TableSchema {
     schema().tables()[0].clone()
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
+fn open_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let node = open_node_at(temp_dir.path(), node_uuid, schema);
     (temp_dir, node)
 }
 
-fn open_node_at(path: &std::path::Path, node_uuid: NodeUuid, schema: JazzSchema) -> NodeState {
+fn open_node_at(
+    path: &std::path::Path,
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> NodeState<BoxedStorage> {
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open_with_durability(path, &refs, Durability::WalNoSync)
-        .expect("open rocksdb");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        path.to_path_buf(),
+        cfs,
+    ))
+    .expect("open rocksdb");
     jazz::db::block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))

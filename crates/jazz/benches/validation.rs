@@ -7,6 +7,7 @@ mod support;
 
 use support::BenchFutureExt as _;
 
+use groove::storage::BoxedStorage;
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -18,7 +19,7 @@ use jazz::time::GlobalTime;
 use jazz::tools::OpenTransactionId;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::Durability;
 use support::{emit_json_line, insert_node_metrics, phase_fields, reset_phase_counters};
 
 const TABLE: &str = "items";
@@ -68,8 +69,8 @@ impl Config {
 
 struct ValidationBench {
     config: Config,
-    core: NodeState,
-    clients: Vec<NodeState>,
+    core: NodeState<BoxedStorage>,
+    clients: Vec<NodeState<BoxedStorage>>,
     _core_dir: tempfile::TempDir,
     _client_dirs: Vec<tempfile::TempDir>,
     rng: Rng,
@@ -553,19 +554,24 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
+fn open_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
-            .expect("open rocksdb");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        temp_dir.path().to_path_buf(),
+        cfs,
+    ))
+    .expect("open rocksdb");
     let node =
         NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).expect("single node");
     (temp_dir, node)
 }
 
-fn core_ingest(core: &mut NodeState, unit: &SyncMessage) -> SyncMessage {
+fn core_ingest(core: &mut NodeState<BoxedStorage>, unit: &SyncMessage) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
@@ -578,7 +584,7 @@ fn core_ingest(core: &mut NodeState, unit: &SyncMessage) -> SyncMessage {
     fate
 }
 
-fn apply_fate(node: &mut NodeState, fate: &SyncMessage) {
+fn apply_fate(node: &mut NodeState<BoxedStorage>, fate: &SyncMessage) {
     support::apply_and_settle(node, fate.clone());
 }
 

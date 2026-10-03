@@ -1692,26 +1692,6 @@ where
                 &binding_claim_params,
             )?;
         }
-        // Prepared binding-source names are runtime identities. Claim values
-        // normally route independent bindings through one shape, but equal
-        // author identities may hold distinct authenticated sessions. Give
-        // their claim scopes separate source identities so a later session
-        // cannot replace an already-maintained sibling binding.
-        let source_shape = source_shape.map(|source_shape| {
-            self.active_session_claim_scope_key(identity)
-                .map(|scope| format!("{source_shape}:session:{scope}"))
-                .unwrap_or(source_shape)
-        });
-        if let Some(source_shape) = &source_shape {
-            retarget_binding_value_sources(&mut input_shape, source_shape);
-        }
-        if crate::debug_env::covered_input_trace() {
-            eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=program_scope identity={identity:?} mode={authorization_mode:?} prepared={use_prepared_binding_source} source_shape={source_shape:?} strips_policy_branches={strips_policy_branches} query_policy_branches={} query_includes={} policy={policy:?}",
-                shape.query().policy_branches.len(),
-                shape.query().includes.len(),
-            );
-        }
         let root_has_read_policy = self
             .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .read_policy
@@ -1757,6 +1737,20 @@ where
         // final name, since System authority re-derives it above.
         if client_local && let Some(source_shape) = program_binding.source_shape.as_mut() {
             source_shape.push_str(":client-local");
+        }
+        // Policy adjustment and source-authority namespacing must finish
+        // before graph inputs are tied to the descriptor registered at bind.
+        // Session scopes are already included by the identity-aware builder.
+        if let Some(source_shape) = &program_binding.source_shape {
+            retarget_binding_value_sources(&mut input_shape, source_shape);
+        }
+        if crate::debug_env::covered_input_trace() {
+            let source_shape = &program_binding.source_shape;
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=program_scope identity={identity:?} mode={authorization_mode:?} prepared={use_prepared_binding_source} source_shape={source_shape:?} strips_policy_branches={strips_policy_branches} query_policy_branches={} query_includes={} policy={policy:?}",
+                shape.query().policy_branches.len(),
+                shape.query().includes.len(),
+            );
         }
         let input = RowSetProgramInput {
             binding: program_binding,
@@ -5243,6 +5237,7 @@ fn aggregate_current_row_from_record(
 }
 
 mod authorization;
+pub(in crate::node) use authorization::{AuthorizedCreatedEvidence, CandidateProofBudget};
 
 impl<S> HistoricalRead<'_, S>
 where

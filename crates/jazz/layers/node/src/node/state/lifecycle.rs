@@ -80,6 +80,7 @@ impl NodeState {
     where
         T: ReopenableStorage + 'static,
     {
+        crate::storage_codec_profile::require_node_storage_admission(&storage)?;
         let meta_database = Database::new_with_storage_layout(
             JazzSchema::empty().lower_catalogue_meta_to_groove(),
             storage,
@@ -249,6 +250,7 @@ impl NodeState {
     where
         T: ReopenableStorage + 'static,
     {
+        crate::storage_codec_profile::require_node_storage_admission(&storage)?;
         let bootstrap_schema = JazzSchema::empty();
         // Dynamic discovery must inspect the fixed history/branch/fate stores
         // too: an empty catalogue does not make an existing Jazz store safe to
@@ -715,6 +717,7 @@ impl NodeState {
     where
         T: ReopenableStorage + 'static,
     {
+        crate::storage_codec_profile::require_node_storage_admission(&storage)?;
         let local_schema_version_id = schema.version_id();
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
@@ -1043,6 +1046,7 @@ impl NodeState {
         physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
         storage: BoxedStorage,
     ) -> Result<Database, Error> {
+        crate::storage_codec_profile::require_node_storage_admission(&storage)?;
         debug_assert_lowered_layouts(schema);
         let mut lowered = schema.lower_to_groove();
         let current_tables = physical_version_storage_tables(
@@ -1183,7 +1187,15 @@ where
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> ActiveSessionClaimsScope<'_, S> {
-        let previous = self.active_session_claims.replace((identity, claims));
+        self.scoped_session_claim_binding(Some((identity, claims)))
+    }
+
+    /// Restore an exact parked scope, including absence of delegated authority.
+    pub(in crate::node) fn scoped_session_claim_binding(
+        &mut self,
+        binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    ) -> ActiveSessionClaimsScope<'_, S> {
+        let previous = std::mem::replace(&mut self.active_session_claims, binding);
         ActiveSessionClaimsScope {
             node: self,
             previous,
@@ -2065,6 +2077,7 @@ where
     where
         T: ReopenableStorage + 'static,
     {
+        crate::storage_codec_profile::require_node_storage_admission(&storage)?;
         let local_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
         let mut meta_database =

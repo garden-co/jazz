@@ -360,6 +360,65 @@ The overlay only holds rows of the candidate unit, never a table-wide read, and
 it changes no wire or storage encoding: it is formed from the versions the unit
 already carries.
 
+#### Same-commit INSERT policy evidence
+
+`policy.<table>.existsIncludingCreated.where(...)` explicitly enables
+`ExistsIncludingCreated` at one scalar, positively correlated INSERT-policy
+source occurrence. The source may combine accepted Global rows with independently
+authorized new root inserts from the same complete exclusive transaction.
+Unmarked policies retain the ordinary grounding and post-state rules above.
+Within a marked proof, unmarked aliases remain accepted-only; the protected
+row cannot witness itself.
+Candidate-aware negation, uncorrelated scans, relational/gather sources, and
+read/update/delete policy declarations are rejected.
+
+Dispatch uses the operation policy and pinned schema actually selected for each
+version. A marked INSERT first evaluates its complete policy against accepted
+Global evidence; that baseline may succeed for a mergeable or otherwise
+augmentation-ineligible write. An unselected INSERT marker never changes UPDATE
+or DELETE admission. Unmarked selected policies retain ordinary unit admission.
+
+Created witnesses require unique physical row coordinates, exact absence
+evidence, and the complete exclusive unit. Updates, deletions, branch writes,
+and ambiguous duplicate coordinates cannot become witnesses. Existing
+first-committer, authenticated-subject, and provenance checks remain in force.
+An exclusive create that records an authoritative absent-row read carries this
+evidence. Reading absence outside the exclusive transaction is not a substitute
+for that transaction's durable absence set.
+Authorization grows monotonically: publish a witness only after its entire
+policy succeeds, preserving every predicate and correlation. An independently
+true OR arm may seed a dependency cycle; a cycle without an independent seed
+cannot authorize itself. Failure rejects the entire transaction.
+
+Ordinary admission and witness eligibility are separate. An unmarked insert
+needed by an unresolved marked occurrence must also satisfy its entire policy
+against accepted Global evidence before it can serve as a witness. Failure
+withholds that witness without revoking an unrelated write's ordinary admission.
+Unrelated unmarked writes do not require this additional proof.
+
+Strict qualification produces evidence for the selected version and normalized
+source occurrence, not a transaction-wide admission verdict. A created witness
+becomes visible at that occurrence only after it is both strictly qualified and
+grounded by the ordinary unit evaluator. The canonical all-write grounding and
+post-state checks remain the sole final decision. Marked post-state checks see
+updates to previously accepted rows, so demoting an accepted grant can revoke a
+passing INSERT. They do not import unrelated new rows or restores into unmarked
+aliases, or upgrade an initially failing strict proof from the generic overlay.
+Deletes retain the ordinary unit rule above.
+
+The proof permits at most 4,096 candidate versions, 16,384 occurrence
+dependencies, and 16,384 proof-work units. One budget covers selected
+write-policy baselines, inherited expansion, witness qualification, candidate
+indexing, dependency traversal, and repeated evaluation. Work is bounded before
+execution; exhaustion rejects the complete unit. Preceding branch-copy and
+read-visibility integrity gates retain their existing contracts and limits.
+
+Ordinary untrusted query shapes cannot carry this capability. Generated
+permission-support subscriptions use private accepted-only projections while
+the original policy and its canonical identity remain unchanged. Candidate
+augmentation is local to the authorized source occurrence; both source arms
+preserve all requested fields and their physical type identities.
+
 #### Read-for-write authorization
 
 jazz follows PostgreSQL's rule: **reads require read permission, including reads

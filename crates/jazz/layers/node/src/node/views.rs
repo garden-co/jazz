@@ -381,6 +381,7 @@ where
     ) -> Result<ViewBundlePreflight, Error> {
         let mut merged = BTreeMap::<TxId, VersionBundle>::new();
         for bundle in bundles {
+            self.validate_incoming_exclusive_evidence(bundle.tx).await?;
             merge_receiver_version_bundle_ref(&mut merged, *bundle)?;
         }
         let mut persisted_tx_ids = BTreeSet::new();
@@ -1642,6 +1643,7 @@ where
                 if !matches!(bundle.fate, Fate::Pending) {
                     continue;
                 }
+                self.validate_incoming_exclusive_evidence(bundle.tx).await?;
                 let mut tx = transaction_without_permission_subject(bundle.tx);
                 tx.n_total_writes = 0;
                 self.admit_contribution_merge_for_storage(&tx)?;
@@ -1747,6 +1749,7 @@ where
                 // allocation, clock advancement, or receiver staging. The
                 // shared transaction boundary keeps view payloads from being
                 // a durable-ingress bypass for operation provenance.
+                super::exclusive_read_evidence::validate_presence(bundle.tx)?;
                 self.admit_contribution_merge_for_storage(bundle.tx)?;
                 self.validate_view_payload_versions_prepared(bundle.versions, &mut descriptors)?;
             }
@@ -2681,17 +2684,10 @@ where
         tx_versions: &[VersionRow],
         source: MaintainedBundleVersionSource,
     ) -> Result<VersionBundle, Error> {
-        let Transaction {
-            tx_id,
-            kind,
-            n_total_writes,
-            made_by,
-            permission_subject: _,
-            base_snapshot: _,
-            user_metadata_json,
-            contribution_merge,
-            ..
-        } = stored_tx.tx.clone();
+        let tx_id = stored_tx.tx.tx_id;
+        let kind = stored_tx.tx.kind;
+        let n_total_writes = stored_tx.tx.n_total_writes;
+        let made_by = stored_tx.tx.made_by;
         // A structured result can reach the same immutable version through
         // more than one retained fact (for example, a root's nested relation
         // and the relation's sender witness). A wire bundle describes a set of
@@ -2748,14 +2744,14 @@ where
             // Policy capabilities are local authority state and never part of
             // a view or repair carrier. Durable made_by remains explicit.
             permission_subject: None,
-            // Exclusive read evidence is kept only for retransmitting the
-            // author's own pending unit; view carriers never expose it.
+            // A receipt redacts the entire proof, never just its read sets.
+            // The receiver retains any complete original proof already stored.
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,
             predicate_read_set: None,
-            user_metadata_json,
-            contribution_merge,
+            user_metadata_json: stored_tx.tx.user_metadata_json.clone(),
+            contribution_merge: stored_tx.tx.contribution_merge.clone(),
         };
         Ok(VersionBundle {
             tx: tx_payload,

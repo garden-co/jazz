@@ -9,7 +9,7 @@ use jazz::{
     block_on,
     groove::{
         records::Value,
-        storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage},
+        storage::{BoxedStorage, MemoryStorage, OrderedKvStorage, ReopenableStorage},
     },
     ids::{NodeUuid, RowUuid},
     node::{MergeableCommit, NodeState},
@@ -19,7 +19,7 @@ use jazz::{
     tools::{ColumnType, SchemaBuilder, TableSchemaBuilder},
     tx::DurabilityTier,
 };
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::{Durability, RocksDbStorage, RocksDbStorageFactory};
 use serde_json::json;
 thread_local! { static REPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
@@ -443,7 +443,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         );
     }
 }
-impl Fixture<RocksDbStorage> {
+impl Fixture<BoxedStorage> {
     pub fn rocksdb(count: usize) -> Self {
         if !REPORT.get() {
             jazz_benchmark_guard::refuse_contaminated_measurement();
@@ -451,8 +451,12 @@ impl Fixture<RocksDbStorage> {
         let dir = tempfile::tempdir().unwrap();
         let cfs = schema().column_families();
         Self::seeded("rocksdb_wal", count, move || {
-            let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap()
+            block_on(jazz::storage_codec_profile::open_node_storage(
+                &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+                dir.path().to_path_buf(),
+                cfs.clone(),
+            ))
+            .unwrap()
         })
     }
     pub fn loaded(count: usize) -> Self {
@@ -524,8 +528,12 @@ fn run_fixture(count: usize, percent: usize) {
     run("memory", count, percent, move || memory.clone());
     let dir = tempfile::tempdir().unwrap();
     run("rocksdb_wal", count, percent, move || {
-        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap()
+        block_on(jazz::storage_codec_profile::open_node_storage(
+            &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+            dir.path().to_path_buf(),
+            cfs.clone(),
+        ))
+        .unwrap()
     });
 }
 

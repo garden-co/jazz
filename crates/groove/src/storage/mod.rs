@@ -31,8 +31,9 @@ use thiserror::Error;
 
 pub use idb::IdbStorage;
 pub use manifest::{
-    AdapterFormat, ManifestOpenReceipt, MigrationJournal, MigrationRegistry, STORAGE_EPOCH_1,
-    StorageCodecProfile, StorageEpochManifest, StorageMigration,
+    AdapterFormat, DurableStorageAdmission, ManifestOpenReceipt, MigrationJournal,
+    MigrationRegistry, STORAGE_EPOCH_1, STORAGE_EPOCH_2, StorageAdmission, StorageAdmissionReceipt,
+    StorageCodecProfile, StorageEpochManifest, StorageMigration, StorageOpenSpec,
 };
 pub use memory::MemoryStorage;
 #[cfg(any(test, feature = "test"))]
@@ -339,6 +340,11 @@ pub enum ValueComparison {
 }
 
 pub trait OrderedKvStorage {
+    /// Explicit admission evidence. Unknown adapters cannot be assumed ephemeral.
+    fn admission(&self) -> Result<StorageAdmission, Error> {
+        Err(Error::UnsupportedAdmission)
+    }
+
     /// Whether a read that yields once may be immediately re-polled by the
     /// caller without turning an external storage wait into a synchronous
     /// drain. Backends return `true` only for executor-local storage whose
@@ -553,6 +559,10 @@ impl<S> OrderedKvStorage for Rc<S>
 where
     S: OrderedKvStorage,
 {
+    fn admission(&self) -> Result<StorageAdmission, Error> {
+        self.as_ref().admission()
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -663,6 +673,10 @@ impl<S> OrderedKvStorage for &S
 where
     S: OrderedKvStorage,
 {
+    fn admission(&self) -> Result<StorageAdmission, Error> {
+        S::admission(*self)
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -945,66 +959,16 @@ impl LayoutStorage {
     }
 
     async fn ensure_layout_marker(&self) -> Result<(), Error> {
-        if !self.layout.validates_marker() {
-            return Ok(());
-        }
-
-        match self
-            .inner
-            .get(CLASS_META_CF.to_owned(), CLASS_LAYOUT_MARKER_KEY.to_vec())
-            .await?
-        {
-            Some(value) if value == CLASS_LAYOUT_MARKER_VALUE => Ok(()),
-            Some(_) => Err(Error::InvalidStorageLayout(
-                "unsupported class-CF storage layout marker".to_owned(),
-            )),
-            None => {
-                if self.has_class_data_or_legacy_layout().await? {
-                    return Err(Error::InvalidStorageLayout(
-                        "missing class-CF storage layout marker in non-empty store".to_owned(),
-                    ));
-                }
-                self.inner
-                    .set(
-                        CLASS_META_CF.to_owned(),
-                        CLASS_LAYOUT_MARKER_KEY.to_vec(),
-                        CLASS_LAYOUT_MARKER_VALUE.to_vec(),
-                    )
-                    .await
-            }
-        }
-    }
-
-    async fn has_class_data_or_legacy_layout(&self) -> Result<bool, Error> {
-        if self.layout.validates_marker() {
-            // An unenumerable adapter cannot distinguish a fresh class layout
-            // from a legacy logical-CF store. Creating the marker would make
-            // that ambiguity durable, so V1 deliberately refuses it.
-            let names = self.inner.column_family_names().ok_or_else(|| {
-                Error::InvalidStorageLayout(
-                    "class-CF v1 requires enumerable physical column families".to_owned(),
+        if !validate_layout_marker(&self.inner, &self.layout, false).await? {
+            self.inner
+                .set(
+                    CLASS_META_CF.to_owned(),
+                    CLASS_LAYOUT_MARKER_KEY.to_vec(),
+                    CLASS_LAYOUT_MARKER_VALUE.to_vec(),
                 )
-            })?;
-            if names.iter().any(|name| jazz_physical_class(name).is_some()) {
-                return Ok(true);
-            }
+                .await?;
         }
-        for cf in [
-            CLASS_HISTORY_CF,
-            CLASS_REGISTER_CF,
-            CLASS_GLOBAL_CURRENT_CF,
-            CLASS_AHEAD_CURRENT_CF,
-            CLASS_CHANGES_CF,
-            CLASS_INDICES_CF,
-            CLASS_META_CF,
-        ] {
-            match self.inner.last_with_prefix(cf.to_owned(), Vec::new()).await {
-                Ok(Some(_)) => return Ok(true),
-                Ok(None) | Err(Error::ColumnFamilyNotFound(_)) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(false)
+        Ok(())
     }
 
     fn physical_key(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(String, Vec<u8>), Error> {
@@ -1024,16 +988,7 @@ impl LayoutStorage {
         cf: &ColumnFamilyName,
         prefix: &Key,
     ) -> Result<(String, Vec<u8>, usize), Error> {
-        let mapping = self.layout.map_cf(cf)?;
-        let Some(logical_prefix) = mapping.logical_prefix else {
-            return Ok((mapping.physical_cf.to_owned(), prefix.to_vec(), 0));
-        };
-        let mut physical_prefix = Vec::with_capacity(4 + logical_prefix.len() + prefix.len());
-        physical_prefix.extend_from_slice(&(logical_prefix.len() as u32).to_be_bytes());
-        physical_prefix.extend_from_slice(logical_prefix.as_bytes());
-        physical_prefix.extend_from_slice(prefix);
-        let strip_len = 4 + logical_prefix.len();
-        Ok((mapping.physical_cf.to_owned(), physical_prefix, strip_len))
+        map_physical_prefix(&self.layout, cf, prefix)
     }
 
     fn physical_operations(
@@ -1061,6 +1016,10 @@ impl LayoutStorage {
 impl OrderedKvStorage for LayoutStorage {
     fn permits_eager_read_retry(&self) -> bool {
         self.inner.permits_eager_read_retry()
+    }
+
+    fn admission(&self) -> Result<StorageAdmission, Error> {
+        self.inner.admission()
     }
 
     fn compare_value(
@@ -1346,6 +1305,10 @@ impl OrderedKvStorage for BoxedStorage {
         self.inner.permits_eager_read_retry()
     }
 
+    fn admission(&self) -> Result<StorageAdmission, Error> {
+        self.inner.admission()
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -1463,8 +1426,168 @@ impl ReopenableStorage for BoxedStorage {
     }
 }
 
+/// A read-only borrow cannot mutate or expand the backend while its exclusive
+/// migration guard owns admission.
+pub struct ReadOnlyStorage<'a> {
+    inner: &'a dyn OrderedKvStorage,
+}
+
+impl<'a> ReadOnlyStorage<'a> {
+    pub fn new(inner: &'a dyn OrderedKvStorage) -> Self {
+        Self { inner }
+    }
+    pub async fn get(&self, cf: String, key: Vec<u8>) -> Result<Option<Value>, Error> {
+        self.inner.get(cf, key).await
+    }
+    pub async fn scan(&self, request: ScanRequest) -> Result<StorageScan<'_>, Error> {
+        self.inner.scan(request).await
+    }
+}
+
+pub enum StagedStorageOpen {
+    Ready(BoxedStorage),
+    Guard(Box<dyn StorageAdmissionGuard>),
+}
+
+pub trait StorageAdmissionGuard {
+    fn read_only(&self) -> ReadOnlyStorage<'_>;
+    fn complete(self: Box<Self>) -> StorageFuture<'static, Result<BoxedStorage, Error>>;
+}
+
+/// Existing logical layout used only during admission, never an ordinary
+/// Database: opening this view cannot ensure families or write its marker.
+pub struct ReadOnlyLayoutView<'a> {
+    storage: ReadOnlyStorage<'a>,
+    layout: StorageLayout,
+    has_marker: bool,
+}
+
+impl<'a> ReadOnlyLayoutView<'a> {
+    pub async fn new(storage: ReadOnlyStorage<'a>, layout: StorageLayout) -> Result<Self, Error> {
+        let has_marker = validate_layout_marker(storage.inner, &layout, true).await?;
+        if !has_marker {
+            let families = storage
+                .inner
+                .column_family_names()
+                .ok_or(Error::UnsupportedAdmission)?;
+            for family in families {
+                let mut scan = storage
+                    .scan(ScanRequest::prefix(family, Vec::new()).with_max_items(1))
+                    .await?;
+                while let Some(rows) = scan.next_batch().await? {
+                    if !rows.is_empty() {
+                        return Err(Error::InvalidStorageLayout(
+                            "missing class-CF storage layout marker in non-empty store".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            storage,
+            layout,
+            has_marker,
+        })
+    }
+
+    pub async fn scan_prefix(&self, cf: &str, prefix: &[u8]) -> Result<StorageScan<'_>, Error> {
+        if !self.has_marker {
+            return Ok(Box::new(ReadyStorageCursor::new(Vec::new())));
+        }
+        let (physical_cf, physical_prefix, strip_len) =
+            map_physical_prefix(&self.layout, cf, prefix)?;
+        let inner = self
+            .storage
+            .scan(ScanRequest::prefix(physical_cf, physical_prefix))
+            .await?;
+        Ok(Box::new(MappedStorageCursor { inner, strip_len }))
+    }
+}
+
+fn map_physical_prefix(
+    layout: &StorageLayout,
+    cf: &str,
+    prefix: &[u8],
+) -> Result<(String, Vec<u8>, usize), Error> {
+    let mapping = layout.map_cf(cf)?;
+    let Some(logical_prefix) = mapping.logical_prefix else {
+        return Ok((mapping.physical_cf.to_owned(), prefix.to_vec(), 0));
+    };
+    let strip_len = 4 + logical_prefix.len();
+    let mut physical_prefix = Vec::with_capacity(strip_len + prefix.len());
+    physical_prefix.extend_from_slice(&(logical_prefix.len() as u32).to_be_bytes());
+    physical_prefix.extend_from_slice(logical_prefix.as_bytes());
+    physical_prefix.extend_from_slice(prefix);
+    Ok((mapping.physical_cf.to_owned(), physical_prefix, strip_len))
+}
+
+/// True means an existing marker; false means a verified empty class layout.
+async fn validate_layout_marker(
+    storage: &dyn OrderedKvStorage,
+    layout: &StorageLayout,
+    allow_missing_family: bool,
+) -> Result<bool, Error> {
+    if !layout.validates_marker() {
+        return Ok(true);
+    }
+    match storage
+        .get(CLASS_META_CF.to_owned(), CLASS_LAYOUT_MARKER_KEY.to_vec())
+        .await
+    {
+        Ok(Some(value)) if value == CLASS_LAYOUT_MARKER_VALUE => return Ok(true),
+        Ok(Some(_)) => {
+            return Err(Error::InvalidStorageLayout(
+                "unsupported class-CF storage layout marker".to_owned(),
+            ));
+        }
+        Ok(None) => {}
+        Err(Error::ColumnFamilyNotFound(_)) if allow_missing_family => {}
+        Err(error) => return Err(error),
+    }
+    let names = storage.column_family_names().ok_or_else(|| {
+        Error::InvalidStorageLayout(
+            "class-CF v1 requires enumerable physical column families".to_owned(),
+        )
+    })?;
+    if names.iter().any(|name| jazz_physical_class(name).is_some()) {
+        return Err(Error::InvalidStorageLayout(
+            "missing class-CF storage layout marker in non-empty store".to_owned(),
+        ));
+    }
+    for cf in [
+        CLASS_HISTORY_CF,
+        CLASS_REGISTER_CF,
+        CLASS_GLOBAL_CURRENT_CF,
+        CLASS_AHEAD_CURRENT_CF,
+        CLASS_CHANGES_CF,
+        CLASS_INDICES_CF,
+        CLASS_META_CF,
+    ] {
+        match storage.last_with_prefix(cf.to_owned(), Vec::new()).await {
+            Ok(Some(_)) => {
+                return Err(Error::InvalidStorageLayout(
+                    "missing class-CF storage layout marker in non-empty store".to_owned(),
+                ));
+            }
+            Ok(None) | Err(Error::ColumnFamilyNotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
 /// Opens a persistent ordered-KV backend at an exact target-owned path.
 pub trait StorageFactory: std::fmt::Debug + Send + Sync {
+    fn open_staged(
+        &self,
+        _path: std::path::PathBuf,
+        _column_families: Vec<String>,
+        _source: StorageOpenSpec,
+        _target: StorageOpenSpec,
+    ) -> StorageFuture<'_, Result<StagedStorageOpen, Error>> {
+        Box::pin(async { Err(Error::UnsupportedAdmission) })
+    }
+
     fn open(
         &self,
         path: std::path::PathBuf,
@@ -2091,6 +2214,10 @@ impl<S: ?Sized> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn admission(&self) -> Result<StorageAdmission, Error> {
+        self.base.admission()
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -2187,6 +2314,10 @@ where
         self.base.permits_eager_read_retry()
     }
 
+    fn admission(&self) -> Result<StorageAdmission, Error> {
+        self.base.admission()
+    }
+
     fn put_if_absent(
         &self,
         _cf: String,
@@ -2264,6 +2395,8 @@ impl<'a> WriteOperation<'a> {
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("storage adapter does not support explicit admission")]
+    UnsupportedAdmission,
     #[error("column family not found: {0}")]
     ColumnFamilyNotFound(String),
     #[error("invalid storage layout: {0}")]
@@ -2298,6 +2431,220 @@ impl From<crate::records::Error> for Error {
 #[cfg(any(test, feature = "test"))]
 pub mod conformance {
     use super::*;
+
+    /// Adapter-seam behavior: source rows survive cancellation and completion,
+    /// fresh/upgrade receipts are distinct, and old/unknown profiles fail closed.
+    pub async fn staged_admission_preserves_rows(
+        factory: &dyn StorageFactory,
+        legacy_path: std::path::PathBuf,
+        fresh_path: std::path::PathBuf,
+    ) {
+        let source = StorageOpenSpec {
+            epoch: 1,
+            codec_profile: StorageCodecProfile::groove_epoch_1(),
+        };
+        let target = StorageOpenSpec {
+            epoch: 2,
+            codec_profile: source
+                .codec_profile
+                .with_additional_codecs(["owner.new-payload.v1"])
+                .unwrap(),
+        };
+        let families = vec!["records".to_owned()];
+        let legacy = factory
+            .open(
+                legacy_path.clone(),
+                families.clone(),
+                source.codec_profile.clone(),
+            )
+            .await
+            .unwrap();
+        legacy
+            .set("records".into(), b"row".to_vec(), b"original".to_vec())
+            .await
+            .unwrap();
+        let before = legacy.admission().unwrap();
+        legacy.close().await.unwrap();
+        drop(legacy);
+
+        let staged = factory
+            .open_staged(
+                legacy_path.clone(),
+                vec!["records".into(), "not-yet".into()],
+                source.clone(),
+                target.clone(),
+            )
+            .await
+            .unwrap();
+        let StagedStorageOpen::Guard(guard) = staged else {
+            panic!("legacy root requires preflight")
+        };
+        assert_eq!(
+            guard
+                .read_only()
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(b"original".to_vec())
+        );
+        // Cancellation before completion must not admit families, alter rows,
+        // advance the manifest, or leave a durable in-progress intent.
+        drop(guard);
+        let unchanged = factory
+            .open(
+                legacy_path.clone(),
+                families.clone(),
+                source.codec_profile.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged.admission().unwrap(), before);
+        assert!(
+            !unchanged
+                .column_family_names()
+                .unwrap()
+                .iter()
+                .any(|name| name == "not-yet")
+        );
+        assert_eq!(
+            unchanged
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(b"original".to_vec())
+        );
+        drop(unchanged);
+
+        let StagedStorageOpen::Guard(guard) = factory
+            .open_staged(
+                legacy_path.clone(),
+                families.clone(),
+                source.clone(),
+                target.clone(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("cancelled transition must retry")
+        };
+        let upgraded = guard.complete().await.unwrap();
+        assert_eq!(
+            upgraded
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(b"original".to_vec())
+        );
+        assert!(matches!(
+            upgraded.admission().unwrap(),
+            StorageAdmission::Durable(admission) if admission.is_migrated()
+        ));
+        upgraded
+            .set("records".into(), b"new".to_vec(), b"target".to_vec())
+            .await
+            .unwrap();
+        upgraded.close().await.unwrap();
+        drop(upgraded);
+        assert!(
+            factory
+                .open(
+                    legacy_path.clone(),
+                    families.clone(),
+                    source.codec_profile.clone()
+                )
+                .await
+                .is_err()
+        );
+        let StagedStorageOpen::Ready(reopened) = factory
+            .open_staged(
+                legacy_path.clone(),
+                families.clone(),
+                source.clone(),
+                target.clone(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("completed transition must not rescan")
+        };
+        assert_eq!(
+            reopened
+                .get("records".into(), b"new".to_vec())
+                .await
+                .unwrap(),
+            Some(b"target".to_vec())
+        );
+        let admitted = reopened.admission().unwrap();
+        drop(reopened);
+        let unknown = StorageOpenSpec {
+            epoch: 2,
+            codec_profile: target
+                .codec_profile
+                .with_additional_codecs(["owner.unknown.v1"])
+                .unwrap(),
+        };
+        assert!(
+            factory
+                .open_staged(
+                    legacy_path.clone(),
+                    families.clone(),
+                    source.clone(),
+                    unknown
+                )
+                .await
+                .is_err()
+        );
+        let StagedStorageOpen::Ready(reopened) = factory
+            .open_staged(
+                legacy_path,
+                families.clone(),
+                source.clone(),
+                target.clone(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("unknown-profile failure changed root")
+        };
+        assert_eq!(reopened.admission().unwrap(), admitted);
+        drop(reopened);
+
+        let StagedStorageOpen::Ready(fresh) = factory
+            .open_staged(
+                fresh_path.clone(),
+                families.clone(),
+                source.clone(),
+                target.clone(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("fresh root needs no row scan")
+        };
+        assert!(matches!(
+            fresh.admission().unwrap(),
+            StorageAdmission::Durable(admission) if admission.has_receipt() && !admission.is_migrated()
+        ));
+        fresh
+            .set("records".into(), b"fresh".to_vec(), b"persisted".to_vec())
+            .await
+            .unwrap();
+        drop(fresh);
+        let StagedStorageOpen::Ready(reopened) = factory
+            .open_staged(fresh_path, families, source, target)
+            .await
+            .unwrap()
+        else {
+            panic!("fresh receipt must reopen")
+        };
+        assert_eq!(
+            reopened
+                .get("records".into(), b"fresh".to_vec())
+                .await
+                .unwrap(),
+            Some(b"persisted".to_vec())
+        );
+    }
 
     pub async fn persistence_order_and_batch_atomicity<S>(storage: S)
     where

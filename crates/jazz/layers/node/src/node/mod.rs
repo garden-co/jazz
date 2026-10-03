@@ -324,7 +324,7 @@ mod currency;
 mod database_slot;
 mod descriptor_roles;
 mod eviction;
-mod exclusive_read_evidence;
+use jazz_protocol::exclusive_read_evidence;
 mod global_state;
 mod ingest;
 mod node_aliases;
@@ -1574,15 +1574,12 @@ impl PendingParentTimeBound {
 /// Authenticated identity attached to an inbound commit-unit upload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommitUnitIngestContext {
-    /// Identity authenticated by the connection carrying the upload.
+    /// Authenticated connection identity, or the exact delegated session
+    /// selected by relay admission. Relay policy requires a matching active
+    /// immutable claims scope; the transport identity alone grants nothing.
     pub identity: AuthorSubject,
     /// Whether the connection may attribute writes to a different `made_by`.
     pub trust: CommitUnitTrust,
-    /// The authenticated connection admission path has already proved every
-    /// terminal write clause against its immutable delegated session binding.
-    /// This may only be set by the peer-connection authority path immediately
-    /// after that proof; wire messages cannot carry it.
-    pub admitted_write_authorization: bool,
     /// The connection's checked wire decoder has already validated every
     /// version receipt in this upload. Set only by a peer connection whose
     /// transport reports that it admits all inbound messages that way; wire
@@ -3455,6 +3452,17 @@ pub(super) fn is_unrepresentable_enum_projection(error: &Error) -> bool {
 impl From<QueryError> for Error {
     fn from(error: QueryError) -> Self {
         Self::Query(Box::new(error))
+    }
+}
+
+impl From<exclusive_read_evidence::Error> for Error {
+    fn from(error: exclusive_read_evidence::Error) -> Self {
+        match error {
+            exclusive_read_evidence::Error::Record(error) => Self::Record(error),
+            exclusive_read_evidence::Error::InvalidStoredValue(message) => {
+                Self::InvalidStoredValue(message)
+            }
+        }
     }
 }
 
