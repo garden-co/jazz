@@ -333,3 +333,59 @@ async fn ordered_window_rejects_a_boundary_tie_beyond_its_budget() {
     );
     assert!(sub.try_recv().is_err(), "no partial page may publish");
 }
+
+/// Bob's distinct rows may project to identical values. Alice's source still
+/// needs their full multiplicity as rows enter and leave its retained prefix.
+/// This runtime seam exposes projection multiplicities hidden by Jazz row IDs.
+#[futures_test::test]
+async fn ordered_window_preserves_projected_row_multiplicity() {
+    let schema = schema();
+    let mut db = Database::new(
+        schema.clone(),
+        MemoryStorage::new(&schema.column_families()).unwrap(),
+    )
+    .await
+    .unwrap();
+    let output = schema.table("items").unwrap().record_schema();
+    db.define_variant_projection("items", "visible", output)
+        .unwrap();
+    db.register_variant_projection_case(
+        "items",
+        "visible",
+        1,
+        [
+            ProjectField::renamed("rank", "id"),
+            ProjectField::named("bucket"),
+            ProjectField::named("rank"),
+        ],
+    )
+    .unwrap();
+    let mut batch = db.open_batch();
+    for id in 0..8 {
+        batch.insert("items", item(id, 1, id / 2, 1));
+    }
+    db.commit_batch(batch).await.unwrap();
+    let GraphBuilder::TopBy { input, .. } = page(false, true) else {
+        unreachable!()
+    };
+    let sub = db.subscribe_one_sink((*input).clone()).await.unwrap();
+    let first = db
+        .next_subscription(&sub)
+        .await
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(first.len(), 4);
+    assert!(first.iter().all(|(_, weight)| *weight == 2), "{first:?}");
+    let mut batch = db.open_batch();
+    batch.delete("items", PrimaryKeyValue::U64(7));
+    db.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        db.next_subscription(&sub)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![(vec![Value::U64(3), Value::U64(1), Value::U64(3)], -1)]
+    );
+}

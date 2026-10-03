@@ -297,10 +297,11 @@ impl TickEvaluator<'_> {
             let proved = visible.len() > window.limit
                 && visible[window.limit - 1].0 != visible.last().unwrap().0;
             if raw_count < cap || proved {
-                break visible
-                    .into_iter()
-                    .map(|(_, record)| record)
-                    .collect::<HashSet<_>>();
+                let mut rows = HashMap::default();
+                for (_, record) in visible {
+                    *rows.entry(record).or_insert(0_i64) += 1;
+                }
+                break rows;
             }
             if cap >= max_cap {
                 return Err(IvmRuntimeError::UnsupportedIndexWindow(
@@ -318,17 +319,22 @@ impl TickEvaluator<'_> {
             }
         };
         let mut deltas = Vec::new();
-        for record in state.value().difference(&rows) {
-            deltas.push(RecordDelta {
-                record: record.clone(),
-                weight: -1,
-            });
+        for (record, before) in state.value().iter() {
+            let weight = rows.get(record).copied().unwrap_or(0) - before;
+            if weight != 0 {
+                deltas.push(RecordDelta {
+                    record: record.clone(),
+                    weight,
+                });
+            }
         }
-        for record in rows.difference(state.value()) {
-            deltas.push(RecordDelta {
-                record: record.clone(),
-                weight: 1,
-            });
+        for (record, &weight) in &rows {
+            if !state.value().contains_key(record) {
+                deltas.push(RecordDelta {
+                    record: record.clone(),
+                    weight,
+                });
+            }
         }
         *state.value_mut() = Rc::new(rows);
         state.mark_forward_as_of(SubTick {

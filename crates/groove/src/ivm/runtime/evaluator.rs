@@ -92,7 +92,7 @@ const UNARY_ROWS_PER_POLL: usize = 256;
 pub(super) enum OperatorState {
     Stateless,
     TableLookup(AsOf<super::table_lookup::TableLookupState, SubTick>),
-    IndexWindow(AsOf<Rc<HashSet<Bytes>>, SubTick>),
+    IndexWindow(AsOf<Rc<HashMap<Bytes, i64>>, SubTick>),
     Join(JoinState),
     SemiJoin(SemiJoinState),
     AntiJoin(AntiJoinState),
