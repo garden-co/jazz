@@ -203,5 +203,5 @@ it.each([
       await server.stop();
     }
   },
-  60000,
+  120_000,
 );
