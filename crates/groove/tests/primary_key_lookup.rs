@@ -324,3 +324,55 @@ fn cancelled_cold_lookup_leaves_no_partial_state() {
         .unwrap();
     assert_eq!(rows, vec![(vec![Value::U64(1), Value::U64(100)], 1)]);
 }
+
+/// Alice requests many keys before Bob has any targets. One bounded emptiness
+/// probe replaces absent point reads, but Bob's later insert must still appear.
+/// Storage controls expose request counts and suspend the emptiness proof.
+#[test]
+fn large_lookup_of_empty_table_stays_live_without_absent_point_reads() {
+    let (storage, control) = TestStorage::controlled(&["refs", "targets"]);
+    let mut db = block_on(Database::new(schema(), storage.clone())).unwrap();
+    storage.evict_column_family("targets");
+    control.take_observed();
+    let before = control.point_read_count();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let keys = GraphBuilder::values(
+        RecordDescriptor::new([("key", ColumnType::U64)]),
+        (0..128).map(|key| [Value::U64(key)]),
+    )
+    .unwrap();
+    let sub = block_on(db.subscribe_one_sink(GraphBuilder::table_lookup(keys, "targets", ["key"])))
+        .unwrap();
+    let mut progress = Box::pin(db.drive_progress());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        progress.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(sub.try_recv().is_err());
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    block_on(progress).unwrap();
+    assert!(sub.recv().unwrap().is_empty());
+    assert_eq!(control.point_read_count(), before);
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|op| **op == TestStorageOperation::ScanOpen)
+            .count(),
+        1
+    );
+
+    let mut batch = db.open_batch();
+    batch.insert("targets", vec![Value::U64(7), Value::U64(70)]);
+    batch.insert("targets", vec![Value::U64(900), Value::U64(9000)]);
+    block_on(db.commit_batch(batch)).unwrap();
+    block_on(db.drive_progress()).unwrap();
+    let mut rows = BTreeMap::new();
+    drain(&sub, &mut rows);
+    assert_eq!(
+        rows,
+        BTreeMap::from([(format!("{:?}", [Value::U64(7), Value::U64(70)]), 1)])
+    );
+}

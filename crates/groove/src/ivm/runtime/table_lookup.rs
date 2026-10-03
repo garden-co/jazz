@@ -1,6 +1,6 @@
 //! A live primary-key semijoin with demand-driven target hydration.
 //!
-//! The target is never scanned. A new input key loads its current target row;
+//! The target is never scanned in full. A new input key loads its current row;
 //! subsequent target deltas update only admitted keys. Missing rows are tracked
 //! too, so a later insert is observable. State changes are staged until all
 //! point reads complete, including when a cold read suspends the evaluator.
@@ -81,6 +81,24 @@ impl TickEvaluator<'_> {
             let key = primary_key_value_bytes(&input.descriptor, delta.raw(), &lookup.key_fields)?;
             *changes.entry(key).or_default() += delta.weight;
         }
+        // Amortize the request bookkeeping for large batches against an empty
+        // target (the usual deletion table in a new app). This reads at most
+        // one row, regardless of unrelated target history. Small lookups keep
+        // their single round of point requests. Missing keys are still retained
+        // below, so later target inserts remain ordinary live updates.
+        let target_empty = hydrate
+            && changes.len() >= 64
+            && self
+                .evaluation_inputs
+                .as_deref_mut()
+                .ok_or(IvmRuntimeError::StorageUnavailable)?
+                .rows(StorageRequestKey::ScanPrefixLimit {
+                    family: lookup.table.clone(),
+                    prefix: Vec::new(),
+                    max_items: 1,
+                    reversed: false,
+                })?
+                .is_empty();
         let mut targets = HashMap::<Vec<u8>, Option<Bytes>>::default();
         if !hydrate {
             for delta in self
@@ -120,7 +138,7 @@ impl TickEvaluator<'_> {
             if references < 0 {
                 return Err(IvmRuntimeError::UnsupportedOperator);
             }
-            let row = if references == 0 {
+            let row = if references == 0 || target_empty {
                 None
             } else if let Some(target) = targets.get(&key) {
                 target.clone()
