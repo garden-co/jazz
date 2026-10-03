@@ -253,12 +253,13 @@ describe("StagePlan permissions", () => {
       }),
     );
 
-    await joinShow(
+    const joined = await joinShow(
       ctx.crew,
       { account: crewAccount, profile: ctx.crewProfile },
       ctx.show.id,
       ctx.invite.code,
     );
+    await joined.accepted;
     await expect(ctx.crew.all(app.shows.where({ id: ctx.show.id }))).resolves.toEqual([
       expect.objectContaining({ name: "Late show" }),
     ]);

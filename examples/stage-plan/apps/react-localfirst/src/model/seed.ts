@@ -3,6 +3,7 @@ import { app, type Crew, type TaskStatus } from "../../schema.js";
 import {
   addComment,
   ensureChiefSetup,
+  nameBasedId,
   stageComment,
   stageShow,
   type Me,
@@ -40,18 +41,47 @@ const DEMO_TASKS: { title: string; status: TaskStatus; mine?: boolean; notes?: s
   },
 ];
 
-/** Finds or creates the crew profile for an account. */
+/**
+ * Finds or creates the crew profile for an account. The account is a
+ * local-first one held by this browser profile, together with its local data,
+ * so its profile is found locally: once this browser holds it, reading never
+ * waits for the server.
+ *
+ * This is an insert, not an upsert, on purpose. The profile's id is derived
+ * from the account, and an insert of an id the local store already holds is
+ * rejected rather than applied, so a name the user has changed is never reset
+ * to the default. The rejection arrives through the write handle, so the
+ * insert is awaited to local durability (a local write, no server round
+ * trip). That covers two tabs opening a new account at once: the later
+ * insert is rejected, and that tab reads the profile the other one wrote and
+ * reports it as existing, so it does not seed a second demo show.
+ */
 export async function ensureProfile(
   db: Db,
   account: string,
 ): Promise<{ profile: Crew; isNew: boolean }> {
   const existing = await db.one(app.crew.where({ account }), { tier: "local-first-unless-empty" });
   if (existing) return { profile: existing, isNew: false };
-  const profile = db.insert(app.crew, {
-    account,
-    name: `Stagehand ${account.slice(-4).toUpperCase()}`,
-  });
-  return { profile: profile.value, isNew: true };
+  const id = await profileId(account);
+  const insert = db.insert(
+    app.crew,
+    { account, name: `Stagehand ${account.slice(-4).toUpperCase()}` },
+    { id },
+  );
+  try {
+    await insert.wait({ tier: "local" });
+    return { profile: insert.value, isNew: true };
+  } catch (error) {
+    const written = await db.one(app.crew.where({ account }), {
+      tier: "local-first-unless-empty",
+    });
+    if (written) return { profile: written, isNew: false };
+    throw error;
+  }
+}
+
+export function profileId(account: string) {
+  return nameBasedId(`stage-plan/profile/${account}`);
 }
 
 const DEMO_COMMENT = "Channel 7 crackles. Swapping the DI box before soundcheck.";

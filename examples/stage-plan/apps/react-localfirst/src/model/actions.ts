@@ -133,7 +133,7 @@ export async function removeFromCrew(db: Db, member: ShowCrew) {
 }
 
 /** A name-based (version 5) UUID, so the same name always gives the same id. */
-async function nameBasedId(name: string) {
+export async function nameBasedId(name: string) {
   const namespace = hexBytes("6f9d1c8e2b4a4e7d9c3a5b1e8f2d7a64");
   const bytes = new Uint8Array([...namespace, ...new TextEncoder().encode(name)]);
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-1", bytes)).slice(0, 16);
@@ -228,27 +228,34 @@ export function rotateInvite(db: Db, showId: string, oldInviteIds: string[]) {
   });
 }
 
+/** A membership that applied locally; `accepted` settles once the server has ruled on it. */
+export type JoinedShow = { accepted: Promise<void> };
+
 /**
- * Joins a show with an invite code. The server checks the code against the
- * private invite; once it accepts, the code is cleared from the membership so
- * the rest of the crew can't read it.
+ * Joins a show with an invite code. The membership applies locally at once,
+ * so the caller can open the show straight away; the server checks the code
+ * against the private invite in the background. Once it accepts, the code is
+ * cleared from the membership so the rest of the crew can't read it.
+ * `accepted` rejects when the server turns the membership down (and the local
+ * row is rolled back).
  */
-export async function joinShow(db: Db, me: Me, showId: string, code: string) {
-  let membership = await db.one(app.showCrew.where({ showId, account: me.account }));
-  if (!membership) {
-    membership = await db
-      .insert(app.showCrew, {
+export async function joinShow(db: Db, me: Me, showId: string, code: string): Promise<JoinedShow> {
+  const existing = await db.one(app.showCrew.where({ showId, account: me.account }));
+  if (existing && !existing.inviteCode) return { accepted: Promise.resolve() };
+  const inserted = existing
+    ? undefined
+    : db.insert(app.showCrew, {
         showId,
         crewId: me.profile.id,
         account: me.account,
         role: "crew",
         inviteCode: code,
-      })
-      .wait({ tier: "global" });
-  }
-  if (membership.inviteCode) {
+      });
+  const accepted = (async () => {
+    const membership = inserted ? await inserted.wait({ tier: "global" }) : existing!;
     await db.update(app.showCrew, membership.id, { inviteCode: null }).wait({ tier: "global" });
-  }
+  })();
+  return { accepted };
 }
 
 /** Rank that puts a task after every task in the column. */
