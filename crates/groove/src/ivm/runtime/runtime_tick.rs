@@ -137,6 +137,9 @@ pub(super) struct IncrementalEvaluation<'a> {
     current_tick: u64,
     metrics: TickMetrics,
     storage: OwnedStorage<'a>,
+    /// Query refills must see this tick's derived index writes before the
+    /// facade extracts them. Persistence continues to use the base adapter.
+    read_storage: OwnedStorage<'a>,
     requests: EvaluationRequests<'a>,
     evaluation_inputs: Option<EvaluationInputs>,
     work_queue: EvaluationWorkQueue,
@@ -1374,7 +1377,7 @@ impl<'a> IncrementalEvaluation<'a> {
             binding_frontiers: &self.binding_frontiers,
             memo_use_clock: &mut self.memo_use_clock,
             node_meta: &mut self.node_meta,
-            storage: Some(self.storage.as_ref()),
+            storage: Some(self.read_storage.as_ref()),
             evaluation_inputs: self.evaluation_inputs.as_mut(),
             context: EvalContext::root(),
             metrics: &mut self.metrics,
@@ -1401,7 +1404,7 @@ impl<'a> IncrementalEvaluation<'a> {
                     for request in requests.iter().cloned() {
                         registered_requests |= self.requests.request(
                             request,
-                            &self.storage,
+                            &self.read_storage,
                             Some(
                                 self.pending_resident_publication
                                     .as_ref()
@@ -1589,7 +1592,7 @@ impl<'a> IncrementalEvaluation<'a> {
                         for request in requests {
                             self.requests.request(
                                 request,
-                                &self.storage,
+                                &self.read_storage,
                                 Some(
                                     self.pending_resident_publication
                                         .as_ref()
@@ -3726,6 +3729,7 @@ impl IvmRuntime {
             binding_frontiers,
             current_tick,
             metrics,
+            read_storage: storage.with_staged_writes(Rc::clone(&durable_writes)),
             storage,
             requests,
             evaluation_inputs,
@@ -4240,8 +4244,10 @@ fn commit_operator_state(state: &mut OperatorState) {
         OperatorState::CollectBy(collect_by) => {
             collect_by.groups.commit_overlay();
         }
-        OperatorState::Stateless | OperatorState::Join(_) | OperatorState::StreamingChecksum(_) => {
-        }
+        OperatorState::IndexWindow(_)
+        | OperatorState::Stateless
+        | OperatorState::Join(_)
+        | OperatorState::StreamingChecksum(_) => {}
     }
 }
 

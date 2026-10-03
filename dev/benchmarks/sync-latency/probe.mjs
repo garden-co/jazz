@@ -23,6 +23,7 @@ const { values } = parseArgs({
     tier: { type: "string", default: "global" },
     "select-only": { type: "boolean", default: false },
     "matching-rows": { type: "string", default: "1000" },
+    "seed-batch-size": { type: "string", default: "1000" },
     "unrelated-rows": { type: "string", default: "0" },
     "deleted-rows": { type: "string", default: "0" },
     "composite-index": { type: "boolean", default: false },
@@ -54,9 +55,11 @@ const rttMs = Number(values["rtt-ms"]),
 assert(Number.isFinite(rttMs) && rttMs >= 0);
 assert(Number.isInteger(repeats) && repeats > 0);
 const matchingRows = Number(values["matching-rows"]),
+  seedBatchSize = Number(values["seed-batch-size"]),
   unrelatedRows = Number(values["unrelated-rows"]),
   deletedRows = Number(values["deleted-rows"]);
 assert(Number.isInteger(matchingRows) && matchingRows >= 10);
+assert(Number.isInteger(seedBatchSize) && seedBatchSize > 0);
 assert(Number.isInteger(unrelatedRows) && unrelatedRows >= 0);
 assert(Number.isInteger(deletedRows) && deletedRows >= 0);
 for (const storage of [values["client-storage"], values["server-storage"]])
@@ -149,7 +152,7 @@ const server = await startLocalJazzServer({
   permissions,
   inMemory: values["server-storage"] === "memory",
 });
-let proxy, context, clientDir;
+let proxy, context, clientDir, seedDurationMs;
 const peers = new Set(),
   timers = new Set();
 async function timed(name, fn) {
@@ -280,8 +283,8 @@ try {
     operation = "seed";
     async function seed(count, runId, remove = false) {
       const allIds = [];
-      for (let start = 0; start < count; start += 1000) {
-        const ids = await create(Math.min(1000, count - start), runId, "global", start);
+      for (let start = 0; start < count; start += seedBatchSize) {
+        const ids = await create(Math.min(seedBatchSize, count - start), runId, "global", start);
         if (remove) {
           const commit = await db.transaction((tx) =>
             ids.forEach((id) => tx.delete(app.items, id)),
@@ -293,9 +296,11 @@ try {
       return allIds;
     }
     const runId = `selected-${randomUUID()}`;
+    const seedStartedAt = performance.now();
     const ids = await seed(matchingRows, runId);
     await seed(unrelatedRows, `unrelated-${randomUUID()}`);
     await seed(deletedRows, `deleted-${randomUUID()}`, true);
+    seedDurationMs = performance.now() - seedStartedAt;
     if (values["fresh-reader"]) {
       await context.shutdown();
       if (clientDir) {
@@ -309,7 +314,16 @@ try {
       // query on the ordinary Global durability and sync path.
       await db.one(app.items.where({ id: warmupIds[0] }), { tier: "global" });
     }
-    console.log(JSON.stringify({ ready: process.pid, matchingRows, unrelatedRows, deletedRows }));
+    console.log(
+      JSON.stringify({
+        ready: process.pid,
+        matchingRows,
+        unrelatedRows,
+        deletedRows,
+        seedBatchSize,
+        seedDurationMs,
+      }),
+    );
     const opts = { tier: values.tier };
     const expectedIds = new Set(ids);
     const expectedPageIds = values["ordered-select"]
@@ -410,7 +424,9 @@ try {
     compositeIndex: values["composite-index"],
     orderedSelect: values["ordered-select"],
     freshReader: values["fresh-reader"],
-    ...(values["select-only"] ? { matchingRows, unrelatedRows, deletedRows } : {}),
+    ...(values["select-only"]
+      ? { matchingRows, unrelatedRows, deletedRows, seedBatchSize, seedDurationMs }
+      : {}),
     clientStorage: values["client-storage"],
     serverStorage: values["server-storage"],
     trace: values.trace,
@@ -420,7 +436,7 @@ try {
     events,
   };
   const workload = values["select-only"]
-    ? `select-${matchingRows}-${unrelatedRows}-${deletedRows}-`
+    ? `select-${matchingRows}-${unrelatedRows}-${deletedRows}-batch-${seedBatchSize}-`
     : "";
   const indexLabel = `${values["composite-index"] ? "composite-" : ""}${values["ordered-select"] ? "ordinal-" : ""}`;
   const filename = `${workload}${indexLabel}${values["fresh-reader"] ? "fresh-" : ""}rtt-${rttMs}-${values["client-storage"]}-${values["server-storage"]}-${values.tier}-${values.trace ? "trace" : "timing"}-${values["pump-debounce-ms"] ?? "default"}.json`;

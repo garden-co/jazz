@@ -254,6 +254,16 @@ impl<'a> OwnedStorage<'a> {
         self.0.as_ref()
     }
 
+    /// Read derived index writes before their owning tick flushes them. Keep
+    /// the original adapter for persistence so flushing cannot stage the same
+    /// writes back into their own buffer.
+    pub(crate) fn with_staged_writes(&self, staged_writes: Rc<RefCell<StagedWriteState>>) -> Self {
+        Self::new(Rc::new(StagedWriteOverlay {
+            base: OverlayHandle::Owned(Rc::clone(&self.0)),
+            staged_writes: OverlayHandle::Owned(staged_writes),
+        }))
+    }
+
     pub(crate) fn get(
         &self,
         cf: String,

@@ -548,6 +548,7 @@ impl IvmRuntime {
                 intersections,
                 candidate_filter,
                 row_projection,
+                window,
             } => {
                 let table = self
                     .schema
@@ -558,7 +559,7 @@ impl IvmRuntime {
                     .iter()
                     .find(|candidate| candidate.name == *index)
                     .ok_or_else(|| IvmRuntimeError::IndexNotFound(index.clone()))?;
-                let source = self.index_source_op(
+                let mut source = self.index_source_op(
                     table,
                     index,
                     scan.clone(),
@@ -567,6 +568,11 @@ impl IvmRuntime {
                     row_projection.clone(),
                 )?;
                 let output = inferred_output;
+                if let Some(window) = window {
+                    source.window = Some(Box::new(
+                        self.compile_index_window(&source, output, window)?,
+                    ));
+                }
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(OpType::IndexSource(source), [], output),
                     NodeDurability::Ephemeral,
@@ -1933,6 +1939,7 @@ impl IvmRuntime {
             append_value_to_key: !index.unique && !index_key_covers_primary_key,
             store_value: index.unique && !index_key_covers_primary_key,
             scan,
+            window: None,
         })
     }
 

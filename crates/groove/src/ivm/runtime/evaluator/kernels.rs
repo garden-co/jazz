@@ -39,6 +39,9 @@ impl TickEvaluator<'_> {
                 &output_desc,
                 self.table_deltas,
             ),
+            OpType::IndexSource(input) if input.window.is_some() => {
+                self.update_index_window(node, input, output_desc)
+            }
             OpType::IndexSource(input)
                 if self.context.eval_mode == EvalMode::Hydrate
                     && self.evaluation_inputs.is_some() =>

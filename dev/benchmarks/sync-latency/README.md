@@ -55,6 +55,12 @@ startup are warmed by an untimed point read of the warmup row. Page rows are
 initially absent locally and become cached across repetitions. Both options
 are recorded in the receipt and filename.
 
+Use `--seed-batch-size 1` to create the same dataset with one row per transaction
+instead of the default 1,000-row batches. Seeding waits for each transaction's
+Global durability before starting the next, outside the select timings. Receipts
+record the batch size and total seed duration; this allows isolating transaction
+history size without changing query shape, row count, or deletion history.
+
 `updateTopN` includes a global read followed by a global write when the global
 tier is selected, so its critical path includes two serial network round trips.
 

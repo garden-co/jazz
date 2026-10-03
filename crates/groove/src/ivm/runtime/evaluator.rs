@@ -92,6 +92,7 @@ const UNARY_ROWS_PER_POLL: usize = 256;
 pub(super) enum OperatorState {
     Stateless,
     TableLookup(AsOf<super::table_lookup::TableLookupState, SubTick>),
+    IndexWindow(AsOf<Rc<HashSet<Bytes>>, SubTick>),
     Join(JoinState),
     SemiJoin(SemiJoinState),
     AntiJoin(AntiJoinState),
@@ -727,6 +728,9 @@ impl TopByIncrementalState {
 pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
         OpType::TableLookup(_) => OperatorState::TableLookup(AsOf::default()),
+        OpType::IndexSource(source) if source.window.is_some() => {
+            OperatorState::IndexWindow(AsOf::default())
+        }
         OpType::Join(_) => OperatorState::Join(JoinState),
         OpType::SemiJoin(_) => OperatorState::SemiJoin(SemiJoinState::default()),
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState::default()),
@@ -1724,6 +1728,7 @@ impl TickEvaluator<'_> {
                 | OpType::ArgMinBy(_)
                 | OpType::ArgMaxBy(_)
                 | OpType::Aggregate(_) => frontier.push(node),
+                OpType::IndexSource(source) if source.window.is_some() => frontier.push(node),
                 _ => {}
             }
             // Match the original recursive walk's input order, including the
@@ -1780,6 +1785,17 @@ impl TickEvaluator<'_> {
                 },
             };
             if !matches!(self.operator_states.get(&key), Some(OperatorState::TableLookup(state)) if state.as_of() == Some(expected))
+            {
+                return Ok(false);
+            }
+        }
+        if matches!(operator, OpType::IndexSource(source) if source.window.is_some()) {
+            let key = self.operator_key(node);
+            let expected = SubTick {
+                tick: self.current_tick,
+                sub_tick: 0,
+            };
+            if !matches!(self.operator_states.get(&key), Some(OperatorState::IndexWindow(state)) if state.as_of() == Some(expected))
             {
                 return Ok(false);
             }
@@ -2178,8 +2194,9 @@ impl TickEvaluator<'_> {
             let output_desc = graph_node.descriptor.output.records();
             let result = match &graph_node.descriptor.operator {
                 OpType::IndexSource(input)
-                    if self.context.eval_mode != EvalMode::Hydrate
-                        || self.evaluation_inputs.is_none() =>
+                    if input.window.is_none()
+                        && (self.context.eval_mode != EvalMode::Hydrate
+                            || self.evaluation_inputs.is_none()) =>
                 {
                     let read = NodeState::update_index_source(
                         input,
@@ -2373,6 +2390,13 @@ impl TickEvaluator<'_> {
                 tables.insert(input.table);
             }
             OpType::IndexSource(input) => {
+                if let Some(exclusion) = input
+                    .window
+                    .as_ref()
+                    .and_then(|window| window.exclusion.as_ref())
+                {
+                    tables.insert(exclusion.table.clone());
+                }
                 tables.insert(input.table);
             }
             OpType::TableLookup(input) => {
@@ -3898,12 +3922,13 @@ async fn cooperative_operator_yield() {
 /// Operators whose hydration rebuilds retained state that a cached record
 /// batch downstream cannot vouch for.
 fn holds_hydration_state(operator: &OpType) -> bool {
-    matches!(
-        operator,
-        OpType::TableLookup(_)
-            | OpType::Aggregate(_)
-            | OpType::ArgMinBy(_)
-            | OpType::ArgMaxBy(_)
-            | OpType::Arrange(_)
-    )
+    matches!(operator, OpType::IndexSource(source) if source.window.is_some())
+        || matches!(
+            operator,
+            OpType::TableLookup(_)
+                | OpType::Aggregate(_)
+                | OpType::ArgMinBy(_)
+                | OpType::ArgMaxBy(_)
+                | OpType::Arrange(_)
+        )
 }

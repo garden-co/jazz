@@ -2693,3 +2693,209 @@ fn served_indexed_subscription_bounds_deletions_and_tracks_new_keys() {
     restore_global(&mut probe.server, "issues", moved, 149, 149);
     probe.step(&[moved, late], "restore after re-entry");
 }
+
+/// Bob serves Alice an indexed ordered page without loading the full bucket.
+/// Alice's received rows track insertion, order changes, bucket moves, deletion
+/// and restoration. This serving seam exposes storage counts unavailable at
+/// the public client API, while assertions use the ordinary sync receiver.
+/// bob --bounded page / changes--> alice
+#[test]
+fn served_ordered_window_refills_without_hydrating_the_matching_bucket() {
+    let alice = author(0x74);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("entries")
+                .column("bucket", PublicColumnType::Text)
+                .column("rank", PublicColumnType::BigInt)
+                .index_only(["bucket", "rank"])
+                .composite_index(["bucket", "rank"])
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    );
+    let (server_dir, mut server) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe3; 16]), schema.clone());
+    let (reader_dir, mut reader) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe4; 16]), schema.clone());
+    let values = |bucket: &str, rank: i64| {
+        BTreeMap::from([
+            ("bucket".to_owned(), Value::String(bucket.to_owned())),
+            ("rank".to_owned(), Value::I64(rank)),
+        ])
+    };
+    for i in 0..160 {
+        commit_global_cells(
+            &mut server,
+            "entries",
+            row(i),
+            values("selected", i as i64),
+            i as u64 + 1,
+            i as u64 + 1,
+        );
+    }
+    let shape = Query::from("entries")
+        .filter(eq(col("bucket"), lit(Value::String("selected".into()))))
+        .order_by("rank", OrderDirection::Asc)
+        .limit(3)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        ..Default::default()
+    };
+    register_query_shape(&mut reader, &shape, opts.clone());
+    subscribe_query_binding_as_system_with_opts(&mut reader, &shape, &binding, opts);
+    let mut probe = ServedPointSubscription {
+        _server_dir: server_dir,
+        server,
+        _reader_dir: reader_dir,
+        reader,
+        shape,
+        binding,
+        peer: PeerState::client_link(alice),
+        started: false,
+    };
+    probe.server.reset_storage_read_metrics();
+    probe.step(&[row(0), row(1), row(2)], "initial ordered page");
+    let reads = probe.server.take_storage_read_metrics();
+    assert!(
+        reads.global_current_rows.reads < 60,
+        "three-row page must not hydrate 160 matching rows: {reads:?}"
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "entries",
+        row(159),
+        values("selected", -1),
+        200,
+        200,
+    );
+    probe.step(
+        &[row(159), row(0), row(1)],
+        "a distant row moves ahead of the window",
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "entries",
+        row(159),
+        values("outside", -1),
+        201,
+        201,
+    );
+    probe.step(&[row(0), row(1), row(2)], "moving out refills the page");
+    delete_global(&mut probe.server, "entries", row(0), 202, 202);
+    probe.step(
+        &[row(1), row(2), row(3)],
+        "deletion refills past the source cap",
+    );
+    restore_global(&mut probe.server, "entries", row(0), 203, 203);
+    probe.step(
+        &[row(0), row(1), row(2)],
+        "restoration re-enters the window",
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "entries",
+        row(161),
+        values("selected", -2),
+        204,
+        204,
+    );
+    probe.step(&[row(161), row(0), row(1)], "insertion shifts the window");
+}
+
+/// Bob serves an ordered page to Alice whose permitted rows come after a
+/// long prefix owned by Mallory. Applying a source cap before permission
+/// filtering must never shorten Alice's page or reveal Mallory's rows.
+/// The direct serving seam exercises the same policy graph as peer sync.
+#[test]
+fn served_ordered_window_keeps_conditional_permissions_before_limit() {
+    let alice = author(0x75);
+    let mallory = author(0x76);
+    let schema =
+        public_query_eval_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("entries")
+                    .column("bucket", PublicColumnType::Text)
+                    .column("rank", PublicColumnType::BigInt)
+                    .column("owner", PublicColumnType::Uuid)
+                    .index_only(["bucket", "rank"])
+                    .composite_index(["bucket", "rank"])
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session("owner", vec!["claims".into(), "sub".into()]),
+                    )),
+            ),
+        );
+    let (server_dir, mut server) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe5; 16]), schema.clone());
+    let (reader_dir, mut reader) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe6; 16]), schema.clone());
+    server.set_test_provider_claims(
+        alice,
+        BTreeMap::from([("sub".into(), Value::Uuid(alice.test_uuid()))]),
+    );
+    let values = |rank: i64, owner: AuthorSubject| {
+        BTreeMap::from([
+            ("bucket".into(), Value::String("selected".into())),
+            ("rank".into(), Value::I64(rank)),
+            ("owner".into(), Value::Uuid(owner.test_uuid())),
+        ])
+    };
+    for i in 0..40 {
+        commit_global_cells(
+            &mut server,
+            "entries",
+            row(i),
+            values(i as i64, if i < 36 { mallory } else { alice }),
+            i as u64 + 1,
+            i as u64 + 1,
+        );
+    }
+    let shape = Query::from("entries")
+        .filter(eq(col("bucket"), lit(Value::String("selected".into()))))
+        .order_by("rank", OrderDirection::Asc)
+        .limit(3)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    register_query_shape(&mut reader, &shape, RegisterShapeOptions::default());
+    subscribe_query_binding(&mut reader, &shape, &binding);
+    let mut probe = ServedPointSubscription {
+        _server_dir: server_dir,
+        server,
+        _reader_dir: reader_dir,
+        reader,
+        shape,
+        binding,
+        peer: PeerState::client_link(alice),
+        started: false,
+    };
+    probe.step(
+        &[row(36), row(37), row(38)],
+        "permission filtering precedes pagination",
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "entries",
+        row(0),
+        values(0, alice),
+        100,
+        100,
+    );
+    probe.step(
+        &[row(0), row(36), row(37)],
+        "new permission changes the ordered page",
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "entries",
+        row(36),
+        values(36, mallory),
+        101,
+        101,
+    );
+    probe.step(
+        &[row(0), row(37), row(38)],
+        "revocation refills from permitted rows",
+    );
+}

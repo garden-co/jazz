@@ -304,8 +304,7 @@ pub(super) enum CurrentAccessPath {
         /// When set, `prefix` addresses that composite index rather than the
         /// single-column index on `column`.
         order_column: Option<String>,
-        /// Scan the (composite) index prefix from its last key. Only a bounded
-        /// one-shot ordered-page probe sets this, together with `source_limit`.
+        /// Scan an ordered page from the composite index's last key.
         reverse: bool,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
@@ -318,8 +317,9 @@ pub(super) enum CurrentAccessPath {
         /// is snapshot-only and cannot observe later transitions through a
         /// secondary equality index.
         maintained: bool,
-        /// A proved physical source cap for an ordinary one-shot read. This is
-        /// never selected by policy compilation or subscriptions.
+        /// Initial physical source cap. A maintained ordered window expands
+        /// this bounded probe until it has proved the page; a first-result
+        /// caller proves its snapshot before publishing it.
         source_limit: Option<usize>,
     },
 }
@@ -3486,6 +3486,7 @@ where
                 prefix,
                 intersections,
                 maintained: true,
+                source_limit,
                 ..
             }) = self.access_paths.get(&request.source).cloned()
         {
@@ -3504,7 +3505,7 @@ where
                     &prefix,
                     &intersections,
                     true,
-                    None,
+                    source_limit,
                     None,
                     &projection_target,
                 )
@@ -4846,6 +4847,9 @@ where
                 .into_iter()
                 .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
         );
+        if matches!(lifetime, HydrationLifetime::Retained) {
+            self.narrow_maintained_ordered_window(request, shape, binding, &mut paths)?;
+        }
         if matches!(lifetime, HydrationLifetime::FirstResult) {
             let query = shape.query();
             let root = root_source_id(&query.table);
@@ -5133,6 +5137,117 @@ where
         Ok(())
     }
 
+    /// Narrow only an already-admitted root index, with no post-source row
+    /// filtering other than deletion winners. Permission evaluation remains in
+    /// the ordinary graph; policy-bearing shapes keep their existing source.
+    fn narrow_maintained_ordered_window(
+        &self,
+        request: &QueryProgramRequest,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        paths: &mut BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<(), Error> {
+        let query = shape.query();
+        let Some(limit) = query
+            .limit
+            .filter(|limit| *limit > 0 && *limit < usize::MAX)
+        else {
+            return Ok(());
+        };
+        let root = root_source_id(&query.table);
+        if request.authorization_mode != QueryAuthorizationMode::TrustedServing
+            || request.reads.primary.source_current_tier(&root) != Some(DurabilityTier::Global)
+            || !matches!(
+                request.reads.primary.sources.get(&root),
+                Some(SourceExpr::VisibleCurrent { .. })
+            )
+            || request.reads.primary.read_schema != request.reads.primary.policy_schema
+            || query.offset != 0
+            || query.order_by.len() != 1
+            || query.filters.len() != 1
+            || !query.joins.is_empty()
+            || query.flat_join.is_some()
+            || !query.policy_branches.is_empty()
+            || !query.reachable.is_empty()
+            || !query.inherits.is_empty()
+            || !query.includes.is_empty()
+            || !query.array_subqueries.is_empty()
+            || query.aggregate.is_some()
+            || query.relation.is_some()
+        {
+            return Ok(());
+        }
+        // An equality by itself is exactly the source prefix. Decline every
+        // conjunction/extra predicate until its filtering is part of refill.
+        if !matches!(
+            &query.filters[0],
+            Predicate::Eq(Operand::Column(_), Operand::Literal(_) | Operand::Param(_))
+                | Predicate::Eq(Operand::Literal(_) | Operand::Param(_), Operand::Column(_))
+        ) {
+            return Ok(());
+        }
+        let table = self.table_in_schema_ref(&query.table, shape.schema_version())?;
+        if !table.branch_by.is_empty()
+            || table
+                .read_policy
+                .as_ref()
+                .is_some_and(|policy| policy != &JazzQuery::from(query.table.clone()))
+        {
+            return Ok(());
+        }
+        let order = &query.order_by[0];
+        if !table.columns.iter().any(|column| {
+            column.name == order.column
+                && matches!(
+                    column.column_type,
+                    ColumnType::U8
+                        | ColumnType::U16
+                        | ColumnType::U32
+                        | ColumnType::U64
+                        | ColumnType::I32
+                        | ColumnType::I64
+                        | ColumnType::Bool
+                        | ColumnType::String
+                        | ColumnType::Bytes
+                        | ColumnType::Uuid
+                )
+        }) {
+            return Ok(());
+        }
+        let equalities = root_literal_equalities(query, binding)?;
+        let Some(CurrentAccessPath::Index {
+            column,
+            order_column,
+            reverse,
+            prefix,
+            intersections,
+            candidate_filter,
+            maintained,
+            source_limit,
+        }) = paths.get_mut(&root)
+        else {
+            return Ok(());
+        };
+        if !*maintained
+            || order_column.is_some()
+            || source_limit.is_some()
+            || prefix.len() != 1
+            || !intersections.is_empty()
+            || candidate_filter.is_some()
+            || equalities.len() != 1
+            || !equalities.contains_key(column)
+            || !table
+                .composite_indexes
+                .contains(&vec![column.clone(), order.column.clone()])
+        {
+            return Ok(());
+        }
+        *order_column = Some(order.column.clone());
+        *reverse = order.direction == OrderDirection::Desc;
+        *source_limit = Some(limit + 1);
+        Ok(())
+    }
+
     fn physical_global_current_source_for_index_scan(
         &self,
         table: &TableSchema,
@@ -5268,12 +5383,33 @@ where
             // source.  Model each equality as an index source and express the
             // intersection in IVM so table deltas which enter or leave either
             // prefix drive ordinary semi-join updates.
-            let mut graph = GraphBuilder::variant_index_scan(
-                storage_table.clone(),
-                primary_index,
-                projection_target,
-                scan,
-            );
+            let mut graph = if let (Some(order_column), Some(cap)) = (order_column, source_limit) {
+                GraphBuilder::variant_index_window(
+                    storage_table.clone(),
+                    primary_index,
+                    projection_target,
+                    scan,
+                    groove::ivm::IndexWindow {
+                        limit: cap.saturating_sub(1),
+                        order_field: crate::schema::app_storage_column_name(order_column),
+                        exclusion: Some(groove::ivm::IndexWindowExclusion {
+                            table: physical_register_global_current_table_name(mapping.table_id),
+                            key_prefix: vec![LiteralValue::from(Value::Bytes(
+                                BranchKey::default().canonical_bytes(),
+                            ))],
+                            key_fields: vec!["row_uuid".to_owned()],
+                            predicate: PredicateExpr::eq("_deletion", Value::EnumTag(0)),
+                        }),
+                    },
+                )
+            } else {
+                GraphBuilder::variant_index_scan(
+                    storage_table.clone(),
+                    primary_index,
+                    projection_target,
+                    scan,
+                )
+            };
             for (index, scan) in intersections {
                 let right = GraphBuilder::variant_index_scan(
                     storage_table.clone(),

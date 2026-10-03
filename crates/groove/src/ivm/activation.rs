@@ -65,6 +65,16 @@ impl ActivationPlan {
                 OpType::TableLookup(source) => {
                     tables.insert(source.table.clone());
                 }
+                OpType::IndexSource(source) if source.window.is_some() => {
+                    tables.insert(source.table.clone());
+                    if let Some(exclusion) = source
+                        .window
+                        .as_ref()
+                        .and_then(|window| window.exclusion.as_ref())
+                    {
+                        tables.insert(exclusion.table.clone());
+                    }
+                }
                 OpType::BindingSource(source) => {
                     bindings.insert(source.key.clone());
                 }

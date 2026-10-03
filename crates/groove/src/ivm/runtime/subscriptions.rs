@@ -913,6 +913,7 @@ pub(super) fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 intersections,
                 candidate_filter,
                 row_projection,
+                window,
             } => {
                 table.hash(&mut hasher);
                 index.hash(&mut hasher);
@@ -920,6 +921,7 @@ pub(super) fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 intersections.hash(&mut hasher);
                 candidate_filter.hash(&mut hasher);
                 row_projection.hash(&mut hasher);
+                window.hash(&mut hasher);
             }
             GraphBuilder::FrontierSource { binding, output } => {
                 binding.hash(&mut hasher);
@@ -1178,6 +1180,7 @@ pub(crate) fn graph_builders_equal_with(
                     intersections: d,
                     candidate_filter: e,
                     row_projection: f,
+                    window: g,
                 },
                 GraphBuilder::Index {
                     table: x,
@@ -1186,8 +1189,9 @@ pub(crate) fn graph_builders_equal_with(
                     intersections: w,
                     candidate_filter: v,
                     row_projection: u,
+                    window: t,
                 },
-            ) if a == x && b == y && c == z && d == w && e == v && f == u => {}
+            ) if a == x && b == y && c == z && d == w && e == v && f == u && g == t => {}
             (
                 GraphBuilder::FrontierSource {
                     binding: a,

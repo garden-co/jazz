@@ -51,6 +51,7 @@ mod compilation_cache;
 mod counted_map;
 mod evaluation_memo;
 pub(crate) mod evaluation_session;
+mod index_window;
 mod join;
 mod persist;
 pub(crate) mod pipeline;
@@ -569,6 +570,8 @@ pub enum IvmRuntimeError {
     UnsupportedIndexCandidateFilter,
     #[error("Primary-key lookup into heterogeneous table {0} is not supported yet")]
     UnsupportedTableLookup(String),
+    #[error("Reading {0} with a maintained index window is not supported yet")]
+    UnsupportedIndexWindow(&'static str),
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]
