@@ -59,7 +59,8 @@ impl SourceBindings {
 /// admitted request rather than to the reusable operator context.
 fn is_external_leaf(graph: &GraphBuilder) -> bool {
     match graph {
-        GraphBuilder::Table { .. }
+        GraphBuilder::TableLookup { .. }
+        | GraphBuilder::Table { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::InputSource { .. }
         | GraphBuilder::InlineRecords { .. }

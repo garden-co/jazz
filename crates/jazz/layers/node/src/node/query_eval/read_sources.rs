@@ -2780,7 +2780,7 @@ where
             )
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let deleted_winners = self
-            .projected_deletion_register_current_source_graph(request, deletion_tier)?
+            .projected_deletion_register_current_source_graph(request, table, deletion_tier)?
             .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project(["row_uuid"]);
         Ok(GraphBuilder::anti_join(
@@ -2946,7 +2946,8 @@ where
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(DeletionRegisterSource {
-                graph: self.projected_deletion_register_current_source_graph(request, tier)?,
+                graph: self
+                    .projected_deletion_register_current_source_graph(request, table, tier)?,
                 row_uuid_field: "row_uuid".to_owned(),
             }));
         }
@@ -3272,7 +3273,7 @@ where
                     return Ok(content.project(fields));
                 }
                 let deleted_winners = self
-                    .projected_deletion_register_current_source_graph(request, tier)?
+                    .projected_deletion_register_current_source_graph(request, read_table, tier)?
                     .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
                     .project(["row_uuid"]);
                 return Ok(GraphBuilder::anti_join(
@@ -3443,7 +3444,7 @@ where
                 return Ok(content.project(fields));
             }
             let deleted_winners = self
-                .projected_deletion_register_current_source_graph(request, tier)?
+                .projected_deletion_register_current_source_graph(request, read_table, tier)?
                 .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
                 .project(["row_uuid"]);
             Ok(GraphBuilder::anti_join(
@@ -3464,6 +3465,7 @@ where
     pub fn projected_deletion_register_current_source_graph(
         &mut self,
         request: &SourceRequest,
+        table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, SourceResolutionError> {
         if tier == DurabilityTier::Global
@@ -3476,6 +3478,50 @@ where
             .node
             .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        if tier == DurabilityTier::Global
+            && let Some(CurrentAccessPath::Index {
+                column,
+                order_column,
+                reverse,
+                prefix,
+                intersections,
+                maintained: true,
+                ..
+            }) = self.access_paths.get(&request.source).cloned()
+        {
+            // Follow the live indexed candidate relation, including keys that
+            // enter it after opening. A frozen opening UUID set would miss an
+            // existing deletion when a row moves into the selected prefix.
+            let projection_target = self.current_projection_target(request, table)?;
+            let candidates = self
+                .node
+                .physical_global_current_source_for_index_scan(
+                    table,
+                    self.read_view.read_schema,
+                    &column,
+                    order_column.as_deref(),
+                    reverse,
+                    &prefix,
+                    &intersections,
+                    true,
+                    None,
+                    None,
+                    &projection_target,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let keys = candidates.project_fields([
+                ProjectField::literal(
+                    "branch_key",
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                ),
+                ProjectField::named("row_uuid"),
+            ]);
+            return Ok(GraphBuilder::table_lookup(
+                keys,
+                physical_register_global_current_table_name(table_id),
+                ["branch_key", "row_uuid"],
+            ));
+        }
         let fields = register_storage_fields_for_query_engine("");
         // The content access path fixes this source occurrence to one UUID.
         // Keep its deletion inputs live, but read only that same key. Other
@@ -3543,7 +3589,7 @@ where
                 table, true, false,
             ));
         let deleted_winners = self
-            .projected_deletion_register_current_source_graph(request, tier)?
+            .projected_deletion_register_current_source_graph(request, table, tier)?
             .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project_fields([
                 ProjectField::named("row_uuid"),

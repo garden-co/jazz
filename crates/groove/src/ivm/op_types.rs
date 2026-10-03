@@ -34,6 +34,14 @@ pub struct TableSourceOp {
     pub variant_projection: Option<VariantProjectionTarget>,
 }
 
+/// A primary-key lookup driven by a live key relation. Runtime-local only.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TableLookupOp {
+    pub table: String,
+    pub key_fields: Vec<usize>,
+    pub target_key_fields: Vec<usize>,
+}
+
 /// Runtime registry namespace selected by a heterogeneous table source.
 ///
 /// Named projections are caller-defined query boundaries. Schema-index

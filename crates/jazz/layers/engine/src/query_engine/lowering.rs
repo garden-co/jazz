@@ -653,7 +653,9 @@ fn declared_node_fields(
                     fields
                 })
         }
-        GraphBuilder::Table { .. } | GraphBuilder::Index { .. } => None,
+        GraphBuilder::TableLookup { .. }
+        | GraphBuilder::Table { .. }
+        | GraphBuilder::Index { .. } => None,
     }
 }
 
@@ -1028,7 +1030,8 @@ fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
                 pending.push((seed, false));
             }
             GraphBuilder::RecursiveStepWitness { recursive } => pending.push((recursive, false)),
-            GraphBuilder::Filter { input, .. }
+            GraphBuilder::TableLookup { input, .. }
+            | GraphBuilder::Filter { input, .. }
             | GraphBuilder::UnwrapNullable { input, .. }
             | GraphBuilder::Unnest { input, .. }
             | GraphBuilder::VariantProject { input, .. }

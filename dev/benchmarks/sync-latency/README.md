@@ -48,6 +48,12 @@ CRUD benchmark's warm writer/reader topology. Exact Top-N UUIDs and ordinals,
 point contents, and the default UUID-ordered page are checked on every iteration.
 Use `--composite-index` to add `(runId, ordinal)` alongside the two single-column
 indexes. This is a separate schema experiment and is recorded in each receipt.
+Use `--ordered-select` to order `select10` by ascending ordinal; `selectTopN`
+always uses descending ordinal. Use `--fresh-reader` to replace the seeding
+client with an empty client before measuring reads. Its connection and auth
+startup are warmed by an untimed point read of the warmup row. Page rows are
+initially absent locally and become cached across repetitions. Both options
+are recorded in the receipt and filename.
 
 `updateTopN` includes a global read followed by a global write when the global
 tier is selected, so its critical path includes two serial network round trips.

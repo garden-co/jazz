@@ -186,6 +186,13 @@ pub enum GraphBuilder {
         scan: Option<StaticScanSpec>,
         variant_projection: Option<String>,
     },
+    /// A live primary-key semijoin. Only target rows addressed by `input`
+    /// are hydrated; later changes on either side update the same relation.
+    TableLookup {
+        input: Arc<GraphBuilder>,
+        table: String,
+        key_fields: Vec<FieldRef>,
+    },
     InlineRecords {
         output: RecordDescriptor,
         records: Vec<Vec<u8>>,
@@ -513,6 +520,19 @@ impl FieldRef {
 }
 
 impl GraphBuilder {
+    /// Read each existing target row once while its primary key occurs in
+    /// `input`. Fields follow the target table's complete primary-key order.
+    pub fn table_lookup(
+        input: GraphBuilder,
+        table: impl Into<String>,
+        key_fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::TableLookup {
+            input: Arc::new(input),
+            table: table.into(),
+            key_fields: key_fields.into_iter().map(FieldRef::name).collect(),
+        }
+    }
     pub fn table(table: impl Into<String>) -> Self {
         Self::Table {
             table: table.into(),
@@ -777,7 +797,8 @@ impl GraphBuilder {
                         pending.push((input, false));
                     }
                 }
-                Self::Filter { input, .. }
+                Self::TableLookup { input, .. }
+                | Self::Filter { input, .. }
                 | Self::Project { input, .. }
                 | Self::StreamingChecksum { input, .. }
                 | Self::UnwrapNullable { input, .. }
@@ -830,7 +851,8 @@ impl GraphBuilder {
                     visit(input);
                 }
             }
-            Self::Filter { input, .. }
+            Self::TableLookup { input, .. }
+            | Self::Filter { input, .. }
             | Self::Project { input, .. }
             | Self::StreamingChecksum { input, .. }
             | Self::UnwrapNullable { input, .. }
@@ -884,7 +906,8 @@ impl GraphBuilder {
                     *input = map(input);
                 }
             }
-            Self::Filter { input, .. }
+            Self::TableLookup { input, .. }
+            | Self::Filter { input, .. }
             | Self::Project { input, .. }
             | Self::StreamingChecksum { input, .. }
             | Self::UnwrapNullable { input, .. }
@@ -1834,6 +1857,12 @@ impl IvmGraph {
                     .or_default()
                     .insert(id);
             }
+            OpType::TableLookup(source) => {
+                self.table_sources
+                    .entry(source.table.clone())
+                    .or_default()
+                    .insert(id);
+            }
             OpType::IndexSource(source) => {
                 self.table_sources
                     .entry(source.table.clone())
@@ -1975,6 +2004,9 @@ impl IvmGraph {
         }
         match &node.descriptor.operator {
             OpType::TableSource(source) => {
+                remove_source_node(&mut self.table_sources, &source.table, id);
+            }
+            OpType::TableLookup(source) => {
                 remove_source_node(&mut self.table_sources, &source.table, id);
             }
             OpType::IndexSource(source) => {
@@ -2147,6 +2179,21 @@ impl NodeDescriptor {
             | OpType::InlineRecords(_)
             | OpType::FrontierSource(_)
             | OpType::BindingSource(_) => expect_arity(&self.inputs, 0),
+            OpType::TableLookup(lookup) => {
+                expect_arity(&self.inputs, 1)?;
+                if lookup.key_fields.len() != lookup.target_key_fields.len() {
+                    return Err(GraphValidationError::JoinInputDescriptorMismatch);
+                }
+                for (&left, &right) in lookup.key_fields.iter().zip(&lookup.target_key_fields) {
+                    let a = input_outputs[0].fields().get(left);
+                    let b = output.fields().get(right);
+                    if a.is_none() || b.is_none() || a.unwrap().value_type != b.unwrap().value_type
+                    {
+                        return Err(GraphValidationError::JoinInputDescriptorMismatch);
+                    }
+                }
+                Ok(())
+            }
             OpType::Arrange(_) => {
                 expect_arity(&self.inputs, 1)?;
                 if !matches!(typed_inputs[0], NodeOutput::Records(_))
@@ -2676,6 +2723,7 @@ pub enum GraphValidationError {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum OpType {
     TableSource(TableSourceOp),
+    TableLookup(TableLookupOp),
     IndexSource(IndexSourceOp),
     InlineRecords(InlineRecordsOp),
     FrontierSource(FrontierSourceOp),

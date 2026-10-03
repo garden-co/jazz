@@ -1045,10 +1045,12 @@ fn contains_changed_table(
         let graph_node = graph
             .node(node)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        if matches!(
-            &graph_node.descriptor.operator,
-            OpType::TableSource(source) if changed.contains(source.table.as_str())
-        ) {
+        let table = match &graph_node.descriptor.operator {
+            OpType::TableSource(source) => Some(&source.table),
+            OpType::TableLookup(source) => Some(&source.table),
+            _ => None,
+        };
+        if table.is_some_and(|table| changed.contains(table.as_str())) {
             return Ok(true);
         }
         pending.extend(graph_node.descriptor.inputs.iter().copied());
@@ -1073,10 +1075,15 @@ fn collect_changed_join_keys(
         let graph_node = graph
             .node(node)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        if let OpType::TableSource(source) = &graph_node.descriptor.operator {
+        let table = match &graph_node.descriptor.operator {
+            OpType::TableSource(source) => Some(&source.table),
+            OpType::TableLookup(source) => Some(&source.table),
+            _ => None,
+        };
+        if let Some(table) = table {
             for delta in table_deltas
                 .iter()
-                .filter(|delta| delta.table == source.table && !delta.deltas.is_empty())
+                .filter(|delta| delta.table == *table && !delta.deltas.is_empty())
             {
                 keys.extend(touched_join_keys(
                     &delta.descriptor,
@@ -1125,11 +1132,28 @@ fn has_recompute_table_delta(
     if let Some(witness) = nodes.step_witness {
         collect_anti_join_right_table_sources(graph, witness, &mut anti_join_right_tables)?;
     }
+    // Recursive scopes discard child operator state between traversals. A
+    // target change therefore needs a fresh bounded lookup of the accumulated
+    // keys, even for an insertion into a previously absent target. It cannot
+    // rely on the latest positive frontier containing that older key.
+    let mut lookup_tables = HashSet::default();
+    for root in [Some(nodes.seed), Some(nodes.step), nodes.step_witness]
+        .into_iter()
+        .flatten()
+    {
+        walk_input_graph(graph, root, |_, node| {
+            if let OpType::TableLookup(lookup) = &node.descriptor.operator {
+                lookup_tables.insert(lookup.table.clone());
+            }
+            Ok(())
+        })?;
+    }
     Ok(table_deltas
         .iter()
         .filter(|table_delta| tables.contains_key(&table_delta.table))
         .any(|table_delta| {
             anti_join_right_tables.contains_key(&table_delta.table)
+                || lookup_tables.contains(&table_delta.table)
                 || table_delta.deltas.iter().any(|delta| delta.weight <= 0)
         }))
 }
@@ -1431,6 +1455,10 @@ fn collect_table_source_names(
         } else if let OpType::IndexSource(index) = &graph_node.descriptor.operator {
             tables
                 .entry(index.table.clone())
+                .or_insert_with(|| graph_node.descriptor.output.records());
+        } else if let OpType::TableLookup(lookup) = &graph_node.descriptor.operator {
+            tables
+                .entry(lookup.table.clone())
                 .or_insert_with(|| graph_node.descriptor.output.records());
         }
         Ok(())
@@ -1882,6 +1910,73 @@ impl HydrationEvaluator<'_> {
                         join.comparison,
                         true,
                     )?;
+                    Ok(RecordDeltas {
+                        descriptor: output_desc,
+                        deltas,
+                    })
+                }
+                OpType::TableLookup(lookup) => {
+                    let input = self.eval_unary_input(graph_node, node).await?;
+                    let mut keys = HashMap::<Vec<u8>, i64>::default();
+                    for delta in &input.deltas {
+                        let key = super::primary_key_value_bytes(
+                            &input.descriptor,
+                            delta.raw(),
+                            &lookup.key_fields,
+                        )?;
+                        *keys.entry(key).or_default() += delta.weight;
+                    }
+                    let mut deltas = Vec::new();
+                    let mut blocked = false;
+                    for (key, count) in keys {
+                        if count <= 0 {
+                            continue;
+                        }
+                        let record = match self.evaluation_inputs.as_deref_mut() {
+                            Some(inputs) => match inputs.value(
+                                super::evaluation_session::StorageRequestKey::Get {
+                                    family: lookup.table.clone(),
+                                    key: key.clone(),
+                                },
+                            ) {
+                                Ok(stored) => stored
+                                    .map(|stored| {
+                                        super::table_lookup::decode_target(
+                                            lookup,
+                                            &output_desc,
+                                            &key,
+                                            stored,
+                                        )
+                                    })
+                                    .transpose()?,
+                                Err(IvmRuntimeError::EvaluationBlocked) => {
+                                    blocked = true;
+                                    continue;
+                                }
+                                Err(error) => return Err(error),
+                            },
+                            None => self
+                                .storage
+                                .get(lookup.table.clone(), key.clone())
+                                .await?
+                                .as_deref()
+                                .map(|stored| {
+                                    super::table_lookup::decode_target(
+                                        lookup,
+                                        &output_desc,
+                                        &key,
+                                        stored,
+                                    )
+                                })
+                                .transpose()?,
+                        };
+                        if let Some(record) = record {
+                            deltas.push(RecordDelta { record, weight: 1 });
+                        }
+                    }
+                    if blocked {
+                        return Err(IvmRuntimeError::EvaluationBlocked);
+                    }
                     Ok(RecordDeltas {
                         descriptor: output_desc,
                         deltas,

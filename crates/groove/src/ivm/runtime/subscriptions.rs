@@ -880,6 +880,15 @@ pub(super) fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 output.hash(&mut hasher);
                 input.as_ref().map(|input| child!(input)).hash(&mut hasher);
             }
+            GraphBuilder::TableLookup {
+                input,
+                table,
+                key_fields,
+            } => {
+                child!(input).hash(&mut hasher);
+                table.hash(&mut hasher);
+                key_fields.hash(&mut hasher);
+            }
             GraphBuilder::Table {
                 table,
                 scan,
@@ -1118,6 +1127,23 @@ pub(crate) fn graph_builders_equal_with(
                 (None, None) => {}
                 _ => return false,
             },
+            (
+                GraphBuilder::TableLookup {
+                    input: a,
+                    table: at,
+                    key_fields: ak,
+                },
+                GraphBuilder::TableLookup {
+                    input: b,
+                    table: bt,
+                    key_fields: bk,
+                },
+            ) => {
+                if at != bt || ak != bk {
+                    return false;
+                }
+                pending.push((a, b));
+            }
             (
                 GraphBuilder::Table {
                     table: a,
@@ -2298,7 +2324,8 @@ fn lift_literal_filter_node(
                 value: lifted.value,
             }))
         }
-        GraphBuilder::Table { .. }
+        GraphBuilder::TableLookup { .. }
+        | GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
         | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
@@ -2610,7 +2637,8 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
             | GraphBuilder::SemiJoin { left, right, .. }
             | GraphBuilder::AntiJoin { left, right, .. } => child!(left) || child!(right),
             GraphBuilder::Union { inputs } => inputs.iter().any(|input| child!(input)),
-            GraphBuilder::Table { .. }
+            GraphBuilder::TableLookup { .. }
+            | GraphBuilder::Table { .. }
             | GraphBuilder::Index { .. }
             | GraphBuilder::VariantProject { .. } => false,
         };
@@ -2753,7 +2781,8 @@ fn propagate_binding_through_frontier(
                 comparison: *comparison,
             })
         }
-        GraphBuilder::Table { .. }
+        GraphBuilder::TableLookup { .. }
+        | GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
         | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
@@ -4677,6 +4706,20 @@ impl IvmRuntime {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 Ok(*output)
+            }
+            GraphBuilder::TableLookup { table, .. } => {
+                let schema = self
+                    .schema
+                    .table(table)
+                    .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
+                if schema.has_variants() {
+                    return Err(IvmRuntimeError::UnsupportedTableLookup(table.clone()));
+                }
+                Ok(self
+                    .table_descriptors
+                    .get(table)
+                    .copied()
+                    .unwrap_or_else(|| schema.record_schema()))
             }
             GraphBuilder::Table {
                 table,

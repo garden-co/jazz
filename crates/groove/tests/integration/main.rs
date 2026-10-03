@@ -37,6 +37,8 @@ mod prepared_batches;
 mod prepared_binding_regressions;
 #[path = "../prepared_binding_scale.rs"]
 mod prepared_binding_scale;
+#[path = "../primary_key_lookup.rs"]
+mod primary_key_lookup;
 #[path = "../query_templates.rs"]
 mod query_templates;
 #[path = "../recursive_cycle_regressions.rs"]

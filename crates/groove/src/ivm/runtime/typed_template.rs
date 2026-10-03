@@ -81,6 +81,7 @@ fn forest(
                     Some(describe(node)?)
                 }
                 GraphBuilder::Table { .. }
+                | GraphBuilder::TableLookup { .. }
                 | GraphBuilder::Index { .. }
                 | GraphBuilder::Recursive { .. }
                 | GraphBuilder::RecursiveStepWitness { .. }

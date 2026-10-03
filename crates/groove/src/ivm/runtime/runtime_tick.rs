@@ -2233,6 +2233,9 @@ impl<'a> EvaluationSession<'a> {
             if let OperatorState::TopBy(top_by) = state {
                 top_by.value_mut().commit_overlays();
             }
+            if let OperatorState::TableLookup(lookup) = state {
+                lookup.value_mut().commit_overlay();
+            }
             if let OperatorState::ArgBy(arg_by) = state {
                 arg_by.value_mut().commit_overlay();
             }
@@ -4221,6 +4224,9 @@ fn commit_operator_state(state: &mut OperatorState) {
         }
         OperatorState::TopBy(top_by) => {
             top_by.value_mut().commit_overlays();
+        }
+        OperatorState::TableLookup(lookup) => {
+            lookup.value_mut().commit_overlay();
         }
         OperatorState::ArgBy(arg_by) => {
             arg_by.value_mut().commit_overlay();

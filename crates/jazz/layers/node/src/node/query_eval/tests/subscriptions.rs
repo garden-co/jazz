@@ -424,7 +424,8 @@ fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
             graph_contains_point_scan(seed) || graph_contains_point_scan(step)
         }
         GraphBuilder::RecursiveStepWitness { recursive } => graph_contains_point_scan(recursive),
-        GraphBuilder::Filter { input, .. }
+        GraphBuilder::TableLookup { input, .. }
+        | GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::VariantProject { input, .. }
@@ -2529,4 +2530,166 @@ fn served_policy_point_subscription_follows_same_table_inherited_grant() {
         9,
     );
     probe.step(&[], "child detached from parent");
+}
+
+/// Bob serves Alice's indexed page while unrelated rows have deletion history.
+/// Deletion lookup work must follow the live candidate keys, including a row
+/// deleted before it enters the filter. Receiver-visible rows also prove that
+/// ownership checks, later insertion, delete, restore, and page refill survive.
+/// This serving seam exposes storage read counters unavailable in the client API.
+///
+/// bob --indexed page + deletion state--> alice
+/// bob --move / restore / transfer-----> alice
+#[test]
+fn served_indexed_subscription_bounds_deletions_and_tracks_new_keys() {
+    let alice = author(0x72);
+    let bob = author(0x73);
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("issues")
+                .column("title", PublicColumnType::Text)
+                .column("assignee", PublicColumnType::Uuid)
+                .column("requiresAdmin", PublicColumnType::Boolean)
+                .index_only(["title", "assignee"])
+                .policies(
+                    PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                        "assignee",
+                        vec!["claims".to_owned(), "sub".to_owned()],
+                    )),
+                ),
+        ),
+    );
+    let (server_dir, mut server) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe1; 16]), schema.clone());
+    let (reader_dir, mut reader) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xe2; 16]), schema.clone());
+    server.set_test_provider_claims(
+        alice,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.test_uuid()))]),
+    );
+    let shape = Query::from("issues")
+        .filter(eq(col("title"), lit(Value::String("selected".into()))))
+        .limit(2)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    register_query_shape(&mut reader, &shape, RegisterShapeOptions::default());
+    subscribe_query_binding(&mut reader, &shape, &binding);
+    let mut probe = ServedPointSubscription {
+        _server_dir: server_dir,
+        server,
+        _reader_dir: reader_dir,
+        reader,
+        shape,
+        binding,
+        peer: PeerState::client_link(alice),
+        started: false,
+    };
+    let first = row(0x70);
+    let moved = row(0x71);
+    let late = row(0x72);
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        first,
+        served_issue("selected", alice),
+        1,
+        1,
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("outside", alice),
+        2,
+        2,
+    );
+    delete_global(&mut probe.server, "issues", moved, 3, 3);
+    for index in 0..64_u8 {
+        let time = u64::from(index) * 2 + 4;
+        let unrelated = row(usize::from(index));
+        commit_global_cells(
+            &mut probe.server,
+            "issues",
+            unrelated,
+            served_issue("outside", bob),
+            time,
+            time,
+        );
+        delete_global(&mut probe.server, "issues", unrelated, time + 1, time + 1);
+    }
+    probe.server.reset_storage_read_metrics();
+    probe.step(&[first], "initial indexed page");
+    let reads = probe.server.take_storage_read_metrics();
+    assert!(
+        reads.register_global_current_rows.reads <= 8,
+        "one matching key must not load unrelated deletion history: {reads:?}"
+    );
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("selected", alice),
+        140,
+        140,
+    );
+    probe.step(
+        &[first],
+        "a previously deleted row enters the filter but stays deleted",
+    );
+    restore_global(&mut probe.server, "issues", moved, 141, 141);
+    probe.step(&[first, moved], "restore publishes the newly admitted key");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        late,
+        served_issue("selected", alice),
+        142,
+        142,
+    );
+    probe.step(
+        &[first, moved],
+        "the page still has its original first two rows",
+    );
+    delete_global(&mut probe.server, "issues", first, 143, 143);
+    probe.step(&[moved, late], "deletion refills the limited page");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("selected", bob),
+        144,
+        144,
+    );
+    probe.step(&[late], "policy transfer retracts a candidate");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("selected", alice),
+        145,
+        145,
+    );
+    probe.step(&[moved, late], "policy transfer back republishes it");
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("outside", alice),
+        146,
+        146,
+    );
+    probe.step(&[late], "moving out removes the candidate");
+    delete_global(&mut probe.server, "issues", moved, 147, 147);
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        moved,
+        served_issue("selected", alice),
+        148,
+        148,
+    );
+    probe.step(&[late], "re-entry checks deletion state again");
+    restore_global(&mut probe.server, "issues", moved, 149, 149);
+    probe.step(&[moved, late], "restore after re-entry");
 }

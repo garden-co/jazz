@@ -363,7 +363,8 @@ impl IvmRuntime {
                 }
                 Ok(compiled)
             }
-            GraphBuilder::Table { .. }
+            GraphBuilder::TableLookup { .. }
+            | GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
             | GraphBuilder::InputSource { .. }
             | GraphBuilder::Index { .. }
@@ -408,6 +409,56 @@ impl IvmRuntime {
         compiled_memo: &mut HashMap<usize, CompiledNode>,
     ) -> Result<CompiledNode, IvmRuntimeError> {
         match graph {
+            GraphBuilder::TableLookup {
+                input,
+                table,
+                key_fields,
+            } => {
+                let input = self.add_dedup_graph_cached(input, output_memo, compiled_memo)?;
+                let schema = self
+                    .schema
+                    .table(table)
+                    .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
+                if schema.has_variants() {
+                    return Err(IvmRuntimeError::UnsupportedTableLookup(table.clone()));
+                }
+                let target_key_fields = primary_key_field_indices(schema, &inferred_output)?;
+                let key_fields = key_fields
+                    .iter()
+                    .map(|field| record_projection::resolve_field_ref(&input.output, field))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if key_fields.len() != target_key_fields.len() {
+                    return Err(IvmRuntimeError::JoinKeyArityMismatch {
+                        left: key_fields.len(),
+                        right: target_key_fields.len(),
+                    });
+                }
+                for (&left, &right) in key_fields.iter().zip(&target_key_fields) {
+                    if input.output.fields()[left].value_type
+                        != inferred_output.fields()[right].value_type
+                    {
+                        return Err(IvmRuntimeError::GraphOutputMismatch);
+                    }
+                }
+                let node = self.graph.dedup_node(
+                    NodeDescriptor::new(
+                        OpType::TableLookup(TableLookupOp {
+                            table: table.clone(),
+                            key_fields,
+                            target_key_fields,
+                        }),
+                        [input.node],
+                        inferred_output,
+                    ),
+                    NodeDurability::Ephemeral,
+                );
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode {
+                    output: inferred_output,
+                    node,
+                    root_ordering_node: None,
+                })
+            }
             GraphBuilder::Table {
                 table,
                 scan,

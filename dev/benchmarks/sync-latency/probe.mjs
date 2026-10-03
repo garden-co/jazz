@@ -26,6 +26,8 @@ const { values } = parseArgs({
     "unrelated-rows": { type: "string", default: "0" },
     "deleted-rows": { type: "string", default: "0" },
     "composite-index": { type: "boolean", default: false },
+    "ordered-select": { type: "boolean", default: false },
+    "fresh-reader": { type: "boolean", default: false },
   },
 });
 if (!values["sdk-root"])
@@ -195,58 +197,63 @@ try {
   }
   if (values["client-storage"] === "persistent")
     clientDir = mkdtempSync(join(tmpdir(), "jazz-sync-client-"));
-  context = createJazzContext({
-    appId: server.appId,
-    app,
-    permissions,
-    driver: clientDir
-      ? { type: "persistent", dataPath: join(clientDir, "db") }
-      : { type: "memory" },
-    serverUrl: url,
-    backendSecret: server.backendSecret,
-    adminSecret: server.adminSecret,
-  });
-  const db = context.asBackend(),
-    runtime = context.coreSource.currentRuntime;
-  if (values["pump-debounce-ms"] !== undefined) {
-    const delayMs = Number(values["pump-debounce-ms"]);
-    assert(Number.isFinite(delayMs) && delayMs >= 0);
-    // Trial confined to this owner. Keep the existing single-pump, generation,
-    // tick, permission and storage paths; alter only its scheduling delay.
-    runtime.scheduleServerPump = function () {
-      if (this.closed || !this.serverTransport) return;
-      if (this.serverPumpRunning) {
-        this.serverPumpAgain = true;
-        return;
-      }
-      if (this.serverPumpScheduled) return;
-      this.serverPumpScheduled = true;
-      setTimeout(() => {
-        this.serverPumpScheduled = false;
-        if (!this.closed) this.startServerPump();
-      }, delayMs);
-    };
-  }
-  if (values.trace)
-    for (const name of [
-      "commitTransaction",
-      "runCoreTick",
-      "routePendingInboundServerFrames",
-      "startRowsForContext",
-      "awaitNativeRead",
-    ]) {
-      const original = runtime[name];
-      assert.equal(typeof original, "function", `Missing profiling hook ${name}`);
-      runtime[name] = function (...args) {
-        const begin = performance.now();
-        event(`${name}.start`);
-        const result = original.apply(this, args);
-        const finish = () => event(`${name}.end`, { durationMs: performance.now() - begin });
-        if (result?.then) return result.finally(finish);
-        finish();
-        return result;
+  const openContext = () =>
+    createJazzContext({
+      appId: server.appId,
+      app,
+      permissions,
+      driver: clientDir
+        ? { type: "persistent", dataPath: join(clientDir, "db") }
+        : { type: "memory" },
+      serverUrl: url,
+      backendSecret: server.backendSecret,
+      adminSecret: server.adminSecret,
+    });
+  context = openContext();
+  let db = context.asBackend();
+  function configureRuntime() {
+    const runtime = context.coreSource.currentRuntime;
+    if (values["pump-debounce-ms"] !== undefined) {
+      const delayMs = Number(values["pump-debounce-ms"]);
+      assert(Number.isFinite(delayMs) && delayMs >= 0);
+      // Trial confined to this owner. Keep the existing single-pump, generation,
+      // tick, permission and storage paths; alter only its scheduling delay.
+      runtime.scheduleServerPump = function () {
+        if (this.closed || !this.serverTransport) return;
+        if (this.serverPumpRunning) {
+          this.serverPumpAgain = true;
+          return;
+        }
+        if (this.serverPumpScheduled) return;
+        this.serverPumpScheduled = true;
+        setTimeout(() => {
+          this.serverPumpScheduled = false;
+          if (!this.closed) this.startServerPump();
+        }, delayMs);
       };
     }
+    if (values.trace)
+      for (const name of [
+        "commitTransaction",
+        "runCoreTick",
+        "routePendingInboundServerFrames",
+        "startRowsForContext",
+        "awaitNativeRead",
+      ]) {
+        const original = runtime[name];
+        assert.equal(typeof original, "function", `Missing profiling hook ${name}`);
+        runtime[name] = function (...args) {
+          const begin = performance.now();
+          event(`${name}.start`);
+          const result = original.apply(this, args);
+          const finish = () => event(`${name}.end`, { durationMs: performance.now() - begin });
+          if (result?.then) return result.finally(finish);
+          finish();
+          return result;
+        };
+      }
+  }
+  configureRuntime();
   async function create(count, runId, tier = values.tier, ordinalStart = 0) {
     const ids = Array.from({ length: count }, () => randomUUID());
     const commit = await db.transaction((tx) => {
@@ -289,14 +296,30 @@ try {
     const ids = await seed(matchingRows, runId);
     await seed(unrelatedRows, `unrelated-${randomUUID()}`);
     await seed(deletedRows, `deleted-${randomUUID()}`, true);
+    if (values["fresh-reader"]) {
+      await context.shutdown();
+      if (clientDir) {
+        rmSync(clientDir, { recursive: true, force: true });
+        clientDir = mkdtempSync(join(tmpdir(), "jazz-sync-reader-"));
+      }
+      context = openContext();
+      db = context.asBackend();
+      configureRuntime();
+      // Exclude connection/authentication startup, while keeping every timed
+      // query on the ordinary Global durability and sync path.
+      await db.one(app.items.where({ id: warmupIds[0] }), { tier: "global" });
+    }
     console.log(JSON.stringify({ ready: process.pid, matchingRows, unrelatedRows, deletedRows }));
     const opts = { tier: values.tier };
     const expectedIds = new Set(ids);
-    const expectedPageIds = ids.toSorted().slice(0, 10);
+    const expectedPageIds = values["ordered-select"]
+      ? ids.slice(0, 10)
+      : ids.toSorted().slice(0, 10);
+    const firstPage = values["ordered-select"]
+      ? app.items.where({ runId }).orderBy("ordinal", "asc").limit(10)
+      : app.items.where({ runId }).limit(10);
     for (sample = 0; sample < repeats; sample++) {
-      const rows = await timed("select10", () =>
-        db.all(app.items.where({ runId }).limit(10), opts),
-      );
+      const rows = await timed("select10", () => db.all(firstPage, opts));
       assert.equal(rows.length, 10);
       assert.deepEqual(
         rows.map((row) => row.id),
@@ -385,6 +408,8 @@ try {
     tier: values.tier,
     workload: values["select-only"] ? "fixed-select" : "crud-with-cleanup",
     compositeIndex: values["composite-index"],
+    orderedSelect: values["ordered-select"],
+    freshReader: values["fresh-reader"],
     ...(values["select-only"] ? { matchingRows, unrelatedRows, deletedRows } : {}),
     clientStorage: values["client-storage"],
     serverStorage: values["server-storage"],
@@ -397,8 +422,8 @@ try {
   const workload = values["select-only"]
     ? `select-${matchingRows}-${unrelatedRows}-${deletedRows}-`
     : "";
-  const indexLabel = values["composite-index"] ? "composite-" : "";
-  const filename = `${workload}${indexLabel}rtt-${rttMs}-${values["client-storage"]}-${values["server-storage"]}-${values.tier}-${values.trace ? "trace" : "timing"}-${values["pump-debounce-ms"] ?? "default"}.json`;
+  const indexLabel = `${values["composite-index"] ? "composite-" : ""}${values["ordered-select"] ? "ordinal-" : ""}`;
+  const filename = `${workload}${indexLabel}${values["fresh-reader"] ? "fresh-" : ""}rtt-${rttMs}-${values["client-storage"]}-${values["server-storage"]}-${values.tier}-${values.trace ? "trace" : "timing"}-${values["pump-debounce-ms"] ?? "default"}.json`;
   const outputPath = join(outputDir, filename);
   writeFileSync(outputPath, JSON.stringify(receipt, null, 2));
   console.log(JSON.stringify({ outputPath, mediansMs }, null, 2));
