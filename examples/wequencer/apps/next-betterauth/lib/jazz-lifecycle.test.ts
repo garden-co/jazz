@@ -41,6 +41,50 @@ describe("example-owned account lifecycle", () => {
     expect(events).toEqual(["open:A", "shutdown:A:true", "open:B"]);
   });
 
+  it("keeps the open client when a login revalidates its account in place", async () => {
+    const events: string[] = [];
+    const retained = account("A");
+    const loginJWT = vi.fn(async () => retained);
+    const lifecycle = new JazzLifecycle(
+      { getLoggedIn: () => retained, loginJWT } as never,
+      async (next) => {
+        events.push(`open:${next.id}`);
+        return client(events, next.id) as never;
+      },
+      () => {},
+    );
+
+    await lifecycle.attach();
+    await lifecycle.revalidate((manager) => manager.loginJWT({ getToken: async () => "jwt" }));
+
+    expect(loginJWT).toHaveBeenCalledOnce();
+    expect(events).toEqual(["open:A"]);
+  });
+
+  it("syncs and replaces the open client when a login selects another account", async () => {
+    const events: string[] = [];
+    let selected = account("A");
+    const lifecycle = new JazzLifecycle(
+      {
+        getLoggedIn: () => selected,
+        loginJWT: vi.fn(async () => {
+          selected = account("B");
+          return selected;
+        }),
+      } as never,
+      async (next) => {
+        events.push(`open:${next.id}`);
+        return client(events, next.id) as never;
+      },
+      () => {},
+    );
+
+    await lifecycle.attach();
+    await lifecycle.revalidate((manager) => manager.loginJWT({ getToken: async () => "jwt" }));
+
+    expect(events).toEqual(["open:A", "shutdown:A:true", "open:B"]);
+  });
+
   it("reopens the selected client when external sign-out rejects", async () => {
     const events: string[] = [];
     const selected = account("A");
