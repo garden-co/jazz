@@ -44,7 +44,8 @@ const DEMO_TASKS: { title: string; status: TaskStatus; mine?: boolean; notes?: s
 /**
  * Finds or creates the crew profile for an account. The account is a
  * local-first one held by this browser profile, together with its local data,
- * so its profile is found locally: reading never waits for the server.
+ * so its profile is found locally: once this browser holds it, reading never
+ * waits for the server.
  *
  * This is an insert, not an upsert, on purpose. The profile's id is derived
  * from the account, and an insert of an id the local store already holds is
@@ -59,7 +60,7 @@ export async function ensureProfile(
   db: Db,
   account: string,
 ): Promise<{ profile: Crew; isNew: boolean }> {
-  const existing = await db.one(app.crew.where({ account }));
+  const existing = await db.one(app.crew.where({ account }), { tier: "local-first-unless-empty" });
   if (existing) return { profile: existing, isNew: false };
   const id = await profileId(account);
   const insert = db.insert(
@@ -71,7 +72,9 @@ export async function ensureProfile(
     await insert.wait({ tier: "local" });
     return { profile: insert.value, isNew: true };
   } catch (error) {
-    const written = await db.one(app.crew.where({ account }));
+    const written = await db.one(app.crew.where({ account }), {
+      tier: "local-first-unless-empty",
+    });
     if (written) return { profile: written, isNew: false };
     throw error;
   }
