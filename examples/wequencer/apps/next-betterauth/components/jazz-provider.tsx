@@ -192,12 +192,15 @@ function EnrolledProvider({
       const retained = accounts.getLoggedIn();
       if (!registering && retained?.identity.subject === identityId) {
         // This browser kept the signed-in user's Jazz account from an earlier
-        // sign-in: open it straight away. Logging in again would only map the
-        // same Better Auth subject to the same account, after tearing the
-        // client down. The account's keys authenticate its sync connection
-        // either way, and the server's permission checks decide what it may
-        // read and write.
+        // sign-in: open its local data straight away. It has no credential
+        // until it logs in again, so it cannot sync yet. The login keeps the
+        // open client: logging in as the same identity hands the credential
+        // to the account already open.
         await lifecycle.attach(isCurrent);
+        await lifecycle.revalidate(
+          (manager) => manager.loginJWT({ getToken: getJazzToken }),
+          isCurrent,
+        );
       } else {
         await lifecycle.transition(
           (manager) =>
