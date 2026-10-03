@@ -33,7 +33,7 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// canonical enum/schema boundary.
     pub(super) covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
-    /// A one-shot ordered page can restrict deletion checks to its bounded
+    /// A one-shot page can restrict deletion checks to its bounded
     /// content candidates. Other sources retain the complete register.
     pub(super) bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     /// Whether access-path metrics should account for this logical graph
@@ -2335,10 +2335,12 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
         Box::pin(async move {
             let exclusion_scope = self.local_exclusion_scope(request);
-            // A physical limit is valid only when no later source filter can
-            // remove candidates. Unavailability is a mutable anti-join, so
-            // retain the logical query limit after it instead.
+            // Unavailability is a mutable anti-join, so a retained view must
+            // keep its logical limit after that filter. A bounded first-result
+            // probe instead proves completeness after the complete graph and
+            // widens if necessary; its content and deletion caps must agree.
             if exclusion_scope.is_some()
+                && !self.has_bounded_page_deletion_register(&request.source)
                 && let Some(CurrentAccessPath::Index { source_limit, .. }) =
                     self.access_paths.get_mut(&request.source)
             {
@@ -2857,6 +2859,7 @@ where
                     return Ok(None);
                 }
                 let source_limit = (order_column.is_some()
+                    || self.has_bounded_page_deletion_register(&request.source)
                     || request.visibility == RowVisibility::IncludeDeleted)
                     .then_some(source_limit)
                     .flatten();
@@ -3225,9 +3228,12 @@ where
                         maintained,
                         candidate_filter,
                     }) => {
-                        // An ordered-page probe re-proves its page after the
-                        // deletion anti-join, so its cap survives it.
-                        let source_limit = (order_column.is_some() || !exclude_deleted)
+                        // A bounded page probe re-proves its page after the
+                        // deletion anti-join. Its content cap must agree with
+                        // the candidates whose registers were loaded.
+                        let source_limit = (order_column.is_some()
+                            || self.has_bounded_page_deletion_register(&request.source)
+                            || !exclude_deleted)
                             .then_some(source_limit)
                             .flatten();
                         self.node.query_engine_read_metrics.source_index_probes +=
@@ -3447,6 +3453,12 @@ where
                 ["row_uuid"],
             ))
         })
+    }
+
+    fn has_bounded_page_deletion_register(&self, source: &SourceId) -> bool {
+        self.bounded_deletion_register
+            .as_ref()
+            .is_some_and(|(bounded_source, _)| bounded_source == source)
     }
 
     pub fn projected_deletion_register_current_source_graph(

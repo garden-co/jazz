@@ -21,6 +21,11 @@ const { values } = parseArgs({
     trace: { type: "boolean", default: false },
     "pump-debounce-ms": { type: "string" },
     tier: { type: "string", default: "global" },
+    "select-only": { type: "boolean", default: false },
+    "matching-rows": { type: "string", default: "1000" },
+    "unrelated-rows": { type: "string", default: "0" },
+    "deleted-rows": { type: "string", default: "0" },
+    "composite-index": { type: "boolean", default: false },
   },
 });
 if (!values["sdk-root"])
@@ -46,6 +51,12 @@ const rttMs = Number(values["rtt-ms"]),
   repeats = Number(values.repeats);
 assert(Number.isFinite(rttMs) && rttMs >= 0);
 assert(Number.isInteger(repeats) && repeats > 0);
+const matchingRows = Number(values["matching-rows"]),
+  unrelatedRows = Number(values["unrelated-rows"]),
+  deletedRows = Number(values["deleted-rows"]);
+assert(Number.isInteger(matchingRows) && matchingRows >= 10);
+assert(Number.isInteger(unrelatedRows) && unrelatedRows >= 0);
+assert(Number.isInteger(deletedRows) && deletedRows >= 0);
 for (const storage of [values["client-storage"], values["server-storage"]])
   assert(["memory", "persistent"].includes(storage));
 assert(["local", "global"].includes(values.tier));
@@ -53,11 +64,11 @@ const outputDir = values["output-dir"]
   ? resolve(values["output-dir"])
   : mkdtempSync(join(tmpdir(), "jazz-sync-latency-"));
 mkdirSync(outputDir, { recursive: true });
-const app = s.defineApp({
-  items: s
-    .table({ runId: s.string(), ordinal: s.int(), value: s.string(), createdAt: s.int() }, {})
-    .indexOnly(["runId", "ordinal"]),
-});
+let items = s
+  .table({ runId: s.string(), ordinal: s.int(), value: s.string(), createdAt: s.int() }, {})
+  .indexOnly(["runId", "ordinal"]);
+if (values["composite-index"]) items = items.compositeIndex(["runId", "ordinal"]);
+const app = s.defineApp({ items });
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.items.allowRead.always();
   policy.items.allowInsert.always();
@@ -236,7 +247,7 @@ try {
         return result;
       };
     }
-  async function create(count, runId, tier = values.tier) {
+  async function create(count, runId, tier = values.tier, ordinalStart = 0) {
     const ids = Array.from({ length: count }, () => randomUUID());
     const commit = await db.transaction((tx) => {
       for (let index = 0; index < count; index++)
@@ -244,8 +255,8 @@ try {
           app.items,
           {
             runId,
-            ordinal: index,
-            value: `item-${index}`,
+            ordinal: ordinalStart + index,
+            value: `item-${ordinalStart + index}`,
             createdAt: Math.floor(Date.now() / 1000),
           },
           { id: ids[index] },
@@ -258,45 +269,101 @@ try {
     return ids;
   }
   const warmupIds = await timed("warmup", () => create(1, "warmup", "global"));
-  for (sample = 0; sample < repeats; sample++) {
-    const runId = `probe-${randomUUID()}`;
-    const one = await timed("createOne", () => create(1, runId));
-    const ids = await timed("create1k", () => create(1000, runId));
-    const query = app.items.where({ runId }).orderBy("ordinal", "desc").limit(10);
+  if (values["select-only"]) {
+    operation = "seed";
+    async function seed(count, runId, remove = false) {
+      const allIds = [];
+      for (let start = 0; start < count; start += 1000) {
+        const ids = await create(Math.min(1000, count - start), runId, "global", start);
+        if (remove) {
+          const commit = await db.transaction((tx) =>
+            ids.forEach((id) => tx.delete(app.items, id)),
+          );
+          await commit.wait({ tier: "global" });
+          context.flush();
+        } else allIds.push(...ids);
+      }
+      return allIds;
+    }
+    const runId = `selected-${randomUUID()}`;
+    const ids = await seed(matchingRows, runId);
+    await seed(unrelatedRows, `unrelated-${randomUUID()}`);
+    await seed(deletedRows, `deleted-${randomUUID()}`, true);
+    console.log(JSON.stringify({ ready: process.pid, matchingRows, unrelatedRows, deletedRows }));
     const opts = { tier: values.tier };
-    const read10 = await timed("select10", () =>
-      db.all(app.items.where({ runId }).limit(10), opts),
-    );
-    assert.equal(read10.length, 10);
-    const top = await timed("selectTopN", () => db.all(query, opts));
-    assert.equal(top.length, 10);
-    assert.equal(top[0].ordinal, 999);
-    const row = await timed("getById", () => db.one(app.items.where({ id: ids[0] }), opts));
-    assert.equal(row.id, ids[0]);
-    await timed("updateById", async () => {
-      await db.update(app.items, ids[0], { value: "updated" }).wait(opts);
-      context.flush();
-    });
-    await timed("updateTopN", async () => {
-      const rows = await db.all(query, opts);
-      event("read.returned");
+    const expectedIds = new Set(ids);
+    const expectedPageIds = ids.toSorted().slice(0, 10);
+    for (sample = 0; sample < repeats; sample++) {
+      const rows = await timed("select10", () =>
+        db.all(app.items.where({ runId }).limit(10), opts),
+      );
       assert.equal(rows.length, 10);
-      const commit = await db.transaction((tx) =>
-        rows.forEach((item) => tx.update(app.items, item.id, { value: "updated" })),
+      assert.deepEqual(
+        rows.map((row) => row.id),
+        expectedPageIds,
       );
-      event("transaction.returned");
-      await commit.wait(opts);
-      event("wait.returned");
-      context.flush();
-    });
-    // Drain all writes through the real authority before starting another sample.
-    await timed("cleanup", async () => {
-      const commit = await db.transaction((tx) =>
-        [...one, ...ids].forEach((id) => tx.delete(app.items, id)),
+      assert.equal(new Set(rows.map((row) => row.id)).size, 10);
+      for (const row of rows) {
+        assert(expectedIds.has(row.id));
+        assert.equal(row.runId, runId);
+        assert.equal(row.value, `item-${row.ordinal}`);
+      }
+      const top = await timed("selectTopN", () =>
+        db.all(app.items.where({ runId }).orderBy("ordinal", "desc").limit(10), opts),
       );
-      await commit.wait({ tier: "global" });
-    });
-  }
+      assert.deepEqual(
+        top.map((row) => row.ordinal),
+        Array.from({ length: 10 }, (_, i) => matchingRows - 1 - i),
+      );
+      assert.deepEqual(
+        top.map((row) => row.id),
+        ids.slice(-10).reverse(),
+      );
+      const row = await timed("getById", () => db.one(app.items.where({ id: ids[0] }), opts));
+      assert.equal(row.id, ids[0]);
+      assert.equal(row.ordinal, 0);
+      assert.equal(row.value, "item-0");
+    }
+  } else
+    for (sample = 0; sample < repeats; sample++) {
+      const runId = `probe-${randomUUID()}`;
+      const one = await timed("createOne", () => create(1, runId));
+      const ids = await timed("create1k", () => create(1000, runId));
+      const query = app.items.where({ runId }).orderBy("ordinal", "desc").limit(10);
+      const opts = { tier: values.tier };
+      const read10 = await timed("select10", () =>
+        db.all(app.items.where({ runId }).limit(10), opts),
+      );
+      assert.equal(read10.length, 10);
+      const top = await timed("selectTopN", () => db.all(query, opts));
+      assert.equal(top.length, 10);
+      assert.equal(top[0].ordinal, 999);
+      const row = await timed("getById", () => db.one(app.items.where({ id: ids[0] }), opts));
+      assert.equal(row.id, ids[0]);
+      await timed("updateById", async () => {
+        await db.update(app.items, ids[0], { value: "updated" }).wait(opts);
+        context.flush();
+      });
+      await timed("updateTopN", async () => {
+        const rows = await db.all(query, opts);
+        event("read.returned");
+        assert.equal(rows.length, 10);
+        const commit = await db.transaction((tx) =>
+          rows.forEach((item) => tx.update(app.items, item.id, { value: "updated" })),
+        );
+        event("transaction.returned");
+        await commit.wait(opts);
+        event("wait.returned");
+        context.flush();
+      });
+      // Drain all writes through the real authority before starting another sample.
+      await timed("cleanup", async () => {
+        const commit = await db.transaction((tx) =>
+          [...one, ...ids].forEach((id) => tx.delete(app.items, id)),
+        );
+        await commit.wait({ tier: "global" });
+      });
+    }
   await db.delete(app.items, warmupIds[0]).wait({ tier: "global" });
   const median = (xs) => {
     const sorted = xs.toSorted((a, b) => a - b),
@@ -316,6 +383,9 @@ try {
     rttMs,
     repeats,
     tier: values.tier,
+    workload: values["select-only"] ? "fixed-select" : "crud-with-cleanup",
+    compositeIndex: values["composite-index"],
+    ...(values["select-only"] ? { matchingRows, unrelatedRows, deletedRows } : {}),
     clientStorage: values["client-storage"],
     serverStorage: values["server-storage"],
     trace: values.trace,
@@ -324,7 +394,11 @@ try {
     mediansMs,
     events,
   };
-  const filename = `rtt-${rttMs}-${values["client-storage"]}-${values["server-storage"]}-${values.tier}-${values.trace ? "trace" : "timing"}-${values["pump-debounce-ms"] ?? "default"}.json`;
+  const workload = values["select-only"]
+    ? `select-${matchingRows}-${unrelatedRows}-${deletedRows}-`
+    : "";
+  const indexLabel = values["composite-index"] ? "composite-" : "";
+  const filename = `${workload}${indexLabel}rtt-${rttMs}-${values["client-storage"]}-${values["server-storage"]}-${values.tier}-${values.trace ? "trace" : "timing"}-${values["pump-debounce-ms"] ?? "default"}.json`;
   const outputPath = join(outputDir, filename);
   writeFileSync(outputPath, JSON.stringify(receipt, null, 2));
   console.log(JSON.stringify({ outputPath, mediansMs }, null, 2));
