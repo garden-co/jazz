@@ -3465,12 +3465,30 @@ where
             .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let fields = register_storage_fields_for_query_engine("");
-        let global = GraphBuilder::table(physical_register_global_current_table_name(table_id));
+        // The content access path fixes this source occurrence to one UUID.
+        // Keep its deletion inputs live, but read only that same key. Other
+        // policy/source occurrences retain their independently selected paths.
+        let point = match self.access_paths.get(&request.source) {
+            Some(CurrentAccessPath::PrimaryKey(prefix))
+                if matches!(prefix.as_slice(), [Value::Uuid(_)]) =>
+            {
+                Some(prefix)
+            }
+            _ => None,
+        };
+        let register_source = |table, full_key_len| match point {
+            Some(prefix) => GraphBuilder::table_scan(
+                table,
+                shared_branch_scan(Some(static_scan_for_prefix(prefix.clone(), full_key_len))),
+            ),
+            None => GraphBuilder::table(table),
+        };
+        let global = register_source(physical_register_global_current_table_name(table_id), 1);
         if tier == DurabilityTier::Global {
             return Ok(global);
         }
         let global = global.project_fields(fields.clone());
-        let ahead = GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
+        let ahead = register_source(physical_register_ahead_current_table_name(table_id), 3);
         let ahead = { ahead.project_fields(fields.clone()) };
         Ok(GraphBuilder::arg_max_by(
             GraphBuilder::union([global, ahead]),
@@ -4983,9 +5001,9 @@ where
         let equalities = root_literal_equalities(query, binding)?;
         self.table_in_schema_ref(&query.table, shape.schema_version())?;
         // Policy-bearing roots take the point path too (#3511). The point
-        // narrows only the content source: the deletion register stays a full
-        // maintained source anti-joined after it, and policy proofs keep their
-        // own sources, so deletion and grant changes still retract the row.
+        // narrows the content and deletion sources to the same UUID. Both stay
+        // maintained, and policy proofs keep their own source occurrences, so
+        // deletion and grant changes still retract the row.
         if let Some(value) = equalities.get("id").cloned() {
             access_paths.insert(
                 root_source_id(&query.table),

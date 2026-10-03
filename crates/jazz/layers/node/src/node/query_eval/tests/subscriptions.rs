@@ -2260,6 +2260,58 @@ impl ServedPointSubscription {
     }
 }
 
+/// Bob serves Alice's one-row subscription after deleting unrelated rows.
+/// Opening must read only the target's deletion register while its later
+/// delete and restore still reach Alice. This receiver seam exposes serving
+/// storage counters that the public client API does not expose.
+///
+/// bob --unrelated deletes--> bob --point subscription--> alice
+/// bob --target delete / restore------------------------> alice
+#[test]
+fn served_policy_point_subscription_bounds_unrelated_deletion_reads() {
+    let alice = author(0x72);
+    let bob = author(0x73);
+    let target = row(0x72);
+    let mut probe = ServedPointSubscription::new(owner_policy_schema(), "issues", target, alice);
+    commit_global_cells(
+        &mut probe.server,
+        "issues",
+        target,
+        served_issue("target", alice),
+        1,
+        1,
+    );
+    for index in 0..64_u8 {
+        let time = u64::from(index) * 2 + 2;
+        commit_global_cells(
+            &mut probe.server,
+            "issues",
+            row(usize::from(index)),
+            served_issue("unrelated", bob),
+            time,
+            time,
+        );
+        delete_global(
+            &mut probe.server,
+            "issues",
+            row(usize::from(index)),
+            time + 1,
+            time + 1,
+        );
+    }
+    probe.server.reset_storage_read_metrics();
+    probe.step(&[target], "Alice receives only her target");
+    let reads = probe.server.take_storage_read_metrics();
+    assert!(
+        reads.register_global_current_rows.reads <= 8,
+        "one UUID must not hydrate 64 unrelated deletion registers: {reads:?}"
+    );
+    delete_global(&mut probe.server, "issues", target, 130, 130);
+    probe.step(&[], "target deletion still retracts the row");
+    restore_global(&mut probe.server, "issues", target, 131, 131);
+    probe.step(&[target], "target restore still republishes the row");
+}
+
 #[test]
 fn served_policy_point_subscription_follows_transfer_delete_and_restore() {
     let owner = author(0x72);

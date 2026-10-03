@@ -59,6 +59,25 @@ rejection concerns the additional certificate machinery. Source, binaries and
 receipts are preserved in the [#2913](https://github.com/garden-co/jazz/issues/2913)
 log. Do not infer a win from fewer compiled nodes alone.
 
+Node global-sync trials on `71aecb6d275a1ec3dad737ccbf1c0a6a5ecdbbed`
+also rejected these mechanisms after local full-operation measurements:
+
+- Replacing the TypeScript postcard writer's number array with a growable
+  byte buffer preserved byte fixtures but did not reduce CRUD latency.
+  Sequential ABBA runs (seven samples per process, identical native artifact)
+  measured bulk-create medians of 101.4 ms control / 104.6 ms trial with no
+  added RTT, and 114.8 ms / 117.7 ms with 10 ms added RTT. Reverted.
+- Removing discarded register-schema construction from the physical current
+  write path measured 101.0 ms control / 102.0 ms trial for bulk create in a
+  local ABBA comparison. Reverted; a matching profile frame alone did not
+  establish a full-operation gain.
+- Setting the Node background pump debounce to zero did not improve the
+  zero-RTT CRUD workload. The cloud's approximately 100 ms floor was instead
+  reproduced by the measured WebSocket round trip between regions.
+
+These are local diagnostics, not hosted performance claims. The synthetic
+workload and RTT proxy are in `dev/benchmarks/sync-latency/`.
+
 ## Before building another trial
 
 1. Identify the actual allocation/copy/work site with a current profile and code walk.
