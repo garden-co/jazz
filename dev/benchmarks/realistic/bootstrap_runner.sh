@@ -485,8 +485,9 @@ if [[ ! -f "${runner_state}/.runner" ]]; then
   (
     export ACTIONS_RUNNER_INPUT_TOKEN="${RUNNER_TOKEN}"
     unset RUNNER_TOKEN
+    # Keep the recorded launcher directly waitable, without an intermediate shell.
     cd -- "${runner_package}" &&
-      runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${runner_home}/.cargo/bin:${PATH}" \
+      exec runuser -u "${RUNNER_USER}" -- env HOME="${runner_home}" PATH="${runner_home}/.cargo/bin:${PATH}" \
         "${runner_package}/config.sh" --unattended --disableupdate --url "${RUNNER_URL}" \
         --name "${runner_name}" --labels "${RUNNER_LABELS}" --work "_work"
   ) >"${config_log}" 2>&1 &

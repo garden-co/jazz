@@ -74,6 +74,10 @@ checks the pinned package manifest, and removes the temporary copy. If config
 is interrupted, the exit cleanup removes `svc.sh` and reseals the directory.
 Other package changes fail the post-config manifest check or the next bootstrap.
 
+The recorded background PID directly owns the `runuser` launcher. Cancellation
+targets its process group and waits for the launcher before resealing. Reaping
+`runuser` descendants still depends on `runuser` and the host's init process.
+
 The Jazz unit follows the pinned v2.337.0 template with `KillMode=process`
 intentionally omitted: systemd's default control-group mode lets bootstrap prove
 the whole cgroup is empty. Upstream legacy unit names join the repository slug
