@@ -57,7 +57,7 @@ fn mutation_error_event_with_details(
     }
 }
 
-pub(super) fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
+pub(crate) fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
     match reason {
         RejectionReason::ClientClockTooFarAhead => (
             "client_clock_too_far_ahead".to_owned(),

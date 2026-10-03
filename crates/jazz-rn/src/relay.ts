@@ -90,8 +90,16 @@ export type NativeForegroundPermissionAdviceAction =
   | { type: "read" | "delete"; table: string; rowId: Uint8Array }
   | { type: "update"; table: string; rowId: Uint8Array; patch: Uint8Array };
 
+type NativeInitializationAction =
+  | { type: "seal"; transaction: number }
+  | { type: "publish" | "cancel"; token: string }
+  | { type: "recordAbsence"; transaction: number; table: string; rowId: Uint8Array }
+  | { type: "status"; ids: readonly string[] }
+  | { type: "hasAuthenticatedCatalogue" };
+
 export type NativeForegroundCommand =
   | { type: "permissionAdvice"; action: NativeForegroundPermissionAdviceAction }
+  | { type: "initializationV1"; version: 1; action: NativeInitializationAction }
   | "probe"
   | "tick"
   | {
@@ -556,6 +564,39 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   }
   if (command.type === "abortStagedStreamingMutation") {
     return concatForegroundBytes(Uint8Array.of(36), encodeForegroundU64(command.staged));
+  }
+  if (command.type === "initializationV1") {
+    if (command.version !== 1) throw new Error("Unsupported initialization bridge version");
+    const action = command.action;
+    switch (action.type) {
+      case "hasAuthenticatedCatalogue":
+        return Uint8Array.of(37, 1, 5);
+      case "seal":
+        return concatForegroundBytes(
+          Uint8Array.of(37, 1, 0),
+          encodeForegroundU64(action.transaction),
+        );
+      case "publish":
+      case "cancel":
+        return concatForegroundBytes(
+          Uint8Array.of(37, 1, action.type === "publish" ? 1 : 2),
+          encodeForegroundString(action.token),
+        );
+      case "recordAbsence":
+        return concatForegroundBytes(
+          Uint8Array.of(37, 1, 3),
+          encodeForegroundU64(action.transaction),
+          encodeForegroundString(action.table),
+          encodeForegroundId(action.rowId, "row id"),
+        );
+      case "status":
+        if (action.ids.length > 64) throw new Error("Initialization status accepts at most 64 IDs");
+        return concatForegroundBytes(
+          Uint8Array.of(37, 1, 4),
+          encodeForegroundU64(action.ids.length),
+          ...action.ids.map(encodeForegroundString),
+        );
+    }
   }
   throw new Error("Unsupported native foreground command");
 }

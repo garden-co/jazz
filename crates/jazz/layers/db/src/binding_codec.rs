@@ -14,6 +14,45 @@ use crate::node::{CurrentRow, CurrentRowPublicationField, RelationSnapshot};
 use crate::object::ResultKey;
 use groove::ivm::TerminalOperation;
 
+/// Private v1 status envelope shared by every native/worker adapter. This is
+/// not a sync message and does not alter the wire-v3 protocol.
+#[doc(hidden)]
+pub fn encode_initialization_statuses(
+    ids: &[crate::db::ReservedTxId],
+    statuses: &[crate::db::InitializationTransactionStatus],
+) -> Result<String, String> {
+    use crate::db::InitializationTransactionStatus;
+    use crate::tx::{DurabilityTier, Fate};
+    if ids.len() != statuses.len() || ids.len() > 64 {
+        return Err("invalid initialization status cardinality".to_owned());
+    }
+    let statuses = ids.iter().zip(statuses).map(|(id, status)| {
+        let mut entry = serde_json::json!({ "reservedTxId": id.encode() });
+        match status {
+            InitializationTransactionStatus::NotObserved => entry["kind"] = "not-observed".into(),
+            InitializationTransactionStatus::Incomplete => entry["kind"] = "incomplete".into(),
+            InitializationTransactionStatus::Complete { fate, durability } => {
+                entry["kind"] = "complete".into();
+                entry["durability"] = match durability {
+                    DurabilityTier::None => "none",
+                    DurabilityTier::Local => "local",
+                    DurabilityTier::Global => "global",
+                }.into();
+                entry["fate"] = match fate {
+                    Fate::Pending => serde_json::json!({ "kind": "pending" }),
+                    Fate::Accepted => serde_json::json!({ "kind": "accepted" }),
+                    Fate::Rejected(reason) => {
+                        let (code, reason) = crate::db::mutation_error_details(reason);
+                        serde_json::json!({ "kind": "rejected", "code": code, "reason": reason })
+                    },
+                };
+            },
+        }
+        entry
+    }).collect::<Vec<_>>();
+    serde_json::to_string(&serde_json::json!({ "version": 1, "statuses": statuses }))
+        .map_err(|error| error.to_string())
+}
 /// Encode only the descriptor portion of the named-cell input role. This is
 /// also the owner for cross-language descriptor corpus generation.
 pub fn encode_named_cell_descriptor(

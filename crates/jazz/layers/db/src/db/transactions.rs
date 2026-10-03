@@ -1690,7 +1690,7 @@ where
         self.finish_exclusive_publication(published, unit).await
     }
 
-    async fn finish_exclusive_publication(
+    pub(super) async fn finish_exclusive_publication(
         &self,
         published: PublishedTransaction,
         unit: SyncMessage,

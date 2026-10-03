@@ -16,7 +16,7 @@ type StoredDevice = {
   signingPublicKey: number[];
   signingPrivateKey: number[];
 };
-type StoredDevices = { format: "jazz-e2ee-local-devices-v2"; devices: StoredDevice[] };
+export type StoredDevices = { format: "jazz-e2ee-local-devices-v2"; devices: StoredDevice[] };
 export type LocalDevice = DeviceKeyPair & {
   id: string;
   challenge: Uint8Array;

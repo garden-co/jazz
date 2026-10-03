@@ -81,3 +81,37 @@ keep their existing selection semantics.
 The shared helper merges retained roots inside that transaction, so a stale
 manager cannot erase another manager's offline key. Selection follows the
 last successful operation; external provider credentials are never persisted.
+
+New local-first roots retain private **generated-here provenance** and
+first-founder eligibility in the same atomic write as the root. The versioned
+`jazz-account-selection-v3` inventory preserves roots, selection and provenance,
+and adds first-device claims scoped to the account root and application.
+Managers sharing one atomic `AccountStore` cannot create competing automatic
+offline founders. Logout invalidates the handle, not the durable claim.
+
+Ordinary v1/v2 inventories remain readable and keep their roots and selection.
+Migration preserves v2 generation provenance but does not infer original-device
+ownership from it: these roots require online readiness for a new founder.
+Candidate v2 inventories with a valid `founders` field retain their claims and
+eligibility, including an empty claim list. Older writers refuse v3 rather than
+discarding ownership. Independent stores still rely on Global authority.
+
+With an authenticated application catalogue cached by the runtime host, a
+newly eligible account can open an encrypted database and create its first
+spaces offline without a separate initialisation call. Its original device
+reserves ownership, durably journals the proposal, then binds the exact epoch
+before publication. A missing or altered bound journal cannot be replaced;
+the matching original journal can resume even through an imported account store.
+These claims are not accepted membership. Device, account epoch, space roots and
+explicit grants remain provisional until authority acceptance. The SDK journals
+sealed envelopes and reserved transaction identities, not message or image payloads.
+An explicit self grant is required for ordinary local reads and later writes:
+possession of the author's sealed envelope alone is not membership.
+
+Local durability acknowledges the original pending transaction, not eventual
+authorisation. Restart checks those exact identities with the durable runtime
+owner. A missing acknowledged transaction is corruption; an interrupted
+unacknowledged reservation is never resubmitted under a replacement identity.
+Rejection or known revocation disables dependent provisional key use. Unknown
+explicit recipients produce retryable `e2ee_initialization_not_ready` before a
+stream is consumed; requested recipients are never silently omitted.

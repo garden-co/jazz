@@ -535,6 +535,13 @@ structural root-to-leaf walk and every overflow edge it follows. Repeated page
 ids are cycle or shared-subgraph corruption—including two leaf values naming
 the same overflow head—not deduplication.
 
+When a leaf exceeds its page size, splitting uses encoded byte sizes rather than
+entry counts. Both nonempty children must fit, and the separator must fit in a
+minimal internal page. Among eligible cuts, the split minimizes the larger
+child's encoded size. If no such cut exists, the operation fails without
+publishing its staged pages. This leaf-local rule does not change page encodings
+or the internal-node splitting policy.
+
 Tree writes are copy-on-write: the changed leaf and every changed ancestor get
 fresh page ids, then one IndexedDB transaction writes the new immutable closure
 and replaces `current` after checking the observed generation. A crash before

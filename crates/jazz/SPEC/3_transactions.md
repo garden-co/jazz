@@ -145,6 +145,67 @@ to the already-owned commit. Peer ingest follows the same rule: it retains
 publication ownership, preserves ordered post-settlement work, and reports
 refresh failure without causing the sender to retry an already-published unit.
 
+### 3.2.2 Private initialization reservation
+
+E2EE initialization may freeze an existing exclusive transaction before publication.
+After the ordinary preparation queue drains, `seal_initialization_transaction`
+reserves once and freezes that transaction's writes, reads, metadata and author.
+The non-cloneable, owner-bound seal exposes a nominal `ReservedTxId`, not a public
+committed identity. Publishing consumes the seal through the ordinary bound-ID
+commit queue and returns the ordinary write handle. Cancellation or dropping an
+unpublished seal abandons the transaction; its reservation is never reused.
+A failed sealed publication closes the same open transaction under the owner lock,
+preserving the original error; it cannot become mutable or use ordinary commit
+to obtain a replacement identity while deferred cleanup is pending.
+The host must use a durable lease high-water or retire uncertain leases on crash.
+
+The private journal encoding is canonical ASCII
+`jazz-init-v1:<lowercase-hyphenated-node-UUID>:<physical-ms>:<logical-counter>`.
+The two integers are unsigned base-10 without leading zeroes, within the existing
+packed HLC bounds. Decoding this linkage permits only exact status lookup, never
+publication, ID selection, or a public durability wait.
+
+`initialization_transaction_status` reads at most 64 exact reservations, in request
+order, under the owning Db's admitted author. Scope-isolated relays additionally
+require a concrete admitted session equal to that author; unbound scopes fail.
+Missing and foreign-author records are indistinguishable (`NotObserved`). Partial
+owned units are `Incomplete`; complete units expose their actual fate and owner
+durability, including `None` while local persistence is pending. Rejected audits
+remain terminal evidence after payload pruning. Storage and codec failures are
+errors, not absence. Until accepted initialization has been cryptographically
+verified and promoted, a journal that recorded Local acknowledgement and then
+finds `NotObserved` is corrupt; it must not replay callbacks or publish a replacement.
+After verified promotion, retained journal linkage is historical evidence rather
+than pending recovery work. The SDK may reopen accepted keys on another physical
+Db without looking up the original reservation, but ordinary accepted-history and
+revocation checks remain mandatory. This does not permit pending initialization
+to recover from an unrelated owner.
+The binding-only JSON envelope is `{version:1,statuses:[...]}`, with each entry
+containing `reservedTxId` and `kind` (`not-observed`, `incomplete`, `complete`).
+Complete entries additionally carry `fate.kind` (`pending`, `accepted`, `rejected`),
+canonical rejection `code`/`reason` when rejected, and `durability`
+(`none`, `local`, `edge`, `global`). This is not a sync-wire extension.
+
+`prepare_initialization_insert` records the exact original exclusive-snapshot
+absence at the underlying schema/table/row coordinate before an ordinary insert.
+It rejects existing content, tombstones and already-staged coordinates, including
+policy-hidden rows. It does not convert INSERT into upsert or overwrite semantics.
+Checked snapshot reads propagate storage and required audit-field decoding
+failures instead of turning an unreadable existing version into absence.
+Coverage projects the exact transaction's global time without decoding unrelated
+payloads per row version. Legacy nonfallible snapshot observation callers retain
+their existing conservative exclusion rule.
+
+After direct-owner lease rotation, `restore_initialization_owner_pending_uploads`
+derives the admitted author and restores that author's exact pending units before
+transport attachment or new writes. The existing causal replay planner has an
+explicit direct-owner mode: verified Accepted + Global ancestors with an authority
+timestamp need no retained payload, while every pending unit still requires its
+complete versions and exclusive evidence. Every root is planned before enqueueing
+anything. Missing/incomplete owned pending work produces a storage recovery error,
+never successful omission or callback replay. Subscriber replay remains unchanged:
+it must deliver ancestor payloads to reconstruct the downstream replica.
+
 ### 3.3 Durability is not fate
 
 An accepted local publication's persistence continuation belongs to the runtime,
@@ -449,6 +510,52 @@ owner follows the current write schema. These operations neither allocate an
 identity nor grant permission to read rows. High-level online identity reads
 cover the catalogue without requesting row bodies; offline/local-only identity
 reads supply candidates, not proof of current membership.
+
+The private host catalogue cache retains only snapshots captured after successful
+eligible authenticated authority ingest. Ordinary bootstrap, generic catalogue
+export and cache installation cannot create captures. A host envelope binds the
+capture to registry authority, application and environment, never account identity.
+Core capture v1 begins with the exact bytes `JAZZ-CATALOGUE 00 01 03` (the space
+here separates ASCII from hexadecimal bytes), then the authenticated source node's
+16 RFC UUID bytes, followed by the existing canonical wire-v3 encoded
+`SyncMessage::CatalogueSnapshot`; no sync-wire field changes. Unknown versions,
+noncanonical or trailing bytes, and non-snapshot messages fail closed.
+`take_authenticated_catalogue_state` awaits one owner lock and atomically returns
+`{ capture, ready }`. It is a single-owner drain, not a snapshot getter: it moves
+each pending capture once. Contention remains pending, never false readiness or
+an empty capture. Shared schema views do not race to drain it.
+The host retains drained bytes until durable cache publication succeeds,
+and must surface publication failure as not-ready/error. Replacing an undrained
+capture or a host-retained capture requires compatible monotone lineage.
+For persistent browsers, the worker owns host-cache publication. Non-durable
+foreground and inspector peers may install validated cached identities and
+delegate durable readiness, but do not publish their relay-local captures into
+the shared host cache.
+
+Only a host-admitted constructor may install a cached snapshot. It first checks
+that a new root has no durable residue, opens it catalogue-uninitialized, then
+uses the existing trusted snapshot validator before ordinary schema bootstrap
+can allocate identities. Existing roots retain their catalogue: cache compatibility
+is checked without overwriting it. A coordinate-preserving genesis UUID rotation
+may validate against the same logical schema, following the core rebind contract.
+Both manifests must cover the schema and cannot reuse a previous UUID at another
+coordinate. Accepted lineage receipts remain immutable: changed publication
+content IDs, physical manifests, lenses, table partitions or catalogue sequences
+are incompatible, even if changing inherited genesis UUIDs could make them appear
+equivalent. Cache replacement retains schema/lineage prefixes and cannot regress
+the write-pointer revision.
+Validation of an existing root uses the same pure catalogue planner in an explicit
+cached-validation mode, permitting a structurally valid stale write revision
+without installing it. Authority ingestion keeps its monotone revision checks.
+The state's `ready` field requires validated cached identities or an eligible live
+ingest **and** successful admission of this Db handle's requested open schema.
+Retaining an older authenticated catalogue does not admit a missing requested schema,
+even when shared tables already have stable identities. Already admitted cached schemas
+remain ready offline. Pending or failed admission does not suppress capture draining;
+ordinary Global reads still wait for admission or report its original failure.
+Cache validation itself never creates a capture. Hosts must persist a live capture
+before reporting durable cached readiness. Cached stable identities do not assert
+current membership or freshness. Reconnect may reject stale writes.
 
 The native/WASM identity binding is exactly 16 UUID bytes in RFC UUID byte
 order, or zero bytes for absence. JavaScript renders the bytes as a lowercase

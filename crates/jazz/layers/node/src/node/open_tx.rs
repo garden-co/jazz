@@ -181,6 +181,88 @@ where
     }
 
     #[doc(hidden)]
+    pub fn seal_initialization_transaction(
+        &mut self,
+        id: OpenTransactionId,
+        reserved: TxId,
+        nonce: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.check_staged_transaction_identity(id, author, author)?;
+        self.open_tx_mut(id)?.initialization_seal = Some((reserved, nonce));
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn check_initialization_seal(
+        &self,
+        id: OpenTransactionId,
+        reserved: TxId,
+        nonce: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if self
+            .open_tx
+            .open_transactions
+            .get(&id)
+            .is_some_and(|tx| tx.initialization_seal == Some((reserved, nonce)))
+        {
+            Ok(())
+        } else {
+            Err(Error::OpenTransactionIdentityMismatch)
+        }
+    }
+
+    #[doc(hidden)]
+    pub async fn publish_initialization_transaction(
+        &mut self,
+        id: OpenTransactionId,
+        reserved: TxId,
+        nonce: OpenTransactionId,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        self.check_initialization_seal(id, reserved, nonce)?;
+        self.open_tx
+            .open_transactions
+            .get_mut(&id)
+            .unwrap()
+            .initialization_seal = None;
+        let result = self.commit_exclusive_bound_at(id, reserved).await;
+        if result.is_err() {
+            // The seal has been consumed. Close under this same owner lock,
+            // before a later queued cleanup or ordinary operation can run.
+            self.open_tx.open_transactions.remove(&id);
+            self.open_tx.closed_batches.insert(id);
+        }
+        result
+    }
+
+    #[doc(hidden)]
+    pub async fn prepare_initialization_insert(
+        &mut self,
+        id: OpenTransactionId,
+        schema: SchemaVersionId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        let tx = self.open_tx(id)?;
+        if !matches!(tx.kind, OpenTransactionKind::Exclusive { .. })
+            || tx
+                .writes
+                .iter()
+                .any(|write| write.table == table && write.row_uuid == row)
+        {
+            return Err(Error::OpenTransactionIdentityMismatch);
+        }
+        self.tx_read_in_schema(id, schema, table, row).await?;
+        let observed = &self.open_tx(id)?.base_snapshot_rows[&(schema, table.to_owned(), row)];
+        if observed.content_version.is_some() || observed.deletion_version.is_some() {
+            return Err(Error::InvalidMergeableCommit(
+                "initialization insert requires an absent coordinate",
+            ));
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
     pub fn check_staged_transaction_identity(
         &self,
         id: OpenTransactionId,
@@ -280,6 +362,7 @@ where
         self.open_tx.open_transactions.insert(
             id,
             OpenTransaction {
+                initialization_seal: None,
                 kind,
                 provisional_author,
                 base_snapshot,
@@ -2039,6 +2122,7 @@ where
         self.open_tx
             .open_transactions
             .get(&tx_id)
+            .filter(|tx| tx.initialization_seal.is_none())
             .ok_or(Error::MissingOpenBatch(tx_id))
     }
 
@@ -2099,6 +2183,7 @@ where
         self.open_tx
             .open_transactions
             .get_mut(&tx_id)
+            .filter(|tx| tx.initialization_seal.is_none())
             .ok_or(Error::MissingOpenBatch(tx_id))
     }
 
@@ -2221,6 +2306,24 @@ where
             })
     }
 
+    async fn snapshot_covers_checked(
+        &mut self,
+        tx_id: TxId,
+        snapshot: &Snapshot,
+    ) -> Result<bool, Error> {
+        let global_time =
+            self.query_transaction_global_time(tx_id)
+                .await?
+                .ok_or(Error::InvalidStoredValue(
+                    "snapshot version has no transaction audit",
+                ))?;
+        Ok(
+            global_time.is_some_and(|global_time| global_time <= snapshot.global_base)
+                || (tx_id.node == snapshot.owner && tx_id.time <= snapshot.local_base)
+                || snapshot.dots.contains(&tx_id),
+        )
+    }
+
     pub(super) async fn snapshot_row_in_schema(
         &mut self,
         schema_version: SchemaVersionId,
@@ -2229,23 +2332,23 @@ where
         snapshot: &Snapshot,
     ) -> Result<SnapshotRow, Error> {
         let content = self
-            .snapshot_layer_winner(
+            .snapshot_layer_winner_checked(
                 schema_version,
                 table,
                 row_uuid,
                 VersionLayer::Content,
                 snapshot,
             )
-            .await;
+            .await?;
         let deletion = self
-            .snapshot_layer_winner(
+            .snapshot_layer_winner_checked(
                 schema_version,
                 table,
                 row_uuid,
                 VersionLayer::Deletion,
                 snapshot,
             )
-            .await;
+            .await?;
         self.snapshot_row_from_winners(schema_version, table, content, deletion)
     }
 
@@ -2412,6 +2515,30 @@ where
             .map(|idx| versions[idx].clone())
     }
 
+    async fn snapshot_layer_winner_checked(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        snapshot: &Snapshot,
+    ) -> Result<Option<VersionRow>, Error> {
+        let versions = self
+            .query_versions_in_schema(schema_version, table, Some(row_uuid))
+            .await?;
+        let mut candidate_indices = Vec::new();
+        for (idx, version) in versions.iter().enumerate() {
+            let tx_id = self.version_tx_id(version)?;
+            if version.layer() == layer && self.snapshot_covers_checked(tx_id, snapshot).await? {
+                candidate_indices.push(idx);
+            }
+        }
+        Ok(
+            current_version_index(&versions, &candidate_indices, layer, &self.node_aliases)
+                .map(|idx| versions[idx].clone()),
+        )
+    }
+
     pub(super) async fn snapshot_content_witness(
         &mut self,
         schema_version: SchemaVersionId,
@@ -2537,6 +2664,8 @@ pub(super) enum OpenTransactionKind {
 
 #[derive(Clone)]
 pub(super) struct OpenTransaction {
+    /// Frozen work can only be published by its owning, single-use capability.
+    initialization_seal: Option<(TxId, OpenTransactionId)>,
     /// Commit semantics and attribution carried by this open transaction.
     pub(super) kind: OpenTransactionKind,
     /// Author reflected by transaction-local provenance before commit.
