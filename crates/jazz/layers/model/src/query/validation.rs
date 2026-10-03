@@ -806,11 +806,11 @@ fn flat_join_source_tables(
     flat_join: &FlatJoin,
 ) -> Result<BTreeMap<String, TableSchema>, QueryError> {
     let root_name = flat_join_source_name(root_table, &flat_join.root_alias);
-    let mut sources = BTreeMap::from([(root_name, schema_table(schema, root_table)?)]);
+    let mut sources = BTreeMap::from([(root_name, schema_table(schema, root_table)?.clone())]);
     for source in &flat_join.sources {
         let name = flat_join_source_name(&source.table, &source.alias);
         if sources
-            .insert(name.clone(), schema_table(schema, &source.table)?)
+            .insert(name.clone(), schema_table(schema, &source.table)?.clone())
             .is_some()
         {
             return Err(QueryError::UnknownColumn {
@@ -1314,12 +1314,16 @@ fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), Query
     }
 }
 
-fn schema_table(schema: &RuntimeSchema, name: &str) -> Result<TableSchema, QueryError> {
+/// Borrows the table: validation runs for every policy and subscription, and
+/// copying a table schema per lookup dominated its cost.
+fn schema_table<'a>(
+    schema: &'a RuntimeSchema,
+    name: &str,
+) -> Result<&'a TableSchema, QueryError> {
     schema
         .tables
         .iter()
         .find(|table| table.name == name)
-        .cloned()
         .ok_or_else(|| QueryError::UnknownTable(name.to_owned()))
 }
 
@@ -1378,7 +1382,7 @@ fn validate_include(
     root: &TableSchema,
     path: &str,
 ) -> Result<(), QueryError> {
-    let mut current = root.clone();
+    let mut current = root;
     for segment in path.split('.') {
         column_type(&current, segment)?;
         let Some(target) = current.references.get(segment) else {
