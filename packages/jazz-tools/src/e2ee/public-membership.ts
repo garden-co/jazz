@@ -11,6 +11,7 @@ import {
   decodeEpochIds,
   encodePublicApprovalRevision,
   publicSuccessorSigningBytes,
+  successorTargetId,
 } from "./account-successor.js";
 
 /** Internal recipient discovery. Never reads another account's private handshake. */
@@ -195,6 +196,7 @@ async function replay(
   let epochPosition = -1n;
   let base = new Set([root.deviceId]);
   const revoked = new Set<string>();
+  const retiredRecoveryRoots = new Map<string, bigint>();
   const approvalIds = new Set<string>();
   const successorIds = new Set<string>();
   const visited = new Set([epochId]);
@@ -243,9 +245,11 @@ async function replay(
       // Adapter failures propagate; failure to verify is not evidence of invalidity.
       if (recovery) {
         const root = history.recovery.rows.find((row) => row.id === approval.recoveryRootId);
+        const retiredAt = root ? retiredRecoveryRoots.get(root.id) : undefined;
         if (
           !root ||
           recoveryPositions.get(root.id)! >= position ||
+          (retiredAt !== undefined && position >= retiredAt) ||
           !approval.recoverySignature ||
           !(await validRecovery(root))
         )
@@ -286,9 +290,14 @@ async function replay(
       )
     )
       continue;
+    // Registration and transition at one authority position are unordered. Fail
+    // closed rather than deriving authority from row IDs.
+    if (history.recovery.rows.some((root) => recoveryPositions.get(root.id) === position)) continue;
     let bytes: Uint8Array;
     let recorded: string[];
+    let targetId: string;
     try {
+      targetId = successorTargetId(successor);
       bytes = publicSuccessorSigningBytes(application, successor);
       recorded = decodeEpochIds(successor.membership);
     } catch {
@@ -308,20 +317,35 @@ async function replay(
     )
       continue;
     const members = await membersBefore(position);
-    if (!members.has(successor.signerId) || !members.has(successor.removedDeviceId)) continue;
+    if (!members.has(successor.signerId)) continue;
+    const isDeviceRemoval = successor.action === "remove-device";
+    const retiredRoot = isDeviceRemoval
+      ? undefined
+      : history.recovery.rows.find((root) => root.id === targetId);
+    if (
+      (isDeviceRemoval && !members.has(targetId)) ||
+      (!isDeviceRemoval &&
+        (!retiredRoot ||
+          recoveryPositions.get(retiredRoot.id)! >= position ||
+          retiredRecoveryRoots.has(retiredRoot.id) ||
+          !(await validRecovery(retiredRoot))))
+    )
+      continue;
     if (!(await verify(successor.signerId, bytes, successor.signature))) continue;
-    members.delete(successor.removedDeviceId);
+    if (isDeviceRemoval) members.delete(targetId);
     if (recorded.length !== members.size || recorded.some((id) => !members.has(id))) continue;
+    if (isDeviceRemoval) revoked.add(targetId);
+    else retiredRecoveryRoots.set(targetId, position);
     epochId = successor.epochId;
     epochPosition = position;
     base = members;
-    revoked.add(successor.removedDeviceId);
     successorIds.add(successor.id);
     visited.add(epochId);
   }
   const active = await membersBefore();
   const recoveryRoots: RecoveryRoot[] = [];
-  for (const root of history.recovery.rows) if (await validRecovery(root)) recoveryRoots.push(root);
+  for (const root of history.recovery.rows)
+    if (!retiredRecoveryRoots.has(root.id) && (await validRecovery(root))) recoveryRoots.push(root);
   return { epochId, active, revoked, approvalIds, successorIds, recoveryRoots };
 }
 
