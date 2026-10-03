@@ -681,6 +681,19 @@ struct LargeValueIngressState {
     admitted_bytes: u64,
 }
 
+/// Raw-current projection metadata by target schema and table.
+type PhysicalCurrentWinnerProjections =
+    BTreeMap<SchemaVersionId, BTreeMap<String, (String, Vec<String>)>>;
+
+/// Prepared physical write plans by schema, logical table and target.
+type PhysicalWritePlanCache = BTreeMap<
+    SchemaVersionId,
+    BTreeMap<
+        String,
+        BTreeMap<physical::PhysicalWriteTarget, Arc<physical::PreparedPhysicalWritePlan>>,
+    >,
+>;
+
 /// Schema catalogue and schema-version storage layout known by the node.
 #[derive(Clone, Debug)]
 struct SchemaCatalogueState {
@@ -700,8 +713,7 @@ struct SchemaCatalogueState {
     physical_mappings: BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
     /// Successfully registered raw-current projection metadata. Derived from
     /// the catalogue and live registry, never persisted or shared across nodes.
-    physical_current_winner_projections:
-        BTreeMap<SchemaVersionId, BTreeMap<String, (String, Vec<String>)>>,
+    physical_current_winner_projections: PhysicalCurrentWinnerProjections,
     /// Durable, not-yet-visible schema bundles awaiting ordered activation.
     staged_lineages: BTreeMap<u64, StagedSchemaLineage>,
     /// Ordered bundle payloads waiting for an earlier sequence or active source.
@@ -719,13 +731,7 @@ struct SchemaCatalogueState {
     /// Table-specific, already-validated lens programs used by hot read/write paths.
     compiled_lens_cache: BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>>,
     /// Immutable lowering plans reused by authored-to-physical row writes.
-    physical_write_plan_cache: BTreeMap<
-        SchemaVersionId,
-        BTreeMap<
-            String,
-            BTreeMap<physical::PhysicalWriteTarget, Arc<physical::PreparedPhysicalWritePlan>>,
-        >,
-    >,
+    physical_write_plan_cache: PhysicalWritePlanCache,
     /// Schema version currently used for newly authored writes.
     active_schema: ActiveSchema,
 }

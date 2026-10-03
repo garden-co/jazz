@@ -1292,7 +1292,11 @@ self.database.finish_persistence(persisted)?;
             .get(&schema_version_id)
             .copied()
         {
-            if schema_version_id == self.catalogue.local_schema_version_id {
+            // Write only a changed alias: any mutable catalogue access discards
+            // the announced catalogue fingerprint, and this runs for every write.
+            if schema_version_id == self.catalogue.local_schema_version_id
+                && self.catalogue.local_schema_version_alias != Some(alias)
+            {
                 self.catalogue.local_schema_version_alias = Some(alias);
             }
             return Ok(alias);

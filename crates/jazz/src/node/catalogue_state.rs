@@ -5,9 +5,13 @@
 //! Restoring an unchanged clone restores only a fingerprint for that clone's
 //! exact state. Cache misses retain the existing full snapshot validation.
 
-use super::SchemaCatalogueState;
+use super::{
+    CompiledLensCacheKey, CompiledLensPath, LensPathCacheKey, LensPathDirection, MigrationLensId,
+    PhysicalCurrentWinnerProjections, PhysicalWritePlanCache, SchemaCatalogueState,
+};
 use std::{
     cell::Cell,
+    collections::BTreeMap,
     ops::{Deref, DerefMut},
 };
 
@@ -52,5 +56,32 @@ impl SchemaCatalogue {
 
     pub(super) fn remember_announcement_fingerprint(&self, fingerprint: [u8; 32]) {
         self.announcement_fingerprint.set(Some(fingerprint));
+    }
+
+    // Derived caches are not part of the announced catalogue snapshot. Filling
+    // or resetting them on hot read and write paths must keep the fingerprint;
+    // otherwise every cache miss re-serializes and re-hashes the catalogue on
+    // the next sync turn.
+
+    pub(super) fn lens_path_cache_mut(
+        &mut self,
+    ) -> &mut BTreeMap<LensPathCacheKey, Option<Vec<(MigrationLensId, LensPathDirection)>>> {
+        &mut self.state.lens_path_cache
+    }
+
+    pub(super) fn compiled_lens_cache_mut(
+        &mut self,
+    ) -> &mut BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>> {
+        &mut self.state.compiled_lens_cache
+    }
+
+    pub(super) fn physical_write_plan_cache_mut(&mut self) -> &mut PhysicalWritePlanCache {
+        &mut self.state.physical_write_plan_cache
+    }
+
+    pub(super) fn physical_current_winner_projections_mut(
+        &mut self,
+    ) -> &mut PhysicalCurrentWinnerProjections {
+        &mut self.state.physical_current_winner_projections
     }
 }
