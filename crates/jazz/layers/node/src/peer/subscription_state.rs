@@ -189,7 +189,9 @@ pub(super) struct MaintainedSubscriptionViewSubscription {
     pub(super) subscription: MultisinkSubscription,
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
-    pub(super) tables: BTreeMap<String, TableSchema>,
+    /// Shared so each update can read the output tables while the peer state
+    /// is borrowed mutably, without deep-copying every table schema.
+    pub(super) tables: Arc<BTreeMap<String, TableSchema>>,
     /// Exact receiver-owned inputs for a relay child. `None` means this
     /// is an ordinary trusted-serving maintained view, not a receiver.
     pub(super) covered_input_receiver: Option<CoveredInputReceiver>,
