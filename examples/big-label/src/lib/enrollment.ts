@@ -38,10 +38,10 @@ export function claimsSignupIntent(storage: IntentStorage, email: string, identi
  * is open; the personal label bootstrap then runs in the background.
  *
  * A Jazz account this browser kept from an earlier sign-in of the same
- * identity is opened directly. Logging in again would only map the same
- * Better Auth subject to the same account, after closing and reopening its
- * client. The account's keys authenticate its sync connection either way, and
- * the server's permission checks decide what it may read and write.
+ * identity opens its local data at once. It has no credential until it logs
+ * in again, so it cannot sync before that login; logging in as the same
+ * identity hands the credential to the client already open instead of
+ * closing and reopening it.
  *
  * `isCurrent` must belong to this attempt alone. React strict mode (and Retry)
  * abandon an attempt and start the next one straight away; a flag shared
@@ -73,6 +73,7 @@ export async function enrollAndBootstrap(options: {
   const retained = lifecycle.selectedAccount();
   if (!registering && retained?.identity.subject === identityId) {
     await lifecycle.attach(isCurrent);
+    await lifecycle.revalidate((manager) => manager.loginJWT({ getToken }), isCurrent);
   } else {
     await lifecycle.transition(async (manager) => {
       if (!registering) return manager.loginJWT({ getToken });

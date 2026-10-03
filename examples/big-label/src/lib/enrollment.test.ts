@@ -36,12 +36,20 @@ function accounts(afterRegister: () => void = () => {}) {
       return selected;
     }),
   };
+  const events: string[] = [];
   const lifecycle = new JazzLifecycle(
     manager as never,
-    async () => ({ shutdown: async () => {} }) as never,
+    async (account) => {
+      events.push(`open:${account.id}`);
+      return {
+        shutdown: async () => {
+          events.push(`shutdown:${account.id}`);
+        },
+      } as never;
+    },
     () => {},
   );
-  return { manager, lifecycle };
+  return { manager, lifecycle, events };
 }
 
 function attempt(
@@ -84,7 +92,7 @@ describe("BigLabel enrollment", () => {
     expect(claimsSignupIntent(storage, email, identityId)).toBe(false);
   });
 
-  it("reuses the account an abandoned attempt already registered", async () => {
+  it("logs in on the next attempt after an abandoned attempt already registered", async () => {
     // The session changes while the registration request is in flight.
     let firstIsCurrent = true;
     const { manager, lifecycle } = accounts(() => (firstIsCurrent = false));
@@ -97,7 +105,7 @@ describe("BigLabel enrollment", () => {
     await vi.waitFor(() => expect(bootstrap).toHaveBeenCalledTimes(1));
 
     expect(manager.registerJWT).toHaveBeenCalledTimes(1);
-    expect(manager.loginJWT).not.toHaveBeenCalled();
+    expect(manager.loginJWT).toHaveBeenCalledTimes(1);
   });
 
   it("logs in when the browser kept no account for this identity", async () => {
@@ -117,8 +125,8 @@ describe("BigLabel enrollment", () => {
     await vi.waitFor(() => expect(bootstrap).toHaveBeenCalledTimes(1));
   });
 
-  it("opens a retained account without logging in again and skips a finished bootstrap", async () => {
-    const { manager, lifecycle } = accounts();
+  it("logs a retained account in without reopening it and skips a finished bootstrap", async () => {
+    const { manager, lifecycle, events } = accounts();
     await manager.registerJWT();
     manager.registerJWT.mockClear();
     const bootstrap = vi.fn(async () => {});
@@ -135,7 +143,10 @@ describe("BigLabel enrollment", () => {
         isCurrent: () => true,
       }),
     ).resolves.toBe(true);
-    expect(manager.loginJWT).not.toHaveBeenCalled();
+    // Only that login gives the retained account the credential it syncs
+    // with; logging in as the same identity keeps its open client.
+    expect(manager.loginJWT).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(["open:A"]);
     expect(manager.registerJWT).not.toHaveBeenCalled();
     expect(bootstrap).not.toHaveBeenCalled();
   });
@@ -154,7 +165,8 @@ describe("BigLabel enrollment", () => {
         storage: memoryStorage(),
         email,
         identityId,
-        // The open account needs no token; only the bootstrap asks, and fails.
+        // This registry double asks no token to log in; only the bootstrap
+        // asks, and fails.
         getToken: async () => {
           tokens += 1;
           throw new Error("token unavailable");
