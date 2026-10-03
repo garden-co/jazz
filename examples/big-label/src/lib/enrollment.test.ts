@@ -125,11 +125,20 @@ describe("BigLabel enrollment", () => {
     await vi.waitFor(() => expect(bootstrap).toHaveBeenCalledTimes(1));
   });
 
-  it("logs a retained account in without reopening it and skips a finished bootstrap", async () => {
+  it("opens a retained account before its login, then logs it in without reopening it", async () => {
     const { manager, lifecycle, events } = accounts();
     await manager.registerJWT();
     manager.registerJWT.mockClear();
     const bootstrap = vi.fn(async () => {});
+    // The provider answers only once the page shows the retained account.
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    const login = manager.loginJWT.getMockImplementation()!;
+    manager.loginJWT.mockImplementation(async () => {
+      await answered;
+      return login();
+    });
+    const loginError = vi.fn();
 
     await expect(
       enrollAndBootstrap({
@@ -140,15 +149,46 @@ describe("BigLabel enrollment", () => {
         getToken: async () => "token",
         needsBootstrap: () => false,
         bootstrap,
+        onLoginError: loginError,
         isCurrent: () => true,
       }),
     ).resolves.toBe(true);
+    expect(events).toEqual(["open:A"]);
+
     // Only that login gives the retained account the credential it syncs
     // with; logging in as the same identity keeps its open client.
-    expect(manager.loginJWT).toHaveBeenCalledTimes(1);
+    answer();
+    await vi.waitFor(() => expect(manager.loginJWT).toHaveBeenCalledTimes(1));
+    await lifecycle.revalidate(() => {});
     expect(events).toEqual(["open:A"]);
+    expect(loginError).not.toHaveBeenCalled();
     expect(manager.registerJWT).not.toHaveBeenCalled();
     expect(bootstrap).not.toHaveBeenCalled();
+  });
+
+  it("reports a retained account's failed background login", async () => {
+    const { manager, lifecycle, events } = accounts();
+    await manager.registerJWT();
+    manager.loginJWT.mockRejectedValueOnce(new Error("provider unavailable"));
+    const loginError = vi.fn();
+
+    await expect(
+      enrollAndBootstrap({
+        lifecycle,
+        storage: memoryStorage(),
+        email,
+        identityId,
+        getToken: async () => "token",
+        needsBootstrap: () => false,
+        bootstrap: async () => {},
+        onLoginError: loginError,
+        isCurrent: () => true,
+      }),
+    ).resolves.toBe(true);
+    await vi.waitFor(() =>
+      expect(loginError).toHaveBeenCalledWith(new Error("provider unavailable")),
+    );
+    expect(events).toEqual(["open:A"]);
   });
 
   it("names the account before fetching the token, so a failed token fetch can be retried", async () => {

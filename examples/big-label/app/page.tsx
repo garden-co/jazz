@@ -258,6 +258,9 @@ function AccountApp({
         setBootstrapping(false);
         setBootstrapError(toError(cause));
       },
+      onLoginError: (cause) => {
+        if (current) setError(toError(cause));
+      },
       isCurrent: () => current,
     }).then(
       (finished) => {
