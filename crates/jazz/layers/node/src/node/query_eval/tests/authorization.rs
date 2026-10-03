@@ -1251,6 +1251,187 @@ fn policy_claim_array_string_ids_bind_as_uuid_array() {
 }
 
 #[test]
+fn recursive_array_claims_preserve_identity_and_nullable_carriers() {
+    // Direct provider contexts have no active transport-session scope. Exercise
+    // each seed representation while one prepared shape is reused across claims.
+    for seed_kind in ["parameter", "literal", "relation"] {
+        let readable = || PublicTablePolicies::new().with_select(PublicPolicyExpr::True);
+        let schema = public_query_eval_schema(
+            PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("teams")
+                        .column("name", PublicColumnType::Text)
+                        .policies(readable()),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("issues")
+                        .column("assignee", PublicColumnType::Uuid)
+                        .column("isPublic", PublicColumnType::Boolean)
+                        .nullable_column("joinCode", PublicColumnType::Text)
+                        .policies(
+                            PublicTablePolicies::new().with_select(PublicPolicyExpr::And(vec![
+                                PublicPolicyExpr::In {
+                                    column: "assignee".to_owned(),
+                                    session_path: vec!["claims".to_owned(), "team_ids".to_owned()],
+                                },
+                                PublicPolicyExpr::Or(vec![
+                                    PublicPolicyExpr::eq_literal(
+                                        "isPublic",
+                                        crate::tools::Value::Boolean(true),
+                                    ),
+                                    public_claim_eq("joinCode", "join_code"),
+                                ]),
+                            ])),
+                        ),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("access")
+                        .fk_column("issue", "issues")
+                        .fk_column("team", "teams")
+                        .policies(readable()),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("edges")
+                        .fk_column("member", "teams")
+                        .fk_column("parent", "teams")
+                        .policies(readable()),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("seeds")
+                        .fk_column("team", "teams")
+                        .column("kind", PublicColumnType::Text)
+                        .policies(readable()),
+                ),
+        );
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0x91; 16]), schema.clone());
+        let alice = author(1);
+        let bob = author(2);
+        let start = row(10);
+        let parent = row(11);
+        for (id, owner, position) in [(1, alice, 1), (2, bob, 3)] {
+            commit_global_cells(
+                &mut node,
+                "issues",
+                row(id),
+                BTreeMap::from([
+                    ("assignee".to_owned(), Value::Uuid(owner.test_uuid())),
+                    ("isPublic".to_owned(), Value::Bool(true)),
+                    ("joinCode".to_owned(), Value::Nullable(None)),
+                ]),
+                position,
+                position,
+            );
+            commit_global_cells(
+                &mut node,
+                "access",
+                row(id + 20),
+                BTreeMap::from([
+                    ("issue".to_owned(), Value::Uuid(row(id).0)),
+                    ("team".to_owned(), Value::Uuid(parent.0)),
+                ]),
+                position + 1,
+                position + 1,
+            );
+        }
+        commit_global_cells(
+            &mut node,
+            "edges",
+            row(30),
+            BTreeMap::from([
+                ("member".to_owned(), Value::Uuid(start.0)),
+                ("parent".to_owned(), Value::Uuid(parent.0)),
+            ]),
+            5,
+            5,
+        );
+        commit_global_cells(
+            &mut node,
+            "seeds",
+            row(40),
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(start.0)),
+                ("kind".to_owned(), Value::String("shared".to_owned())),
+            ]),
+            6,
+            6,
+        );
+        let mut query = Query::from("issues").reachable_via(
+            "access",
+            "issue",
+            "team",
+            if seed_kind == "parameter" {
+                param("start")
+            } else {
+                crate::query::Operand::Literal(Value::Uuid(start.0))
+            },
+            "edges",
+            "member",
+            "parent",
+            [],
+        );
+        let values = if seed_kind == "parameter" {
+            BTreeMap::from([("start".to_owned(), Value::Uuid(start.0))])
+        } else if seed_kind == "relation" {
+            query.reachable[0].seed = Some(crate::query::ReachableSeed {
+                table: "seeds".to_owned(),
+                user_column: None,
+                user_claim: None,
+                team_column: "team".to_owned(),
+                filters: vec![eq(col("kind"), param("kind"))],
+            });
+            BTreeMap::from([("kind".to_owned(), Value::String("shared".to_owned()))])
+        } else {
+            BTreeMap::new()
+        };
+        let shape = query.validate_runtime(&schema).unwrap();
+        let binding = shape.bind(values).unwrap();
+        let first = author(8);
+        let second = author(9);
+        let claims = |owners: &[AuthorSubject], code: Option<&str>| {
+            BTreeMap::from([
+                (
+                    crate::query::provider_claim_key("team_ids"),
+                    Value::Array(
+                        owners
+                            .iter()
+                            .map(|owner| Value::String(owner.test_uuid().to_string()))
+                            .collect(),
+                    ),
+                ),
+                (
+                    crate::query::provider_claim_key("join_code"),
+                    Value::Nullable(code.map(|code| Box::new(Value::String(code.to_owned())))),
+                ),
+            ])
+        };
+        node.set_test_provider_claims(first, claims(&[alice], None));
+        node.set_test_provider_claims(second, claims(&[bob], None));
+        let visible = |node: &mut NodeState<RocksDbStorage>, identity| {
+            let mut rows = node
+                .query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.row_uuid())
+                .collect::<Vec<_>>();
+            rows.sort();
+            rows
+        };
+        assert_eq!(visible(&mut node, first), vec![row(1)], "{seed_kind}");
+        assert_eq!(visible(&mut node, second), vec![row(2)], "{seed_kind}");
+        assert_eq!(visible(&mut node, first), vec![row(1)], "{seed_kind}");
+        node.set_test_provider_claims(first, claims(&[bob], Some("unused")));
+        assert_eq!(visible(&mut node, first), vec![row(2)], "{seed_kind}");
+        assert_eq!(visible(&mut node, second), vec![row(2)], "{seed_kind}");
+        node.set_test_provider_claims(first, claims(&[], None));
+        assert_eq!(visible(&mut node, first), vec![], "{seed_kind}");
+        assert_eq!(visible(&mut node, second), vec![row(2)], "{seed_kind}");
+        delete_global(&mut node, "access", row(22), 7, 7);
+        assert_eq!(visible(&mut node, second), vec![], "{seed_kind}");
+    }
+}
+
+#[test]
 fn prepared_policy_plan_is_recompiled_after_same_identity_claim_revision_changes() {
     let schema = public_query_eval_schema(
         PublicSchemaBuilder::new().table(

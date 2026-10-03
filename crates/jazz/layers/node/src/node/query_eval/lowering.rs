@@ -1314,9 +1314,19 @@ where
         _shape: &ValidatedQuery,
         _binding: &Binding,
     ) -> Result<PreparedQueryPlan, Error> {
-        let output = app_row_terminal_schema(&program.lowered.output)?.clone();
-        let graph = lowered_materialization_app_rows_graph(&program)?;
+        let graph = lowered_materialization_app_rows_graph(program)?;
         let app_row_fields = self.materialization_app_row_fields(program, &graph)?;
+        self.prepared_materialization_plan_from_program(program, graph, app_row_fields)
+            .await
+    }
+
+    pub(super) async fn prepared_materialization_plan_from_program(
+        &mut self,
+        program: &QueryProgram,
+        graph: GraphBuilder,
+        app_row_fields: Vec<String>,
+    ) -> Result<PreparedQueryPlan, Error> {
+        let output = app_row_terminal_schema(&program.lowered.output)?.clone();
         let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_eligible_fields =
             app_row_terminal_route_eligible_fields(&program.lowered.output)?;
