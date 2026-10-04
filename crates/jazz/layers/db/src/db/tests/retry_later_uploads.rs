@@ -44,7 +44,8 @@ struct Fixture {
     clock: Rc<Cell<u64>>,
     uploads: Rc<RefCell<VecDeque<SyncMessage>>>,
     target: RowUuid,
-    _links: (
+    /// The writer's upstream link and Core's link serving it.
+    links: (
         Rc<LocalMutex<PeerConnection>>,
         Rc<LocalMutex<PeerConnection>>,
     ),
@@ -83,7 +84,7 @@ impl Fixture {
             clock,
             uploads,
             target: seed.row_uuid(),
-            _links: (upstream, subscriber),
+            links: (upstream, subscriber),
         };
         fixture.pump_until(16, |fixture| fixture.is_global(seed.tx_id));
         assert!(fixture.is_global(seed.tx_id));
@@ -302,5 +303,382 @@ fn chained_write_fails_when_its_predecessor_is_lost() {
             .borrow()
             .iter()
             .any(|message| is_commit_unit_for(message, e2))
+    );
+}
+
+/// Core's link answers alice's out-of-order edit with `RetryLater` while
+/// its transport refuses the frame once. The answer waits in Core's fate
+/// queue like a fate and goes out on a later tick, so alice still sends
+/// her chain again; it is never lost to back-pressure.
+#[test]
+fn retry_later_survives_back_pressure_on_cores_link() {
+    let mut fixture = Fixture::new(0xe7);
+    let e1 = fixture.edit("e1");
+    let e2 = fixture.edit("e2");
+    fixture.upload(e2);
+    fixture.take_upload(e1);
+    let refused = Rc::new(Cell::new(false));
+    {
+        let mut link = fixture.links.1.borrow_mut();
+        let inner = std::mem::replace(
+            &mut link.transport,
+            Box::new(BackpressureOnceTransport {
+                outbound: Default::default(),
+                failed: true,
+            }),
+        );
+        link.transport = Box::new(RefuseRetryLaterOnce {
+            inner,
+            refused: Rc::clone(&refused),
+        });
+    }
+    fixture.core.tick().unwrap();
+    assert!(refused.get(), "the transport refused the answer once");
+    assert_eq!(fixture.core_state(e2), None);
+    // The refused answer is still queued at Core and reaches alice.
+    let all_global = |fixture: &Fixture| [e1, e2].iter().all(|tx| fixture.is_global(*tx));
+    fixture.pump_until(8, all_global);
+    fixture.clock.set(fixture.clock.get() + 60_000);
+    fixture.pump_until(32, all_global);
+    assert!(all_global(&fixture), "alice's chain is accepted");
+}
+
+/// Core's side of a link that refuses the first `RetryLater` with
+/// back-pressure and passes everything else through.
+struct RefuseRetryLaterOnce {
+    inner: Box<dyn Transport>,
+    refused: Rc<Cell<bool>>,
+}
+
+impl Transport for RefuseRetryLaterOnce {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        if matches!(message, SyncMessage::RetryLater { .. }) && !self.refused.get() {
+            self.refused.set(true);
+            return Err(TransportError::Backpressure);
+        }
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+}
+
+/// alice's outbox holds her first edit behind her second (here moved
+/// there by hand), and the link loses the first. Core answers the second
+/// with `RetryLater`. alice moves the first edit ahead of the second and
+/// sends nothing during the backoff; then the first goes up before the
+/// second and both are accepted.
+#[test]
+fn predecessor_queued_after_its_successor_goes_up_first_on_retry() {
+    let mut fixture = Fixture::new(0xe9);
+    let e1 = fixture.edit("e1");
+    let e2 = fixture.edit("e2");
+    {
+        let outbox = &fixture.writer.node.outbox;
+        outbox.borrow_mut().retain(|pending| pending.tx_id != e1);
+        queue_pending_upload_in(outbox, e1, None);
+    }
+    fixture.upload(e1);
+    fixture.take_upload(e1);
+    fixture.core.tick().unwrap();
+    assert_eq!(fixture.core_state(e2), None);
+    fixture.uploads.borrow_mut().clear();
+    // Core's answer is not taken off the link here, so whatever alice sends
+    // during the backoff stays visible.
+    for _ in 0..4 {
+        fixture.writer.tick().unwrap();
+    }
+    assert!(
+        !fixture
+            .uploads
+            .borrow()
+            .iter()
+            .any(|message| is_commit_unit_for(message, e1) || is_commit_unit_for(message, e2)),
+        "nothing of the chain goes up during the backoff"
+    );
+    fixture.clock.set(fixture.clock.get() + 60_000);
+    fixture.upload(e2);
+    let position = |tx_id| {
+        fixture
+            .uploads
+            .borrow()
+            .iter()
+            .position(|message| is_commit_unit_for(message, tx_id))
+    };
+    assert!(
+        position(e1).is_some_and(|first| position(e2).is_some_and(|second| first < second)),
+        "the predecessor goes up first"
+    );
+    let all_global = |fixture: &Fixture| [e1, e2].iter().all(|tx| fixture.is_global(*tx));
+    fixture.pump_until(16, all_global);
+    assert!(all_global(&fixture));
+    let rows = fixture.core.read(&Query::from("tracks")).unwrap();
+    assert_eq!(
+        rows[0].cell(&music_schema().tables[0], "title"),
+        Some(Value::String("e2".to_owned()))
+    );
+}
+
+/// Two writers, alice and bob, upload through one relay to Core.
+struct RelayFixture {
+    core: CoreDb,
+    relay: Db,
+    alice: Db,
+    bob: Db,
+    clock: Rc<Cell<u64>>,
+    /// alice's uploads to the relay, and the relay's messages to alice.
+    alice_uploads: Rc<RefCell<VecDeque<SyncMessage>>>,
+    to_alice: Rc<RefCell<VecDeque<SyncMessage>>>,
+    /// The relay's uploads to Core.
+    relay_uploads: Rc<RefCell<VecDeque<SyncMessage>>>,
+    target: RowUuid,
+    _links: Vec<Rc<LocalMutex<PeerConnection>>>,
+}
+
+impl RelayFixture {
+    fn new(node: u8) -> Self {
+        let schema = music_schema();
+        let alice_author = AuthorSubject::for_test_bytes([node; 16]);
+        let bob_author = AuthorSubject::for_test_bytes([node + 1; 16]);
+        let core = open_core(node + 2, AuthorSubject::SYSTEM, &schema);
+        let relay = open_db(node + 3, AuthorSubject::SYSTEM, &schema);
+        let alice = open_db(node, alice_author, &schema);
+        let bob = open_db(node + 1, bob_author, &schema);
+        let clock = Rc::new(Cell::new(10_000));
+        for db in [&relay, &alice, &bob] {
+            db.node
+                .set_upload_retry_clock_for_test(Rc::new(ManualUploadRetryClock(Rc::clone(
+                    &clock,
+                ))));
+            db.set_tick_scheduler(Some(Rc::new(RecordingScheduler::default())));
+        }
+        let (relay_transport, core_transport, relay_uploads) = duplex_with_client_outbound_tap();
+        let relay_upstream =
+            crate::local_executor::block_on(relay.connect_upstream(relay_transport));
+        let core_link = core.accept_subscriber_with_trust(
+            core_transport,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::TrustedBackend,
+        );
+        let (alice_transport, relay_alice_transport, alice_uploads, to_alice) = duplex_with_taps();
+        let alice_upstream =
+            crate::local_executor::block_on(alice.connect_upstream(alice_transport));
+        let relay_alice = relay.accept_subscriber(relay_alice_transport, alice_author);
+        let (bob_transport, relay_bob_transport) = duplex();
+        let bob_upstream = crate::local_executor::block_on(bob.connect_upstream(bob_transport));
+        let relay_bob = relay.accept_subscriber(relay_bob_transport, bob_author);
+        let seed = crate::local_executor::block_on(alice.insert(
+            "tracks",
+            title("seed"),
+            Default::default(),
+        ))
+        .unwrap();
+        let mut fixture = Self {
+            core,
+            relay,
+            alice,
+            bob,
+            clock,
+            alice_uploads,
+            to_alice,
+            relay_uploads,
+            target: seed.row_uuid(),
+            _links: vec![
+                relay_upstream,
+                core_link,
+                alice_upstream,
+                relay_alice,
+                bob_upstream,
+                relay_bob,
+            ],
+        };
+        fixture.pump_until(32, |fixture| is_global(&fixture.alice, seed.tx_id));
+        assert!(is_global(&fixture.alice, seed.tx_id));
+        fixture
+    }
+
+    fn alice_edit(&self, value: &str) -> TxId {
+        crate::local_executor::block_on(self.alice.update(
+            "tracks",
+            self.target,
+            title(value),
+            Default::default(),
+        ))
+        .unwrap()
+        .tx_id
+    }
+
+    fn pump(&self) {
+        self.alice.tick().unwrap();
+        self.bob.tick().unwrap();
+        self.relay.tick().unwrap();
+        self.core.tick().unwrap();
+        self.relay.tick().unwrap();
+    }
+
+    fn pump_until(&mut self, rounds: usize, done: impl Fn(&Self) -> bool) {
+        for _ in 0..rounds {
+            if done(self) {
+                return;
+            }
+            self.pump();
+        }
+    }
+
+    fn core_state(&self, tx_id: TxId) -> Option<Fate> {
+        crate::local_executor::block_on(self.core.node().borrow_mut().transaction_state(tx_id))
+            .map(|(fate, ..)| fate)
+    }
+
+    fn relay_state(&self, tx_id: TxId) -> Option<Fate> {
+        crate::local_executor::block_on(self.relay.node.node.borrow_mut().transaction_state(tx_id))
+            .map(|(fate, ..)| fate)
+    }
+
+    fn retry_later_sent_to_alice(&self, tx_id: TxId) -> bool {
+        self.to_alice.borrow().iter().any(|message| {
+            matches!(message, SyncMessage::RetryLater { tx_id: retried, .. } if *retried == tx_id)
+        })
+    }
+}
+
+fn is_global(db: &Db, tx_id: TxId) -> bool {
+    db.write_state(tx_id)
+        .is_ok_and(|state| state.durability == DurabilityTier::Global)
+}
+
+/// The relay has alice's two chained edits queued, and its link to Core
+/// loses the first. Core answers the second with `RetryLater`. The relay
+/// holds back alice's chain for the backoff and forwards the answer to
+/// her, but bob's write behind hers in the relay's outbox goes up at once.
+/// After the backoff alice's chain is accepted in order.
+///
+/// ```text
+/// alice ── e1, e2 ──► relay ── e2 ──► core   RetryLater(e2, awaiting e1)
+/// relay ── RetryLater ──► alice     alice's chain held for the backoff
+/// bob   ── b1 ──► relay ── b1 ──► core       accepted at once
+/// (backoff) relay ── e1, e2 ──► core         accepted in order
+/// ```
+#[test]
+fn relay_holds_back_only_the_retried_writer_and_forwards_retry_later() {
+    let mut fixture = RelayFixture::new(0x71);
+    let e1 = fixture.alice_edit("e1");
+    let e2 = fixture.alice_edit("e2");
+    let relay_uploaded = |fixture: &RelayFixture, tx_id| {
+        fixture
+            .relay_uploads
+            .borrow()
+            .iter()
+            .any(|message| is_commit_unit_for(message, tx_id))
+    };
+    for _ in 0..8 {
+        if relay_uploaded(&fixture, e2) {
+            break;
+        }
+        fixture.alice.tick().unwrap();
+        fixture.relay.tick().unwrap();
+    }
+    assert!(relay_uploaded(&fixture, e1) && relay_uploaded(&fixture, e2));
+    // The relay's link to Core loses e1.
+    fixture
+        .relay_uploads
+        .borrow_mut()
+        .retain(|message| !is_commit_unit_for(message, e1));
+    fixture.core.tick().unwrap();
+    assert_eq!(fixture.core_state(e2), None, "Core stored nothing for e2");
+    fixture.relay.tick().unwrap();
+    assert!(
+        fixture.retry_later_sent_to_alice(e2),
+        "the relay forwards the answer to alice"
+    );
+    assert_eq!(fixture.relay_state(e2), Some(Fate::Pending));
+
+    let b1 = crate::local_executor::block_on(fixture.bob.insert(
+        "tracks",
+        title("b1"),
+        Default::default(),
+    ))
+    .unwrap()
+    .tx_id;
+    fixture.pump_until(8, |fixture| is_global(&fixture.bob, b1));
+    assert!(
+        is_global(&fixture.bob, b1),
+        "bob's write is not held back by alice's deferral"
+    );
+    for tx_id in [e1, e2] {
+        assert_eq!(fixture.core_state(tx_id), None, "alice's chain waits");
+        assert_eq!(
+            fixture.alice.write_state(tx_id).unwrap().fate,
+            Fate::Pending
+        );
+    }
+
+    fixture.clock.set(fixture.clock.get() + 60_000);
+    let alice_global =
+        |fixture: &RelayFixture| [e1, e2].iter().all(|tx| is_global(&fixture.alice, *tx));
+    fixture.pump_until(32, alice_global);
+    assert!(alice_global(&fixture), "alice's chain is accepted");
+    let rows = fixture.core.read(&Query::from("tracks")).unwrap();
+    let mut titles = rows
+        .iter()
+        .filter_map(|row| match row.cell(&music_schema().tables[0], "title") {
+            Some(Value::String(title)) => Some(title),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    titles.sort();
+    assert_eq!(titles, ["b1", "e2"]);
+}
+
+/// alice's link to the relay loses her first edit, so the relay never has
+/// it. Core answers her second edit with `RetryLater`. The relay did not
+/// author the edit, so it does not decide that its predecessor is lost:
+/// the edit stays pending at the relay and at alice, and the relay
+/// forwards the answer. alice still has her first edit queued, sends her
+/// chain again after the backoff, and both edits are accepted.
+#[test]
+fn relay_never_fails_a_clients_write_whose_predecessor_it_lacks() {
+    let mut fixture = RelayFixture::new(0x75);
+    let e1 = fixture.alice_edit("e1");
+    let e2 = fixture.alice_edit("e2");
+    fixture.alice.tick().unwrap();
+    fixture
+        .alice_uploads
+        .borrow_mut()
+        .retain(|message| !is_commit_unit_for(message, e1));
+    for _ in 0..3 {
+        fixture.relay.tick().unwrap();
+        fixture.core.tick().unwrap();
+    }
+    fixture.relay.tick().unwrap();
+    assert_eq!(fixture.core_state(e2), None);
+    assert_eq!(fixture.relay_state(e1), None, "the relay never had e1");
+    assert!(fixture.retry_later_sent_to_alice(e2));
+    assert_eq!(
+        fixture.relay_state(e2),
+        Some(Fate::Pending),
+        "the relay does not fail alice's write"
+    );
+    fixture.alice.tick().unwrap();
+    assert_eq!(
+        fixture.alice.write_state(e2).unwrap().fate,
+        Fate::Pending,
+        "alice keeps her write pending"
+    );
+
+    fixture.clock.set(fixture.clock.get() + 60_000);
+    let alice_global =
+        |fixture: &RelayFixture| [e1, e2].iter().all(|tx| is_global(&fixture.alice, *tx));
+    fixture.pump_until(32, alice_global);
+    assert!(alice_global(&fixture), "alice's chain is accepted");
+    let rows = fixture.core.read(&Query::from("tracks")).unwrap();
+    assert_eq!(
+        rows[0].cell(&music_schema().tables[0], "title"),
+        Some(Value::String("e2".to_owned()))
     );
 }

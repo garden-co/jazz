@@ -637,10 +637,12 @@ pub(super) struct UpstreamConnectionState {
     pub(super) large_value_uploads: LargeValueUploadQueues,
     pub(super) awaiting_large_value_uploads: BTreeMap<TxId, groove::large_values::LargeValueRef>,
     pub(super) failed_large_value_uploads: BTreeSet<TxId>,
-    /// Where uploads on this link stop after the authority answered
-    /// `RetryLater` (SPEC 8). It belongs to this link: a new link starts
-    /// with none and uploads the whole outbox in order.
-    pub(super) deferred_upload: Option<DeferredUpload>,
+    /// Where each writer's uploads on this link stop after the authority
+    /// answered `RetryLater` (SPEC 8), keyed by the writer node. A relay's
+    /// outbox carries many writers' writes; one writer's deferral holds
+    /// back only that writer's later writes. It belongs to this link: a new
+    /// link starts with none and uploads the whole outbox in order.
+    pub(super) deferred_uploads: BTreeMap<NodeUuid, DeferredUpload>,
     /// `RetryLater` answers each write got on this link, for its backoff.
     pub(super) retry_later_attempts: BTreeMap<TxId, u32>,
     /// Views reopened without known state because an update named a row
@@ -653,9 +655,10 @@ pub(super) struct UpstreamConnectionState {
     pub(super) scope_lease_manager: AuthorizationScopeLeaseManager,
 }
 
-/// Uploads deferred on one link by a `RetryLater` answer: nothing at or
-/// after `from` (in outbox order) goes up before `not_before_ms`, so a
-/// chained write never overtakes the write it waits for.
+/// One writer's uploads deferred on one link by a `RetryLater` answer:
+/// none of that writer's writes at or after `from` (in outbox order) goes
+/// up before `not_before_ms`, so a chained write never overtakes the write
+/// it waits for. Other writers' writes are not held back.
 pub(super) struct DeferredUpload {
     /// The earliest outbox entry to send again.
     from: TxId,
@@ -1937,7 +1940,7 @@ where
                 large_value_uploads,
                 awaiting_large_value_uploads,
                 failed_large_value_uploads,
-                deferred_upload,
+                deferred_uploads,
                 retry_later_attempts,
                 missing_body_resends,
                 scope_view_cuts,
@@ -2358,30 +2361,34 @@ where
                                     .collect()
                             }
                         };
-                        // A `RetryLater` answer stops this link's uploads at
-                        // the write to send again; once its backoff passes,
-                        // they resume from it in outbox order.
-                        let deferred_from = match deferred_upload.as_ref() {
-                            Some(deferred) if outbox.borrow().contains(deferred.from) => {
-                                let now_ms = self.upload_retry_clock.borrow().now_ms();
-                                if now_ms < deferred.not_before_ms {
-                                    if let Some(scheduler) = self.scheduler.borrow().as_ref() {
-                                        scheduler
-                                            .schedule_tick_after(deferred.not_before_ms - now_ms);
-                                    }
-                                    Some(deferred.from)
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => None,
-                        };
-                        if deferred_from.is_none() {
-                            *deferred_upload = None;
+                        // A `RetryLater` answer stops one writer's uploads on
+                        // this link at the write to send again; once its
+                        // backoff passes, they resume from it in outbox
+                        // order. Other writers' uploads go on meanwhile.
+                        let now_ms = self.upload_retry_clock.borrow().now_ms();
+                        deferred_uploads.retain(|_, deferred| {
+                            outbox.borrow().contains(deferred.from)
+                                && now_ms < deferred.not_before_ms
+                        });
+                        if let Some(next) = deferred_uploads
+                            .values()
+                            .map(|deferred| deferred.not_before_ms)
+                            .min()
+                            && let Some(scheduler) = self.scheduler.borrow().as_ref()
+                        {
+                            scheduler.schedule_tick_after(next - now_ms);
                         }
+                        let deferred_from = deferred_uploads
+                            .iter()
+                            .map(|(writer, deferred)| (deferred.from, *writer))
+                            .collect::<BTreeMap<_, _>>();
+                        let mut deferred_writers = BTreeSet::new();
                         for (tx_id, staged) in to_upload {
-                            if Some(tx_id) == deferred_from {
-                                break;
+                            if let Some(writer) = deferred_from.get(&tx_id) {
+                                deferred_writers.insert(*writer);
+                            }
+                            if deferred_writers.contains(&tx_id.node) {
+                                continue;
                             }
                             if failed_large_value_uploads.contains(&tx_id)
                                 || awaiting_large_value_uploads.contains_key(&tx_id)
@@ -3419,30 +3426,57 @@ where
                                 {
                                     continue;
                                 }
-                                let resend_from = if outbox.borrow().contains(awaiting) {
-                                    Some(awaiting)
-                                } else {
-                                    let predecessor = self
-                                        .node
-                                        .lock()
-                                        .await
-                                        .transaction_state(awaiting)
-                                        .await;
-                                    match predecessor {
-                                        Some((Fate::Pending, ..)) => {
-                                            // Pending here but not queued:
-                                            // queue it ahead of its successor.
-                                            outbox.borrow_mut().insert_before(awaiting, tx_id);
-                                            Some(awaiting)
-                                        }
-                                        _ => None,
+                                let (authored_here, predecessor) = {
+                                    let mut node = self.node.lock().await;
+                                    (
+                                        node.node_uuid() == tx_id.node,
+                                        node.transaction_state(awaiting).await,
+                                    )
+                                };
+                                if !authored_here {
+                                    // A relay forwards the answer towards the
+                                    // write's author: only the author knows
+                                    // whether its predecessor is lost, and its
+                                    // retry sends the predecessor again.
+                                    route_local_fate(
+                                        &self.local_fate_routes,
+                                        tx_id,
+                                        &SyncMessage::RetryLater { tx_id, awaiting },
+                                    );
+                                }
+                                // A predecessor whose upload already failed here
+                                // (its rejection may still be staged) never
+                                // goes up again.
+                                let predecessor_failed = failed_large_value_uploads
+                                    .contains(&awaiting)
+                                    || outbox.borrow().upload_failure(awaiting).is_some();
+                                let queued = !predecessor_failed && {
+                                    let mut outbox = outbox.borrow_mut();
+                                    if outbox.contains(awaiting) {
+                                        // Queued behind its successor: move it
+                                        // ahead so the retry sends it first.
+                                        outbox.move_before(awaiting, tx_id);
+                                        true
+                                    } else if authored_here
+                                        && matches!(predecessor, Some((Fate::Pending, ..)))
+                                    {
+                                        // Its author's own write, pending but
+                                        // not queued: queue it ahead of its
+                                        // successor. A relay does not revive a
+                                        // copy it dropped; the author resends.
+                                        outbox.insert_before(awaiting, tx_id)
+                                    } else {
+                                        false
                                     }
                                 };
-                                let Some(resend_from) = resend_from else {
-                                    // The predecessor is unknown here or
-                                    // already settled, so the authority will
-                                    // never get it: retrying would never end.
-                                    // The write fails with a surfaced error.
+                                let resend_from = if queued {
+                                    awaiting
+                                } else if authored_here {
+                                    // The predecessor is unknown here, failed
+                                    // or already settled, so the authority
+                                    // will never get it: retrying would never
+                                    // end. The write fails with a surfaced
+                                    // error. Only its author may decide this.
                                     uploaded.remove(&tx_id);
                                     retry_later_attempts.remove(&tx_id);
                                     {
@@ -3471,10 +3505,25 @@ where
                                     });
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                     continue;
+                                } else {
+                                    // A relay without the predecessor cannot
+                                    // recover the write and must not fate it.
+                                    // It drops its copy from the outbox; the
+                                    // author's retry, sent on the answer
+                                    // forwarded above (or on its reconnect),
+                                    // brings the predecessor and the write
+                                    // here again, in order.
+                                    uploaded.remove(&tx_id);
+                                    retry_later_attempts.remove(&tx_id);
+                                    outbox
+                                        .borrow_mut()
+                                        .retain(|pending| pending.tx_id != tx_id);
+                                    continue;
                                 };
                                 // Send the predecessor (when queued here) and
                                 // this write again, in outbox order, after a
-                                // backoff; nothing after them overtakes them.
+                                // backoff; none of this writer's later writes
+                                // overtakes them.
                                 uploaded.remove(&resend_from);
                                 uploaded.remove(&tx_id);
                                 let attempt = retry_later_attempts.entry(tx_id).or_default();
@@ -3482,9 +3531,10 @@ where
                                 let delay = retry_later_upload_delay_ms(tx_id, *attempt);
                                 let not_before_ms =
                                     self.upload_retry_clock.borrow().now_ms().saturating_add(delay);
-                                let deferred = match deferred_upload.take() {
-                                    Some(mut deferred) => {
-                                        let outbox = outbox.borrow();
+                                let outbox = outbox.borrow();
+                                deferred_uploads
+                                    .entry(tx_id.node)
+                                    .and_modify(|deferred| {
                                         let earlier = match (
                                             outbox.position(resend_from),
                                             outbox.position(deferred.from),
@@ -3498,14 +3548,12 @@ where
                                         }
                                         deferred.not_before_ms =
                                             deferred.not_before_ms.max(not_before_ms);
-                                        deferred
-                                    }
-                                    None => DeferredUpload {
+                                    })
+                                    .or_insert(DeferredUpload {
                                         from: resend_from,
                                         not_before_ms,
-                                    },
-                                };
-                                *deferred_upload = Some(deferred);
+                                    });
+                                drop(outbox);
                                 if let Some(scheduler) = self.scheduler.borrow().as_ref() {
                                     scheduler.schedule_tick_after(delay);
                                 }
@@ -5210,7 +5258,13 @@ where
                                 })
                             });
                             for response in responses {
-                                if matches!(response, SyncMessage::FateUpdate { .. }) {
+                                // A retry-later answer is queued like a fate,
+                                // so back-pressure delays it instead of
+                                // losing it.
+                                if matches!(
+                                    response,
+                                    SyncMessage::FateUpdate { .. } | SyncMessage::RetryLater { .. }
+                                ) {
                                     self.downstream_fates.borrow_mut().push(response);
                                 } else {
                                     send_with_sync_context(
@@ -7300,9 +7354,6 @@ fn pending_view_update_tx_ids(message: &SyncMessage) -> Result<BTreeSet<TxId>, E
     Ok(pending_tx_ids)
 }
 
-/// Whether `message` is a terminal fate for `tx_id` that no upstream can
-/// revise: a rejection, or a Global-durable acceptance carrying its global
-/// time. Only such a fate retires an upload-outbox entry.
 /// Whether an authority answer about this link's uploads (a fate or a
 /// `RetryLater`) may change its outbox: it arrived as an authority receipt
 /// and, when the link expects a particular authority, from the one admitted
@@ -7318,6 +7369,9 @@ fn upload_answer_receipt_eligible(
         })
 }
 
+/// Whether `message` is a terminal fate for `tx_id` that no upstream can
+/// revise: a rejection, or a Global-durable acceptance carrying its global
+/// time. Only such a fate retires an upload-outbox entry.
 fn fate_update_settles_upload(message: &SyncMessage, tx_id: TxId) -> bool {
     match message {
         SyncMessage::FateUpdate {

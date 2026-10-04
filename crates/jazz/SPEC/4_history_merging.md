@@ -23,7 +23,7 @@ Invariant digest:
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
 - `INV-HIST-15`: Core's post-image MUST be a deterministic function of the accepted writes in seq order and of each write's base: no wall clock, writer clock or other node-local state enters a merged value. Concurrent writes to different cells give the same post-image in any seq order, merge-strategy ops commute, and when two concurrent writes change one plain cell the one Core sequences first keeps it.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
-- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another ancestor. A write whose pending predecessor has no fate at Core yet MUST NOT be held or stored by Core: after its cheap admission checks pass, Core MUST answer `RetryLater` naming that predecessor and store nothing for the write. Its writer MUST keep it pending, MUST NOT let a later upload on that link overtake it, MUST send it again from the predecessor (when the writer still holds the predecessor pending) after a backoff, and MUST fail it with a surfaced "predecessor lost" error when the predecessor can no longer reach Core.
+- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another ancestor. A write whose pending predecessor has no fate at Core yet MUST NOT be held or stored by Core: after its cheap admission checks pass, Core MUST answer `RetryLater` naming that predecessor and store nothing for the write. Its writer MUST keep it pending, MUST NOT let a later upload of the same writer node on that link overtake it (other writers' uploads are not held back), MUST send it again from the predecessor (when it still holds the predecessor pending) after a backoff, and only its author MUST fail it with a surfaced "predecessor lost" error when the predecessor can no longer reach Core; a relay never fates it and forwards the `RetryLater` towards its author.
 - `INV-HIST-21`: A write's own patch MUST be recoverable from its history record (the post-image restricted to `authored_columns`, overridden by `lost_cells`), and the ancestor of a chained write MUST be built from those patches, never from Core's post-images of the writer's earlier writes.
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6), so it overrides every value it observed whatever its clock. Core orders writes by its own seq, never by writer clocks, and does not reject a write because the writer's clock is behind.
@@ -315,15 +315,28 @@ unit) is an ordering race, not a refusal. Core does not hold `W` for it:
   with `RetryLater { tx_id: W, awaiting: P }` (SPEC 8). Core keeps no copy,
   queue or timer for `W`, so a Core restart changes nothing.
 - The writer keeps `W` pending, with its local visibility, and stops
-  uploading on that link at the first write it must send again, so nothing
-  chained after it overtakes it. After a jittered backoff it uploads again
-  from there, in outbox order, sending `P` first when it still holds `P`
-  pending. Once `P` has a fate at Core (acceptance or any rejection, a
-  refusal before admission included), Core resolves `W` against it.
-- When the writer no longer holds `P` pending (it does not know `P`, or `P`
-  is already settled there without having reached Core), `P` can never reach
-  Core, and `W` fails at the writer with a surfaced "predecessor lost"
-  rejection instead of being retried forever.
+  uploading `N`'s writes on that link at the first one it must send again,
+  so nothing chained after it overtakes it; other writers' uploads on the
+  link go on. After a jittered backoff it uploads again from there, in
+  outbox order, sending `P` first when it still holds `P` pending (moving
+  `P` ahead of `W` when it was queued behind it). Once `P` has a fate at
+  Core (acceptance or any rejection, a refusal before admission included),
+  Core resolves `W` against it.
+- Only `W`'s author decides that `P` is lost. When the author no longer
+  holds `P` pending (it does not know `P`, `P`'s upload already failed
+  there, or `P` is settled there without having reached Core), `P` can
+  never reach Core, and `W` fails at the author with a surfaced "predecessor
+  lost" rejection instead of being retried forever.
+- A relay that uploaded `W` for another node never fates it. It forwards the
+  `RetryLater` towards `W`'s author. When it holds `P` queued it retries
+  both as above; otherwise it drops its copy of `W` from its outbox, and the
+  author's retry (or its reconnect) brings `P` and `W` to it again in order.
+
+So the two ways `P` can be rejected end differently for `W`. A `P` rejected
+at Core has a fate there: Core resolves `W` against the settled row and
+merges it (the rejected `P`'s cells are not in the image). A `P` rejected
+locally, before it reached Core, never gets a fate there: Core keeps
+answering `RetryLater`, and `W` fails at its author as "predecessor lost".
 
 Core never guesses an ancestor. Uploads carry no lost cells; a nonempty `lost_cells` on an upload is
 malformed.

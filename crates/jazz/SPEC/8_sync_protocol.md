@@ -166,21 +166,29 @@ baseline, frozen fresh rather than appended to v3, is:
   fate at Core yet, Core answers with `RetryLater { tx_id, awaiting }`
   (`SyncMessage` tag 35) naming that predecessor, after the unit's cheap
   admission checks (SPEC 4 §4.6). It is not a fate: Core stores nothing,
-  and no node applies or forwards it. The writer acts on it only when it
+  and no node applies it to its store. Core queues it with the link's fates
+  (back-pressure delays it, never drops it), and it travels on the Writes
+  channel in order with them. The uploading node acts on it only when it
   arrives from the authority admitted on that link (the rule a fate must
   meet to release an outbox entry) and the transaction is in its outbox: it
-  keeps the transaction pending, stops that link's uploads at the first
-  transaction to send again (so no later upload overtakes it), and after a
-  backoff (1 s doubling per answer to at most 30 s, jittered into the upper
-  half of each step) uploads again from there in outbox order. Uploads stay
-  pipelined: the writer never waits for a fate before sending the next
-  transaction. When the writer holds the predecessor pending, it sends the
-  predecessor first (queueing it ahead of the transaction when it is not
-  queued); when it does not know the predecessor or already holds a final
-  fate for it, it fails the transaction locally with a `MalformedCommit`
-  rejection starting "predecessor lost" and drops it from its outbox. The
-  deferral belongs to the link: a new link starts without one and uploads
-  every pending transaction again in outbox order. A history record that a view
+  keeps the transaction pending, stops that link's uploads of the
+  transaction's writer node at the first one to send again (so no later
+  upload of that writer overtakes it; other writers' uploads go on), and
+  after a backoff (1 s doubling per answer to at most 30 s, jittered into
+  the upper half of each step) uploads them again from there in outbox
+  order. Uploads stay pipelined: no node waits for a fate before sending the
+  next transaction. When it holds the predecessor queued or (as the author)
+  pending, it sends the predecessor first, moving or queueing it ahead of
+  the transaction. Only the transaction's author fails it: when the author
+  does not know the predecessor, the predecessor's upload failed there, or
+  it already holds a final fate for it, it fails the transaction locally
+  with a `MalformedCommit` rejection starting "predecessor lost" and drops
+  it from its outbox. A relay forwards the answer towards the author along
+  the transaction's fate route and never fates the transaction; when it
+  does not hold the predecessor queued, it drops its copy from its outbox
+  and the author's retry brings both again. The deferral belongs to the
+  link: a new link starts without one and uploads every pending transaction
+  again in outbox order. A history record that a view
   update or relay forwards carries the base and lost cells Core stored, and
   takes its seq from the bundle's accepted `GlobalTime`. `FateUpdate` is
   unchanged;

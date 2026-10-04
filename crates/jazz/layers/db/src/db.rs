@@ -2276,12 +2276,18 @@ fn release_local_replay_fates(routes: &LocalFateRoutes) {
 
 fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
     let terminal = local_fate_is_terminal(fate);
+    // A forwarded `RetryLater` is not a fate: a blocked replay route keeps
+    // the fate it holds, and the author's live retry recovers the write.
+    let retry_later = matches!(fate, SyncMessage::RetryLater { .. });
     let mut routes = routes.borrow_mut();
     let Some(pending) = routes.get_mut(&tx_id) else {
         return;
     };
     pending.retain_mut(|candidate| {
         if !candidate.replay_ready {
+            if retry_later {
+                return true;
+            }
             // The durable transaction state is authoritative; retaining the
             // latest wire fate only covers the interval before a repair-ready
             // route can reconstruct and emit it. Never replace a terminal
@@ -2985,6 +2991,18 @@ impl UploadOutbox {
         self.entries
             .iter()
             .position(|pending| pending.tx_id == tx_id)
+    }
+
+    /// Move queued `tx_id` to just before queued `before` when it sits after
+    /// it: a predecessor a queued upload waits for goes up first (SPEC 8).
+    fn move_before(&mut self, tx_id: TxId, before: TxId) {
+        let (Some(from), Some(to)) = (self.position(tx_id), self.position(before)) else {
+            return;
+        };
+        if from > to {
+            let pending = self.entries.remove(from).expect("position is in range");
+            self.entries.insert(to, pending);
+        }
     }
 
     /// Queue `tx_id` to go up just before `before`: a write a queued upload
