@@ -2276,8 +2276,6 @@ fn release_local_replay_fates(routes: &LocalFateRoutes) {
 
 fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
     let terminal = local_fate_is_terminal(fate);
-    // A forwarded `RetryLater` is not a fate: a blocked replay route keeps
-    // the fate it holds, and the author's live retry recovers the write.
     let retry_later = matches!(fate, SyncMessage::RetryLater { .. });
     let mut routes = routes.borrow_mut();
     let Some(pending) = routes.get_mut(&tx_id) else {
@@ -2285,19 +2283,21 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
     };
     pending.retain_mut(|candidate| {
         if !candidate.replay_ready {
-            if retry_later {
-                return true;
-            }
             // The durable transaction state is authoritative; retaining the
             // latest wire fate only covers the interval before a repair-ready
             // route can reconstruct and emit it. Never replace a terminal
-            // fate with a later non-terminal progress update.
-            if terminal
-                || candidate
-                    .held_fate
-                    .as_ref()
-                    .is_none_or(|held| !local_fate_is_terminal(held))
-            {
+            // fate with a later non-terminal progress update. A forwarded
+            // `RetryLater` is held too (the relay dropped its own copy of the
+            // write, so it is the author's only signal to resend); a later
+            // progress update, which readiness reconstructs anyway, does not
+            // replace it.
+            let replace = match candidate.held_fate.as_ref() {
+                None => true,
+                Some(held) if local_fate_is_terminal(held) => terminal,
+                Some(SyncMessage::RetryLater { .. }) => terminal || retry_later,
+                Some(_) => true,
+            };
+            if replace {
                 candidate.held_fate = Some(fate.clone());
             }
             return true;

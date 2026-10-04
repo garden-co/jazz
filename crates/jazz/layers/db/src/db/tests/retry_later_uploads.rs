@@ -682,3 +682,114 @@ fn relay_never_fails_a_clients_write_whose_predecessor_it_lacks() {
         Some(Value::String("e2".to_owned()))
     );
 }
+
+/// A relay forwards a `RetryLater` to the author's route while that route
+/// is still blocked on replay. The relay has dropped its own copy of the
+/// write, so the answer is the author's only signal to resend: the route
+/// holds it (a later progress update does not replace it) and delivers it
+/// once replay is ready.
+#[test]
+fn retry_later_forwarded_to_a_blocked_replay_route_is_delivered_once_ready() {
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let author = AuthorSubject::for_test_bytes([0xf1; 16]);
+    let writer = NodeUuid::from_bytes([0xf2; 16]);
+    let tx_id = TxId::new(TxTime(2), writer);
+    let retry_later = SyncMessage::RetryLater {
+        tx_id,
+        awaiting: TxId::new(TxTime(1), writer),
+    };
+    register_local_replay_route(&routes, tx_id, &queue, author, None);
+    route_local_fate(&routes, tx_id, &retry_later);
+    route_local_fate(
+        &routes,
+        tx_id,
+        &SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Pending,
+            global_time: None,
+            durability: Some(DurabilityTier::Local),
+        },
+    );
+    assert!(queue.borrow().is_empty(), "nothing goes out while blocked");
+    register_local_fate_route(&routes, tx_id, &queue);
+    release_local_replay_fates(&routes);
+    assert_eq!(queue.borrow().as_slice(), [retry_later]);
+}
+
+/// A blocked replay route that already holds a terminal fate keeps it: a
+/// later forwarded `RetryLater` does not replace it.
+#[test]
+fn retry_later_never_replaces_a_held_terminal_fate() {
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let author = AuthorSubject::for_test_bytes([0xf3; 16]);
+    let writer = NodeUuid::from_bytes([0xf4; 16]);
+    let tx_id = TxId::new(TxTime(2), writer);
+    let rejected = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+        global_time: None,
+        durability: None,
+    };
+    register_local_replay_route(&routes, tx_id, &queue, author, None);
+    route_local_fate(&routes, tx_id, &rejected);
+    route_local_fate(
+        &routes,
+        tx_id,
+        &SyncMessage::RetryLater {
+            tx_id,
+            awaiting: TxId::new(TxTime(1), writer),
+        },
+    );
+    register_local_fate_route(&routes, tx_id, &queue);
+    release_local_replay_fates(&routes);
+    assert_eq!(queue.borrow().as_slice(), [rejected]);
+}
+
+/// alice's first edit failed its large-value upload: her link dropped it
+/// from the outbox and staged its rejection, which is not applied yet, so
+/// the edit is still pending here. Core then answers her second edit with
+/// `RetryLater`, naming the first. The failed edit is not queued again;
+/// the second fails as "predecessor lost". (The link state is set the way
+/// the large-value `Rejected` answer sets it; the staged rejection is left
+/// out so the window before it applies stays open.)
+#[test]
+fn predecessor_whose_large_value_upload_failed_is_not_queued_again() {
+    let mut fixture = Fixture::new(0xeb);
+    let e1 = fixture.edit("e1");
+    let e2 = fixture.edit("e2");
+    fixture.upload(e2);
+    fixture.take_upload(e1);
+    {
+        let mut link = fixture.links.0.borrow_mut();
+        let ConnectionLink::Upstream(state) = &mut link.link else {
+            unreachable!("the writer's link is upstream")
+        };
+        state.failed_large_value_uploads.insert(e1);
+    }
+    {
+        let mut outbox = fixture.writer.node.outbox.borrow_mut();
+        outbox.retain(|pending| pending.tx_id != e1);
+        outbox.mark_upload_failed(e1, "its large value was not staged by the server");
+    }
+    assert_eq!(fixture.writer.write_state(e1).unwrap().fate, Fate::Pending);
+    let failed = |fixture: &Fixture| {
+        matches!(
+            fixture.writer.write_state(e2).map(|state| state.fate),
+            Ok(Fate::Rejected(_))
+        )
+    };
+    fixture.pump_until(16, failed);
+    let Ok(Fate::Rejected(RejectionReason::MalformedCommit(message))) =
+        fixture.writer.write_state(e2).map(|state| state.fate)
+    else {
+        panic!("e2 fails: {:?}", fixture.writer.write_state(e2));
+    };
+    assert!(message.starts_with("predecessor lost"), "{message}");
+    assert!(
+        !fixture.writer.node.outbox.borrow().contains(e1),
+        "the failed predecessor is not queued again"
+    );
+    assert_eq!(fixture.core_state(e1), None);
+}

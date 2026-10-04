@@ -2380,7 +2380,12 @@ where
                         }
                         let deferred_from = deferred_uploads
                             .iter()
-                            .map(|(writer, deferred)| (deferred.from, *writer))
+                            .map(|(writer, deferred)| {
+                                // A write's pending predecessor is its own
+                                // writer's (SPEC 4 §4.6).
+                                debug_assert_eq!(deferred.from.node, *writer);
+                                (deferred.from, *writer)
+                            })
                             .collect::<BTreeMap<_, _>>();
                         let mut deferred_writers = BTreeSet::new();
                         for (tx_id, staged) in to_upload {
@@ -3423,6 +3428,11 @@ where
                                     *expected_scope_authority,
                                     admitted,
                                 ) || !outbox.borrow().contains(tx_id)
+                                    // Core names only an older write of the
+                                    // same writer (SPEC 4 §4.6); anything else
+                                    // is ignored.
+                                    || awaiting.node != tx_id.node
+                                    || awaiting.time >= tx_id.time
                                 {
                                     continue;
                                 }
@@ -3437,7 +3447,11 @@ where
                                     // A relay forwards the answer towards the
                                     // write's author: only the author knows
                                     // whether its predecessor is lost, and its
-                                    // retry sends the predecessor again.
+                                    // retry sends the predecessor again. It
+                                    // forwards even when it holds the
+                                    // predecessor queued itself; the author's
+                                    // duplicate resend is by design (SPEC 4
+                                    // §4.6) and the relay deduplicates it.
                                     route_local_fate(
                                         &self.local_fate_routes,
                                         tx_id,
