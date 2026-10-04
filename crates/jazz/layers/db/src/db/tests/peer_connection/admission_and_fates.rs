@@ -3998,6 +3998,132 @@ fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
     );
 }
 
+/// Alice reads an unchanged protected row and writes an audit row through a
+/// scope-isolated relay. Final predicate validation must use the same admitted
+/// authMode as the read, not the Core's author-keyed compatibility claims.
+///
+/// alice/external ──predicate read──► unchanged protected row
+///        └──exclusive audit write──► admitted relay ──► Core ──► Accepted/Global
+#[test]
+fn delegated_exclusive_predicate_uses_final_ingest_claim_scope() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("protected")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::SessionCmp {
+                            path: vec!["authMode".to_owned()],
+                            op: PublicCmpOp::Eq,
+                            value: PublicValue::Text("external".to_owned()),
+                        },
+                    )),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("audit")
+                    .column("note", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_insert(PublicPolicyExpr::True),
+                    ),
+            ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xe9; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let protected = row(0x91);
+    server
+        .insert_with_id(
+            "protected",
+            protected,
+            BTreeMap::from([("title".to_owned(), Value::String("unchanged".to_owned()))]),
+        )
+        .unwrap();
+    let claims = BTreeMap::from([("authMode".to_owned(), Value::String("external".to_owned()))]);
+    let client = open_db(0xe9, alice, &schema);
+    client.set_test_provider_claims(alice, claims.clone());
+    let (client_transport, server_transport) = duplex();
+    let upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber_with_claims(server_transport, alice, claims.clone());
+    let query = Query::from("protected");
+    let prepared = prepared(&client, &query);
+    let _stream = block_on(client.subscribe(&prepared, global_subscribe_opts())).unwrap();
+    let pump = || {
+        for _ in 0..32 {
+            client.tick().unwrap();
+            server.tick().unwrap();
+        }
+    };
+    pump();
+    assert_eq!(
+        client
+            .read(&prepared)
+            .unwrap()
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![protected],
+    );
+    // The relay admits the same immutable claims, while the compatibility
+    // cache now lacks authMode. No protected row or read grant changes.
+    assert!(client.detach_connection(&upstream));
+    assert!(server.server.detach_connection(&subscriber));
+    server
+        .node()
+        .borrow_mut()
+        .set_test_provider_claims(alice, BTreeMap::new());
+    let (mut relay, server_transport) = duplex();
+    let relay_subscriber =
+        server.accept_scope_isolated_relay_subscriber(server_transport, alice, claims, 19);
+    let open = crate::db::OpenTransactionId::new();
+    client.begin_exclusive(open).unwrap();
+    assert_eq!(
+        client
+            .exclusive_tx_ref(open)
+            .all_prepared_for_identity(&prepared, alice)
+            .unwrap()
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![protected],
+    );
+    client
+        .exclusive_tx_ref(open)
+        .insert(
+            "audit",
+            BTreeMap::from([(
+                "note".to_owned(),
+                Value::String("read protected".to_owned()),
+            )]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0x92)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let tx_id = client.commit_exclusive_handle(open).unwrap();
+    let unit = block_on(client.node.node.borrow_mut().commit_unit_for(tx_id)).unwrap();
+    relay.send(unit).unwrap();
+    block_on(relay_subscriber.borrow_mut().tick()).unwrap();
+    assert_eq!(
+        block_on(server.node().borrow_mut().transaction_state(tx_id))
+            .unwrap()
+            .0,
+        Fate::Accepted,
+    );
+    assert!(matches!(
+        block_on(server.node().borrow_mut().transaction_state(tx_id)),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global)),
+    ));
+    let rows = server.read(&Query::from("audit")).unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.row_uuid(), row.cell(&schema.tables[1], "note")))
+            .collect::<Vec<_>>(),
+        vec![(row(0x92), Some(Value::String("read protected".to_owned())))],
+    );
+}
+
 /// A terminal proof uses its own admitted link's claims, even if another live
 /// link authenticates the same author with different claims first.
 ///
