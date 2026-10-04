@@ -214,7 +214,6 @@ groove::define_record! {
     }
 }
 
-
 groove::define_record! {
 pub(super) struct ContributionMergeStorageRecord {
         0 => source: Vec<u8>,
@@ -3860,7 +3859,6 @@ pub(super) fn known_transaction_payload_matches(
     redacted_incoming.predicate_read_set = None;
     redacted_existing == redacted_incoming
 }
-
 
 /// Copy a transaction for a carrier boundary or duplicate comparison without
 /// its local-only policy capability. Durable provenance remains untouched.
