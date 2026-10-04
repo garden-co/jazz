@@ -23,7 +23,7 @@ use jazz::query::{OrderDirection, Query, col, eq, lit, param};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
-use jazz_storage_rocksdb::RocksDbStorage;
+use jazz_storage_rocksdb::RocksDbStorageFactory;
 use sha2::{Digest, Sha256};
 
 const TABLE: &str = "catalogue";
@@ -180,12 +180,12 @@ fn schema() -> JazzSchema {
 }
 
 fn open_db(path: &Path, schema: JazzSchema) -> Db {
-    let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(path, &refs).expect("open live-view RocksDB");
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::default(),
+        path.to_path_buf(),
+        schema.column_families(),
+    ))
+    .expect("admit live-view RocksDB");
     block_on(Db::open_history_complete(
         DbConfig::new(
             schema,
