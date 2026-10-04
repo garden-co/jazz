@@ -135,6 +135,10 @@ this document or public receipts.
   Publish it with `prerelease=false`; do not use generated commit lists as a
   substitute for the audited changelog. Set latest deliberately for the new normal
   release rather than leaving the benchmark-fixtures release as latest.
+- Merge `release` back into `main` with a merge commit (a PR from a branch cut
+  from `main`, never squashed), as described under "Release branch lifecycle"
+  below. Without it `main` keeps stale package versions, changelogs and
+  `.changeset/pre.json`.
 - Publish the announcement only with explicit authorization, linking to release
   notes, upgrade instructions and relevant measured benchmarks.
 - Close the completed milestone after moving unresolved work to its agreed target.
