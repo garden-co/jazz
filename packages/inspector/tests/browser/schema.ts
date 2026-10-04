@@ -1,9 +1,9 @@
-import { col, defineApp, definePermissions, type Schema, type App } from "jazz-tools";
+import { schema as s, defineApp, definePermissions, type Schema, type App } from "jazz-tools";
 
 const schema = {
   todos: {
-    title: col.string(),
-    done: col.boolean(),
+    title: s.string(),
+    done: s.boolean(),
   },
 };
 

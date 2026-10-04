@@ -4,6 +4,8 @@
 //! one directly. An executable whose allocator can sample the heap passes a
 //! [`HeapProfileDump`] to [`ServerBuilder::with_heap_profiler`] and to
 //! [`DiagnosticsConfig`]; everything else answers `501 Not Implemented`.
+//! A profiler that is built in but switched off answers `404 Not Found` with
+//! [`HeapProfileError::NotEnabled`]'s explanation.
 //!
 //! The profile is served at `GET /debug/pprof/heap` as a gzipped pprof
 //! protobuf of in-use bytes, the format `go tool pprof` and continuous
@@ -36,7 +38,16 @@ pub const HEAP_PROFILE_PATH: &str = "/debug/pprof/heap";
 /// Dump the sampled in-use heap as a gzipped pprof protobuf.
 ///
 /// Called on a blocking thread; implementations may take tens of milliseconds.
-pub type HeapProfileDump = fn() -> Result<Vec<u8>, String>;
+pub type HeapProfileDump = fn() -> Result<Vec<u8>, HeapProfileError>;
+
+/// Why a [`HeapProfileDump`] produced no profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeapProfileError {
+    /// The profiler is built in but was not switched on; the message says how.
+    NotEnabled(String),
+    /// The dump itself failed.
+    Failed(String),
+}
 
 /// Process diagnostics the server shell serves next to the app routes.
 #[derive(Debug, Clone, Default)]
@@ -157,7 +168,12 @@ async fn heap_profile_response(heap_profiler: Option<HeapProfileDump>) -> Respon
             profile,
         )
             .into_response(),
-        Ok(Err(message)) => (
+        Ok(Err(HeapProfileError::NotEnabled(message))) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(message)),
+        )
+            .into_response(),
+        Ok(Err(HeapProfileError::Failed(message))) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(format!(
                 "Heap profile dump failed: {message}"
@@ -176,8 +192,8 @@ async fn heap_profile_response(heap_profiler: Option<HeapProfileDump>) -> Respon
 
 #[cfg(test)]
 mod tests {
-    //! Router-level tests: the Linux binary always installs a working heap
-    //! profiler, so the no-profiler and failed-dump branches, and the
+    //! Router-level tests: the Linux binary always installs a heap profiler,
+    //! so the no-profiler and failed-dump branches, and the
     //! diagnostics router in isolation, are only reachable from here. The
     //! end-to-end path is covered by `jazz-cli`'s process test.
 
@@ -189,12 +205,18 @@ mod tests {
 
     const FAKE_PROFILE: &[u8] = b"\x1f\x8bfake-pprof";
 
-    fn fake_dump() -> Result<Vec<u8>, String> {
+    fn fake_dump() -> Result<Vec<u8>, HeapProfileError> {
         Ok(FAKE_PROFILE.to_vec())
     }
 
-    fn failing_dump() -> Result<Vec<u8>, String> {
-        Err("heap dump failed".to_owned())
+    fn failing_dump() -> Result<Vec<u8>, HeapProfileError> {
+        Err(HeapProfileError::Failed("heap dump failed".to_owned()))
+    }
+
+    fn disabled_dump() -> Result<Vec<u8>, HeapProfileError> {
+        Err(HeapProfileError::NotEnabled(
+            "Heap profiling is not enabled on this server".to_owned(),
+        ))
     }
 
     fn admin_auth(secret: Option<&str>) -> AuthConfig {
@@ -326,6 +348,20 @@ mod tests {
             String::from_utf8(body)
                 .unwrap()
                 .contains("not supported by this server build yet")
+        );
+    }
+
+    /// A profiler that is built in but off says so instead of serving an
+    /// empty profile.
+    #[tokio::test]
+    async fn disabled_heap_profilers_say_so() {
+        let (status, body) = get(diagnostics_router(Some(disabled_dump), None), None).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            String::from_utf8(body)
+                .unwrap()
+                .contains("not enabled on this server")
         );
     }
 

@@ -333,10 +333,10 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 
 function rootSchemaWithInlinePermissions(dslImportPath: string = dslPath): string {
   return `
-import { table, col } from ${JSON.stringify(dslImportPath)};
+import { table, schemaColumns as s } from ${JSON.stringify(dslImportPath)};
 
 table("todos", {
-  title: col.string(),
+  title: s.string(),
 }, {
   permissions: {
     select: { type: "True" },
@@ -1559,7 +1559,7 @@ describe("cli migrations", () => {
         throw new Error("Expected createMigration() to return a migration file path.");
       }
       const generated = await readFile(filePath, "utf8");
-      expect(generated).toContain('"notes": s.add.string({ default: null }),');
+      expect(generated).toContain('"notes": m.add.string({ default: null }),');
       const snapshotFiles = (await readdir(snapshotsDir))
         .filter((name) => name.endsWith(".json"))
         .sort();
@@ -1792,8 +1792,8 @@ describe("cli migrations", () => {
     }
 
     const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"addedValue": s.add.bigint({ default: null }),');
-    expect(generated).toContain('"removedValue": s.drop.bigint({ backwardsDefault: null }),');
+    expect(generated).toContain('"addedValue": m.add.bigint({ default: null }),');
+    expect(generated).toContain('"removedValue": m.drop.bigint({ backwardsDefault: null }),');
     expect(generated).toContain('"value": s.bigint().merge("counter"),');
     await typecheckGeneratedMigration(filePath);
   }, 30_000);
@@ -1917,10 +1917,10 @@ describe("cli migrations", () => {
     }
     const generated = await readFile(filePath, "utf8");
     expect(filePath).toContain(`-unnamed-${fromShortHash}-`);
-    expect(generated).toContain("s.defineMigration");
+    expect(generated).toContain("m.defineMigration");
     expect(generated).toContain(`fromHash: "${fromShortHash}"`);
     expect(generated).toContain("migrate: {");
-    expect(generated).toContain('"notes": s.add.string({ default: null }),');
+    expect(generated).toContain('"notes": m.add.string({ default: null }),');
     const snapshotFiles = (await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"));
     expect(snapshotFiles).toHaveLength(2);
     expect(
@@ -1990,7 +1990,7 @@ describe("cli migrations", () => {
     }
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain('"todos": {');
-    expect(generated).toContain('"notes": s.add.string({ default: null }),');
+    expect(generated).toContain('"notes": m.add.string({ default: null }),');
     expect(generated).toContain("createTables: {");
     expect(generated).toContain('"users": true,');
     expect(generated).toContain("dropTables: {");
@@ -2042,7 +2042,7 @@ describe("cli migrations", () => {
 
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain("renameTables: {");
-    expect(generated).toContain('people: s.renameTableFrom("users"),');
+    expect(generated).toContain('people: m.renameTableFrom("users"),');
     expect(generated).toContain("from: {");
     expect(generated).toContain('"users": s.table({');
     expect(generated).toContain("to: {");
@@ -2101,8 +2101,8 @@ describe("cli migrations", () => {
 
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain("renameTables: {");
-    expect(generated).toContain('companies: s.renameTableFrom("orgs"),');
-    expect(generated).toContain('people: s.renameTableFrom("users"),');
+    expect(generated).toContain('companies: m.renameTableFrom("orgs"),');
+    expect(generated).toContain('people: m.renameTableFrom("users"),');
     expect(generated).not.toContain("createTables: {");
     expect(generated).not.toContain("dropTables: {");
     expect(generated).toContain('"orgs": s.table({');
@@ -2181,12 +2181,12 @@ describe("cli migrations", () => {
     await writeFile(
       migrationPath,
       `
-import { schema as s } from ${JSON.stringify(indexPath)};
+import { schema as s, migration as m } from ${JSON.stringify(indexPath)};
 
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     users: {
-      email_address: s.renameFrom("email"),
+      email_address: m.renameFrom("email"),
     },
   },
   fromHash: ${JSON.stringify(fromShortHash)},
@@ -2274,12 +2274,12 @@ export default s.defineMigration({
     await writeFile(
       migrationPath,
       `
-import { schema as s } from ${JSON.stringify(indexPath)};
+import { schema as s, migration as m } from ${JSON.stringify(indexPath)};
 
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     users: {
-      email_address: s.renameFrom("email"),
+      email_address: m.renameFrom("email"),
     },
   },
   fromHash: ${JSON.stringify(fromShortHash)},
@@ -2380,9 +2380,9 @@ export default s.defineMigration({
     await writeFile(
       migrationPath,
       `
-import { schema as s } from ${JSON.stringify(indexPath)};
+import { schema as s, migration as m } from ${JSON.stringify(indexPath)};
 
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {},
   fromHash: ${JSON.stringify(fromShortHash)},
   toHash: ${JSON.stringify(toShortHash)},
@@ -2565,15 +2565,15 @@ export default s.defineMigration({
     await writeFile(
       migrationPath,
       `
-import { schema as s } from ${JSON.stringify(indexPath)};
+import { schema as s, migration as m } from ${JSON.stringify(indexPath)};
 
-export default s.defineMigration({
+export default m.defineMigration({
   renameTables: {
-    people: s.renameTableFrom("users"),
+    people: m.renameTableFrom("users"),
   },
   migrate: {
     people: {
-      email_address: s.renameFrom("email"),
+      email_address: m.renameFrom("email"),
     },
   },
   fromHash: ${JSON.stringify(fromShortHash)},
@@ -2651,9 +2651,9 @@ export default s.defineMigration({
     await writeFile(
       migrationPath,
       `
-import { schema as s } from ${JSON.stringify(indexPath)};
+import { schema as s, migration as m } from ${JSON.stringify(indexPath)};
 
-export default s.defineMigration({
+export default m.defineMigration({
   createTables: {
     profiles: true,
   },
@@ -3154,12 +3154,12 @@ describe("cli deploy", () => {
     await writeFile(
       join(migrationsDir, `20260318-rename-${previousShortHash}-${nextShortHash}.ts`),
       `
-import { schema as s } from ${JSON.stringify(indexPath)};
+import { schema as s, migration as m } from ${JSON.stringify(indexPath)};
 
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     todos: {
-      ownerId: s.renameFrom("owner_id"),
+      ownerId: m.renameFrom("owner_id"),
     },
   },
   fromHash: ${JSON.stringify(previousShortHash)},
@@ -3437,12 +3437,12 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
         ? `${toColumn}: s.string(),\n      title: s.string(),`
         : `title: s.string(),\n      ${toColumn}: s.string(),`;
       return `
-import { schema as s } from ${JSON.stringify(indexPath)};
+import { schema as s, migration as m } from ${JSON.stringify(indexPath)};
 
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     todos: {
-      ${toColumn}: s.renameFrom(${JSON.stringify(fromColumn)}),
+      ${toColumn}: m.renameFrom(${JSON.stringify(fromColumn)}),
     },
   },
   fromHash: ${JSON.stringify(fromHash)},
