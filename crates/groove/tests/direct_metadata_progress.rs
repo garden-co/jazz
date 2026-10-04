@@ -218,6 +218,8 @@ fn metadata_completion_leaves_unrelated_cold_query_on_its_durable_owner_waker() 
         Some(&owner_waker),
     ))
     .unwrap();
+    // A later externally-driven turn must not replace the retained owner.
+    finish(database.drive_ready_progress()).unwrap();
     assert!(
         second.try_recv().is_err(),
         "metadata must complete without awaiting unrelated chunks"
