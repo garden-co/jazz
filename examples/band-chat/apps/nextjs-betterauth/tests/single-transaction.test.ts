@@ -55,7 +55,6 @@ it("creates a room with its creator's membership, then a sketch with its message
       text: "",
       canvasId: canvas.id,
     });
-    tx.update(app.rooms, room.id, { lastActivityAt: new Date() });
     return canvas;
   });
   const canvas = await sketching.wait({ tier: "global" });
