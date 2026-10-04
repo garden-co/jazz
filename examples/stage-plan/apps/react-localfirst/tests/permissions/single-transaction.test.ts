@@ -67,5 +67,5 @@ it("writes the whole demo show in one transaction", async () => {
   await expect(chief.all(app.showCrew.where({ showId }), remote)).resolves.toHaveLength(1);
   await expect(chief.all(app.tasks.where({ showId }), remote)).resolves.toHaveLength(8);
   await expect(chief.all(app.activity.where({ showId }), remote)).resolves.toHaveLength(9);
-  await expect(chief.all(app.comments, global)).resolves.toHaveLength(1);
+  await expect(chief.all(app.comments, remote)).resolves.toHaveLength(1);
 });
