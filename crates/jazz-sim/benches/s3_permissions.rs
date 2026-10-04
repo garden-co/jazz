@@ -43,7 +43,7 @@ use jazz_sim::{
     DeterministicDriver, DriverContext, NodeRole, PeerProfile, ThreadedDriver, Topology,
     bench_profile, emit_json_line, metadata_fields, profiling,
 };
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::{Durability, RocksDbStorageFactory};
 use serde_json::{Value as JsonValue, json};
 
 const ORGS: &str = "orgs";
@@ -2452,10 +2452,12 @@ struct CoreDb {
 
 fn open_core_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, CoreDb) {
     let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        schema.column_families(),
+    ))
+    .unwrap();
     let node = block_on(NodeState::new_history_complete(node_uuid, schema, storage)).unwrap();
     (
         dir,
@@ -2485,10 +2487,12 @@ fn open_db(
     seed: u64,
 ) -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        schema.column_families(),
+    ))
+    .unwrap();
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -2505,10 +2509,12 @@ fn open_db(
 
 fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        schema.column_families(),
+    ))
+    .unwrap();
     let node = block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))

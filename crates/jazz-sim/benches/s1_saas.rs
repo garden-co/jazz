@@ -35,7 +35,7 @@ use jazz_sim::{
     ThreadedDriver, Topology, bench_profile, emit_json_line, metadata_fields, profiling,
     scenario_transport_codec_env,
 };
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::{Durability, RocksDbStorageFactory};
 use serde_json::{Value as JsonValue, json};
 
 const ORGS: &str = "orgs";
@@ -2232,11 +2232,12 @@ fn schema() -> JazzSchema {
 
 fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
-            .expect("open rocksdb");
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        temp_dir.path().to_path_buf(),
+        schema.column_families(),
+    ))
+    .expect("admit rocksdb");
     let node = block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))
@@ -2250,11 +2251,12 @@ fn open_db(
     schema: JazzSchema,
 ) -> (tempfile::TempDir, Db) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
-            .expect("open rocksdb");
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        temp_dir.path().to_path_buf(),
+        schema.column_families(),
+    ))
+    .expect("admit rocksdb");
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
