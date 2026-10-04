@@ -6571,8 +6571,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
     tier: DurabilityTier,
     settled: bool,
 ) -> Result<SubscriptionEvent, Error> {
-    let mut root_operations = Vec::new();
-    let mut descendant_operations = Vec::new();
+    let mut addressed_operations = Vec::new();
     for operation in operations {
         if operation.root_descriptor != layout.root_descriptor {
             return Err(Error::new(
@@ -6603,9 +6602,9 @@ fn apply_terminal_operations_to_subscription_snapshot(
                         layout.root_union_arm,
                     )
                 })?;
-            root_operations.push((occurrence_id, operation));
+            addressed_operations.push((Some(occurrence_id), operation));
         } else {
-            descendant_operations.push(operation);
+            addressed_operations.push((None, operation));
         }
     }
 
@@ -6619,9 +6618,9 @@ fn apply_terminal_operations_to_subscription_snapshot(
             "maintained snapshot root is missing an occurrence identity",
         ));
     }
-    let affected = root_operations
+    let affected = addressed_operations
         .iter()
-        .map(|(occurrence_id, _)| occurrence_id.clone())
+        .filter_map(|(occurrence_id, _)| occurrence_id.clone())
         .collect::<BTreeSet<_>>();
     for occurrence in &affected {
         materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
@@ -6634,52 +6633,55 @@ fn apply_terminal_operations_to_subscription_snapshot(
         })
         .collect::<BTreeMap<_, _>>();
 
-    let inserted = root_operations
-        .iter()
-        .filter_map(|(occurrence, operation)| match operation.edit {
-            groove::ivm::TerminalEdit::Insert { .. } => Some((occurrence.clone(), true)),
-            groove::ivm::TerminalEdit::Remove { .. } => Some((occurrence.clone(), false)),
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .filter_map(|(key, present)| present.then_some(key))
-        .collect::<BTreeSet<_>>();
-    let replaced = root_operations
-        .iter()
-        .filter_map(|(occurrence, operation)| {
-            (matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. })
-                && inserted.contains(occurrence))
-            .then_some(occurrence.clone())
-        })
-        .collect::<BTreeSet<_>>();
-    for (occurrence, operation) in &root_operations {
-        if replaced.contains(occurrence) {
-            if let groove::ivm::TerminalEdit::Insert { value, .. } = &operation.edit {
-                if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
-                    state.update_record(OwnedRecord::new(
-                        value.clone(),
-                        operation.root_descriptor,
-                    ))?;
-                }
-            }
-            continue;
-        }
-        if let groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit {
-            if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
-                state.update_record(OwnedRecord::new(value.clone(), operation.root_descriptor))?;
-            }
-        } else if !matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. }) {
-            snapshot_index.terminal_records.remove(occurrence);
-        }
-    }
-
     // Apply Groove's positional edits directly to the root order: each edit
     // costs O(log n) index work plus one row-vector shift, and unchanged
     // roots are never renumbered or revisited.
-    for (occurrence_id, operation) in root_operations {
+    let mut descendant_operations = Vec::new();
+    let mut removed_roots = BTreeSet::new();
+    for (occurrence_id, operation) in addressed_operations {
+        let Some(occurrence_id) = occurrence_id else {
+            apply_descendant_terminal_operations_to_snapshot(
+                snapshot,
+                snapshot_index,
+                &removed_roots,
+                std::slice::from_ref(&operation),
+                layout.root_union_arm,
+            )?;
+            descendant_operations.push(operation);
+            continue;
+        };
+        let occurrence = &occurrence_id;
+        if let groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit {
+            // A root which has not received child edits still holds its
+            // collections in the snapshot row. Retain that pre-update state
+            // before replacing the scalar payload below.
+            if !snapshot_index.terminal_records.contains_key(occurrence) {
+                let position = snapshot_index.roots.position(occurrence).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Protocol,
+                        "terminal root update addressed a missing result",
+                    )
+                })?;
+                let (descriptor, raw) = snapshot.rows[position].encoded_record();
+                let state = terminal_record::TerminalRecordState::new(OwnedRecord::new(
+                    raw.to_vec(),
+                    *descriptor,
+                ))?;
+                snapshot_index
+                    .terminal_records
+                    .insert(occurrence.clone(), state);
+            }
+            snapshot_index
+                .terminal_records
+                .get_mut(occurrence)
+                .expect("initialized above")
+                .update_record(OwnedRecord::new(value.clone(), operation.root_descriptor))?;
+        } else if !matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. }) {
+            snapshot_index.terminal_records.remove(occurrence);
+        }
         match operation.edit {
             groove::ivm::TerminalEdit::Insert { index, value, .. } => {
+                removed_roots.remove(&occurrence_id);
                 if let Some(existing) = snapshot_index.roots.remove(&occurrence_id) {
                     snapshot.rows.remove(existing);
                     snapshot.root_count -= 1;
@@ -6716,6 +6718,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
                 .row;
             }
             groove::ivm::TerminalEdit::Remove { .. } => {
+                removed_roots.insert(occurrence_id.clone());
                 let Some(index) = snapshot_index.roots.remove(&occurrence_id) else {
                     return Err(Error::new(
                         ErrorCode::Protocol,
@@ -6740,19 +6743,13 @@ fn apply_terminal_operations_to_subscription_snapshot(
         }
     }
 
-    // The facade retains the exact collector tree by folding the same
-    // root/descendant terminal stream it exposes to consumers.  This is not
-    // a second materializer: a later reset is simply a snapshot of this
-    // receiver-local reducer after the ordered operations below have been
-    // applied.  In particular, an authority-covered receiver must never
-    // reconstruct nested children from result membership or authority facts.
-    apply_descendant_terminal_operations_to_snapshot(
-        snapshot,
-        snapshot_index,
-        &affected,
-        &descendant_operations,
-        layout.root_union_arm,
-    )?;
+    // Roots changed in this drain are published as complete final rows below.
+    // Do not replay their earlier child edits on top of those replacements.
+    descendant_operations.retain(|operation| {
+        let occurrence =
+            terminal_root_occurrence_id_with_root_union(&operation.root_key, layout.root_union_arm);
+        !occurrence.is_ok_and(|occurrence| affected.contains(&occurrence))
+    });
 
     for occurrence in &affected {
         materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
@@ -6814,7 +6811,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
 fn apply_descendant_terminal_operations_to_snapshot(
     snapshot: &mut RelationSnapshot,
     snapshot_index: &mut RelationSnapshotIndex,
-    roots_changed_in_batch: &BTreeSet<OutputOccurrenceId>,
+    removed_roots: &BTreeSet<OutputOccurrenceId>,
     operations: &[groove::ivm::TerminalOperation],
     root_union_arm: bool,
 ) -> Result<(), Error> {
@@ -6826,11 +6823,9 @@ fn apply_descendant_terminal_operations_to_snapshot(
             terminal_root_occurrence_id_with_root_union(&operation.root_key, root_union_arm)?;
         let Some(root_index) = snapshot_index.roots.position(&occurrence) else {
             // A collector can emit the child retractions belonging to a root
-            // it retracts in the same terminal batch.  The public operation
-            // remains useful to a consumer which folds its child state before
-            // the root removal, but the receiver snapshot has already
-            // dropped that root in the root-edit phase above.
-            if roots_changed_in_batch.contains(&occurrence) {
+            // it has already retracted. Ignore those edits only until a new
+            // insertion starts another lifetime for that root.
+            if removed_roots.contains(&occurrence) {
                 continue;
             }
             return Err(Error::new(

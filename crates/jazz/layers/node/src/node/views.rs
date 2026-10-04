@@ -183,6 +183,19 @@ fn invalid_authority_source_closure_error(subscription: SubscriptionKey, error: 
     }
 }
 
+/// Name one supporting version in a source-closure diagnostic: the table,
+/// row and exact version, so a rejected transition says which coordinate
+/// disagreed with the receiver's retained predecessor.
+fn supporting_row_diagnostic(row: &crate::protocol::SupportingRow) -> String {
+    format!(
+        "{} {} {:?} tx {:?}",
+        row.version_table.as_str(),
+        row.row.0,
+        row.version.layer,
+        row.version.tx,
+    )
+}
+
 fn version_bundle_record_key(
     version: &VersionRecord,
 ) -> (String, BranchKey, RowUuid, SchemaVersionId, bool) {
@@ -1956,6 +1969,11 @@ where
         &mut self,
         updates: &[ViewUpdateParts],
     ) -> Result<BTreeMap<AuthorityResultKey, CompiledScopeTables>, Error> {
+        let receiver_role = if self.client_relay_scope().is_some() {
+            "client relay"
+        } else {
+            "client"
+        };
         let mut caches = BTreeMap::new();
         let mut overlays = BTreeMap::<
             AuthorityResultKey,
@@ -2017,15 +2035,24 @@ where
                         }
                     };
                     if adding {
-                        if current.is_some() {
-                            return Err(invalid(
-                                "scope addition duplicates a retained physical coordinate",
-                            ));
+                        if let Some(retained) = current {
+                            return Err(invalid(&format!(
+                                "scope addition duplicates a retained physical coordinate \
+                                 (receiver {receiver_role}: retained {}, added {})",
+                                supporting_row_diagnostic(retained),
+                                supporting_row_diagnostic(row),
+                            )));
                         }
                         changes.insert(coordinate, Some(row.clone()));
                     } else {
                         if current != Some(row) {
-                            return Err(invalid("scope removal is absent from exact predecessor"));
+                            return Err(invalid(&format!(
+                                "scope removal is absent from exact predecessor \
+                                 (receiver {receiver_role}: retained {}, removed {})",
+                                current
+                                    .map_or_else(|| "none".to_owned(), supporting_row_diagnostic),
+                                supporting_row_diagnostic(row),
+                            )));
                         }
                         changes.insert(coordinate, None);
                     }

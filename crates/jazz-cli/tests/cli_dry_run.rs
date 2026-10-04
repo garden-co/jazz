@@ -105,7 +105,11 @@ fn server_command_report(command: &mut Command) -> String {
 }
 
 fn jazz_tools_command() -> Command {
-    let mut command = Command::new(cargo_binary("jazz-tools"));
+    jazz_tools_command_at(cargo_binary("jazz-tools"))
+}
+
+fn jazz_tools_command_at(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
     command
         .env_remove("JAZZ_SERVER_PORT")
         .env_remove("JAZZ_SERVER_DATA_DIR")
@@ -138,7 +142,26 @@ fn wait_for_successful_exit(child: &mut Child, timeout: Duration) {
 
 #[cfg(unix)]
 fn start_jazz_tools_server(data_dir: &Path, bound_port_file: &Path) -> (Child, u16) {
-    let mut child = jazz_tools_command()
+    start_jazz_tools_server_with_env(data_dir, bound_port_file, &[])
+}
+
+#[cfg(unix)]
+fn start_jazz_tools_server_with_env(
+    data_dir: &Path,
+    bound_port_file: &Path,
+    env: &[(&str, &str)],
+) -> (Child, u16) {
+    let mut command = jazz_tools_command();
+    command.envs(env.iter().copied());
+    start_jazz_tools_server_with(command, data_dir, bound_port_file)
+}
+
+fn start_jazz_tools_server_with(
+    mut command: Command,
+    data_dir: &Path,
+    bound_port_file: &Path,
+) -> (Child, u16) {
+    let mut child = command
         .args([
             "server",
             "00000000-0000-0000-0000-000000000001",
@@ -1298,6 +1321,110 @@ fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
 #[test]
 fn jazz_tools_server_sigint_exits_cleanly_and_releases_storage() {
     run_signal_lifecycle(libc::SIGINT, "SIGINT");
+}
+
+/// Alice, the operator, scrapes the heap profile of a running Linux
+/// `jazz-tools` server with the admin secret and gets a gzipped pprof that
+/// names the server's own functions, so memory growth can be traced to code.
+/// Mallory, without the secret, is refused.
+///
+/// ```text
+/// mallory ──GET /debug/pprof/heap (no secret)──► 401
+/// alice   ──GET /debug/pprof/heap (admin)──────► gzipped pprof naming jazz_server::*
+/// ```
+#[cfg(heap_profiling)]
+#[test]
+fn jazz_tools_server_serves_a_symbolized_heap_profile_to_admins() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let port_file = temp_dir.path().join("port");
+    // Turn sampling on at about every allocation so the profile
+    // deterministically contains the server's startup allocations.
+    // Started as `./jazz-tools`, the way operators often run it: the
+    // profile must still find the executable's symbols.
+    let binary = cargo_binary("jazz-tools");
+    let mut command = jazz_tools_command_at("./jazz-tools");
+    command
+        .current_dir(binary.parent().expect("binary has a directory"))
+        .env("JAZZ_HEAP_PROFILE_SAMPLE_BYTES", "1");
+    let (mut server, port) = start_jazz_tools_server_with(command, &data_dir, &port_file);
+
+    let (status, _) = http_get(port, "/debug/pprof/heap", None);
+    assert_eq!(status, 401);
+
+    let (status, body) = http_get(port, "/debug/pprof/heap", Some("sigterm-test-secret"));
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let mut profile = Vec::new();
+    flate2::read::GzDecoder::new(body.as_slice())
+        .read_to_end(&mut profile)
+        .expect("heap profile is gzipped");
+    let profile = String::from_utf8_lossy(&profile);
+    assert!(
+        profile.contains("jazz_server"),
+        "heap profile should be symbolized with the server's own functions"
+    );
+
+    // SAFETY: `server.id()` names the live child process spawned above.
+    let result = unsafe { libc::kill(server.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(result, 0, "send SIGTERM to jazz-tools server");
+    wait_for_successful_exit(&mut server, Duration::from_secs(10));
+}
+
+/// With sampling turned off (`JAZZ_HEAP_PROFILE_SAMPLE_BYTES=0`) alice, the
+/// admin, gets an explicit "turned off" answer instead of an empty profile.
+#[cfg(heap_profiling)]
+#[test]
+fn jazz_tools_server_with_heap_sampling_off_says_so() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let port_file = temp_dir.path().join("port");
+    let mut command = jazz_tools_command_at(cargo_binary("jazz-tools"));
+    command.env("JAZZ_HEAP_PROFILE_SAMPLE_BYTES", "0");
+    let (mut server, port) = start_jazz_tools_server_with(command, &data_dir, &port_file);
+
+    let (status, body) = http_get(port, "/debug/pprof/heap", Some("sigterm-test-secret"));
+    assert_eq!(status, 404, "{}", String::from_utf8_lossy(&body));
+    assert!(
+        String::from_utf8_lossy(&body).contains("JAZZ_HEAP_PROFILE_SAMPLE_BYTES"),
+        "the answer says how to turn sampling on"
+    );
+
+    // SAFETY: `server.id()` names the live child process spawned above.
+    let result = unsafe { libc::kill(server.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(result, 0, "send SIGTERM to jazz-tools server");
+    wait_for_successful_exit(&mut server, Duration::from_secs(10));
+}
+
+#[cfg(heap_profiling)]
+fn http_get(port: u16, path: &str, admin_secret: Option<&str>) -> (u16, Vec<u8>) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+    let secret_header = admin_secret
+        .map(|secret| format!("X-Jazz-Admin-Secret: {secret}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{secret_header}Connection: close\r\n\r\n"
+    )
+    .expect("send request");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read response");
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("response has a header terminator");
+    let head = String::from_utf8_lossy(&response[..header_end]);
+    assert!(
+        !head
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked"),
+        "expected a sized response: {head}"
+    );
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse().ok())
+        .expect("response has a status code");
+    (status, response[header_end + 4..].to_vec())
 }
 
 /// Bound-port readiness accepts only one complete newline-terminated numeric record.
