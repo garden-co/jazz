@@ -116,9 +116,14 @@ node dev/benchmarks/sync-latency/probe.mjs \
 ```
 
 CI builds the release NAPI client/server and normal TypeScript SDK off the macro
-runner. Fast WASM is only an SDK build prerequisite and is not measured. The
+runner. Its `JAZZ_NAPI_PORTABLE_ALLOCATOR=1` build enables
+`mimalloc-safe/no_opt_arch`: the macro runner's Cortex-A72 cannot execute the
+allocator's default ARMv8.1 LSE atomics. This keeps mimalloc and all normal
+runtime features, with a distinct native fingerprint and manifest feature list;
+ordinary NAPI builds keep their defaults. Fast WASM is only an SDK build
+prerequisite and is not measured. The
 archive is checked against its content hash, source commit, workflow run,
-Node version, architecture, platform, and lockfile before measurement. This
+Node version, architecture, platform, lockfile, and native features before measurement. This
 release-profile CI run is distinct from the earlier local `perf`-profile trials.
 
 New benchmark IDs need a baseline with the same harness. A first head-only

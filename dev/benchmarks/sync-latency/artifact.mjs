@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { artifactFeatures } from "../../artifacts/provenance.mjs";
 
 async function digest(path) {
   const hash = createHash("sha256");
@@ -48,6 +49,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     arch: process.arch,
     lockfile: await digest("pnpm-lock.yaml"),
     nativeProfile: "release",
+    nativeFeatures: artifactFeatures("napi"),
   };
   await (action === "seal" ? seal : verify)(archive, identity);
 }

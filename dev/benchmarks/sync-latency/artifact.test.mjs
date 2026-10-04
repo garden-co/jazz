@@ -8,7 +8,13 @@ import { seal, verify } from "./artifact.mjs";
 test("Node benchmark handoff rejects different sources, runs, runtimes and changed bytes", async () => {
   const dir = await mkdtemp(join(tmpdir(), "jazz-node-bench-artifact-"));
   const archive = join(dir, "runtime.tgz");
-  const identity = { source: "head", run: "123", node: "v24.13.0", arch: "arm64" };
+  const identity = {
+    source: "head",
+    run: "123",
+    node: "v24.13.0",
+    arch: "arm64",
+    nativeFeatures: "default,mimalloc-safe/no_opt_arch",
+  };
   try {
     await writeFile(archive, "compiled SDK and native runtime");
     await seal(archive, identity);

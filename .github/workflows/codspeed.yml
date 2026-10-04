@@ -79,13 +79,15 @@ jobs:
       contents: read
     env:
       CARGO_BUILD_JOBS: 16
+      # The macro host is Cortex-A72 (ARMv8.0); mimalloc otherwise emits LSE.
+      JAZZ_NAPI_PORTABLE_ALLOCATOR: "1"
       CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-build
         with:
           rust-targets: wasm32-unknown-unknown
-          rust-cache-key: codspeed-node-sync-arm64-ubuntu2204-v1
+          rust-cache-key: codspeed-node-sync-arm64-ubuntu2204-v2-portable-allocator
       - uses: ./.github/actions/install-rust-tool
         with:
           tool: wasm-pack@0.13.1
@@ -120,6 +122,7 @@ jobs:
     runs-on: codspeed-macro
     timeout-minutes: 15
     env:
+      JAZZ_NAPI_PORTABLE_ALLOCATOR: "1"
       CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -136,6 +139,7 @@ jobs:
           tar -xzf target/codspeed-node-sync.tgz
       - name: Check Node runtime and CodSpeed introspection before profiling
         run: |
+          lscpu
           node --test dev/benchmarks/sync-latency/introspection.test.mjs
           node dev/benchmarks/sync-latency/probe.mjs \
             --sdk-root packages/jazz-tools --codspeed \

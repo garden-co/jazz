@@ -501,11 +501,10 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
   const napiStage =
     kind === "napi" ? mkdtempSync(join(root, "crates", "jazz-napi", ".napi-stage-")) : undefined;
   const napiPath = expectedNapiBinding && join(napiStage, expectedNapiBinding);
+  const extraFeatures = artifactFeatures(kind).split(",").slice(1);
   const args = [
     ...selectedArgs,
-    ...(artifactFeatures(kind) === "default,rn-test-bridge"
-      ? ["--features", "rn-test-bridge"]
-      : []),
+    ...(extraFeatures.length ? ["--features", extraFeatures.join(",")] : []),
     ...extraArgs,
     ...(wasmStage ? ["--out-dir", wasmStage.outDir] : []),
     ...(napiStage ? ["--output-dir", napiStage] : []),
