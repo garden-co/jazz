@@ -318,6 +318,11 @@ claims. This is the query-level application of
 output-affecting input's declared identity and type, while a binding supplies
 its execution-time value.
 
+Finalize the runtime binding-source identity after policy descriptor selection
+and execution-mode namespacing, then retarget normalized binding value sources
+to that identity. Recursive seeds and authorization subplans consume the same
+source that the prepared execution binds.
+
 A claim has one of two semantic roles wherever lowering considers an
 arrangement key. In a **filter role**, such as `row.team == claim.team`, it is
 an execution-time parameter and MUST NOT be baked as a constant into an
