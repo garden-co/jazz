@@ -450,11 +450,11 @@
         "anchor": "Positions 5 through 8 hold exclusive read evidence"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
+        "path": "crates/jazz/layers/protocol/src/exclusive_read_evidence.rs",
         "anchor": "fn exclusive_read_evidence_v1_bytes_are_pinned"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
+        "path": "crates/jazz/layers/protocol/src/exclusive_read_evidence.rs",
         "anchor": "fn exclusive_read_evidence_rejects_malformed_noncanonical_and_unknown_versions"
       },
       "evidence": [
