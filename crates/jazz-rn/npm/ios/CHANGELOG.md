@@ -1,5 +1,7 @@
 # jazz-rn-ios
 
+## 2.0.0-alpha.59
+
 ## 2.0.0-alpha.58
 
 ### Patch Changes

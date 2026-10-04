@@ -1,5 +1,12 @@
 # jazz-napi
 
+## 2.0.0-alpha.59
+
+### Patch Changes
+
+- d06d76d: Name the table, row and versions that disagreed when a subscription's supporting-set transition is rejected, so an out-of-sync live query can be traced to the row that caused it.
+- 36d7f66: Keep local writes visible while a query waits for large-value bytes from the server. A write no longer waits for another query's first result that is stuck on an attachment fetch, for example while offline. That query restarts after the write and keeps its pending fetch.
+
 ## 2.0.0-alpha.58
 
 ### Patch Changes

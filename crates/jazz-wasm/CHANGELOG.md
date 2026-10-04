@@ -1,5 +1,15 @@
 # jazz-wasm
 
+## 2.0.0-alpha.59
+
+### Patch Changes
+
+- d06d76d: Name the table, row and versions that disagreed when a subscription's supporting-set transition is rejected, so an out-of-sync live query can be traced to the row that caused it.
+- d16b569: The browser WASM is now about 28% smaller (7.1 MB instead of 9.2 MB gzipped), and it compiles and opens faster, with no slowdown in reads or writes.
+- 05dcbeb: The browser WASM is about 12% smaller (6.3 MB instead of 7.3 MB gzipped): JSON column schemas are now checked by a small JavaScript validator instead of a Rust one compiled into the WASM. A few rarely used JSON Schema features (`$dynamicRef`, draft-07 `contentMediaType`, and the `idn-email`, `idn-hostname`, `iri` and `iri-reference` formats) are reported as not supported in the browser yet, as are a few regular expression constructs the browser cannot match the same way (inline flags other than a leading `(?i)`, the `x` flag, possessive quantifiers, and a counted repetition directly after another quantifier). Code that loads `jazz-wasm` directly instead of through `jazz-tools` must call `setJsonSchemaValidator` before opening a database whose JSON columns declare a schema.
+- 36d7f66: Keep local writes visible while a query waits for large-value bytes from the server. A write no longer waits for another query's first result that is stuck on an attachment fetch, for example while offline. That query restarts after the write and keeps its pending fetch.
+- bb22c51: Reserve an 8 MiB stack for the WebAssembly module, matching native builds, so deeply nested queries no longer overflow the stack in development builds.
+
 ## 2.0.0-alpha.58
 
 ## 2.0.0-alpha.57

@@ -1,5 +1,11 @@
 # create-jazz
 
+## 2.0.0-alpha.59
+
+### Patch Changes
+
+- 25c9319: Stream dependency installation output so verbose successful installs do not fail from exceeding Node's synchronous output buffer. Keep installer output hidden on success and include bounded stdout/stderr diagnostics on failure.
+
 ## 2.0.0-alpha.58
 
 ### Patch Changes
