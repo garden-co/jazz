@@ -26,8 +26,11 @@ first-time enrolment still needs a connection.
 Ordinary reads decrypt selected logical values. Unsupported encrypted query,
 subscription and migration paths fail closed until their owning layers.
 
-Native transaction waits no longer spin on queued inbound frames or accumulate
-settlement callbacks while waiting for server acceptance.
+Native transaction waits use transport progress edges rather than queued-frame
+occupancy. Caller tasks remain runnable while an earlier asynchronous frame route
+is blocked, without dropping or reordering later frames. Settlement callbacks
+do not accumulate while waiting for server acceptance; transaction fates and
+terminal errors are unchanged.
 
 Tombstone-inclusive reads retain deletion state when binding session claims.
 After a read grant is restored, the same client can receive fresh readable
