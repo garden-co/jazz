@@ -39,8 +39,15 @@ New applications should use the two product read choices `"local-first"` and `"r
 - `"remote"` uses the server's current query scope, without pending local writes. It waits while offline.
 
 Without a `tier`, browser clients read `"local-first"`. Other clients read `"remote"` when they have a
-server, and `"local-first"` when they don't. A remote read is answered after your earlier writes reach
-the server, so it sees them. A remote subscription shows your later writes once the server confirms them.
+server, and `"local-first"` when they don't.
+
+Remote reads and your own writes:
+
+- A one-shot remote read (`db.all`, `db.one`) is answered after your earlier writes have been uploaded,
+  so it sees them.
+- A remote subscription shows pending writes only once the server confirms them.
+- Neither holds across a reconnect yet: writes still being re-sent after a reconnect may be missing
+  from a remote read ([#3863](https://github.com/garden-co/jazz/issues/3863)).
 
 ### Waiting for the server (`firstLoadRemoteWaitMs`)
 
@@ -77,8 +84,9 @@ Reads accept only `"local-first"` and `"remote"`; any other name throws.
   few seconds. The new option also waits when the cache has data, but is always bounded by the
   timeout.
 - The read names `"local"` and `"global"` (and the `"core"` alias) were removed. Use
-  `"local-first"` for `"local"` and `"remote"` for `"global"`. A `"remote"` read shows your own
-  pending writes once the server confirms them, where the old `"global"` read showed them at once.
+  `"local-first"` for `"local"` and `"remote"` for `"global"`. A one-shot `"remote"` read still sees
+  your earlier writes, but a `"remote"` subscription shows your pending writes only once the server
+  confirms them, where the old `"global"` subscription showed them at once.
 - `"remote-if-possible"` and `"edge"` were removed in alpha.57.
 
 Losing remote access does not erase cached data: local-first reads may still show it. An actual

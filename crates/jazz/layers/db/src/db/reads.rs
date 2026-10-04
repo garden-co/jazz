@@ -1441,7 +1441,7 @@ fn local_writes_upload_stalled(tables: &BTreeSet<String>) -> Error {
     Error::new(
         ErrorCode::NotObserved,
         format!(
-            "Timed out waiting for local writes to {} to upload before a Global read: \
+            "Timed out waiting for local writes to {} to upload before a remote read: \
              no upload progress for {} s",
             quoted_tables(tables),
             LOCAL_WRITE_UPLOAD_STALL_MS / 1_000
@@ -1466,7 +1466,7 @@ fn local_writes_not_uploaded(tables: &BTreeSet<String>, reason: &str) -> Error {
     Error::new(
         ErrorCode::NotObserved,
         format!(
-            "Global read waits on local writes to {tables} that could not be uploaded ({reason})"
+            "Remote read waits on local writes to {tables} that could not be uploaded ({reason})"
         ),
     )
 }

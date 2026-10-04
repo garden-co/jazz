@@ -454,7 +454,7 @@ fn failed_large_value_upload_rejects_a_waiting_global_read() {
     assert!(
         error
             .to_string()
-            .contains("Global read waits on local writes to `tracks` that could not be uploaded"),
+            .contains("Remote read waits on local writes to `tracks` that could not be uploaded"),
         "unexpected error: {error}"
     );
 }
@@ -561,7 +561,7 @@ fn stalled_upload_on_a_live_link_rejects_a_waiting_global_read() {
     );
     assert!(
         error.to_string().contains(
-            "Timed out waiting for local writes to `tracks` to upload before a Global read"
+            "Timed out waiting for local writes to `tracks` to upload before a remote read"
         ),
         "unexpected error: {error}"
     );
