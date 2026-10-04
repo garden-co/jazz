@@ -226,6 +226,14 @@ marker. Claim-routing fields remain routing inputs, not materialization output.
 Include-deleted decoding resolves the marker from the returned descriptor rather
 than inferring its position from the application schema (`INV-LOWER-19`).
 
+Live branch-view include-deleted sources compose content-backed rows with
+selected register-only tombstones. The sparse arm is application output only,
+not an authorization-subplan subject. It excludes physical content winners
+before compatibility omission and reuses the selected source's exact runtime
+carrier types and logical field identities, including bound enum registries,
+logical nullable wrappers and JSON semantic kinds. Only explicitly selected
+head/current-base sources participate; no implicit preimage lookup is added.
+
 There is one intended lowered-query core. That core takes an explicit **base
 source expression graph** (for example visible current rows for a table/tier,
 historic cuts, snapshot-qualified branch sources, explicit prefixes,

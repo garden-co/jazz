@@ -670,9 +670,10 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let head_content = self
-                    .projected_branch_content_source_graph(request, &table, tier, &head_keys)
+                let (head_content, head_presence) = self
+                    .projected_branch_content_source_graph(request, &table, tier, &head_keys, true)
                     .await?;
+                let head_presence = head_presence.expect("requested branch content presence");
                 let head_deletions = self
                     .projected_branch_deletion_source_graph(request, tier, &head_keys)
                     .await?;
@@ -681,7 +682,7 @@ where
                 // IncludeDeleted sibling must use that exact same selection
                 // before policy evaluation, or an authorized base preimage
                 // could accidentally attest to a distinct head deletion.
-                let (content, deletions) = match base {
+                let (content, content_presence, deletions) = match base {
                     Some(BranchViewSourceBase::Current(base)) if base != head => {
                         let base_keys = self
                             .node
@@ -691,24 +692,27 @@ where
                                 base,
                             )
                             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                        let base_content = self
+                        let (base_content, base_presence) = self
                             .projected_branch_content_source_graph(
-                                request, &table, tier, &base_keys,
+                                request, &table, tier, &base_keys, true,
                             )
                             .await?;
+                        let base_presence =
+                            base_presence.expect("requested branch content presence");
                         let base_deletions = self
                             .projected_branch_deletion_source_graph(request, tier, &base_keys)
                             .await?;
                         (
                             GraphBuilder::union([
-                                head_content.clone(),
+                                head_content,
                                 GraphBuilder::anti_join(
                                     base_content,
-                                    head_content,
+                                    head_presence.clone(),
                                     ["row_uuid"],
                                     ["row_uuid"],
                                 ),
                             ]),
+                            GraphBuilder::union([head_presence, base_presence]),
                             GraphBuilder::union([
                                 head_deletions.clone(),
                                 GraphBuilder::anti_join(
@@ -720,10 +724,38 @@ where
                             ]),
                         )
                     }
-                    _ => (head_content, head_deletions),
+                    _ => (head_content, head_presence, head_deletions),
                 };
-                let base = include_deleted_branch_graph(&table, head, content, deletions)
+                let content = content
+                    .project_fields(
+                        branch_view_storage_source_fields(&table, head)
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?,
+                    )
+                    .project_fields(storage_to_canonical_current_source_fields(
+                        &table, false, false,
+                    ));
+                // Reuse the selected source's bound enum registries and runtime
+                // carriers. Rebuilding these from ColumnSchema loses registry identity.
+                let content_descriptor = self
+                    .node
+                    .database
+                    .graph_output_descriptor(&content)
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let descriptor = RecordDescriptor::new_with_fields(
+                    content_descriptor.fields().iter().cloned().chain([
+                        records::DescriptorField::new("__jazz_deleted", ValueType::Bool),
+                    ]),
+                );
+                let base = include_deleted_branch_graph(
+                    &table,
+                    head,
+                    content,
+                    &content_descriptor,
+                    content_presence,
+                    deletions,
+                    !self.policy_subplan,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let graph = match &authorization {
                     SourceAuthorizationRequest::System => base,
                     SourceAuthorizationRequest::PolicyFiltered {
@@ -768,7 +800,7 @@ where
                 };
                 let (graph, descriptor, metadata) = with_requested_author_paths(
                     graph,
-                    include_deleted_current_row_descriptor(&table),
+                    descriptor,
                     BTreeMap::new(),
                     &request.requirements,
                 )
@@ -804,12 +836,13 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let head_content = self
+                let (head_content, _) = self
                     .projected_branch_content_source_graph(
                         request,
                         &table,
                         graph_tier.expect("branch view has a current tier"),
                         &head_keys,
+                        false,
                     )
                     .await?;
                 let head_deletions = self
@@ -829,12 +862,13 @@ where
                                 base,
                             )
                             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                        let base_content = self
+                        let (base_content, _) = self
                             .projected_branch_content_source_graph(
                                 request,
                                 &table,
                                 graph_tier.expect("branch view has a current tier"),
                                 &base_keys,
+                                false,
                             )
                             .await?;
                         let base_deletions = self
@@ -960,8 +994,8 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let head_content = self
-                    .projected_branch_content_source_graph(request, &table, tier, &head_keys)
+                let (head_content, _) = self
+                    .projected_branch_content_source_graph(request, &table, tier, &head_keys, false)
                     .await?;
                 let head_deletions = self
                     .projected_branch_deletion_source_graph(request, tier, &head_keys)
@@ -3076,7 +3110,8 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
         stored_keys: &BTreeSet<BranchKey>,
-    ) -> Result<GraphBuilder, SourceResolutionError> {
+        retain_content_presence: bool,
+    ) -> Result<(GraphBuilder, Option<GraphBuilder>), SourceResolutionError> {
         let required_fields = self.current_projection_required_fields(request, table);
         let (projection_target, physical_fields) = self
             .node
@@ -3125,7 +3160,11 @@ where
             )
             .project(physical_fields)
         };
-        Ok(content.project_fields(post_winner_fields))
+        // Compatibility omission is not physical absence. Sparse tombstones
+        // must not resurrect a selected content winner an old schema cannot read.
+        let content_presence =
+            retain_content_presence.then(|| content.clone().project(["row_uuid"]));
+        Ok((content.project_fields(post_winner_fields), content_presence))
     }
 
     /// Build the maintained deletion-register winner relation for one logical
@@ -3934,10 +3973,21 @@ fn with_requested_author_paths(
         return Ok((graph, descriptor, metadata));
     }
     let mut fields = descriptor.fields().to_vec();
-    let mut projection = descriptor_field_names(&descriptor)?
-        .into_iter()
-        .map(ProjectField::named)
-        .collect::<Vec<_>>();
+    let mut projection = descriptor
+        .fields()
+        .iter()
+        .map(|field| {
+            let name = field
+                .name
+                .clone()
+                .ok_or(Error::InvalidStoredValue("source descriptor field unnamed"))?;
+            let identity = field
+                .identity
+                .clone()
+                .unwrap_or_else(|| records::FieldIdentity::Name(name.clone()));
+            Ok(ProjectField::named_with_identity(name, identity))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
     for name in missing {
         let (root, path) = AuthorSubject::metadata_path(&name).expect("validated author path");
         projection.push(ProjectField::record_field(
@@ -4301,11 +4351,14 @@ fn branch_view_storage_source_fields(
                 .map_err(|_| {
                     Error::InvalidBranchKey("invalid head branch value encoding".to_owned())
                 })?;
-            fields.push(ProjectField::literal_with_identity(
-                user_column_field(&column.name),
-                value,
-                records::FieldIdentity::Name(column.name.clone()),
-            ));
+            fields.push(ProjectField {
+                output_identity: records::FieldIdentity::Name(column.name.clone()),
+                ..ProjectField::literal_typed(
+                    user_column_field(&column.name),
+                    value,
+                    current_row_column_type(column),
+                )
+            });
         } else {
             fields.push(ProjectField::named_with_identity(
                 user_column_field(&column.name),
@@ -6048,13 +6101,73 @@ fn include_deleted_branch_graph(
     table: &TableSchema,
     head: &BranchKey,
     content: GraphBuilder,
+    content_descriptor: &RecordDescriptor,
+    content_presence: GraphBuilder,
     deletions: GraphBuilder,
+    include_register_only: bool,
 ) -> Result<GraphBuilder, Error> {
-    let content = content
-        .project_fields(branch_view_storage_source_fields(table, head)?)
-        .project_fields(storage_to_canonical_current_source_fields(
-            table, false, false,
-        ));
+    let register_only = if include_register_only {
+        let mut fields = Vec::with_capacity(table.columns.len() + 8);
+        fields.push(ProjectField::named("row_uuid"));
+        for (column, content_field) in table
+            .columns
+            .iter()
+            .zip(content_descriptor.fields().iter().skip(1))
+        {
+            let mut field = if table.branch_by.contains(&column.name) {
+                let value = head
+                    .values
+                    .iter()
+                    .find(|(name, _)| name == &column.name)
+                    .ok_or_else(|| {
+                        Error::InvalidBranchKey(
+                            "head branch key missing projected table column".to_owned(),
+                        )
+                    })?
+                    .1
+                    .decode()
+                    .map_err(|_| {
+                        Error::InvalidBranchKey("invalid head branch value encoding".to_owned())
+                    })?;
+                ProjectField::literal_typed(
+                    user_column_field(&column.name),
+                    value,
+                    content_field.value_type.clone(),
+                )
+            } else {
+                ProjectField::null_typed(
+                    user_column_field(&column.name),
+                    content_field.value_type.clone(),
+                )
+            };
+            field.output_identity = records::FieldIdentity::Name(column.name.clone());
+            fields.push(field);
+        }
+        fields.extend([
+            ProjectField::renamed("created_by", "$createdBy"),
+            ProjectField::renamed("created_at", "$createdAt"),
+            ProjectField::renamed("updated_by", "$updatedBy"),
+            ProjectField::renamed("updated_at", "$updatedAt"),
+            ProjectField::named("tx_time"),
+            ProjectField::named("tx_node_id"),
+            ProjectField::literal("__jazz_deleted", Value::Bool(true)),
+        ]);
+        Some(
+            GraphBuilder::anti_join(
+                deletions
+                    .clone()
+                    .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0))),
+                content_presence,
+                ["row_uuid"],
+                ["row_uuid"],
+            )
+            .project_fields(fields),
+        )
+    } else {
+        // Authorization requires selected content; a sparse output row must
+        // never manufacture its own read-policy proof (INV-RLS-8).
+        None
+    };
     let deleted_winners = deletions
         .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
         .project_fields([
@@ -6071,27 +6184,52 @@ fn include_deleted_branch_graph(
         ["row_uuid"],
     )
     .project_fields(
-        current_row_fields(table)
-            .into_iter()
-            .map(ProjectField::named)
+        content_descriptor
+            .fields()
+            .iter()
+            .map(|field| {
+                let name = field
+                    .name
+                    .as_ref()
+                    .expect("canonical current source field named");
+                ProjectField::named_with_identity(
+                    name.clone(),
+                    field
+                        .identity
+                        .clone()
+                        .expect("canonical current source field identity"),
+                )
+            })
             .chain([ProjectField::literal("__jazz_deleted", Value::Bool(false))]),
     );
     let deleted = GraphBuilder::join(content, deleted_winners, ["row_uuid"], ["row_uuid"])
         .project_fields(
-            current_row_fields(table)
-                .into_iter()
+            content_descriptor
+                .fields()
+                .iter()
                 .map(|field| {
-                    let source = match field.as_str() {
-                        "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => {
-                            right_field(&field)
-                        }
-                        _ => left_field(&field),
+                    let name = field
+                        .name
+                        .as_ref()
+                        .expect("canonical current source field named");
+                    let source = match name.as_str() {
+                        "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => right_field(name),
+                        _ => left_field(name),
                     };
-                    ProjectField::renamed(source, field)
+                    ProjectField::renamed_with_identity(
+                        source,
+                        name.clone(),
+                        field
+                            .identity
+                            .clone()
+                            .expect("canonical current source field identity"),
+                    )
                 })
                 .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
         );
-    Ok(GraphBuilder::union([undeleted, deleted]))
+    Ok(GraphBuilder::union(
+        [undeleted, deleted].into_iter().chain(register_only),
+    ))
 }
 
 fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {

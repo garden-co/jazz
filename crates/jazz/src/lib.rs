@@ -131,6 +131,7 @@ pub use jazz_protocol::protocol;
 pub use jazz_protocol::protocol_limits;
 pub use jazz_types::account_registry;
 pub use jazz_types::app_id;
+#[cfg(any(test, feature = "testing", feature = "runtime"))]
 use jazz_types::debug_env;
 pub use jazz_types::identity;
 pub use jazz_types::ids;
