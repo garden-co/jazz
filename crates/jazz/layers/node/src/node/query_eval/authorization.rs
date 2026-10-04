@@ -1314,18 +1314,19 @@ where
         let binding_source_shape = binding_source_shape.clone().or_else(|| {
             authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
         });
-        if let Some(source_shape) = binding_source_shape.clone() {
-            retarget_binding_value_sources(&mut input_shape, &source_shape);
+        let program_binding = self.program_binding_for_shape_and_policy(
+            &policy_shape,
+            &binding,
+            binding_source_shape,
+            binding_user_params,
+            claim_params,
+            &policy,
+        )?;
+        if let Some(source_shape) = program_binding.source_shape.as_ref() {
+            retarget_binding_value_sources(&mut input_shape, source_shape);
         }
         let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape_and_policy(
-                &policy_shape,
-                &binding,
-                binding_source_shape,
-                binding_user_params,
-                claim_params,
-                &policy,
-            )?,
+            binding: program_binding,
             shape: input_shape,
         };
         Ok(QueryProgramRequest {
@@ -1435,18 +1436,19 @@ where
         let binding_source_shape = binding_source_shape.clone().or_else(|| {
             authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
         });
-        if let Some(source_shape) = binding_source_shape.clone() {
-            retarget_binding_value_sources(&mut input_shape, &source_shape);
+        let program_binding = self.program_binding_for_shape_and_policy(
+            &policy_shape,
+            &binding,
+            binding_source_shape,
+            binding_user_params,
+            claim_params,
+            &policy,
+        )?;
+        if let Some(source_shape) = program_binding.source_shape.as_ref() {
+            retarget_binding_value_sources(&mut input_shape, source_shape);
         }
         let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape_and_policy(
-                &policy_shape,
-                &binding,
-                binding_source_shape,
-                binding_user_params,
-                claim_params,
-                &policy,
-            )?,
+            binding: program_binding,
             shape: input_shape,
         };
         let request = QueryProgramRequest {

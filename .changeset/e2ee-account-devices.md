@@ -14,3 +14,7 @@ device delivery. Complete prepared policy claim domains and preserve recursive b
 carriers, and fix release-build hydration of shared recursive query graphs.
 Device lifecycle reads and waits use the current global tier for authoritative
 acceptance, preserving the meaning of the retired edge-tier calls.
+
+Align recursive prepared sources with their final policy and execution binding.
+Cold trusted-backend subscriptions receive their initial reachable rows and
+retain correct grant and revocation updates.
