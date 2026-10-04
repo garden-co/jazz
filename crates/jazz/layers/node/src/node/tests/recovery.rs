@@ -265,6 +265,73 @@ fn contribution_merge_provenance_survives_reopen() {
     );
 }
 
+/// Alice's real relay-ingested provenance remains Pending/Local across reopen,
+/// then supports both point and range transaction evaluation.
+/// Internal ingress and memo access are needed to distinguish these load paths.
+///
+/// alice ──relay ingest──► disk ──reopen──► Pending + exact provenance
+#[test]
+fn pending_contribution_provenance_survives_reopen_and_transaction_preloads() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let provenance = canonical_contribution_provenance(tx_id);
+    {
+        let mut relay = open_node_at(&temp_dir, schema.clone());
+        relay
+            .ingest_relay_commit_unit(
+                Transaction {
+                    tx_id,
+                    kind: TxKind::Mergeable,
+                    n_total_writes: 1,
+                    made_by: AuthorSubject::system_at(tx_id.node),
+                    permission_subject: None,
+                    base_snapshot: None,
+                    row_read_set: None,
+                    absent_read_set: None,
+                    predicate_read_set: None,
+                    user_metadata_json: None,
+                    contribution_merge: Some(provenance.clone()),
+                },
+                vec![version_record(
+                    row(9),
+                    Vec::new(),
+                    title_cells("merged"),
+                    None,
+                )],
+            )
+            .unwrap();
+    }
+
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_eq!(
+        reopened.transaction_state_settled(tx_id).unwrap(),
+        (Fate::Pending, None, DurabilityTier::Local)
+    );
+    assert_eq!(
+        reopened
+            .query_transaction(tx_id)
+            .unwrap()
+            .unwrap()
+            .tx
+            .contribution_merge
+            .as_ref(),
+        Some(&provenance)
+    );
+    let absent = TxId::new(TxTime::from(11), tx_id.node);
+    for tx_ids in [&[tx_id][..], &[tx_id, absent][..]] {
+        let mut context = super::super::policy::ViewEvaluationContext::default();
+        reopened
+            .preload_transaction_memo(tx_ids.iter().copied(), &mut context)
+            .unwrap();
+        let stored = context.tx_rows.get(&tx_id).unwrap().as_ref().unwrap();
+        assert_eq!(stored.fate, Fate::Pending);
+        assert_eq!(stored.global_time, None);
+        assert_eq!(stored.durability, DurabilityTier::Local);
+        assert_eq!(stored.tx.contribution_merge.as_ref(), Some(&provenance));
+    }
+}
+
 /// Storage-format corpus for the v1 branch-view copy evidence carried in the
 /// existing non-causal provenance column. This stays at the codec boundary:
 /// public mutation APIs intentionally cannot hand-author physical evidence.
@@ -970,12 +1037,38 @@ fn canonical_contribution_provenance(tx_id: TxId) -> ContributionMergeProvenance
     .unwrap()
 }
 
-/// Persist a structurally valid, but semantically non-canonical, contribution
-/// record through the system-table encoder. Opening must reject it before a
-/// node becomes resident; normal public commit APIs cannot construct it.
-fn reopen_with_noncanonical_contribution_provenance(
+fn assert_corrupt_contribution_loads_reject(reopened: &mut NodeState, tx_id: TxId) {
+    assert!(matches!(
+        reopened.query_transaction(tx_id).resolve(),
+        Err(Error::InvalidStoredValue(_))
+    ));
+    {
+        let mut context = super::super::policy::ViewEvaluationContext::default();
+        assert!(matches!(
+            reopened
+                .preload_transaction_memo([tx_id], &mut context)
+                .resolve(),
+            Err(Error::InvalidStoredValue(_))
+        ));
+    }
+    {
+        let absent = TxId::new(TxTime::from(11), tx_id.node);
+        let mut context = super::super::policy::ViewEvaluationContext::default();
+        assert!(matches!(
+            reopened
+                .preload_transaction_memo([tx_id, absent], &mut context)
+                .resolve(),
+            Err(Error::InvalidStoredValue(_))
+        ));
+    }
+}
+
+/// Persist semantically invalid provenance through the system-table encoder:
+/// public ingress cannot construct it. Bounded startup projects metadata;
+/// subsequent full transaction loads must reject before usable publication.
+fn assert_noncanonical_contribution_loads_reject(
     mutate: impl FnOnce(&mut ContributionMergeProvenance),
-) -> Error {
+) {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
@@ -1032,19 +1125,11 @@ fn reopen_with_noncanonical_contribution_provenance(
         core.database.finish_persistence(persisted).unwrap();
     }
 
-    let column_families = schema.column_families();
-    let references = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &references).unwrap();
-    match NodeState::new(node(1), schema, storage).resolve() {
-        Ok(_) => panic!("opening non-canonical contribution provenance must fail"),
-        Err(error) => error,
-    }
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_corrupt_contribution_loads_reject(&mut reopened, tx_id);
 }
 
-fn reopen_with_corrupt_contribution_coordinate(mutate: impl FnOnce(Value) -> Value) -> Error {
+fn assert_corrupt_contribution_coordinate_loads_reject(mutate: impl FnOnce(Value) -> Value) {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
@@ -1097,16 +1182,8 @@ fn reopen_with_corrupt_contribution_coordinate(mutate: impl FnOnce(Value) -> Val
         core.database.finish_persistence(persisted).unwrap();
     }
 
-    let column_families = schema.column_families();
-    let references = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &references).unwrap();
-    match NodeState::new(node(1), schema, storage).resolve() {
-        Ok(_) => panic!("opening corrupt contribution coordinate storage must fail"),
-        Err(error) => error,
-    }
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_corrupt_contribution_loads_reject(&mut reopened, tx_id);
 }
 
 fn mutate_stored_contribution_target(
@@ -1144,8 +1221,8 @@ fn mutate_stored_contribution_target(
     Value::Nullable(Some(Box::new(Value::Record(mutated.record().clone()))))
 }
 
-fn reopen_with_invalid_contribution_column_id(physical_column_id: u64) -> Error {
-    reopen_with_corrupt_contribution_coordinate(|value| {
+fn assert_invalid_contribution_column_loads_reject(physical_column_id: u64) {
+    assert_corrupt_contribution_coordinate_loads_reject(|value| {
         mutate_stored_contribution_target(value, |record| {
             let coordinate = ContributionCoordinateStorageRecord::new(record);
             let component = coordinate.component().unwrap();
@@ -1171,8 +1248,8 @@ fn reopen_with_invalid_contribution_column_id(physical_column_id: u64) -> Error 
     })
 }
 
-fn reopen_with_invalid_contribution_table_id(physical_table_id: u64) -> Error {
-    reopen_with_corrupt_contribution_coordinate(|value| {
+fn assert_invalid_contribution_table_loads_reject(physical_table_id: u64) {
+    assert_corrupt_contribution_coordinate_loads_reject(|value| {
         mutate_stored_contribution_target(value, |record| {
             let coordinate = ContributionCoordinateStorageRecord::new(record);
             ContributionCoordinateStorageRecord::encode(
@@ -1190,98 +1267,73 @@ fn reopen_with_invalid_contribution_table_id(physical_table_id: u64) -> Error {
     })
 }
 
+/// Alice's planted zero column id rejects on full load after bounded reopen.
+/// Internal storage access is necessary because public ingress rejects the id.
 #[test]
-fn reopen_rejects_zero_contribution_physical_column_id_before_residency() {
-    let error = reopen_with_invalid_contribution_column_id(0);
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("stored contribution physical column id must be nonzero")
-    ));
+fn loading_reopened_transaction_rejects_zero_contribution_physical_column_id() {
+    assert_invalid_contribution_column_loads_reject(0);
 }
 
+/// Alice's unmapped column id rejects on full load after bounded reopen.
+/// Internal storage access is necessary because public ingress rejects the id.
 #[test]
-fn reopen_rejects_unknown_contribution_physical_column_id_before_residency() {
-    let error = reopen_with_invalid_contribution_column_id(u64::MAX);
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue(
-            "stored contribution physical column id is absent from its table mapping"
-        )
-    ));
+fn loading_reopened_transaction_rejects_unknown_contribution_physical_column_id() {
+    assert_invalid_contribution_column_loads_reject(u64::MAX);
 }
 
+/// Alice's planted zero table id rejects on full load after bounded reopen.
+/// Internal storage access is necessary because public ingress rejects the id.
 #[test]
-fn reopen_rejects_zero_contribution_physical_table_id_before_residency() {
-    let error = reopen_with_invalid_contribution_table_id(0);
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("stored contribution physical table id must be nonzero")
-    ));
+fn loading_reopened_transaction_rejects_zero_contribution_physical_table_id() {
+    assert_invalid_contribution_table_loads_reject(0);
 }
 
+/// Alice's unmapped table id rejects on full load after bounded reopen.
+/// Internal storage access is necessary because public ingress rejects the id.
 #[test]
-fn reopen_rejects_unknown_contribution_physical_table_id_before_residency() {
-    let error = reopen_with_invalid_contribution_table_id(u64::MAX);
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue(
-            "stored contribution physical table id is absent from the catalogue"
-        )
-    ));
+fn loading_reopened_transaction_rejects_unknown_contribution_physical_table_id() {
+    assert_invalid_contribution_table_loads_reject(u64::MAX);
 }
 
+/// Alice's descending source dots reject rather than normalize on full load.
+/// The internal encoder plants an ordering that public ingress cannot admit.
 #[test]
-fn reopen_rejects_noncanonical_contribution_source_dots() {
-    // alice's persisted provenance has a valid record shape, but an unsorted
-    // source-dot array.  This must not silently become canonical on recovery.
-    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
+fn loading_reopened_transaction_rejects_noncanonical_contribution_source_dots() {
+    assert_noncanonical_contribution_loads_reject(|provenance| {
         let source = provenance.substitutions[0].sources[0].clone();
         provenance.substitutions[0].sources.push(ContributionDot {
             tx_id: TxId::new(TxTime::from(9), source.tx_id.node),
             coordinate: source.coordinate,
         });
     });
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("transaction contribution provenance must be canonical")
-    ));
 }
 
+/// Alice's duplicate source rejects before a merge can double-count it.
+/// The internal encoder plants a duplicate that public ingress cannot admit.
 #[test]
-fn reopen_rejects_duplicate_contribution_source_dots() {
-    // A duplicate source is also structurally valid, but provenance identity
-    // must be set-like so downstream expansion cannot double-count it.
-    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
+fn loading_reopened_transaction_rejects_duplicate_contribution_source_dots() {
+    assert_noncanonical_contribution_loads_reject(|provenance| {
         let source = provenance.substitutions[0].sources[0].clone();
         provenance.substitutions[0].sources.push(source);
     });
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("transaction contribution provenance must be canonical")
-    ));
 }
 
+/// Alice's duplicate substitution target rejects on full load after reopen.
+/// The internal encoder plants a duplicate that public ingress cannot admit.
 #[test]
-fn reopen_rejects_duplicate_contribution_substitution_targets() {
-    // alice's on-disk record is structurally decodable, but maps one derived
-    // target twice.  Recovery must fail before rebuilding any resident state.
-    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
+fn loading_reopened_transaction_rejects_duplicate_contribution_substitution_targets() {
+    assert_noncanonical_contribution_loads_reject(|provenance| {
         provenance
             .substitutions
             .push(provenance.substitutions[0].clone());
     });
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("transaction contribution provenance must be canonical")
-    ));
 }
 
+/// Alice's LWW column cannot carry an operation identity, even when canonical.
+/// Internal storage access plants a strategy mismatch impossible at ingress.
 #[test]
-fn reopen_rejects_operation_identity_with_the_wrong_column_strategy_before_residency() {
-    // This is a planted durable transaction: normal ingress cannot create an
-    // operation for an LWW column. Recovery must nevertheless validate the
-    // decoded operation before rebuilding any resident or derived state.
-    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
+fn loading_reopened_transaction_rejects_operation_identity_with_the_wrong_column_strategy() {
+    assert_noncanonical_contribution_loads_reject(|provenance| {
         let substitution = &mut provenance.substitutions[0];
         for coordinate in std::iter::once(&mut substitution.target).chain(
             substitution
@@ -1295,10 +1347,6 @@ fn reopen_rejects_operation_identity_with_the_wrong_column_strategy_before_resid
             };
         }
     });
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
-    ));
 }
 
 #[cfg(feature = "testing")]
