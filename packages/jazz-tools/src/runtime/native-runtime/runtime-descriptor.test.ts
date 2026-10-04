@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { col } from "../../dsl.js";
+import { schema as s } from "../../schema-namespace.js";
 import { defineApp } from "../../typed-app.js";
 import type { ColumnDescriptor, WasmSchema } from "../../drivers/types.js";
 import { createRecord } from "./native-codec.js";
@@ -493,7 +493,7 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
 
 it("preserves stored application columns named like internal metadata", () => {
   const app = defineApp({
-    notes: { parents: col.string(), schema_version: col.string(), authored_columns: col.string() },
+    notes: { parents: s.string(), schema_version: s.string(), authored_columns: s.string() },
   });
   const names = ["parents", "schema_version", "authored_columns"];
   const rows = rowsFromBatches(

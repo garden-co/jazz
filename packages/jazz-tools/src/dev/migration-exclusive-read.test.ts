@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -11,10 +12,10 @@ it("accepts an exclusive read of an unchanged table after migration", async () =
   const after = { projects, notes: s.table({ body: s.string() }, {}) };
   const oldApp = s.defineApp(before);
   const newApp = s.defineApp(after);
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: before,
     to: after,
-    migrate: { notes: { body: s.renameFrom("title") } },
+    migrate: { notes: { body: m.renameFrom("title") } },
   });
   const permissions = (app: typeof oldApp | typeof newApp) =>
     definePermissions(app, ({ policy }) => {
@@ -50,10 +51,10 @@ it("preserves exclusive conflict detection after renaming the queried table", as
   const after = { initiatives: s.table({ title: s.string() }, {}) };
   const oldApp = s.defineApp(before);
   const newApp = s.defineApp(after);
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: before,
     to: after,
-    renameTables: { initiatives: s.renameTableFrom("projects") },
+    renameTables: { initiatives: m.renameTableFrom("projects") },
   });
   const oldPermissions = definePermissions(oldApp, ({ policy }) => {
     policy.projects.allowRead.always();

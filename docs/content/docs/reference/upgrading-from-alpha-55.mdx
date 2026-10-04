@@ -1,15 +1,15 @@
 ---
 title: Upgrading from alpha.55
-description: The breaking changes between alpha.55 and alpha.58, what to change in your app, and what happens to clients that haven't upgraded yet.
+description: The breaking changes between alpha.55 and alpha.60, what to change in your app, and what happens to clients that haven't upgraded yet.
 ---
 
-This page covers moving an app from `jazz-tools@2.0.0-alpha.55` or `alpha.56` to alpha.58. Stored
+This page covers moving an app from `jazz-tools@2.0.0-alpha.55` or `alpha.56` to alpha.60. Stored
 data needs nothing: server data directories and browser storage from alpha.55 open in place, with
 no reset or conversion step. Your code and deployment do need changes.
 
 The changes are grouped by the release that introduced them. If your app is on alpha.56, skip to
-[From alpha.56](#from-alpha56); on alpha.57, read [In alpha.58](#in-alpha58). Upgrade all Jazz
-packages together.
+[From alpha.56](#from-alpha56); on alpha.57, read [In alpha.58](#in-alpha58); on alpha.58 or
+alpha.59, read [In alpha.60](#in-alpha60). Upgrade all Jazz packages together.
 
 ## From alpha.55
 
@@ -174,3 +174,56 @@ reference arrays (without additional join keys), are supported.
 
 If your app uses exclusive transactions, ship the alpha.58 client build together with the server
 upgrade. Other writes and reads from alpha.56 and alpha.57 clients keep working.
+
+## In alpha.60
+
+### Import migration builders from `migration`
+
+The builders for migration files moved out of the `schema` namespace into their own `migration`
+namespace, so lens operations no longer sit next to column types. The `col` export is gone too.
+Migration behavior and stored data are unchanged.
+
+1. Import both namespaces: `import { schema as s, migration as m } from "jazz-tools";`
+2. Change `s.defineMigration` and `s.renameTableFrom` to `m.defineMigration` and
+   `m.renameTableFrom`.
+3. Change `s.add.*`, `s.drop.*` and `s.renameFrom` to `m.add.*`, `m.drop.*` and `m.renameFrom`.
+   Column types in the `from` and `to` witnesses stay on `s`.
+4. Replace any `col.*` column builders with `s.*`, and `col.add`/`col.drop`/`col.renameFrom` with
+   `m.*`.
+
+Rewrite every file in `migrations/`, including ones you already deployed: `deploy` loads the whole
+migration chain, and a file still using the old builders stops it with:
+
+```
+Failed to load migration <file>: ... The migration DSL moved to `migration as m` from jazz-tools: ...
+```
+
+Before:
+
+```ts title="migrations/20260318-add-description-a01f5c72ec47-311995e9a178.ts"
+import { schema as s } from "jazz-tools";
+
+export default s.defineMigration({
+  migrate: {
+    todos: {
+      description: s.add.string({ default: null }),
+    },
+  },
+  // fromHash, toHash, from, to unchanged
+});
+```
+
+After:
+
+```ts title="migrations/20260318-add-description-a01f5c72ec47-311995e9a178.ts"
+import { schema as s, migration as m } from "jazz-tools";
+
+export default m.defineMigration({
+  migrate: {
+    todos: {
+      description: m.add.string({ default: null }),
+    },
+  },
+  // fromHash, toHash, from, to unchanged
+});
+```

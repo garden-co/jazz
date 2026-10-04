@@ -1,5 +1,5 @@
-import { col, table } from "jazz-tools";
+import { schema as s, table } from "jazz-tools";
 
 table("side_effect_tasks", {
-  title: col.string(),
+  title: s.string(),
 });
