@@ -237,6 +237,16 @@ state, including a commit that landed before its acknowledgement was lost.
 These adapter ownership rules neither issue a cancelled caller a receipt nor
 weaken the database-level possibly-committed publication rules in chapter 2.
 
+The direct metadata progress facade waits only for its own batch. After storage
+success it performs one nonblocking ready-progress turn, including when storage
+assistance completed the write on its first poll. A supplied durable query-owner
+waker remains retained after return and later externally driven turns; unrelated
+cold queries need not finish before the metadata operation returns.
+
+A fatal error from that post-write progress turn is propagated and poisons the
+database, but does not undo the already-committed metadata batch. It is not proof
+that the batch was unapplied and does not authorize automatic replay.
+
 Pure operators remain ordinary synchronous transformations over ready inputs.
 Interruptible state is concentrated at table/index sources, persisted
 arrangements and operators, recursive hydration, and other storage-dependent

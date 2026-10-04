@@ -2190,6 +2190,9 @@ impl Database {
     /// Owners with automatic progress must supply their durable wake bridge.
     /// Suspended query work keeps that bridge after this operation returns;
     /// callers passing `None` remain responsible for subsequent owner turns.
+    ///
+    /// A fatal progress error is reported even if this batch already committed.
+    /// Such an error does not imply metadata rollback or authorize replay.
     pub async fn write_direct_records_with_progress(
         &mut self,
         name: &str,
@@ -2235,7 +2238,11 @@ impl Database {
             }
             Poll::Pending
         })
-        .await
+        .await?;
+        // Storage assistance can complete both the earlier chunk write and
+        // this batch on the first poll, bypassing the Pending-only bridge.
+        // Refresh cold request wakers and retain the owner without awaiting I/O.
+        self.drive_ready_progress_with_waker(progress_waker).await
     }
 
     /// Return a typed handle for a schema-declared direct record store.
