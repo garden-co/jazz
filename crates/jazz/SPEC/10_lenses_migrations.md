@@ -421,11 +421,13 @@ An operation identity is strategy-owned rather than opaque provenance:
 canonical one-field Groove record `{ element: <the declared array element
 type> }`. The receiving node validates the table/column ownership, content
 layer, merge strategy, enum tag, payload shape, and canonical identity bytes
-at remote admission and again while reopening durable state, before any
-derived mutation or resident state. Zero, unknown, ambiguous, malformed,
-trailing, or noncanonical contribution payloads fail closed. This is local
-storage identity only: API and wire records never expose physical ids or a
-private postcard contribution encoding.
+at remote admission and whenever a full durable transaction payload is loaded,
+including after reopen, before returning usable provenance or applying a
+derived mutation. Metadata-only startup recovery and status projections do not
+audit contribution payloads. Zero, unknown, ambiguous, malformed, trailing, or
+noncanonical contribution payloads fail closed at payload consumption. This is
+local storage identity only: API and wire records never expose physical ids or
+a private postcard contribution encoding.
 
 Jazz registers a schema variant and every projection needed for its logical
 views before activating a catalogue bundle or accepting a row under that
