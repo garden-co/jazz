@@ -2342,7 +2342,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     const settlement = new Promise<void>((resolve) => {
       settleWrite = resolve;
     });
-    const transport: Transport = new FakeTransport([]);
+    const receivedTransport = new FakeTransport([]);
+    const transport: Transport = receivedTransport;
     let routedFrames = 0;
     transport.routeAuxiliaryWireFrame = async (frame) => {
       routedFrames += 1;
@@ -2406,9 +2407,12 @@ describe("NativeRuntimeAdapter server transport", () => {
 
       await callerTurn;
       expect(waitSettled).toBe(false);
+      expect(routedFrames).toBe(1);
+      expect(receivedTransport.received).toEqual([]);
 
       releaseFirstRoute();
       await Promise.all([secondRoute, waiting]);
+      expect(receivedTransport.received).toEqual([Uint8Array.from([42]), Uint8Array.from([43])]);
     } finally {
       releaseFirstRoute();
       await runtime.close();
