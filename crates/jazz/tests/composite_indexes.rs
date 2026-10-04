@@ -115,6 +115,8 @@ fn top_two_titles(db: &Db, schema: &JazzSchema, owner: &str) -> Vec<String> {
 /// alice ──insert 3 tasks, bob 1──► db ──top2(alice)──► [ship, plan]
 /// alice ──bob's task → alice rank 9; ship → rank 0──► top2(alice) = [review, plan]
 /// db ──close──► reopen same directory ──top2(alice)──► [review, plan]
+/// reopened ──move plan → bob──► top2(alice) = [review, draft]; top2(bob) = [plan]
+/// db ──close──► reopen again ──same owner prefixes and ordered pages
 /// ```
 #[test]
 fn composite_index_schema_serves_ordered_pages_across_updates_and_reopen() {
@@ -158,6 +160,29 @@ fn composite_index_schema_serves_ordered_pages_across_updates_and_reopen() {
         ["review", "plan"]
     );
     assert!(top_two_titles(&reopened, &schema, "bob").is_empty());
+    block_on(reopened.update(
+        "tasks",
+        row(3),
+        BTreeMap::from([
+            ("owner".to_owned(), Value::String("bob".to_owned())),
+            ("rank".to_owned(), Value::I32(7)),
+        ]),
+        UpdateOptions::default(),
+    ))
+    .unwrap();
+    assert_eq!(
+        top_two_titles(&reopened, &schema, "alice"),
+        ["review", "draft"]
+    );
+    assert_eq!(top_two_titles(&reopened, &schema, "bob"), ["plan"]);
+    drop(reopened);
+
+    let reopened_again = open_rocks_db(directory.path(), &schema);
+    assert_eq!(
+        top_two_titles(&reopened_again, &schema, "alice"),
+        ["review", "draft"]
+    );
+    assert_eq!(top_two_titles(&reopened_again, &schema, "bob"), ["plan"]);
 }
 
 /// Composite indexes are part of schema identity, but only as a set: the
