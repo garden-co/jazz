@@ -72,7 +72,8 @@ fn large_title(label: &str) -> RowCells {
 
 type ReadFuture<'a> = Pin<Box<dyn Future<Output = Result<SerializedReadResult, Error>> + 'a>>;
 
-/// A default-tier Global read with local updates, as a backend issues it.
+/// A remote read (Global, local writes deferred), as a backend issues it by
+/// default.
 fn global_read<'a>(
     db: &'a Db,
     table: &str,
@@ -84,6 +85,7 @@ fn global_read<'a>(
             &query,
             ReadOpts {
                 tier: DurabilityTier::Global,
+                local_updates: LocalUpdates::Deferred,
                 ..ReadOpts::default()
             },
             None,

@@ -1686,7 +1686,7 @@ describe("RecordPlayer after a streamed upload", () => {
       (rows) => rows.length === trackCount,
       `the reopened ${label} did not read the library at edge`,
       20_000,
-      "global",
+      "remote",
     );
     const albums = await withTimeout(
       db.all(app.albums.select("title"), { tier: "remote" }),

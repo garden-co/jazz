@@ -367,3 +367,31 @@ async fn writer_keeps_nested_asset_in_local_first_subscription() {
         })
         .await;
 }
+
+/// A remote read is answered by the server after Alice's earlier writes reach
+/// it, so it sees them without waiting for their acknowledgements.
+#[tokio::test]
+async fn writer_reads_own_nested_writes_remotely_right_after_inserting() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let f = Fixture::start().await;
+            let (asset, _, _) = f
+                .alice
+                .insert("assets", row_input!("status" => "pending"))
+                .unwrap();
+            let (message, _, _) = f
+                .alice
+                .insert("messages", row_input!("text" => "photo"))
+                .unwrap();
+            f.alice
+                .insert(
+                    "attachments",
+                    row_input!("message_id" => message, "asset_id" => asset),
+                )
+                .unwrap();
+
+            assert_fresh_read_has_asset(&f.alice, asset).await;
+            f.shutdown().await;
+        })
+        .await;
+}

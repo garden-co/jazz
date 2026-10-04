@@ -74,7 +74,10 @@ describe("JazzClient runtime helpers", () => {
   it("passes query propagation options to runtime query", async () => {
     const { client, queryCalls } = makeClient();
     await client.queryInternal('{"table":"todos"}', { propagation: "local-only" });
-    expect(queryCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
+    // This client's default read is remote, which defers local writes.
+    expect(queryCalls[0]![3]).toBe(
+      JSON.stringify({ propagation: "local-only", local_updates: "deferred" }),
+    );
   });
 
   it("passes transaction overlay options to runtime query for transaction reads", async () => {

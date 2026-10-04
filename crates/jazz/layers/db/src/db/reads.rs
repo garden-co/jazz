@@ -372,7 +372,8 @@ where
         .await
     }
 
-    /// Order a Global read's open after the local writes it must observe.
+    /// Order a Global (remote) read's open after the local writes it must
+    /// observe, so a remote read sees this node's earlier writes.
     ///
     /// A Global read is answered from the authority's state, so it sees this
     /// node's own writes only when they reach the authority before its open
@@ -538,7 +539,6 @@ where
             && open_tx.is_none()
             && opts.propagation == Propagation::Full
             && opts.tier >= DurabilityTier::Global
-            && opts.local_updates == LocalUpdates::Immediate
         {
             self.preceding_local_writes_on_wire(query).await?;
         }

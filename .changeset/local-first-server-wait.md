@@ -15,7 +15,7 @@ Removed read tiers now throw with a migration message:
 - `ReadTier.LocalFirstUnlessEmpty` (`"local-first-unless-empty"`, Rust `ReadTier::LocalFirstUnlessEmpty`): use `ReadTier.LocalFirst` with `firstLoadRemoteWaitMs`. Unlike the old tier, the wait also applies when the cache already has rows, but never lasts longer than the timeout.
 - The read names `"local"` and `"global"`: use `"local-first"` and `"remote"`. A `"remote"` read shows your own pending writes once the server confirms them, where a `"global"` read showed them at once.
 
-Outside the browser, a client with a server now reads `"remote"` by default, where it used to read `"global"`. Your own writes show once the server confirms them, so wait for a write before reading it back. This also fixes rows that briefly disappeared from a subscription when the server acknowledged the writes that created them, which only happened with the old `"global"` read.
+Outside the browser, a client with a server now reads `"remote"` by default, where it used to read `"global"`. A remote read is answered after your earlier writes reach the server, so it still sees them. This also fixes rows that briefly disappeared from a subscription when the server acknowledged the writes that created them, which only happened with the old `"global"` read.
 
 TypeScript rejects `firstLoadRemoteWaitMs` on a `"remote"` read; `tier` selects which options a read accepts.
 
