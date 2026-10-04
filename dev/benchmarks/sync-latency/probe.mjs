@@ -34,6 +34,9 @@ const { values } = parseArgs({
 });
 if (!values["sdk-root"])
   throw new Error("Pass --sdk-root /absolute/path/to/jazz-tools (built SDK)");
+// CodSpeed first launches an introspection process to discover V8 flags. Let
+// its plugin exit that process before loading NAPI or starting server threads.
+const codspeed = values.codspeed ? await import("@codspeed/tinybench-plugin") : undefined;
 const sdkRoot = resolve(values["sdk-root"]);
 const load = (path) => import(pathToFileURL(join(sdkRoot, path)).href);
 const [
@@ -400,11 +403,8 @@ try {
       },
     ];
     if (values.codspeed) {
-      const [{ Bench }, { withCodSpeed }] = await Promise.all([
-        import("tinybench"),
-        import("@codspeed/tinybench-plugin"),
-      ]);
-      const bench = withCodSpeed(
+      const { Bench } = await import("tinybench");
+      const bench = codspeed.withCodSpeed(
         new Bench({
           iterations: repeats,
           time: 0,

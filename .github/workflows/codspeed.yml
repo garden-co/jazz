@@ -98,7 +98,7 @@ jobs:
           pnpm --filter jazz-tools build:runtime
       - name: Seal Node benchmark runtime
         run: |
-          node --test dev/benchmarks/sync-latency/artifact.test.mjs
+          node --test dev/benchmarks/sync-latency/*.test.mjs
           mkdir -p target
           tar -czf target/codspeed-node-sync.tgz \
             packages/jazz-tools/dist \
@@ -134,6 +134,14 @@ jobs:
         run: |
           node dev/benchmarks/sync-latency/artifact.mjs verify target/codspeed-node-sync.tgz
           tar -xzf target/codspeed-node-sync.tgz
+      - name: Check Node runtime and CodSpeed introspection before profiling
+        run: |
+          node --test dev/benchmarks/sync-latency/introspection.test.mjs
+          node dev/benchmarks/sync-latency/probe.mjs \
+            --sdk-root packages/jazz-tools --codspeed \
+            --select-only --fresh-reader --composite-index --ordered-select \
+            --server-storage persistent --matching-rows 1000 --repeats 3 \
+            --output-dir target/codspeed-node-sync-preflight
       - name: Measure global SELECTs through the Node client and local server
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
         with:
