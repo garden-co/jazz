@@ -29,6 +29,7 @@ const { values } = parseArgs({
     "composite-index": { type: "boolean", default: false },
     "ordered-select": { type: "boolean", default: false },
     "fresh-reader": { type: "boolean", default: false },
+    codspeed: { type: "boolean", default: false },
   },
 });
 if (!values["sdk-root"])
@@ -65,6 +66,20 @@ assert(Number.isInteger(deletedRows) && deletedRows >= 0);
 for (const storage of [values["client-storage"], values["server-storage"]])
   assert(["memory", "persistent"].includes(storage));
 assert(["local", "global"].includes(values.tier));
+if (values.codspeed) {
+  // Stable benchmark IDs must always describe the same end-to-end workload.
+  for (const flag of ["select-only", "composite-index", "ordered-select", "fresh-reader"])
+    assert(values[flag], `--codspeed requires --${flag}`);
+  assert.equal(values.tier, "global");
+  assert.equal(values["client-storage"], "memory");
+  assert.equal(values["server-storage"], "persistent");
+  assert.equal(rttMs, 0);
+  assert.equal(unrelatedRows, 0);
+  assert.equal(deletedRows, 0);
+  assert.equal(seedBatchSize, 1000);
+  assert.equal(values.trace, false);
+  assert.equal(values["pump-debounce-ms"], undefined);
+}
 const outputDir = values["output-dir"]
   ? resolve(values["output-dir"])
   : mkdtempSync(join(tmpdir(), "jazz-sync-latency-"));
@@ -329,37 +344,101 @@ try {
     const expectedPageIds = values["ordered-select"]
       ? ids.slice(0, 10)
       : ids.toSorted().slice(0, 10);
+    const expectedPageOrdinals = expectedPageIds.map((id) => ids.indexOf(id));
     const firstPage = values["ordered-select"]
       ? app.items.where({ runId }).orderBy("ordinal", "asc").limit(10)
       : app.items.where({ runId }).limit(10);
-    for (sample = 0; sample < repeats; sample++) {
-      const rows = await timed("select10", () => db.all(firstPage, opts));
-      assert.equal(rows.length, 10);
-      assert.deepEqual(
-        rows.map((row) => row.id),
-        expectedPageIds,
+    const cases = [
+      {
+        name: "select10",
+        read: () => db.all(firstPage, opts),
+        check(rows) {
+          assert.equal(rows.length, 10);
+          assert.deepEqual(
+            rows.map((row) => row.id),
+            expectedPageIds,
+          );
+          assert.deepEqual(
+            rows.map((row) => row.ordinal),
+            expectedPageOrdinals,
+          );
+          assert.equal(new Set(rows.map((row) => row.id)).size, 10);
+          for (const row of rows) {
+            assert(expectedIds.has(row.id));
+            assert.equal(row.runId, runId);
+            assert.equal(row.value, `item-${row.ordinal}`);
+          }
+        },
+      },
+      {
+        name: "selectTopN",
+        read: () => db.all(app.items.where({ runId }).orderBy("ordinal", "desc").limit(10), opts),
+        check(rows) {
+          assert.deepEqual(
+            rows.map((row) => row.ordinal),
+            Array.from({ length: 10 }, (_, i) => matchingRows - 1 - i),
+          );
+          assert.deepEqual(
+            rows.map((row) => row.id),
+            ids.slice(-10).reverse(),
+          );
+          for (const row of rows) {
+            assert.equal(row.runId, runId);
+            assert.equal(row.value, `item-${row.ordinal}`);
+          }
+        },
+      },
+      {
+        name: "getById",
+        read: () => db.one(app.items.where({ id: ids[0] }), opts),
+        check(row) {
+          assert.equal(row.id, ids[0]);
+          assert.equal(row.ordinal, 0);
+          assert.equal(row.runId, runId);
+          assert.equal(row.value, "item-0");
+        },
+      },
+    ];
+    if (values.codspeed) {
+      const [{ Bench }, { withCodSpeed }] = await Promise.all([
+        import("tinybench"),
+        import("@codspeed/tinybench-plugin"),
+      ]);
+      const bench = withCodSpeed(
+        new Bench({
+          iterations: repeats,
+          time: 0,
+          warmup: false,
+          throws: true,
+          retainSamples: true,
+        }),
       );
-      assert.equal(new Set(rows.map((row) => row.id)).size, 10);
-      for (const row of rows) {
-        assert(expectedIds.has(row.id));
-        assert.equal(row.runId, runId);
-        assert.equal(row.value, `item-${row.ordinal}`);
+      for (const { name, read, check } of cases) {
+        let rows;
+        bench.add(
+          `global_${name}_${matchingRows}_rows`,
+          async () => {
+            rows = await read();
+          },
+          {
+            async: true,
+            // Validate every sample outside its timer. A wrong page fails the run.
+            afterEach: () => check(rows),
+          },
+        );
       }
-      const top = await timed("selectTopN", () =>
-        db.all(app.items.where({ runId }).orderBy("ordinal", "desc").limit(10), opts),
-      );
-      assert.deepEqual(
-        top.map((row) => row.ordinal),
-        Array.from({ length: 10 }, (_, i) => matchingRows - 1 - i),
-      );
-      assert.deepEqual(
-        top.map((row) => row.id),
-        ids.slice(-10).reverse(),
-      );
-      const row = await timed("getById", () => db.one(app.items.where({ id: ids[0] }), opts));
-      assert.equal(row.id, ids[0]);
-      assert.equal(row.ordinal, 0);
-      assert.equal(row.value, "item-0");
+      const tasks = await bench.run();
+      tasks.forEach((task, index) => {
+        assert.equal(task.result.state, "completed");
+        assert.equal(task.result.latency.samples.length, repeats);
+        task.result.latency.samples.forEach((ms, sample) => {
+          results.push({ operation: cases[index].name, sample, ms });
+        });
+      });
+      console.table(bench.table());
+    } else {
+      for (sample = 0; sample < repeats; sample++)
+        for (const { name, read, check } of cases) check(await timed(name, read));
     }
   } else
     for (sample = 0; sample < repeats; sample++) {
@@ -424,6 +503,8 @@ try {
     compositeIndex: values["composite-index"],
     orderedSelect: values["ordered-select"],
     freshReader: values["fresh-reader"],
+    harness: values.codspeed ? "codspeed-tinybench" : "probe",
+    sampleOrder: values.codspeed ? "latency-ascending-per-operation" : "chronological",
     ...(values["select-only"]
       ? { matchingRows, unrelatedRows, deletedRows, seedBatchSize, seedDurationMs }
       : {}),
