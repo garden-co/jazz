@@ -43,3 +43,22 @@ continue to require selected content and read-policy authorization.
 Group recovery correctness checks use the 120-second multi-client test budget,
 including interrupted recovery and retry; fault injection and permission
 assertions are unchanged.
+
+Authenticated session and admitted relay writes now retain their exact verified
+claim scope through final authority ingest, including exclusive predicate checks.
+This prevents an unchanged protected row from producing a false
+`ExclusiveConflict` after a detached preflight drops its claim scope. Parent and
+schema prerequisite replay retains the original binding within the process;
+changed resend bindings conflict and current policy revocation remains effective.
+No implicit grant, startup validation, or wire/storage format change is added.
+
+Rust callers must remove `CommitUnitIngestContext.admitted_write_authorization`
+and replace the removed `PeerState::prove_terminal_commit_authorization` and
+`NodeState::commit_unit_satisfies_write_policy` preflights with actual authenticated
+ingest. There are no compatibility aliases.
+
+Offline readiness refusal checks now initialize real foregrounds and use
+confirmed `disconnect()` state. An unreachable configured server is not an
+explicit disconnect: online enrolment can remain pending until connection or
+cancellation. Retained-key persistent reopen with a stopped server continues to
+use accepted local history.

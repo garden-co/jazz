@@ -3,6 +3,8 @@ import { schema as s } from "../../src/schema-namespace.js";
 import { definePermissions } from "../../src/permissions/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { deploy } from "../../src/dev/catalogue.js";
+import { E2eeHistoryUnavailable } from "../../src/e2ee/history-reader.js";
+import { attachE2ee, prepareE2eeStartup } from "../../src/e2ee/lifecycle.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
 import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
 
@@ -81,7 +83,7 @@ it("restores local encrypted readiness at startup after persistent reopen while 
   }
 }, 60_000);
 
-it("does not treat missing retained keys or accepted local history as offline readiness", async () => {
+it("refuses encrypted readiness without retained keys or accepted history after confirmed disconnect", async () => {
   const server = await getJazzServerInfo(`e2ee-offline-evidence-${crypto.randomUUID()}`);
   const { app, permissions } = defineEncryptedFixture();
   const retainedKey = `e2ee-device-${crypto.randomUUID()}`;
@@ -89,7 +91,8 @@ it("does not treat missing retained keys or accepted local history as offline re
   const dbName = `e2ee-offline-evidence-${crypto.randomUUID()}`;
   const emptyDbName = `e2ee-offline-empty-history-${crypto.randomUUID()}`;
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
-  let unexpectedlyOpened: Awaited<ReturnType<typeof createDb>> | undefined;
+  let emptyHistoryOwner: Awaited<ReturnType<typeof createDb>> | undefined;
+  const foregrounds: Awaited<ReturnType<typeof createDb>>[] = [];
   let stopped = false;
   try {
     await deploy({ ...server, schema: app, permissions });
@@ -118,45 +121,55 @@ it("does not treat missing retained keys or accepted local history as offline re
     const project = tx.insert(app.projects, { title: "Local evidence" });
     tx.insert(app.notes, { projectId: project.id, body: "Key required" });
     await tx.commit().wait({ tier: "global" });
-    await db.shutdown();
-    db = undefined;
+    await db.disconnect();
+    emptyHistoryOwner = await createDb({
+      ...config,
+      e2ee: undefined,
+      driver: { type: "persistent" as const, dbName: emptyDbName },
+    });
+    await emptyHistoryOwner.all(app.projects, { tier: "local" });
+    await emptyHistoryOwner.disconnect();
     await stopJazzServer(server.serverUrl);
     stopped = true;
 
-    await expect(
-      createDb({
-        ...config,
-        e2ee: {
-          app,
-          store: {
-            async read() {
-              return localStorage.getItem(absentKey);
-            },
-            async update(transform: (current: string | null) => string) {
-              await navigator.locks.request(absentKey, () =>
-                localStorage.setItem(absentKey, transform(localStorage.getItem(absentKey))),
-              );
-            },
+    // Initialize real followers before testing the startup readiness gate.
+    // Constructor enrollment without keys may otherwise wait for online authority.
+    const withoutKeys = await createDb({ ...config, e2ee: undefined });
+    foregrounds.push(withoutKeys);
+    await withoutKeys.all(app.projects, { tier: "local" });
+    attachE2ee(
+      withoutKeys,
+      account,
+      {
+        app,
+        store: {
+          async read() {
+            return localStorage.getItem(absentKey);
+          },
+          async update(transform: (current: string | null) => string) {
+            await navigator.locks.request(absentKey, () =>
+              localStorage.setItem(absentKey, transform(localStorage.getItem(absentKey))),
+            );
           },
         },
-      }).then((opened) => {
-        unexpectedlyOpened = opened;
-        return "unexpectedly opened";
-      }),
-    ).rejects.toThrow();
+      },
+      "dev",
+    );
+    await expect(prepareE2eeStartup(withoutKeys)).rejects.toBeInstanceOf(E2eeHistoryUnavailable);
 
-    await expect(
-      createDb({
-        ...config,
-        driver: { type: "persistent" as const, dbName: emptyDbName },
-      }).then((opened) => {
-        unexpectedlyOpened = opened;
-        return "unexpectedly opened";
-      }),
-    ).rejects.toThrow();
+    const withoutHistory = await createDb({
+      ...config,
+      e2ee: undefined,
+      driver: { type: "persistent" as const, dbName: emptyDbName },
+    });
+    foregrounds.push(withoutHistory);
+    await withoutHistory.all(app.projects, { tier: "local" });
+    attachE2ee(withoutHistory, account, config.e2ee, "dev");
+    await expect(prepareE2eeStartup(withoutHistory)).rejects.toBeInstanceOf(E2eeHistoryUnavailable);
   } finally {
-    await unexpectedlyOpened?.shutdown();
+    await Promise.all(foregrounds.map((foreground) => foreground.shutdown()));
     await db?.shutdown();
+    await emptyHistoryOwner?.shutdown();
     localStorage.removeItem(retainedKey);
     localStorage.removeItem(absentKey);
     if (!stopped) await stopJazzServer(server.serverUrl);

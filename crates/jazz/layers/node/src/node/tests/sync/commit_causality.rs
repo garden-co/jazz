@@ -449,7 +449,6 @@ fn parked_commit_unit_resent_over_another_transport_is_not_conflicting() {
         Some(crate::node::CommitUnitIngestContext {
             identity: AuthorSubject::SYSTEM,
             trust: crate::node::CommitUnitTrust::TrustedBackend,
-            admitted_write_authorization: false,
             version_receipts_validated,
         })
     };

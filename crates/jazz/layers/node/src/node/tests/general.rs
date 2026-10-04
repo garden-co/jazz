@@ -700,7 +700,6 @@ fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
             Some(CommitUnitIngestContext {
                 identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::Session,
-                admitted_write_authorization: false,
                 version_receipts_validated: false,
             }),
         )
@@ -808,7 +807,6 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        admitted_write_authorization: false,
         version_receipts_validated: false,
     });
     assert!(matches!(
@@ -887,7 +885,6 @@ fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        admitted_write_authorization: false,
         version_receipts_validated: false,
     });
     let mut root = prepared
@@ -948,7 +945,6 @@ fn rate_limited_upload_preserves_pending_claim_for_retry() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        admitted_write_authorization: false,
         version_receipts_validated: false,
     });
     let start = receiver
@@ -1072,7 +1068,6 @@ fn maintenance_evicts_pending_upload_after_the_configured_age() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        admitted_write_authorization: false,
         version_receipts_validated: false,
     });
     let _ = receiver
@@ -1120,7 +1115,6 @@ fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
     let context = Some(CommitUnitIngestContext {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
-        admitted_write_authorization: false,
         version_receipts_validated: false,
     });
     let started = receiver

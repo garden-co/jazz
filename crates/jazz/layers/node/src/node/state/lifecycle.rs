@@ -1175,7 +1175,15 @@ where
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> ActiveSessionClaimsScope<'_, S> {
-        let previous = self.active_session_claims.replace((identity, claims));
+        self.scoped_session_claim_binding(Some((identity, claims)))
+    }
+
+    /// Restore an exact parked scope, including absence of delegated authority.
+    pub(in crate::node) fn scoped_session_claim_binding(
+        &mut self,
+        binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    ) -> ActiveSessionClaimsScope<'_, S> {
+        let previous = std::mem::replace(&mut self.active_session_claims, binding);
         ActiveSessionClaimsScope {
             node: self,
             previous,
