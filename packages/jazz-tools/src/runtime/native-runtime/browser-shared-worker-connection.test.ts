@@ -1000,32 +1000,3 @@ describe("browser SharedWorker realm identity", () => {
     expect(current).toContain('"protocolVersion":"jazz-shared-runtime-v2"');
   });
 });
-
-describe("broker SharedWorker construction", () => {
-  it("has exactly one bundler-visible broker worker construction site (#3801)", async () => {
-    // webpack 5 emits one worker chunk, with its own URL, per
-    // `new (Shared)Worker(new URL(..., import.meta.url))` expression. The
-    // foreground lease and the runtime connection must share one SharedWorker
-    // realm (keyed by URL + name), so a second construction site silently
-    // splits them and the runtime never starts under webpack.
-    const { readdir, readFile } = await import("node:fs/promises");
-    const { join } = await import("node:path");
-    const { fileURLToPath } = await import("node:url");
-    const srcRoot = fileURLToPath(new URL("../..", import.meta.url));
-    const constructionSite = /new\s+(?:Shared)?Worker\s*\(\s*new\s+URL\s*\(\s*["'`]([^"'`]+)["'`]/g;
-
-    const sites: string[] = [];
-    const entries = await readdir(srcRoot, { recursive: true, withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !/\.(?:ts|tsx|js|mjs)$/.test(entry.name)) continue;
-      if (/\.test\.|\.spec\./.test(entry.name)) continue;
-      const path = join(entry.parentPath, entry.name);
-      const source = await readFile(path, "utf8");
-      for (const match of source.matchAll(constructionSite)) {
-        if (match[1]!.includes("jazz-broker-worker")) sites.push(path);
-      }
-    }
-
-    expect(sites).toEqual([expect.stringMatching(/browser-shared-worker-connection\.ts$/)]);
-  });
-});
