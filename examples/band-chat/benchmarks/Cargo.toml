@@ -12,6 +12,16 @@ uuid = "1.18.1"
 [dev-dependencies]
 divan = { workspace = true }
 
+# CodSpeed measures `walltime` on every merge (dev/benchmarks/codspeed-artifact.mjs).
 [[bench]]
 name = "walltime"
 harness = false
+
+# The band after years of use: measured by the nightly CodSpeed run only.
+[[bench]]
+name = "nightly"
+harness = false
+
+[[bin]]
+name = "band-chat-memory-receipt"
+path = "src/bin/memory_receipt.rs"
