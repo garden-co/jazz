@@ -34,6 +34,12 @@ After a read grant is restored, the same client can receive fresh readable
 content without discarding its local cache; revoked successor content remains
 withheld.
 
+Exact-head tombstone-inclusive reads now retain deletions whose content exists
+only in an undeclared base. These rows have absent non-branch cells; naming a
+current base supplies its retained body. Compatibility-omitted head content
+still masks the base and never becomes a sparse tombstone. Trusted reads
+continue to require selected content and read-policy authorization.
+
 Group recovery correctness checks use the 120-second multi-client test budget,
 including interrupted recovery and retry; fault injection and permission
 assertions are unchanged.
