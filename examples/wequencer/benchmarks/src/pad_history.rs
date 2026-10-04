@@ -15,7 +15,7 @@ use jazz::node::{MergeableCommit, NodeState};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, TxId};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::{Durability, RocksDbStorageFactory};
 
 const TABLE: &str = "pads";
 
@@ -32,14 +32,12 @@ impl PadHistoryFixture {
         assert!(depth > 0, "a pad needs at least one retained edit");
         let schema = schema();
         let directory = tempfile::tempdir().expect("create pad-history fixture directory");
-        let families = schema.column_families();
-        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = RocksDbStorage::open_with_durability(
-            directory.path(),
-            &family_refs,
-            Durability::WalNoSync,
-        )
-        .expect("open pad-history RocksDB");
+        let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+            &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+            directory.path().to_path_buf(),
+            schema.column_families(),
+        ))
+        .expect("admit pad-history RocksDB");
         let mut core =
             block_on(NodeState::new(node(), schema, storage)).expect("open pad-history node");
 

@@ -8,13 +8,13 @@ use std::task::{Context, Poll, Waker};
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, UpdateOptions};
 use jazz::groove::records::Value;
-use jazz::groove::storage::{LayoutStorage, OrderedKvStorage, StorageLayout};
+use jazz::groove::storage::{BoxedStorage, LayoutStorage, OrderedKvStorage, StorageLayout};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{CurrentWriteSchema, MigrationLens, SchemaVersion, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchemaBuilder};
-use jazz_storage_rocksdb::RocksDbStorage;
+use jazz_storage_rocksdb::RocksDbStorageFactory;
 
 mod common;
 
@@ -50,13 +50,17 @@ fn public_schema() -> Schema {
         .build()
 }
 
+fn open_admitted_storage(path: &std::path::Path, schema: &JazzSchema) -> BoxedStorage {
+    block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::default(),
+        path.to_path_buf(),
+        schema.column_families(),
+    ))
+    .unwrap()
+}
+
 fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
-    let families = schema.column_families();
-    let storage = RocksDbStorage::open(
-        path,
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-    .unwrap();
+    let storage = open_admitted_storage(path, schema);
     block_on(Db::open(DbConfig::new(
         schema.clone(),
         storage,
@@ -114,9 +118,9 @@ fn top_two_titles(db: &Db, schema: &JazzSchema, owner: &str) -> Vec<String> {
 /// ```text
 /// alice ──insert 3 tasks, bob 1──► db ──top2(alice)──► [ship, plan]
 /// alice ──bob's task → alice rank 9; ship → rank 0──► top2(alice) = [review, plan]
-/// db ──close──► reopen same directory ──top2(alice)──► [review, plan]
+/// db ──drop──► reopen same directory ──top2(alice)──► [review, plan]
 /// reopened ──move plan → bob──► top2(alice) = [review, draft]; top2(bob) = [plan]
-/// db ──close──► reopen again ──same owner prefixes and ordered pages
+/// reopened ──drop──► reopen again ──same owner prefixes and ordered pages
 /// ```
 #[test]
 fn composite_index_schema_serves_ordered_pages_across_updates_and_reopen() {
@@ -266,13 +270,12 @@ fn physical_composite_index_entry_keys_are_pinned() {
         let db = open_rocks_db(directory.path(), &schema);
         insert_task(&db, row(0x0a), "alice", 7, "ship");
     }
-    let families = schema.column_families();
-    let storage = RocksDbStorage::open(
-        directory.path(),
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
+    let storage = open_admitted_storage(directory.path(), &schema);
+    let storage = block_on(LayoutStorage::new_boxed(
+        storage,
+        StorageLayout::jazz_class_v1(),
+    ))
     .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v1())).unwrap();
     let keys = block_on(storage.prefix("indices".into(), Vec::new()))
         .unwrap()
         .into_iter()
@@ -303,13 +306,12 @@ fn physical_composite_index_entry_keys_are_pinned() {
 /// order the index would serve `(owner, rank)` pages in, and each key ends in
 /// the row's primary key, whose 16-byte row uuid is `[n; 16]` in these tests.
 fn composite_index_row_order(path: &std::path::Path, schema: &JazzSchema) -> Vec<u8> {
-    let families = schema.column_families();
-    let storage = RocksDbStorage::open(
-        path,
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
+    let storage = open_admitted_storage(path, schema);
+    let storage = block_on(LayoutStorage::new_boxed(
+        storage,
+        StorageLayout::jazz_class_v1(),
+    ))
     .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v1())).unwrap();
     block_on(storage.prefix("indices".into(), Vec::new()))
         .unwrap()
         .into_iter()
@@ -560,12 +562,7 @@ fn physical_global_current_composite_index_entry_keys_are_pinned() {
     let schema = JazzSchema::new(&public_schema()).expect("composite schema compiles");
     let directory = tempfile::tempdir().unwrap();
     {
-        let families = schema.column_families();
-        let storage = RocksDbStorage::open(
-            directory.path(),
-            &families.iter().map(String::as_str).collect::<Vec<_>>(),
-        )
-        .unwrap();
+        let storage = open_admitted_storage(directory.path(), &schema);
         let db = block_on(Db::open_history_complete(DbConfig::new(
             schema.clone(),
             storage,
@@ -588,13 +585,12 @@ fn physical_global_current_composite_index_entry_keys_are_pinned() {
         .unwrap();
         block_on(db.close()).unwrap();
     }
-    let families = schema.column_families();
-    let storage = RocksDbStorage::open(
-        directory.path(),
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
+    let storage = open_admitted_storage(directory.path(), &schema);
+    let storage = block_on(LayoutStorage::new_boxed(
+        storage,
+        StorageLayout::jazz_class_v1(),
+    ))
     .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v1())).unwrap();
     let keys = block_on(storage.prefix("indices".into(), Vec::new()))
         .unwrap()
         .into_iter()
