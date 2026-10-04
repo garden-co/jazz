@@ -1887,9 +1887,18 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
     assert!(block_on(db.all(&prepared, opts)).unwrap().is_empty());
 }
 
+/// Alice's exact head exposes its tombstones without implicitly reading a base.
+/// An explicit base supplies inherited cells; restoration replaces the tombstone.
+///
+/// alice ──base insert──► head delete ──► exact head (sparse) / declared base (body)
 #[test]
 fn include_deleted_reads_select_the_requested_live_branch_view() {
-    let (db, _schema) = open_db();
+    let (db, schema) = open_db();
+    let table = schema
+        .tables()
+        .iter()
+        .find(|table| table.name == "todos")
+        .unwrap();
     let base = selector(0x31);
     let head = selector(0x32);
     let other = selector(0x33);
@@ -1909,6 +1918,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
             jazz::db::InsertOptions {
                 row_id: Some(row),
                 target: jazz::db::ExactWriteTarget::Branch(branch),
+                updated_at_ms: Some(1_000),
                 ..Default::default()
             },
         )
@@ -1923,6 +1933,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
         jazz::db::InsertOptions {
             row_id: Some(head_deleted),
             target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+            updated_at_ms: Some(1_100),
             ..Default::default()
         },
     )
@@ -1935,6 +1946,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
                 head: head.clone(),
                 base: None,
             },
+            updated_at_ms: Some(3_000),
             ..Default::default()
         },
     )
@@ -1947,6 +1959,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
                 head: head.clone(),
                 base: Some(BranchViewBase::Current(base.clone())),
             },
+            updated_at_ms: Some(4_000),
             ..Default::default()
         },
     )
@@ -1959,6 +1972,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
                 head: other.clone(),
                 base: None,
             },
+            updated_at_ms: Some(5_000),
             ..Default::default()
         },
     )
@@ -1979,28 +1993,157 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
         read_view: ReadViewSpec {
             source: ReadViewSourceSpec::BranchView {
                 head: head.clone(),
-                base: Some(BranchViewBase::Current(base)),
+                base: Some(BranchViewBase::Current(base.clone())),
             },
         },
         ..head_opts.clone()
     };
     let head_rows = block_on(db.all(&prepared, head_opts.clone())).unwrap();
+    let states = |rows: &[jazz::node::CurrentRow]| {
+        rows.iter()
+            .map(|row| {
+                let provenance = db.row_provenance(row).unwrap().unwrap();
+                (
+                    row.row_uuid(),
+                    (
+                        row.cell(table, "title"),
+                        row.cell(table, "branch_id"),
+                        row.is_deleted(),
+                        provenance.created_at,
+                        provenance.updated_at,
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let head_cell = Some(Value::Uuid(uuid::Uuid::from_bytes([0x32; 16])));
     assert_eq!(
-        head_rows
-            .iter()
-            .map(|row| row.row_uuid())
-            .collect::<Vec<_>>(),
-        vec![inherited_deleted, head_deleted],
-        "an exact head read includes head tombstones, not another branch's tombstones"
+        states(&head_rows),
+        BTreeMap::from([
+            (
+                inherited_deleted,
+                (None, head_cell.clone(), true, 4_000, 4_000)
+            ),
+            (
+                head_deleted,
+                (
+                    Some(Value::String("deleted on head".to_owned())),
+                    head_cell.clone(),
+                    true,
+                    1_100,
+                    3_000
+                )
+            ),
+        ]),
+        "exact head keeps register-only tombstones without fetching an undeclared body"
     );
-    let base_rows = block_on(db.all(&prepared, current_base_opts)).unwrap();
+    let base_rows = block_on(db.all(&prepared, current_base_opts.clone())).unwrap();
     assert_eq!(
-        base_rows
+        states(&base_rows),
+        BTreeMap::from([
+            (
+                inherited_deleted,
+                (
+                    Some(Value::String("deleted from head".to_owned())),
+                    head_cell.clone(),
+                    true,
+                    1_000,
+                    4_000
+                )
+            ),
+            (
+                inherited_visible,
+                (
+                    Some(Value::String("visible from base".to_owned())),
+                    head_cell.clone(),
+                    false,
+                    1_000,
+                    1_000
+                )
+            ),
+            (
+                head_deleted,
+                (
+                    Some(Value::String("deleted on head".to_owned())),
+                    head_cell.clone(),
+                    true,
+                    1_100,
+                    3_000
+                )
+            ),
+        ]),
+        "declared base supplies content while head deletion and branch coordinates win"
+    );
+    let exact_base_rows = block_on(db.all(
+        &prepared,
+        ReadOpts {
+            read_view: ReadViewSpec {
+                source: ReadViewSourceSpec::BranchView {
+                    head: base,
+                    base: None,
+                },
+            },
+            ..head_opts.clone()
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        states(&exact_base_rows),
+        BTreeMap::from([
+            (
+                inherited_deleted,
+                (
+                    Some(Value::String("deleted from head".to_owned())),
+                    Some(Value::Uuid(uuid::Uuid::from_bytes([0x31; 16]))),
+                    false,
+                    1_000,
+                    1_000
+                )
+            ),
+            (
+                inherited_visible,
+                (
+                    Some(Value::String("visible from base".to_owned())),
+                    Some(Value::Uuid(uuid::Uuid::from_bytes([0x31; 16]))),
+                    false,
+                    1_000,
+                    1_000
+                )
+            ),
+        ]),
+        "head tombstone does not mutate base content or visibility"
+    );
+    db.restore(
+        "todos",
+        inherited_deleted,
+        Some(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("restored on head".to_owned()),
+        )])),
+        jazz::db::RestoreOptions {
+            target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+            updated_at_ms: Some(6_000),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let restored = block_on(db.all(&prepared, head_opts.clone())).unwrap();
+    assert_eq!(
+        restored
             .iter()
-            .map(|row| row.row_uuid())
-            .collect::<Vec<_>>(),
-        vec![inherited_deleted, inherited_visible, head_deleted],
-        "the current base is covered while a head tombstone remains the winner"
+            .map(|row| (row.row_uuid(), (row.cell(table, "title"), row.is_deleted())))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            (
+                inherited_deleted,
+                (Some(Value::String("restored on head".to_owned())), false)
+            ),
+            (
+                head_deleted,
+                (Some(Value::String("deleted on head".to_owned())), true)
+            ),
+        ]),
+        "restore supersedes the register-only tombstone without a duplicate"
     );
 
     let unsupported_snapshot_base = ReadOpts {
@@ -2020,7 +2163,9 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
         },
         ..head_opts
     };
-    assert!(block_on(db.all(&prepared, unsupported_snapshot_base)).is_err());
+    let error = block_on(db.all(&prepared, unsupported_snapshot_base))
+        .expect_err("include-deleted frozen bases remain unsupported");
+    assert_eq!(error.code, jazz::db::ErrorCode::Query);
 }
 
 #[test]
