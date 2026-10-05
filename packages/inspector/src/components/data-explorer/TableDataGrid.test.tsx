@@ -868,6 +868,31 @@ describe("TableDataGrid", () => {
     expect(document.querySelector(".rdg-cell-frozen")).toBeNull();
   });
 
+  it("bounds binary cell text and tooltips to a hex preview", () => {
+    const bytes = new Uint8Array(300_877).fill(255);
+    bytes.set([0, 1, 10, 16]);
+    currentRows = [
+      { ...currentRows[0], blob: bytes },
+      { ...currentRows[1], blob: new Uint8Array() },
+    ];
+    const { rerender } = renderGrid();
+    const preview = `${bytes.length.toLocaleString()} bytes · 00 01 0a 10 ${"ff ".repeat(11)}ff …`;
+    expect(screen.getByText(preview).getAttribute("title")).toBe(preview);
+    expect(screen.getByText("0 bytes").getAttribute("title")).toBe("0 bytes");
+
+    // The preview stays the same, but an edit beyond its prefix is still a change.
+    const changed = bytes.slice();
+    changed[changed.length - 1] = 0;
+    currentRows = [{ ...currentRows[0], blob: changed }, currentRows[1]!];
+    rerender(renderGridUi());
+    expect(getContainingCell(screen.getByText(preview))?.dataset.cellChangeState).toBe("updated");
+  });
+
+  it("shows short binary values completely", () => {
+    renderGrid();
+    expect(screen.getByText("2 bytes · 01 02").getAttribute("title")).toBe("2 bytes · 01 02");
+  });
+
   it("marks changed cells so live updates can pulse", () => {
     vi.useFakeTimers();
     const { rerender } = renderGrid();
