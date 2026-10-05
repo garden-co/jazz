@@ -101,3 +101,43 @@ fn wide_separators_fit_after_skewed_parent_split() {
         }
     });
 }
+
+/// A leaf created earlier in one batch must choose a split whose promoted
+/// separator fits the new root, just like a previously persisted leaf.
+#[test]
+fn fresh_leaf_split_uses_a_separator_that_fits_the_new_root() {
+    futures::executor::block_on(async {
+        let store = MemoryPageStore::default();
+        let options = Options { page_size: 1024 };
+        let tree = IdbTree::open(store.clone(), options).await.unwrap();
+        let first = vec![0];
+        let middle = vec![1; 980];
+        let last = vec![2];
+        // Insert the wide middle key last: the two narrow entries establish a
+        // fresh leaf first. Both leaf partitions fit; only the narrow separator
+        // can be promoted into the root.
+        tree.write_many(vec![
+            WriteOperation::Set {
+                key: first.clone(),
+                value: vec![10],
+            },
+            WriteOperation::Set {
+                key: last.clone(),
+                value: vec![30],
+            },
+            WriteOperation::Set {
+                key: middle.clone(),
+                value: vec![20],
+            },
+        ])
+        .await
+        .unwrap();
+        tree.flush().await.unwrap();
+        drop(tree);
+        let reopened = IdbTree::open(store, options).await.unwrap();
+        assert_eq!(
+            reopened.range(&[], &[255]).await.unwrap(),
+            vec![(first, vec![10]), (middle, vec![20]), (last, vec![30])],
+        );
+    });
+}

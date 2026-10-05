@@ -167,16 +167,46 @@ impl Db {
     where
         T: OrderedKvStorage + ReopenableStorage + 'static,
     {
+        Self::open_with_catalogue_snapshot(config, None).await
+    }
+
+    /// Restore a host-owned authenticated catalogue into a new root only.
+    ///
+    /// # Safety
+    /// The host must validate the cache envelope's registry/application/environment
+    /// scope and retain capture bytes only from `take_authenticated_catalogue_state`.
+    #[doc(hidden)]
+    pub async unsafe fn open_with_cached_catalogue<T>(
+        config: DbConfig<T>,
+        cached: Option<&[u8]>,
+    ) -> Result<Self, Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
+        let snapshot = cached
+            .map(initialization::decode_catalogue_capture)
+            .transpose()?;
+        Self::open_with_catalogue_snapshot(config, snapshot).await
+    }
+
+    async fn open_with_catalogue_snapshot<T>(
+        config: DbConfig<T>,
+        snapshot: Option<crate::protocol::CatalogueSnapshot>,
+    ) -> Result<Self, Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
         let schema_version_id = config.schema.version_id();
         let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
             SchemaViewId::for_schema(&config.schema),
             config.schema.clone(),
         )])));
-        let node = NodeState::new_client(
+        let node = NodeState::new_client_with_cached_catalogue(
             config.identity.node,
             config.schema.clone(),
             config.storage,
             false,
+            snapshot,
         )
         .await?;
         let requires_open_schema_admission =
@@ -230,6 +260,25 @@ impl Db {
         T: OrderedKvStorage + ReopenableStorage + 'static,
     {
         let db = Self::open(config).await?;
+        db.node.configure_scope_isolated_client_relay(scope)?;
+        Ok(db)
+    }
+
+    /// Scope-admitted relay counterpart of `open_with_cached_catalogue`.
+    ///
+    /// # Safety
+    /// Both the storage scope and the catalogue cache scope must already be
+    /// authenticated by the host, as required by the two ordinary constructors.
+    #[doc(hidden)]
+    pub async unsafe fn open_scope_isolated_client_relay_with_cached_catalogue<T>(
+        config: DbConfig<T>,
+        scope: ClientRelayScope,
+        cached: Option<&[u8]>,
+    ) -> Result<Self, Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
+        let db = unsafe { Self::open_with_cached_catalogue(config, cached).await? };
         db.node.configure_scope_isolated_client_relay(scope)?;
         Ok(db)
     }
@@ -711,6 +760,15 @@ where
     #[doc(hidden)]
     pub fn drive_queued_mutation_once(&self) {
         self.node.poll_queued_mutation_once();
+    }
+
+    /// Drive one bounded owner turn, retaining the installed scheduler wake.
+    ///
+    /// Without a scheduler, cold work wakes the binding's own continuation.
+    /// Returns true only when an operation completed, never for cold pending work.
+    #[doc(hidden)]
+    pub fn drive_queued_mutation_with_waker_for_binding(&self, waker: &std::task::Waker) -> bool {
+        self.node.poll_queued_mutation_with_waker(waker).1
     }
 
     /// Number of admitted owner operations (mutations, fenced reads and

@@ -128,9 +128,7 @@ it("keeps enrolment requests private to their verified author account and immuta
       await expect(client.delete(directory, request.id).wait({ tier: "global" })).rejects.toThrow();
     }
     await expect(
-      alice.one(requests.select("$createdBy").where({ id: request.id }), {
-        tier: "remote",
-      }),
+      alice.one(requests.select("$createdBy").where({ id: request.id }), { tier: "remote" }),
     ).resolves.toMatchObject({ $createdBy: { account: aliceConfig.account.id } });
 
     for (const client of [alice, bob]) {

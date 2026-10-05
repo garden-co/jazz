@@ -27,6 +27,15 @@ export declare class JazzServer {
 }
 
 export declare class NapiDb {
+  validateCatalogueCaptureReplacement(previous: Uint8Array, next: Uint8Array): void
+  takeAuthenticatedCatalogueState(): NativeCatalogueState | PendingNativeCatalogueState
+  sealInitializationTransaction(openId: string): NativeInitializationSeal | PendingNativeInitializationSeal
+  publishInitializationTransaction(token: string): Write
+  cancelInitializationTransaction(token: string): void
+  recordInitializationInsertAbsence(openId: string, table: string, rowId: Uint8Array): Uint8Array | PendingNativeRead
+  initializationTransactionStatus(ids: Array<string>): string | PendingNativePermissionAdvice
+  static openPersistentAccountOwnerWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, storageOwner: string, token: string, appId: string, claimedAuthor: string, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
+  static openPersistentAccountOwner(dataPath: string, schema: Uint8Array, config: Uint8Array, storageOwner: string, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
   /**
    * Exact wire capabilities compiled into this native binding.
    *
@@ -63,7 +72,7 @@ export declare class NapiDb {
   restore(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
   restoreInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
   beginStreamingMutation(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
-  static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
+  static openMemory(schema: Uint8Array, config: Uint8Array, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
   /**
    * Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
    * this explicit ABI derives the canonical system author.
@@ -75,14 +84,14 @@ export declare class NapiDb {
    * hand proof bytes to an old constructor, and an old client cannot enter
    * the proof-bearing path.
    */
-  static openMemoryWithSelfSignedProof(schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
-  static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
+  static openMemoryWithSelfSignedProof(schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
+  static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
   /**
    * Open a deliberate persistent backend runtime. This is intentionally a
    * distinct ABI from the public raw-open entrypoint.
    */
   static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
-  static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
+  static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
   /** Read an accepted table UUID without blocking pending native storage. */
   tableIdentity(table: string): Uint8Array | PendingNativeRead
   /** Read an accepted column UUID without blocking pending native storage. */
@@ -141,6 +150,18 @@ export declare class NapiDb {
   seedForegroundTxTimeHighWater(highWater: bigint): void
   waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
+}
+
+/** A single owner observation, retained on the JavaScript thread until ready. */
+export declare class PendingNativeCatalogueState {
+  poll(): NativeCatalogueState | null
+  cancel(): void
+}
+
+/** Thread-affine initialization preparation, driven by the owner's normal ticks. */
+export declare class PendingNativeInitializationSeal {
+  poll(): NativeInitializationSeal | null
+  cancel(): void
 }
 
 /**
@@ -306,6 +327,16 @@ export declare function mintLocalFirstToken(seedB64: string, audience: string, t
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
 export declare function nativeArtifactFingerprint(): string
+
+export interface NativeCatalogueState {
+  capture?: Uint8Array
+  ready: boolean
+}
+
+export interface NativeInitializationSeal {
+  token: string
+  reservedTxId: string
+}
 
 export interface RestoreOptions {
   author?: Uint8Array

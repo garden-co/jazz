@@ -1,3 +1,9 @@
+import { NodeCatalogueCache } from "../runtime/catalogue-cache-node.js";
+import {
+  ephemeralCatalogueCache,
+  type CatalogueCache,
+  type CatalogueCacheScope,
+} from "../runtime/catalogue-cache.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { E2eeConfig } from "../e2ee/lifecycle.js";
 import { createNativeCrypto } from "../e2ee/native.js";
@@ -15,12 +21,17 @@ import type { AccountHandle } from "../accounts/state.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
+import { acquireNodeForegroundNodeLease } from "../runtime/native-runtime/node-foreground-node-lease.js";
+import {
+  createBrowserAuthSessionKey,
+  createBrowserStorageOwner,
+} from "../runtime/browser-worker-config.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
 import { JazzClient as RuntimeClient, type RequestLike } from "../runtime/client.js";
 import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
 import type { AppContext, PublicSession } from "../runtime/context.js";
-import type { Db } from "../runtime/db.js";
+import type { Db, DbConfig } from "../runtime/db.js";
 import {
   getTrustedReservedSession,
   setTrustedReservedSession,
@@ -87,6 +98,21 @@ function backendNodeId(config: JazzSessionConfig): string {
 /** Each selected user opens an ordinary native client, never a backend facade. */
 class NodeUserRuntimeSource extends RuntimeSource {
   override readonly supportsPolicyBypass = false;
+  private catalogueCache?: { cache: CatalogueCache; scope: CatalogueCacheScope };
+  private cachedCatalogue?: Uint8Array;
+  override async load(): Promise<void> {
+    const scope = {
+      registryAuthority: accountRegistry(this.account),
+      appId: this.host.appId,
+      environment: this.host.env ?? "dev",
+    };
+    const cache =
+      this.host.driver.type === "persistent"
+        ? new NodeCatalogueCache(`${this.host.driver.dataPath}.catalogue`)
+        : ephemeralCatalogueCache;
+    this.catalogueCache = { cache, scope };
+    this.cachedCatalogue = (await cache.load(scope)) ?? undefined;
+  }
   flush(): void {
     // Native writes already cross the local durability boundary when committed.
   }
@@ -96,7 +122,23 @@ class NodeUserRuntimeSource extends RuntimeSource {
   ) {
     super();
   }
-  override createClient({ config, schema, onAuthFailure }: RuntimeClientContext): RuntimeClient {
+  override async acquireForegroundNodeLease(config: DbConfig) {
+    if (this.host.driver.type !== "persistent") return undefined;
+    return acquireNodeForegroundNodeLease({
+      appId: config.appId,
+      env: config.env ?? "dev",
+      authScope: createBrowserAuthSessionKey(config),
+    });
+  }
+
+  override createClient({
+    config,
+    schema,
+    onAuthFailure,
+    foregroundNodeLease,
+  }: RuntimeClientContext): RuntimeClient {
+    if (this.host.driver.type === "persistent" && !foregroundNodeLease)
+      throw new Error("Persistent Node user runtime requires a foreground node lease");
     const declaredSchema = resolveSchemaSource(this.host.app);
     if (
       serializeRuntimeSchema(mergePermissionsIntoWasmSchema(declaredSchema, {})) !==
@@ -122,22 +164,25 @@ class NodeUserRuntimeSource extends RuntimeSource {
     const runtime = new NativeRuntimeAdapter(
       NapiDb,
       runtimeSchema,
-      this.host.driver.type === "persistent"
-        ? deterministicBytes(
-            `${this.host.appId}:${this.host.env ?? "dev"}:${this.host.driver.dataPath}.accounts/${scope}:node`,
-          )
-        : uuidBytes(randomUUID()),
+      foregroundNodeLease?.node.slice() ?? uuidBytes(randomUUID()),
       authorBytesForSession(session),
       1,
       false,
       {
         ...(this.host.driver.type === "persistent"
-          ? { persistentPath: `${this.host.driver.dataPath}.accounts/${scope}` }
+          ? {
+              persistentPath: `${this.host.driver.dataPath}.accounts/${scope}`,
+              persistentAccountOwner: createBrowserStorageOwner(config),
+            }
           : {}),
         selfSignedClientProof: selfSignedClientProofFromConfig(config, session),
         readAuthorizationHost: "client-local",
+        cachedCatalogue: this.cachedCatalogue,
+        catalogueCache: this.catalogueCache,
       },
     );
+    if (foregroundNodeLease)
+      runtime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
     const context: AppContext = { ...config, schema: runtimeSchema, tier: "local" };
     setTrustedReservedSession(context, trustedReservedSession);
     return RuntimeClient.connectWithRuntime(runtime, context, { onAuthFailure });

@@ -253,6 +253,7 @@ it("uses the public begin snapshot for cold and late initial recipients", async 
   const { app, db } = fixture;
   try {
     const cold = await fixture.openOtherAccount();
+    await cold.client.e2ee.devices.list();
     // Advance the creator's known authority coordinate without loading recipient history.
     await db.insert(app.events, { message: "Recipient enrolment precedes this snapshot" }).wait({
       tier: "global",
@@ -282,6 +283,7 @@ it("uses the public begin snapshot for cold and late initial recipients", async 
       await lateTx.one(app.projects.where({ id: crypto.randomUUID() }), { tier: "global" }),
     ).toBeNull();
     const late = await fixture.openOtherAccount();
+    await late.client.e2ee.devices.list();
     const lateProject = lateTx.insert(
       app.projects,
       { title: "Late recipient scope" },
@@ -315,8 +317,6 @@ it("reads plaintext-only projections in exclusive transactions without the local
     });
     await initial.commit().wait({ tier: "global" });
     const storeError = new Error("Local key store unavailable");
-    let reads = 0;
-    let updates = 0;
     let unavailable = false;
     let retained: string | null = null;
     observer = await createDb({
@@ -325,19 +325,18 @@ it("reads plaintext-only projections in exclusive transactions without the local
         app,
         store: {
           async read() {
-            reads += 1;
             if (unavailable) throw storeError;
             return retained;
           },
           async update(transform: (current: string | null) => string) {
-            updates += 1;
             if (unavailable) throw storeError;
             retained = transform(retained);
           },
         },
       },
     });
-    const startupStoreAccesses = { reads, updates };
+    // Background initialization may still read the store; plaintext projections
+    // must succeed independently when those reads fail.
     unavailable = true;
 
     const plain = app.notes.where({ id: note.id }).select("id", "projectId");
@@ -345,7 +344,6 @@ it("reads plaintext-only projections in exclusive transactions without the local
       id: note.id,
       projectId: project.id,
     });
-    expect({ reads, updates }).toEqual(startupStoreAccesses);
 
     const exclusive = observer.beginExclusiveTransaction();
     try {
@@ -353,7 +351,6 @@ it("reads plaintext-only projections in exclusive transactions without the local
         id: note.id,
         projectId: project.id,
       });
-      expect({ reads, updates }).toEqual(startupStoreAccesses);
     } finally {
       await exclusive.rollback();
     }

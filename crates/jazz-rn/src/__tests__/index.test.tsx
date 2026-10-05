@@ -4,47 +4,14 @@ type FixtureNativeRelay = {
 };
 
 import { NATIVE_RELAY_ABI_V1 } from "../native-relay-abi";
+import type { NativeForegroundCommand } from "../relay";
 
 const foregroundRuntimeGlobal = "__jazzNativeForegroundRuntimeV1";
 
-type NativeForegroundCommand =
-  | "probe"
-  | "tick"
-  | "close"
-  | {
-      type: "all";
-      query: Uint8Array;
-      optionsJson: string;
-      transaction?: number;
-    }
-  | { type: "poll"; operation: number }
-  | { type: "cancel"; operation: number }
-  | { type: "waitForTransaction"; txId: Uint8Array; tier: string; observeOnly?: boolean }
-  | { type: "beginTransaction"; kind: "mergeable" | "exclusive" }
-  | {
-      type: "insert";
-      transaction: number;
-      table: string;
-      cells: Uint8Array;
-      rowId?: Uint8Array;
-    }
-  | {
-      type: "update";
-      transaction: number;
-      table: string;
-      rowId: Uint8Array;
-      patch: Uint8Array;
-    }
-  | {
-      type: "upsert";
-      transaction: number;
-      table: string;
-      rowId: Uint8Array;
-      cells: Uint8Array;
-    }
-  | { type: "delete"; transaction: number; table: string; rowId: Uint8Array }
-  | { type: "commitTransaction"; transaction: number }
-  | { type: "rollbackTransaction"; transaction: number };
+type NativeInitializationAction = Extract<
+  NativeForegroundCommand,
+  { type: "initializationV1" }
+>["action"];
 
 type RelayExports = {
   executeNativeRelayCommand(command: string): Promise<string>;
@@ -546,4 +513,27 @@ it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly 
   expect(() => relay.decodeNativeForegroundResponse(deltaEvent(malformed))).toThrow(
     /malformed UTF-8 terminal operations/,
   );
+});
+
+it("pins initialization V1 command tags and rejects oversized status batches", () => {
+  const relay = loadRelay({ getAbiVersion: () => NATIVE_RELAY_ABI_V1, execute: jest.fn() });
+  const encode = (action: NativeInitializationAction) =>
+    relay.encodeNativeForegroundCommand({ type: "initializationV1", version: 1, action });
+  expect(encode({ type: "seal", transaction: 129 })).toEqual(Uint8Array.of(37, 1, 0, 129, 1));
+  expect(encode({ type: "publish", token: "x" })).toEqual(Uint8Array.of(37, 1, 1, 1, 120));
+  expect(encode({ type: "cancel", token: "x" })).toEqual(Uint8Array.of(37, 1, 2, 1, 120));
+  expect(
+    encode({
+      type: "recordAbsence",
+      transaction: 3,
+      table: "t",
+      rowId: new Uint8Array(16).fill(7),
+    }),
+  ).toEqual(Uint8Array.of(37, 1, 3, 3, 1, 116, ...new Array(16).fill(7)));
+  expect(encode({ type: "status", ids: ["x"] })).toEqual(Uint8Array.of(37, 1, 4, 1, 1, 120));
+  expect(encode({ type: "hasAuthenticatedCatalogue" })).toEqual(Uint8Array.of(37, 1, 5));
+  expect(() => encode({ type: "status", ids: new Array(65).fill("x") })).toThrow("at most 64");
+  expect(() =>
+    encode({ type: "recordAbsence", transaction: 3, table: "t", rowId: new Uint8Array(15) }),
+  ).toThrow("16-byte");
 });

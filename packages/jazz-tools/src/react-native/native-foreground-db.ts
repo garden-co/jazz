@@ -1,3 +1,4 @@
+import { Utf8Decoder } from "../runtime/utf8.js";
 import type { MutationErrorEvent } from "../runtime/client.js";
 
 type ForegroundMutationKind = "insert" | "update" | "upsert" | "delete" | "restore";
@@ -17,6 +18,16 @@ type ForegroundPermissionAdviceAction =
   | { type: "update"; table: string; rowId: Uint8Array; patch: Uint8Array };
 
 type ForegroundCommand =
+  | {
+      type: "initializationV1";
+      version: 1;
+      action:
+        | { type: "seal"; transaction: number }
+        | { type: "publish" | "cancel"; token: string }
+        | { type: "recordAbsence"; transaction: number; table: string; rowId: Uint8Array }
+        | { type: "status"; ids: string[] }
+        | { type: "hasAuthenticatedCatalogue" };
+    }
   | { type: "permissionAdvice"; action: ForegroundPermissionAdviceAction }
   | "tick"
   | "close"
@@ -536,6 +547,103 @@ export class NativeForegroundDb {
       kind,
       closed: false,
     });
+  }
+
+  async hasAuthenticatedCatalogue(): Promise<boolean> {
+    const response = await this.completeMutationOperation(
+      this.execute({
+        type: "initializationV1",
+        version: 1,
+        action: { type: "hasAuthenticatedCatalogue" },
+      }),
+    );
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "rows") return unexpected("hasAuthenticatedCatalogue", response.type);
+    const ready = JSON.parse(new Utf8Decoder().decode(response.rows));
+    if (typeof ready !== "boolean") throw new Error("Invalid native catalogue readiness");
+    return ready;
+  }
+
+  async sealInitializationTransaction(
+    openTransactionId: string,
+  ): Promise<{ token: string; reservedTxId: string }> {
+    const transaction = this.openTransaction(openTransactionId, "seal");
+    const response = await this.completeMutationOperation(
+      this.execute({
+        type: "initializationV1",
+        version: 1,
+        action: { type: "seal", transaction: transaction.handle },
+      }),
+    );
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "rows") return unexpected("sealInitializationTransaction", response.type);
+    const seal = JSON.parse(new Utf8Decoder().decode(response.rows));
+    if (typeof seal?.token !== "string" || typeof seal?.reservedTxId !== "string")
+      throw new Error("Invalid native initialization seal");
+    this.transactions.delete(openTransactionId);
+    transaction.closed = true;
+    return seal;
+  }
+
+  async publishInitializationTransaction(token: string): Promise<NativeForegroundWrite> {
+    const response = await this.completeMutationOperation(
+      this.execute({
+        type: "initializationV1",
+        version: 1,
+        action: { type: "publish", token },
+      }),
+    );
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "transactionCommitted")
+      return unexpected("publishInitializationTransaction", response.type);
+    return nativeWrite(this, response.txId);
+  }
+
+  async cancelInitializationTransaction(token: string): Promise<void> {
+    const response = await this.completeMutationOperation(
+      this.execute({
+        type: "initializationV1",
+        version: 1,
+        action: { type: "cancel", token },
+      }),
+    );
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "rows")
+      return unexpected("cancelInitializationTransaction", response.type);
+  }
+
+  async recordInitializationInsertAbsence(
+    openTransactionId: string,
+    table: string,
+    rowId: Uint8Array,
+  ): Promise<void> {
+    const transaction = this.openTransaction(openTransactionId, "record insert absence");
+    const response = await this.completeMutationOperation(
+      this.execute({
+        type: "initializationV1",
+        version: 1,
+        action: { type: "recordAbsence", transaction: transaction.handle, table, rowId },
+      }),
+    );
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "rows")
+      return unexpected("recordInitializationInsertAbsence", response.type);
+  }
+
+  async initializationTransactionStatus(ids: string[]): Promise<string> {
+    if (ids.length > 64)
+      throw new RangeError("Initialization status accepts at most 64 transaction identities");
+    const response = await this.completeMutationOperation(
+      this.execute({
+        type: "initializationV1",
+        version: 1,
+        action: { type: "status", ids },
+      }),
+    );
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "rows")
+      return unexpected("initializationTransactionStatus", response.type);
+    return new Utf8Decoder().decode(response.rows);
   }
 
   commitTransaction(openTransactionId: string): NativeForegroundWrite {

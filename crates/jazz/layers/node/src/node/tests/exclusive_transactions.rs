@@ -2060,6 +2060,18 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
         .rehydrate_query(&mut core, &first_shape, &first_binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&first);
+    // Internal protocol seam: ordinary local writes cannot create partial audit
+    // records. Exact initialization status must distinguish this received view
+    // fragment from a complete replayable transaction.
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_shape_binding(&mut reader, &first_shape, &first_binding);
+    reader.apply_sync_message_settled(first.clone()).unwrap();
+    assert_eq!(
+        reader
+            .initialization_transaction_status(tx_id, version_bundles[0].tx.made_by)
+            .unwrap(),
+        crate::node::InitializationTransactionStatus::Incomplete,
+    );
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {

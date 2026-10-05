@@ -2,10 +2,10 @@ import { exclusiveE2eeTransaction } from "../runtime/db.js";
 import type { Db, QueryBuilder } from "../runtime/db.js";
 import type { E2eeHistoryReader } from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
-import type { SpaceRoot, SpaceGrant } from "./spaces.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { decodeLocalDeviceStore } from "./local-device.js";
+import { observeE2eeHistory } from "./history-reader.js";
 
 type Read = {
   query: QueryBuilder<{ id: string }>;
@@ -21,6 +21,9 @@ type Storage = { store: AccountStore; scope: string; assertOpen(): void };
 type StoredRead = { query: string; snapshot: Read["snapshot"] };
 type StoredHistory = { scope: string; key: string; reads: string; initial?: Retained["initial"] };
 const stores = new WeakMap<Db, Storage>();
+
+/** Retained evidence needs authority refresh; operational failures are not cache misses. */
+export class RetainedHistoryUnavailableError extends Error {}
 
 /** Internal, account/application-scoped storage; never installs an authority receipt. */
 export function configureAcceptedHistory(db: Db, storage: Storage): void {
@@ -205,8 +208,8 @@ function retain(db: Db, key: string, bundle: Retained): void {
     reads: bundle.reads.map((r, i) => ({ query: r.query, snapshot: copied.snapshots[i]! })),
     result: copied.result,
   });
-  // Keep provisional preparation until acceptance can save it; ordinary bundles
-  // may be evicted because accepted reads have already been persisted.
+  // Legacy accepted initial bundles finish exact-ID validation before eviction;
+  // new initializations live exclusively in the sealed proposal journal.
   if (entries.size > 8) {
     const oldest = [...entries].find(([, entry]) => !entry.initial);
     if (oldest) entries.delete(oldest[0]);
@@ -214,56 +217,23 @@ function retain(db: Db, key: string, bundle: Retained): void {
   histories.set(db, entries);
 }
 
-/** Capture a coherent preparation snapshot; it is not accepted merely by being retained. */
-export async function prepareInitialHistory<
-  T extends { roots: Read["snapshot"]; grants: Read["snapshot"] },
->(
+/** Promote only coherent, actually accepted owner metadata after journal reconciliation. */
+export async function retainLocalAcceptedHistory<T>(
   db: Db,
-  tx: E2eeHistoryReader,
+  key: string,
   read: (reader: E2eeHistoryReader) => Promise<T>,
-  root: SpaceRoot,
-  grants: SpaceGrant[],
+  validate: (result: T) => Promise<void>,
 ): Promise<void> {
-  const bundle = await capture(tx, read);
-  if (bundle.result.roots.rows.length || bundle.result.grants.rows.length)
-    throw new Error("Initial E2EE history must precede its root and grants");
-  bundle.result.roots.rows.push(root);
-  bundle.result.grants.rows.push(...grants);
-  retain(db, JSON.stringify(["space", root.scopeId, root.identifier]), {
-    ...bundle,
-    initial: {
-      rootId: root.id,
-      rowIds: [root.id, ...grants.map((row) => row.id)],
-      recipientIds: grants.map((row) => row.recipientId),
-    },
-  });
-}
-
-/** Discard an uncommitted preparation after rollback or rejection. */
-export function discardInitialHistory(db: Db, root: SpaceRoot): void {
-  const key = JSON.stringify(["space", root.scopeId, root.identifier]);
-  const entry = histories.get(db)?.get(key);
-  if (entry?.initial?.rootId === root.id && !entry.initial.transactionId)
-    histories.get(db)!.delete(key);
-}
-
-/** Save the exact accepted preparation without changing the committed receipt on cache failure. */
-export async function acceptInitialHistory(
-  db: Db,
-  root: SpaceRoot,
-  transactionId: string,
-): Promise<void> {
-  const key = JSON.stringify(["space", root.scopeId, root.identifier]);
-  const retained = histories.get(db)?.get(key);
-  if (retained?.initial?.rootId !== root.id) return;
-  retained.initial.transactionId = transactionId;
+  const bundle = await observeE2eeHistory(db, (reader) => capture(reader, read));
+  await validate(bundle.result);
+  stores.get(db)?.assertOpen();
   try {
-    await persist(db, key, retained.reads, retained.initial);
-    if (stores.has(db) && histories.get(db)?.get(key) === retained) histories.get(db)!.delete(key);
+    await persist(db, key, bundle.reads);
   } catch {
-    // The transaction is already accepted. Keep the in-memory history, but never
-    // report that committed write as rejected because an optional cache failed.
+    // Cache durability is not acceptance authority; keep the verified bundle.
   }
+  stores.get(db)?.assertOpen();
+  retain(db, key, bundle);
 }
 
 /** Retain complete accepted read bundles, never individual rows or unaccepted results. */
@@ -277,9 +247,10 @@ export async function readAcceptedHistory<T>(
   histories.set(db, entries);
   if (localOnly || (await db.e2eeIsExplicitlyOffline())) {
     const retained: Retained | undefined = entries.get(key) ?? (await restore(db, key, read));
-    if (!retained) throw new Error("Accepted E2EE history is unavailable offline");
+    if (!retained)
+      throw new RetainedHistoryUnavailableError("Accepted E2EE history is unavailable offline");
     if (retained.initial && !retained.initial.transactionId)
-      throw new Error("Initial E2EE history has not been accepted");
+      throw new RetainedHistoryUnavailableError("Initial E2EE history has not been accepted");
     const observed = await db.observeE2eeHistory(retained.reads.map(({ query }) => query));
     if (retained.initial) {
       const initial = retained.initial;
@@ -292,7 +263,9 @@ export async function readAcceptedHistory<T>(
         new Set(additions.map((row) => row.rowId)).size !== own.size ||
         additions.some((row) => row.transactionId !== initial.transactionId)
       )
-        throw new Error("Initial E2EE history lacks its accepted transaction");
+        throw new RetainedHistoryUnavailableError(
+          "Initial E2EE history lacks its accepted transaction",
+        );
       // Update only the settlement of our exact accepted writes. Other rows and
       // absences must still match the coherent preparation snapshot below.
       for (let i = 0; i < retained.reads.length; i++)
@@ -305,19 +278,23 @@ export async function readAcceptedHistory<T>(
       observed.some((snapshot, index) => !sameMetadata(snapshot, retained.reads[index]!.snapshot))
     ) {
       entries.delete(key);
-      throw new Error("Accepted E2EE history changed; authority reconciliation is required");
+      throw new RetainedHistoryUnavailableError(
+        "Accepted E2EE history changed; authority reconciliation is required",
+      );
     }
     if (!entries.has(key)) retain(db, key, retained);
     return structuredClone(retained.result) as T;
   }
   const transaction = await exclusiveE2eeTransaction(db, (tx) => capture(tx, read));
   const bundle = await transaction.wait({ tier: "global" });
+  stores.get(db)?.assertOpen();
   try {
     await persist(db, key, bundle.reads);
   } catch {
     // History is already verified. Optional persistence must not fail this read;
     // offline reuse still checks the retained bundle against accepted history.
   }
+  stores.get(db)?.assertOpen();
   retain(db, key, bundle);
   return bundle.result;
 }

@@ -157,6 +157,7 @@ it.each(["selection", "logout"])(
       },
     });
     const first = accounts.createLocalFirst();
+    source = new PreparationSource();
     db = await createAccountDbWithRuntimeSource(
       { appId, account: first, driver: { type: "memory" } },
       source,

@@ -1407,18 +1407,11 @@ impl<S: PageStore> TreeCore<S> {
                 page_size: self.options.page_size,
             });
         }
-        let split = byte_balanced_split(
-            entries
-                .iter()
-                .map(|(key, value)| page::leaf_entry_len(key, value)),
-            page::LEAF_BASE_LEN,
-            self.options.page_size,
-            false,
-        )
-        .ok_or(Error::PageTooLarge {
-            page_id,
-            page_size: self.options.page_size,
-        })?;
+        let split =
+            page::leaf_split_index(entries, self.options.page_size).ok_or(Error::PageTooLarge {
+                page_id,
+                page_size: self.options.page_size,
+            })?;
         Ok(entries.split_off(split))
     }
 
@@ -1435,7 +1428,13 @@ impl<S: PageStore> TreeCore<S> {
             let Page::Leaf { mut entries } = page else {
                 unreachable!()
             };
-            let right_entries = self.split_leaf_entries(page_id, &mut entries)?;
+            let middle = page::leaf_split_index(&entries, self.options.page_size).ok_or(
+                Error::PageTooLarge {
+                    page_id,
+                    page_size: self.options.page_size,
+                },
+            )?;
+            let right_entries = entries.split_off(middle);
             let separator = right_entries[0].0.clone();
             PageReplacement::Split {
                 left: self.allocate_page(Page::Leaf { entries })?,
@@ -2010,6 +2009,80 @@ mod tests {
                 Some(false)
             );
             assert_eq!(tree.get(b"large").await.unwrap(), Some(large));
+        });
+    }
+
+    #[test]
+    fn uneven_inline_values_split_and_reopen_without_losing_rows() {
+        futures::executor::block_on(async {
+            for replace in [false, true] {
+                let store = MemoryPageStore::default();
+                let options = Options::default();
+                let tree = IdbTree::open(store.clone(), options).await.unwrap();
+                let key = |prefix: u8, ordinal: u8| {
+                    let mut key = vec![prefix; 61];
+                    key[60] = ordinal;
+                    key
+                };
+                let mut expected = BTreeMap::new();
+                for ordinal in 0..4 {
+                    expected.insert(key(b'a', ordinal), vec![ordinal; 3491]);
+                }
+                for ordinal in 0..20 {
+                    expected.insert(key(b'z', ordinal), vec![ordinal; 20]);
+                }
+                if replace {
+                    expected.insert(key(b'a', 4), vec![4]);
+                }
+                for (key, value) in &expected {
+                    tree.put(key.clone(), value.clone()).await.unwrap();
+                }
+                tree.flush().await.unwrap();
+                drop(tree);
+                let tree = IdbTree::open(store.clone(), options).await.unwrap();
+                let inserted = key(b'a', 4);
+                tree.put(inserted.clone(), vec![4; 3491]).await.unwrap();
+                expected.insert(inserted, vec![4; 3491]);
+                tree.flush().await.unwrap();
+                drop(tree);
+                let reopened = IdbTree::open(store, options).await.unwrap();
+                for (key, value) in &expected {
+                    assert_eq!(reopened.get(key).await.unwrap().as_ref(), Some(value));
+                }
+                assert_eq!(
+                    reopened.range(b"", &[255]).await.unwrap(),
+                    expected.into_iter().collect::<Vec<_>>()
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn leaf_split_keeps_unpromotable_key_inside_leaf() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let options = Options { page_size: 1024 };
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
+            let expected = vec![
+                (vec![b'a'; 4], Vec::new()),
+                (vec![b'b'; 980], Vec::new()),
+                (vec![b'c'], Vec::new()),
+            ];
+            tree.write_many(
+                expected
+                    .iter()
+                    .map(|(key, value)| WriteOperation::Set {
+                        key: key.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
+            )
+            .await
+            .unwrap();
+            tree.flush().await.unwrap();
+            drop(tree);
+            let reopened = IdbTree::open(store, options).await.unwrap();
+            assert_eq!(reopened.range(b"", b"d").await.unwrap(), expected);
         });
     }
 

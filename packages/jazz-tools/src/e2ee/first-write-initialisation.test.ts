@@ -98,6 +98,7 @@ it.each([
   "insert",
   "upsert",
   "exclusive",
+  "exclusive-nullable-upsert",
   "mergeable",
   "deny-data",
   "deny-root",
@@ -114,7 +115,10 @@ it.each([
       events: s.table({ message: s.string() }, {}),
       notes: s
         .table(
-          { projectId: s.uuid(), body: s.string() },
+          {
+            projectId: s.uuid(),
+            body: mode === "exclusive-nullable-upsert" ? s.string().optional() : s.string(),
+          },
           { project: s.rel("projects", "projectId") },
         )
         .encrypted({ space: "projectId", columns: ["body"] }),
@@ -190,22 +194,41 @@ it.each([
         await writer.e2ee.devices.list();
         failWrapping = true;
       }
+      if (mode === "exclusive-nullable-upsert") {
+        await writer.e2ee.devices.list();
+        await writer.all(app.projects, { tier: "global" });
+        await writer.disconnect();
+        const id = crypto.randomUUID();
+        const tx = writer.beginExclusiveTransaction();
+        tx.upsert(app.notes, id, { projectId: project.id });
+        await tx.commit().wait({ tier: "local" });
+        const expected = { id, projectId: project.id, body: null };
+        expect(await writer.one(app.notes.where({ id }), { tier: "local" })).toEqual(expected);
+        const roots = await writer.all(app.__e2ee_spaces, { tier: "local" });
+        expect(roots).toEqual([expect.objectContaining({ identifier: project.id })]);
+        await writer.reconnect();
+        expect(await writer.one(app.notes.where({ id }), { tier: "global" })).toEqual(expected);
+        expect(await writer.all(app.__e2ee_spaces, { tier: "global" })).toEqual(roots);
+        return;
+      }
       const data = { projectId: project.id, body: "Original value" };
       let noteId: string;
       let completed: Promise<unknown>;
+      // Policy rejection and portable accepted keys require authority acceptance,
+      // not merely the provisional initialization's local durability.
       if (mode === "exclusive" || mode === "mergeable") {
         const tx =
           mode === "exclusive" ? writer.beginExclusiveTransaction() : writer.beginTransaction();
         tx.insert(app.events, { message: "Same transaction" });
         noteId = tx.insert(app.notes, data).id;
-        completed = tx.commit().wait({ tier: "local" });
+        completed = tx.commit().wait({ tier: "global" });
       } else if (mode === "upsert") {
         noteId = crypto.randomUUID();
-        completed = writer.upsert(app.notes, noteId, data).wait({ tier: "local" });
+        completed = writer.upsert(app.notes, noteId, data).wait({ tier: "global" });
       } else {
         const write = writer.insert(app.notes, data);
         noteId = write.value.id;
-        completed = write.wait({ tier: "local" });
+        completed = write.wait({ tier: "global" });
       }
       // A deferred retry must retain the original values and provisional ID.
       data.body = "Changed after the mutation returned";

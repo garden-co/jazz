@@ -3,7 +3,10 @@
 use super::*;
 
 #[cfg(feature = "testing")]
-async fn create_parent_child_exclusively() -> (crate::db::Db, crate::tx::Fate) {
+async fn create_parent_child_exclusively(
+    include_created: bool,
+    through_relay: bool,
+) -> (crate::db::Db, crate::tx::Fate) {
     use crate::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps};
     use groove::storage::TestStorage;
 
@@ -11,7 +14,14 @@ async fn create_parent_child_exclusively() -> (crate::db::Db, crate::tx::Fate) {
         "id",
         vec!["__jazz_outer_row".to_owned(), "parent_id".to_owned()],
     );
-    let child_policy = PublicPolicyExpr::exists_including_created("parents", correlation);
+    let child_policy = if include_created {
+        PublicPolicyExpr::exists_including_created("parents", correlation)
+    } else {
+        PublicPolicyExpr::Exists {
+            table: "parents".to_owned(),
+            condition: Box::new(correlation),
+        }
+    };
     let schema = PublicSchemaBuilder::new()
         .table(
             PublicTableSchemaBuilder::new("parents")
@@ -53,7 +63,7 @@ async fn create_parent_child_exclusively() -> (crate::db::Db, crate::tx::Fate) {
     .await
     .expect("open Alice's local database");
     let authority = Db::open_history_complete(DbConfig::new(
-        schema,
+        schema.clone(),
         TestStorage::new(&refs),
         DbIdentity {
             node: crate::ids::NodeUuid::from_bytes([0xc1; 16]),
@@ -62,11 +72,42 @@ async fn create_parent_child_exclusively() -> (crate::db::Db, crate::tx::Fate) {
     ))
     .await
     .expect("open real core authority");
-    let (upstream, downstream) = duplex();
-    alice.connect_upstream(upstream).await;
-    let _peer = authority.accept_subscriber(downstream, author);
+    let relay = if through_relay {
+        let relay = Db::open(DbConfig::new(
+            schema,
+            TestStorage::new(&refs),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xb1; 16]),
+                author,
+            },
+        ))
+        .await
+        .unwrap();
+        relay.set_relay_authority_session_owner_for_test();
+        alice.set_non_durable_client();
+        let (upstream, downstream) = duplex();
+        relay.connect_upstream(upstream).await;
+        authority.accept_scope_isolated_relay_subscriber_for_test(
+            downstream,
+            author,
+            BTreeMap::new(),
+            1,
+        );
+        let (upstream, downstream) = duplex();
+        alice.connect_upstream(upstream).await;
+        relay.accept_subscriber_with_claims(downstream, author, BTreeMap::new());
+        Some(relay)
+    } else {
+        let (upstream, downstream) = duplex();
+        alice.connect_upstream(upstream).await;
+        authority.accept_subscriber(downstream, author);
+        None
+    };
     for _ in 0..32 {
         alice.tick().await.expect("progress Alice's handshake");
+        if let Some(relay) = &relay {
+            relay.tick().await.unwrap();
+        }
         authority
             .tick()
             .await
@@ -113,6 +154,9 @@ async fn create_parent_child_exclusively() -> (crate::db::Db, crate::tx::Fate) {
         .expect("publish exclusive bundle");
     for _ in 0..128 {
         alice.tick().await.expect("send exclusive bundle");
+        if let Some(relay) = &relay {
+            relay.tick().await.unwrap();
+        }
         authority.tick().await.expect("process exclusive bundle");
         if !matches!(
             alice.write_state(committed).expect("read settlement").fate,
@@ -138,7 +182,7 @@ async fn create_parent_child_exclusively() -> (crate::db::Db, crate::tx::Fate) {
 #[test]
 fn candidate_exists_accepts_authorized_parent_child_exclusive_create() {
     crate::db::block_on(async {
-        let (alice, fate) = create_parent_child_exclusively().await;
+        let (alice, fate) = create_parent_child_exclusively(true, false).await;
         assert_eq!(
             fate,
             crate::tx::Fate::Accepted,
@@ -187,6 +231,28 @@ fn candidate_exists_accepts_authorized_parent_child_exclusive_create() {
     });
 }
 
+/// A terminal relay preserves both strict marked creation and ordinary
+/// same-unit grounding when the parent is independently authorized.
+#[cfg(feature = "testing")]
+#[test]
+fn terminal_relay_authorizes_strict_and_ordinary_grounded_parent_child_units() {
+    crate::db::block_on(async {
+        for include_created in [true, false] {
+            let (alice, fate) = create_parent_child_exclusively(include_created, true).await;
+            assert_eq!(fate, crate::tx::Fate::Accepted);
+            for (table, id) in [("parents", 10), ("children", 11)] {
+                let value = alice
+                    .local_current_row(table, RowUuid(uuid::Uuid::from_u128(id)))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    value.map(|row| row.row_uuid()),
+                    Some(RowUuid(uuid::Uuid::from_u128(id)))
+                );
+            }
+        }
+    });
+}
 #[cfg(feature = "testing")]
 mod proof_graph {
     use super::*;

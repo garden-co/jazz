@@ -89,7 +89,9 @@ it("preserves accepted scope and data when later initial recipient delivery is d
       },
     );
     const note = tx.insert(app.notes, { projectId: project.id, body: "Accepted ciphertext" });
-    await tx.commit().wait({ tier: "global" });
+    await expect(tx.commit().wait({ tier: "global" })).rejects.toMatchObject({
+      code: "permission_denied",
+    });
     expect(await creator.one(app.projects.where({ id: project.id }), { tier: "global" })).toEqual(
       project,
     );

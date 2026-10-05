@@ -3,7 +3,12 @@ import { configureAcceptedHistory } from "./accepted-history.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { encryptedSchemas } from "./encrypted-schema.js";
-import { accountRegistry, exportLocalFirstSecret } from "../accounts/enrollment.js";
+import {
+  accountRegistry,
+  exportLocalFirstSecret,
+  accountGeneratedHere,
+  accountFounderOwnership,
+} from "../accounts/enrollment.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import { openRecoveryMaterial, protectRecoveryMaterial } from "./recovery-protection.js";
 import { E2eeRecoveryError } from "./recovery-error.js";
@@ -17,7 +22,9 @@ import { encodeEnvelope } from "./envelope.js";
 import type { CryptoMechanism } from "./envelope.js";
 import { localDevice, retainedLocalDevice } from "./local-device.js";
 import { observeE2eeHistory, E2eeHistoryUnavailable } from "./history-reader.js";
-import { firstAccountEpoch } from "./first-epoch.js";
+import { firstAccountEpoch, provisionalFirstAccountEpoch } from "./first-epoch.js";
+import { InitializationJournal, E2eeInitializationNotReady } from "./provisional-initialization.js";
+import type { FounderProposal } from "./provisional-initialization.js";
 import { DeviceApproval } from "./device-approval.js";
 import {
   prefetchPublicMembershipHistory,
@@ -130,7 +137,8 @@ export async function prepareStreamingSpace<T, Init, R>(
           try {
             await plan.validate(tx);
           } catch (error) {
-            if (error instanceof E2eeDataError) throw error;
+            if (error instanceof E2eeDataError || error instanceof E2eeInitializationNotReady)
+              throw error;
             throw new E2eeDataError("key-unavailable");
           }
         },
@@ -140,24 +148,16 @@ export async function prepareStreamingSpace<T, Init, R>(
       },
     };
   } catch (error) {
-    if (error instanceof E2eeDataError || (stageFailure && stageFailure.error === error))
+    if (
+      error instanceof E2eeDataError ||
+      error instanceof E2eeInitializationNotReady ||
+      (stageFailure && stageFailure.error === error)
+    )
       throw error;
     throw new E2eeDataError("key-unavailable");
   }
 }
 
-const initialSpaceCompletions = new WeakMap<Db, Spaces["completeInitial"]>();
-/** The owner transaction is already accepted; later key delivery cannot reject its receipt. */
-export async function completeInitialSpace(db: Db, root: SpaceRoot): Promise<void> {
-  try {
-    e2eeForDb(db);
-    await initialSpaceCompletions.get(db)!(root);
-  } catch {
-    console.warn(
-      "E2EE: initial data was accepted, but recipient key delivery requires maintenance. Retry with db.e2ee.explain().",
-    );
-  }
-}
 const configuredSchemas = new WeakMap<Db, WasmSchema>();
 const configuredAccounts = new WeakMap<Db, string>();
 
@@ -174,6 +174,17 @@ export function e2eeSchemaForDb(db: Db): WasmSchema | undefined {
 const initialSpacePreparers = new WeakMap<Db, Spaces["prepareInitial"]>();
 const missingSpacePreparers = new WeakMap<Db, Spaces["prepareMissing"]>();
 const currentSpaceKeys = new WeakMap<Db, Spaces["withKeys"]>();
+const spaceWriteAdmissions = new WeakMap<Db, Spaces["assertWriteTransaction"]>();
+/** @internal Check provisional dependency isolation before borrowing a key or staging bytes. */
+export async function assertSpaceWriteTransaction<T, Init>(
+  db: Db,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  kind: "mergeable" | "exclusive",
+): Promise<void> {
+  e2eeForDb(db);
+  await spaceWriteAdmissions.get(db)!(scope, identifier, kind);
+}
 const initialSpacePrerequisites = new WeakMap<
   Db,
   (recipientIds?: readonly string[]) => Promise<void>
@@ -208,7 +219,11 @@ export async function withSpaceKeys<T, Init>(
   ).catch((error: unknown) => {
     // Key adapters can include secret material in their exceptions.
     // The operation owns its own crypto diagnostics and ordinary runtime errors.
-    if (error instanceof E2eeDataError || (callbackFailure && callbackFailure.error === error))
+    if (
+      error instanceof E2eeDataError ||
+      error instanceof E2eeInitializationNotReady ||
+      (callbackFailure && callbackFailure.error === error)
+    )
       throw error;
     throw new E2eeDataError("key-unavailable");
   });
@@ -289,6 +304,7 @@ export async function prepareMissingSpaceWrite(
     if (
       error instanceof SpaceInitialisationRequired ||
       error instanceof E2eeDataError ||
+      error instanceof E2eeInitializationNotReady ||
       (callbackFailure && callbackFailure.error === error)
     )
       throw error;
@@ -346,6 +362,8 @@ export class E2ee {
   private preparation: Promise<boolean> | undefined;
   private localPreparation: Promise<boolean> | undefined;
   private locallyPrepared = false;
+  private provisional?: FounderProposal;
+  private readonly journal: InitializationJournal;
   private readonly scope: string;
   private readonly app: DeviceTables;
   readonly groups = {
@@ -675,17 +693,43 @@ export class E2ee {
     this.app = app as DeviceTables;
     configuredSchemas.set(db, this.app.__e2ee_device_requests._schema);
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);
+    this.journal = new InitializationJournal(
+      db,
+      config.store,
+      this.scope,
+      () => this.assertOpen(),
+      async (proposal) => {
+        if (proposal.kind === "founder") {
+          await this.localPreparation;
+          this.provisional = undefined;
+          if (!(await this.prepareRequest(true)))
+            throw new E2eeHistoryUnavailable("Accepted founder history is not yet available");
+          this.approval?.startResponder();
+        } else {
+          await this.requireSpaces().promoteInitial(proposal.root);
+        }
+      },
+      (proposal) => this.requireSpaces().completeInitial(proposal.root),
+    );
     configureAcceptedHistory(db, {
       store: config.store,
       scope: this.scope,
       assertOpen: () => this.assertOpen(),
     });
     startupPreparers.set(db, async () => {
-      if (await this.prepareRequest(true)) return;
-      await this.prepare();
+      const prepared = await (this.localPreparation ??= this.prepareRequest(true).finally(() => {
+        this.localPreparation = undefined;
+      }));
+      if (!prepared) await this.prepare();
+      await this.journal.reconcile();
+      for (const entry of await this.journal.entries()) {
+        if (entry.proposal.kind === "space" && entry.outcome === "accepted" && !entry.promoted)
+          await this.journal.promoteAccepted(entry.proposal.id);
+      }
     });
     db.onE2eeReconnect(() => {
       this.preparation = undefined;
+      this.journal.wake(true);
     });
     let cellCipher: Promise<CellCipher> | undefined;
     let equalityIndex: Promise<EqualityIndex> | undefined;
@@ -700,7 +744,7 @@ export class E2ee {
       return { cipher, application: JSON.stringify([accountRegistry(this.account), this.env]) };
     });
     streamingSpacePreparers.set(db, async (scope, identifier, options, stage) => {
-      await this.prepare();
+      await this.prepare(false, true);
       return this.requireSpaces().prepareStreaming(scope, identifier, options, stage);
     });
     equalityCrypto.set(db, async () => {
@@ -722,20 +766,20 @@ export class E2ee {
       return { cipher, application: JSON.stringify([accountRegistry(this.account), this.env]) };
     });
     initialSpacePrerequisites.set(db, async (recipientIds) => {
-      await this.prepare();
+      await this.prepare(false, true);
       await this.requireSpaces().warmInitialRecipients(recipientIds);
     });
     initialSpacePreparers.set(db, async (...args) => {
-      await this.prepare();
+      await this.prepare(false, true);
       await this.requireSpaces().prepareInitial(...args);
     });
-    initialSpaceCompletions.set(db, async (root) => {
-      this.assertOpen();
-      await this.requireSpaces().completeInitial(root);
-    });
     missingSpacePreparers.set(db, async (...args) => {
-      await this.prepare();
+      await this.prepare(false, true);
       return this.requireSpaces().prepareMissing(...args);
+    });
+    spaceWriteAdmissions.set(db, async (...args) => {
+      await this.prepare(true);
+      await this.requireSpaces().assertWriteTransaction(...args);
     });
     currentSpaceKeys.set(
       db,
@@ -761,7 +805,36 @@ export class E2ee {
     accountRegistry(this.account); // Reject logout, including during asynchronous preparation.
   }
 
-  private async prepare(localOnly = false): Promise<void> {
+  private async provisionalFounder(): Promise<FounderProposal | undefined> {
+    if (this.approval?.isKnownRevoked()) throw new E2eeDataError("key-unavailable");
+    const founder = await this.journal.founder();
+    if (!this.provisional || !founder) return undefined;
+    const accepted = await observeE2eeHistory(this.db, (reader) =>
+      reader.allSettledForE2ee(this.app.__e2ee_account_identities.where({ id: this.account.id })),
+    );
+    const identity = accepted.rows[0];
+    if (identity) {
+      if (identity.deviceId !== founder.deviceId || identity.epochId !== founder.epochId)
+        throw new E2eeInitializationNotReady(
+          "Another account identity won; the original founder cannot be replaced",
+        );
+      const state = await observeE2eeHistory(this.db, (reader) =>
+        this.approval!.deviceStates(reader),
+      );
+      if (
+        !state.active.has(founder.deviceId) ||
+        !state.verified.has(founder.deviceId) ||
+        state.epochId !== founder.epochId
+      )
+        throw new E2eeDataError("key-unavailable");
+      this.provisional = undefined;
+      this.locallyPrepared = true;
+      return undefined;
+    }
+    return founder;
+  }
+
+  private async prepare(localOnly = false, provisionalAllowed = false): Promise<void> {
     this.assertOpen();
     if (!this.locallyPrepared) {
       await (this.localPreparation ??= this.prepareRequest(true).finally(() => {
@@ -769,6 +842,15 @@ export class E2ee {
       }));
     }
     this.assertOpen();
+    if (this.provisional) {
+      await this.provisionalFounder();
+      if (localOnly || provisionalAllowed) return;
+      // Administration, enrollment and recovery still require real acceptance.
+      await this.journal.waitForFounderAcceptance();
+      this.provisional = undefined;
+      await this.prepareRequest(true);
+    }
+    if (provisionalAllowed && this.locallyPrepared) return;
     // Local key use must not join an unrelated, stalled online enrolment check.
     if (localOnly || (await this.db.e2eeIsExplicitlyOffline())) {
       if (!this.locallyPrepared)
@@ -791,7 +873,9 @@ export class E2ee {
       this.config.crypto?.deviceSigner ??
       (await (await import("./browser.js")).createBrowserDeviceSigner());
     encodeEnvelope(signer.mechanism, new Uint8Array());
-    const device = await (retainedOnly ? retainedLocalDevice : localDevice)(
+    const generatedHere = await accountGeneratedHere(this.account);
+    const ownership = accountFounderOwnership(this.account);
+    const device = await (retainedOnly && !generatedHere ? retainedLocalDevice : localDevice)(
       this.config.store,
       this.scope,
       envelope,
@@ -802,8 +886,78 @@ export class E2ee {
     try {
       this.assertOpen();
       const requests = this.app.__e2ee_device_requests;
+      let retained = await this.journal.founder();
+      this.assertOpen();
+      if (retained && (retained.id !== this.account.id || retained.deviceId !== device.id))
+        throw new E2eeInitializationNotReady(
+          "The retained founder does not match this account device",
+        );
+      let retainedEpochId = retained?.epochId;
+      let ownsFounder = false;
+      if (retained || (retainedOnly && generatedHere && encryptedSchemas.has(requests._schema))) {
+        const claim = await ownership?.reserve(this.scope, device.id, retainedEpochId);
+        this.assertOpen();
+        ownsFounder = claim !== undefined;
+        if (claim && claim.epochId !== null) {
+          // A shared context may have bound the original proposal since the
+          // first journal read. Only that exact durable journal may resume.
+          retained = await this.journal.founder();
+          this.assertOpen();
+          retainedEpochId = retained?.epochId;
+          if (
+            !retained ||
+            retained.id !== this.account.id ||
+            retained.deviceId !== device.id ||
+            retainedEpochId !== claim.epochId
+          )
+            throw new E2eeInitializationNotReady(
+              "The original founder journal is missing or changed",
+            );
+        }
+        if (retained && !ownsFounder)
+          throw new E2eeInitializationNotReady("The retained founder belongs to another device");
+      }
       // Once online preparation starts, complete it or reject so it can retry.
       // A later disconnect must not cache skipped enrolment as successful.
+      if (retainedOnly) {
+        const known = retained;
+        // Existing journals are account-scoped and survive schema changes.
+        // Only a new encrypted application founder may bypass online enrollment.
+        if (known || ownsFounder) {
+          if (!(await this.db.tableIdentity(this.app.__e2ee_account_identities)))
+            throw new E2eeInitializationNotReady(
+              "An authenticated application catalogue is required",
+            );
+          const identity = await this.db.one(
+            this.app.__e2ee_account_identities.includeDeleted().where({ id: this.account.id }),
+            { tier: "local" },
+          );
+          this.assertOpen();
+          if (known || !identity) {
+            const founder = await provisionalFirstAccountEpoch(
+              this.db,
+              this.account.id,
+              this.scope,
+              device,
+              envelope,
+              signer,
+              this.app,
+              this.journal,
+              () => this.assertOpen(),
+              (epochId) => ownership!.bind(this.scope, device.id, epochId),
+            );
+            this.assertOpen();
+            const entry = (await this.journal.entries()).find(
+              (entry) => entry.proposal.kind === "founder",
+            );
+            this.assertOpen();
+            this.provisional = entry?.outcome === "pending" ? founder : undefined;
+          } else {
+            await ownership!.close(this.scope, device.id, retainedEpochId);
+            this.assertOpen();
+          }
+        }
+      }
       if (!retainedOnly) {
         const query = requests.where({ id: device.id });
         let row = await this.db.one(query, { tier: "global" });
@@ -864,6 +1018,8 @@ export class E2ee {
           }
         }
         this.assertOpen();
+        const mayCreate = (await ownership?.close(this.scope, device.id, retainedEpochId)) ?? true;
+        this.assertOpen();
         await firstAccountEpoch(
           this.db,
           this.account.id,
@@ -871,8 +1027,10 @@ export class E2ee {
           device,
           envelope,
           () => this.assertOpen(),
+          mayCreate,
           this.app,
         );
+        this.assertOpen();
       }
       // Reconnection enrols without adding another responder or key owner.
       if (!this.approval) {
@@ -934,12 +1092,15 @@ export class E2ee {
               isKnownRevoked: () => this.approval!.isKnownRevoked(),
               load: loadDevice,
               states: (transaction) => this.approval!.deviceStates(transaction),
+              journal: this.journal,
+              founder: () => this.provisionalFounder(),
             },
             this.groupLifecycle,
             this.config.staleWrites,
           );
         }
       }
+      if (this.provisional) return true;
       if (retainedOnly) {
         try {
           const state = await observeE2eeHistory(this.db, (reader) =>
