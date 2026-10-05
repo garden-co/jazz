@@ -1114,6 +1114,84 @@ mod tests {
         assert_ne!(left.shape_id(), right.shape_id());
     }
 
+    /// Alice's UUID binding is required when any direct column comparison is
+    /// required, regardless of operand or occurrence order. This lower-level
+    /// public-builder test covers binding carriers and canonical revalidation,
+    /// which serving row reads cannot expose independently.
+    #[test]
+    fn mixed_nullability_uuid_parameter_binding_is_canonical_and_order_independent() {
+        let schema = JazzSchema::new(
+            &PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("documents")
+                        .nullable_column("owner", PublicColumnType::Uuid)
+                        .column("account", PublicColumnType::Uuid)
+                        .column("title", PublicColumnType::Text),
+                )
+                .build(),
+        )
+        .unwrap();
+        let alice = uuid::Uuid::from_bytes([0xa1; 16]);
+        for param_first in [false, true] {
+            let comparison = |column| {
+                if param_first {
+                    eq(param("alice"), col(column))
+                } else {
+                    eq(col(column), param("alice"))
+                }
+            };
+            for columns in [["owner", "account"], ["account", "owner"]] {
+                let validated = Query::from("documents")
+                    .filter(comparison(columns[0]))
+                    .filter(comparison(columns[1]))
+                    .validate(&schema)
+                    .unwrap();
+                let canonical = validated.query().validate(&schema).unwrap();
+                assert_eq!(validated.shape_id(), canonical.shape_id());
+                for shape in [&validated, &canonical] {
+                    assert_eq!(shape.params()["alice"], ColumnType::Uuid);
+                    shape
+                        .bind(BTreeMap::from([("alice".to_owned(), Value::Uuid(alice))]))
+                        .expect("mixed comparisons accept a bare UUID");
+                    for value in [
+                        Value::Nullable(Some(Box::new(Value::Uuid(alice)))),
+                        Value::Nullable(None),
+                    ] {
+                        assert!(matches!(
+                            shape.bind(BTreeMap::from([("alice".to_owned(), value)])),
+                            Err(QueryError::ParamTypeMismatch { .. })
+                        ));
+                    }
+                }
+            }
+            let nullable = Query::from("documents")
+                .filter(comparison("owner"))
+                .validate(&schema)
+                .unwrap();
+            let canonical = nullable.query().validate(&schema).unwrap();
+            for shape in [&nullable, &canonical] {
+                assert_eq!(shape.params()["alice"], ColumnType::Uuid.nullable());
+                for value in [
+                    Value::Nullable(Some(Box::new(Value::Uuid(alice)))),
+                    Value::Nullable(None),
+                ] {
+                    shape
+                        .bind(BTreeMap::from([("alice".to_owned(), value)]))
+                        .expect("nullable-only comparisons accept nullable UUID carriers");
+                }
+            }
+            for columns in [["owner", "title"], ["title", "owner"]] {
+                assert!(matches!(
+                    Query::from("documents")
+                        .filter(comparison(columns[0]))
+                        .filter(comparison(columns[1]))
+                        .validate(&schema),
+                    Err(QueryError::OperandTypeMismatch)
+                ));
+            }
+        }
+    }
+
     #[test]
     fn binding_type_mismatch_errors() {
         let validated = Query::from("issues")

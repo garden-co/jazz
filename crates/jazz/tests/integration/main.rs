@@ -72,6 +72,9 @@ mod large_value_tx_update;
 #[cfg(feature = "testing")]
 #[path = "../local_first_unless_empty.rs"]
 mod local_first_unless_empty;
+#[cfg(feature = "testing")]
+#[path = "../mixed_nullable_uuid_claims.rs"]
+mod mixed_nullable_uuid_claims;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[cfg(feature = "testing")]
