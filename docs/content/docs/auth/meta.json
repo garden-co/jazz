@@ -1,4 +1,11 @@
 {
   "title": "Auth & Permissions",
-  "pages": ["authentication", "lifecycle", "local-first-auth", "sessions", "permissions"]
+  "pages": [
+    "authentication",
+    "lifecycle",
+    "local-first-auth",
+    "end-to-end-encryption",
+    "sessions",
+    "permissions"
+  ]
 }

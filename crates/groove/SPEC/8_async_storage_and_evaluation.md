@@ -220,6 +220,33 @@ chunk; completion must wake the foreground read even if the background query
 cannot receive another owner turn yet. Re-polling replaces that consumer's
 previous waker rather than retaining obsolete task owners.
 
+A serialized storage mutation must likewise remain progressable when its
+initiating query is parked. The IDB adapter retains a started mutation through
+its full write, flush and reset outcome; a later read or mutation can drive that
+completion before taking the storage gate. Helpers do not consume the original
+caller's result. Cancelling a started caller does not promise rollback or issue
+a durability receipt: a later operation reconciles the retained commit before
+reading the tree. Cancelling an unstarted caller must not enqueue its mutation.
+The retained driver must not form a cycle that keeps the storage owner alive.
+Resident reads follow the same rule: they do not bypass the retained mutation
+to return an older committed generation. Failed commits reconcile or reset the
+tree before any dependent read can expose it; a reset failure remains dirty
+until a later reset succeeds. Releasing the last storage handle cancels the
+owned job and releases its I/O and gate. Reopening then reads the actual durable
+state, including a commit that landed before its acknowledgement was lost.
+These adapter ownership rules neither issue a cancelled caller a receipt nor
+weaken the database-level possibly-committed publication rules in chapter 2.
+
+The direct metadata progress facade waits only for its own batch. After storage
+success it performs one nonblocking ready-progress turn, including when storage
+assistance completed the write on its first poll. A supplied durable query-owner
+waker remains retained after return and later externally driven turns; unrelated
+cold queries need not finish before the metadata operation returns.
+
+A fatal error from that post-write progress turn is propagated and poisons the
+database, but does not undo the already-committed metadata batch. It is not proof
+that the batch was unapplied and does not authorize automatic replay.
+
 Pure operators remain ordinary synchronous transformations over ready inputs.
 Interruptible state is concentrated at table/index sources, persisted
 arrangements and operators, recursive hydration, and other storage-dependent
