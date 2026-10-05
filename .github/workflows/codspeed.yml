@@ -221,9 +221,8 @@ jobs:
 
   text-editor-browser-build:
     name: Build text editor browser benchmark runtime
-    if: >-
-      github.event_name != 'schedule' && inputs.suite != 'nightly' &&
-      (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark'))
+    needs: native-workloads-plan
+    if: github.event_name != 'schedule' && inputs.suite != 'nightly'
     runs-on: blacksmith-16vcpu-ubuntu-2204-arm
     timeout-minutes: 60
     steps:
