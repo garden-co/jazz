@@ -19,35 +19,38 @@ function Editor({ id }: { id: string }) {
   useEffect(() => {
     const doc = new Y.Doc();
     const editable = new Compartment();
-    const view = new EditorView({
-      parent: parent.current!,
-      state: EditorState.create({
-        extensions: [
-          keymap.of([...yUndoManagerKeymap, ...defaultKeymap]),
-          drawSelection(),
-          EditorView.lineWrapping,
-          EditorView.contentAttributes.of({ "aria-label": "Document" }),
-          editable.of(EditorView.editable.of(false)),
-          yCollab(doc.getText("text"), null),
-        ],
-      }),
-    });
+    let view: EditorView | undefined;
     const disconnect = connect(
       db,
       id,
       doc,
       () => {
+        if (view) return;
+        // Replay the initial logs before attaching the editor's Yjs observers.
+        view = new EditorView({
+          parent: parent.current!,
+          state: EditorState.create({
+            doc: doc.getText("text").toString(),
+            extensions: [
+              keymap.of([...yUndoManagerKeymap, ...defaultKeymap]),
+              drawSelection(),
+              EditorView.lineWrapping,
+              EditorView.contentAttributes.of({ "aria-label": "Document" }),
+              editable.of(EditorView.editable.of(true)),
+              yCollab(doc.getText("text"), null),
+            ],
+          }),
+        });
         setLoading(false);
-        view.dispatch({ effects: editable.reconfigure(EditorView.editable.of(true)) });
       },
       (cause) => {
         setError(String(cause));
-        view.dispatch({ effects: editable.reconfigure(EditorView.editable.of(false)) });
+        view?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(false)) });
       },
     );
     return () => {
       disconnect();
-      view.destroy();
+      view?.destroy();
       doc.destroy();
     };
   }, [db, id]);
