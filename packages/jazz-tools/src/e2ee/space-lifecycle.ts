@@ -1179,7 +1179,24 @@ export class Spaces {
     includeHistory = false,
   ): Promise<SpaceState> {
     const address = await this.address(scope, identifier);
-    return this.explainAddress(address, use, includeHistory);
+    const state = await this.explainAddress(address, use, includeHistory);
+    if (state.state === "ready") this.reconcileInBackground(address);
+    return state;
+  }
+
+  private readonly pendingReconciliation = new Set<string>();
+
+  private reconcileInBackground(address: Address): void {
+    const key = JSON.stringify([address.scopeId, address.identifier]);
+    if (this.pendingReconciliation.has(key)) return;
+    this.pendingReconciliation.add(key);
+    const finished = () => {
+      this.pendingReconciliation.delete(key);
+    };
+    // Local key use does not wait for delivery or a disconnected server. A failed
+    // attempt can retry on the next affected operation; explicit explain() still
+    // reports maintenance errors to its caller. No key-use callback is replayed.
+    this.explainAddress(address).then(finished, finished);
   }
 
   private async explainAddress(

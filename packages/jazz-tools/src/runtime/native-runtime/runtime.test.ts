@@ -24,8 +24,8 @@ import {
   isWireHello,
   WIRE_PROTOCOL_VERSION,
 } from "./websocket.js";
+import { formatUuid } from "../uuid.js";
 import {
-  formatUuid,
   NativeRuntimeAdapter,
   decodeSubscriptionDelta,
   type Transport,
