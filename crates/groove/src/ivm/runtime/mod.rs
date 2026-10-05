@@ -212,6 +212,10 @@ pub struct IvmRuntime {
     /// Binding retractions discovered while routing notifications cannot tick
     /// recursively; the next public tick drains them before user deltas run.
     pending_binding_retractions: Vec<BindingDelta>,
+    /// Prepared bindings whose last subscription ended, oldest first. They stay
+    /// arranged (count 0) so a later bind of the same values reuses them; see
+    /// `release_binding_ref`.
+    idle_prepared_bindings: std::collections::VecDeque<(String, subscriptions::BindingKey)>,
     /// Bindings admitted onto a live prepared shape without full hydration.
     live_attaches: u64,
     deferred_notifications: HashMap<PublicationId, Vec<(SubscriptionId, QueuedMultisinkDeltas)>>,
@@ -376,6 +380,7 @@ impl IvmRuntime {
                 .fetch_add(1, Ordering::Relaxed),
             next_input_source_id: 1,
             pending_binding_retractions: Vec::new(),
+            idle_prepared_bindings: std::collections::VecDeque::new(),
             live_attaches: 0,
             deferred_notifications: HashMap::default(),
             durable_notification_publications: HashSet::default(),

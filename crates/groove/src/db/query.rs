@@ -1299,6 +1299,13 @@ impl Database {
             .map_err(Error::IvmRuntime)
     }
 
+    /// Queue the retraction of every prepared binding that is still arranged
+    /// although its last subscription ended. The next tick applies them.
+    pub fn release_idle_bindings(&mut self) -> Result<usize, Error> {
+        self.ensure_not_poisoned()?;
+        Ok(self.ivm_runtime.release_idle_bindings())
+    }
+
     /// Retire subscriptions whose receiving handles have already been
     /// dropped, even when no later data delta exists to discover the closed
     /// notification channel.

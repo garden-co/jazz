@@ -1048,6 +1048,9 @@ async fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 5, 3, 4);
     database.commit_batch(batch).await.unwrap();
+    // The dropped binding stays arranged until released; release it so the
+    // flush below applies its retraction.
+    database.release_idle_bindings().unwrap();
 
     database.flush().await.unwrap();
     assert_eq!(
