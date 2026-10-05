@@ -255,6 +255,12 @@ type NativeDb = {
     connected: boolean;
   };
   registerSchema(schema: Uint8Array): NativeDb;
+  /** Fresh global catalogue coverage; successful reads return empty bytes. */
+  coverCatalogue?(
+    table: string,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativeReadResult | Promise<NativeReadResult>;
   /** Empty bytes mean absent; otherwise the portable table UUID is exactly 16 bytes. */
   tableIdentity?(table: string): NativeReadResult | Promise<NativeReadResult>;
   columnIdentity?(table: string, column: string): NativeReadResult | Promise<NativeReadResult>;
@@ -822,6 +828,26 @@ export class NativeRuntimeAdapter implements Runtime {
       selfSignedClientProof: opts?.selfSignedClientProof,
       scopeIsolatedRelay: opts?.scopeIsolatedRelay,
     });
+  }
+
+  async coverCatalogue(table: string, sessionJson?: string | null): Promise<void> {
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    if (!this.db.coverCatalogue) throw new Error("Runtime does not expose catalogue coverage");
+    const session = readSession(sessionJson);
+    const readContext = this.nativeReadContext(session);
+    await this.ensureClientSessionClaims(session);
+    await this.waitForStrictRemoteQueryTransport("global");
+    await this.processPendingPeerActivityBeforeRead();
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    await this.awaitNativeRead(
+      this.db.coverCatalogue(
+        table,
+        this.nativeReadAuthor(readContext),
+        this.nativeReadClaims(readContext),
+      ),
+      "global",
+    );
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
   }
 
   async tableIdentity(table: string): Promise<string | null> {

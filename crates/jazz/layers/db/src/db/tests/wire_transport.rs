@@ -2,10 +2,11 @@
 
 use super::*;
 
-/// Binding-only rows retain transaction identity across authority acceptance.
-/// This is internal because the public client does not expose CurrentRow or
-/// let callers retain its private node alias while scheduling individual frames.
-/// Alice -> authority acceptance -> Bob's subscription -> opt-in settlement.
+/// Binding-only paired reads refuse pending content and retain its exact
+/// transaction identity after authority acceptance without changing ordinary rows.
+/// This is internal because the public client does not expose the paired core
+/// result or let callers schedule individual authority receipt frames.
+/// Alice -> authority acceptance -> Bob's subscription -> paired settlement.
 #[test]
 fn row_settlement_is_opt_in_and_follows_authority_acceptance() {
     let schema = schema();
@@ -45,23 +46,74 @@ fn row_settlement_is_opt_in_and_follows_authority_acceptance() {
     let local_query = alice.prepare_query(&Query::from("todos")).unwrap();
     let local = block_on(alice.all(&local_query, ReadOpts::default())).unwrap();
     assert_eq!(local.len(), 1);
+    let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+    let observation_opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let pending_read = OpenTransactionId::new();
+    block_on(alice.begin_exclusive(pending_read)).unwrap();
+    let pending = block_on(alice.all_settled_serialized_query_for_binding(
+        &query,
+        observation_opts.clone(),
+        pending_read,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| alice.detach_query(attachment),
+    ));
+    assert!(matches!(
+        pending,
+        Err(Error {
+            code: ErrorCode::NotObserved,
+            ..
+        })
+    ));
     assert_eq!(
-        block_on(alice.row_settlement_for_binding(&local[0])).unwrap(),
-        None
+        block_on(alice.all(&local_query, ReadOpts::default())).unwrap(),
+        local
     );
+    alice.abandon_transaction_handle(pending_read).unwrap();
     pump();
     block_on(write.wait(DurabilityTier::Global)).unwrap();
     let received = block_on(bob.all(&prepared, opts.clone())).unwrap();
     assert_eq!(received.len(), 1);
-    let (tx, position) = block_on(bob.row_settlement_for_binding(&received[0]))
-        .unwrap()
-        .expect("received authority settlement");
+    let bob_read = OpenTransactionId::new();
+    block_on(bob.begin_exclusive(bob_read)).unwrap();
+    let paired = block_on(bob.all_settled_serialized_query_for_binding(
+        &query,
+        observation_opts.clone(),
+        bob_read,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| bob.detach_query(attachment),
+    ))
+    .unwrap();
+    assert_eq!(paired.rows, received);
+    assert_eq!(paired.settlements.len(), 1);
+    let (tx, position) = paired.settlements[0];
     assert_eq!(tx, write.mergeable_tx_id());
     assert_eq!(alice.write_state(tx).unwrap().global_time, Some(position));
-    assert_eq!(
-        block_on(alice.row_settlement_for_binding(&local[0])).unwrap(),
-        Some((tx, position))
-    );
+    bob.abandon_transaction_handle(bob_read).unwrap();
+    let alice_read = OpenTransactionId::new();
+    block_on(alice.begin_exclusive(alice_read)).unwrap();
+    let paired = block_on(alice.all_settled_serialized_query_for_binding(
+        &query,
+        observation_opts,
+        alice_read,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| alice.detach_query(attachment),
+    ))
+    .unwrap();
+    assert_eq!(paired.rows, local);
+    assert_eq!(paired.settlements, vec![(tx, position)]);
+    alice.abandon_transaction_handle(alice_read).unwrap();
     assert_eq!(block_on(bob.all(&prepared, opts)).unwrap(), received);
 }
 

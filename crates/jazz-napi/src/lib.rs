@@ -3269,6 +3269,60 @@ impl NapiDb {
         }
     }
 
+    /// Refresh opened-schema catalogue coverage without returning row bodies.
+    #[napi(js_name = "coverCatalogue")]
+    pub fn cover_catalogue(
+        &self,
+        table: String,
+        author: Option<Uint8Array>,
+        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] claims: Option<
+            JsonValue,
+        >,
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let explicit_author = author
+            .map(|author| self.author_admissions.resolve(&author))
+            .transpose()?;
+        let admission = explicit_author
+            .map(|author| Ok::<_, napi::Error>((author, core_claims_from_json(author, claims)?)))
+            .transpose()?;
+        let author = match explicit_author {
+            Some(author) => Some(author),
+            None if self.trusted_backend => Some(CoreAuthorSubject::SYSTEM),
+            None => None,
+        };
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        macro_rules! cover {
+            ($db:expr) => {{
+                let db = Rc::clone($db);
+                let release_db = Rc::clone(&db);
+                native_covered_read_or_pending(
+                    Box::pin(async move {
+                        let deadline = Instant::now() + Duration::from_secs(15);
+                        db.cover_catalogue_for_binding(
+                            &table,
+                            admission,
+                            author,
+                            || Instant::now() >= deadline,
+                            move |attachment| release_db.detach_query(attachment),
+                        )
+                        .await
+                        .map_err(napi_error)?;
+                        Ok(Uint8Array::new(Vec::new()))
+                    }),
+                    Box::new(|| {}),
+                )
+                .map_err(BindingError::from)
+            }};
+        }
+        match db {
+            NapiDbInnerStorage::Memory(db) => cover!(db),
+            NapiDbInnerStorage::Persistent(db) => cover!(db),
+        }
+    }
+
     /// Opt-in transaction settlement sidecar for E2EE; ordinary rows and their
     /// codec remain unchanged. The caller still needs global snapshot acceptance.
     #[napi(js_name = "allSettlementMetadata")]
@@ -3315,7 +3369,7 @@ impl NapiDb {
                         || (opts.tier >= jazz::tx::DurabilityTier::Global
                             && opts.propagation == CorePropagation::Full);
                     let deadline = Instant::now() + Duration::from_secs(15);
-                    owner.all_serialized_query(&query, opts, Some(open_tx), admission, author, requires_coverage,
+                    owner.all_settled_serialized_query_for_binding(&query, opts, open_tx, admission, author, requires_coverage,
                         || Instant::now() >= deadline, move |attachment| release_db.detach_query(attachment)).await
                 });
                 if drive_read { db.drive_queued_mutation_once(); }
@@ -3323,14 +3377,9 @@ impl NapiDb {
                     let result = read.await
                         .map_err(|_| napi::Error::from_reason("transaction read owner operation was cancelled"))?
                         .map_err(napi_error)?;
-                    let CoreSerializedReadResult::Rows(rows) = result else {
-                        return Err(napi::Error::from_reason("E2EE settlement reads require ordinary stored rows"));
-                    };
+                    let jazz::db::BindingSettledRead { rows, settlements } = result;
                     let mut metadata = Vec::with_capacity(rows.len());
-                    for row in &rows {
-                        let (tx, position) = db.row_settlement_for_binding(row).await
-                            .map_err(napi_error)?
-                            .ok_or_else(|| napi::Error::from_reason("Authority settlement unavailable"))?;
+                    for (row, (tx, position)) in rows.iter().zip(settlements) {
                         metadata.push(serde_json::json!({
                             "rowId": row.row_uuid().0.to_string(),
                             "transactionId": TransactionId::from_committed_tx(tx).to_string(),

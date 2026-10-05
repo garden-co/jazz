@@ -102,6 +102,8 @@ export declare class NapiDb {
    * never crosses the language boundary.
    */
   all(query: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
+  /** Refresh opened-schema catalogue coverage without returning row bodies. */
+  coverCatalogue(table: string, author?: Uint8Array | undefined | null, claims?: Record<string, unknown> | undefined | null): Uint8Array | PendingNativeRead
   /**
    * Opt-in transaction settlement sidecar for E2EE; ordinary rows and their
    * codec remain unchanged. The caller still needs global snapshot acceptance.

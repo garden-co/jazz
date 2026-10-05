@@ -17,3 +17,12 @@ transactions, preventing writes and typed reads through a different schema.
 Catalogue coverage uses the current global tier. The legacy `edge` write-wait
 alias resolves to global acceptance; omitted exclusive waits retain their
 existing local-without-upstream behaviour.
+
+Keep accepted-history bodies paired with their own accepted content transaction.
+Reject staged replacements rather than borrowing an older version's acceptance,
+and retain content settlement when only the deletion register changes.
+
+Refresh online catalogue identities across renames and reconnects through the
+admitted opened schema. Preserve request-scoped coverage, offline candidate
+reads, cancellation and admission deadlines. Fresh lookups return no row bodies
+but retain the existing authority-side query and policy evaluation cost.

@@ -5636,6 +5636,14 @@ pub enum SerializedReadResult {
     Relation(RelationSnapshot),
 }
 
+/// Rows and exact content settlements captured under the same node lock.
+/// This does not replace the exclusive transaction's global acceptance.
+#[doc(hidden)]
+pub struct BindingSettledRead {
+    pub rows: Vec<CurrentRow>,
+    pub settlements: Vec<(TxId, GlobalTime)>,
+}
+
 /// Authorization route used when a host opens a serialized subscription.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[doc(hidden)]

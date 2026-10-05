@@ -165,6 +165,8 @@ export interface Runtime {
   onRemoteLinkStateChange?(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void;
   /** @internal Report the host's view of the server link to the core read gate. */
   setRemoteLinkHint?(state: RemoteLinkState): void;
+  /** @internal Obtain fresh global catalogue coverage without returning row bodies. */
+  coverCatalogue?(table: string, sessionJson?: string | null): Promise<void>;
   /** @internal Portable accepted catalogue identity; never a locally allocated alias. */
   tableIdentity?(table: string): Promise<string | null>;
   columnIdentity?(table: string, column: string): Promise<string | null>;
@@ -1749,6 +1751,16 @@ export class JazzClient {
       : undefined;
     if (preparation) await preparation;
     return this.queryWithoutPreparation(query, options, session);
+  }
+
+  /** @internal Cover the catalogue outside transaction and mutation preparation. */
+  async coverCatalogue(table: string, session?: Session): Promise<void> {
+    if (!this.runtime.coverCatalogue) throw new Error("Runtime does not expose catalogue coverage");
+    const effectiveSession = session ?? this.resolvedSession;
+    const sessionJson = effectiveSession
+      ? JSON.stringify(serializeRuntimeSession(effectiveSession))
+      : undefined;
+    await this.runtime.coverCatalogue(table, sessionJson);
   }
 
   private async queryWithoutPreparation(

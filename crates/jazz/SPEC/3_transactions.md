@@ -421,6 +421,13 @@ Ordinary reads retain their existing row codec and do not perform settlement
 lookups. Projection/relation results that are not stored rows are refused by
 the settlement boundary.
 
+Row evaluation and content-settlement capture retain the same node lock, so
+incoming history cannot replace a content witness between the two operations.
+A returned row with staged content writes is refused rather than paired with
+an earlier version's acceptance. Deletion-register updates do not replace the
+content transaction or position; ordinary `$updatedBy` and `$updatedAt`
+provenance continues to describe the latest logical-row update.
+
 Row settlement is not query completeness. Callers may use a covered snapshot
 as authoritative history only after that exclusive transaction's explicit
 `wait({ tier: "global" })` succeeds. For example, two rows authored atomically
@@ -450,6 +457,16 @@ identity nor grant permission to read rows. High-level online identity reads
 cover the catalogue without requesting row bodies; offline/local-only identity
 reads supply candidates, not proof of current membership.
 
+Every online identity lookup obtains fresh global coverage through a zero-row
+query validated against the admitted opened schema, then resolves the identity
+in the owner or fixed view. A rename or removal from the current schema can
+therefore return absence without querying a nonexistent current table. A table
+UUID is not a reusable catalogue-freshness receipt, including after reconnect.
+Coverage preserves the effective reader and claims, bounds initial schema
+admission by the read deadline, and releases its attachment on cancellation.
+It returns no row bodies or application results, but the authority can still
+perform the existing source and policy evaluation work on each lookup.
+
 The native/WASM identity binding is exactly 16 UUID bytes in RFC UUID byte
 order, or zero bytes for absence. JavaScript renders the bytes as a lowercase
 hyphenated UUID; local table/column aliases never cross this boundary.
@@ -467,15 +484,15 @@ this contract.
 
 Regressions cover authority ordering and snapshot conflicts
 (`settlement-snapshot.test.ts`), Node and browser parity
-(`settlement-native.test.ts`, `e2ee-settlement.server.test.ts`), accepted identity
-across a real-server rename (`scope-identity-native.test.ts`), authored-but-unaccepted
+(`settlement-native.test.ts`, `e2ee-settlement.server.test.ts`), staged-content
+refusal and independent deletion provenance, accepted identity across a real-server
+rename and reconnect (`scope-identity-native.test.ts`), authored-but-unaccepted
 schema-ID lookup (`catalogue.rs::catalogue_table_identity_requires_accepted_schema_publication`),
-fresh clients and denied row access (`e2ee-scope-identity.server.test.ts`), and
-the binding byte corpus (`wasm-settled-rows.test.ts`). These are extracted regressions; this extraction
-itself has not run native generation, focused tests or the canonical gate.
-Release-level qualification and limitations remain tracked in
-[#3125](https://github.com/garden-co/jazz/issues/3125); prior source receipts do
-not qualify this extracted layer.
+fresh clients, denied row access and persistent browser-worker identity refresh
+(`e2ee-scope-identity.server.test.ts`), and the binding byte corpus
+(`wasm-settled-rows.test.ts`). Validation receipts remain specific to their source
+and runtime. Release-level qualification and limitations remain tracked in
+[#3125](https://github.com/garden-co/jazz/issues/3125).
 Encryption, lifecycle authoring and automatic managed schemas are unchanged
 by this substrate.
 

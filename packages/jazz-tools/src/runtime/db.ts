@@ -2370,8 +2370,6 @@ export class Db {
     }
   }
 
-  private readonly coveredE2eeTableIdentities = new WeakMap<JazzClient, Map<string, string>>();
-
   /** @internal Resolve the accepted table lineage for E2EE scope selection. */
   async tableIdentity<T, Init>(
     table: TableProxy<T, Init>,
@@ -2381,33 +2379,18 @@ export class Db {
     const runtime = client.getRuntime();
     if (!runtime.tableIdentity)
       throw new Error("Runtime does not expose catalogue table identities");
-    const localIdentity = await runtime.tableIdentity(table._table);
-    this.assertOpen();
-    if (localOnly) return localIdentity;
-    // Bootstrap UUIDs are candidates until this client covers the catalogue.
-    if (
-      localIdentity &&
-      this.coveredE2eeTableIdentities.get(client)?.get(table._table) === localIdentity
-    )
-      return localIdentity;
-    const initialOfflineState = this.connection.initialExplicitOfflineState();
-    if (initialOfflineState) await initialOfflineState;
-    const offline = this.connection.isExplicitlyOffline();
-    await this.ensureReady(offline ? "local" : "global");
-    // Cover the catalogue without rows and outside the preparation queue.
-    // Offline identities are observations, not accepted encryption membership.
-    if (!offline)
-      await client.query(JSON.stringify({ table: table._table, limit: 0 }), { tier: "global" });
+    if (!localOnly) {
+      const initialOfflineState = this.connection.initialExplicitOfflineState();
+      if (initialOfflineState) await initialOfflineState;
+      const offline = this.connection.isExplicitlyOffline();
+      await this.ensureReady(offline ? "local" : "global");
+      // Every online lookup needs fresh coverage, without returning row bodies
+      // or waiting on preparation. Serving-side query and policy work still applies.
+      // Offline identities remain local observations, not accepted membership.
+      if (!offline) await client.coverCatalogue(table._table, this.getAccessContext()?.readSession);
+    }
     const identity = await runtime.tableIdentity(table._table);
     this.assertOpen();
-    if (!offline && identity) {
-      let covered = this.coveredE2eeTableIdentities.get(client);
-      if (!covered) {
-        covered = new Map();
-        this.coveredE2eeTableIdentities.set(client, covered);
-      }
-      covered.set(table._table, identity);
-    }
     return identity;
   }
 

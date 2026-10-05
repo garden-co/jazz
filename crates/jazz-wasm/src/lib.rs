@@ -997,7 +997,6 @@ impl WasmDbInner {
         author: Option<AuthorSubject>,
         require_coverage: bool,
         coverage_deadline_ms: f64,
-        restrict_observation_to_accepted: bool,
     ) -> Result<SerializedReadResult, Error> {
         macro_rules! read {
             ($db:expr) => {{
@@ -1013,12 +1012,6 @@ impl WasmDbInner {
                 };
                 let future = async move {
                     let coverage_started = std::cell::Cell::new(None::<f64>);
-                    // Transaction creation must run before snapshot restriction.
-                    if let Some(open_tx) = open_tx.filter(|_| restrict_observation_to_accepted) {
-                        owner
-                            .restrict_e2ee_observation_snapshot_for_binding(open_tx)
-                            .await?;
-                    }
                     owner
                         .all_serialized_query(
                             &query,
@@ -1070,14 +1063,48 @@ impl WasmDbInner {
             .await)
     }
 
-    async fn row_settlement_for_binding(
+    #[allow(clippy::too_many_arguments)]
+    async fn all_settled_serialized_query(
         &self,
-        row: &jazz::node::CurrentRow,
-    ) -> Result<Option<(jazz::tx::TxId, jazz::time::GlobalTime)>, jazz::db::Error> {
+        query: Vec<u8>,
+        opts: ReadOpts,
+        open_tx: OpenTransactionId,
+        request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        author: Option<AuthorSubject>,
+        require_coverage: bool,
+        coverage_budget_ms: f64,
+    ) -> Result<jazz::db::BindingSettledRead, Error> {
+        macro_rules! read {
+            ($db:expr) => {{
+                let owner = Rc::clone($db);
+                let release_db = Rc::clone($db);
+                let pending = $db.enqueue_transaction_read(open_tx, async move {
+                    if opts.propagation == Propagation::LocalOnly {
+                        owner
+                            .restrict_e2ee_observation_snapshot_for_binding(open_tx)
+                            .await?;
+                    }
+                    let coverage_deadline_ms = js_sys::Date::now() + coverage_budget_ms;
+                    owner
+                        .all_settled_serialized_query_for_binding(
+                            &query,
+                            opts,
+                            open_tx,
+                            request_scope,
+                            author,
+                            require_coverage,
+                            || js_sys::Date::now() >= coverage_deadline_ms,
+                            move |attachment| release_db.detach_query(attachment),
+                        )
+                        .await
+                });
+                pending.await.map_err(transaction_read_cancelled)?
+            }};
+        }
         match self {
-            Self::Memory(db) => db.row_settlement_for_binding(row).await,
+            Self::Memory(db) => read!(db),
             #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.row_settlement_for_binding(row).await,
+            Self::Browser(db) => read!(db),
             Self::Closed => Err(Error {
                 code: ErrorCode::Protocol,
                 message: "WasmDb is closed".into(),
@@ -1981,7 +2008,6 @@ impl WasmDb {
                     author,
                     requires_coverage,
                     js_sys::Date::now() + 15_000.0,
-                    false,
                 )
                 .await
                 .map_err(to_js_error)?;
@@ -1992,6 +2018,50 @@ impl WasmDb {
             .map_err(to_js_error)
         });
         wasm_read_or_pending(future)
+    }
+
+    /// Refresh opened-schema catalogue coverage through the cancelable read owner.
+    #[wasm_bindgen(js_name = coverCatalogue)]
+    pub fn cover_catalogue(
+        &self,
+        table: String,
+        author: Option<Vec<u8>>,
+        claims: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let inner = self.open_inner()?;
+        let has_explicit_author = author.is_some();
+        let author = self.read_author(author)?;
+        let admission = if has_explicit_author {
+            author
+                .map(|author| Ok::<_, JsValue>((author, claims_from_js(author, claims)?)))
+                .transpose()?
+        } else {
+            None
+        };
+        wasm_read_or_pending(Box::pin(async move {
+            let deadline = js_sys::Date::now() + 15_000.0;
+            macro_rules! cover {
+                ($db:expr) => {{
+                    let release_db = Rc::clone($db);
+                    $db.cover_catalogue_for_binding(
+                        &table,
+                        admission,
+                        author,
+                        || js_sys::Date::now() >= deadline,
+                        move |attachment| release_db.detach_query(attachment),
+                    )
+                    .await
+                    .map_err(to_js_error)?;
+                    Ok(Vec::new())
+                }};
+            }
+            match &inner {
+                WasmDbInner::Memory(db) => cover!(db),
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => cover!(db),
+                WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+            }
+        }))
     }
 
     /// Opt-in E2EE transaction sidecar; global snapshot acceptance is separate.
@@ -2021,34 +2091,23 @@ impl WasmDb {
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         wasm_read_or_pending(Box::pin(async move {
-            let restrict_observation_to_accepted = opts.propagation == Propagation::LocalOnly;
             let requires_coverage = non_durable_client
                 || (opts.tier >= DurabilityTier::Global && opts.propagation == Propagation::Full);
             let result = inner
-                .all_serialized_query(
+                .all_settled_serialized_query(
                     query,
                     opts,
-                    Some(tx_id),
+                    tx_id,
                     admission,
                     author,
                     requires_coverage,
-                    js_sys::Date::now() + 15_000.0,
-                    restrict_observation_to_accepted,
+                    15_000.0,
                 )
                 .await
                 .map_err(to_js_error)?;
-            let SerializedReadResult::Rows(rows) = result else {
-                return Err(JsValue::from_str(
-                    "E2EE settlement reads require ordinary stored rows",
-                ));
-            };
+            let jazz::db::BindingSettledRead { rows, settlements } = result;
             let mut metadata = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let (tx, position) = inner
-                    .row_settlement_for_binding(row)
-                    .await
-                    .map_err(to_js_error)?
-                    .ok_or_else(|| JsValue::from_str("Authority settlement unavailable"))?;
+            for (row, (tx, position)) in rows.iter().zip(settlements) {
                 metadata.push(serde_json::json!({
                     "rowId": row.row_uuid().0.to_string(),
                     "transactionId": TransactionId::from_committed_tx(tx).to_string(),
@@ -4978,7 +5037,6 @@ mod dynamic_schema_view_tests {
                     None,
                     false,
                     f64::INFINITY,
-                    false,
                 ),
                 owner.tick(),
             )
@@ -5078,7 +5136,6 @@ mod dynamic_schema_view_tests {
                 None,
                 false,
                 f64::INFINITY,
-                false,
             )
             .await
             .expect("attached facade reads its staged row");

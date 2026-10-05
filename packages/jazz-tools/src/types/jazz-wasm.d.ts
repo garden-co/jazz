@@ -131,6 +131,12 @@ declare module "jazz-wasm" {
       head?: unknown,
       base?: unknown,
     ): StreamingMutation;
+    /** Fresh global catalogue coverage without returned row bodies; empty bytes on completion. */
+    coverCatalogue(
+      table: string,
+      author?: Uint8Array,
+      claims?: unknown,
+    ): Uint8Array | PendingNativeRead;
     /** Empty bytes mean no accepted table identity; otherwise a 16-byte UUID. */
     tableIdentity(table: string): Promise<Uint8Array>;
     /** Empty bytes mean no accepted column identity; otherwise a 16-byte UUID. */

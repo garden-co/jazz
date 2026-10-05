@@ -2288,6 +2288,54 @@ where
         self.version_tx_id(&version).ok()
     }
 
+    /// Capture content settlements while the caller still holds the node lock
+    /// used to evaluate these rows. The generic updater alias may name a
+    /// deletion, so it is only a stored-provenance check, never the witness.
+    #[doc(hidden)]
+    pub async fn tx_content_settlements_for_binding(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        rows: &[CurrentRow],
+    ) -> Result<Option<Vec<(TxId, GlobalTime)>>, Error> {
+        let open_tx = self.open_tx(tx_id)?;
+        if !matches!(open_tx.kind, OpenTransactionKind::Exclusive { .. }) {
+            return Ok(None);
+        }
+        let staged_content = open_tx
+            .writes
+            .iter()
+            .filter(|write| write.deletion.is_none())
+            .map(|write| (write.table.as_str(), write.row_uuid))
+            .collect::<BTreeSet<_>>();
+        if rows.iter().any(|row| {
+            staged_content.contains(&(row.table(), row.row_uuid()))
+                || row.projected_tx_alias().is_none()
+        }) {
+            return Ok(None);
+        }
+        let snapshot = open_tx.base_snapshot.clone();
+        let mut settlements = Vec::with_capacity(rows.len());
+        for row in rows {
+            if self.current_row_tx_id(row).await.is_none() {
+                return Ok(None);
+            }
+            let Some(witness) = self
+                .snapshot_content_witness(schema_version, row.table(), row.row_uuid(), &snapshot)
+                .await
+            else {
+                return Ok(None);
+            };
+            let Some((Fate::Accepted, Some(position), DurabilityTier::Global)) =
+                self.transaction_state(witness).await
+            else {
+                return Ok(None);
+            };
+            settlements.push((witness, position));
+        }
+        Ok(Some(settlements))
+    }
+
     fn overlay_pending_writes_in_schema(
         &self,
         tx_id: OpenTransactionId,
