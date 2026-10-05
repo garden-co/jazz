@@ -12,6 +12,21 @@ const txId = Uint8Array.from({ length: 16 }, () => 7);
 const optionsJson = '{"readTier":"local","view":{"head":"main"}}';
 const cases: [string, unknown, unknown][] = [
   [
+    "stage upload",
+    { type: "stageStreamingMutation", upload: 129 },
+    { StageStreamingMutation: { upload: 129 } },
+  ],
+  [
+    "attach upload",
+    { type: "attachStagedStreamingMutation", staged: 129, transaction: 256 },
+    { AttachStagedStreamingMutation: { staged: 129, transaction: 256 } },
+  ],
+  [
+    "abort staged upload",
+    { type: "abortStagedStreamingMutation", staged: 129 },
+    { AbortStagedStreamingMutation: { staged: 129 } },
+  ],
+  [
     "graceful shutdown",
     { type: "waitForPendingWrites", tier: "core" },
     { WaitForPendingWrites: { tier: "core" } },
@@ -142,6 +157,34 @@ const cases: [string, unknown, unknown][] = [
 ];
 
 describe("RN Rust/TypeScript foreground codec contract", () => {
+  test("staged upload ABI uses append-only canonical postcard ordinals", () => {
+    expect(encodeNativeForegroundCommand({ type: "stageStreamingMutation", upload: 129 })).toEqual(
+      Uint8Array.of(34, 129, 1),
+    );
+    expect(
+      encodeNativeForegroundCommand({
+        type: "attachStagedStreamingMutation",
+        staged: 129,
+        transaction: 256,
+      }),
+    ).toEqual(Uint8Array.of(35, 129, 1, 128, 2));
+    expect(
+      encodeNativeForegroundCommand({ type: "abortStagedStreamingMutation", staged: 129 }),
+    ).toEqual(Uint8Array.of(36, 129, 1));
+    expect(decodeNativeForegroundResponse(Uint8Array.of(26, 129, 1))).toEqual({
+      type: "streamingMutationStaged",
+      staged: 129,
+    });
+    expect(decodeNativeForegroundResponse(Uint8Array.of(27))).toEqual({
+      type: "stagedStreamingMutationAttached",
+    });
+    expect(decodeNativeForegroundResponse(Uint8Array.of(28, 1))).toEqual({
+      type: "stagedStreamingMutationAborted",
+      aborted: true,
+    });
+    for (const malformed of [[26], [26, 129, 0], [27, 0], [28, 2], [28, 1, 0]])
+      expect(() => decodeNativeForegroundResponse(Uint8Array.from(malformed))).toThrow();
+  });
   test.each(cases)("%s preserves Rust semantic fields", (_name, command, expected) => {
     const bytes = encodeNativeForegroundCommand(command as NativeForegroundCommand);
     expect(decodeCommandInRust(bytes)).toEqual(expected);

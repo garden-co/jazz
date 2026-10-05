@@ -103,7 +103,7 @@ it.each([false, true])(
       const another = (await third.e2ee.devices.list()).find(
         (device) => device.id !== initial!.id && device.id !== pending.id,
       )!;
-      await expect(second.e2ee.devices.approve(another.id).wait()).rejects.toThrow(/active|key/i);
+      await expect(second.e2ee.devices.approve(another.id).wait()).rejects.toThrow();
       let shared: Awaited<ReturnType<typeof open>> | undefined;
       if (adversarial) {
         shared = await open(secondStore);

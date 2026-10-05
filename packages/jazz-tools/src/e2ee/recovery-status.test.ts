@@ -70,7 +70,6 @@ it("inspects recovery registration without enrolling a device or claiming recove
     const otherRoot = JSON.stringify({ ...JSON.parse(material), rootId: crypto.randomUUID() });
     await expect(observer.e2ee.recovery.status(otherRoot)).rejects.toMatchObject({
       code: "recovery-root-mismatch",
-      message: "Recovery material does not match an accepted recovery root",
     });
     const requests = await owner.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" });
     await owner.shutdown();

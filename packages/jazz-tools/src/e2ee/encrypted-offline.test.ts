@@ -735,14 +735,17 @@ it.each([
       clients.push(reader);
       await owner.e2ee.devices.list();
       await reader.e2ee.devices.list();
-      const group = await owner.e2ee.groups.create().wait();
-      await owner.e2ee.groups.add(group.id, bob.account.id).wait();
+      let groupId: string | undefined;
+      if (removal === "group") {
+        groupId = (await owner.e2ee.groups.create().wait()).id;
+        await owner.e2ee.groups.add(groupId, bob.account.id).wait();
+      }
       const tx = owner.beginExclusiveTransaction();
       const project = tx.insert(
         groupApp.projects,
         { title: "Group removal" },
         {
-          initialRecipients: removal === "group" ? [group.id] : [alice.account.id, bob.account.id],
+          initialRecipients: removal === "group" ? [groupId!] : [alice.account.id, bob.account.id],
         },
       );
       const note = tx.insert(groupApp.notes, {
@@ -762,7 +765,7 @@ it.each([
           ? await reader.all(groupApp.__e2ee_group_membership, { tier: "global" })
           : await reader.all(groupApp.__e2ee_space_grants, { tier: "global" });
 
-      if (removal === "group") await owner.e2ee.groups.remove(group.id, bob.account.id).wait();
+      if (removal === "group") await owner.e2ee.groups.remove(groupId!, bob.account.id).wait();
       else await owner.e2ee.spaces.revoke(groupApp.projects, project.id, bob.account.id).wait();
       // Fetch through an ordinary sibling query, without refreshing the space.
       const after =
@@ -774,7 +777,7 @@ it.each([
         expect.arrayContaining([
           expect.objectContaining(
             removal === "group"
-              ? { operation: "remove", groupId: group.id, memberId: bob.account.id }
+              ? { operation: "remove", groupId: groupId!, memberId: bob.account.id }
               : { operation: "remove", spaceId: space!.id, recipientId: bob.account.id },
           ),
         ]),

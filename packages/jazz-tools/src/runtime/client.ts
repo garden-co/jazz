@@ -30,6 +30,7 @@ export type TransactionPreparationIO = Pick<
   JazzClient,
   "queryInternal" | "insertInternal" | "updateInternal" | "upsertInternal" | "restoreInternal"
 > & {
+  attachStreamingMutation(staged: StagedStreamingMutation): Promise<void>;
   /** @internal Authorized query that deliberately excludes the open transaction overlay. */
   queryGlobal(
     query: string,
@@ -37,6 +38,15 @@ export type TransactionPreparationIO = Pick<
     session?: Session,
   ): Promise<Row[]>;
 };
+
+/** @internal Single-use capability; no descriptor or locator crosses this seam. */
+export type StagedStreamingMutation = {
+  readonly id: string;
+  attach(openTransactionId: OpenTransactionId): void | Promise<void>;
+  abort(): boolean | Promise<boolean>;
+};
+
+const stagedStreamingOwners = new WeakMap<StagedStreamingMutation, JazzClient>();
 
 type RuntimeSerializedSession = Pick<
   Session,
@@ -192,6 +202,15 @@ export interface Runtime {
     write_context_json?: string | null,
     object_id?: string | null,
   ): Promise<StreamingInsertResult>;
+  stageStreamingMutation?(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    write_context_json?: string | null,
+    object_id?: string | null,
+  ): Promise<StagedStreamingMutation>;
   restore(
     table: string,
     object_id: string,
@@ -1203,6 +1222,12 @@ export class JazzClient {
       };
       try {
         await prepare({
+          attachStreamingMutation: async (staged) => {
+            assertActive();
+            if (stagedStreamingOwners.get(staged) !== this)
+              throw new Error("Staged streaming mutation belongs to another client");
+            await staged.attach(id);
+          },
           queryInternal: (query, options, session) => {
             assertActive();
             return this.queryWithoutPreparation(
@@ -1580,6 +1605,34 @@ export class JazzClient {
       attribution,
       objectId,
     );
+  }
+
+  /** @internal Consume input before opening the publication transaction. */
+  async stageStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+  ): Promise<StagedStreamingMutation> {
+    if (!this.runtime.stageStreamingMutation)
+      throw new Error("This runtime does not support staged streaming mutations");
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const staged = await this.runtime.stageStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      this.encodeWriteContext(effectiveSession, attribution, undefined, options?.updatedAt),
+      objectId ?? (options as InsertOptions | undefined)?.id,
+    );
+    stagedStreamingOwners.set(staged, this);
+    return staged;
   }
 
   private async streamingMutation(

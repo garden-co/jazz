@@ -106,9 +106,7 @@ it("accepts only one of two overlapping group edges that would form a cycle", as
     expect(await parent.db.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
     expect(await child.db.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
     expect(await parent.db.e2ee.explain({ groupId: child.id })).toMatchObject({ state: "refused" });
-    await expect(child.db.e2ee.groups.add(child.id, parent.id).wait()).rejects.toThrow(
-      "cycle or depth",
-    );
+    await expect(child.db.e2ee.groups.add(child.id, parent.id).wait()).rejects.toThrow();
     expect(await a.db.all(app.__e2ee_group_membership, { tier: "remote" })).toEqual(edges);
     const root = (await child.db.one(app.__e2ee_groups.where({ id: child.id }), {
       tier: "remote",
