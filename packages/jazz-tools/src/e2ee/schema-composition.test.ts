@@ -6,13 +6,19 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./index.js";
 
-it.each([false, true])(
-  "composes managed records with application policies (devices first: %s)",
-  async (devicesFirst) => {
+it.each([
+  { devicesFirst: false, schemaOnly: false },
+  { devicesFirst: true, schemaOnly: false },
+  { devicesFirst: false, schemaOnly: true },
+  { devicesFirst: true, schemaOnly: true },
+])(
+  "composes managed records with application policies (devices first: $devicesFirst, schema only: $schemaOnly)",
+  async ({ devicesFirst, schemaOnly }) => {
     const app = s.defineApp({
       ...deviceRequestSchema,
       notes: s.table({ body: s.string() }, {}),
     });
+    const configuredApp = schemaOnly ? { wasmSchema: app.wasmSchema } : app;
     const applicationPermissions = definePermissions(app, ({ policy, session }) => {
       policy.notes.allowInsert.where({ "$createdBy.account": session.user.account });
       policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
@@ -33,7 +39,7 @@ it.each([false, true])(
       db = await createDb({
         ...account,
         e2ee: {
-          app,
+          app: configuredApp,
           store: {
             async read() {
               return retained;
@@ -59,7 +65,7 @@ it.each([false, true])(
         second = await createDb({
           ...account,
           e2ee: {
-            app,
+            app: configuredApp,
             store: {
               async read() {
                 return secondRetained;
