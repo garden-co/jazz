@@ -457,7 +457,11 @@ where
             ));
         }
         let schema = &publication.schema;
-        let lens = &publication.lens;
+        let acknowledged_lens = publication
+            .predecessors
+            .first()
+            .filter(|_| publication.predecessors.len() == 1)
+            .map(|p| p.lens.id);
         if let Some(existing) = self.catalogue.active_lineages_by_target.get(&schema.id) {
             if existing.publication != publication || existing.catalogue_seq != catalogue_seq {
                 return Err(Error::InvalidCatalogueUpdate(
@@ -468,7 +472,7 @@ where
                 SyncMessage::CatalogueAck(CatalogueAck {
                     revision: None,
                     schema: Some(schema.id),
-                    lens: Some(lens.id),
+                    lens: acknowledged_lens,
                     applied: true,
                 }),
             ]));
@@ -486,35 +490,19 @@ where
                 ));
             }
         } else {
-            if let Some(source) = self.catalogue.catalogue_schemas.get(&lens.source) {
-                Self::validate_migration_lens_between(lens, source, schema)?;
-                let identity_history = self.physical_identity_history_for_candidate(
-                    publication.schema.id,
-                    Some(publication.id),
-                );
-                let source_identities = &self
-                    .catalogue
-                    .physical_mappings
-                    .get(&lens.source)
-                    .ok_or(Error::InvalidCatalogueUpdate(
-                        "source physical identity manifest missing",
-                    ))?
-                    .identities;
-                source_identities
-                    .validate_evolution_to_with_history(
-                        &source.schema,
-                        &publication.physical_identities,
-                        &schema.schema,
-                        lens,
-                        identity_history,
-                    )
-                    .map_err(Error::InvalidCatalogueUpdate)?;
-                Self::validate_lineage_table_partition(
-                    &source.schema,
-                    &schema.schema,
-                    lens,
-                    &publication.new_tables,
-                    &publication.dropped_tables,
+            if publication.predecessors.iter().all(|p| {
+                self.catalogue
+                    .catalogue_schemas
+                    .contains_key(&p.lens.source)
+            }) {
+                Self::validate_publication_sources(
+                    &publication,
+                    &self.catalogue.catalogue_schemas,
+                    &self.catalogue.physical_mappings,
+                    self.physical_identity_history_for_candidate(
+                        publication.schema.id,
+                        Some(publication.id),
+                    ),
                 )?;
             }
             if self
@@ -577,49 +565,23 @@ where
                 break;
             };
             let publication = &pending.publication;
-            let Some(source) = self
-                .catalogue
-                .catalogue_schemas
-                .get(&publication.lens.source)
-                .cloned()
-            else {
+            if publication.predecessors.iter().any(|p| {
+                !self
+                    .catalogue
+                    .catalogue_schemas
+                    .contains_key(&p.lens.source)
+            }) {
                 break;
-            };
-            let validation = Self::validate_migration_lens_between(
-                &publication.lens,
-                &source,
-                &publication.schema,
-            )
-            .and_then(|()| {
-                Self::validate_lineage_table_partition(
-                    &source.schema,
-                    &publication.schema.schema,
-                    &publication.lens,
-                    &publication.new_tables,
-                    &publication.dropped_tables,
-                )
-            })
-            .and_then(|()| {
-                let identity_history = self.physical_identity_history_for_candidate(
+            }
+            let validation = Self::validate_publication_sources(
+                publication,
+                &self.catalogue.catalogue_schemas,
+                &self.catalogue.physical_mappings,
+                self.physical_identity_history_for_candidate(
                     publication.schema.id,
                     Some(publication.id),
-                );
-                self.catalogue
-                    .physical_mappings
-                    .get(&publication.lens.source)
-                    .ok_or(Error::InvalidCatalogueUpdate(
-                        "source physical identity manifest missing",
-                    ))?
-                    .identities
-                    .validate_evolution_to_with_history(
-                        &source.schema,
-                        &publication.physical_identities,
-                        &publication.schema.schema,
-                        &publication.lens,
-                        identity_history,
-                    )
-                    .map_err(Error::InvalidCatalogueUpdate)
-            })
+                ),
+            )
             // A parked sibling was admitted against the catalogue prefix that
             // existed when it arrived. Reconcile it again only when its
             // sequence becomes active: an earlier sibling may have widened a
@@ -660,11 +622,8 @@ where
                     &mut provisional_next_table_id,
                     &mut provisional_next_column_id,
                 )?;
-                let mapping = self.reconcile_physical_mapping_for_lens_payload(
-                    &publication.lens,
-                    &publication.schema,
-                    &fresh,
-                )?;
+                let mapping =
+                    Self::reconcile_publication_mapping(&self.catalogue, &publication, &fresh)?;
                 let mut next_physical_table_id = self.catalogue.next_physical_table_id;
                 let mut next_physical_column_id = self.catalogue.next_physical_column_id;
                 for table in mapping.tables.values() {
@@ -804,7 +763,12 @@ where
                 outcome.value.push(SyncMessage::CatalogueAck(CatalogueAck {
                     revision: Some(next),
                     schema: Some(staged.publication.schema.id),
-                    lens: Some(staged.publication.lens.id),
+                    lens: staged
+                        .publication
+                        .predecessors
+                        .first()
+                        .filter(|_| staged.publication.predecessors.len() == 1)
+                        .map(|p| p.lens.id),
                     applied: true,
                 }));
                 outcome.extend(self.drain_parked_commit_units().await?);
@@ -820,9 +784,11 @@ where
             staged.publication.schema.id,
             staged.publication.schema.clone(),
         );
-        self.catalogue
-            .catalogue_lenses
-            .insert(staged.publication.lens.id, staged.publication.lens.clone());
+        for predecessor in &staged.publication.predecessors {
+            self.catalogue
+                .catalogue_lenses
+                .insert(predecessor.lens.id, predecessor.lens.clone());
+        }
         self.catalogue
             .schema_version_aliases
             .insert(staged.publication.schema.id, staged.alias);
@@ -847,9 +813,9 @@ where
         self.catalogue
             .catalogue_schemas
             .remove(&staged.publication.schema.id);
-        self.catalogue
-            .catalogue_lenses
-            .remove(&staged.publication.lens.id);
+        for predecessor in &staged.publication.predecessors {
+            self.catalogue.catalogue_lenses.remove(&predecessor.lens.id);
+        }
         self.catalogue
             .schema_version_aliases
             .remove(&staged.publication.schema.id);
@@ -969,183 +935,7 @@ where
         source: &SchemaVersion,
         target: &SchemaVersion,
     ) -> Result<(), Error> {
-        for table_lens in &lens.table_lenses {
-            let source_table = source
-                .schema
-                .tables
-                .iter()
-                .find(|table| table.name == table_lens.source_table)
-                .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
-            let target_table = target
-                .schema
-                .tables
-                .iter()
-                .find(|table| table.name == table_lens.target_table)
-                .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
-            let target_bindings = target_table
-                .branch_by
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            let mut branch_columns = source_table
-                .branch_by
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            let mut columns = source_table
-                .columns
-                .iter()
-                .cloned()
-                .map(|column| (column.name.clone(), column))
-                .collect::<BTreeMap<_, _>>();
-            let mut saw_table_rename = source_table.name == target_table.name;
-            for op in &table_lens.ops {
-                match op {
-                    LensOp::RenameTable { from, to } => {
-                        if saw_table_rename
-                            || from != &source_table.name
-                            || to != &target_table.name
-                        {
-                            return Err(Error::InvalidCatalogueUpdate(
-                                "table rename does not match lens endpoints",
-                            ));
-                        }
-                        saw_table_rename = true;
-                    }
-                    LensOp::RenameColumn { from, to } => {
-                        if columns.contains_key(to) {
-                            return Err(Error::InvalidCatalogueUpdate(
-                                "column rename collides with existing column",
-                            ));
-                        }
-                        let mut column = columns.remove(from).ok_or(
-                            Error::InvalidCatalogueUpdate("column rename source is unknown"),
-                        )?;
-                        column.name = to.clone();
-                        columns.insert(to.clone(), column);
-                        if branch_columns.remove(from) {
-                            branch_columns.insert(to.clone());
-                        }
-                    }
-                    LensOp::CopyColumn { from, to } => {
-                        if columns.contains_key(to) {
-                            return Err(Error::InvalidCatalogueUpdate(
-                                "column copy collides with existing column",
-                            ));
-                        }
-                        let mut column =
-                            columns
-                                .get(from)
-                                .cloned()
-                                .ok_or(Error::InvalidCatalogueUpdate(
-                                    "column copy source is unknown",
-                                ))?;
-                        column.name = to.clone();
-                        columns.insert(to.clone(), column);
-                    }
-                    LensOp::AddColumn { column, .. } => {
-                        if columns.contains_key(column) {
-                            return Err(Error::InvalidCatalogueUpdate(
-                                "added column already exists",
-                            ));
-                        }
-                        let target_column = target_table
-                            .columns
-                            .iter()
-                            .find(|candidate| candidate.name == *column)
-                            .cloned()
-                            .ok_or(Error::InvalidCatalogueUpdate(
-                                "added column is absent from target",
-                            ))?;
-                        columns.insert(column.clone(), target_column);
-                        if target_bindings.contains(column) && columns[column].default.is_none() {
-                            return Err(Error::InvalidCatalogueUpdate(
-                                "added branch column requires a migration default",
-                            ));
-                        }
-                    }
-                    LensOp::DropColumn { column, .. } => {
-                        if branch_columns.contains(column) {
-                            return Err(Error::InvalidCatalogueUpdate(
-                                "table branch columns cannot be removed",
-                            ));
-                        }
-                        if columns.remove(column).is_none() {
-                            return Err(Error::InvalidCatalogueUpdate(
-                                "dropped column is absent from source",
-                            ));
-                        }
-                    }
-                    LensOp::TransformColumn { column, transform } => {
-                        if branch_columns.contains(column) {
-                            return Err(Error::InvalidCatalogueUpdate(
-                                "branch column type and migration default are immutable",
-                            ));
-                        }
-                        validate_transform_column(columns.get(column), transform)?;
-                        let source_column =
-                            columns.get(column).ok_or(Error::InvalidCatalogueUpdate(
-                                "transformed column is absent from source",
-                            ))?;
-                        let target_column = target_table
-                            .columns
-                            .iter()
-                            .find(|candidate| candidate.name == *column)
-                            .ok_or(Error::InvalidCatalogueUpdate(
-                                "transformed column is absent from target",
-                            ))?;
-                        if !physical_value_epoch_is_compatible(
-                            &source_column.column_type,
-                            &target_column.column_type,
-                        ) || source_column.large_value_kind != target_column.large_value_kind
-                        {
-                            return Err(Error::InvalidCatalogueUpdate(
-                                "column transform changes physical value or large-value semantic kind",
-                            ));
-                        }
-                        columns.insert(column.clone(), target_column.clone());
-                    }
-                    LensOp::RejectSourceDelta { .. } => {}
-                }
-            }
-            if !saw_table_rename {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "renamed table requires an explicit RenameTable operation",
-                ));
-            }
-            if !branch_columns.is_subset(&target_bindings) {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "table branch columns cannot be removed",
-                ));
-            }
-            let target_columns = target_table
-                .columns
-                .iter()
-                .cloned()
-                .map(|column| (column.name.clone(), column))
-                .collect::<BTreeMap<_, _>>();
-            for branch_column in &branch_columns {
-                let Some(source_column) = columns.get(branch_column) else {
-                    continue;
-                };
-                let Some(target_column) = target_columns.get(branch_column) else {
-                    continue;
-                };
-                if source_column.column_type != target_column.column_type
-                    || source_column.default != target_column.default
-                {
-                    return Err(Error::InvalidCatalogueUpdate(
-                        "branch column type and migration default are immutable",
-                    ));
-                }
-            }
-            if columns != target_columns {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "lens operations do not reproduce target columns",
-                ));
-            }
-        }
-        Ok(())
+        crate::node::migration_validation::validate_migration_lens_between(lens, source, target)
     }
 
     pub(super) fn validate_lineage_table_partition(
@@ -1155,75 +945,43 @@ where
         new_tables: &[String],
         dropped_tables: &[String],
     ) -> Result<(), Error> {
-        let source_tables = source
-            .tables
-            .iter()
-            .map(|table| table.name.clone())
-            .collect::<BTreeSet<_>>();
-        let target_tables = target
-            .tables
-            .iter()
-            .map(|table| table.name.clone())
-            .collect::<BTreeSet<_>>();
-        let related_source = lens
-            .table_lenses
-            .iter()
-            .map(|table| table.source_table.clone())
-            .collect::<BTreeSet<_>>();
-        let related_target = lens
-            .table_lenses
-            .iter()
-            .map(|table| table.target_table.clone())
-            .collect::<BTreeSet<_>>();
-        let new = new_tables.iter().cloned().collect::<BTreeSet<_>>();
-        let dropped = dropped_tables.iter().cloned().collect::<BTreeSet<_>>();
-        if related_source.len() != lens.table_lenses.len()
-            || related_target.len() != lens.table_lenses.len()
-            || new.len() != new_tables.len()
-            || dropped.len() != dropped_tables.len()
-            || !related_source.is_disjoint(&dropped)
-            || !related_target.is_disjoint(&new)
-            || related_source
-                .union(&dropped)
-                .cloned()
-                .collect::<BTreeSet<_>>()
-                != source_tables
-            || related_target.union(&new).cloned().collect::<BTreeSet<_>>() != target_tables
-        {
-            return Err(Error::InvalidCatalogueUpdate(
-                "lineage table declarations do not partition schemas",
-            ));
-        }
-        Ok(())
+        crate::node::migration_validation::validate_lineage_table_partition(
+            source, target, lens, new_tables, dropped_tables,
+        )
     }
 
     pub(super) fn validate_schema_lineage_publication_bounds(
         publication: &SchemaLineagePublication,
     ) -> Result<(), Error> {
         let declaration_count = publication
-            .lens
-            .table_lenses
-            .len()
-            .saturating_add(publication.new_tables.len())
-            .saturating_add(publication.dropped_tables.len());
-        let operation_count = publication
-            .lens
-            .table_lenses
+            .predecessors
             .iter()
-            .map(|table| table.ops.len())
-            .sum::<usize>();
-        let names_in_bounds = publication
-            .new_tables
-            .iter()
-            .chain(&publication.dropped_tables)
-            .chain(
-                publication
-                    .lens
+            .map(|p| {
+                p.lens
                     .table_lenses
-                    .iter()
-                    .flat_map(|table| [&table.source_table, &table.target_table]),
-            )
-            .all(|name| !name.is_empty() && name.len() <= MAX_SCHEMA_LINEAGE_NAME_BYTES);
+                    .len()
+                    .saturating_add(p.new_tables.len())
+                    .saturating_add(p.dropped_tables.len())
+            })
+            .fold(publication.predecessors.len(), usize::saturating_add);
+        let operation_count = publication
+            .predecessors
+            .iter()
+            .flat_map(|p| &p.lens.table_lenses)
+            .map(|table| table.ops.len())
+            .fold(0usize, usize::saturating_add);
+        let names_in_bounds = publication.predecessors.iter().all(|p| {
+            p.new_tables
+                .iter()
+                .chain(&p.dropped_tables)
+                .chain(
+                    p.lens
+                        .table_lenses
+                        .iter()
+                        .flat_map(|table| [&table.source_table, &table.target_table]),
+                )
+                .all(|name| !name.is_empty() && name.len() <= MAX_SCHEMA_LINEAGE_NAME_BYTES)
+        });
         if declaration_count > MAX_SCHEMA_LINEAGE_DECLARATIONS
             || operation_count > MAX_SCHEMA_LINEAGE_OPS
             || !names_in_bounds
@@ -1253,15 +1011,29 @@ where
                 "schema id does not match schema payload",
             ));
         }
-        if publication.lens.id != publication.lens.content_id() {
+        if publication.predecessors.is_empty() {
             return Err(Error::InvalidCatalogueUpdate(
-                "lens id does not match lens payload",
+                "schema requires a predecessor",
             ));
         }
-        if publication.lens.target != publication.schema.id {
-            return Err(Error::InvalidCatalogueUpdate(
-                "lineage lens target does not match schema",
-            ));
+        let mut sources = BTreeSet::new();
+        for predecessor in &publication.predecessors {
+            let lens = &predecessor.lens;
+            if !sources.insert(lens.source) || lens.source == publication.schema.id {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "duplicate or self schema predecessor",
+                ));
+            }
+            if lens.id != lens.content_id() {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "lens id does not match lens payload",
+                ));
+            }
+            if lens.target != publication.schema.id {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "lineage lens target does not match schema",
+                ));
+            }
         }
         Ok(())
     }

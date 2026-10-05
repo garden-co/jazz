@@ -466,6 +466,19 @@ where
             .set_catalogue_activation_failpoint(failpoint);
     }
 
+    #[cfg(feature = "runtime")]
+    #[doc(hidden)]
+    pub fn validate_deployment_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow()
+            .validate_deployment_snapshot(snapshot)
+            .map_err(Into::into)
+    }
+
     /// Produce the authority's complete catalogue for the privileged
     /// snapshot-only transport exchange.
     #[cfg(feature = "runtime")]

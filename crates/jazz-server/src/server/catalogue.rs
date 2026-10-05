@@ -1,4 +1,9 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+mod deployment;
+pub(crate) use deployment::DeploymentResponse;
+
+#[cfg(test)]
+use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -52,6 +57,25 @@ pub(crate) struct ActiveSchema {
     pub permissions: HashMap<TableName, TablePolicies>,
 }
 
+/// HTTP graph inventory, captured under one catalogue index lock.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MigrationGraph {
+    active_schema_hash: Option<String>,
+    schemas: Vec<String>,
+    migrations: Vec<MigrationGraphEdge>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MigrationGraphEdge {
+    from_hash: String,
+    to_hash: String,
+    /// Derived capability, not persisted provenance: no migration file is needed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    automatic: bool,
+}
+
 /// Errors from server-local catalogue operations.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -100,24 +124,23 @@ impl std::error::Error for CatalogueError {}
 pub struct ServerCatalogue;
 
 pub(crate) trait CatalogueStore {
+    fn migration_graph(&self) -> Result<MigrationGraph, CatalogueError>;
     fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError>;
     fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError>;
     fn known_lenses(&self) -> Result<Vec<Lens>, CatalogueError>;
     fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, CatalogueError>;
-    fn are_schema_hashes_connected(
-        &self,
-        from_hash: SchemaHash,
-        to_hash: SchemaHash,
-    ) -> Result<bool, CatalogueError>;
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError>;
     fn active_schema_summary(&self) -> Result<Option<ActiveSchemaSummary>, CatalogueError>;
     fn active_schema(&self) -> Result<Option<ActiveSchema>, CatalogueError>;
+    #[cfg(test)]
     fn publish_permissions_bundle(
         &self,
         schema_hash: SchemaHash,
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, CatalogueError>;
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, CatalogueError>;
     fn flush(&self) -> Result<(), CatalogueError>;
     fn close(&self) -> Result<(), CatalogueError>;
@@ -269,7 +292,7 @@ fn unix_timestamp_millis() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct CatalogueIndex {
     schemas: HashMap<SchemaHash, Schema>,
     schema_published_at: HashMap<SchemaHash, u64>,
@@ -282,7 +305,12 @@ struct CatalogueIndex {
 impl CatalogueIndex {
     fn from_storage(storage: &dyn CatalogueStorage, app_id: AppId) -> Result<Self, CatalogueError> {
         let mut index = Self::default();
-        for entry in storage.scan_catalogue_entries()? {
+        let mut entries = storage.scan_catalogue_entries()?;
+        // Read references first so an empty schema used by an active selection
+        // or migration is distinguished from a legacy initialization sentinel.
+        entries
+            .sort_by_key(|entry| entry.object_type() == Some(ObjectType::CatalogueSchema.as_str()));
+        for entry in entries {
             if entry.metadata.get(MetadataKey::AppId.as_str()) != Some(&app_id.uuid().to_string()) {
                 continue;
             }
@@ -301,34 +329,6 @@ impl CatalogueIndex {
         let mut hashes = self.schemas.keys().copied().collect::<Vec<_>>();
         hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         hashes
-    }
-
-    fn are_schema_hashes_connected(&self, from_hash: SchemaHash, to_hash: SchemaHash) -> bool {
-        if !self.schemas.contains_key(&from_hash) || !self.schemas.contains_key(&to_hash) {
-            return false;
-        }
-        let mut seen = HashSet::from([from_hash]);
-        let mut queue = VecDeque::from([from_hash]);
-        while let Some(current) = queue.pop_front() {
-            if current == to_hash {
-                return true;
-            }
-            for &(source, target) in &self.lens_edges {
-                let next = if source == current {
-                    Some(target)
-                } else if target == current {
-                    Some(source)
-                } else {
-                    None
-                };
-                if let Some(next) = next
-                    && seen.insert(next)
-                {
-                    queue.push_back(next);
-                }
-            }
-        }
-        false
     }
 
     fn active_schema(&self) -> Option<ActiveSchema> {
@@ -415,7 +415,14 @@ impl CatalogueIndex {
                 let schema = decode_schema(&entry.content).map_err(|error| {
                     corrupt_catalogue_entry(entry, format!("decode schema payload: {error}"))
                 })?;
-                if schema.is_empty() {
+                if schema.is_empty()
+                    && self
+                        .active_schema
+                        .is_none_or(|active| active.schema_hash != SchemaHash::compute(&schema))
+                    && !self.lens_edges.iter().any(|(from, to)| {
+                        *from == SchemaHash::compute(&schema) || *to == SchemaHash::compute(&schema)
+                    })
+                {
                     // Old servers could write the empty-schema sentinel before
                     // initialization. It is a valid, forward-compatible value
                     // that must remain invisible to rehydration.
@@ -610,6 +617,38 @@ fn catalogue_metadata(app_id: AppId, object_type: ObjectType) -> HashMap<String,
 }
 
 impl CatalogueStore for StoredCatalogue {
+    fn migration_graph(&self) -> Result<MigrationGraph, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
+        let mut schemas: Vec<_> = index.schemas.keys().map(ToString::to_string).collect();
+        schemas.sort();
+        let mut migrations: Vec<_> = index
+            .lenses
+            .values()
+            .map(|lens| MigrationGraphEdge {
+                from_hash: lens.source_hash.to_string(),
+                to_hash: lens.target_hash.to_string(),
+                automatic: lens.forward.ops.is_empty()
+                    && lens.backward.ops.is_empty()
+                    && !lens.is_draft()
+                    && index
+                        .schemas
+                        .get(&lens.source_hash)
+                        .zip(index.schemas.get(&lens.target_hash))
+                        .is_some_and(|(from, to)| {
+                            jazz::tools::deployment::schemas_are_compatible(from, to)
+                        }),
+            })
+            .collect();
+        migrations.sort_by(|a, b| (&a.from_hash, &a.to_hash).cmp(&(&b.from_hash, &b.to_hash)));
+        Ok(MigrationGraph {
+            active_schema_hash: index
+                .active_schema
+                .map(|active| active.schema_hash.to_string()),
+            schemas,
+            migrations,
+        })
+    }
+
     fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.known_schema_hashes())
@@ -630,22 +669,14 @@ impl CatalogueStore for StoredCatalogue {
         Ok(index.schema_published_at.get(schema_hash).copied())
     }
 
-    fn are_schema_hashes_connected(
-        &self,
-        from_hash: SchemaHash,
-        to_hash: SchemaHash,
-    ) -> Result<bool, CatalogueError> {
-        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        Ok(index.are_schema_hashes_connected(from_hash, to_hash))
-    }
-
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError> {
         let published_at = unix_timestamp_millis();
         let (schema_hash, entry) = schema_entry(self.app_id, schema, published_at);
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
+        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         storage.upsert_catalogue_entry(&entry)?;
         let object_id = entry.object_id;
-        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.apply_entry(&entry)?;
         index.schema_published_at.insert(schema_hash, published_at);
         Ok(object_id)
@@ -661,6 +692,7 @@ impl CatalogueStore for StoredCatalogue {
         Ok(index.active_schema())
     }
 
+    #[cfg(test)]
     fn publish_permissions_bundle(
         &self,
         schema_hash: SchemaHash,
@@ -736,6 +768,7 @@ impl CatalogueStore for StoredCatalogue {
         Ok(Some(head_entry.object_id))
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, CatalogueError> {
         if lens.is_draft() {
             return Err(CatalogueError::WriteError(
@@ -744,8 +777,8 @@ impl CatalogueStore for StoredCatalogue {
         }
         let entry = lens_entry(self.app_id, lens);
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        storage.upsert_catalogue_entry(&entry)?;
         let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
+        storage.upsert_catalogue_entry(&entry)?;
         index.apply_entry(&entry)?;
         Ok(entry.object_id)
     }
@@ -767,6 +800,13 @@ impl CatalogueStore for StoredCatalogue {
 }
 
 impl ServerCatalogue {
+    pub(crate) fn migration_graph(
+        &self,
+        store: &impl CatalogueStore,
+    ) -> Result<MigrationGraph, CatalogueError> {
+        store.migration_graph()
+    }
+
     pub(crate) fn known_schema_hashes(
         &self,
         store: &impl CatalogueStore,
@@ -797,15 +837,7 @@ impl ServerCatalogue {
         store.schema_published_at(schema_hash)
     }
 
-    pub(crate) fn are_schema_hashes_connected(
-        &self,
-        store: &impl CatalogueStore,
-        from_hash: SchemaHash,
-        to_hash: SchemaHash,
-    ) -> Result<bool, CatalogueError> {
-        store.are_schema_hashes_connected(from_hash, to_hash)
-    }
-
+    #[cfg(any(test, feature = "embedded-server"))]
     pub(crate) fn publish_schema(
         &self,
         store: &impl CatalogueStore,
@@ -828,6 +860,7 @@ impl ServerCatalogue {
         store.active_schema()
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_permissions_bundle(
         &self,
         store: &impl CatalogueStore,
@@ -838,6 +871,7 @@ impl ServerCatalogue {
         store.publish_permissions_bundle(schema_hash, permissions, expected_parent_bundle_object_id)
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     pub(crate) fn publish_lens(
         &self,
         store: &impl CatalogueStore,

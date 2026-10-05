@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { WebSocket } from "undici";
 import type { RuntimeSubscriptionDelta, WasmSchema } from "../../drivers/types.js";
 import { deploy } from "../../dev/catalogue.js";
-import { fetchSchemaHashes, fetchStoredWasmSchema } from "../schema-fetch.js";
+import { fetchSchemaHashes, fetchStoredWasmSchema } from "../../dev/catalogue-api.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
@@ -178,13 +178,18 @@ describe("NativeRuntimeAdapter server convergence", () => {
       await immediateWriter.shutdown();
       clients.splice(clients.indexOf(immediateWriter), 1);
 
-      const wrongSecretResponse = await fetch(`${server.url}/apps/${appId}/admin/schemas`, {
+      const wrongSecretResponse = await fetch(`${server.url}/apps/${appId}/admin/deploy`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": "not-the-admin-secret",
         },
-        body: JSON.stringify({ schema: { tables: schema } }),
+        body: JSON.stringify({
+          targetSchemaHash: published.hash,
+          schemas: [],
+          migrations: [],
+          permissions: allowAll(schema),
+        }),
       });
       expect(wrongSecretResponse.status).toBe(401);
 

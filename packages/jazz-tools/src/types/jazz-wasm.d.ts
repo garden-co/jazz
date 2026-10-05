@@ -1,6 +1,7 @@
 declare module "jazz-wasm" {
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
+  export function validateSchema(schema: Uint8Array): void;
   export function nativeArtifactFingerprint(): string;
   export function setJsonSchemaValidator(
     compile: (schemaJson: string) => (instanceJson: string) => string | undefined,

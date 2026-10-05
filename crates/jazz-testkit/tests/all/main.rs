@@ -24,6 +24,8 @@ mod claims_merge_integration;
 mod client_storage_shutdown_integration;
 #[path = "../clients_sync.rs"]
 mod clients_sync;
+#[path = "../compatible_deployment.rs"]
+mod compatible_deployment;
 #[path = "../durable_local_write_replay_integration.rs"]
 mod durable_local_write_replay_integration;
 #[path = "../flush_once_per_refresh.rs"]

@@ -146,22 +146,23 @@ the Rust receipt rejects noncanonical payloads, and TypeScript independently
 encodes the corpus and rejects malformed relation input. It is compatibility
 evidence, not a migration input.
 
-**Deployment boundary, 2026-09-18 — the sole wire protocol is v3.** `ViewUpdate` carries
+**Deployment boundary — the sole wire protocol is v4.** `ViewUpdate` carries
 settled version payloads only through `version_carriers`; the transitional
 duplicate `version_bundles` field is absent. Every endpoint advertises exactly
-wire-protocol v3 and requires every peer Hello to advertise exactly
-`min_protocol_version=3, max_protocol_version=3`; v1, v2, and ranges such as `0..=3`,
+wire-protocol v4 and requires every peer Hello to advertise exactly
+`min_protocol_version=4, max_protocol_version=4`; v1, v2, v3, and ranges such as `0..=4`,
 `2..=3`, and `3..=15` reject before payload decoding. There are no compatibility
 aliases, migration paths, or old wire decoders. `VersionBundle` remains the semantic unit produced when a
 carrier is expanded and remains the direct payload of `RowVersionPayloads`
 repair responses.
 
-Wire v3 introduces deployment-aware catalogue policy snapshot semantics: an old
-Core can emit a policy-only snapshot at the same write revision that v3 receivers
-reject. Therefore v2 peers fail the Hello handshake rather than reaching that
-semantic mismatch. Clients and Core servers must upgrade together. Existing
-message discriminants remain fixed, including retired tag 12; this wire boundary
-does not change storage formats or remove legacy storage upgrade paths.
+Wire v4 replaces the single incoming migration in each schema publication with
+an explicit predecessor vector. V3 and older peers fail the Hello handshake
+before decoding these snapshots. Clients and Core servers must upgrade together.
+It retains v3's deployment-aware catalogue policy semantics: policy changes must
+advance the write revision. Existing message discriminants remain fixed,
+including retired tags 12 and 30. Persisted single-predecessor records remain readable;
+storage versions are independent of this wire boundary.
 
 Transaction and row-version authors use the native record
 `{account: UUID, identity: {issuer: String, subject: String}}`. System authors
@@ -171,8 +172,8 @@ Accountless reader sessions remain distinct from non-null row authors. Large sca
 internal enum/record encoding rather than the former private tagged/postcard
 payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
 milliseconds; the packed HLC is internal ordering state and is not protocol
-data. The wire-v3 golden fixture set is the only supported message layout.
-Wire-protocol v3 is independent of other formats that are also labelled v1,
+data. The wire-v4 golden fixture set is the only supported message layout.
+Wire-protocol v4 is independent of other formats that are also labelled v1,
 including storage, catalogue, migration-lens, and NAPI/WASM binding formats.
 `MigrationLens` payloads in that fixture set are
 their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
@@ -1071,7 +1072,7 @@ current-row availability contract for authorization and receipt validation.
 - `Snapshot { revision: [u8;16], rows: Vec<SupportingRow> }`.
 - `Delta { predecessor: [u8;16], revision: [u8;16], adds: Vec<SupportingRow>, removes: Vec<SupportingRow> }`.
 
-The named semantic encoding is postcard in the version-3 WireEnvelope. Enum
+The named semantic encoding is postcard in the version-4 WireEnvelope. Enum
 discriminants are respectively 0 and 1, followed by fields in declaration order.
 Revisions are exactly 16 raw array bytes (no length prefix). Vectors use postcard
 lengths and the existing exact SupportingRow field encoding. Populated snapshots

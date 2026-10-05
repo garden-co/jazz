@@ -303,9 +303,11 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     let mut lineage_publication = SchemaLineagePublication {
         id: jazz::ids::SchemaLineagePublicationId(uuid::Uuid::nil()),
         schema: lineage_target.clone(),
-        lens: lineage_lens,
-        new_tables: Vec::new(),
-        dropped_tables: Vec::new(),
+        predecessors: vec![jazz::protocol::SchemaPredecessor {
+            lens: lineage_lens,
+            new_tables: Vec::new(),
+            dropped_tables: Vec::new(),
+        }],
         physical_identities: lineage_target_identities,
     };
     lineage_publication.id = lineage_publication.content_id();
@@ -689,6 +691,34 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         "view_update_physical_delta",
         "ViewUpdate",
         SyncMessage::ViewUpdate(delta),
+    ));
+    let (_, _, snapshot) = messages
+        .iter()
+        .find(|(_, _, message)| matches!(message, SyncMessage::CatalogueSnapshot(_)))
+        .unwrap();
+    let SyncMessage::CatalogueSnapshot(mut merged_snapshot) = snapshot.clone() else {
+        unreachable!()
+    };
+    let publication = &mut merged_snapshot.lineages[0].1;
+    let predecessor = &publication.predecessors[0];
+    publication
+        .predecessors
+        .push(jazz::protocol::SchemaPredecessor {
+            lens: MigrationLens::new(
+                SchemaVersionId(uuid::Uuid::from_bytes([0x34; 16])),
+                publication.schema.id,
+                predecessor.lens.table_lenses().to_vec(),
+            )
+            .unwrap(),
+            new_tables: vec![],
+            dropped_tables: vec![],
+        });
+    publication.predecessors.sort_by_key(|p| p.lens.source());
+    publication.id = publication.content_id();
+    messages.push((
+        "catalogue_snapshot_multiple_predecessors",
+        "CatalogueSnapshot",
+        SyncMessage::CatalogueSnapshot(merged_snapshot),
     ));
     messages
 }

@@ -454,7 +454,7 @@ describe("migration stub generation", () => {
   });
 
   it("exports snapshots and creates relation migrations with lossless bigint and bytes defaults", async () => {
-    const { exportSchema, createMigration } = await import("./catalogue-project.js");
+    const { compileSchema, createMigration } = await import("./catalogue-project.js");
     const root = await mkdtemp(join(tmpdir(), "jazz-default-snapshots-"));
     const migrationsDir = join(root, "migrations");
     const schemaPath = join(root, "schema.ts");
@@ -468,14 +468,12 @@ export const app = s.defineApp({
     try {
       await writeFile(join(root, "package.json"), '{"type":"module"}');
       await writeFile(schemaPath, source(false));
-      const before = await exportSchema({ schemaDir: root, migrationsDir: join(root, "exports") });
+      const before = await compileSchema({ schemaDir: root, migrationsDir: join(root, "exports") });
       const exported = JSON.parse(await readFile(before.snapshotPath!, "utf8"));
       expect(wasmSchemasEqual(exported, before.schema)).toBe(true);
-      const initial = await createMigration({ schemaDir: root, migrationsDir });
-      expect(initial.status).toBe("initial-snapshot");
-      if (initial.status !== "initial-snapshot") throw new Error("Expected initial snapshot");
+      const initial = await compileSchema({ schemaDir: root, migrationsDir });
       expect(
-        wasmSchemasEqual(JSON.parse(await readFile(initial.snapshotPath, "utf8")), before.schema),
+        wasmSchemasEqual(JSON.parse(await readFile(initial.snapshotPath!, "utf8")), before.schema),
       ).toBe(true);
       await writeFile(schemaPath, source(true));
       const generated = await createMigration({ schemaDir: root, migrationsDir });
@@ -490,7 +488,7 @@ export const app = s.defineApp({
           .replace("export default", "return"),
       )(s, m);
       expect(wasmSchemasEqual(s.defineApp(migration.from).wasmSchema, before.schema)).toBe(true);
-      const after = await exportSchema({ schemaDir: root, migrationsDir });
+      const after = await compileSchema({ schemaDir: root, migrationsDir });
       expect(wasmSchemasEqual(s.defineApp(migration.to).wasmSchema, after.schema)).toBe(true);
       expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
       expect(await createMigration({ schemaDir: root, migrationsDir })).toEqual({
@@ -501,9 +499,9 @@ export const app = s.defineApp({
     }
   });
 
-  it("loads and pushes the generated relation migration through the project API", async () => {
-    const { computeSchemaHash } = await import("./catalogue.js");
-    const { pushMigration } = await import("./catalogue-project.js");
+  it("loads and deploys the generated relation migration", async () => {
+    const { computeSchemaHash, deploy } = await import("./catalogue.js");
+    const { loadDefinedMigration } = await import("./catalogue-project.js");
     const users = s
       .table({ name: s.string(), peerId: s.uuid() }, { peer: s.rel("peers", "peerId") })
       .indexOnly(["name"])
@@ -542,7 +540,12 @@ export const app = s.defineApp({
       vi.stubGlobal(
         "fetch",
         vi.fn(async (input: string, init?: RequestInit) => {
-          if (input.endsWith("/schemas")) return Response.json({ hashes: [fromHash, toHash] });
+          if (input.endsWith("/migrations/graph"))
+            return Response.json({
+              schemas: [fromHash],
+              migrations: [],
+              activeSchemaHash: fromHash,
+            });
           if (input.endsWith(`/schema/${fromHash}`))
             return new Response(
               JSON.stringify({ schema: { tables: fromSchema }, publishedAt: 0 }, (_, value) =>
@@ -555,12 +558,12 @@ export const app = s.defineApp({
                 typeof value === "bigint" ? value.toString() : value,
               ),
             );
-          if (input.endsWith("/admin/migrations")) {
+          if (input.endsWith("/admin/deploy")) {
             body = JSON.parse(String(init?.body));
-            return Response.json(
-              { objectId: "44444444-4444-4444-4444-444444444444", fromHash, toHash },
-              { status: 201 },
-            );
+            return Response.json({
+              changed: true,
+              published: { schemas: [toHash], migrations: [{ fromHash, toHash }] },
+            });
           }
           throw new Error(`Unexpected fetch: ${input}`);
         }),
@@ -577,13 +580,13 @@ export const app = s.defineApp({
             ),
         );
         await expect(
-          pushMigration({
+          deploy({
             appId: "test-app",
             serverUrl: "http://localhost:1625",
             adminSecret: "test-secret",
-            migrationsDir: root,
-            fromHash,
-            toHash,
+            schema: toSchema,
+            permissions: {},
+            migration: await loadDefinedMigration(path),
           }),
         ).rejects.toThrow("does not match");
         expect(body).toBeUndefined();
@@ -595,18 +598,18 @@ export const app = s.defineApp({
           JSON.stringify(new URL("../index.ts", import.meta.url).pathname),
         ),
       );
-      const result = await pushMigration({
+      const result = await deploy({
         appId: "test-app",
         serverUrl: "http://localhost:1625",
         adminSecret: "test-secret",
-        migrationsDir: root,
-        fromHash,
-        toHash,
+        schema: toSchema,
+        permissions: {},
+        migration: await loadDefinedMigration(path),
       });
-      expect(result.status).toBe("published");
-      expect(body.forward).toEqual([{ table: "records", operations: [] }]);
-      expect(body.fromHash).toBe(fromHash);
-      expect(body.toHash).toBe(toHash);
+      expect(result.changed).toBe(true);
+      expect(body.migrations[0].forward).toEqual([{ table: "records", operations: [] }]);
+      expect(body.migrations[0].fromHash).toBe(fromHash);
+      expect(body.migrations[0].toHash).toBe(toHash);
     } finally {
       vi.unstubAllGlobals();
       await rm(root, { recursive: true, force: true });
@@ -614,7 +617,7 @@ export const app = s.defineApp({
   });
 
   it("names the file and points at the new namespace when a legacy migration fails to load", async () => {
-    const { pushMigration } = await import("./catalogue-project.js");
+    const { loadDefinedMigration } = await import("./catalogue-project.js");
     const fromHash = "a".repeat(64);
     const toHash = "b".repeat(64);
     const root = await mkdtemp(join(tmpdir(), "jazz-legacy-migration-"));
@@ -632,23 +635,9 @@ export default s.defineMigration({
   to: { todos: s.table({ title: s.string(), notes: s.string().optional() }, {}) },
 });`,
       );
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async (input: string) => {
-          if (input.endsWith("/schemas")) return Response.json({ hashes: [fromHash, toHash] });
-          throw new Error(`Unexpected fetch: ${input}`);
-        }),
-      );
-      const push = pushMigration({
-        appId: "test-app",
-        serverUrl: "http://localhost:1625",
-        adminSecret: "test-secret",
-        migrationsDir: root,
-        fromHash,
-        toHash,
-      });
-      await expect(push).rejects.toThrow(`Failed to load migration ${fileName}:`);
-      await expect(push).rejects.toThrow("The migration DSL moved to `migration as m`");
+      const load = loadDefinedMigration(join(root, fileName));
+      await expect(load).rejects.toThrow(`Failed to load migration ${fileName}:`);
+      await expect(load).rejects.toThrow("The migration DSL moved to `migration as m`");
     } finally {
       vi.unstubAllGlobals();
       await rm(root, { recursive: true, force: true });
