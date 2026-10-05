@@ -1250,10 +1250,20 @@ fn policy_claim_array_string_ids_bind_as_uuid_array() {
     assert_eq!(visible, BTreeSet::from([row(1)]));
 }
 
+/// Independent readers see only the issues admitted by their array claims for
+/// alice and bob, through parameter, literal and relation recursive seeds.
+/// Nullable claim carriers must remain valid, and revising or revoking the
+/// first reader's claims must not change the second reader's access:
+///
+/// ```text
+/// read alice / read bob -> revise first to bob -> revoke first -> read bob
+/// ```
+///
+/// This node seam deliberately uses direct provider contexts without an active
+/// transport scope, so it exercises ambient claim identity and nullable
+/// carriers that transport-session isolation could otherwise mask.
 #[test]
 fn recursive_array_claims_preserve_identity_and_nullable_carriers() {
-    // Direct provider contexts have no active transport-session scope. Exercise
-    // each seed representation while one prepared shape is reused across claims.
     for seed_kind in ["parameter", "literal", "relation"] {
         let readable = || PublicTablePolicies::new().with_select(PublicPolicyExpr::True);
         let schema = public_query_eval_schema(

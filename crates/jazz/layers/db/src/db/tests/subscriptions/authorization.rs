@@ -232,6 +232,12 @@ fn local_membership_update_refreshes_policy_dependent_subscription() {
     );
 }
 
+/// alice and bob's array claims admit independent todo membership. A change
+/// to bob's row reaches only bob, and dropping alice must leave bob delivering:
+///
+/// ```text
+/// open alice -> open bob -> change bob -> drop alice -> change bob
+/// ```
 #[test]
 fn live_array_claim_subscriptions_do_not_share_membership_or_teardown() {
     let schema = build_public_db_test_schema(

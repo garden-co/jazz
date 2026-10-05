@@ -104,6 +104,18 @@ fn union_occurrence_rejects_nul_delimited_label_collision() {
     assert!(format!("{error:?}").contains("NUL-free"));
 }
 
+/// alice's recursive request may use physical current-row ArgBy resolution,
+/// but a logical Slice in its recursive step must fail before source expansion:
+///
+/// ```text
+/// recursive request -> validate logical step -> expand physical sources
+///                             |
+///                        Slice rejected
+/// ```
+///
+/// The normalized-program/compiler seam distinguishes a valid internal physical
+/// operator from an unsupported logical operator; public row assertions cannot
+/// locate that distinction or prove rejection precedes source expansion.
 #[test]
 fn logical_recursive_arg_by_is_rejected_before_source_expansion() {
     let seed = RowSetNodeId("seed".to_owned());

@@ -1,9 +1,17 @@
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
+import type { Db } from "../runtime/db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { createNativeKeyEnvelope } from "./native.js";
+import { createNativeCrypto, createNativeKeyEnvelope } from "./native.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
+import { accountEpochContext, firstAccountEpoch } from "./first-epoch.js";
+import { readAccountMembership } from "./public-membership.js";
+import {
+  encodeEpochIds,
+  encodePublicApprovalRevision,
+  publicSuccessorSigningBytes,
+} from "./account-successor.js";
 
 it("rejects a correctly sealed but substituted account epoch key", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
@@ -144,6 +152,33 @@ it("accepts only one first device and never reinitialises an existing account fo
       tier: "remote",
     });
     expect(original).not.toBeNull();
+    const settled = await first.exclusiveTransaction(async (tx) => ({
+      identities: await tx.allSettledForE2ee(identities.where({ id: config.account.id })),
+      roots: await tx.allSettledForE2ee(
+        deviceRequestApp.__e2ee_account_roots.where({ accountId: config.account.id }),
+      ),
+    }));
+    const history = await settled.wait({ tier: "global" });
+    expect(history.identities.rows).toHaveLength(1);
+    expect(history.roots.rows).toHaveLength(1);
+    expect(history.roots.rows[0]).toMatchObject({
+      deviceId: activeId,
+      epochId: original!.epochId,
+      ledgerVersion: 1,
+    });
+    // Concurrent first-device producers publish one identity/root activation,
+    // not an identity followed by an independently accepted projection.
+    expect(history.roots.settlements[0]!.transactionId).toBe(
+      history.identities.settlements[0]!.transactionId,
+    );
+    expect(history.roots.settlements[0]!.position).toBe(
+      history.identities.settlements[0]!.position,
+    );
+    expect(
+      (await second.e2ee.devices.list())
+        .filter((device) => device.state === "active")
+        .map((device) => device.id),
+    ).toEqual([activeId]);
     for (const client of [first, second]) {
       const replacement = {
         deviceId: activeId,
@@ -177,6 +212,146 @@ it("accepts only one first device and never reinitialises an existing account fo
     expect(afterLoss.filter((device) => device.state === "pending")).toHaveLength(2);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
+    await server.stop();
+  }
+}, 15_000);
+
+it("repairs a missing initial root without granting authority to pre-root successors", async () => {
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let db: Db | undefined;
+  const secrets: Uint8Array[] = [];
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    const config = await localAccountConfig(server.appId, server.url);
+    db = await createDb(config);
+    const adapters = await createNativeCrypto();
+    const pair = await adapters.keyEnvelope.createKeyPair();
+    secrets.push(pair.privateKey);
+    const signing = await adapters.deviceSigner.createKeyPair();
+    secrets.push(signing.privateKey);
+    const device = {
+      ...pair,
+      signing,
+      id: crypto.randomUUID(),
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+    };
+    const columns = {
+      publicKey: device.publicKey,
+      mechanism: adapters.keyEnvelope.mechanism.id,
+      version: adapters.keyEnvelope.mechanism.version,
+      signingPublicKey: signing.publicKey,
+      signingMechanism: adapters.deviceSigner.mechanism.id,
+      signingVersion: adapters.deviceSigner.mechanism.version,
+    };
+    await db
+      .insert(
+        deviceRequestApp.__e2ee_device_requests,
+        {
+          ...columns,
+          challenge: device.challenge,
+        },
+        { id: device.id },
+      )
+      .wait({ tier: "global" });
+    await db
+      .insert(deviceRequestApp.__e2ee_device_keys, {
+        ...columns,
+        deviceId: device.id,
+      })
+      .wait({ tier: "global" });
+    const application = "missing-initial-root";
+    const epochId = crypto.randomUUID();
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    secrets.push(secret);
+    const identity = await db
+      .insert(
+        deviceRequestApp.__e2ee_account_identities,
+        {
+          deviceId: device.id,
+          epochId,
+          ledgerVersion: 1,
+          envelope: await adapters.keyEnvelope.seal(
+            device.publicKey,
+            accountEpochContext(application, config.account.id, epochId, device.id),
+            secret,
+          ),
+          verification: await adapters.keyEnvelope.wrap(
+            secret,
+            accountEpochContext(application, config.account.id, epochId, "", "verification"),
+            new Uint8Array(32),
+          ),
+        },
+        { id: config.account.id },
+      )
+      .wait({ tier: "global" });
+    const successor = {
+      id: crypto.randomUUID(),
+      accountId: config.account.id,
+      predecessor: epochId,
+      epochId: crypto.randomUUID(),
+      signerId: device.id,
+      removedDeviceId: device.id,
+      membership: encodeEpochIds([]),
+      revision: encodePublicApprovalRevision([]),
+    };
+    const { id, ...successorColumns } = successor;
+    await db
+      .insert(
+        deviceRequestApp.__e2ee_public_account_successors,
+        {
+          ...successorColumns,
+          signature: await adapters.deviceSigner.sign(
+            signing.privateKey,
+            publicSuccessorSigningBytes(application, successor),
+          ),
+        },
+        { id },
+      )
+      .wait({ tier: "global" });
+    expect(await db.all(deviceRequestApp.__e2ee_account_roots, { tier: "global" })).toEqual([]);
+    expect(
+      await firstAccountEpoch(
+        db,
+        config.account.id,
+        application,
+        device,
+        adapters.keyEnvelope,
+        () => {},
+      ),
+    ).toBe(device.id);
+    expect(
+      await db.one(deviceRequestApp.__e2ee_account_identities.where({ id: config.account.id }), {
+        tier: "global",
+      }),
+    ).toEqual(identity);
+    const state = await readAccountMembership(
+      db,
+      config.account.id,
+      application,
+      adapters.deviceSigner,
+    );
+    expect(state.epochId).toBe(epochId);
+    expect(state.active).toEqual(new Set([device.id]));
+    expect(state.successorIds).toEqual(new Set());
+    // Reopening is idempotent and never republishes an already present root.
+    await firstAccountEpoch(
+      db,
+      config.account.id,
+      application,
+      device,
+      adapters.keyEnvelope,
+      () => {},
+    );
+    expect(await db.all(deviceRequestApp.__e2ee_account_roots, { tier: "global" })).toHaveLength(1);
+  } finally {
+    for (const secret of secrets) secret.fill(0);
+    await db?.shutdown();
     await server.stop();
   }
 }, 15_000);

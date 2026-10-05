@@ -56,6 +56,7 @@ it("publishes the first accepted device binding without exposing private account
           accountId: config.account.id,
           deviceId: second.id,
           epochId: root.epochId,
+          ledgerVersion: 1,
         })
         .wait({ tier: "global" }),
     ).rejects.toThrow();
@@ -65,6 +66,7 @@ it("publishes the first accepted device binding without exposing private account
           accountId: config.account.id,
           deviceId: first!.id,
           epochId: root.epochId,
+          ledgerVersion: 1,
         })
         .wait({ tier: "global" }),
     ).rejects.toThrow();
