@@ -105,42 +105,74 @@ export function createSodiumLargeValueCipher(sodium: SodiumStreamPrimitives): La
   return {
     mechanism: MECHANISM,
     async *encrypt(key, context, source, options) {
-      options?.signal?.throwIfAborted();
+      const signal = options?.signal;
+      signal?.throwIfAborted();
       const { aad, derived } = prepare(key, context);
       let state: ReturnType<SodiumStreamPrimitives["encrypt"]> | undefined;
       let input: ReturnType<typeof reader> | undefined;
+      const close = () => {
+        signal?.removeEventListener("abort", close);
+        derived.fill(0);
+        const current = state;
+        state = undefined;
+        try {
+          current?.dispose();
+        } finally {
+          input?.close();
+        }
+      };
+      signal?.addEventListener("abort", close, { once: true });
       try {
         state = sodium.encrypt(derived);
         derived.fill(0);
-        input = reader(source, options?.signal);
+        input = reader(source, signal);
+        signal?.throwIfAborted();
         yield concat(header, state.header);
         while (true) {
           const plaintext = await input.read(BLOCK);
-          if (!plaintext) break;
+          if (!plaintext) {
+            signal?.throwIfAborted();
+            break;
+          }
           let encrypted: Uint8Array;
           try {
+            signal?.throwIfAborted();
             encrypted = record(state.push(plaintext, aad, false));
           } finally {
             plaintext.fill(0);
           }
           yield encrypted;
         }
-        options?.signal?.throwIfAborted();
+        signal?.throwIfAborted();
         yield record(state.push(new Uint8Array(), aad, true));
+        signal?.throwIfAborted();
       } finally {
-        derived.fill(0);
-        state?.dispose();
-        input?.close();
+        close();
       }
     },
     async *decrypt(key, context, source, options) {
-      options?.signal?.throwIfAborted();
+      const signal = options?.signal;
+      signal?.throwIfAborted();
       const { aad, derived } = prepare(key, context);
       let state: ReturnType<SodiumStreamPrimitives["decrypt"]> | undefined;
       let input: ReturnType<typeof reader> | undefined;
+      const close = () => {
+        signal?.removeEventListener("abort", close);
+        derived.fill(0);
+        const current = state;
+        state = undefined;
+        try {
+          current?.dispose();
+        } finally {
+          input?.close();
+        }
+      };
+      signal?.addEventListener("abort", close, { once: true });
       try {
-        input = reader(source, options?.signal);
+        input = reader(source, signal);
+        signal?.throwIfAborted();
         const prefix = await input.read(header.length + 24);
+        signal?.throwIfAborted();
         if (
           !prefix ||
           prefix.length !== header.length + 24 ||
@@ -151,6 +183,7 @@ export function createSodiumLargeValueCipher(sodium: SodiumStreamPrimitives): La
         derived.fill(0);
         while (true) {
           const size = await input.read(4);
+          signal?.throwIfAborted();
           if (!size || size.length !== 4) throw new Error("Truncated E2EE stream");
           const length = new DataView(size.buffer, size.byteOffset, size.byteLength).getUint32(
             0,
@@ -159,20 +192,21 @@ export function createSodiumLargeValueCipher(sodium: SodiumStreamPrimitives): La
           if (length < OVERHEAD || length > BLOCK + OVERHEAD)
             throw new Error("Invalid E2EE stream record length");
           const ciphertext = await input.read(length);
+          signal?.throwIfAborted();
           if (!ciphertext || ciphertext.length !== length) throw new Error("Truncated E2EE stream");
           const result = state.pull(ciphertext, aad);
           if (result.final) {
-            if (result.message.length !== 0 || (await input.read(1)))
-              throw new Error("Invalid E2EE stream ending");
+            if (result.message.length !== 0) throw new Error("Invalid E2EE stream ending");
+            const trailing = await input.read(1);
+            signal?.throwIfAborted();
+            if (trailing) throw new Error("Invalid E2EE stream ending");
             return;
           }
           if (result.message.length === 0) throw new Error("Invalid E2EE stream record");
           yield result.message;
         }
       } finally {
-        derived.fill(0);
-        state?.dispose();
-        input?.close();
+        close();
       }
     },
   };

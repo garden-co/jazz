@@ -58,6 +58,10 @@ a pending read. Consumer `return()` does not interrupt an already pending
 
 On early consumer return (including `break`), cancellation or failure, the
 adapters clear owned crypto state and request upstream cleanup at most once.
+Cancellation also performs this cleanup while the consumer is paused at a
+yielded header or data record; another pull or explicit `return()` is not
+required. A subsequent pull rejects with the original abort reason, including
+when encryption was paused at its final record or decryption was accepting EOF.
 They do not await the upstream `return()` promise, even without an
 `AbortSignal`. Cleanup rejections and synchronous cleanup errors are ignored;
 they must not replace successful early termination or the original failure.
