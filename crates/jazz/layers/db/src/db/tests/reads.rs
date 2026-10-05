@@ -1349,6 +1349,157 @@ fn global_page_with_reads(db: &Db, query: Query) -> (Vec<RowUuid>, groove::db::S
     )
 }
 
+/// Alice reads UUID-ordered pages from Bob's indexed bucket. Permission holes,
+/// deletes and later bucket/visibility changes must produce exactly the same
+/// pages as the unlimited query. Unrelated deleted rows must not be hydrated.
+/// Internal counters and settlement hooks pin bounded work and pending/settled
+/// visibility; all result assertions use the public Db query API.
+///
+/// bob -> seed a/b/deleted buckets -> delete 2 and 6 -> alice reads a: [4, 8, 10]
+/// alice -> restore 2, move 4 to b, hide 8 -> Local [2, 10, 12], Global [4, 8, 10]
+/// settle --------------------------------> both [2, 10, 12]
+#[test]
+fn equality_uuid_pages_bound_hydration_and_preserve_policy_and_deletion() {
+    let alice = AuthorSubject::for_test_bytes([0xba; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xbb; 16]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("entries")
+                .column("bucket", PublicColumnType::Text)
+                .column("visibility", PublicColumnType::Text)
+                .index_only(["bucket"])
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::eq_literal(
+                            "visibility",
+                            PublicValue::Text("allowed".into()),
+                        ))
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xbc; 16]),
+            author: alice,
+        },
+    )))
+    .unwrap();
+    let cells = |bucket: &str, visible: bool| {
+        BTreeMap::from([
+            ("bucket".into(), Value::String(bucket.into())),
+            (
+                "visibility".into(),
+                Value::String(if visible { "allowed" } else { "hidden" }.into()),
+            ),
+        ])
+    };
+    for n in 1..=224_u8 {
+        let bucket = if n <= 128 {
+            "a"
+        } else if n <= 134 {
+            "b"
+        } else {
+            "deleted"
+        };
+        db.seed_settled_mergeable_for_bootstrap("entries", row(n), bob, cells(bucket, n % 2 == 0))
+            .unwrap();
+    }
+    for n in [2, 6].into_iter().chain(135..=224) {
+        let tx = block_on(db.delete("entries", row(n), Default::default()))
+            .unwrap()
+            .mergeable_tx_id();
+        db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+    }
+    let read = |query: Query, tier| {
+        let prepared = db.prepare_query(&query).unwrap();
+        db.node.node.borrow().reset_storage_read_metrics();
+        let rows = block_on(db.all_for_identity(
+            &prepared,
+            ReadOpts {
+                tier,
+                propagation: Propagation::LocalOnly,
+                ..ReadOpts::default()
+            },
+            alice,
+        ))
+        .unwrap();
+        (
+            row_ids(&rows),
+            db.node.node.borrow().take_storage_read_metrics(),
+        )
+    };
+    let query = |bucket: &str| Query::from("entries").filter(eq(col("bucket"), lit(bucket)));
+    let (page, reads) = read(query("a").limit(3), DurabilityTier::Global);
+    assert_eq!(page, vec![row(4), row(8), row(10)]);
+    assert!(
+        reads.global_current_rows.reads <= 64,
+        "page must not hydrate all 128 matching rows: {reads:?}"
+    );
+    assert!(
+        reads.register_global_current_rows.reads <= 24,
+        "page must not hydrate unrelated deletion registers: {reads:?}"
+    );
+    for bucket in ["a", "b", "missing"] {
+        let (control, _) = read(query(bucket), DurabilityTier::Global);
+        for limit in [1, 3, 10, 200] {
+            let (page, _) = read(query(bucket).limit(limit), DurabilityTier::Global);
+            assert_eq!(
+                page,
+                control.iter().copied().take(limit).collect::<Vec<_>>(),
+                "bucket {bucket}, limit {limit}"
+            );
+        }
+    }
+    let writes = [
+        block_on(db.restore(
+            "entries",
+            row(2),
+            Some(cells("a", true)),
+            Default::default(),
+        ))
+        .unwrap()
+        .mergeable_tx_id(),
+        block_on(db.update(
+            "entries",
+            row(4),
+            BTreeMap::from([("bucket".into(), Value::String("b".into()))]),
+            Default::default(),
+        ))
+        .unwrap()
+        .mergeable_tx_id(),
+        block_on(db.update(
+            "entries",
+            row(8),
+            BTreeMap::from([("visibility".into(), Value::String("hidden".into()))]),
+            Default::default(),
+        ))
+        .unwrap()
+        .mergeable_tx_id(),
+    ];
+    assert_eq!(
+        read(query("a").limit(3), DurabilityTier::Local).0,
+        vec![row(2), row(10), row(12)]
+    );
+    assert_eq!(
+        read(query("a").limit(3), DurabilityTier::Global).0,
+        vec![row(4), row(8), row(10)]
+    );
+    for tx in writes {
+        db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+    }
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
+        assert_eq!(
+            read(query("a").limit(3), tier).0,
+            vec![row(2), row(10), row(12)]
+        );
+    }
+}
+
 /// A first bounded probe that finds no visible row, or only a tie, retries a
 /// larger bounded prefix instead of falling back to the whole bucket; a
 /// bucket shorter than the probe is complete without an extra row.

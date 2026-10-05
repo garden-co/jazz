@@ -27,6 +27,8 @@ mod large_value_query;
 mod multisink_subscription;
 #[path = "../operator_pipeline.rs"]
 mod operator_pipeline;
+#[path = "../ordered_index_window.rs"]
+mod ordered_index_window;
 #[path = "../plain_output_positions_unbounded.rs"]
 mod plain_output_positions_unbounded;
 #[path = "../plain_output_root_positions.rs"]
@@ -37,6 +39,8 @@ mod prepared_batches;
 mod prepared_binding_regressions;
 #[path = "../prepared_binding_scale.rs"]
 mod prepared_binding_scale;
+#[path = "../primary_key_lookup.rs"]
+mod primary_key_lookup;
 #[path = "../query_templates.rs"]
 mod query_templates;
 #[path = "../recursive_cycle_regressions.rs"]

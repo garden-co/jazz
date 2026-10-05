@@ -91,6 +91,8 @@ const UNARY_ROWS_PER_POLL: usize = 256;
 #[derive(Clone, Debug)]
 pub(super) enum OperatorState {
     Stateless,
+    TableLookup(AsOf<super::table_lookup::TableLookupState, SubTick>),
+    IndexWindow(AsOf<Rc<HashMap<Bytes, i64>>, SubTick>),
     Join(JoinState),
     SemiJoin(SemiJoinState),
     AntiJoin(AntiJoinState),
@@ -725,6 +727,10 @@ impl TopByIncrementalState {
 
 pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
+        OpType::TableLookup(_) => OperatorState::TableLookup(AsOf::default()),
+        OpType::IndexSource(source) if source.window.is_some() => {
+            OperatorState::IndexWindow(AsOf::default())
+        }
         OpType::Join(_) => OperatorState::Join(JoinState),
         OpType::SemiJoin(_) => OperatorState::SemiJoin(SemiJoinState::default()),
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState::default()),
@@ -1717,10 +1723,12 @@ impl TickEvaluator<'_> {
                     frontier.push(node);
                     continue;
                 }
-                OpType::Arrange(_)
+                OpType::TableLookup(_)
+                | OpType::Arrange(_)
                 | OpType::ArgMinBy(_)
                 | OpType::ArgMaxBy(_)
                 | OpType::Aggregate(_) => frontier.push(node),
+                OpType::IndexSource(source) if source.window.is_some() => frontier.push(node),
                 _ => {}
             }
             // Match the original recursive walk's input order, including the
@@ -1762,6 +1770,32 @@ impl TickEvaluator<'_> {
             };
             if self.arrangement_states.get(&key).and_then(AsOf::as_of)
                 != Some(self.arrangement_sub_tick(&key))
+            {
+                return Ok(false);
+            }
+        }
+        if matches!(operator, OpType::TableLookup(_)) {
+            let key = self.operator_key(node);
+            let expected = SubTick {
+                tick: self.current_tick,
+                sub_tick: if key.scope == ScopeId::root() {
+                    0
+                } else {
+                    self.context.sub_tick
+                },
+            };
+            if !matches!(self.operator_states.get(&key), Some(OperatorState::TableLookup(state)) if state.as_of() == Some(expected))
+            {
+                return Ok(false);
+            }
+        }
+        if matches!(operator, OpType::IndexSource(source) if source.window.is_some()) {
+            let key = self.operator_key(node);
+            let expected = SubTick {
+                tick: self.current_tick,
+                sub_tick: 0,
+            };
+            if !matches!(self.operator_states.get(&key), Some(OperatorState::IndexWindow(state)) if state.as_of() == Some(expected))
             {
                 return Ok(false);
             }
@@ -2160,8 +2194,9 @@ impl TickEvaluator<'_> {
             let output_desc = graph_node.descriptor.output.records();
             let result = match &graph_node.descriptor.operator {
                 OpType::IndexSource(input)
-                    if self.context.eval_mode != EvalMode::Hydrate
-                        || self.evaluation_inputs.is_none() =>
+                    if input.window.is_none()
+                        && (self.context.eval_mode != EvalMode::Hydrate
+                            || self.evaluation_inputs.is_none()) =>
                 {
                     let read = NodeState::update_index_source(
                         input,
@@ -2303,7 +2338,7 @@ impl TickEvaluator<'_> {
         hasher.finish()
     }
 
-    fn operator_key(&self, node: NodeId) -> OperatorStateKey {
+    pub(super) fn operator_key(&self, node: NodeId) -> OperatorStateKey {
         // Recursive step evaluation must be isolated per recursive node even
         // for context-independent table/index inputs. Sibling recursive nodes
         // can evaluate the same base-table delta in one outer tick; sharing
@@ -2355,6 +2390,16 @@ impl TickEvaluator<'_> {
                 tables.insert(input.table);
             }
             OpType::IndexSource(input) => {
+                if let Some(exclusion) = input
+                    .window
+                    .as_ref()
+                    .and_then(|window| window.exclusion.as_ref())
+                {
+                    tables.insert(exclusion.table.clone());
+                }
+                tables.insert(input.table);
+            }
+            OpType::TableLookup(input) => {
                 tables.insert(input.table);
             }
             OpType::BindingSource(input) => {
@@ -3877,8 +3922,13 @@ async fn cooperative_operator_yield() {
 /// Operators whose hydration rebuilds retained state that a cached record
 /// batch downstream cannot vouch for.
 fn holds_hydration_state(operator: &OpType) -> bool {
-    matches!(
-        operator,
-        OpType::Aggregate(_) | OpType::ArgMinBy(_) | OpType::ArgMaxBy(_) | OpType::Arrange(_)
-    )
+    matches!(operator, OpType::IndexSource(source) if source.window.is_some())
+        || matches!(
+            operator,
+            OpType::TableLookup(_)
+                | OpType::Aggregate(_)
+                | OpType::ArgMinBy(_)
+                | OpType::ArgMaxBy(_)
+                | OpType::Arrange(_)
+        )
 }

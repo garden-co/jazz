@@ -68,6 +68,108 @@ jobs:
           echo "groups=$groups" >> "$GITHUB_OUTPUT"
           echo "measure=$measure" >> "$GITHUB_OUTPUT"
 
+  node-sync-build:
+    needs: native-workloads-plan
+    # These fixed-size cases run per merge; nightly keeps its existing sweep.
+    if: github.event_name != 'schedule' && inputs.suite != 'nightly'
+    name: Build Node global SELECT benchmarks
+    runs-on: blacksmith-16vcpu-ubuntu-2204-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: 16
+      # The macro host is Cortex-A72 (ARMv8.0); mimalloc otherwise emits LSE.
+      JAZZ_NAPI_PORTABLE_ALLOCATOR: "1"
+      CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          rust-cache-key: codspeed-node-sync-arm64-ubuntu2204-v2-portable-allocator
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+      - name: Build matching Node SDK and native server
+        run: |
+          pnpm --filter jazz-napi build
+          # WASM supplies the SDK's generated types; measured reads use release NAPI.
+          pnpm --filter jazz-wasm build:fast
+          node dev/artifacts/stage-native-fingerprints.mjs --local
+          pnpm --filter jazz-tools build:runtime
+      - name: Seal Node benchmark runtime
+        run: |
+          node --test dev/benchmarks/sync-latency/*.test.mjs
+          mkdir -p target
+          tar -czf target/codspeed-node-sync.tgz \
+            packages/jazz-tools/dist \
+            crates/jazz-napi/.native-artifacts \
+            crates/jazz-napi/native-binding.pointer.cjs \
+            crates/jazz-napi/native-artifact-fingerprint.cjs \
+            crates/jazz-wasm/pkg
+          node dev/benchmarks/sync-latency/artifact.mjs seal target/codspeed-node-sync.tgz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codspeed-node-sync-${{ github.sha }}
+          path: target/codspeed-node-sync.tgz*
+          if-no-files-found: error
+          retention-days: 7
+
+  node-sync-walltime:
+    needs: node-sync-build
+    name: Node global SELECT wall time
+    runs-on: codspeed-macro
+    timeout-minutes: 15
+    env:
+      JAZZ_NAPI_PORTABLE_ALLOCATOR: "1"
+      CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: codspeed-node-sync-${{ github.sha }}
+          path: target/
+      - name: Verify and install Node benchmark runtime
+        run: |
+          node dev/benchmarks/sync-latency/artifact.mjs verify target/codspeed-node-sync.tgz
+          tar -xzf target/codspeed-node-sync.tgz
+      - name: Check Node runtime and CodSpeed introspection before profiling
+        run: |
+          lscpu
+          node --test dev/benchmarks/sync-latency/introspection.test.mjs
+          node dev/benchmarks/sync-latency/probe.mjs \
+            --sdk-root packages/jazz-tools --codspeed \
+            --select-only --fresh-reader --composite-index --ordered-select \
+            --server-storage persistent --matching-rows 1000 --repeats 3 \
+            --output-dir target/codspeed-node-sync-preflight
+      - name: Measure global SELECTs through the Node client and local server
+        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
+        with:
+          mode: walltime
+          run: |
+            set -euo pipefail
+            for rows in 1000 10000; do
+              node dev/benchmarks/sync-latency/probe.mjs \
+                --sdk-root packages/jazz-tools --codspeed \
+                --select-only --fresh-reader --composite-index --ordered-select \
+                --server-storage persistent --client-storage memory --tier global \
+                --matching-rows "$rows" --deleted-rows 0 --unrelated-rows 0 \
+                --seed-batch-size 1000 --rtt-ms 0 --repeats 60 \
+                --output-dir target/codspeed-node-sync-results
+            done
+      - name: Preserve per-read samples and native fingerprints
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codspeed-node-sync-results-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/codspeed-node-sync-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
   native-workloads-build:
     needs: native-workloads-plan
     name: Build ${{ matrix.group }} native benchmarks

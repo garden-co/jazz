@@ -341,10 +341,6 @@ pub struct StorageReadMetrics {
 }
 
 impl StorageReadMetrics {
-    pub(super) fn record_point(&mut self, cf: &str, key: &[u8]) {
-        self.record_destination(storage_read_destination(cf, key), 1, 1);
-    }
-
     pub(super) fn record_range(&mut self, cf: &str, key: &[u8]) {
         self.record_destination(storage_read_destination(cf, key), 0, 1);
     }
@@ -425,6 +421,10 @@ impl<T> std::ops::Deref for LocalHandle<'_, T> {
 pub(crate) struct MeteredStorage<'a, S> {
     storage: LocalHandle<'a, S>,
     metrics: LocalHandle<'a, RefCell<StorageReadMetrics>>,
+    // Indexed hydration issues many point reads against the same table.
+    // Classification depends only on its name; keep one entry per adapter,
+    // independent of the number of rows or tables in the database.
+    last_table_destination: RefCell<Option<(String, StorageReadDestination)>>,
 }
 
 impl<'a, S> MeteredStorage<'a, S> {
@@ -432,6 +432,7 @@ impl<'a, S> MeteredStorage<'a, S> {
         Self {
             storage: LocalHandle::Borrowed(storage),
             metrics: LocalHandle::Borrowed(metrics),
+            last_table_destination: RefCell::new(None),
         }
     }
 
@@ -445,13 +446,35 @@ impl<'a, S> MeteredStorage<'a, S> {
         MeteredStorage {
             storage: LocalHandle::Owned(storage),
             metrics: LocalHandle::Owned(metrics),
+            last_table_destination: RefCell::new(None),
         }
+    }
+
+    fn record_point(&self, cf: &str, key: &[u8]) {
+        let destination = if cf == "indices" {
+            // A shared index family can contain different destinations.
+            storage_index_read_destination(key)
+        } else {
+            let mut cached = self.last_table_destination.borrow_mut();
+            match cached.as_ref() {
+                Some((table, destination)) if table == cf => *destination,
+                _ => {
+                    let destination = storage_table_read_destination(cf);
+                    *cached = Some((cf.to_owned(), destination));
+                    destination
+                }
+            }
+        };
+        self.metrics
+            .borrow_mut()
+            .record_destination(destination, 1, 1);
     }
 }
 
 struct MeteredStorageCursor<'a> {
     inner: crate::storage::StorageScan<'a>,
     column_family: String,
+    table_destination: Option<StorageReadDestination>,
     metrics: &'a RefCell<StorageReadMetrics>,
 }
 
@@ -466,8 +489,12 @@ impl crate::storage::StorageCursor for MeteredStorageCursor<'_> {
             let batch = self.inner.next_batch().await?;
             if let Some(batch) = &batch {
                 let mut metrics = self.metrics.borrow_mut();
-                for (key, _) in batch {
-                    metrics.record_range_row(&self.column_family, key);
+                if let Some(destination) = self.table_destination {
+                    metrics.record_destination(destination, batch.len(), 0);
+                } else {
+                    for (key, _) in batch {
+                        metrics.record_range_row(&self.column_family, key);
+                    }
                 }
             }
             Ok(batch)
@@ -499,6 +526,7 @@ where
         Box::pin(async move {
             Ok(Box::new(MeteredStorageCursor {
                 inner: self.storage.scan(request).await?,
+                table_destination: (cf != "indices").then(|| storage_table_read_destination(&cf)),
                 column_family: cf,
                 metrics: &self.metrics,
             }) as crate::storage::StorageScan<'_>)
@@ -542,7 +570,7 @@ where
         '_,
         Result<crate::storage::ValueComparison, crate::storage::Error>,
     > {
-        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.record_point(&cf, &key);
         self.storage.compare_value(cf, key, expected)
     }
 
@@ -554,7 +582,7 @@ where
         '_,
         Result<Option<crate::storage::Value>, crate::storage::Error>,
     > {
-        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.record_point(&cf, &key);
         self.storage.get(cf, key)
     }
 
@@ -567,7 +595,7 @@ where
         '_,
         Result<Option<crate::storage::Value>, crate::storage::Error>,
     > {
-        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.record_point(&cf, &key);
         self.storage.put_if_absent(cf, key, value)
     }
 
@@ -577,7 +605,7 @@ where
         key: Vec<u8>,
         expected: Vec<u8>,
     ) -> crate::storage::StorageFuture<'_, Result<bool, crate::storage::Error>> {
-        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.record_point(&cf, &key);
         self.storage.compare_and_delete(cf, key, expected)
     }
 

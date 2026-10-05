@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  artifactFeatures,
   expectedManifest,
   manifestPath,
   nativeArtifactFingerprint,
@@ -799,6 +800,43 @@ test("RN test bridge recipe changes NAPI provenance and fingerprint only", () =>
   } finally {
     if (previous === undefined) delete process.env.JAZZ_RN_TEST_BRIDGE;
     else process.env.JAZZ_RN_TEST_BRIDGE = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("portable NAPI allocator has a distinct fingerprint and composes with the RN test bridge", () => {
+  const root = fixture();
+  const previousPortable = process.env.JAZZ_NAPI_PORTABLE_ALLOCATOR;
+  const previousBridge = process.env.JAZZ_RN_TEST_BRIDGE;
+  try {
+    delete process.env.JAZZ_NAPI_PORTABLE_ALLOCATOR;
+    delete process.env.JAZZ_RN_TEST_BRIDGE;
+    const normal = nativeArtifactFingerprint(root, "napi", "release");
+    const wasm = nativeArtifactFingerprint(root, "wasm", "fast");
+    assert.equal(artifactFeatures("napi"), "default");
+    process.env.JAZZ_NAPI_PORTABLE_ALLOCATOR = "1";
+    const portable = nativeArtifactFingerprint(root, "napi", "release");
+    assert.notEqual(portable, normal);
+    assert.equal(nativeArtifactFingerprint(root, "wasm", "fast"), wasm);
+    assert.equal(
+      expectedManifest(root, "napi", "release").features,
+      "default,mimalloc-safe/no_opt_arch",
+    );
+    writeManifest(root, "napi", "release");
+    process.env.JAZZ_NAPI_PORTABLE_ALLOCATOR = "0";
+    assert.match(verifyManifest(root, "napi", "release"), /features|Fingerprint/);
+    assert.equal(nativeArtifactFingerprint(root, "napi", "release"), normal);
+    process.env.JAZZ_NAPI_PORTABLE_ALLOCATOR = "1";
+    process.env.JAZZ_RN_TEST_BRIDGE = "1";
+    assert.equal(artifactFeatures("napi"), "default,rn-test-bridge,mimalloc-safe/no_opt_arch");
+    assert.notEqual(nativeArtifactFingerprint(root, "napi", "release"), portable);
+    process.env.JAZZ_NAPI_PORTABLE_ALLOCATOR = "yes";
+    assert.throws(() => artifactFeatures("napi"), /JAZZ_NAPI_PORTABLE_ALLOCATOR must be 0 or 1/);
+  } finally {
+    if (previousPortable === undefined) delete process.env.JAZZ_NAPI_PORTABLE_ALLOCATOR;
+    else process.env.JAZZ_NAPI_PORTABLE_ALLOCATOR = previousPortable;
+    if (previousBridge === undefined) delete process.env.JAZZ_RN_TEST_BRIDGE;
+    else process.env.JAZZ_RN_TEST_BRIDGE = previousBridge;
     rmSync(root, { recursive: true, force: true });
   }
 });

@@ -620,13 +620,42 @@ where
             binding,
             HydrationLifetime::FirstResult,
         )?;
-        if access_paths.contains_key(&root) {
-            return Ok(None);
-        }
-        access_paths.insert(root.clone(), CurrentAccessPath::PrimaryKeyPage { cap });
-        let (register, exhausted) = self
-            .bounded_deletion_register_for_uuid_page(shape, cap)
-            .await?;
+        let (register, exhausted) = match access_paths.get_mut(&root) {
+            Some(path @ CurrentAccessPath::Index { .. }) => {
+                let CurrentAccessPath::Index {
+                    order_column: None,
+                    reverse: false,
+                    prefix,
+                    intersections,
+                    source_limit,
+                    maintained,
+                    candidate_filter: None,
+                    ..
+                } = path
+                else {
+                    return Ok(None);
+                };
+                if prefix.len() != 1 || !intersections.is_empty() || source_limit.is_some() {
+                    return Ok(None);
+                }
+                // A fully fixed single-column equality prefix is ordered by
+                // its remaining primary-key suffix (branch, UUID). With the
+                // shared branch fixed too, it has the same UUID order as the
+                // unfiltered page probe. Policy and deletion filtering still
+                // run before the caller proves that this page is complete.
+                *source_limit = Some(cap);
+                *maintained = false;
+                let path = path.clone();
+                self.bounded_deletion_register_for_index_page(shape, &path, cap)
+                    .await?
+            }
+            None if shape.query().filters.is_empty() => {
+                access_paths.insert(root.clone(), CurrentAccessPath::PrimaryKeyPage { cap });
+                self.bounded_deletion_register_for_uuid_page(shape, cap)
+                    .await?
+            }
+            _ => return Ok(None),
+        };
         let program = self
             .compile_query_program_request_with_bounded_deletion_register(
                 request,
@@ -742,7 +771,6 @@ where
         if query.offset != 0
             || !query.order_by.is_empty()
             || query.select.is_some()
-            || !query.filters.is_empty()
             || !query.joins.is_empty()
             || query.flat_join.is_some()
             || !query.policy_branches.is_empty()
@@ -877,7 +905,7 @@ where
         // Policy subplans that specialise this occurrence inherit the same
         // capped path and therefore the same register.
         let (register, exhausted) = self
-            .bounded_deletion_register_for_ordered_page(shape, &path, cap)
+            .bounded_deletion_register_for_index_page(shape, &path, cap)
             .await?;
         let program = self
             .compile_query_program_request_with_bounded_deletion_register(
@@ -890,13 +918,13 @@ where
     }
 
     /// Materialize only the deletion winners whose content rows can enter a
-    /// bounded ordered page probe. The caller holds the node's read lock over
+    /// bounded index page probe. The caller holds the node's read lock over
     /// both this snapshot and execution of the lowered query program.
     ///
     /// Also reports whether the physical index prefix is exhausted: it holds
     /// fewer than `cap` raw entries, so the capped content source saw every
     /// candidate the prefix can ever produce.
-    async fn bounded_deletion_register_for_ordered_page(
+    async fn bounded_deletion_register_for_index_page(
         &mut self,
         shape: &ValidatedQuery,
         path: &CurrentAccessPath,
@@ -904,7 +932,7 @@ where
     ) -> Result<(GraphBuilder, bool), Error> {
         let CurrentAccessPath::Index {
             column,
-            order_column: Some(order_column),
+            order_column,
             reverse,
             prefix,
             intersections,
@@ -912,7 +940,7 @@ where
         } = path
         else {
             return Err(Error::InvalidStoredValue(
-                "ordered page probe requires a composite index",
+                "index page probe requires an index access path",
             ));
         };
         if !intersections.is_empty() {
@@ -934,16 +962,21 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "ordered page probe has no equality column mapping",
             ))?;
-        let order_column_id =
-            *mapping
-                .columns
-                .get(order_column)
-                .ok_or(Error::InvalidStoredValue(
-                    "ordered page probe has no order column mapping",
-                ))?;
         let content_table = physical_global_current_table_name(mapping.table_id);
         let register_table = physical_register_global_current_table_name(mapping.table_id);
-        let index = physical_current_composite_index_name(&[column_id, order_column_id]);
+        let index = match order_column {
+            Some(order_column) => {
+                let order_column_id =
+                    *mapping
+                        .columns
+                        .get(order_column)
+                        .ok_or(Error::InvalidStoredValue(
+                            "ordered page probe has no order column mapping",
+                        ))?;
+                physical_current_composite_index_name(&[column_id, order_column_id])
+            }
+            None => physical_current_index_name(column_id),
+        };
         let branch = Value::Bytes(BranchKey::default().canonical_bytes());
         let scan_prefix = std::iter::once(branch.clone())
             .chain(prefix.iter().cloned())
@@ -961,7 +994,7 @@ where
             }
         };
         // Both this read and the query graph's content source cap the same
-        // raw composite index entries before projection. With no required
+        // raw index entries before projection. With no required
         // fields this projection omits no more rows than the graph's own
         // projection target, so every row the graph can admit keeps its
         // deletion register.

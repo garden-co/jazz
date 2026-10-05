@@ -579,7 +579,17 @@ export function artifactFeatures(kind) {
   const enabled = process.env.JAZZ_RN_TEST_BRIDGE;
   if (enabled !== undefined && enabled !== "0" && enabled !== "1")
     throw new Error("JAZZ_RN_TEST_BRIDGE must be 0 or 1");
-  return kind === "napi" && enabled === "1" ? "default,rn-test-bridge" : "default";
+  const portableAllocator = process.env.JAZZ_NAPI_PORTABLE_ALLOCATOR;
+  if (portableAllocator !== undefined && portableAllocator !== "0" && portableAllocator !== "1")
+    throw new Error("JAZZ_NAPI_PORTABLE_ALLOCATOR must be 0 or 1");
+  const features = ["default"];
+  if (kind === "napi") {
+    if (enabled === "1") features.push("rn-test-bridge");
+    // CodSpeed's Cortex-A72 hosts cannot execute mimalloc-safe's default
+    // ARMv8.1 LSE instructions. Keep this explicit in both build and ABI identity.
+    if (portableAllocator === "1") features.push("mimalloc-safe/no_opt_arch");
+  }
+  return features.join(",");
 }
 
 export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {

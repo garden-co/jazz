@@ -1208,7 +1208,8 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
             GraphBuilder::TemplateInput { input, .. } => input.as_ref().is_some_and(|input| {
                 contains([input.as_ref() as *const GraphBuilder], &contains_collect)
             }),
-            GraphBuilder::Filter { input, .. }
+            GraphBuilder::TableLookup { input, .. }
+            | GraphBuilder::Filter { input, .. }
             | GraphBuilder::Project { input, .. }
             | GraphBuilder::StreamingChecksum { input, .. }
             | GraphBuilder::UnwrapNullable { input, .. }

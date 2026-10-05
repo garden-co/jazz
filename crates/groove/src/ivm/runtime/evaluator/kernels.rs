@@ -39,6 +39,9 @@ impl TickEvaluator<'_> {
                 &output_desc,
                 self.table_deltas,
             ),
+            OpType::IndexSource(input) if input.window.is_some() => {
+                self.update_index_window(node, input, output_desc)
+            }
             OpType::IndexSource(input)
                 if self.context.eval_mode == EvalMode::Hydrate
                     && self.evaluation_inputs.is_some() =>
@@ -52,6 +55,12 @@ impl TickEvaluator<'_> {
                         .as_deref_mut()
                         .expect("guarded evaluation inputs"),
                 )
+            }
+            OpType::TableLookup(lookup) => {
+                let input = inputs
+                    .first()
+                    .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
+                self.update_table_lookup(node, lookup, output_desc, input)
             }
             OpType::InlineRecords(inline) if self.context.eval_mode == EvalMode::Hydrate => {
                 Ok(RecordDeltas {

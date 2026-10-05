@@ -36,6 +36,25 @@ pub struct IndexCandidateFilter {
     pub candidate_column: String,
 }
 
+/// A retained prefix with a completeness witness beyond its final order key.
+/// The source re-reads a bounded prefix when either input table changes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexWindow {
+    pub limit: usize,
+    pub order_field: String,
+    pub exclusion: Option<IndexWindowExclusion>,
+}
+
+/// Exclude a candidate when its point-addressed companion matches a predicate.
+/// Missing companions admit the candidate. The key is prefix + named fields.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexWindowExclusion {
+    pub table: String,
+    pub key_prefix: Vec<LiteralValue>,
+    pub key_fields: Vec<String>,
+    pub predicate: PredicateExpr,
+}
+
 /// User-facing graph construction API before deduplication.
 ///
 /// Builders refer to table and field names directly; the runtime resolves those
@@ -186,6 +205,13 @@ pub enum GraphBuilder {
         scan: Option<StaticScanSpec>,
         variant_projection: Option<String>,
     },
+    /// A live primary-key semijoin. Only target rows addressed by `input`
+    /// are hydrated; later changes on either side update the same relation.
+    TableLookup {
+        input: Arc<GraphBuilder>,
+        table: String,
+        key_fields: Vec<FieldRef>,
+    },
     InlineRecords {
         output: RecordDescriptor,
         records: Vec<Vec<u8>>,
@@ -208,6 +234,7 @@ pub enum GraphBuilder {
         /// When present, fetch indexed table rows and project their variants
         /// instead of exposing the index's encoded key/value records.
         row_projection: Option<String>,
+        window: Option<Box<IndexWindow>>,
     },
     FrontierSource {
         binding: FrontierName,
@@ -513,6 +540,19 @@ impl FieldRef {
 }
 
 impl GraphBuilder {
+    /// Read each existing target row once while its primary key occurs in
+    /// `input`. Fields follow the target table's complete primary-key order.
+    pub fn table_lookup(
+        input: GraphBuilder,
+        table: impl Into<String>,
+        key_fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::TableLookup {
+            input: Arc::new(input),
+            table: table.into(),
+            key_fields: key_fields.into_iter().map(FieldRef::name).collect(),
+        }
+    }
     pub fn table(table: impl Into<String>) -> Self {
         Self::Table {
             table: table.into(),
@@ -590,6 +630,7 @@ impl GraphBuilder {
             intersections: Vec::new(),
             candidate_filter: None,
             row_projection: None,
+            window: None,
         }
     }
 
@@ -605,6 +646,7 @@ impl GraphBuilder {
             intersections: Vec::new(),
             candidate_filter: None,
             row_projection: None,
+            window: None,
         }
     }
 
@@ -623,6 +665,7 @@ impl GraphBuilder {
             intersections: Vec::new(),
             candidate_filter: None,
             row_projection: Some(projection_target.into()),
+            window: None,
         }
     }
 
@@ -642,6 +685,7 @@ impl GraphBuilder {
             intersections: intersections.into_iter().collect(),
             candidate_filter: None,
             row_projection: Some(projection_target.into()),
+            window: None,
         }
     }
 
@@ -661,6 +705,29 @@ impl GraphBuilder {
             intersections: Vec::new(),
             candidate_filter: Some(candidate_filter),
             row_projection: Some(projection_target.into()),
+            window: None,
+        }
+    }
+
+    /// Maintain enough of an ordered prefix to prove a page after companion
+    /// exclusions. The order projection must preserve the first index key
+    /// after the prefix. Add downstream TopBy for the exact limit/tie order;
+    /// additional row filtering would invalidate this source's page proof.
+    pub fn variant_index_window(
+        table: impl Into<String>,
+        index: impl Into<String>,
+        projection_target: impl Into<String>,
+        scan: StaticScanSpec,
+        window: IndexWindow,
+    ) -> Self {
+        Self::Index {
+            table: table.into(),
+            index: index.into(),
+            scan: Some(scan),
+            intersections: Vec::new(),
+            candidate_filter: None,
+            row_projection: Some(projection_target.into()),
+            window: Some(Box::new(window)),
         }
     }
 
@@ -777,7 +844,8 @@ impl GraphBuilder {
                         pending.push((input, false));
                     }
                 }
-                Self::Filter { input, .. }
+                Self::TableLookup { input, .. }
+                | Self::Filter { input, .. }
                 | Self::Project { input, .. }
                 | Self::StreamingChecksum { input, .. }
                 | Self::UnwrapNullable { input, .. }
@@ -830,7 +898,8 @@ impl GraphBuilder {
                     visit(input);
                 }
             }
-            Self::Filter { input, .. }
+            Self::TableLookup { input, .. }
+            | Self::Filter { input, .. }
             | Self::Project { input, .. }
             | Self::StreamingChecksum { input, .. }
             | Self::UnwrapNullable { input, .. }
@@ -884,7 +953,8 @@ impl GraphBuilder {
                     *input = map(input);
                 }
             }
-            Self::Filter { input, .. }
+            Self::TableLookup { input, .. }
+            | Self::Filter { input, .. }
             | Self::Project { input, .. }
             | Self::StreamingChecksum { input, .. }
             | Self::UnwrapNullable { input, .. }
@@ -1834,11 +1904,27 @@ impl IvmGraph {
                     .or_default()
                     .insert(id);
             }
+            OpType::TableLookup(source) => {
+                self.table_sources
+                    .entry(source.table.clone())
+                    .or_default()
+                    .insert(id);
+            }
             OpType::IndexSource(source) => {
                 self.table_sources
                     .entry(source.table.clone())
                     .or_default()
                     .insert(id);
+                if let Some(exclusion) = source
+                    .window
+                    .as_ref()
+                    .and_then(|window| window.exclusion.as_ref())
+                {
+                    self.table_sources
+                        .entry(exclusion.table.clone())
+                        .or_default()
+                        .insert(id);
+                }
             }
             OpType::BindingSource(source) => {
                 self.binding_sources
@@ -1977,8 +2063,18 @@ impl IvmGraph {
             OpType::TableSource(source) => {
                 remove_source_node(&mut self.table_sources, &source.table, id);
             }
+            OpType::TableLookup(source) => {
+                remove_source_node(&mut self.table_sources, &source.table, id);
+            }
             OpType::IndexSource(source) => {
                 remove_source_node(&mut self.table_sources, &source.table, id);
+                if let Some(exclusion) = source
+                    .window
+                    .as_ref()
+                    .and_then(|window| window.exclusion.as_ref())
+                {
+                    remove_source_node(&mut self.table_sources, &exclusion.table, id);
+                }
             }
             OpType::BindingSource(source) => {
                 remove_source_node(&mut self.binding_sources, &source.key, id);
@@ -2147,6 +2243,21 @@ impl NodeDescriptor {
             | OpType::InlineRecords(_)
             | OpType::FrontierSource(_)
             | OpType::BindingSource(_) => expect_arity(&self.inputs, 0),
+            OpType::TableLookup(lookup) => {
+                expect_arity(&self.inputs, 1)?;
+                if lookup.key_fields.len() != lookup.target_key_fields.len() {
+                    return Err(GraphValidationError::JoinInputDescriptorMismatch);
+                }
+                for (&left, &right) in lookup.key_fields.iter().zip(&lookup.target_key_fields) {
+                    let a = input_outputs[0].fields().get(left);
+                    let b = output.fields().get(right);
+                    if a.is_none() || b.is_none() || a.unwrap().value_type != b.unwrap().value_type
+                    {
+                        return Err(GraphValidationError::JoinInputDescriptorMismatch);
+                    }
+                }
+                Ok(())
+            }
             OpType::Arrange(_) => {
                 expect_arity(&self.inputs, 1)?;
                 if !matches!(typed_inputs[0], NodeOutput::Records(_))
@@ -2676,6 +2787,7 @@ pub enum GraphValidationError {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum OpType {
     TableSource(TableSourceOp),
+    TableLookup(TableLookupOp),
     IndexSource(IndexSourceOp),
     InlineRecords(InlineRecordsOp),
     FrontierSource(FrontierSourceOp),
