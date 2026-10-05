@@ -41,10 +41,13 @@ versions, non-UUIDv4 root IDs, a different account-context scope, incompatible
 mechanisms and malformed or oversized byte arrays. Input is limited to two
 million JavaScript string code units before parsing. Both restored keypairs must
 pass seal/open and sign/verify checks. Parsed private-key arrays and failed
-imports' private buffers are cleared; a successful import transfers owned private
-buffers to the recovery operation, which must clear them afterwards. Importing
-material alone does not establish recovery authority: use must match both public
-keys to an accepted root and validate its history before enrolling a device.
+imports' private buffers are cleared. This includes temporary arrays created
+when reading only the embedded root ID for protector creation or selection;
+that metadata read does not establish recovery authority. A successful import
+transfers owned private buffers to the recovery operation, which must clear
+them afterwards. Importing material alone does not establish recovery authority:
+use must match both public keys to an accepted root and validate its history
+before enrolling a device.
 Both recovery use and status inspection report material-import failures as
 `E2eeRecoveryError` with code `recovery-material-unusable`. Parser and private-key
 adapter diagnostics are replaced, without retaining their messages or causes.
@@ -137,9 +140,15 @@ accepted root and delivery; resumable publication remains unfinished.
 `recovery.use()` without material explicitly opens account-private protectors
 with the retained local-first account secret, checks the embedded root ID and
 runs the ordinary recovery-material and historical-authority checks. It tries
-later candidates after a failed candidate and reports failure if none works.
-It does not activate a device automatically during sign-in. External-auth
-accounts require explicit material or another active device's approval.
+later candidates when material is unusable, the root does not match, or a
+delivery is missing or unusable, and reports failure if none works.
+Operational signature-verifier errors while checking accepted membership or
+history abort the operation without trying another delivery or protector. An adapter throwing
+a public recovery error code does not itself make that error a candidate
+failure. Material-import and protector-opening diagnostics remain sanitised
+as described above. Recovery does not activate a device automatically during
+sign-in. External-auth accounts require explicit material or another active
+device's approval.
 
 ## Qualification and open questions
 
