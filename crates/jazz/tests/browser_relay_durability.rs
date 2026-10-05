@@ -302,7 +302,7 @@ fn band_chat_message_schema() -> JazzSchema {
     )
 }
 
-fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -324,7 +324,7 @@ fn open_db_with_storage(
     author: AuthorSubject,
     schema: &JazzSchema,
     storage: TestStorage,
-) -> Db<TestStorage> {
+) -> Db {
     block_on(Db::open(DbConfig::new(
         schema.clone(),
         storage,
@@ -336,7 +336,7 @@ fn open_db_with_storage(
     .expect("open database")
 }
 
-fn open_core(node: u8, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_core(node: u8, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -372,11 +372,7 @@ fn assert_truthful_empty_local_opening(event: Option<SubscriptionEvent>) {
     assert!(removed.is_empty());
 }
 
-fn open_persistent_worker(
-    path: &std::path::Path,
-    node: u8,
-    schema: &JazzSchema,
-) -> Db<RocksDbStorage> {
+fn open_persistent_worker(path: &std::path::Path, node: u8, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -402,7 +398,7 @@ fn open_persistent_browser_worker(
     node: u8,
     author: AuthorSubject,
     schema: &JazzSchema,
-) -> Db<RocksDbStorage> {
+) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -432,7 +428,7 @@ fn open_persistent_scope_isolated_browser_worker(
     node: u8,
     author: AuthorSubject,
     schema: &JazzSchema,
-) -> Db<RocksDbStorage> {
+) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()

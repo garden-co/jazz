@@ -5,15 +5,16 @@ name: Nightly tests
 # from a gate; each job names the suite it owns.
 #
 # - oracle-300: the canonical 300-seed maintained-vs-one-shot oracle
-#   (CLAUDE.md gate) at churn depths 10 and 1000, the depths the continuous
+#   (canonical gate) at churn depths 10 and 1000, the depths the continuous
 #   simulation soak already budgets. The 100000 depth stays manual until its
 #   runtime is measured. PR CI runs one bounded seed.
 # - browser-soak: the two JAZZ_BROWSER_SOAK worker-bridge tests, which no
 #   other workflow enables.
 # - benchmark-api: benchmark-smoke.sh --compile-ci, whose only other home is
 #   the realistic benchmark workflow on the self-hosted jazz-bench runner.
-# - starters: starters-e2e on the default branch, so a broken starter shows
-#   up before a release PR exists.
+#
+# Starters E2E is not part of the nightly: it runs only on release PRs
+# (see starters-e2e.yml).
 #
 # A scheduled failure opens (or reopens) one issue per job.
 
@@ -109,39 +110,10 @@ jobs:
       - name: Compile maintained benchmark APIs
         run: dev/gates/benchmark-smoke.sh --compile-ci
 
-  starters:
-    name: Starters E2E on the default branch
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      actions: write
-      contents: read
-    steps:
-      - name: Dispatch starters-e2e and wait for it
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          REF: ${{ github.ref_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # return_run_details makes the dispatch return its own run ID, so
-          # this never waits on another dispatch of the same workflow.
-          run_id="$(gh api --method POST \
-            "repos/${REPO}/actions/workflows/starters-e2e.yml/dispatches" \
-            -f ref="${REF}" -F return_run_details=true --jq .workflow_run_id)"
-          if [[ ! "${run_id}" =~ ^[0-9]+$ ]]; then
-            echo "::error::starters-e2e dispatch returned no run ID (got '${run_id}')"
-            exit 1
-          fi
-          echo "Watching starters-e2e run ${run_id}"
-          gh run watch "${run_id}" --repo "${REPO}" --exit-status --interval 60 > /dev/null
-
   report:
     name: Report nightly failures
     if: ${{ always() && github.event_name == 'schedule' }}
-    needs: [oracle-300, browser-soak, benchmark-api, starters]
+    needs: [oracle-300, browser-soak, benchmark-api]
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -63,3 +63,862 @@ h6 {
   --diagram-fg: var(--color-fd-foreground);
   --diagram-muted: var(--color-fd-muted-foreground);
 }
+
+/* Docs pages (Astryx). Astryx components carry no outer margins, so the
+   article sets the vertical rhythm between MDX blocks here. */
+.docs-body {
+  max-width: 46rem;
+}
+
+.docs-body :is(.docs-heading, [id]) {
+  scroll-margin-top: 5rem;
+}
+
+.docs-body h2.docs-heading {
+  margin-top: 2.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.docs-body :is(h3, h4, h5, h6).docs-heading {
+  margin-top: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.docs-body .docs-block {
+  margin-block: 1rem;
+}
+
+.docs-body :is(ul, ol) {
+  margin-block: 1rem;
+  padding-inline-start: 1.5rem;
+  line-height: 1.6;
+}
+
+.docs-body ul {
+  list-style: disc;
+}
+
+.docs-body ol {
+  list-style: decimal;
+}
+
+.docs-body li + li,
+.docs-body li > :is(ul, ol) {
+  margin-top: 0.375rem;
+}
+
+.docs-body .docs-callout > :first-child {
+  margin-top: 0;
+}
+
+.docs-body .docs-callout > :last-child {
+  margin-bottom: 0;
+}
+
+.docs-body img {
+  border-radius: 0.5rem;
+}
+
+/* The outline follows the reader; it needs the width of a wide screen. */
+.docs-toc-panel {
+  position: sticky;
+  top: 5rem;
+  align-self: start;
+  padding-top: 2rem;
+}
+
+@media (max-width: 1279px) {
+  .docs-toc-panel {
+    display: none;
+  }
+}
+
+/* Astryx tables bleed into their container's padding (for tables flush with
+   a card edge). Docs tables sit in the article text column, so they keep to
+   it; otherwise every table overflows by the layout's 32px padding on each
+   side and scrolls in both directions. */
+.docs-table {
+  --container-padding-inline-start: 0px;
+  --container-padding-inline-end: 0px;
+  --container-padding-block-start: 0px;
+  --container-padding-block-end: 0px;
+}
+
+/* The top nav's search trigger reads as a field: label left, shortcut right. */
+.site-search-field > button {
+  justify-content: flex-start;
+}
+.site-search-field > button > span > span:last-child {
+  flex: 1;
+}
+
+/* Homepage and blog: the site's page background (not Astryx's surface) and
+   the 1400px layout width their sections centre within. */
+.site-page-shell {
+  --fd-layout-width: 1400px;
+  /* The sticky top nav's height, including its bottom border, for content
+     that sticks below it. */
+  --site-nav-height: 65px;
+}
+/* Below the drawer breakpoint the bar holds only icon buttons. */
+@media (max-width: 767px) {
+  .site-page-shell {
+    --site-nav-height: 61px;
+  }
+}
+.site-page-shell .astryx-app-shell,
+.site-page-shell .astryx-app-shell-header {
+  background-color: var(--color-background-body);
+}
+/* Without a sidebar the bar spans the same centred width as the content and
+   footer, so the logo lines up with the text's left edge and the last icon
+   with its right edge. The heading's and icon buttons' own insets are pulled
+   back so the glyphs themselves sit on those lines. */
+.site-page-shell .astryx-top-nav {
+  max-width: var(--fd-layout-width);
+  margin-inline: auto;
+}
+.site-page-shell .astryx-top-nav-heading {
+  margin-inline-start: -8px;
+}
+.site-page-shell .site-nav-end {
+  margin-inline-end: -6px;
+}
+
+/* Callout bodies written in MDX use the Banner's own description style
+   (size, leading, colour), like callouts built in components. */
+.docs-callout .astryx-text {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+/* Banner descriptions default to the secondary text colour, which drops below
+   AA on the tinted warning and error backgrounds; callout prose is primary
+   text, and its links keep that colour with an underline to stand out. */
+.docs-callout {
+  color: var(--color-text-primary);
+}
+.docs-callout a {
+  color: inherit;
+  text-decoration-line: underline;
+}
+.docs-callout .astryx-code {
+  font-size: inherit;
+}
+
+/* Homepage diagrams (components/home/diagrams.tsx), in the style of the
+   Jazz print material: square boxes, mono labels, thin wires with open
+   arrowheads. Blue = local, mint = global, periwinkle = in flight. Sizes
+   are SVG user units. */
+.home-diagram {
+  font-family: var(--font-family-code);
+}
+.home-diagram .dg-stroke-ink {
+  stroke: var(--color-text-primary);
+}
+.home-diagram .dg-stroke-blue {
+  stroke: var(--color-jazz-blue);
+}
+.home-diagram .dg-stroke-mint {
+  stroke: var(--color-jazz-mint);
+}
+.home-diagram .dg-stroke-periwinkle {
+  stroke: var(--color-jazz-periwinkle);
+}
+.home-diagram .dg-stroke-muted {
+  stroke: var(--color-text-secondary);
+}
+.home-diagram .dg-fill-ink {
+  fill: var(--color-text-primary);
+}
+.home-diagram .dg-fill-blue {
+  fill: var(--color-jazz-blue);
+}
+.home-diagram .dg-fill-mint {
+  fill: var(--color-jazz-mint);
+}
+.home-diagram .dg-fill-periwinkle {
+  fill: var(--color-jazz-periwinkle);
+}
+.home-diagram .dg-fill-muted {
+  fill: var(--color-text-secondary);
+}
+.home-diagram .dg-box {
+  fill: var(--color-background-card);
+  stroke-width: 2;
+}
+.home-diagram .dg-box-dash {
+  fill: none;
+  stroke-width: 2;
+  stroke-dasharray: 6 6;
+}
+.home-diagram .dg-wire,
+.home-diagram .dg-chevron {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.home-diagram .dg-wire-dashed {
+  stroke-dasharray: 4 4;
+}
+.home-diagram .dg-lane {
+  fill: none;
+  stroke-width: 2.5;
+}
+.home-diagram .dg-region {
+  fill: none;
+  stroke: var(--color-text-secondary);
+  stroke-width: 1;
+  stroke-dasharray: 3 5;
+}
+.home-diagram .dg-bracket {
+  fill: none;
+  stroke: var(--color-text-secondary);
+  stroke-width: 1;
+}
+.home-diagram .dg-title {
+  font-size: 15px;
+  font-weight: var(--font-weight-medium);
+}
+.home-diagram .dg-detail {
+  font-size: 12px;
+  font-weight: var(--font-weight-normal);
+}
+/* Low specificity, so a dg-fill-* tone can highlight a detail line. */
+.home-diagram :where(.dg-detail) {
+  fill: var(--color-text-secondary);
+}
+.home-diagram .dg-label {
+  font-size: 12px;
+}
+.home-diagram .dg-struck {
+  text-decoration: line-through;
+}
+.home-diagram .dg-grid {
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+.home-diagram .dg-rule {
+  stroke-width: 1.5;
+}
+.home-diagram .dg-hot {
+  fill: var(--color-jazz-blue-tint);
+}
+
+/* Site footer (components/site/site-footer.tsx). */
+.site-footer {
+  border-top: 1px solid var(--color-border);
+}
+.site-footer-base {
+  border-top: 1px solid var(--color-border);
+}
+.site-footer-link {
+  text-decoration: none;
+}
+.site-footer-link:hover {
+  text-decoration: underline;
+}
+.site-footer-maker {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-2);
+  color: var(--color-text-secondary);
+  transition: color 150ms;
+}
+.site-footer-maker:hover {
+  color: var(--color-text-primary);
+}
+
+/* Homepage sections below the hero (app/(home)/page.tsx). */
+.home-container {
+  margin-inline: auto;
+  width: 100%;
+  max-width: var(--fd-layout-width);
+  padding-inline: var(--spacing-4);
+}
+.home-section {
+  border-top: 1px solid var(--color-border);
+  padding-block: var(--spacing-12) calc(var(--spacing-12) * 1.5);
+}
+/* Hero pattern (a live stipple canvas, see components/brand/stipple-presets.ts),
+   pinned to the hero's top-right corner. Tune these in devtools on
+   `.home-hero`: --pattern-width (the canvas width; its height follows the
+   pattern's 1.1 aspect ratio), --pattern-top / --pattern-right (offsets from
+   that corner), --pattern-opacity. Dots and ribs keep a fixed on-screen size
+   whatever the canvas size, so wider screens show more of them:
+   --pattern-dot-radius, --pattern-dot-spacing, and --pattern-rib-unit (each
+   rib is its pattern width, 0.2 across or 0.12 down, times this). */
+.home-hero {
+  --pattern-width: 100%;
+  --pattern-dot-radius: 1.1px;
+  --pattern-dot-spacing: 2.5px;
+  --pattern-rib-unit: 450px;
+  --pattern-top: 0px;
+  --pattern-right: 0px;
+  --pattern-opacity: 1;
+  --pattern-fade: 0.5;
+  position: relative;
+  overflow: clip;
+  isolation: isolate;
+}
+@media (max-width: 639px) {
+  .home-hero {
+    --pattern-width: 190%;
+    --pattern-rib-unit: 320px;
+  }
+}
+.home-hero-pattern {
+  position: absolute;
+  z-index: -1;
+  top: var(--pattern-top);
+  right: var(--pattern-right);
+  width: var(--pattern-width);
+  aspect-ratio: 1.1;
+  max-width: none;
+  opacity: var(--pattern-opacity);
+  transition: opacity 600ms ease-out;
+  pointer-events: none;
+  user-select: none;
+}
+/* A wash of the page background over the pattern, strongest behind the
+   intro paragraph at the bottom left, so the text stays readable. Tune
+   --pattern-fade (its strongest opacity) on `.home-hero`. */
+.home-hero-fade {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(
+    to top right,
+    color-mix(in srgb, var(--color-background-body) calc(var(--pattern-fade) * 100%), transparent),
+    transparent 60%
+  );
+}
+/* Fades in once the canvas has drawn. */
+.home-hero-pattern:not([data-drawn]) {
+  opacity: 0;
+}
+.home-anchor {
+  scroll-margin-top: 5rem;
+}
+.home-prose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  color: var(--color-text-secondary);
+  max-width: 38rem;
+}
+.home-prose p,
+.home-prose li {
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-leading);
+}
+.home-prose ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-1);
+  padding-left: 1.25em;
+  list-style: disc;
+}
+.home-figure {
+  margin: 0;
+  padding: var(--spacing-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  background-color: var(--color-background-card);
+}
+.home-facts {
+  display: grid;
+  gap: var(--spacing-8);
+}
+@media (min-width: 768px) {
+  .home-facts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.home-fact {
+  border-top: 1px solid var(--color-border-emphasized);
+  padding-top: var(--spacing-4);
+}
+.home-feature {
+  display: grid;
+  gap: var(--spacing-8);
+  border-top: 1px solid var(--color-border);
+  padding-block: var(--spacing-10);
+}
+.home-feature:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+@media (min-width: 1024px) {
+  .home-feature {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    align-items: start;
+  }
+  .home-feature-text {
+    grid-column: span 5;
+  }
+  .home-feature-figure {
+    grid-column: 6 / span 7;
+  }
+}
+.home-code {
+  height: 100%;
+}
+/* Figures: the frame holds the figure surface and its caption. The margin
+   reset sits in the base layer so spacing utilities such as mt-12 on a
+   figure still apply. */
+@layer base {
+  .home-figure-frame {
+    margin: 0;
+  }
+}
+.home-figure-frame {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  min-width: 0;
+}
+.home-figcaption {
+  display: flex;
+  gap: var(--spacing-3);
+  font-size: var(--text-supporting-size);
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+.home-figcaption-number {
+  flex: none;
+  font-family: var(--font-family-code);
+  color: var(--color-text-primary);
+}
+.home-statement {
+  max-width: 56rem;
+}
+.home-code-grid {
+  display: grid;
+  gap: var(--spacing-6);
+}
+@media (min-width: 1024px) {
+  .home-code-grid {
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    align-items: start;
+  }
+}
+.home-code-window {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  background-color: var(--color-background-card);
+  overflow: hidden;
+}
+.home-code-window > nav {
+  padding-top: var(--spacing-2);
+  padding-inline: var(--spacing-3);
+}
+/* The code sits on the window's own card background, not the tinted
+   code-block surface. */
+.home-code-window .home-code {
+  border: 0;
+  border-radius: 0;
+  background-color: var(--color-background-card);
+}
+.home-video-figure .home-figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+  padding: 0;
+  border: 0;
+  background: none;
+  overflow: visible;
+}
+.home-video {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-element);
+  background-color: #000;
+}
+.home-posts {
+  display: grid;
+  gap: var(--spacing-8);
+  list-style: none;
+  padding: 0;
+}
+@media (min-width: 768px) {
+  .home-posts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.home-post {
+  position: relative;
+  border-top: 1px solid var(--color-border-emphasized);
+  padding-top: var(--spacing-5);
+}
+.home-post-link {
+  color: inherit;
+  text-decoration: none;
+}
+.home-post-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.home-post:hover .home-post-link {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+@media (max-width: 767px) {
+  /* Keep diagram text legible on phones: scroll the figure sideways
+     instead of shrinking it. */
+  .home-figure {
+    padding: var(--spacing-4);
+    overflow-x: auto;
+  }
+  .home-figure > svg {
+    min-width: 34rem;
+  }
+  .home-figure-wide .home-figure > svg {
+    min-width: 44rem;
+  }
+}
+.home-figure-wide .home-figure > svg {
+  max-width: 64rem;
+  margin-inline: auto;
+}
+/* Three value columns under one sticky header row, with each topic as its own
+   full-width row above its values: narrow enough for phones without sideways
+   scrolling. Sticky needs the page as its scroller, so neither the frame nor
+   the table's own scroll wrapper may scroll; clip keeps the rounded corners. */
+/* Pricing table. Below 900px: no outer card; each topic ("Setup",
+   "Topology", ...) sits on the page above a rounded three-column box of
+   values, and the sticky header is a box of its own. From 900px: the topics
+   move into a left column on the page, and the values form one ordinary
+   table with a single rounded outline. */
+.home-table {
+  --home-table-radius: var(--radius-container);
+  --home-table-line: 1px solid var(--color-border);
+}
+.home-table .astryx-table-scroll-wrapper,
+.home-table [data-scroll-content] {
+  overflow: visible;
+}
+.home-table table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.home-table th,
+.home-table td {
+  border-bottom: 0;
+}
+.home-table thead th {
+  position: sticky;
+  top: var(--site-nav-height);
+  z-index: 1;
+}
+.home-table thead th:not(.home-table-topic-cell),
+.home-table .home-table-values td:not(.home-table-topic-cell) {
+  background-color: var(--color-background-card);
+}
+.home-table-topic-cell {
+  display: none;
+}
+/* Equal-height call-to-action buttons: the cells stretch to the row and
+   the buttons fill them. */
+.home-table .home-table-actions td {
+  height: 1px;
+  padding-block-start: var(--spacing-4);
+}
+.home-table .home-table-actions .astryx-button {
+  height: 100%;
+}
+@media (max-width: 899px) {
+  .home-table thead th:not(.home-table-topic-cell),
+  .home-table .home-table-values td:not(.home-table-topic-cell) {
+    border-block: var(--home-table-line);
+  }
+  .home-table thead th:nth-child(2),
+  .home-table .home-table-values td:nth-child(2) {
+    border-inline-start: var(--home-table-line);
+    border-start-start-radius: var(--home-table-radius);
+    border-end-start-radius: var(--home-table-radius);
+  }
+  .home-table thead th:last-child,
+  .home-table .home-table-values td:last-child {
+    border-inline-end: var(--home-table-line);
+    border-start-end-radius: var(--home-table-radius);
+    border-end-end-radius: var(--home-table-radius);
+  }
+  .home-table .home-table-topic td {
+    padding-block: var(--spacing-5) var(--spacing-2);
+  }
+}
+/* Phones: the table runs edge to edge so the three columns get the room,
+   and the boxes lose their side borders and rounding at the screen edge. */
+@media (max-width: 639px) {
+  .home-table {
+    --home-table-radius: 0;
+    margin-inline: calc(-1 * var(--spacing-4));
+  }
+  .home-table thead th:nth-child(2),
+  .home-table .home-table-values td:nth-child(2) {
+    border-inline-start: 0;
+  }
+  .home-table thead th:last-child,
+  .home-table .home-table-values td:last-child {
+    border-inline-end: 0;
+  }
+}
+@media (min-width: 900px) {
+  .home-table {
+    max-width: calc(900px - 2 * var(--spacing-4));
+  }
+  .home-table .home-table-topic {
+    display: none;
+  }
+  /* Astryx caps every cell at max-width: 0 (for truncation), so the topic
+     column gets an explicit width, sized for its longest label. */
+  .home-table .home-table-topic-cell {
+    display: table-cell;
+    width: 8.5rem;
+    min-width: 8.5rem;
+    max-width: none;
+    padding-inline-end: var(--spacing-6);
+  }
+  /* The empty corner above the topics covers them as the header sticks. */
+  .home-table thead .home-table-topic-cell {
+    background-color: var(--color-background-body);
+  }
+  .home-table thead th:not(.home-table-topic-cell) {
+    border-block: var(--home-table-line);
+  }
+  .home-table .home-table-values td:not(.home-table-topic-cell) {
+    border-bottom: var(--home-table-line);
+  }
+  .home-table thead th:nth-child(2),
+  .home-table .home-table-values td:nth-child(2) {
+    border-inline-start: var(--home-table-line);
+  }
+  .home-table thead th:last-child,
+  .home-table .home-table-values td:last-child {
+    border-inline-end: var(--home-table-line);
+  }
+  .home-table thead th:nth-child(2) {
+    border-start-start-radius: var(--home-table-radius);
+  }
+  .home-table thead th:last-child {
+    border-start-end-radius: var(--home-table-radius);
+  }
+  .home-table .home-table-values:nth-last-child(2) td:nth-child(2) {
+    border-end-start-radius: var(--home-table-radius);
+  }
+  .home-table .home-table-values:nth-last-child(2) td:last-child {
+    border-end-end-radius: var(--home-table-radius);
+  }
+}
+/* Narrow columns: hyphenate long words instead of splitting them anywhere,
+   and let the call-to-action labels wrap instead of being cut off. */
+.home-table td,
+.home-table td * {
+  word-break: normal;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+}
+.home-table td .astryx-button {
+  max-width: 100%;
+  height: auto;
+  min-height: 2rem;
+  white-space: normal;
+  text-align: center;
+}
+.home-table td .astryx-button * {
+  height: auto;
+  overflow: visible;
+  white-space: normal;
+}
+.home-logos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-3) var(--spacing-6);
+  list-style: none;
+  padding: 0;
+}
+.home-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  text-decoration: none;
+  transition: color var(--duration-fast);
+}
+.home-logo:hover {
+  color: var(--color-text-primary);
+}
+.home-logo-mark {
+  width: 1.25rem;
+  height: 1.25rem;
+  fill: currentColor;
+}
+.home-command {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: var(--spacing-2) var(--spacing-2) var(--spacing-2) var(--spacing-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background-color: var(--color-background-card);
+  font-family: var(--font-family-code);
+}
+.home-command-prompt {
+  color: var(--color-text-secondary);
+}
+
+/* Blog index and posts (app/(home)/blog). */
+.blog-list {
+  border-top: 1px solid var(--color-border-emphasized);
+}
+.blog-list-item {
+  position: relative;
+  display: grid;
+  gap: var(--spacing-2);
+  padding-block: var(--spacing-6);
+  border-bottom: 1px solid var(--color-border);
+}
+@media (min-width: 768px) {
+  .blog-list-item {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: var(--spacing-8);
+  }
+  .blog-list-meta {
+    grid-column: span 3;
+  }
+  .blog-list-body {
+    grid-column: span 8;
+  }
+}
+.blog-list-link {
+  text-decoration: none;
+}
+.blog-list-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.blog-list-item:hover .blog-list-link {
+  text-decoration: underline;
+}
+.blog-post-header {
+  max-width: 52rem;
+}
+.blog-post-layout {
+  display: grid;
+  gap: var(--spacing-12);
+}
+@media (min-width: 1280px) {
+  .blog-post-layout {
+    grid-template-columns: minmax(0, 46rem) 15rem;
+    justify-content: space-between;
+  }
+  .blog-post-toc {
+    position: sticky;
+    top: 5rem;
+    align-self: start;
+  }
+}
+@media (max-width: 1279px) {
+  .blog-post-toc {
+    display: none;
+  }
+}
+
+/* Adopter quotes: one featured quote at statement size, the rest in a row. */
+.home-quotes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-12);
+}
+.home-quote {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--spacing-6);
+}
+.home-quote blockquote {
+  margin: 0;
+}
+.home-quote blockquote p {
+  font-size: var(--text-large-size);
+  line-height: 1.5;
+  color: var(--color-text-primary);
+}
+.home-quote-featured blockquote p {
+  max-width: 52rem;
+  font-size: clamp(1.5rem, 1.1rem + 1.4vw, 2.25rem);
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+  /* Hang the opening quote mark so the text edge stays on the grid. */
+  text-indent: -0.4em;
+}
+.home-quote-row {
+  display: grid;
+  gap: var(--spacing-8);
+}
+@media (min-width: 768px) {
+  .home-quote-row {
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  }
+}
+.home-quote-row .home-quote {
+  border-top: 1px solid var(--color-border-emphasized);
+  padding-top: var(--spacing-5);
+}
+.home-quote-attribution {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+}
+.home-quote-source {
+  color: inherit;
+  text-decoration: none;
+}
+.home-quote-source:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+.home-quote-portrait {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  overflow: hidden;
+  background-color: var(--color-background-muted);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  font-weight: 500;
+}
+.home-quote-portrait-avatar {
+  border-radius: 999px;
+}
+.home-quote-portrait-logo {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  padding: var(--spacing-1-5);
+}
+.home-quote-portrait img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.home-quote-portrait-logo img {
+  object-fit: contain;
+  filter: grayscale(1);
+}

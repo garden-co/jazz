@@ -62,9 +62,12 @@ use jazz_native_transport::NativeWebSocketConnector;
 use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage};
 use thiserror::Error;
 
-/// The first public native-relay ABI. Future breaking command/wire changes
-/// receive a distinct version; no historical implementation number is public.
-pub const NATIVE_RELAY_ABI_V1: u16 = 1;
+/// The current native-relay ABI version. (The name is kept for the exported
+/// `jazz-rn` constant.) Breaking command/response changes bump the value:
+/// 1 was the first public ABI; 2 added `CodedOperationError` answers to
+/// existing commands, so a JS bundle and native build from different ABIs
+/// refuse to open rather than misread a failure.
+pub const NATIVE_RELAY_ABI_V1: u16 = 2;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_DEFERRED: u8 = 1;
@@ -313,6 +316,7 @@ fn validate_private_session_endpoint(server_url: &str) -> Result<url::Url, JazzN
     match url.scheme() {
         "https" => Ok(url),
         "http" if private_plaintext_host_is_allowed(&url) => Ok(url),
+        "http" if url.host_str().is_some() => Err(JazzNativeRelayStatus::RemotePlaintextEndpoint),
         "http" => Err(JazzNativeRelayStatus::LifecycleFailure),
         _ => Err(JazzNativeRelayStatus::LifecycleFailure),
     }
@@ -683,6 +687,13 @@ pub enum ForegroundDbCommandResponse {
     PermissionAdvice {
         advice: ForegroundPermissionAdvice,
     },
+    /// An `OperationError` caused by a core `jazz::db::Error`, carrying its
+    /// stable `ErrorCode::as_str` code beside the unchanged reason text.
+    /// Introduced by ABI 2: every other failure still uses `OperationError`.
+    CodedOperationError {
+        code: String,
+        reason: String,
+    },
 }
 
 /// One already-materialized subscription event.  The byte payload deliberately
@@ -741,6 +752,7 @@ pub enum JazzNativeRelayStatus {
     InvalidAbiRange = 6,
     IncompatibleAbi = 7,
     Backpressure = 8,
+    RemotePlaintextEndpoint = 9,
 }
 
 /// Explicit host-owned lifecycle registry for JNI/Swift. No global relay map.
@@ -768,6 +780,10 @@ pub struct NativeRelayHost {
     next_handle: u64,
     #[cfg(test)]
     thread_start_counter: Option<Arc<AtomicUsize>>,
+    /// Deterministic transport seam for host-level socket lifecycle tests.
+    /// Production always uses [`NativeWebSocketConnector`].
+    #[cfg(test)]
+    socket_connector: Option<Arc<dyn NativeTransportConnector>>,
 }
 
 #[derive(Clone)]
@@ -786,11 +802,32 @@ struct PrivateScopeSocketWorker {
     admitted_scope: AdmissionCapability,
     _worker: NativeRelaySocketWorker,
     connected: Arc<AtomicBool>,
-    /// A transient bridge/socket failure is observable to foreground calls
-    /// until a new authenticated connection succeeds.  This prevents a
-    /// background worker from silently turning an upstream failure into an
-    /// indefinite query timeout.
+    /// The upstream rejected this session before it connected, or the
+    /// worker gave up after a failure. It is observable to foreground ticks
+    /// until a new authenticated connection succeeds, so an upstream failure
+    /// never silently becomes an indefinite query timeout.
+    ///
+    /// Losing an already-authenticated link is not latched here while the
+    /// worker retries it: that is connection state (a failed remote link),
+    /// and must not poison a valid foreground (#3630). A reconnect that the
+    /// upstream then rejects latches as usual.
     terminal_error: Arc<Mutex<Option<String>>>,
+    /// The worker's socket loop has exited and will never reconnect on its
+    /// own. An explicit reconnect replaces such a worker.
+    stopped: Arc<AtomicBool>,
+}
+
+impl PrivateScopeSocketWorker {
+    /// The worker gave up after a terminal failure: it is no longer an
+    /// upstream and nothing but a replacement can clear its failure.
+    fn terminally_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+            && self
+                .terminal_error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some()
+    }
 }
 
 struct OpenedForeground {
@@ -907,6 +944,8 @@ impl Default for NativeRelayHost {
             next_handle: 1,
             #[cfg(test)]
             thread_start_counter: None,
+            #[cfg(test)]
+            socket_connector: None,
         }
     }
 }
@@ -1018,11 +1057,24 @@ impl NativeRelayHost {
             .then_some(())
             .ok_or(JazzNativeRelayStatus::LifecycleFailure);
         }
-        let worker =
-            Self::prepare_private_scope_worker(admitted_scope, relay, peer_identity, session)?;
+        let worker = Self::prepare_private_scope_worker(
+            admitted_scope,
+            relay,
+            peer_identity,
+            session,
+            self.socket_connector(),
+        )?;
         worker._worker.activate();
         self.private_scope_workers.insert(scope.clone(), worker);
         Ok(())
+    }
+
+    fn socket_connector(&self) -> Arc<dyn NativeTransportConnector> {
+        #[cfg(test)]
+        if let Some(connector) = &self.socket_connector {
+            return Arc::clone(connector);
+        }
+        Arc::new(NativeWebSocketConnector)
     }
 
     fn prepare_private_scope_worker(
@@ -1030,11 +1082,17 @@ impl NativeRelayHost {
         relay: NativeRelay,
         peer_identity: jazz::ids::AuthorSubject,
         session: PrivateRelaySocketSession,
+        connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<PrivateScopeSocketWorker, JazzNativeRelayStatus> {
         let terminal_error = Arc::new(Mutex::new(None));
         let terminal_for_event = Arc::clone(&terminal_error);
         let connected = Arc::new(AtomicBool::new(false));
         let connected_for_event = Arc::clone(&connected);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stopped_for_event = Arc::clone(&stopped);
+        // A failure of an established link, held until the worker either
+        // retries it (connection state) or stops on it (terminal).
+        let link_failure = Mutex::new(None::<String>);
         let worker = NativeRelaySocketWorker::prepare_with_connector(
             relay,
             NativeRelaySocketConfig {
@@ -1047,25 +1105,43 @@ impl NativeRelayHost {
                     ..AuthConfig::default()
                 },
                 reconnect_delay: std::time::Duration::from_secs(1),
-                on_event: Arc::new(move |event| match event {
-                    NativeRelaySocketEvent::Connected => {
-                        connected_for_event.store(true, Ordering::Release);
+                on_event: Arc::new(move |event| {
+                    let set_terminal = |error| {
                         *terminal_for_event
                             .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-                    }
-                    NativeRelaySocketEvent::TerminalError(error) => {
-                        connected_for_event.store(false, Ordering::Release);
-                        *terminal_for_event
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
-                    }
-                    NativeRelaySocketEvent::Reconnecting | NativeRelaySocketEvent::Stopped => {
-                        connected_for_event.store(false, Ordering::Release);
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = error;
+                    };
+                    let mut link_failure = link_failure
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    match event {
+                        NativeRelaySocketEvent::Connected => {
+                            connected_for_event.store(true, Ordering::Release);
+                            *link_failure = None;
+                            set_terminal(None);
+                        }
+                        NativeRelaySocketEvent::TerminalError(error) => {
+                            if connected_for_event.swap(false, Ordering::AcqRel) {
+                                *link_failure = Some(error);
+                            } else {
+                                set_terminal(Some(error));
+                            }
+                        }
+                        NativeRelaySocketEvent::Reconnecting => {
+                            connected_for_event.store(false, Ordering::Release);
+                            *link_failure = None;
+                        }
+                        NativeRelaySocketEvent::Stopped => {
+                            connected_for_event.store(false, Ordering::Release);
+                            if let Some(error) = link_failure.take() {
+                                set_terminal(Some(error));
+                            }
+                            stopped_for_event.store(true, Ordering::Release);
+                        }
                     }
                 }),
             },
-            Arc::new(NativeWebSocketConnector),
+            connector,
         )
         .map_err(relay_status)?;
         Ok(PrivateScopeSocketWorker {
@@ -1073,6 +1149,7 @@ impl NativeRelayHost {
             _worker: worker,
             connected,
             terminal_error,
+            stopped,
         })
     }
 
@@ -1112,6 +1189,18 @@ impl NativeRelayHost {
                     .identity
                     .author;
                 let was_offline = self.explicitly_offline_scopes.remove(&scope);
+                // A worker that gave up after a terminal failure is no longer
+                // an upstream. Explicit reconnect replaces it (dropping it
+                // only joins an already-exited thread) so its latched failure
+                // cannot outlive the caller's request to try again. A worker
+                // that is still connected or retrying is left untouched.
+                if self
+                    .private_scope_workers
+                    .get(&scope)
+                    .is_some_and(PrivateScopeSocketWorker::terminally_stopped)
+                {
+                    self.private_scope_workers.remove(&scope);
+                }
                 if let Err(error) =
                     self.ensure_private_scope_worker(capability, &scope, native_relay, author)
                 {
@@ -1449,8 +1538,8 @@ impl NativeRelayHost {
     /// own upstream is the local relay core, which is always attached, so it
     /// cannot tell whether the authoritative server could answer. Only a
     /// change is reported, so an `Attempting` report timestamps the start of
-    /// the attempt the relay first observed. Foregrounds without a native
-    /// socket session keep the core's derived state.
+    /// the attempt the relay first observed. A foreground without a native
+    /// socket session has no server to wait for.
     fn sync_foreground_remote_link(&mut self, foreground: u64) {
         let Some(opened) = self.foregrounds.get(&foreground) else {
             return;
@@ -1462,6 +1551,7 @@ impl NativeRelayHost {
             .private_socket_sessions
             .contains_key(&relay.admitted_scope)
         {
+            self.report_foreground_remote_link(foreground, RemoteLinkHint::NoServer);
             return;
         }
         let scope = opened.scope.clone();
@@ -1498,6 +1588,17 @@ impl NativeRelayHost {
         if previous == Some(hint) {
             return;
         }
+        self.report_foreground_remote_link(foreground, hint);
+    }
+
+    fn report_foreground_remote_link(&mut self, foreground: u64, hint: RemoteLinkHint) {
+        if self
+            .foregrounds
+            .get(&foreground)
+            .is_none_or(|opened| opened.remote_link_hint == Some(hint))
+        {
+            return;
+        }
         let reported = self
             .foreground_client(foreground)
             .is_ok_and(|client| client.set_foreground_remote_link_hint(hint).is_ok());
@@ -1513,6 +1614,10 @@ impl NativeRelayHost {
             .get(&foreground)
             .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
         let (relay, scope) = (opened.relay, opened.scope.clone());
+        // A rejected session or a stopped upstream fails the tick. A lost
+        // established link that the worker is retrying is not latched: it is
+        // reported through the remote-link hint and `NativeConnectionStatus`
+        // while local work continues.
         if self.private_scope_terminal_error(&scope).is_some() {
             return Err(JazzNativeRelayStatus::LifecycleFailure);
         }
@@ -3445,7 +3550,7 @@ impl NativeRelayClient {
     /// across JSI/JNI/Swift boundaries.
     pub fn with_db<T: Send + 'static>(
         &self,
-        operation: impl FnOnce(&Db<MemoryStorage>) -> Result<T, RelayError> + Send + 'static,
+        operation: impl FnOnce(&Db) -> Result<T, RelayError> + Send + 'static,
     ) -> Result<T, RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
@@ -4365,8 +4470,9 @@ impl NativeRelayWire {
 enum NativeRelayWireBridgeError {
     Relay(RelayError),
     /// `WebSocketTransport` closed its outbound receiver after choosing an
-    /// established transport terminal. This is deliberately distinct from a
-    /// relay/wire liveness closure, which means the owner is gone.
+    /// established transport terminal, or the server ended the link with an
+    /// error frame. This is deliberately distinct from a relay/wire liveness
+    /// closure, which means the owner is gone.
     SocketPumpClosed,
 }
 
@@ -4423,6 +4529,18 @@ fn bridge_native_relay_wire_once_classified<T: WireTransport>(
             // whether the socket worker reconnects; every other send error
             // remains a terminal foreground error.
             Err(TransportError::Failed(message)) if message == "websocket pump is closed" => {
+                return Err(NativeRelayWireBridgeError::SocketPumpClosed);
+            }
+            // The server ended this link with a retry-later error frame, and
+            // the adapter latched it before the socket close arrived. The
+            // link is over, not the relay: the established transport terminal
+            // decides whether to reconnect, exactly as when the close wins
+            // the race. Any other remote error still stops the worker.
+            Err(_)
+                if upstream
+                    .remote_wire_error()
+                    .is_some_and(|error| error.asks_reconnect_later()) =>
+            {
                 return Err(NativeRelayWireBridgeError::SocketPumpClosed);
             }
             Err(error) => {
@@ -4497,9 +4615,11 @@ impl std::fmt::Debug for NativeRelaySocketConfig {
 pub enum NativeRelaySocketEvent {
     Connected,
     Reconnecting,
-    /// A bridge or established transport failed. The worker will retry, but
-    /// its scope-owned relay surfaces this failure to foreground ticks until a
-    /// subsequent authenticated connection reaches `Connected`.
+    /// A bridge or transport failed non-retryably; the worker retries unless
+    /// `Stopped` follows. The scope-owned host surfaces a failure before
+    /// `Connected` (the upstream rejected the session), or one the worker
+    /// stops on, to foreground ticks until a subsequent `Connected`. Losing an
+    /// established link that the worker retries is connection state only.
     TerminalError(String),
     Stopped,
 }
@@ -4955,7 +5075,9 @@ struct ConnectedClient {
     refreshed_claims: Option<BTreeMap<String, Value>>,
     retiring: bool,
     admitted_scope_advice: bool,
-    db: Rc<Db<MemoryStorage>>,
+    /// Reachability last reported to a client the host does not manage.
+    relay_link_hint: Option<RemoteLinkHint>,
+    db: Rc<Db>,
     tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     served_io: Option<RelayPeerIo>,
@@ -4976,8 +5098,8 @@ struct ConnectedClient {
     next_foreground_handle: u64,
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
-    _upstream: Rc<LocalMutex<PeerConnection<MemoryStorage>>>,
-    _served: Option<Rc<LocalMutex<PeerConnection<SqliteStorage>>>>,
+    _upstream: Rc<LocalMutex<PeerConnection>>,
+    _served: Option<Rc<LocalMutex<PeerConnection>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -5119,11 +5241,8 @@ type ForegroundOperationFuture =
     Pin<Box<dyn Future<Output = Result<ForegroundOperationResult, RelayError>> + 'static>>;
 
 type RelayTickFuture = Pin<Box<dyn Future<Output = Result<(), jazz::db::Error>>>>;
-type RelayAdmissionFuture = Pin<
-    Box<
-        dyn Future<Output = Result<Rc<LocalMutex<PeerConnection<SqliteStorage>>>, jazz::db::Error>>,
-    >,
->;
+type RelayAdmissionFuture =
+    Pin<Box<dyn Future<Output = Result<Rc<LocalMutex<PeerConnection>>, jazz::db::Error>>>>;
 
 /// A peer's chunk lane must progress even while its semantic tick or a
 /// foreground read owns the node. Retain both the endpoint and any suspended
@@ -5239,9 +5358,30 @@ enum ForegroundOperationResult {
 }
 
 enum ForegroundOperationPoll {
-    Pending { operation: u64 },
+    Pending {
+        operation: u64,
+    },
     Ready(ForegroundOperationResult),
-    Error { reason: String },
+    Error {
+        /// The stable core code when the failure is a core `jazz::db::Error`.
+        code: Option<&'static str>,
+        reason: String,
+    },
+}
+
+/// The response for a failed foreground operation. A core error keeps its
+/// display text as the reason and adds its stable code.
+fn foreground_operation_error(
+    code: Option<&'static str>,
+    reason: String,
+) -> ForegroundDbCommandResponse {
+    match code {
+        Some(code) => ForegroundDbCommandResponse::CodedOperationError {
+            code: code.to_owned(),
+            reason,
+        },
+        None => ForegroundDbCommandResponse::OperationError { reason },
+    }
 }
 
 fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbCommandResponse {
@@ -5274,9 +5414,7 @@ fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbC
                 tx_id: *tx_id.as_bytes(),
             }
         }
-        ForegroundOperationPoll::Error { reason } => {
-            ForegroundDbCommandResponse::OperationError { reason }
-        }
+        ForegroundOperationPoll::Error { code, reason } => foreground_operation_error(code, reason),
     }
 }
 
@@ -5294,9 +5432,10 @@ fn foreground_command_error(
         RelayError::QueueCapacityExceeded { .. } => Err(JazzNativeRelayStatus::Backpressure),
         // Preserve the core Error prefix consumed by the shared TS adapter's
         // rejection normalizer, exactly as NAPI and WASM do.
-        RelayError::Db(error) => Ok(ForegroundDbCommandResponse::OperationError {
-            reason: error.to_string(),
-        }),
+        RelayError::Db(error) => Ok(foreground_operation_error(
+            Some(error.code.as_str()),
+            error.to_string(),
+        )),
         error => Ok(ForegroundDbCommandResponse::OperationError {
             reason: error.to_string(),
         }),
@@ -5351,13 +5490,7 @@ impl ClosingForeground {
 type UpstreamTransition = Pin<
     Box<
         dyn Future<
-            Output = Result<
-                Option<(
-                    Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
-                    NativeRelayWire,
-                )>,
-                RelayError,
-            >,
+            Output = Result<Option<(Rc<LocalMutex<PeerConnection>>, NativeRelayWire)>, RelayError>,
         >,
     >,
 >;
@@ -5369,13 +5502,13 @@ struct RelayWorker {
     drive_error: Option<RelayError>,
     #[cfg(test)]
     drive_turns: u64,
-    persistent: Rc<Db<SqliteStorage>>,
+    persistent: Rc<Db>,
     persistent_tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     pending_foreground_wakes: PendingForegroundWakes,
     foreground_wake_generations: BTreeMap<u64, Arc<AtomicU64>>,
     owner_wake_queued: Arc<AtomicBool>,
-    _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+    _upstream: Rc<LocalMutex<PeerConnection>>,
     upstream_attached: bool,
     socket_generation: u64,
     socket_wire: Option<NativeRelayWire>,
@@ -5714,6 +5847,7 @@ impl RelayWorker {
                 refreshed_claims: None,
                 retiring: false,
                 admitted_scope_advice,
+                relay_link_hint: None,
                 mutations: foreground_mutations::MutationHandles::new(&db),
                 db,
                 tick: None,
@@ -5735,6 +5869,7 @@ impl RelayWorker {
                 _served: None,
             },
         );
+        self.report_relay_link();
         let client = self.clients.get_mut(&id).expect("new client was inserted");
         client.poll_admission(&Waker::from(Arc::clone(&self.wake)));
         if let Err(error) = client.check_admission() {
@@ -5811,9 +5946,33 @@ impl RelayWorker {
         self.flush_foreground_wakes();
     }
 
+    /// What a client's reads can expect from the authority through this
+    /// relay: its connected clients' own upstream is the relay, which answers
+    /// for the authority only while its socket upstream is installed.
+    fn relay_link_hint(&self) -> RemoteLinkHint {
+        match (&self.socket_wire, &self.upstream_transition) {
+            (None, _) => RemoteLinkHint::NoServer,
+            (Some(_), None) if self.upstream_attached => RemoteLinkHint::Live,
+            (Some(_), _) => RemoteLinkHint::Attempting,
+        }
+    }
+
+    /// Report the relay's reachability to clients whose host does not report
+    /// it (host-opened foregrounds get the host's own hint).
+    fn report_relay_link(&mut self) {
+        let hint = self.relay_link_hint();
+        for client in self.clients.values_mut() {
+            if !client.admitted_scope_advice && client.relay_link_hint != Some(hint) {
+                client.relay_link_hint = Some(hint);
+                client.db.set_remote_link_hint(hint);
+            }
+        }
+    }
+
     fn pump(&mut self) -> Result<(), RelayError> {
         let waker = Waker::from(Arc::clone(&self.wake));
         self.poll_upstream_transition()?;
+        self.report_relay_link();
         self.poll_closing(&waker)?;
         // One fair relay turn has exactly three protocol phases. A UI upload
         // becomes relay input, the relay applies/forwards it, then UI clients
@@ -6227,10 +6386,14 @@ impl RelayWorker {
         let mut context = Context::from_waker(&waker);
         match pending_operation.future.as_mut().poll(&mut context) {
             Poll::Ready(Ok(result)) => Ok(ForegroundOperationPoll::Ready(result)),
-            Poll::Ready(Err(error)) => Ok(ForegroundOperationPoll::Error {
-                reason: match error {
-                    RelayError::Db(error) => error.to_string(),
-                    error => error.to_string(),
+            Poll::Ready(Err(error)) => Ok(match error {
+                RelayError::Db(error) => ForegroundOperationPoll::Error {
+                    code: Some(error.code.as_str()),
+                    reason: error.to_string(),
+                },
+                error => ForegroundOperationPoll::Error {
+                    code: None,
+                    reason: error.to_string(),
                 },
             }),
             Poll::Pending => {
@@ -6325,7 +6488,7 @@ impl RelayWorker {
         &self,
         client: u64,
         transaction: u64,
-    ) -> Result<(Rc<Db<MemoryStorage>>, ForegroundTransaction), RelayError> {
+    ) -> Result<(Rc<Db>, ForegroundTransaction), RelayError> {
         let client = self.foreground_client(client)?;
         let transaction = client
             .transactions
@@ -7586,6 +7749,239 @@ mod tests {
         assert!(host.foregrounds.is_empty());
     }
 
+    /// One scripted connection attempt of the host-owned socket worker.
+    enum HostSocketStep {
+        /// Connect, then lose the established transport non-retryably once
+        /// the test releases it.
+        ConnectThenTerminal(tokio::sync::oneshot::Receiver<()>),
+        /// Hold the attempt until released, then connect and stay connected.
+        ConnectWhenReleased(tokio::sync::oneshot::Receiver<()>),
+        /// Connect as a different authenticated identity than was admitted,
+        /// which makes the worker give up for good.
+        ForeignIdentity,
+    }
+
+    /// Plays [`HostSocketStep`]s in order; further attempts never complete.
+    struct ScriptedHostConnector {
+        steps: Mutex<std::collections::VecDeque<HostSocketStep>>,
+    }
+
+    impl ScriptedHostConnector {
+        fn new(steps: impl IntoIterator<Item = HostSocketStep>) -> Arc<Self> {
+            Arc::new(Self {
+                steps: Mutex::new(steps.into_iter().collect()),
+            })
+        }
+    }
+
+    impl NativeTransportConnector for ScriptedHostConnector {
+        fn connect(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> jazz::tools::native_transport_connector::NativeTransportFuture {
+            let step = self.steps.lock().unwrap().pop_front();
+            Box::pin(async move {
+                let connected = |session_context, terminal| {
+                    jazz::tools::native_transport_connector::ConnectedNativeTransport {
+                        transport: Box::new(IdleWire),
+                        protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+                        features: jazz::wire::current_wire_features(),
+                        session_context,
+                        permits_delegated_sessions: false,
+                        terminal,
+                    }
+                };
+                match step {
+                    Some(HostSocketStep::ConnectThenTerminal(release)) => Ok(connected(
+                        None,
+                        Box::pin(async move {
+                            let _ = release.await;
+                            NativeTransportTerminal::Failed(NativeTransportError::Terminal(
+                                "websocket peer sent a non-binary wire batch".into(),
+                            ))
+                        }),
+                    )),
+                    Some(HostSocketStep::ConnectWhenReleased(release)) => {
+                        let _ = release.await;
+                        Ok(connected(None, Box::pin(std::future::pending())))
+                    }
+                    Some(HostSocketStep::ForeignIdentity) => {
+                        let endpoint = jazz::wire::WireAuthorityEndpoint::fresh(
+                            NodeUuid::from_bytes([0x3c; 16]),
+                        );
+                        Ok(connected(
+                            Some(jazz::db::ConnectionSessionContext {
+                                local: endpoint,
+                                remote: None,
+                                link_identity: AuthorSubject::for_test_bytes([0x3c; 16]),
+                                negotiated_features: jazz::wire::current_wire_features(),
+                            }),
+                            Box::pin(std::future::pending()),
+                        ))
+                    }
+                    None => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    /// Admit alice's private scope against a scripted upstream and open one
+    /// foreground on it.
+    fn scripted_private_foreground(
+        root: &std::path::Path,
+        app_id: &str,
+        connector: Arc<ScriptedHostConnector>,
+    ) -> (NativeRelayHost, u64) {
+        use base64::Engine;
+        let jwt = format!(
+            "x.{}.x",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(br#"{"iss":"https://issuer.example","sub":"alice"}"#)
+        );
+        let mut host = NativeRelayHost {
+            socket_connector: Some(connector),
+            ..NativeRelayHost::default()
+        };
+        let pending = host
+            .begin_private_session(PrivateSessionSetupJson {
+                server_url: "https://edge.example".to_owned(),
+                app_id: app_id.to_owned(),
+                jwt,
+                storage_root: root.display().to_string(),
+            })
+            .unwrap();
+        let admitted = host
+            .attach_canonical_schema(
+                pending,
+                &serde_json::to_string(schema().public_schema()).unwrap(),
+            )
+            .unwrap();
+        let foreground = host
+            .open_foreground(admitted, DIRECT_FOREGROUND_RUNTIME_TOKEN)
+            .unwrap();
+        (host, foreground)
+    }
+
+    fn wait_for_host(host: &NativeRelayHost, what: &str, done: impl Fn(&NativeRelayHost) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done(host) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting: {what}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn native_connected(host: &mut NativeRelayHost, foreground: u64) -> bool {
+        match host.foreground_connectivity(foreground, None).unwrap() {
+            ForegroundDbCommandResponse::NativeConnectionStatus { connected, .. } => connected,
+            other => panic!("unexpected connectivity response: {other:?}"),
+        }
+    }
+
+    /// Losing an established upstream link that the worker is retrying is
+    /// connection state, not a foreground failure (#3630), even when the
+    /// transport classifies the loss as non-retryable. Alice's foreground
+    /// keeps ticking while the native socket reports disconnected, and the
+    /// worker's next authenticated connection restores it. (A server that
+    /// rejects the session itself still fails the tick; see
+    /// `private_session_invalid_bearer_still_fails_closed`.)
+    ///
+    /// Host-level rather than through JSI: the regression is the relay host's
+    /// tick gate, and only a scripted connector can hold the worker inside
+    /// its retry window deterministically.
+    ///
+    /// ```text
+    /// alice ─open─► relay ══socket══► edge   (connected)
+    ///                 │        ✗ terminal transport loss, worker retries
+    /// alice ─tick─► relay                    (Ok, connected=false)
+    ///                 │ ══socket══► edge     (reconnected)
+    /// alice ─tick─► relay                    (Ok, connected=true)
+    /// ```
+    #[test]
+    fn retrying_upstream_failure_keeps_foreground_ticking() {
+        let root = tempfile::tempdir().unwrap();
+        let (fail_first, first_failure) = tokio::sync::oneshot::channel();
+        let (reconnect, reconnected) = tokio::sync::oneshot::channel();
+        let connector = ScriptedHostConnector::new([
+            HostSocketStep::ConnectThenTerminal(first_failure),
+            HostSocketStep::ConnectWhenReleased(reconnected),
+        ]);
+        let (mut host, alice) =
+            scripted_private_foreground(root.path(), "retrying-upstream-tick", connector);
+        let scope = host.foregrounds[&alice].scope.clone();
+        wait_for_host(&host, "first connection", |host| {
+            host.private_scope_workers[&scope]
+                .connected
+                .load(Ordering::Acquire)
+        });
+        assert_eq!(host.tick_foreground(alice), Ok(()));
+
+        fail_first.send(()).unwrap();
+        wait_for_host(&host, "established link lost", |host| {
+            !host.private_scope_workers[&scope]
+                .connected
+                .load(Ordering::Acquire)
+        });
+        assert!(!native_connected(&mut host, alice));
+        assert_eq!(
+            host.tick_foreground(alice),
+            Ok(()),
+            "a retrying upstream failure must not fail a valid foreground tick"
+        );
+        assert!(host.foregrounds.contains_key(&alice));
+
+        reconnect.send(()).unwrap();
+        wait_for_host(&host, "worker reconnects", |host| {
+            host.private_scope_workers[&scope]
+                .connected
+                .load(Ordering::Acquire)
+        });
+        assert_eq!(host.tick_foreground(alice), Ok(()));
+    }
+
+    /// An upstream whose worker gave up still fails alice's tick, so strict
+    /// remote work is never parked forever in silence. Explicit reconnect is
+    /// a single-call recovery: it replaces the stopped worker instead of
+    /// returning early on it, and the new connection clears the failure.
+    ///
+    /// ```text
+    /// alice ─open─► relay ══socket══► edge (as mallory) ✗ worker stops
+    /// alice ─tick─► relay                  (LifecycleFailure)
+    /// alice ─reconnect─► relay ══socket══► edge (as alice)
+    /// alice ─tick─► relay                  (Ok, connected=true)
+    /// ```
+    #[test]
+    fn explicit_reconnect_replaces_a_stopped_upstream_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let (reconnect, reconnected) = tokio::sync::oneshot::channel();
+        reconnect.send(()).unwrap();
+        let connector = ScriptedHostConnector::new([
+            HostSocketStep::ForeignIdentity,
+            HostSocketStep::ConnectWhenReleased(reconnected),
+        ]);
+        let (mut host, alice) =
+            scripted_private_foreground(root.path(), "stopped-upstream-reconnect", connector);
+        let scope = host.foregrounds[&alice].scope.clone();
+        wait_for_host(&host, "worker gives up", |host| {
+            host.private_scope_workers[&scope].terminally_stopped()
+        });
+        assert_eq!(
+            host.tick_foreground(alice),
+            Err(JazzNativeRelayStatus::LifecycleFailure)
+        );
+
+        host.foreground_connectivity(alice, Some(false)).unwrap();
+        wait_for_host(&host, "replacement worker connects", |host| {
+            host.private_scope_workers[&scope]
+                .connected
+                .load(Ordering::Acquire)
+        });
+        assert!(host.private_scope_terminal_error(&scope).is_none());
+        assert_eq!(host.tick_foreground(alice), Ok(()));
+    }
+
     fn encoded_cells(descriptor: RecordDescriptor, raw: Vec<u8>) -> Vec<u8> {
         jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
             raw, descriptor,
@@ -8380,10 +8776,6 @@ mod tests {
             matches!(remote, ForegroundDbCommandResponse::Rows { .. }),
             "{remote:?}"
         );
-        fixture.execute(
-            foreground,
-            ForegroundDbCommandRequest::DisconnectNativeUpstream,
-        );
         let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
             foreground,
             ForegroundDbCommandRequest::BeginTransaction {
@@ -8425,6 +8817,11 @@ mod tests {
         assert!(
             matches!(read, ForegroundDbCommandResponse::Rows { .. }),
             "{read:?}"
+        );
+        // The read hydrated its snapshot online; the commit is made offline.
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::DisconnectNativeUpstream,
         );
         let ForegroundDbCommandResponse::TransactionCommitted { tx_id } = fixture.execute(
             foreground,
@@ -10915,6 +11312,92 @@ mod tests {
         client.close().unwrap();
     }
 
+    // Internal receipt: the reported hint is the core read gate's input, which
+    // no public surface exposes. A plain relay client's own upstream is the
+    // relay, so it must see the relay's server link, not an always-live peer.
+    #[test]
+    fn plain_relay_clients_see_the_relay_server_link() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay =
+            NativeRelay::spawn(config(directory.path().join("link.sqlite"), Some("link"))).unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4a; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let hint = |relay: &NativeRelay| {
+            relay
+                .run(move |worker| Ok(worker.foreground_client(id)?.db.remote_link_hint_for_test()))
+                .unwrap()
+        };
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::NoServer));
+
+        let generation = relay
+            .run(|worker| {
+                worker
+                    .begin_socket_upstream(None)
+                    .map(|(generation, _)| generation)
+            })
+            .unwrap();
+        relay.pump().unwrap();
+        assert!(matches!(
+            hint(&relay),
+            Some(RemoteLinkHint::Attempting | RemoteLinkHint::Live)
+        ));
+        for _ in 0..10 {
+            if hint(&relay) == Some(RemoteLinkHint::Live) {
+                break;
+            }
+            relay.pump().unwrap();
+        }
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::Live));
+
+        assert!(
+            relay
+                .run(move |worker| worker.retire_socket_upstream(generation))
+                .unwrap()
+        );
+        relay.pump().unwrap();
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::NoServer));
+        client.close().unwrap();
+    }
+
+    // Internal receipt: see above. A host foreground whose scope has no native
+    // socket session has no server its reads could wait for.
+    #[test]
+    fn host_foreground_without_a_socket_session_reports_no_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("no-socket.sqlite"),
+            "no-socket",
+            &permissive_schema(),
+            0xc7,
+        );
+        let foreground = fixture.open_foreground(&capability);
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::NativeSessionMetadata,
+        );
+        let client = unsafe { &*fixture.host }
+            .inner
+            .lock()
+            .unwrap()
+            .foreground_client(foreground)
+            .unwrap()
+            .clone();
+        let id = client.id;
+        assert_eq!(
+            client
+                .relay
+                .run(move |worker| Ok(worker.foreground_client(id)?.db.remote_link_hint_for_test()))
+                .unwrap(),
+            Some(RemoteLinkHint::NoServer)
+        );
+    }
+
     // Internal receipt: JS cannot deliberately hold the native owner. All results
     // are asserted through the foreground transaction/read/settlement boundary.
     #[test]
@@ -11165,7 +11648,7 @@ mod tests {
                     )
                 })
                 .unwrap();
-            thread_local! { static CLOSED_DB: RefCell<std::rc::Weak<Db<MemoryStorage>>> = const { RefCell::new(std::rc::Weak::new()) }; }
+            thread_local! { static CLOSED_DB: RefCell<std::rc::Weak<Db>> = const { RefCell::new(std::rc::Weak::new()) }; }
             relay
                 .run(move |worker| {
                     CLOSED_DB.with(|weak| {
@@ -11191,7 +11674,7 @@ mod tests {
                 .start_foreground_read(query, "{}".into(), Some(tx))
                 .unwrap();
             assert!(matches!(pending, ForegroundOperationPoll::Pending { .. }));
-            thread_local! { static CLOSED_WRITE: RefCell<Option<Rc<jazz::db::WriteHandle<MemoryStorage>>>> = const { RefCell::new(None) }; }
+            thread_local! { static CLOSED_WRITE: RefCell<Option<Rc<jazz::db::WriteHandle>>> = const { RefCell::new(None) }; }
             if committed {
                 let tx_id = client.commit_foreground_transaction(tx).unwrap();
                 relay
@@ -11291,7 +11774,7 @@ mod tests {
         let id = client.id;
         let observed = Arc::new(AtomicBool::new(false));
         let receipt = Arc::clone(&observed);
-        thread_local! { static RETIRED_DB: RefCell<std::rc::Weak<Db<MemoryStorage>>> = const { RefCell::new(std::rc::Weak::new()) }; }
+        thread_local! { static RETIRED_DB: RefCell<std::rc::Weak<Db>> = const { RefCell::new(std::rc::Weak::new()) }; }
         relay
             .run(move |worker| {
                 let db = Rc::clone(&worker.foreground_client(id)?.db);
@@ -13621,6 +14104,83 @@ mod tests {
         );
     }
 
+    // Internal bridge seam: the server's error frame and its socket close race,
+    // and only this seam can deterministically land the error first.
+    #[test]
+    fn native_upstream_bridge_leaves_a_server_ended_link_to_the_transport_terminal() {
+        assert!(matches!(
+            bridge_after_remote_error(
+                jazz::wire::WireErrorCode::Backpressure,
+                jazz::wire::WireRetry::Later,
+            ),
+            Err(NativeRelayWireBridgeError::SocketPumpClosed)
+        ));
+        // Errors that retrying cannot fix still stop the worker.
+        for (code, retry) in [
+            (
+                jazz::wire::WireErrorCode::AuthFailed,
+                jazz::wire::WireRetry::AfterAuth,
+            ),
+            (
+                jazz::wire::WireErrorCode::MalformedFrame,
+                jazz::wire::WireRetry::Never,
+            ),
+            (
+                jazz::wire::WireErrorCode::Backpressure,
+                jazz::wire::WireRetry::Never,
+            ),
+        ] {
+            assert!(matches!(
+                bridge_after_remote_error(code, retry),
+                Err(NativeRelayWireBridgeError::Relay(_))
+            ));
+        }
+    }
+
+    fn bridge_after_remote_error(
+        code: jazz::wire::WireErrorCode,
+        retry: jazz::wire::WireRetry,
+    ) -> Result<bool, NativeRelayWireBridgeError> {
+        struct ScriptedWire {
+            inbound: VecDeque<Vec<u8>>,
+        }
+        impl WireTransport for ScriptedWire {
+            fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+                self.inbound.pop_front()
+            }
+        }
+        let error = jazz::wire::encode_frame(&jazz::wire::WireFrame::Error(
+            jazz::wire::WireError::new(code, retry, "server ended the link"),
+        ))
+        .unwrap();
+        let mut upstream = WireTransportAdapter::current(ScriptedWire {
+            inbound: VecDeque::from([error]),
+        });
+        let relay_wire = NativeRelayWire::default();
+
+        // The error frame lands first and latches the adapter.
+        assert!(!bridge_native_relay_wire_once(&relay_wire, &mut upstream).unwrap());
+        assert!(upstream.remote_wire_error().is_some());
+
+        // A write queued before the close arrives reaches the latched adapter.
+        relay_wire
+            .outbound
+            .lock()
+            .unwrap()
+            .push(
+                SyncMessage::SessionClaims {
+                    identity: AuthorSubject::for_test_bytes([0x63; 16]),
+                    claims: BTreeMap::new(),
+                },
+                "test relay outbound",
+            )
+            .unwrap();
+        bridge_native_relay_wire_once_classified(&relay_wire, &mut upstream)
+    }
+
     // Internal bridge seam: a slow native socket is only observable here as
     // `TransportError::Backpressure` from the adapter, and the public ClientDb
     // path cannot deterministically stall the platform WebSocket pump.
@@ -14344,8 +14904,14 @@ mod tests {
             admitted_scope,
         };
         for (request, expected) in [
-            (request(3, 2), JazzNativeRelayStatus::InvalidAbiRange),
-            (request(2, 2), JazzNativeRelayStatus::IncompatibleAbi),
+            (
+                request(NATIVE_RELAY_ABI_V1 + 2, NATIVE_RELAY_ABI_V1 + 1),
+                JazzNativeRelayStatus::InvalidAbiRange,
+            ),
+            (
+                request(NATIVE_RELAY_ABI_V1 + 1, NATIVE_RELAY_ABI_V1 + 1),
+                JazzNativeRelayStatus::IncompatibleAbi,
+            ),
         ] {
             let encoded = postcard::to_allocvec(&request).unwrap();
             let mut output = JazzNativeRelayBytes {
@@ -15799,7 +16365,7 @@ mod tests {
 
         // Invalid schema/cell input is a logical operation error rather than
         // a lifecycle failure, preserving the core error boundary for the
-        // shared adapter.
+        // shared adapter. Being a core error, it carries its stable code.
         let ForegroundDbCommandResponse::TransactionOpened { transaction } = response(
             foreground,
             ForegroundDbCommandRequest::BeginTransaction {
@@ -15808,18 +16374,22 @@ mod tests {
         ) else {
             panic!("begin must return a handle");
         };
-        assert!(matches!(
-            response(
-                foreground,
-                ForegroundDbCommandRequest::Insert {
-                    transaction,
-                    table: "missing_table".to_owned(),
-                    cells: encoded_title_cells("nope"),
-                    row_id: Some([0x73; 16]),
-                }
-            ),
-            ForegroundDbCommandResponse::OperationError { .. }
-        ));
+        let rejected_insert = response(
+            foreground,
+            ForegroundDbCommandRequest::Insert {
+                transaction,
+                table: "missing_table".to_owned(),
+                cells: encoded_title_cells("nope"),
+                row_id: Some([0x73; 16]),
+            },
+        );
+        assert_eq!(
+            rejected_insert,
+            ForegroundDbCommandResponse::CodedOperationError {
+                code: "schema".to_owned(),
+                reason: "Schema: unknown table missing_table".to_owned(),
+            }
+        );
         assert_eq!(
             response(
                 foreground,
@@ -16155,6 +16725,35 @@ mod tests {
         {
             assert_eq!(postcard::to_allocvec(&kind).unwrap(), vec![ordinal as u8]);
         }
+    }
+
+    #[test]
+    fn foreground_coded_operation_error_v1_byte_contract() {
+        // Response 25 is appended to V1: a core error's stable code, then the
+        // unchanged reason. Uncoded failures keep response 8.
+        let coded = ForegroundDbCommandResponse::CodedOperationError {
+            code: "not_observed".into(),
+            reason: "NotObserved: oops".into(),
+        };
+        let bytes = [
+            vec![25, 12],
+            b"not_observed".to_vec(),
+            vec![17],
+            b"NotObserved: oops".to_vec(),
+        ]
+        .concat();
+        assert_eq!(postcard::to_allocvec(&coded).unwrap(), bytes);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap(),
+            coded
+        );
+        assert_eq!(
+            postcard::to_allocvec(&ForegroundDbCommandResponse::OperationError {
+                reason: "oops".into()
+            })
+            .unwrap(),
+            vec![8, 4, 111, 111, 112, 115]
+        );
     }
 
     #[test]

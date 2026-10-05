@@ -86,7 +86,7 @@ async function fileExists(path: string): Promise<boolean> {
 function spawnMigrationCreate(
   root: string,
   migrationsDir: string,
-  pauseAt: "lock-held" | "lock-quarantined" | "between-publications" | "journaled",
+  pauseAt: "lock-held" | "lock-observed" | "lock-recovered" | "between-publications" | "journaled",
   marker: string,
   releaseMarker?: string,
 ) {
@@ -103,6 +103,12 @@ function spawnMigrationCreate(
       },
       stdio: "ignore",
     },
+  );
+}
+
+async function migrationLockLeftovers(migrationsDir: string): Promise<string[]> {
+  return (await readdir(migrationsDir)).filter((name) =>
+    name.startsWith(".jazz-create-migration.lock"),
   );
 }
 
@@ -316,10 +322,10 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 
 function rootSchemaWithInlinePermissions(dslImportPath: string = dslPath): string {
   return `
-import { table, col } from ${JSON.stringify(dslImportPath)};
+import { table, schemaColumns as s } from ${JSON.stringify(dslImportPath)};
 
 table("todos", {
-  title: col.string(),
+  title: s.string(),
 }, {
   permissions: {
     select: { type: "True" },
@@ -1035,7 +1041,7 @@ describe("cli migrations", () => {
     const externalLock = join(migrationsDir, ".jazz-create-migration.lock");
     await mkdir(externalLock);
     await writeFile(
-      join(externalLock, "owner.json"),
+      join(externalLock, "owner-00000000-0000-4000-8000-000000000001.json"),
       `${JSON.stringify({ version: 1, pid: process.pid, hostname: hostname(), token: "00000000-0000-4000-8000-000000000001" })}\n`,
     );
 
@@ -1121,23 +1127,155 @@ describe("cli migrations", () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
-    const marker = join(root, "lock-quarantined.marker");
+    const marker = join(root, "lock-recovered.marker");
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await saveBaseline({ schemaDir: root, migrationsDir });
     await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
     await mkdir(lockDir, { recursive: true });
     await writeFile(
-      join(lockDir, "owner.json"),
+      join(lockDir, "owner-00000000-0000-4000-8000-000000000002.json"),
       `${JSON.stringify({ version: 1, pid: 2_147_483_647, hostname: hostname(), token: "00000000-0000-4000-8000-000000000002" })}\n`,
     );
 
-    const child = spawnMigrationCreate(root, migrationsDir, "lock-quarantined", marker);
+    const child = spawnMigrationCreate(root, migrationsDir, "lock-recovered", marker);
     await waitForCrashMarker(marker, child);
     await killChild(child);
 
     const result = await createCatalogueMigration({ schemaDir: root, migrationsDir });
     expect(result.status).toBe("generated");
     expect(await fileExists(lockDir)).toBe(false);
+  });
+
+  it("never quarantines a live lock that replaced the stale owner it observed", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+    const marker = join(root, "lock-observed.marker");
+    const releaseMarker = join(root, "lock-observed.release");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await saveBaseline({ schemaDir: root, migrationsDir });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(
+      join(lockDir, "owner-00000000-0000-4000-8000-000000000004.json"),
+      `${JSON.stringify({ version: 1, pid: 2_147_483_647, hostname: hostname(), token: "00000000-0000-4000-8000-000000000004" })}\n`,
+    );
+
+    const child = spawnMigrationCreate(root, migrationsDir, "lock-observed", marker, releaseMarker);
+    const exited = new Promise<number | null>((resolve) => child.once("close", resolve));
+    try {
+      // The recoverer has read the dead owner but not yet acted on it. Now the
+      // stale lock is released and a live generator acquires a fresh one.
+      await waitForCrashMarker(marker, child);
+      await rm(lockDir, { recursive: true });
+      const liveOwnerPath = join(lockDir, "owner-00000000-0000-4000-8000-000000000005.json");
+      const liveOwner = `${JSON.stringify({ version: 1, pid: process.pid, hostname: hostname(), token: "00000000-0000-4000-8000-000000000005" })}\n`;
+      await mkdir(lockDir);
+      await writeFile(liveOwnerPath, liveOwner);
+      await writeFile(releaseMarker, "release");
+
+      // The recoverer must keep waiting on the live lock instead of stealing it.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(child.exitCode).toBeNull();
+      expect(await readFile(liveOwnerPath, "utf8")).toBe(liveOwner);
+      expect((await readdir(migrationsDir)).filter((name) => name.includes(".recovery-"))).toEqual(
+        [],
+      );
+
+      await rm(lockDir, { recursive: true });
+      expect(await exited).toBe(0);
+    } finally {
+      await killChild(child);
+    }
+    expect(await migrationLockLeftovers(migrationsDir)).toEqual([]);
+    expect(
+      (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
+    ).toHaveLength(2);
+  });
+
+  it("releases its lock without leaving a lock directory or claimed records behind", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await saveBaseline({ schemaDir: root, migrationsDir });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+    expect((await createCatalogueMigration({ schemaDir: root, migrationsDir })).status).toBe(
+      "generated",
+    );
+    expect(await migrationLockLeftovers(migrationsDir)).toEqual([]);
+    expect((await createCatalogueMigration({ schemaDir: root, migrationsDir })).status).toBe(
+      "unchanged",
+    );
+    expect(await migrationLockLeftovers(migrationsDir)).toEqual([]);
+  });
+
+  it("leaves a recoverable lock when removing the released lock directory fails", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await saveBaseline({ schemaDir: root, migrationsDir });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+    const child = spawn(
+      process.execPath,
+      [
+        distCliPath,
+        "migrations",
+        "create",
+        "--schema-dir",
+        root,
+        "--migrations-dir",
+        migrationsDir,
+      ],
+      {
+        env: { ...process.env, NODE_ENV: "test", JAZZ_TEST_MIGRATION_FAIL_AT: "release-rmdir" },
+        stdio: ["ignore", "ignore", "pipe"],
+      },
+    );
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+    const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
+
+    // The generation itself succeeded; only the lock directory stayed behind,
+    // still attributed to the now-dead child rather than ownerless.
+    expect(code, stderr).toBe(0);
+    expect(stderr).toContain(`Could not remove migration lock ${lockDir}`);
+    expect(await migrationLockLeftovers(migrationsDir)).toEqual([".jazz-create-migration.lock"]);
+    const [record, ...extra] = await readdir(lockDir);
+    expect(extra).toEqual([]);
+    expect(record).toMatch(/^owner-[0-9a-f-]{36}\.json$/);
+    expect(JSON.parse(await readFile(join(lockDir, record!), "utf8")).pid).toBe(child.pid);
+
+    expect((await createCatalogueMigration({ schemaDir: root, migrationsDir })).status).toBe(
+      "unchanged",
+    );
+    expect(await migrationLockLeftovers(migrationsDir)).toEqual([]);
+  });
+
+  it("names the live owner and how to clear a stuck lock when waiting times out", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+    const token = "00000000-0000-4000-8000-000000000006";
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(
+      join(lockDir, `owner-${token}.json`),
+      `${JSON.stringify({ version: 1, pid: process.pid, hostname: hostname(), token })}\n`,
+    );
+
+    vi.stubEnv("JAZZ_TEST_MIGRATION_LOCK_TIMEOUT_MS", "200");
+    try {
+      await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+        `Timed out waiting for another migration generator to release ${lockDir}; it is held by pid ${process.pid} on host ${hostname()}. If no \`jazz-tools migrations create\` is running for this directory, delete ${lockDir} and retry.`,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(await readdir(lockDir)).toEqual([`owner-${token}.json`]);
+    expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
   });
 
   it.each([false, true])(
@@ -1151,7 +1289,7 @@ describe("cli migrations", () => {
       if (nonempty) await writeFile(join(lockDir, "unknown"), "unknown\n");
 
       await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
-        "owner metadata is missing, invalid, or unsafe",
+        `owner metadata is missing, invalid, or unsafe. If no \`jazz-tools migrations create\` is running for this directory, delete ${lockDir} and retry.`,
       );
       expect(await fileExists(lockDir)).toBe(true);
       expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
@@ -1169,22 +1307,41 @@ describe("cli migrations", () => {
       { version: 1, pid: "2147483647", hostname: hostname(), token: validToken },
       { version: 1, pid: deadPid, hostname: "", token: validToken },
       { version: 2, pid: deadPid, hostname: hostname(), token: validToken },
+      // A record whose content names a different lock instance than its file.
+      {
+        version: 1,
+        pid: deadPid,
+        hostname: hostname(),
+        token: "00000000-0000-4000-8000-000000000009",
+      },
+    ];
+    const validOwner = { version: 1, pid: deadPid, hostname: hostname(), token: validToken };
+    const malformedRecords = [
+      ...malformedOwners.map((owner) => ({ name: `owner-${validToken}.json`, owner })),
+      // Records that are not the single token-named owner record of a lock.
+      { name: "owner.json", owner: validOwner },
+      { name: `owner-${validToken.toUpperCase()}-extra.json`, owner: validOwner },
     ];
 
     await Promise.all(
-      malformedOwners.map(async (malformedOwner) => {
+      malformedRecords.map(async ({ name, owner: malformedOwner }) => {
         const { root } = await createWorkspace();
         const migrationsDir = join(root, "migrations");
         const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
         const ownerText = `${JSON.stringify(malformedOwner)}\n`;
         await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
         await mkdir(lockDir, { recursive: true });
-        await writeFile(join(lockDir, "owner.json"), ownerText);
+        await writeFile(join(lockDir, name), ownerText);
 
-        await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
-          "owner metadata is missing, invalid, or unsafe",
-        );
-        expect(await readFile(join(lockDir, "owner.json"), "utf8")).toBe(ownerText);
+        const failure = createCatalogueMigration({ schemaDir: root, migrationsDir });
+        await expect(failure).rejects.toThrow("owner metadata is missing, invalid, or unsafe");
+        await expect(failure).rejects.toThrow(`delete ${lockDir} and retry`);
+        if (name === "owner.json") {
+          await expect(failure).rejects.toThrow("owner.json left by an older jazz-tools");
+        } else {
+          await expect(failure).rejects.not.toThrow("older jazz-tools");
+        }
+        expect(await readFile(join(lockDir, name), "utf8")).toBe(ownerText);
         expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
       }),
     );
@@ -1407,7 +1564,7 @@ describe("cli migrations", () => {
       if (result.status === "generated") {
         expect(result.fromHash).toBe(baseline.hash);
         expect(await readFile(result.filePath, "utf8")).toContain(
-          '"notes": s.add.string({ default: null }),',
+          '"notes": m.add.string({ default: null }),',
         );
       }
       fetchMock.mockClear();
@@ -1445,7 +1602,7 @@ describe("cli migrations", () => {
         throw new Error("Expected createMigration() to return a migration file path.");
       }
       const generated = await readFile(filePath, "utf8");
-      expect(generated).toContain('"notes": s.add.string({ default: null }),');
+      expect(generated).toContain('"notes": m.add.string({ default: null }),');
       const snapshotFiles = (await readdir(snapshotsDir))
         .filter((name) => name.endsWith(".json"))
         .sort();
@@ -1678,8 +1835,8 @@ describe("cli migrations", () => {
     }
 
     const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"addedValue": s.add.bigint({ default: null }),');
-    expect(generated).toContain('"removedValue": s.drop.bigint({ backwardsDefault: null }),');
+    expect(generated).toContain('"addedValue": m.add.bigint({ default: null }),');
+    expect(generated).toContain('"removedValue": m.drop.bigint({ backwardsDefault: null }),');
     expect(generated).toContain('"value": s.bigint().merge("counter"),');
     await typecheckGeneratedMigration(filePath);
   }, 30_000);
@@ -1798,10 +1955,10 @@ describe("cli migrations", () => {
     }
     const generated = await readFile(filePath, "utf8");
     expect(filePath).toContain(`-unnamed-${fromShortHash}-`);
-    expect(generated).toContain("s.defineMigration");
+    expect(generated).toContain("m.defineMigration");
     expect(generated).toContain(`fromHash: "${fromShortHash}"`);
     expect(generated).toContain("migrate: {");
-    expect(generated).toContain('"notes": s.add.string({ default: null }),');
+    expect(generated).toContain('"notes": m.add.string({ default: null }),');
     const snapshotFiles = (await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"));
     expect(snapshotFiles).toHaveLength(2);
     expect(
@@ -1871,7 +2028,7 @@ describe("cli migrations", () => {
     }
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain('"todos": {');
-    expect(generated).toContain('"notes": s.add.string({ default: null }),');
+    expect(generated).toContain('"notes": m.add.string({ default: null }),');
     expect(generated).toContain("createTables: {");
     expect(generated).toContain('"users": true,');
     expect(generated).toContain("dropTables: {");
@@ -1923,7 +2080,7 @@ describe("cli migrations", () => {
 
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain("renameTables: {");
-    expect(generated).toContain('people: s.renameTableFrom("users"),');
+    expect(generated).toContain('people: m.renameTableFrom("users"),');
     expect(generated).toContain("from: {");
     expect(generated).toContain('"users": s.table({');
     expect(generated).toContain("to: {");
@@ -1982,8 +2139,8 @@ describe("cli migrations", () => {
 
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain("renameTables: {");
-    expect(generated).toContain('companies: s.renameTableFrom("orgs"),');
-    expect(generated).toContain('people: s.renameTableFrom("users"),');
+    expect(generated).toContain('companies: m.renameTableFrom("orgs"),');
+    expect(generated).toContain('people: m.renameTableFrom("users"),');
     expect(generated).not.toContain("createTables: {");
     expect(generated).not.toContain("dropTables: {");
     expect(generated).toContain('"orgs": s.table({');
@@ -2231,12 +2388,12 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
         ? `${toColumn}: s.string(),\n      title: s.string(),`
         : `title: s.string(),\n      ${toColumn}: s.string(),`;
       return `
-import { schema as s } from ${JSON.stringify(indexPath)};
+import { schema as s, migration as m } from ${JSON.stringify(indexPath)};
 
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     todos: {
-      ${toColumn}: s.renameFrom(${JSON.stringify(fromColumn)}),
+      ${toColumn}: m.renameFrom(${JSON.stringify(fromColumn)}),
     },
   },
   fromHash: ${JSON.stringify(fromHash)},
@@ -2317,14 +2474,26 @@ export default s.defineMigration({
     expect(logs.some((line) => line.toLowerCase().includes("not connected"))).toBe(false);
     expect(logs.some((line) => line.includes("Deployed schema"))).toBe(true);
 
-    // A replay is idempotent: already-connected edges are not published twice.
-    await deploy({
-      appId: APP_ID,
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      schemaDir: root,
-      migrationsDir,
-    });
+    // A replay is idempotent: already-connected edges are reported as skipped.
+    const { logs: replayLogs } = await captureConsoleLogs(() =>
+      deploy({
+        appId: APP_ID,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir,
+      }),
+    );
+    for (const [from, to] of [
+      [headHash, middleHash],
+      [middleHash, releaseHash],
+    ]) {
+      expect(replayLogs).toContain(
+        `Migration ${from.slice(0, 12)} -> ${to.slice(0, 12)} is already connected; skipping migration publish.`,
+      );
+    }
+    expect(replayLogs.some((line) => /^(?:Published|Pushed) migration\b/i.test(line))).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/admin/deploy"))).toHaveLength(2);
     expect(pushedMigrations).toHaveLength(2);
   });
 

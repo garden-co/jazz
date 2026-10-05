@@ -5,6 +5,12 @@ members = [
   "crates/idb-tree",
   "crates/groove",
   "crates/jazz",
+  "crates/jazz/layers/db",
+  "crates/jazz/layers/engine",
+  "crates/jazz/layers/model",
+  "crates/jazz/layers/node",
+  "crates/jazz/layers/protocol",
+  "crates/jazz/layers/types",
   "crates/jazz-compression",
   "crates/jazz-native-transport",
   "crates/jazz-native-relay",
@@ -24,12 +30,10 @@ members = [
   # gates until they are rebuilt around the new server boundary.
   # "examples/todo-server-rs",
   # "examples/docs/todo-server-rs",
-  "examples/todo-client-localfirst-ts/benchmarks",
+  "examples/stage-plan/benchmarks",
+  "examples/band-book/benchmarks",
   "examples/permissioned-resources/benchmarks",
-  "examples/policy-scoped-documents/benchmarks",
   "examples/big-label/benchmarks",
-  "examples/chat-react/benchmarks",
-  "examples/auth-simple-chat/benchmarks",
   "examples/epic-drop/benchmarks",
   "examples/band-chat/benchmarks",
   "examples/music-agent/benchmarks",
@@ -38,7 +42,6 @@ members = [
   "examples/poster-shop/benchmarks",
   "examples/jamazon-warehouse/benchmarks",
   "examples/wequencer/benchmarks",
-  "examples/benchmarks/w1",
   "dev/benchmarks/storage/bench-core",
 ]
 exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs", "vendor/ruzstd"]
@@ -46,6 +49,12 @@ exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs", "vendor/ru
 [workspace.dependencies]
 groove = { path = "crates/groove", default-features = false }
 jazz = { path = "crates/jazz", default-features = false }
+jazz-db = { path = "crates/jazz/layers/db", default-features = false }
+jazz-engine = { path = "crates/jazz/layers/engine", default-features = false }
+jazz-model = { path = "crates/jazz/layers/model", default-features = false }
+jazz-node = { path = "crates/jazz/layers/node", default-features = false }
+jazz-protocol = { path = "crates/jazz/layers/protocol", default-features = false }
+jazz-types = { path = "crates/jazz/layers/types", default-features = false }
 jazz-compression = { path = "crates/jazz-compression", default-features = false }
 jazz-otel = { path = "crates/jazz-otel" }
 jazz-storage-rocksdb = { path = "crates/jazz-storage-rocksdb" }
@@ -69,6 +78,19 @@ debug = false
 [profile.debugging]
 inherits = "dev"
 debug = true
+
+# The Linux jazz-tools server binary keeps line tables for Jazz's own crates
+# so heap profiles, CPU profiles and panics resolve to file:line in production. Everything else
+# (optimization, codegen units) matches `release`; other release artifacts
+# (NAPI, WASM) stay without debug info.
+[profile.release-server]
+inherits = "release"
+debug = "line-tables-only"
+
+# Dependencies, including bundled C/C++ such as RocksDB (cc-rs turns any
+# debug level into full `-g`), keep only their symbol names.
+[profile.release-server.package."*"]
+debug = false
 
 [profile.perf]
 inherits = "release"

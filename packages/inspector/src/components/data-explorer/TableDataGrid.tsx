@@ -58,6 +58,12 @@ const NULL_CELL_MARKER = "<null>";
 function formatCellValue(value: unknown): string {
   if (value === null) return NULL_CELL_MARKER;
   if (value === undefined) return "";
+  if (value instanceof Uint8Array) {
+    const preview = Array.from(value.subarray(0, 16), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join(" ");
+    return `${value.byteLength.toLocaleString()} bytes${preview ? ` · ${preview}` : ""}${value.byteLength > 16 ? " …" : ""}`;
+  }
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -394,6 +400,19 @@ function getChangedCellIds(
   const changedCellIds: string[] = [];
 
   for (const column of gridColumns) {
+    const previousBytes = previousRow[column.accessorKey];
+    const nextBytes = nextRow[column.accessorKey];
+    // A change outside the displayed prefix must still trigger the cell pulse.
+    if (previousBytes instanceof Uint8Array && nextBytes instanceof Uint8Array) {
+      if (
+        previousBytes !== nextBytes &&
+        (previousBytes.length !== nextBytes.length ||
+          previousBytes.some((byte, index) => byte !== nextBytes[index]))
+      ) {
+        changedCellIds.push(column.id);
+      }
+      continue;
+    }
     const previousValue = formatCellValue(previousRow[column.accessorKey]);
     const nextValue = formatCellValue(nextRow[column.accessorKey]);
     if (previousValue !== nextValue) {

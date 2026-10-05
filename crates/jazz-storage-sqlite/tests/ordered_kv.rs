@@ -7,9 +7,9 @@ use groove::schema::{
 };
 use groove::storage::{
     Error, LayoutStorage, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest,
-    StorageLayout, WriteManyOutcome, WriteOperation, collect_scan,
+    StorageCodecProfile, StorageLayout, WriteManyOutcome, WriteOperation, collect_scan,
 };
-use jazz_storage_sqlite::SqliteStorage;
+use jazz_storage_sqlite::{Durability, SqliteStorage};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -970,5 +970,61 @@ fn multi_page_scans_and_borrowed_batches_match_the_memory_oracle() {
                 .await,
             WriteManyOutcome::Uncommitted(Error::ColumnFamilyNotFound(name)) if name == "missing"
         ));
+    });
+}
+
+#[test]
+fn reopen_with_added_family_keeps_caller_selected_codec_profile() {
+    // Regression for the SQLite twin of #3339: `reopen` used to drop a
+    // non-default codec profile, so adding a column family failed the
+    // pinned-profile check.
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jazz.sqlite");
+        let profile = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs(["jazz.example-opaque.v1"])
+            .unwrap();
+        let storage = SqliteStorage::open_with_durability_and_codec_profile(
+            &path,
+            &["records"],
+            Durability::WalNoSync,
+            &profile,
+        )
+        .unwrap();
+        storage
+            .set("records".into(), b"key".to_vec(), b"value".to_vec())
+            .await
+            .unwrap();
+
+        let reopened = storage
+            .reopen(vec!["records".to_owned(), "extra".to_owned()])
+            .await
+            .expect("reopen with an added family keeps the pinned codec profile");
+        reopened
+            .set("extra".into(), b"key".to_vec(), b"more".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .get("records".into(), b"key".to_vec())
+                .await
+                .unwrap(),
+            Some(b"value".to_vec())
+        );
+        drop(reopened);
+
+        // The store still requires the caller's profile after the reopen.
+        assert!(SqliteStorage::open(&path, &["records", "extra"]).is_err());
+        let again = SqliteStorage::open_with_durability_and_codec_profile(
+            &path,
+            &["records", "extra"],
+            Durability::WalNoSync,
+            &profile,
+        )
+        .unwrap();
+        assert_eq!(
+            again.get("extra".into(), b"key".to_vec()).await.unwrap(),
+            Some(b"more".to_vec())
+        );
     });
 }

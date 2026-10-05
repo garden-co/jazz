@@ -48,6 +48,7 @@ use thiserror::Error;
 
 mod aggregate;
 mod compilation_cache;
+mod counted_map;
 mod evaluation_memo;
 pub(crate) mod evaluation_session;
 mod join;
@@ -60,6 +61,7 @@ mod terminal;
 mod typed_template;
 
 use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_aggregate_expr};
+use counted_map::CountedMap;
 use evaluation_memo::EvaluationMemo;
 use join::{
     AntiJoinState, ArrangementState, JoinInput, JoinState, SemiJoinState, touched_join_keys,
@@ -187,6 +189,12 @@ pub struct IvmRuntime {
     /// `poll_incremental` temporarily owns its queue outside the shared slot.
     /// Lifecycle reclamation must wait until that queue is visible again.
     pending_incremental_polling: bool,
+    /// The most recent durable wake bridge a runtime owner supplied, and the
+    /// cached fan-out waker for the latest non-owner poller (see
+    /// `poll_incremental`). A suspended cold evaluation keeps only its latest
+    /// poller's waker, so every poll must still reach this owner.
+    owner_progress_waker: Option<std::task::Waker>,
+    owner_fanout_waker: Option<(std::task::Waker, std::task::Waker)>,
     /// A lifecycle operation released retainers while queued work may still
     /// reference the released graph slice.
     ephemeral_graph_gc_pending: bool,
@@ -221,6 +229,9 @@ pub struct IvmRuntime {
     /// expensive context-independent arrangements.
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
+    /// Keys of retained hydration entries grouped by producer node. Staged
+    /// tick frames are deliberately not represented here.
+    eval_memo_keys_by_node: HashMap<NodeId, HashSet<EvalMemoKey>>,
     /// Input-owned memoization for pure node evaluation results. Entries are
     /// keyed by node/scope/context inputs and validated against per-input
     /// frontier counters before reuse; operator state remains owned separately.
@@ -248,6 +259,48 @@ pub struct IvmRuntime {
 }
 
 impl IvmRuntime {
+    /// Insert one retained hydration memo while keeping its node index and
+    /// byte budget synchronized. Tick-keyed deltas remain in staged frames.
+    fn insert_retained_eval_memo(&mut self, key: EvalMemoKey, entry: EvalMemoEntry) {
+        debug_assert!(key.tick_epoch.is_none());
+        let payload_bytes = entry.payload_bytes;
+        self.eval_memo_keys_by_node
+            .entry(key.node)
+            .or_default()
+            .insert(key.clone());
+        if let Some(previous) = self.eval_memo.insert(key, entry) {
+            self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(previous.payload_bytes);
+        }
+        self.eval_memo_bytes = self.eval_memo_bytes.saturating_add(payload_bytes);
+    }
+
+    fn remove_retained_eval_memo(&mut self, key: &EvalMemoKey) {
+        debug_assert!(key.tick_epoch.is_none());
+        if let Some(entry) = self.eval_memo.remove(key) {
+            self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
+        }
+        if let Some(keys) = self.eval_memo_keys_by_node.get_mut(&key.node) {
+            keys.remove(key);
+            if keys.is_empty() {
+                self.eval_memo_keys_by_node.remove(&key.node);
+            }
+        }
+    }
+
+    fn remove_retained_eval_memos_for_nodes(&mut self, nodes: &HashSet<NodeId>) {
+        for node in nodes {
+            if let Some(keys) = self.eval_memo_keys_by_node.remove(node) {
+                for key in keys {
+                    debug_assert!(key.tick_epoch.is_none());
+                    if let Some(entry) = self.eval_memo.remove(&key) {
+                        self.eval_memo_bytes =
+                            self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn new(schema: DatabaseSchema) -> Result<Self, IvmRuntimeError> {
         let table_storage_descriptors = schema
             .tables
@@ -291,12 +344,15 @@ impl IvmRuntime {
             subscriptions_by_output_node: HashMap::default(),
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
             pending_incremental_polling: false,
+            owner_progress_waker: None,
+            owner_fanout_waker: None,
             ephemeral_graph_gc_pending: false,
             gc_candidates: HashSet::default(),
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),
             arrangement_keys_by_input: HashMap::default(),
             eval_memo: EvaluationMemo::default(),
+            eval_memo_keys_by_node: HashMap::default(),
             table_frontiers: HashMap::default(),
             binding_frontiers: HashMap::default(),
             memo_use_clock: 0,
@@ -440,6 +496,17 @@ impl IvmRuntime {
     }
 }
 
+/// Freezes a batch output buffer whose rows are handed out as slices. Each retained slice pins
+/// the whole allocation, so a buffer left mostly unused by an overestimate or by doubling growth
+/// is copied down to its length first.
+fn freeze_batch_buffer(buffer: BytesMut) -> Bytes {
+    if buffer.capacity() - buffer.len() > buffer.len() / 2 {
+        Bytes::copy_from_slice(&buffer)
+    } else {
+        buffer.freeze()
+    }
+}
+
 mod compilation;
 mod graph_lifecycle;
 mod runtime_tick;
@@ -515,8 +582,6 @@ pub enum IvmRuntimeError {
     PersistRecordMismatch,
     #[error("binding sources can only be evaluated through prepared shapes")]
     BindingSourceRequiresPrepare,
-    #[error("physical root values are only supported for first-result subscriptions")]
-    PhysicalRootValuesRequireFirstResult,
     #[error("multisink subscription must have at least one sink")]
     EmptyMultisinkSubscription,
     #[error("multisink sink already exists: {0}")]
@@ -654,5 +719,13 @@ pub enum IvmRuntimeError {
     UnsupportedOperator,
 }
 
+/// Arrangement folds on this thread that had to copy a shared join index.
+#[cfg(test)]
+pub(crate) fn shared_arrangement_index_folds() -> usize {
+    join::shared_index_folds()
+}
+
+#[cfg(test)]
+mod retained_gc_tests;
 #[cfg(test)]
 mod tests;

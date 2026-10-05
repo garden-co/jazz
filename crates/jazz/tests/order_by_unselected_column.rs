@@ -42,7 +42,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db() -> Db<TestStorage> {
+fn open_db() -> Db {
     let schema = schema();
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -76,7 +76,7 @@ fn task_cells(title: &str, rank: i32) -> BTreeMap<String, Value> {
 
 /// Alice's four tasks, inserted so that row-id (insertion) order differs from
 /// rank order: row-id order is c, a, d, b; rank order is a, b, c, d.
-fn seeded_db() -> Db<TestStorage> {
+fn seeded_db() -> Db {
     let db = open_db();
     for (byte, title, rank) in [(1u8, "c", 3), (2, "a", 1), (3, "d", 4), (4, "b", 2)] {
         block_on(db.insert(
@@ -122,7 +122,7 @@ fn titles(rows: impl IntoIterator<Item = CurrentRow>) -> Vec<String> {
         .collect()
 }
 
-fn read_titles(db: &Db<TestStorage>, query: &Query) -> Vec<String> {
+fn read_titles(db: &Db, query: &Query) -> Vec<String> {
     let prepared = db.prepare_query(query).expect("prepare query");
     titles(block_on(db.all(&prepared, local())).expect("read"))
 }

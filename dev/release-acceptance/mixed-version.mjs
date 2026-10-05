@@ -1,0 +1,1000 @@
+#!/usr/bin/env node
+// Mixed-version wire acceptance: runs real `jazz-tools server` binaries and
+// real Node clients from two installed package versions against each other.
+//
+//   node dev/release-acceptance/mixed-version.mjs <config.json>
+//
+// config.json (keep outside the repository):
+//   {
+//     "output": "/abs/new/output-dir",
+//     "versions": {
+//       "old": { "project": "/abs/project-with-jazz-tools@current", "cli": "/abs/jazz-tools-binary" },
+//       "new": { "project": "/abs/project-with-jazz-tools@candidate", "cli": "/abs/jazz-tools-binary" }
+//     },
+//     "only": ["cell-name", ...],  // optional; also runs opt-in cells named here
+//     "skipLarge": false,          // optional: skip the 800KB value checks
+//     "legacyEdgeTier": false,     // old clients still accept the "edge" tier
+//     "serverEdges": false,        // run the retired server-edge cells
+//     "oversized": null,           // {count,size,batch,readerMinutes}: oversized first sync
+//     "knownFailures": {},         // {"cell:check": "#NNNN"}: recorded as known-fail
+//     "deadlineMinutes": 30        // whole-run watchdog
+//   }
+//
+// Each `project` is an external npm project with `jazz-tools` (and its native
+// payload) installed; each `cli` is the matching native `jazz-tools` binary.
+// Every cell uses a fresh server data dir and fresh client stores. Results go
+// to <output>/results.json and one JSON line per check on stdout.
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+  openSync,
+  closeSync,
+  unlinkSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
+import { createRequire } from "node:module";
+import { createInterface } from "node:readline";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
+import { createProcessOwner } from "./process-owner.mjs";
+
+const ownDir = dirname(fileURLToPath(import.meta.url));
+const input = JSON.parse(readFileSync(process.argv[2], "utf8"));
+// A misspelled key must fail loudly rather than silently skip its cells.
+const CONFIG_KEYS = new Set([
+  "output",
+  "versions",
+  "only",
+  "skipLarge",
+  "largeSizes",
+  "legacyEdgeTier",
+  "serverEdges",
+  "oversized",
+  "knownFailures",
+  "deadlineMinutes",
+]);
+for (const key of Object.keys(input))
+  assert(CONFIG_KEYS.has(key), `unknown config key ${JSON.stringify(key)}`);
+const knownFailures = input.knownFailures ?? {};
+const output = resolve(input.output);
+assert(!existsSync(output), "output must be a new directory");
+mkdirSync(output, { recursive: true, mode: 0o700 });
+const V = {};
+for (const key of ["old", "new"]) {
+  const v = input.versions?.[key];
+  assert(v?.project && v?.cli, `versions.${key}.project and .cli are required`);
+  const project = realpathSync(v.project);
+  const require = createRequire(join(project, "package.json"));
+  const pkg = JSON.parse(
+    readFileSync(join(project, "node_modules", "jazz-tools", "package.json"), "utf8"),
+  );
+  V[key] = {
+    key,
+    project,
+    cli: realpathSync(v.cli),
+    cliJs: join(dirname(require.resolve("jazz-tools")), "cli.js"),
+    version: pkg.version,
+  };
+}
+
+const processes = createProcessOwner();
+const results = [];
+function record(cell, check, status, detail = {}) {
+  const entry = { cell, check, status, ...detail };
+  results.push(entry);
+  console.log(JSON.stringify(entry));
+}
+
+const FIXTURE_SCHEMA = `import {schema as s} from 'jazz-tools';
+export const app=s.defineApp({docs:s.table({label:s.string(),body:s.string(),author:s.string()},{})});
+export default app;
+`;
+const FIXTURE_PERMISSIONS = `import {schema as s} from 'jazz-tools';
+import {app} from './schema';
+export default s.definePermissions(app,({policy})=>{policy.docs.allowRead.always();policy.docs.allowInsert.always();policy.docs.allowUpdate.always();policy.docs.allowDelete.always();});
+`;
+
+function launch(dir, command, args, log, env = {}, cwd) {
+  const fd = openSync(join(dir, log), "a", 0o600);
+  const child = processes.spawn(command, args, {
+    cwd,
+    env: { ...process.env, ...env },
+    stdio: ["ignore", fd, fd],
+  });
+  closeSync(fd);
+  return child;
+}
+
+async function run(dir, command, args, log, env, cwd, ms = 120000) {
+  const child = launch(dir, command, args, log, env, cwd);
+  const timer = setTimeout(() => void processes.stop(child), ms);
+  const [code, signal] = await once(child, "exit");
+  clearTimeout(timer);
+  return { code, signal, log: readFileSync(join(dir, log), "utf8") };
+}
+
+class Server {
+  constructor(cell, dir, ctx) {
+    Object.assign(this, { cell, dir, ctx });
+    this.dataDir = join(dir, "server-data");
+    this.port = 0;
+  }
+  async start(version, { upstreamUrl, log = "server.log" } = {}) {
+    const portPath = join(this.dir, "port");
+    if (existsSync(portPath)) unlinkSync(portPath);
+    this.version = version;
+    const args = [
+      "server",
+      this.ctx.appId,
+      "--port",
+      String(this.port),
+      "--data-dir",
+      this.dataDir,
+      "--bound-port-file",
+      portPath,
+      "--allow-local-first-auth",
+    ];
+    if (upstreamUrl) args.push("--upstream-url", upstreamUrl);
+    this.child = launch(this.dir, version.cli, args, log, {
+      NODE_ENV: "production",
+      JAZZ_ADMIN_SECRET: this.ctx.adminSecret,
+      JAZZ_BACKEND_SECRET: this.ctx.backendSecret,
+    });
+    for (let i = 0; i < 400; i++) {
+      if (this.child.exitCode !== null)
+        throw new Error(
+          `${version.key} server exited (${this.child.exitCode}): ${readFileSync(join(this.dir, log), "utf8").slice(-2000)}`,
+        );
+      if (existsSync(portPath)) {
+        const port = Number(readFileSync(portPath, "utf8").trim());
+        if (port) {
+          this.url = `http://127.0.0.1:${port}`;
+          try {
+            const r = await fetch(`${this.url}/health`, {
+              signal: AbortSignal.timeout(1000),
+            });
+            if (r.status < 500) {
+              this.port = port; // restarts reuse the port so clients reconnect in place
+              return this.url;
+            }
+          } catch {}
+        }
+      }
+      await delay(50);
+    }
+    throw new Error("server readiness timeout");
+  }
+  async stop() {
+    if (this.child) await processes.stop(this.child);
+    this.child = undefined;
+  }
+}
+
+class Client {
+  constructor(cell, dir, version, name) {
+    Object.assign(this, { cell, version, name, next: 0, pending: new Map() });
+    const fd = openSync(join(dir, `client-${name}.stderr.log`), "a", 0o600);
+    this.child = processes.spawn(
+      process.execPath,
+      [join(ownDir, "mixed-version-client.mjs"), version.project, join(dir, `client-${name}`)],
+      { stdio: ["pipe", "pipe", fd] },
+    );
+    closeSync(fd);
+    createInterface({ input: this.child.stdout }).on("line", (line) => {
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        this.stdoutLog ??= openSync(join(dir, `client-${name}.stdout.log`), "a", 0o600);
+        writeFileSync(this.stdoutLog, `${line}\n`);
+        return; // library logging on stdout
+      }
+      this.pending.get(msg.rpc)?.(msg);
+      this.pending.delete(msg.rpc);
+    });
+    this.child.on("exit", () => {
+      this.exited = true;
+      for (const done of this.pending.values()) done({ ok: false, error: `client ${name} exited` });
+      this.pending.clear();
+    });
+  }
+  call(op, args = {}) {
+    const rpc = ++this.next;
+    if (this.exited)
+      return Promise.reject(
+        new Error(`[${this.version.key} client ${this.name}] ${op}: client exited`),
+      );
+    return new Promise((resolve, reject) => {
+      this.pending.set(rpc, (msg) =>
+        msg.ok
+          ? resolve(msg.value)
+          : reject(new Error(`[${this.version.key} client ${this.name}] ${op}: ${msg.error}`)),
+      );
+      this.child.stdin.write(`${JSON.stringify({ rpc, op, ...args })}\n`);
+    });
+  }
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      await this.call("close", { ms: 10000 });
+    } catch {}
+    this.child.stdin.end();
+    await processes.stop(this.child);
+  }
+}
+
+// Runs `fn` as one named check; failures are recorded and do not abort the cell
+// unless `fatal` is set.
+async function check(cell, name, fn, { fatal = false } = {}) {
+  const started = Date.now();
+  try {
+    const detail = (await fn()) ?? {};
+    record(cell, name, "pass", { ms: Date.now() - started, ...detail });
+    return true;
+  } catch (error) {
+    const issue = knownFailures[`${cell}:${name}`];
+    record(cell, name, issue ? "known-fail" : "fail", {
+      ms: Date.now() - started,
+      ...(issue ? { issue } : {}),
+      error: String(error?.message ?? error).slice(0, 4000),
+    });
+    if (fatal) throw error;
+    return false;
+  }
+}
+
+async function deploy(cell, dir, server, deployer) {
+  const fixture = join(deployer.project, `mixed-version-fixture-${randomUUID()}`);
+  mkdirSync(fixture);
+  writeFileSync(join(fixture, "schema.ts"), FIXTURE_SCHEMA);
+  writeFileSync(join(fixture, "permissions.ts"), FIXTURE_PERMISSIONS);
+  const r = await run(
+    dir,
+    process.execPath,
+    [
+      deployer.cliJs,
+      "deploy",
+      server.ctx.appId,
+      "--schema-dir",
+      fixture,
+      "--server-url",
+      server.url,
+    ],
+    `deploy-${deployer.key}.log`,
+    { JAZZ_ADMIN_SECRET: server.ctx.adminSecret },
+    deployer.project,
+  ).finally(() => rmSync(fixture, { recursive: true, force: true }));
+  if (r.code !== 0)
+    throw new Error(`deploy with ${deployer.key} CLI failed: ${r.log.slice(-2000)}`);
+}
+
+function newCell(name) {
+  const dir = join(output, name);
+  mkdirSync(dir, { mode: 0o700 });
+  const ctx = {
+    appId: randomUUID(),
+    adminSecret: randomUUID(),
+    backendSecret: randomUUID(),
+  };
+  return { name, dir, ctx };
+}
+
+/**
+ * Core sync matrix: server `sv`, clients A (`va`) and B (`vb`). Covers schema
+ * deploy, account registration, writes at global tier, remote point reads,
+ * subscriptions in both directions (insert/update/delete), a large chunked
+ * value, disconnect + offline write + reconnect, and a server restart.
+ */
+async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
+  const cell = newCell(name);
+  const server = new Server(name, cell.dir, cell.ctx);
+  const clients = [];
+  try {
+    await check(
+      name,
+      "server-start",
+      async () => ({ url: await server.start(sv), server: sv.version }),
+      { fatal: true },
+    );
+    const deployed = await check(name, `deploy-with-${deployer.key}-cli`, () =>
+      deploy(name, cell.dir, server, deployer),
+    );
+    if (!deployed && deployer !== sv)
+      await check(
+        name,
+        `deploy-with-${sv.key}-cli-fallback`,
+        () => deploy(name, cell.dir, server, sv),
+        { fatal: true },
+      );
+    else if (!deployed) throw new Error("deploy failed");
+
+    const A = new Client(name, cell.dir, va, "a");
+    const B = new Client(name, cell.dir, vb, "b");
+    clients.push(A, B);
+    const open = (c) =>
+      c.call("open", {
+        name: c.name,
+        appId: cell.ctx.appId,
+        serverUrl: server.url,
+        ms: 30000,
+      });
+    await check(name, `open-a-${va.key}`, async () => open(A), { fatal: true });
+    await check(name, `open-b-${vb.key}`, async () => open(B), { fatal: true });
+    await check(name, "subscribe-both", async () => {
+      await A.call("subscribe", { sub: "all", tier: "global" });
+      await B.call("subscribe", { sub: "all", tier: "global" });
+    });
+
+    const ids = {};
+    await check(name, "a-insert-global->b-read+sub", async () => {
+      ids.r1 = (
+        await A.call("insert", {
+          values: { label: "r1", body: "from-a", author: va.key },
+          wait: "global",
+        })
+      ).id;
+      const row = await B.call("one", { id: ids.r1, tier: "global" });
+      assert.equal(row?.body, "from-a");
+      return {
+        sub: await B.call("expectSub", {
+          sub: "all",
+          id: ids.r1,
+          body: "from-a",
+        }),
+      };
+    });
+    await check(name, "b-update-global->a-read+sub", async () => {
+      await B.call("update", {
+        id: ids.r1,
+        values: { body: "edited-by-b" },
+        wait: "global",
+      });
+      const row = await A.call("one", { id: ids.r1, tier: "global" });
+      assert.equal(row?.body, "edited-by-b");
+      return {
+        sub: await A.call("expectSub", {
+          sub: "all",
+          id: ids.r1,
+          body: "edited-by-b",
+        }),
+      };
+    });
+    await check(name, "b-insert->a-delete->b-sub-sees-removal", async () => {
+      ids.r2 = (
+        await B.call("insert", {
+          values: { label: "r2", body: "to-delete", author: vb.key },
+          wait: "global",
+        })
+      ).id;
+      await A.call("expectSub", { sub: "all", id: ids.r2, body: "to-delete" });
+      await A.call("delete", { id: ids.r2, wait: "global" });
+      await B.call("expectSub", { sub: "all", id: ids.r2, absent: true });
+      assert.equal(await B.call("one", { id: ids.r2, tier: "global" }), null);
+      assert.equal((await B.call("one", { id: ids.r1, tier: "global" }))?.body, "edited-by-b");
+    });
+    if (!input.skipLarge)
+      await check(name, "a-large-800KB-value->b", async () => {
+        const body = "L".repeat(800_000);
+        ids.big = (
+          await A.call("insert", {
+            values: { label: "big", body, author: va.key },
+            wait: "global",
+            ms: 60000,
+          })
+        ).id;
+        const row = await B.call("one", {
+          id: ids.big,
+          tier: "global",
+          ms: 60000,
+        });
+        assert.equal(row?.body?.length, body.length);
+        assert.equal(row.body, body);
+      });
+    if (!input.skipLarge)
+      await check(name, "b-large-800KB-value->a", async () => {
+        const body = "M".repeat(800_000);
+        const id = (
+          await B.call("insert", {
+            values: { label: "big2", body, author: vb.key },
+            wait: "global",
+            ms: 60000,
+          })
+        ).id;
+        const row = await A.call("one", { id, tier: "global", ms: 60000 });
+        assert.equal(row?.body, body);
+      });
+    for (const [c, v] of [
+      [A, va],
+      [B, vb],
+    ]) {
+      if (v.key !== "old" || !legacyEdgeTier) continue;
+      // Pre-alpha.57 apps may still use the retired "edge" durability name.
+      await check(name, `${c.name}-legacy-edge-tier-write+read`, async () => {
+        const id = (
+          await c.call("insert", {
+            values: { label: "edge", body: "edge-tier", author: v.key },
+            wait: "edge",
+          })
+        ).id;
+        const other = c === A ? B : A;
+        await other.call("expectSub", { sub: "all", id, body: "edge-tier" });
+        assert.equal((await c.call("one", { id, tier: "edge" }))?.body, "edge-tier");
+      });
+    }
+    await check(name, "a-offline-write->reconnect->b-sees", async () => {
+      await A.call("disconnect");
+      ids.r3 = (
+        await A.call("insert", {
+          values: { label: "r3", body: "offline", author: va.key },
+          wait: "local",
+        })
+      ).id;
+      await delay(500);
+      assert.equal(await B.call("one", { id: ids.r3, tier: "global" }), null);
+      await A.call("reconnect");
+      await B.call("expectSub", { sub: "all", id: ids.r3, body: "offline" });
+      assert.equal((await B.call("one", { id: ids.r3, tier: "global" }))?.body, "offline");
+    });
+    await check(name, "b-offline-write->reconnect->a-sees", async () => {
+      await B.call("disconnect");
+      const id = (
+        await B.call("insert", {
+          values: { label: "r3b", body: "offline-b", author: vb.key },
+          wait: "local",
+        })
+      ).id;
+      await B.call("reconnect");
+      await A.call("expectSub", { sub: "all", id, body: "offline-b" });
+    });
+
+    const freshClient = async (cname, v, expectId) => {
+      const C = new Client(name, cell.dir, v, cname);
+      clients.push(C);
+      await C.call("open", {
+        name: cname,
+        appId: cell.ctx.appId,
+        serverUrl: server.url,
+        ms: 30000,
+      });
+      const point = await C.call("one", {
+        id: ids.r1,
+        tier: "global",
+        ms: 30000,
+      });
+      assert.equal(point?.body, "edited-by-b", "fresh client point read");
+      await C.call("subscribe", { sub: "all", tier: "global" });
+      await C.call("expectSub", { sub: "all", id: expectId, ms: 45000 });
+      await C.call("expectSub", { sub: "all", id: ids.r2, absent: true });
+      await C.close();
+      return { client: v.version };
+    };
+    await check(name, "fresh-client-before-restart", () => freshClient("c0", va, ids.r3));
+
+    // Server bounce (same version), or an in-place upgrade of the server binary
+    // on the same data dir and port: the rolling-deploy case.
+    const next = upgradeTo ?? sv;
+    const label = upgradeTo ? `server-upgrade-${sv.key}-to-${upgradeTo.key}` : "server-restart";
+    await check(name, label, async () => {
+      await server.stop();
+      await delay(300);
+      // Write while the server is down: must be delivered after it returns.
+      ids.r4 = (
+        await A.call("insert", {
+          values: { label: "r4", body: "while-down", author: va.key },
+          wait: "local",
+        })
+      ).id;
+      await server.start(next, { log: `server-${next.key}-restart.log` });
+      return { server: next.version };
+    });
+    await check(name, `${label}:pending-write-delivered`, async () => {
+      await B.call("expectSub", {
+        sub: "all",
+        id: ids.r4,
+        body: "while-down",
+        ms: 45000,
+      });
+      assert.equal(
+        (await B.call("one", { id: ids.r4, tier: "global", ms: 30000 }))?.body,
+        "while-down",
+      );
+    });
+    await check(name, `${label}:history-readable`, async () => {
+      assert.equal(
+        (await A.call("one", { id: ids.r1, tier: "global", ms: 30000 }))?.body,
+        "edited-by-b",
+      );
+      assert.equal(await A.call("one", { id: ids.r2, tier: "global" }), null);
+      if (ids.big)
+        assert.equal(
+          (await A.call("one", { id: ids.big, tier: "global", ms: 60000 }))?.label,
+          "big",
+        );
+    });
+    await check(name, `${label}:b-write->a-sub`, async () => {
+      const id = (
+        await B.call("insert", {
+          values: { label: "r5", body: "after-restart", author: vb.key },
+          wait: "global",
+          ms: 30000,
+        })
+      ).id;
+      await A.call("expectSub", { sub: "all", id, body: "after-restart" });
+    });
+    await check(name, "fresh-client-after-restart", () => freshClient("c", vb, ids.r4));
+  } catch (error) {
+    record(name, "cell-aborted", "fail", {
+      error: String(error?.message ?? error).slice(0, 4000),
+    });
+  } finally {
+    for (const c of clients) await c.close();
+    await server.stop();
+  }
+}
+
+/**
+ * Large values vs. fresh subscribers: a client that subscribes after a large
+ * row already exists must receive its first result. Isolates the size
+ * threshold and whether a server restart changes the outcome.
+ */
+async function largeValueCell(name, sv, writer, reader) {
+  const cell = newCell(name);
+  const server = new Server(name, cell.dir, cell.ctx);
+  const clients = [];
+  try {
+    await check(
+      name,
+      "server-start",
+      async () => ({ url: await server.start(sv), server: sv.version }),
+      { fatal: true },
+    );
+    await check(name, "deploy", () => deploy(name, cell.dir, server, sv), {
+      fatal: true,
+    });
+    const open = async (v, cname) => {
+      const c = new Client(name, cell.dir, v, cname);
+      clients.push(c);
+      await c.call("open", {
+        name: cname,
+        appId: cell.ctx.appId,
+        serverUrl: server.url,
+        ms: 30000,
+      });
+      return c;
+    };
+    const W = await open(writer, "w");
+    const sizes = input.largeSizes ?? [60_000, 70_000, 800_000];
+    const ids = [];
+    const probe = async (label, size, id) => {
+      await check(name, `${label}-${size}B`, async () => {
+        const R = await open(reader, `r-${label}-${size}`);
+        await R.call("subscribe", { sub: "all", tier: "global" });
+        await R.call("expectSub", { sub: "all", id, ms: 20000 });
+        await R.close();
+      });
+    };
+    for (const size of sizes) {
+      const id = (
+        await W.call("insert", {
+          values: {
+            label: `size-${size}`,
+            body: "Z".repeat(size),
+            author: writer.key,
+          },
+          wait: "global",
+          ms: 60000,
+        })
+      ).id;
+      ids.push([size, id]);
+      await probe("fresh-subscriber", size, id);
+    }
+    await check(name, "server-restart", async () => {
+      await server.stop();
+      await server.start(sv, { log: "server-restart.log" });
+    });
+    for (const [size, id] of ids) await probe("fresh-subscriber-after-restart", size, id);
+  } catch (error) {
+    record(name, "cell-aborted", "fail", {
+      error: String(error?.message ?? error).slice(0, 4000),
+    });
+  } finally {
+    for (const c of clients) await c.close();
+    await server.stop();
+  }
+}
+
+/**
+ * Exclusive transactions from a `cv` client against an `sv` server: reads and
+ * updates commit while their rows are unchanged and conflict once another
+ * client changed them. A new server rejects an old client's reads that match
+ * rows and its updates of existing rows; inserts without reads still commit.
+ */
+async function exclusiveCell(name, sv, cv) {
+  const cell = newCell(name);
+  const server = new Server(name, cell.dir, cell.ctx);
+  const clients = [];
+  try {
+    await check(
+      name,
+      "server-start",
+      async () => ({ url: await server.start(sv), server: sv.version }),
+      { fatal: true },
+    );
+    await check(name, "deploy", () => deploy(name, cell.dir, server, sv), { fatal: true });
+    const open = async (v, cname) => {
+      const c = new Client(name, cell.dir, v, cname);
+      clients.push(c);
+      await c.call("open", {
+        name: cname,
+        appId: cell.ctx.appId,
+        serverUrl: server.url,
+        ms: 30000,
+      });
+      return c;
+    };
+    const A = await open(cv, "a");
+    const B = await open(sv, "b");
+    const rows = [];
+    await check(
+      name,
+      "seed",
+      async () => {
+        for (const label of ["x0", "x1", "x2", "x3", "x4"])
+          rows.push(
+            (
+              await A.call("insert", {
+                values: { label, body: "seed", author: cv.key },
+                wait: "global",
+              })
+            ).id,
+          );
+      },
+      { fatal: true },
+    );
+    // Runs one exclusive transaction on A; `between` runs after its reads and
+    // writes, before it commits.
+    const exclusive = async (label, steps, expected, between) => {
+      await check(name, label, async () => {
+        await A.call("txBegin", { tx: label });
+        for (const [op, args] of steps) await A.call(op, { tx: label, ...args });
+        if (between) await between();
+        const result = await A.call("txCommit", { tx: label, ms: 30000 });
+        assert.deepEqual(result, expected);
+        return result;
+      });
+    };
+    const accepted = { outcome: "accepted" };
+    const conflict = { outcome: "rejected", code: "exclusive_conflict" };
+    const edit = (id) => async () => {
+      await B.call("one", { id, tier: "global" });
+      await B.call("update", { id, values: { body: "changed-by-b" }, wait: "global" });
+    };
+    // Only alpha.58 clients prove the rows their reads return (#3694). A new
+    // server rejects an old client's read that matches rows, and its update
+    // of a row in a table holding other rows: the old client records the
+    // update's read-policy check as an unproved read of the whole table.
+    const legacy = sv === V.new && cv === V.old;
+    await exclusive(
+      "read-by-id+update",
+      [
+        ["txReadById", { id: rows[0] }],
+        ["txUpdate", { id: rows[0], values: { body: "read-then-updated" } }],
+      ],
+      legacy ? conflict : accepted,
+    );
+    if (!legacy)
+      await check(name, "read-by-id+update:visible", async () => {
+        const row = await B.call("one", { id: rows[0], tier: "global" });
+        assert.equal(row?.body, "read-then-updated");
+      });
+    await exclusive(
+      "read-by-id+insert",
+      [
+        ["txReadById", { id: rows[1] }],
+        ["txInsert", { values: { label: "by-id", body: "saw", author: cv.key } }],
+      ],
+      legacy ? conflict : accepted,
+    );
+    await exclusive(
+      "blind-update",
+      [["txUpdate", { id: rows[1], values: { body: "blind" } }]],
+      legacy ? conflict : accepted,
+    );
+    await exclusive(
+      "blind-upsert-existing",
+      [["txUpsert", { id: rows[2], values: { body: "upserted" } }]],
+      legacy ? conflict : accepted,
+    );
+    await exclusive(
+      "matching-query+insert",
+      [
+        ["txAllByLabel", { label: "x0" }],
+        ["txInsert", { values: { label: "after-query", body: "saw", author: cv.key } }],
+      ],
+      legacy ? conflict : accepted,
+    );
+    await exclusive(
+      "insert-only",
+      [["txInsert", { values: { label: "insert-only", body: "new", author: cv.key } }]],
+      accepted,
+    );
+    await exclusive(
+      "stale-read-by-id-conflicts",
+      [
+        ["txReadById", { id: rows[3] }],
+        ["txInsert", { values: { label: "stale", body: "saw", author: cv.key } }],
+      ],
+      conflict,
+      edit(rows[3]),
+    );
+    await exclusive(
+      "stale-update-conflicts",
+      [["txUpdate", { id: rows[4], values: { body: "stale" } }]],
+      conflict,
+      edit(rows[4]),
+    );
+  } catch (error) {
+    record(name, "cell-aborted", "fail", {
+      error: String(error?.message ?? error).slice(0, 4000),
+    });
+  } finally {
+    for (const c of clients) await c.close();
+    await server.stop();
+  }
+}
+
+/**
+ * Oversized first sync (#3477/#3520): a fresh whole-table subscriber whose
+ * initial snapshot exceeds the 256 MiB routed payload limit. `writer` fills
+ * the table with settled rows of just-under-inline-limit bodies; then fresh
+ * readers of each version subscribe and must receive every row.
+ */
+async function oversizedCell(name, sv, writer, readers) {
+  const cell = newCell(name);
+  const server = new Server(name, cell.dir, cell.ctx);
+  const clients = [];
+  const count = input.oversized?.count ?? 4800;
+  const size = input.oversized?.size ?? 60_000;
+  const ms = (input.oversized?.readerMinutes ?? 15) * 60_000;
+  try {
+    await check(
+      name,
+      "server-start",
+      async () => ({ url: await server.start(sv), server: sv.version }),
+      { fatal: true },
+    );
+    await check(name, "deploy", () => deploy(name, cell.dir, server, sv), { fatal: true });
+    const open = async (v, cname) => {
+      const c = new Client(name, cell.dir, v, cname);
+      clients.push(c);
+      await c.call("open", {
+        name: cname,
+        appId: cell.ctx.appId,
+        serverUrl: server.url,
+        ms: 30000,
+      });
+      return c;
+    };
+    const W = await open(writer, "w");
+    await check(
+      name,
+      `${writer.key}-writer-bulk-${count}x${size}B-global`,
+      async () =>
+        W.call("bulkInsert", { count, size, batch: input.oversized?.batch ?? 20, ms: 60 * 60_000 }),
+      { fatal: true },
+    );
+    await W.close();
+    const probe = async (label) => {
+      for (const v of readers)
+        await check(name, `${label}-${v.key}-reader-gets-all-${count}`, async () => {
+          const R = await open(v, `r-${label}-${v.key}`);
+          await R.call("subscribe", { sub: "all", tier: "global" });
+          const got = await R.call("expectSubCount", { sub: "all", count, prefix: "bulk-", ms });
+          await R.close();
+          return got;
+        });
+    };
+    await probe("fresh-subscriber");
+    await check(name, "server-restart", async () => {
+      await server.stop();
+      await server.start(sv, { log: "server-restart.log" });
+    });
+    await probe("fresh-subscriber-after-restart");
+  } catch (error) {
+    record(name, "cell-aborted", "fail", { error: String(error?.message ?? error).slice(0, 4000) });
+  } finally {
+    for (const c of clients) await c.close();
+    await server.stop();
+  }
+}
+
+/** Legacy server-edge topologies. Edges are removed on the candidate. */
+async function edgeCells() {
+  {
+    const name = "edge-old-behind-new-core";
+    const cell = newCell(name);
+    const core = new Server(name, cell.dir, cell.ctx);
+    const edgeDir = join(cell.dir, "edge");
+    mkdirSync(edgeDir);
+    const edge = new Server(name, edgeDir, cell.ctx);
+    const clients = [];
+    try {
+      await check(name, "core-start", async () => ({ url: await core.start(V.new) }), {
+        fatal: true,
+      });
+      await check(name, "deploy", () => deploy(name, cell.dir, core, V.new), {
+        fatal: true,
+      });
+      // A retired edge must be refused explicitly by the new Core, not
+      // accepted or left hanging silently.
+      await check(name, "old-edge-rejected-explicitly-by-new-core", async () => {
+        let ready = false;
+        try {
+          await edge.start(V.old, { upstreamUrl: core.url, log: "edge.log" });
+          ready = true;
+        } catch {}
+        const edgeLog = existsSync(join(edgeDir, "edge.log"))
+          ? readFileSync(join(edgeDir, "edge.log"), "utf8")
+          : "";
+        const rejection = edgeLog
+          .split("\n")
+          .find((l) => /UnsupportedFeature|no longer supported/.test(l));
+        assert(!ready, "old edge became ready behind the new Core");
+        assert(rejection, "no explicit rejection in the edge log");
+        return { rejection: rejection.slice(0, 400) };
+      });
+    } catch (error) {
+      record(name, "cell-aborted", "fail", {
+        error: String(error?.message ?? error).slice(0, 4000),
+      });
+    } finally {
+      for (const c of clients) await c.close();
+      await edge.stop();
+      await core.stop();
+    }
+  }
+  {
+    const name = "edge-new-cli-refuses-upstream";
+    const cell = newCell(name);
+    const edge = new Server(name, cell.dir, cell.ctx);
+    await check(name, "new-cli-with-upstream-url-fails-explicitly", async () => {
+      try {
+        await edge.start(V.new, { upstreamUrl: "http://127.0.0.1:9" });
+      } catch (error) {
+        const message = String(error.message);
+        assert.match(message, /edge|upstream/i);
+        return { message: message.slice(0, 400) };
+      } finally {
+        await edge.stop();
+      }
+      throw new Error("candidate server accepted --upstream-url");
+    });
+  }
+}
+
+// Version-pair-specific behavior is opt-in so the harness fits any pair:
+//   legacyEdgeTier: old clients still accept the retired "edge" durability
+//     name (alpha.56 and earlier).
+//   serverEdges: the old CLI can run as a server edge (`--upstream-url`) and
+//     the new one has removed edges (alpha.56 -> alpha.57).
+//   oversized: { count, size, batch, readerMinutes } enables the heavy
+//     oversized first-sync cells (default 4800 x 60KB rows, up to 15 min each).
+const legacyEdgeTier = input.legacyEdgeTier === true;
+const OPTIONAL = {
+  edge: input.serverEdges === true,
+  "oversized-first-sync-new-server-old-writer": Boolean(input.oversized),
+  "oversized-first-sync-old-server-new-writer": Boolean(input.oversized),
+  "oversized-first-sync-new-server-new-only": Boolean(input.oversized),
+};
+
+const CELLS = {
+  "baseline-old-server-old-clients": () =>
+    syncCell("baseline-old-server-old-clients", V.old, V.old, V.old),
+  "candidate-new-server-new-clients": () =>
+    syncCell("candidate-new-server-new-clients", V.new, V.new, V.new),
+  "new-server-old+new-clients": () =>
+    syncCell("new-server-old+new-clients", V.new, V.old, V.new, {
+      deployer: V.old,
+    }),
+  "new-server-new+old-clients": () => syncCell("new-server-new+old-clients", V.new, V.new, V.old),
+  "old-server-new+old-clients": () =>
+    syncCell("old-server-new+old-clients", V.old, V.new, V.old, {
+      deployer: V.new,
+    }),
+  "old-server-old+new-clients": () => syncCell("old-server-old+new-clients", V.old, V.old, V.new),
+  "rolling-upgrade-old-to-new-server": () =>
+    syncCell("rolling-upgrade-old-to-new-server", V.old, V.old, V.new, {
+      upgradeTo: V.new,
+    }),
+  "rolling-upgrade-old-clients-only": () =>
+    syncCell("rolling-upgrade-old-clients-only", V.old, V.old, V.old, {
+      upgradeTo: V.new,
+    }),
+  "large-values-new-server-new-clients": () =>
+    largeValueCell("large-values-new-server-new-clients", V.new, V.new, V.new),
+  "large-values-new-server-old-writer-old-reader": () =>
+    largeValueCell("large-values-new-server-old-writer-old-reader", V.new, V.old, V.old),
+  "large-values-old-server-old-clients": () =>
+    largeValueCell("large-values-old-server-old-clients", V.old, V.old, V.old),
+  "exclusive-new-server-old-client": () =>
+    exclusiveCell("exclusive-new-server-old-client", V.new, V.old),
+  "exclusive-new-server-new-client": () =>
+    exclusiveCell("exclusive-new-server-new-client", V.new, V.new),
+  "exclusive-old-server-new-client": () =>
+    exclusiveCell("exclusive-old-server-new-client", V.old, V.new),
+  edge: edgeCells,
+  "oversized-first-sync-new-server-old-writer": () =>
+    oversizedCell("oversized-first-sync-new-server-old-writer", V.new, V.old, [V.old, V.new]),
+  "oversized-first-sync-old-server-new-writer": () =>
+    oversizedCell("oversized-first-sync-old-server-new-writer", V.old, V.new, [V.new, V.old]),
+  "oversized-first-sync-new-server-new-only": () =>
+    oversizedCell("oversized-first-sync-new-server-new-only", V.new, V.new, [V.new]),
+};
+
+function writeResults() {
+  writeFileSync(join(output, "results.json"), JSON.stringify(results, null, 2));
+  const count = (status) => results.filter((r) => r.status === status).length;
+  const summary = {
+    checks: results.length,
+    failed: count("fail"),
+    knownFailed: count("known-fail"),
+  };
+  console.log(JSON.stringify({ summary }));
+  return summary;
+}
+
+let currentCell = "run";
+const watchdog = setTimeout(
+  () => {
+    // terminate() exits the process, so record the hang and write results first.
+    record(currentCell, "deadline", "fail", {
+      error: `whole-run deadline of ${input.deadlineMinutes ?? 30} minutes exceeded`,
+    });
+    writeResults();
+    void processes.terminate(1);
+  },
+  (input.deadlineMinutes ?? 30) * 60_000,
+);
+let summary;
+try {
+  record("run", "versions", "info", {
+    old: { version: V.old.version, cli: V.old.cli },
+    new: { version: V.new.version, cli: V.new.cli },
+  });
+  for (const name of input.only ?? []) {
+    if (!(name in CELLS)) {
+      record("run", "config", "fail", { error: `unknown cell in only: ${JSON.stringify(name)}` });
+      throw new Error(`unknown cell in only: ${name}`);
+    }
+  }
+  let ran = 0;
+  for (const [name, cell] of Object.entries(CELLS)) {
+    if (input.only && !input.only.includes(name)) {
+      record(name, "cell", "skip", { reason: "not in only" });
+      continue;
+    }
+    if (!input.only && OPTIONAL[name] === false) {
+      record(name, "cell", "skip", { reason: "opt-in cell not enabled" });
+      continue;
+    }
+    currentCell = name;
+    ran++;
+    await cell();
+  }
+  currentCell = "run";
+  if (ran === 0) record("run", "cells", "fail", { error: "no cells ran" });
+} finally {
+  clearTimeout(watchdog);
+  summary = writeResults();
+  await processes.cleanup();
+  processes.dispose();
+  process.exitCode = summary.failed ? 1 : 0;
+}

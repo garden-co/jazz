@@ -362,6 +362,162 @@ async fn prepared_routed_multisink_combines_binding_sets_with_user_output_routin
     );
 }
 
+/// Binding a value the shape's binding source already holds adds no binding,
+/// so every retained result over the shape stays valid. Reacquiring it must
+/// reuse those results instead of hydrating the shared nodes again (#3797).
+#[futures_test::test]
+async fn reacquired_binding_reuses_retained_hydration_results() {
+    let mut db = project_database().await;
+    let mut batch = db.open_batch();
+    insert_doc(&mut batch, 1, 10, 20, "Spec");
+    insert_doc(&mut batch, 2, 10, 21, "Roadmap");
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
+
+    let shape = db
+        .prepare(
+            routed_doc_output_terminals(),
+            "project_route",
+            route_descriptor(),
+        )
+        .await
+        .unwrap();
+    let first = db
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
+        .unwrap();
+    let expected = first.recv().unwrap();
+    let hydrated = db.runtime_stats();
+
+    let second = db
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
+        .unwrap();
+    let initial = second.recv().unwrap();
+    assert_eq!(
+        initial.get("rows").unwrap().to_values().unwrap(),
+        expected.get("rows").unwrap().to_values().unwrap()
+    );
+    let reused = db.runtime_stats();
+    assert_eq!(
+        reused.hydration_memo_computes, hydrated.hydration_memo_computes,
+        "a reacquired binding must not invalidate results over its shape"
+    );
+    assert!(reused.hydration_memo_hits > hydrated.hydration_memo_hits);
+}
+
+/// Reusing results for a reacquired binding must still see writes committed
+/// after the first bind.
+#[futures_test::test]
+async fn reacquired_binding_sees_writes_between_binds() {
+    let mut db = project_database().await;
+    let mut batch = db.open_batch();
+    insert_doc(&mut batch, 1, 10, 20, "Spec");
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
+
+    let shape = db
+        .prepare(
+            routed_doc_output_terminals(),
+            "project_route",
+            route_descriptor(),
+        )
+        .await
+        .unwrap();
+    let first = db
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
+        .unwrap();
+    first.recv().unwrap();
+
+    let mut batch = db.open_batch();
+    insert_doc(&mut batch, 2, 10, 20, "Design");
+    insert_doc(&mut batch, 3, 10, 21, "Other project");
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
+    first.recv().unwrap();
+
+    let second = db
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
+        .unwrap();
+    let mut rows = second
+        .recv()
+        .unwrap()
+        .get("rows")
+        .unwrap()
+        .to_values()
+        .unwrap();
+    rows.sort_by_key(|(row, _)| format!("{row:?}"));
+    assert_eq!(
+        rows,
+        [
+            (vec![Value::U64(1), Value::String("Spec".to_owned())], 1),
+            (vec![Value::U64(2), Value::String("Design".to_owned())], 1),
+        ]
+    );
+}
+
+/// Dropping the only subscriber retracts the binding; binding it again adds
+/// it back and must hydrate the full result.
+#[futures_test::test]
+async fn rebinding_after_unsubscribe_hydrates_the_full_result() {
+    let mut db = project_database().await;
+    let mut batch = db.open_batch();
+    insert_doc(&mut batch, 1, 10, 20, "Spec");
+    insert_doc(&mut batch, 2, 10, 21, "Roadmap");
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
+
+    let shape = db
+        .prepare(
+            routed_doc_output_terminals(),
+            "project_route",
+            route_descriptor(),
+        )
+        .await
+        .unwrap();
+    let first = db
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
+        .unwrap();
+    let expected = first
+        .recv()
+        .unwrap()
+        .get("rows")
+        .unwrap()
+        .to_values()
+        .unwrap();
+    drop(first);
+
+    let mut batch = db.open_batch();
+    insert_doc(&mut batch, 3, 10, 20, "Design");
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
+
+    let again = db
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
+        .unwrap();
+    let mut rows = again
+        .recv()
+        .unwrap()
+        .get("rows")
+        .unwrap()
+        .to_values()
+        .unwrap();
+    rows.sort_by_key(|(row, _)| format!("{row:?}"));
+    let mut want = expected;
+    want.push((vec![Value::U64(3), Value::String("Design".to_owned())], 1));
+    want.sort_by_key(|(row, _)| format!("{row:?}"));
+    assert_eq!(rows, want);
+}
+
 #[futures_test::test]
 async fn multisink_subscription_delivers_initial_and_tick_deltas_for_all_sinks() {
     let mut db = database().await;
@@ -494,7 +650,7 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
         plain.try_recv().unwrap().get("rows").unwrap().deltas.len(),
         1
     );
-    for (id, year, expected_index, expected_visits) in [(3, 1965, 1, 3), (2, 1959, 1, 5)] {
+    for (id, year, expected_index) in [(3, 1965, 1), (2, 1959, 1)] {
         insert_album(&mut db, id, "Album", year).await;
         let tick = plain.try_recv().unwrap();
         assert!(tick.terminal_sinks["rows"].operations.iter().any(|operation| {
@@ -502,10 +658,11 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
         }));
         assert!(!structured.try_recv().unwrap().terminal_sinks["rows"].is_empty());
         let metrics = db.last_tick_metrics().unwrap();
-        // One shared TopBy: both consumers must not duplicate position work.
-        assert_eq!(metrics.root_ordering_position_records, expected_visits);
+        // One shared TopBy: only the plain consumer takes positions, and only
+        // the inserted row is ranked for it, not the whole window.
+        assert_eq!(metrics.root_ordering_position_records, 1);
         assert_eq!(metrics.root_ordering_position_records_skipped, 0);
-        assert_eq!(metrics.top_by_delta_membership_records, 0);
+        assert_eq!(metrics.top_by_delta_membership_records, 1);
     }
 
     let mut batch = db.open_batch();
@@ -563,7 +720,7 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
         db.last_tick_metrics()
             .unwrap()
             .root_ordering_position_records,
-        9
+        1
     );
 }
 

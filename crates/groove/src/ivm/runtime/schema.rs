@@ -543,6 +543,8 @@ impl IvmRuntime {
             project,
             raw_projection,
         };
+        // Neither outcome replaces a case, so no retained result is stale; see
+        // `register_variant_projection_target_case`.
         match projection.cases.entry(variant_tag) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(case);
@@ -556,7 +558,6 @@ impl IvmRuntime {
                 });
             }
         }
-        self.invalidate_table_inputs(table);
         Ok(())
     }
 
@@ -741,10 +742,16 @@ impl IvmRuntime {
         } else {
             VariantProjectionCase::Ignore { source }
         };
-        let changed = match projection.cases.entry(variant_tag) {
+        // Only replacing a case can make a retained result stale. Every reader
+        // of a projection fails on a row whose tag has no case, so no result
+        // that exists was computed from one: adding a case for a new tag (in
+        // particular the first case of a new target) leaves them all valid.
+        // Invalidating the whole table here dropped every hydration memo over
+        // it each time a query registered its own projection target (#3797).
+        let replaced = match projection.cases.entry(variant_tag) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(case);
-                true
+                false
             }
             std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => false,
             std::collections::hash_map::Entry::Occupied(mut entry)
@@ -769,7 +776,7 @@ impl IvmRuntime {
                 });
             }
         };
-        if changed {
+        if replaced {
             self.invalidate_table_inputs(table);
         }
         Ok(())
@@ -828,21 +835,22 @@ impl IvmRuntime {
         )
     }
 
-    fn invalidate_table_inputs(&mut self, table: &str) {
+    pub(super) fn invalidate_table_inputs(&mut self, table: &str) {
         *self.table_frontiers.entry(table.to_owned()).or_default() += 1;
-        self.eval_memo.retain(|key, _| {
-            self.node_meta
-                .get(&key.node)
-                .and_then(|meta| meta.input_signature.as_ref())
-                .is_none_or(|signature| {
-                    !signature.tables.iter().any(|candidate| candidate == table)
-                })
-        });
-        self.eval_memo_bytes = self
-            .eval_memo
-            .values()
-            .map(|entry| entry.payload_bytes)
-            .sum();
+        let invalidated_nodes = self
+            .eval_memo_keys_by_node
+            .keys()
+            .filter(|node| {
+                self.node_meta
+                    .get(node)
+                    .and_then(|meta| meta.input_signature.as_ref())
+                    .is_some_and(|signature| {
+                        signature.tables.iter().any(|candidate| candidate == table)
+                    })
+            })
+            .copied()
+            .collect();
+        self.remove_retained_eval_memos_for_nodes(&invalidated_nodes);
     }
 
     pub fn index(&self, table: &str, index_name: &str) -> Option<&IndexSchema> {

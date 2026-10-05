@@ -33,7 +33,7 @@ const PAGE_SIZE: usize = 100;
 const MAX_ROUTES: usize = 1_000;
 const WRITER: AuthorSubject = AuthorSubject::SYSTEM;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 #[derive(Serialize)]
 struct Receipt {

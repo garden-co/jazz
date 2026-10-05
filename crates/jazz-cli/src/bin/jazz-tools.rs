@@ -7,10 +7,21 @@
 //! jazz-tools server <APP_ID> [--port 1625] [--data-dir ./data] [--in-memory]
 //! ```
 
-// mimalloc replaces the system allocator for ~12-26% throughput on the server's
-// allocation-heavy paths (query/insert/observer). The global allocator is a
-// per-binary choice; library code in `jazz-tools` does not declare one so that
-// consumers (jazz-napi, todo-server, third-party embedders) keep theirs.
+// The global allocator is a per-binary choice; library code in `jazz-tools`
+// does not declare one so that consumers (jazz-napi, todo-server, third-party
+// embedders) keep theirs. mimalloc replaces the system allocator for
+// throughput on the server's allocation-heavy paths (query/insert/observer).
+//
+// With the `heap-profiling` feature on Linux, where production servers run,
+// a sampling wrapper records a stack for about one allocation per 512 KiB
+// (`JAZZ_HEAP_PROFILE_SAMPLE_BYTES`; `0` turns it off), so operators can see
+// which code holds memory (see `jazz_cli::heap_profiling`).
+#[cfg(heap_profiling)]
+#[global_allocator]
+static GLOBAL: jazz_cli::heap_profiling::SamplingAllocator<mimalloc::MiMalloc> =
+    jazz_cli::heap_profiling::SamplingAllocator::new(mimalloc::MiMalloc);
+
+#[cfg(not(heap_profiling))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -19,6 +30,7 @@ use jazz_cli::commands;
 #[cfg(feature = "otel")]
 use jazz_otel as otel;
 use jazz_server::AuthConfig;
+use jazz_server::profiling::DiagnosticsConfig;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const MAX_SHUTDOWN_TIMEOUT_SECS: u64 = 60 * 60;
@@ -177,6 +189,20 @@ enum Commands {
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
+
+        /// Address for a diagnostics listener serving `/debug/pprof/heap`,
+        /// e.g. `0.0.0.0:6060`.
+        ///
+        /// Non-loopback addresses require `--diagnostics-token`. The same
+        /// profile is served on the main port with the admin secret.
+        #[arg(long, env = "JAZZ_DIAGNOSTICS_LISTEN")]
+        diagnostics_listen: Option<std::net::SocketAddr>,
+
+        /// Bearer token the diagnostics listener requires
+        /// (`Authorization: Bearer <TOKEN>`). A read-only scrape credential
+        /// that can be shared across servers without their admin secrets.
+        #[arg(long, env = "JAZZ_DIAGNOSTICS_TOKEN", requires = "diagnostics_listen")]
+        diagnostics_token: Option<String>,
     },
 }
 
@@ -190,8 +216,19 @@ enum CreateResource {
     },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Before the runtime starts its worker threads: only threads that start
+    // after sampling is turned on sample.
+    #[cfg(heap_profiling)]
+    jazz_cli::heap_profiling::configure();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to start the async runtime")
+        .block_on(run())
+}
+
+async fn run() {
     // Initialize tracing with layered subscriber
     init_tracing();
 
@@ -224,6 +261,8 @@ async fn main() {
             admin_secret,
             shutdown_timeout_secs,
             bound_port_file,
+            diagnostics_listen,
+            diagnostics_token,
         } => {
             let node_env_mode = resolve_node_env_mode();
             let explicitly_allowed = allow_local_first_auth;
@@ -270,6 +309,14 @@ async fn main() {
                 auth_config,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),
+                DiagnosticsConfig {
+                    #[cfg(heap_profiling)]
+                    heap_profiler: Some(jazz_cli::heap_profiling::activate()),
+                    #[cfg(not(heap_profiling))]
+                    heap_profiler: None,
+                    listen: diagnostics_listen,
+                    token: diagnostics_token,
+                },
             )
             .await
             {

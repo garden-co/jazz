@@ -344,6 +344,7 @@ test("update_history ingests jazz-sim JSONL metrics from manifest files", () => 
         elapsed_us: 2500,
         replay_edits_per_sec: 40000,
         local_echo_p95_us: 120,
+        git_status_available: true,
         seed: 1,
       }),
       JSON.stringify({
@@ -392,6 +393,7 @@ test("update_history ingests jazz-sim JSONL metrics from manifest files", () => 
   assert.equal(replay.wall_time_ms, 2.5);
   assert.equal(replay.throughput_ops_per_sec, 40000);
   assert.equal(replay.extra.benchmark_id, "jazz-sim:s2_canvas:canvas_replay");
+  assert.equal(replay.extra.metrics.git_status_available, undefined);
   assert.equal(replay.extra.metrics.local_echo_p95_us, 120);
 
   assert.equal(

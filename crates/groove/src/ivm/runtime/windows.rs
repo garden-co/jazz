@@ -525,7 +525,31 @@ fn canonical_collect_by_terminal_deltas(
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(canonicalize_collect_by_terminal_weights(keyed)
+    let mut canonical = canonicalize_collect_by_terminal_weights(keyed);
+    if let Some(presence) = direct_tree_slot.and_then(|slot| slot.presence_field_index) {
+        // A direct-tree group includes a parent anchor with no child. Sorting
+        // that anchor by the child's fields can put it after child insertions
+        // (or before child removals). Consumers apply edits in emitted order:
+        // retire children before their parent, then create the new parent
+        // before its children. Keep the canonical child sort within each phase.
+        let mut ordered = canonical
+            .into_iter()
+            .map(|entry| {
+                let is_child = BorrowedRecord::new(&entry.2, &input_desc).get_bool(presence)?;
+                let phase = if entry.3 > 0 { is_child } else { !is_child };
+                Ok::<_, IvmRuntimeError>((entry, phase))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Stable sorting preserves child order and exact-record tie breaking.
+        ordered.sort_by(|(left, left_phase), (right, right_phase)| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.3.is_positive().cmp(&right.3.is_positive()))
+                .then_with(|| left_phase.cmp(right_phase))
+        });
+        canonical = ordered.into_iter().map(|(entry, _)| entry).collect();
+    }
+    Ok(canonical
         .into_iter()
         .map(|(_, _, record, weight)| RecordDelta { record, weight })
         .collect())
@@ -1306,11 +1330,24 @@ pub(super) fn diff_record_windows(
 /// Unbounded, zero-offset membership is the positive part of each weight.
 /// Compare first/final weights for touched records, not complete windows.
 /// This helper does not compute generic root positions or finite boundaries.
+#[cfg(test)]
 pub(super) fn update_unbounded_top_by_group(
     descriptor: RecordDescriptor,
     top_by: &TopByOp,
     group: &mut CollectByGroup,
     input: &[RecordDelta],
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+    update_unbounded_top_by_group_touching(descriptor, top_by, group, input, None)
+}
+
+/// [`update_unbounded_top_by_group`], also reporting each touched order key
+/// when a positions consumer will rank the changed rows.
+pub(super) fn update_unbounded_top_by_group_touching(
+    descriptor: RecordDescriptor,
+    top_by: &TopByOp,
+    group: &mut CollectByGroup,
+    input: &[RecordDelta],
+    mut touched_keys: Option<&mut Vec<CollectByOrderKey>>,
 ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
     let mut touched = BTreeMap::<CollectByOrderKey, (i64, i64)>::new();
     for delta in input {
@@ -1340,6 +1377,9 @@ pub(super) fn update_unbounded_top_by_group(
             } else {
                 added.push(delta);
             }
+        }
+        if let Some(keys) = touched_keys.as_deref_mut() {
+            keys.push(key.clone());
         }
         group.set(key, after);
     }

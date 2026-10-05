@@ -59,14 +59,14 @@ const m3DifferentialCommand = command(
   [
     "-lc",
     String.raw`set -euo pipefail
-test_binary="$(cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
+test_binary="$(cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
   const readline = require("node:readline");
   let executable;
   const lines = readline.createInterface({ input: process.stdin });
   lines.on("line", (line) => {
     try {
       const message = JSON.parse(line);
-      if (message.reason === "compiler-artifact" && message.target.name === "jazz" && message.executable)
+      if (message.reason === "compiler-artifact" && message.target.name === "jazz_node" && message.executable)
         executable = message.executable;
     } catch {}
   });
@@ -110,6 +110,20 @@ export const ciPartitions = Object.freeze({
       ...RUST_WORKSPACE_TARGETS,
       "--features",
       RUST_CI_FEATURES,
+    ]),
+    // Cold-load phase attribution is opt-in and off in every other build, so
+    // without this its cfg'd spans and counters would rot unnoticed.
+    command("cold-settle attribution compile", "cargo", [
+      "check",
+      "-p",
+      "jazz-sim",
+      "-p",
+      "jazz-example-permissioned-resources-benchmark",
+      "--lib",
+      "--bins",
+      "--tests",
+      "--features",
+      "cold-settle-attribution",
     ]),
   ]),
   "rust-workspace": Object.freeze([
@@ -196,6 +210,18 @@ export const ciPartitions = Object.freeze({
       "test:browser:focused",
       "--",
       "tests/browser/indexeddb-jazz-compat.test.ts",
+    ]),
+    // Vitest strips types without checking them, so without this step an
+    // example can break against a jazz-tools API change while its tests pass.
+    // It runs last, against the jazz-tools build the consumers produced.
+    command("example typecheck", "pnpm", [
+      "--recursive",
+      "--no-bail",
+      "--workspace-concurrency=4",
+      "--filter",
+      "./examples/**",
+      "run",
+      "typecheck",
     ]),
   ]),
   "react-native": Object.freeze([

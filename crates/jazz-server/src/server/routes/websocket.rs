@@ -904,8 +904,11 @@ async fn handle_ws_connection(
             }
             eviction = admission_registration.evict_rx.recv() => {
                 if eviction.is_some() {
+                    // A newer connection for this identity superseded this
+                    // one. Retrying would only evict that newer connection in
+                    // turn, so this link is told not to come back.
                     queue_ws_error(&writer_tx, WireError::new(
-                        WireErrorCode::Backpressure, WireRetry::Later,
+                        WireErrorCode::Backpressure, WireRetry::Never,
                         "websocket peer_identity connection cap exceeded",
                     ));
                     let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
@@ -2777,7 +2780,7 @@ mod tests {
     }
 
     struct TestClient {
-        db: Db<CoreMemoryStorage>,
+        db: Db,
         transport: TestWireTransport,
         todos_table: TableSchema,
         received: Rc<RefCell<Vec<SyncMessage>>>,
@@ -2842,7 +2845,7 @@ mod tests {
             }
         }
 
-        fn write_todo(&self, title: &str) -> WriteHandle<CoreMemoryStorage> {
+        fn write_todo(&self, title: &str) -> WriteHandle {
             jazz::db::block_on(self.db.insert(
                 "todos",
                 RowCells::from([
@@ -3066,7 +3069,7 @@ mod tests {
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
-        write: &WriteHandle<CoreMemoryStorage>,
+        write: &WriteHandle,
     ) -> WriteState {
         let start = tokio::time::Instant::now();
         loop {
@@ -4275,7 +4278,7 @@ mod tests {
                 for frame in decode_ws_message(&msg) {
                     if let WireFrame::Error(error) = frame {
                         saw_backpressure = error.code == WireErrorCode::Backpressure
-                            && error.retry == WireRetry::Later
+                            && error.retry == WireRetry::Never
                             && error.message.contains("connection cap exceeded");
                     }
                 }

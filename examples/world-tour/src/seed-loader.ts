@@ -1,111 +1,100 @@
-import type { Db } from "jazz-tools";
+import type { Db, TransactionScope } from "jazz-tools";
 import { app } from "../schema.js";
-import type { Venue } from "../schema.js";
-import { defaultBandName, venues as seedVenues, descriptions, privateNotes } from "./seed-data.js";
+import { buildTourFixture, DEFAULT_SEED } from "./fixture.js";
 
-function pickWeightedStatus(rand: number): "confirmed" | "tentative" | "cancelled" {
-  if (rand < 0.7) return "confirmed";
-  if (rand < 0.95) return "tentative";
-  return "cancelled";
+/**
+ * The band an empty server's first visitor creates. A fixed id lets the server
+ * accept exactly one of two concurrent first visits (see `claimDemoBand`).
+ */
+export const DEMO_BAND_ID = "1917d0e0-5eed-4b0d-8a4d-000000001917";
+
+/** A fresh invite code. Codes are bearer secrets, so keep the full UUID's entropy. */
+export function newInviteCode(): string {
+  return crypto.randomUUID();
 }
 
-export async function ensureData(
+/**
+ * Creates the demo band on an empty server.
+ *
+ * The band insert runs in an exclusive transaction with the fixed DEMO_BAND_ID, and
+ * an exclusive insert with an explicit id is create-only: when two first visitors
+ * race, the server commits one band and rejects the other, whose app then shows
+ * the winner's tour. The same rejection happens if the demo band was ever deleted,
+ * so an empty server whose demo band is gone stays empty. Resolves to false when
+ * the claim is rejected.
+ *
+ * The rest of the tour is written in one transaction after the claim commits (see
+ * `stageTour`). If that transaction is lost (the tab closes before it syncs) or
+ * rejected, the band stays without a tour and is not reseeded; the caller only
+ * reports the error.
+ */
+export async function claimDemoBand(
   db: Db,
-  userId: string | undefined,
-  isMember: boolean,
-): Promise<void> {
-  const existingBands = await db.all(app.bands);
-  let bandId: string;
-
-  if (existingBands.length === 0) {
-    const { value: band } = db.insert(app.bands, { name: defaultBandName });
-    bandId = band.id;
-  } else {
-    bandId = existingBands[0].id;
+  { userId, ownerName }: { userId: string; ownerName: string },
+): Promise<boolean> {
+  const fixture = buildTourFixture({ seed: DEFAULT_SEED, start: new Date() });
+  try {
+    const claim = await db.exclusiveTransaction((tx) =>
+      tx.insert(app.bands, { name: fixture.bandName, ownerId: userId }, { id: DEMO_BAND_ID }),
+    );
+    await claim.wait();
+  } catch {
+    return false;
   }
-
-  if (userId && isMember) {
-    const myMembership = await db.all(app.members.where({ userId }));
-    if (myMembership.length === 0) {
-      db.insert(app.members, { bandId, userId });
-    }
-  }
-
-  const existingVenues = await db.all(app.venues);
-  const existingNames = new Set(existingVenues.map((v: any) => v.name));
-  const insertedVenues: Venue[] = [];
-  for (const v of seedVenues) {
-    if (!existingNames.has(v.name)) {
-      try {
-        const { value: venue } = db.insert(app.venues, v);
-        insertedVenues.push(venue);
-      } catch (err) {
-        console.warn("[ensureData] venue insert skipped:", (err as Error).message);
-      }
-    }
-  }
-
-  const allVenues = [...existingVenues, ...insertedVenues];
-
-  if (!isMember) return;
-
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const threeWeeks = new Date(today.getTime() + 21 * 24 * 60 * 60 * 1000);
-
-  const upcomingStops = await db.all(
-    app.stops.where({ date: { gte: today, lte: threeWeeks } }).limit(12),
+  const tour = await db.transaction((tx) =>
+    stageTour(tx, DEMO_BAND_ID, { userId, ownerName }, fixture),
   );
+  await tour.wait({ tier: "global" });
+  return true;
+}
 
-  const needed = 12 - upcomingStops.length;
-  if (needed <= 0) return;
+/** Creates a new band owned by `userId` with the seeded demo tour starting today. */
+export async function startDemoTour(
+  db: Db,
+  { userId, ownerName, seed = DEFAULT_SEED }: { userId: string; ownerName: string; seed?: number },
+): Promise<string> {
+  const fixture = buildTourFixture({ seed, start: new Date() });
+  const tour = await db.transaction((tx) => {
+    const band = tx.insert(app.bands, { name: fixture.bandName, ownerId: userId });
+    stageTour(tx, band.id, { userId, ownerName }, fixture);
+    return band.id;
+  });
+  await tour.wait({ tier: "global" });
+  return tour.value;
+}
 
-  if (allVenues.length === 0) return;
+/**
+ * Stages the owner's membership, an invite, and the tour for a band into one
+ * transaction. The membership and invite need the band, the venues need the
+ * membership, the stops need their venues, and the notes need their stops; each
+ * row's policy sees the rows staged before it in the same transaction.
+ */
+function stageTour(
+  tx: TransactionScope<"mergeable">,
+  bandId: string,
+  { userId, ownerName }: { userId: string; ownerName: string },
+  fixture: ReturnType<typeof buildTourFixture>,
+): void {
+  tx.insert(app.members, { bandId, userId, name: ownerName });
+  tx.insert(app.bandInvites, { bandId, code: newInviteCode() });
 
-  const existingDates = new Set(
-    upcomingStops.map((s: any) => {
-      const d = s.date instanceof Date ? s.date : new Date(s.date);
-      return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-    }),
-  );
-
-  const rand = Math.random;
-  const availableDays: Date[] = [];
-  for (let i = 0; i < 21; i++) {
-    const d = new Date(today.getTime() + i * 24 * 60 * 60 * 1000);
-    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-    if (!existingDates.has(key)) {
-      availableDays.push(d);
-    }
+  // Each band gets its own venues: a shared venue could be moved or deleted by
+  // another band, taking this band's stops with it.
+  const venueIds = new Map<string, string>();
+  for (const { venue } of fixture.stops) {
+    if (!venueIds.has(venue.name))
+      venueIds.set(venue.name, tx.insert(app.venues, { ...venue, ownerId: userId, bandId }).id);
   }
 
-  // Shuffle available days then pick `needed`
-  for (let i = availableDays.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [availableDays[i], availableDays[j]] = [availableDays[j], availableDays[i]];
-  }
-  const pickedDays = availableDays.slice(0, needed).sort((a, b) => a.getTime() - b.getTime());
-
-  // Pick random venues, sort by longitude for a believable west-to-east route
-  const shuffledVenues = [...allVenues].sort(() => rand() - 0.5);
-  const pickedVenues = shuffledVenues.slice(0, needed).sort((a, b) => (a.lng ?? 0) - (b.lng ?? 0));
-
-  for (let i = 0; i < pickedDays.length; i++) {
-    const day = pickedDays[i];
-    const venue = pickedVenues[i % pickedVenues.length];
-    if (!venue?.id) continue;
-
-    const hour = 18 + Math.floor(rand() * 4);
-    day.setHours(hour, 0, 0, 0);
-
-    db.insert(app.stops, {
+  for (const stop of fixture.stops) {
+    const row = tx.insert(app.stops, {
       bandId,
-      venueId: venue.id,
-      date: day,
-      status: pickWeightedStatus(rand()),
-      publicDescription: descriptions[Math.floor(rand() * descriptions.length)],
-      privateNotes:
-        rand() > 0.3 ? privateNotes[Math.floor(rand() * privateNotes.length)] : undefined,
+      venueId: venueIds.get(stop.venue.name)!,
+      date: stop.date,
+      status: stop.status,
+      publicDescription: stop.publicDescription,
     });
+    if (stop.privateNote)
+      tx.insert(app.stopNotes, { stopId: row.id, bandId, body: stop.privateNote });
   }
 }

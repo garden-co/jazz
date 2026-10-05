@@ -67,8 +67,8 @@ use crate::tools::{
     SubscriptionStreamItem,
 };
 
-type CoreClientDb = CoreDb<CoreStorage>;
-type BackendConnection = Rc<LocalMutex<CorePeerConnection<CoreStorage>>>;
+type CoreClientDb = CoreDb;
+type BackendConnection = Rc<LocalMutex<CorePeerConnection>>;
 
 // Credit windows bound protocol ingress; charge tiny frames as one physical slot
 // too, so a peer cannot turn the byte limit into an unbounded allocation count.
@@ -1700,7 +1700,15 @@ impl ClientDb {
                     match tick_result {
                         Ok(()) => backpressure_attempts = 0,
                         Err(error) => {
-                            let class = classify_tick_driver_error(&error);
+                            let class = match classify_tick_driver_error(&error) {
+                                TickDriverErrorClass::Fatal
+                                    if ClientDbInner::upstream_asks_reconnect_later(&inner)
+                                        .await =>
+                                {
+                                    TickDriverErrorClass::Reconnect
+                                }
+                                class => class,
+                            };
                             let should_exit = match class {
                                 TickDriverErrorClass::Fatal => {
                                     inner
@@ -1903,6 +1911,19 @@ impl ClientDbInner {
             && inner_state.upstream_generation == generation
             && inner_state.upstream.is_none()
             && inner_state.upstream_recovery_generation == Some(generation)
+    }
+
+    /// Whether the server ended the current upstream with an error that asks
+    /// this client to come back later, such as ingress backpressure. That link
+    /// is gone, but the client and its pending writes are not.
+    async fn upstream_asks_reconnect_later(inner: &Rc<RefCell<Self>>) -> bool {
+        let Some(upstream) = inner.borrow().upstream.clone() else {
+            return false;
+        };
+        let connection = upstream.lock().await;
+        connection
+            .remote_wire_error()
+            .is_some_and(|error| error.asks_reconnect_later())
     }
 
     fn start_upstream_recovery(inner: &Rc<RefCell<Self>>, initial_error: String) {
@@ -4540,6 +4561,8 @@ mod tests {
     struct DriverConnectorState {
         behavior: DriverTransportBehavior,
         block_reconnect: bool,
+        /// A server error frame the first connection receives once.
+        remote_error_frame: Mutex<Option<Vec<u8>>>,
         connect_calls: std::sync::atomic::AtomicUsize,
         send_attempted: tokio::sync::Notify,
         reconnect_started: tokio::sync::Notify,
@@ -4576,6 +4599,7 @@ mod tests {
                 state: Arc::new(DriverConnectorState {
                     behavior,
                     block_reconnect,
+                    remote_error_frame: Mutex::new(None),
                     connect_calls: std::sync::atomic::AtomicUsize::new(0),
                     send_attempted: tokio::sync::Notify::new(),
                     reconnect_started: tokio::sync::Notify::new(),
@@ -4590,6 +4614,24 @@ mod tests {
 
         fn closed_pump(block_reconnect: bool) -> Self {
             Self::new(DriverTransportBehavior::ClosedPump, block_reconnect)
+        }
+
+        /// An idle server whose first connection ends with `error`. The error
+        /// frame arrives without a peer-close terminal, so only the tick
+        /// driver's classification can decide whether the client reconnects.
+        fn remote_error_once(error: crate::wire::WireError) -> Self {
+            let connector = Self::idle();
+            *connector.state.remote_error_frame.lock().unwrap() = Some(
+                crate::wire::encode_frame(&crate::wire::WireFrame::Error(error))
+                    .expect("encode server error frame"),
+            );
+            connector
+        }
+
+        fn connect_count(&self) -> usize {
+            self.state
+                .connect_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -4608,7 +4650,7 @@ mod tests {
         }
 
         fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-            None
+            self.state.remote_error_frame.lock().unwrap().take()
         }
     }
 
@@ -4732,6 +4774,110 @@ mod tests {
             })
             .await;
     }
+    async fn drive_remote_error_to_tick_driver(
+        error: crate::wire::WireError,
+        name: &str,
+    ) -> (JazzClient, DriverConnector) {
+        let connector = DriverConnector::remote_error_once(error);
+        let client = JazzClient::connect_with_native_transport(
+            make_online_context(
+                AppId::from_name(name),
+                TempDir::new().expect("tempdir").keep(),
+                declared_todo_schema(),
+            ),
+            Arc::new(connector.clone()),
+        )
+        .await
+        .expect("connect online client");
+        client
+            .insert(
+                "todos",
+                crate::row_input!("title" => "pending", "completed" => false),
+            )
+            .expect("stage a write before the server ends the link");
+        client
+            .db
+            .inner
+            .borrow()
+            .scheduler
+            .schedule_tick(TickUrgency::Immediate);
+        (client, connector)
+    }
+
+    async fn wait_until(mut predicate: impl FnMut() -> bool, failure: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !predicate() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{failure}"));
+    }
+
+    /// Given the server ends alice's link with a retry-later backpressure
+    /// error, when the tick driver sees it before any peer-close terminal,
+    /// then the client reconnects and stays usable instead of stopping.
+    #[tokio::test(flavor = "current_thread")]
+    async fn retry_later_server_error_reconnects_instead_of_stopping() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (client, connector) = drive_remote_error_to_tick_driver(
+                    crate::wire::WireError::new(
+                        crate::wire::WireErrorCode::Backpressure,
+                        crate::wire::WireRetry::Later,
+                        "wire frame queue backpressure",
+                    ),
+                    "retry-later-reconnects",
+                )
+                .await;
+
+                wait_until(
+                    || connector.connect_count() >= 2,
+                    "a retry-later server error must reconnect the upstream",
+                )
+                .await;
+                assert_eq!(client.db.inner.borrow().tick_driver_error, None);
+                client
+                    .insert(
+                        "todos",
+                        crate::row_input!("title" => "after", "completed" => false),
+                    )
+                    .expect("the client keeps accepting writes after reconnecting");
+
+                client.shutdown().await.expect("shutdown online client");
+            })
+            .await;
+    }
+
+    /// Given the server ends alice's link with an error that retrying cannot
+    /// fix, when the tick driver sees it, then the client stops instead of
+    /// reconnecting in a loop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_retryable_server_error_stops_the_tick_driver() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (client, connector) = drive_remote_error_to_tick_driver(
+                    crate::wire::WireError::new(
+                        crate::wire::WireErrorCode::AuthFailed,
+                        crate::wire::WireRetry::Later,
+                        "credential revoked",
+                    ),
+                    "non-retryable-stops",
+                )
+                .await;
+
+                wait_until(
+                    || client.db.inner.borrow().tick_driver_error.is_some(),
+                    "a non-retryable server error must stop the tick driver",
+                )
+                .await;
+                assert_eq!(connector.connect_count(), 1);
+
+                let _ = client.shutdown().await;
+            })
+            .await;
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn shutdown_joins_an_idle_tick_driver() {
         tokio::task::LocalSet::new()

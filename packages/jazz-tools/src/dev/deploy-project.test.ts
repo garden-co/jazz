@@ -37,9 +37,9 @@ async function fixture(commonjs = false) {
     migrationsDir,
     `20260925T000001-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`,
   );
-  const source = `import { schema as s } from ${JSON.stringify(indexPath)};
-const migration = s.defineMigration({fromHash:${JSON.stringify(fromHash)},toHash:${JSON.stringify(toHash)},
-from:{notes:s.table({title:s.string()}, {})},to:{notes:s.table({body:s.string()}, {})},migrate:{notes:{body:s.renameFrom("title")}}});
+  const source = `import { schema as s, migration as m } from ${JSON.stringify(indexPath)};
+const migration = m.defineMigration({fromHash:${JSON.stringify(fromHash)},toHash:${JSON.stringify(toHash)},
+from:{notes:s.table({title:s.string()}, {})},to:{notes:s.table({body:s.string()}, {})},migrate:{notes:{body:m.renameFrom("title")}}});
 ${commonjs ? "module.exports = migration;" : "export default migration;"}`;
   await writeFile(file, source);
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {

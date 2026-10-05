@@ -6,6 +6,36 @@ use crate::storage::{MemoryStorage, OwnedStorage, RecordStore, TestStorage, Test
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
+// Public rows cannot reveal stale private memo indexing or byte accounting
+// until a later lookup, invalidation, or eviction exercises the bad state.
+fn assert_retained_eval_memo_index_is_consistent(runtime: &IvmRuntime) {
+    let retained = runtime
+        .eval_memo
+        .keys()
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        retained.iter().all(|key| key.tick_epoch.is_none()),
+        "runtime cache must contain hydration memos only"
+    );
+    let indexed = runtime
+        .eval_memo_keys_by_node
+        .values()
+        .flat_map(|keys| keys.iter())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        indexed, retained,
+        "retained memo keys and node index diverged"
+    );
+    assert_eq!(
+        runtime.eval_memo_bytes,
+        runtime
+            .eval_memo
+            .values()
+            .map(|entry| entry.payload_bytes)
+            .sum::<usize>(),
+        "retained memo byte accounting diverged"
+    );
+}
 #[futures_test::test]
 async fn immutable_compilation_reuse_preserves_live_updates_and_retirement() {
     // The private hit counter proves avoided compilation; row equality alone
@@ -1026,10 +1056,12 @@ async fn hydration_memo_survives_empty_ticks_without_replaying_deltas() {
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
     assert!(runtime.eval_memo.keys().any(|key| key.tick_epoch.is_none()));
+    assert_retained_eval_memo_index_is_consistent(&runtime);
 
     runtime.tick(Vec::new(), &storage).await.unwrap();
     assert!(subscription.try_recv().is_err());
     assert!(runtime.eval_memo.keys().any(|key| key.tick_epoch.is_none()));
+    assert_retained_eval_memo_index_is_consistent(&runtime);
 
     let albums = schema.table("albums").unwrap().record_schema();
     let row = albums
@@ -1054,6 +1086,37 @@ async fn hydration_memo_survives_empty_ticks_without_replaying_deltas() {
 
     runtime.tick(Vec::new(), &storage).await.unwrap();
     assert!(subscription.try_recv().is_err());
+    assert_retained_eval_memo_index_is_consistent(&runtime);
+}
+
+// Internal schema invalidation receipt: public rows cannot reveal a stale
+// retained index or byte count after schema-dependent memo entries are cleared.
+#[futures_test::test]
+async fn table_input_invalidation_removes_retained_memo_index() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums", "indices"]).unwrap());
+    let subscription = runtime
+        .subscribe_one_sink(GraphBuilder::table("albums"), &storage)
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    assert_retained_eval_memo_index_is_consistent(&runtime);
+    let stale_keys = runtime
+        .eval_memo
+        .keys()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    assert!(!stale_keys.is_empty());
+
+    runtime.invalidate_table_inputs("albums");
+
+    assert!(
+        stale_keys
+            .iter()
+            .all(|key| runtime.eval_memo.get(key).is_none()),
+        "schema invalidation must remove stale memo keys"
+    );
+    assert_retained_eval_memo_index_is_consistent(&runtime);
 }
 
 async fn write_two_album_rows(storage: &impl OrderedKvStorage, albums: &RecordDescriptor) {
@@ -1397,6 +1460,8 @@ async fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_
     assert_eq!(after_subscribe.arrangement_count, 1);
 }
 
+// Internal cache receipt: eviction is not a public operation, and final rows
+// cannot reveal stale index/accounting state before a later hydration.
 #[futures_test::test]
 async fn pending_subscription_drains_match_unbounded_when_eval_memo_is_evicted_before_drain() {
     let schema = albums_schema();
@@ -1438,6 +1503,7 @@ async fn pending_subscription_drains_match_unbounded_when_eval_memo_is_evicted_b
                 runtime.eval_memo.is_empty(),
                 "the eval memo is a pure cache and may be fully evicted while subscription output is pending"
             );
+            assert_retained_eval_memo_index_is_consistent(&runtime);
         }
 
         let delivered = subscription.recv().unwrap();
@@ -1448,6 +1514,7 @@ async fn pending_subscription_drains_match_unbounded_when_eval_memo_is_evicted_b
                 runtime.eval_memo.is_empty(),
                 "draining subscription output must not depend on eval memo entries"
             );
+            assert_retained_eval_memo_index_is_consistent(&runtime);
         }
 
         delivered
@@ -2295,6 +2362,8 @@ fn deeply_nested_retained_graph_ticks_on_a_server_sized_stack() {
     );
 }
 
+// Internal lifecycle receipt: public query results cannot show retained memo
+// keys left behind when an unsubscribed graph is reclaimed.
 #[futures_test::test]
 async fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     let schema = albums_schema();
@@ -2315,6 +2384,12 @@ async fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     );
 
     assert!(runtime.unsubscribe(subscription.id()));
+    assert!(!runtime.eval_memo_keys_by_node.contains_key(&output));
+    assert!(
+        runtime.eval_memo.keys().all(|key| key.node != output),
+        "retired graph nodes must not retain memo entries"
+    );
+    assert_retained_eval_memo_index_is_consistent(&runtime);
 
     assert!(runtime.retained_node_ids().is_empty());
     assert!(runtime.graph().node(output).is_none());
@@ -2723,6 +2798,7 @@ async fn recursive_iteration_limit_rolls_back_partial_positive_tick() {
         [(vec![Value::U64(1), Value::U64(2)], 1)]
     );
 
+    assert_retained_eval_memo_index_is_consistent(&runtime);
     let output = runtime.subscription_output_node(subscription.id()).unwrap();
     let before_state = recursive_state_snapshot(&runtime, output);
     let before_stats = runtime.stats();
@@ -2740,6 +2816,7 @@ async fn recursive_iteration_limit_rolls_back_partial_positive_tick() {
         error,
         IvmRuntimeError::RecursiveIterationLimit { max_iters: 1, .. }
     ));
+    assert_retained_eval_memo_index_is_consistent(&runtime);
 
     assert_eq!(
         recursive_state_snapshot(&runtime, output),
@@ -3705,4 +3782,136 @@ fn join_consumers_retain_only_required_columns_without_mutating_shared_sources()
         projected.output.bind(&bytes).get_idx(0).unwrap(),
         Value::String("retained".into())
     );
+}
+
+/// Three inline relations joined as a flattened chain, the shape Jazz lowers
+/// a policy's correlated `exists` chain to: each join output is renamed back
+/// to plain names before the next join, and a final projection keeps two.
+fn flattened_join_chain(filter_between_joins: bool) -> GraphBuilder {
+    let base = RecordDescriptor::new([("id", ValueType::U64), ("payload", ValueType::String)]);
+    let grant = RecordDescriptor::new([
+        ("target", ValueType::U64),
+        ("member", ValueType::String),
+        ("note", ValueType::String),
+    ]);
+    let base_rows = [(1, "a"), (2, "b"), (3, "c")].map(|(id, payload)| {
+        base.create(&[Value::U64(id), Value::String(payload.into())])
+            .unwrap()
+    });
+    let grant_rows = |rows: [(u64, &str, &str); 3]| {
+        rows.map(|(target, member, note)| {
+            grant
+                .create(&[
+                    Value::U64(target),
+                    Value::String(member.into()),
+                    Value::String(note.into()),
+                ])
+                .unwrap()
+        })
+    };
+    // Two first-hop grants for row 1 give it multiplicity 2 downstream.
+    let first_grants = grant_rows([(1, "x", "n1"), (1, "y", "n2"), (2, "x", "n3")]);
+    let second_grants = grant_rows([(1, "x", "m1"), (2, "z", "m2"), (3, "x", "m3")]);
+    let first = GraphBuilder::join(
+        GraphBuilder::inline_records(base, base_rows),
+        GraphBuilder::inline_records(grant, first_grants),
+        ["id"],
+        ["target"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.id", "id"),
+        ProjectField::renamed("left.payload", "payload"),
+        ProjectField::renamed("right.target", "first_target"),
+        ProjectField::renamed("right.member", "first_member"),
+        ProjectField::renamed("right.note", "first_note"),
+    ]);
+    let first = if filter_between_joins {
+        first.filter(PredicateExpr::eq("first_member", Value::String("x".into())))
+    } else {
+        first
+    };
+    GraphBuilder::join(
+        first,
+        GraphBuilder::inline_records(grant, second_grants),
+        ["id"],
+        ["target"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.id", "id"),
+        ProjectField::renamed("right.member", "second_member"),
+    ])
+}
+
+/// The projection between the two joins of [`flattened_join_chain`].
+fn inner_chain_projection(graph: &GraphBuilder) -> &[ProjectField] {
+    let GraphBuilder::Project { input, .. } = graph else {
+        panic!("final projection")
+    };
+    let GraphBuilder::Join { left, .. } = input.as_ref() else {
+        panic!("second join")
+    };
+    let left = match left.as_ref() {
+        GraphBuilder::Filter { input, .. } => input.as_ref(),
+        left => left,
+    };
+    let GraphBuilder::Project { fields, .. } = left else {
+        panic!("flattened projection")
+    };
+    fields
+}
+
+#[futures_test::test]
+async fn narrowed_join_chains_keep_only_consumed_fields_and_the_same_rows() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    for filter_between_joins in [false, true] {
+        let chain = flattened_join_chain(filter_between_joins);
+        let narrowed = chain.clone().narrow_projected_join_chain();
+        let kept = inner_chain_projection(&narrowed)
+            .iter()
+            .map(|field| field.output_name.as_str())
+            .collect::<Vec<_>>();
+        // The final projection reads `id` from the flattened record and the
+        // next join keys on it; a filter between the joins reads its field.
+        let expected = if filter_between_joins {
+            vec!["id", "first_member"]
+        } else {
+            vec!["id"]
+        };
+        assert_eq!(kept, expected);
+
+        let mut original = runtime
+            .query_snapshot(chain, &storage)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap();
+        let mut narrowed = runtime
+            .query_snapshot(narrowed, &storage)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap();
+        original.sort_by_key(|row| format!("{row:?}"));
+        narrowed.sort_by_key(|row| format!("{row:?}"));
+        assert_eq!(narrowed, original);
+        let row_one_weight = if filter_between_joins { 1 } else { 2 };
+        assert!(original.contains(&(
+            vec![Value::U64(1), Value::String("x".into())],
+            row_one_weight
+        )));
+    }
+}
+
+#[test]
+fn join_chain_narrowing_stops_at_positional_references() {
+    let chain = flattened_join_chain(false);
+    let GraphBuilder::Project { input, .. } = &chain else {
+        panic!("final projection")
+    };
+    let positional = GraphBuilder::Project {
+        input: input.clone(),
+        fields: vec![ProjectField::renamed_resolved(0, "id")],
+    };
+    assert_eq!(positional.clone().narrow_projected_join_chain(), positional);
 }

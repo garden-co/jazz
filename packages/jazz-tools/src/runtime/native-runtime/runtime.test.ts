@@ -5589,15 +5589,20 @@ describe("NativeRuntimeAdapter read and subscription lifecycle", () => {
     }
   });
 
-  it("reports a background coverage failure while keeping local-only reads usable", async () => {
+  it("drops a background coverage failure while keeping local-only reads usable", async () => {
     const failure = new Error("background coverage failure");
+    let globalReads = 0;
     const runtime = openRuntime({
       all: (_query, options) => {
-        if ((options as { tier?: string }).tier === "global") throw failure;
+        if ((options as { tier?: string }).tier === "global") {
+          globalReads += 1;
+          throw failure;
+        }
         return encodeRows([]);
       },
     });
-    const failed = new Promise<Error>((resolve) => runtime.onServerTransportError(resolve));
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
     Object.assign(runtime, {
       serverTransport: new FakeTransport([]),
       serverCarrier: { close() {} },
@@ -5607,7 +5612,10 @@ describe("NativeRuntimeAdapter read and subscription lifecycle", () => {
       await expect(
         runtime.query(query, null, "local", JSON.stringify({ propagation: "full" })),
       ).resolves.toEqual([]);
-      await expect(failed).resolves.toBe(failure);
+      await vi.waitFor(() => expect(globalReads).toBe(1));
+      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+      // A best-effort refresh failure is not a transport failure (#3692).
+      expect(terminal).not.toHaveBeenCalled();
       await expect(
         runtime.query(query, null, "local", JSON.stringify({ propagation: "local-only" })),
       ).resolves.toEqual([]);

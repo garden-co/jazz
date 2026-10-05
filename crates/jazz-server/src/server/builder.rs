@@ -12,6 +12,7 @@ use crate::middleware::AuthConfig;
 use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
+use crate::profiling::{self, HeapProfileDump};
 use crate::server::routes;
 use crate::server::{
     CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage, ServerState, StoredCatalogue,
@@ -79,6 +80,7 @@ pub struct ServerBuilder {
     core_server_shell_schema: Option<JazzSchema>,
     shutdown_timeout: Duration,
     storage_factory: Option<Arc<dyn StorageFactory>>,
+    heap_profiler: Option<HeapProfileDump>,
 }
 
 impl ServerBuilder {
@@ -96,6 +98,7 @@ impl ServerBuilder {
             core_server_shell_schema: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             storage_factory: None,
+            heap_profiler: None,
         }
     }
 
@@ -122,6 +125,14 @@ impl ServerBuilder {
     /// Supply the target-owned durable storage adapter.
     pub fn with_storage_factory(mut self, factory: Arc<dyn StorageFactory>) -> Self {
         self.storage_factory = Some(factory);
+        self
+    }
+
+    /// Serve the executable's heap profile at `/debug/pprof/heap` to admins.
+    ///
+    /// Without one, the route answers `501 Not Implemented`.
+    pub fn with_heap_profiler(mut self, dump: HeapProfileDump) -> Self {
+        self.heap_profiler = Some(dump);
         self
     }
 
@@ -195,7 +206,10 @@ impl ServerBuilder {
             .await
             .map_err(|error| format!("restore active schema before serving: {error}"))?;
 
-        let app = routes::create_router(state.clone());
+        let app = routes::create_router(state.clone()).merge(profiling::admin_router(
+            self.heap_profiler,
+            state.auth_config.clone(),
+        ));
         Ok(BuiltServer { state, app })
     }
 

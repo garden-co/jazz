@@ -31,12 +31,19 @@ export class PreHelloWireError extends Error {
   }
 }
 
+/**
+ * Whether a server error asks this client to reconnect with backoff.
+ *
+ * `later` alone is not enough: an authentication or malformed-frame error can
+ * carry it too, and retrying those cannot succeed. Only the server's transient
+ * overload and bootstrap signals end the link without ending the client.
+ */
+export function isReconnectLaterWireError(error: WireError): boolean {
+  return error.retry === "later" && (error.code === "not_ready" || error.code === "backpressure");
+}
+
 export function isRetryablePreHelloWireError(error: unknown): error is PreHelloWireError {
-  return (
-    error instanceof PreHelloWireError &&
-    error.wireError.code === "not_ready" &&
-    error.wireError.retry === "later"
-  );
+  return error instanceof PreHelloWireError && isReconnectLaterWireError(error.wireError);
 }
 
 export type WebSocketNegotiation = {
@@ -409,7 +416,7 @@ export class WebSocketCarrier {
       }
       if (isWireError(frame)) {
         const error = decodeWireError(frame);
-        if (error.code === "not_ready" && error.retry === "later") {
+        if (isReconnectLaterWireError(error)) {
           this.reportTerminal(error);
           this.close();
           return;

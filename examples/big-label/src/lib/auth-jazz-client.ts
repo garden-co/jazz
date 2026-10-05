@@ -1,4 +1,5 @@
 import { app } from "../../schema";
+import permissions from "../../permissions";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 import { serverSecret } from "./server-secret";
@@ -12,6 +13,8 @@ const { createJazzSession } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
+const appOrigin = () => process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
+
 type AuthSession = Awaited<ReturnType<typeof createJazzSession>>;
 
 declare global {
@@ -22,9 +25,15 @@ declare global {
 export async function authJazzClient(): Promise<JazzClient> {
   const pending = (globalThis.__bigLabelAuthSession ??= createJazzSession({
     app,
+    permissions,
     appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
     driver: { type: "memory" },
     serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
+    // Lets `forRequest()` verify a browser's Better Auth JWT, so a route can
+    // write as that user under the same permissions the browser has.
+    jwksUrl: `${appOrigin()}/api/auth/jwks`,
+    jwtIssuer: appOrigin(),
+    jwtAudience: appOrigin(),
     initial: { backendSecret: serverSecret("BACKEND_SECRET", "big-label-dev-backend") },
     env: process.env.NODE_ENV === "production" ? "prod" : "dev",
     tier: "global",

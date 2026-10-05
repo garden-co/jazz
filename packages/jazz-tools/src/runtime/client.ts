@@ -136,6 +136,8 @@ function encodeBranchViewBase(base: BranchViewBase | undefined): WireBranchViewB
  *
  * Works with common server frameworks (Express, Fastify, Hono, Web Request wrappers)
  * as long as Authorization headers are exposed through `header(name)` or `headers`.
+ * Plain-record `headers` keys are matched case-insensitively; conflicting case variants
+ * are rejected. Web `Headers` objects retain their native lookup behavior.
  */
 export interface RequestLike {
   header?: (name: string) => string | undefined;
@@ -821,13 +823,27 @@ function copyWriteWaitReadiness<T extends WriteHandle<unknown, unknown>>(
 
 let warnedRemovedEdgeWriteTier = false;
 
+const writeWaitTiers: ReadonlySet<string> = new Set<DurabilityTier>(["local", "global"]);
+
 /**
  * The write has already been applied by the time a caller picks a wait tier,
  * so a removed tier must not reject: a caller that retries on rejection would
  * duplicate the write. `"edge"` waits for the stronger `"global"` instead.
+ *
+ * Any other unknown tier (a typo from plain JavaScript or a cast) is rejected
+ * here, before reaching the native runtime, with a `TypeError` that says the
+ * write was already applied, so it cannot be mistaken for a rejected write.
  */
 function resolveWriteWaitTier(tier: DurabilityTier | "edge"): DurabilityTier {
-  if (tier !== "edge") return tier;
+  if (tier !== "edge") {
+    if (!writeWaitTiers.has(tier)) {
+      throw new TypeError(
+        `Unknown wait tier ${JSON.stringify(tier)}; expected "local" or "global". ` +
+          "The write was already applied: do not retry it.",
+      );
+    }
+    return tier;
+  }
   if (!warnedRemovedEdgeWriteTier) {
     warnedRemovedEdgeWriteTier = true;
     console.warn('The "edge" tier was removed. wait({ tier: "edge" }) now waits for "global".');
@@ -1305,7 +1321,7 @@ export class JazzClient {
     return this;
   }
 
-  private updateAuthSnapshot(update: AuthUpdate): void {
+  private updateAuthSnapshot(update: AuthUpdate, updateRuntime = true): void {
     const previousJwtToken = this.context.jwtToken;
     const previousCookieSession = this.context.cookieSession;
     const previousTrustedReservedSession = getTrustedReservedSession(this.context);
@@ -1323,7 +1339,9 @@ export class JazzClient {
 
     try {
       this.resolvedSession = this.resolveSessionFromContext();
-      this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+      if (updateRuntime) {
+        this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+      }
     } catch (error) {
       this.context.jwtToken = previousJwtToken;
       this.context.cookieSession = previousCookieSession;
@@ -1335,6 +1353,11 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.updateAuthSnapshot({ mode: "bearer", jwtToken });
+  }
+
+  /** @internal Accept an auth update already applied by the owning connection. */
+  acceptAuthUpdate(update: AuthUpdate): void {
+    this.updateAuthSnapshot(update, false);
   }
 
   /** @internal Update a token minted by a dedicated first-party reserved auth flow. */
@@ -1773,16 +1796,14 @@ export class JazzClient {
     openTransactionId?: OpenTransactionId,
     branch?: BranchView,
   ): MutationResult {
-    if (openTransactionId || branch) {
-      throw new Error(
-        "Partial-value updates are not yet supported inside transactions or branch views.",
-      );
+    if (branch) {
+      throw new Error("Partial-value updates are not yet supported in branch views.");
     }
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      undefined,
+      openTransactionId,
       updatedAt,
     );
     if (!this.runtime.updateLargeValues) {
