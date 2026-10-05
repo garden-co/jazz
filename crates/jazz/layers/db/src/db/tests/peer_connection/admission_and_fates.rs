@@ -3998,20 +3998,144 @@ fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
     );
 }
 
-/// A terminal proof uses its own admitted link's claims, even if another live
-/// link authenticates the same author with different claims first.
+/// Alice reads an unchanged protected row and writes an audit row through a
+/// scope-isolated relay. Final predicate validation must use the same admitted
+/// authMode as the read, not the Core's author-keyed compatibility claims.
 ///
-/// ```text
-/// alice/A link ──admitted──► Core ──terminal proof──► A's claims
-///                                  ▲
-/// alice/B link ──binds B───────────┘
-/// ```
-///
-/// The policy snapshot must not be selected from the node's author-keyed
-/// legacy cache. Replacing the explicit A snapshot below with
-/// `session_claims_for` makes the first proof observe B and fail.
+/// alice/external ──predicate read──► unchanged protected row
+///        └──exclusive audit write──► admitted relay ──► Core ──► Accepted/Global
 #[test]
-fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
+fn delegated_exclusive_predicate_uses_final_ingest_claim_scope() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("protected")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::SessionCmp {
+                            path: vec!["authMode".to_owned()],
+                            op: PublicCmpOp::Eq,
+                            value: PublicValue::Text("external".to_owned()),
+                        },
+                    )),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("audit")
+                    .column("note", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_insert(PublicPolicyExpr::True),
+                    ),
+            ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xe9; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let protected = row(0x91);
+    server
+        .insert_with_id(
+            "protected",
+            protected,
+            BTreeMap::from([("title".to_owned(), Value::String("unchanged".to_owned()))]),
+        )
+        .unwrap();
+    let claims = BTreeMap::from([("authMode".to_owned(), Value::String("external".to_owned()))]);
+    let client = open_db(0xe9, alice, &schema);
+    client.set_test_provider_claims(alice, claims.clone());
+    let (client_transport, server_transport) = duplex();
+    let upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber_with_claims(server_transport, alice, claims.clone());
+    let query = Query::from("protected");
+    let prepared = prepared(&client, &query);
+    let _stream = block_on(client.subscribe(&prepared, global_subscribe_opts())).unwrap();
+    let pump = || {
+        for _ in 0..32 {
+            client.tick().unwrap();
+            server.tick().unwrap();
+        }
+    };
+    pump();
+    assert_eq!(
+        client
+            .read(&prepared)
+            .unwrap()
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![protected],
+    );
+    // The relay admits the same immutable claims, while the compatibility
+    // cache now lacks authMode. No protected row or read grant changes.
+    assert!(client.detach_connection(&upstream));
+    assert!(server.server.detach_connection(&subscriber));
+    server
+        .node()
+        .borrow_mut()
+        .set_test_provider_claims(alice, BTreeMap::new());
+    let (mut relay, server_transport) = duplex();
+    let relay_subscriber =
+        server.accept_scope_isolated_relay_subscriber(server_transport, alice, claims, 19);
+    let open = crate::db::OpenTransactionId::new();
+    client.begin_exclusive(open).unwrap();
+    assert_eq!(
+        client
+            .exclusive_tx_ref(open)
+            .all_prepared_for_identity(&prepared, alice)
+            .unwrap()
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![protected],
+    );
+    client
+        .exclusive_tx_ref(open)
+        .insert(
+            "audit",
+            BTreeMap::from([(
+                "note".to_owned(),
+                Value::String("read protected".to_owned()),
+            )]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0x92)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let tx_id = client.commit_exclusive_handle(open).unwrap();
+    let unit = block_on(client.node.node.borrow_mut().commit_unit_for(tx_id)).unwrap();
+    relay.send(unit).unwrap();
+    block_on(relay_subscriber.borrow_mut().tick()).unwrap();
+    assert_eq!(
+        block_on(server.node().borrow_mut().transaction_state(tx_id))
+            .unwrap()
+            .0,
+        Fate::Accepted,
+    );
+    assert!(matches!(
+        block_on(server.node().borrow_mut().transaction_state(tx_id)),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global)),
+    ));
+    let rows = server.read(&Query::from("audit")).unwrap();
+    let audit_table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "audit")
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.row_uuid(), row.cell(audit_table, "note")))
+            .collect::<Vec<_>>(),
+        vec![(row(0x92), Some(Value::String("read protected".to_owned())))],
+    );
+}
+
+/// Alice's admitted claims survive a same-author sibling's cache overwrite.
+/// Authenticated refreshes affect subsequent uploads, not the sibling's scope.
+///
+/// alice/editor A -> Core <- alice/viewer B
+/// A uploads -> Accepted; A refreshes viewer -> Denied; editor -> Accepted
+#[test]
+fn terminal_commit_ingest_keeps_same_author_sibling_claim_snapshot() {
     // The clause reads an open workspace as well as the claim.
     let schema = editor_claim_workspace_write_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -4031,7 +4155,7 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
         crate::query::provider_claim_key("role"),
         Value::String("viewer".to_owned()),
     )]);
-    let (_a_transport, a_server_transport) = duplex_with_admitted_session_context(
+    let (mut a_transport, a_server_transport) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0xa1; 16]),
         1,
@@ -4061,74 +4185,46 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
 
     let client = open_db(0xa1, alice, &schema);
     client.set_test_provider_claims(alice, a_claims.clone());
-    let candidate_cells = cells("same-author sibling snapshot", false, alice);
-    let write = client
-        .insert("todos", candidate_cells.clone(), Default::default())
-        .expect("A can prepare its editor-authorized write");
-    let SyncMessage::CommitUnit { tx, versions } = client
-        .node
-        .node
-        .borrow_mut()
-        .commit_unit_for(write.mergeable_tx_id())
-        .expect("prepared write retains a commit unit")
-    else {
-        panic!("prepared mergeable write must produce one commit unit");
-    };
-    {
-        let mut a_connection = a_subscriber.borrow_mut();
-        let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
-            unreachable!("A is an admitted subscriber link");
-        };
-        let allowed =
-            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-                &mut server.node().borrow_mut(),
-                alice,
-                a_state.session_claims.clone(),
-                &versions,
-                tx.tx_id,
-            ))
-            .expect("A terminal proof remains valid after B updates the legacy cache");
-        assert!(allowed, "A's editor snapshot authorizes the write");
-    }
-
-    // 0→1→2 authenticated refreshes each prove under their own snapshot.
-    a_subscriber
-        .borrow_mut()
-        .update_authenticated_session_claims(b_claims.clone());
-    {
-        let mut a_connection = a_subscriber.borrow_mut();
-        let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
-            unreachable!("A remains an admitted subscriber link");
-        };
-        let allowed =
-            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-                &mut server.node().borrow_mut(),
-                alice,
-                a_state.session_claims.clone(),
-                &versions,
-                tx.tx_id,
-            ))
-            .expect("a refreshed terminal proof uses the refreshed snapshot");
-        assert!(!allowed, "the viewer snapshot denies the same write");
-    }
-    a_subscriber
-        .borrow_mut()
-        .update_authenticated_session_claims(a_claims.clone());
-    {
-        let mut a_connection = a_subscriber.borrow_mut();
-        let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
-            unreachable!("A remains an admitted subscriber link");
-        };
-        let allowed =
-            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-                &mut server.node().borrow_mut(),
-                alice,
-                a_state.session_claims.clone(),
-                &versions,
-                tx.tx_id,
-            ))
-            .expect("the next refreshed terminal proof uses the restored snapshot");
-        assert!(allowed, "the restored editor snapshot authorizes it again");
+    for (claims, expected) in [
+        (a_claims.clone(), Fate::Accepted),
+        (
+            b_claims,
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+        ),
+        (a_claims, Fate::Accepted),
+    ] {
+        a_subscriber
+            .borrow_mut()
+            .update_authenticated_session_claims(claims);
+        let write = client
+            .insert(
+                "todos",
+                cells("same-author sibling snapshot", false, alice),
+                Default::default(),
+            )
+            .expect("A can prepare a fresh candidate before terminal adjudication");
+        let tx_id = write.mergeable_tx_id();
+        let unit = client
+            .node
+            .node
+            .borrow_mut()
+            .commit_unit_for(tx_id)
+            .expect("prepared write retains its commit unit");
+        a_transport.send(unit).unwrap();
+        a_subscriber
+            .borrow_mut()
+            .tick()
+            .expect("terminal ingest uses A's current immutable admitted snapshot");
+        let fate =
+            std::iter::from_fn(|| a_transport.try_recv()).find_map(|message| match message {
+                SyncMessage::FateUpdate {
+                    tx_id: candidate,
+                    fate,
+                    ..
+                } if candidate == tx_id => Some(fate),
+                _ => None,
+            });
+        assert_eq!(fate, Some(expected));
     }
 }
 
@@ -5163,5 +5259,446 @@ fn scope_relay_remote_registration_cannot_disable_propagation() {
             }
         }
         assert!(rejected);
+    }
+}
+
+mod e13_terminal_ingress {
+    use super::*;
+
+    fn schema_with_authored_body(body: bool) -> JazzSchema {
+        let editor = PublicPolicyExpr::SessionCmp {
+            path: vec!["claims".to_owned(), "role".to_owned()],
+            op: PublicCmpOp::Eq,
+            value: PublicValue::Text("editor".to_owned()),
+        };
+        let table = PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("done", PublicColumnType::Boolean)
+            .column("owner", PublicColumnType::Uuid)
+            .policies(
+                public_legacy_write_policy(PublicPolicyExpr::and(vec![
+                    editor,
+                    public_session_eq("$createdBy", &["user"]),
+                ]))
+                .with_select(PublicPolicyExpr::True),
+            );
+        build_public_db_test_schema(PublicSchemaBuilder::new().table(if body {
+            table.column("body", PublicColumnType::Text)
+        } else {
+            table
+        }))
+    }
+
+    fn role_claims(role: &str) -> BTreeMap<String, Value> {
+        BTreeMap::from([(
+            crate::query::provider_claim_key("role"),
+            Value::String(role.to_owned()),
+        )])
+    }
+
+    fn authored_unit(client: &Db, alice: AuthorSubject) -> (TxId, SyncMessage) {
+        let mut values = cells("parked authored schema", false, alice);
+        values.insert("body".to_owned(), Value::String("complete body".to_owned()));
+        let write = block_on(client.insert("todos", values, Default::default())).unwrap();
+        let tx_id = write.mergeable_tx_id();
+        let unit = block_on(client.node.node.borrow_mut().commit_unit_for(tx_id)).unwrap();
+        (tx_id, unit)
+    }
+
+    fn authored_schema_publication(
+        state: &NodeState,
+        base: &JazzSchema,
+        authored: &JazzSchema,
+    ) -> SchemaLineagePublication {
+        state
+            .author_schema_lineage_publication(
+                SchemaVersion::new(authored.clone()),
+                MigrationLens::new(
+                    base.version_id(),
+                    authored.version_id(),
+                    vec![TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "todos".to_owned(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "body".to_owned(),
+                            default: Value::String(String::new()),
+                        }],
+                    }],
+                )
+                .unwrap(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap()
+    }
+
+    fn install_authored_schema(
+        server: &CoreDb,
+        base: &JazzSchema,
+        authored: &JazzSchema,
+    ) -> Vec<SyncMessage> {
+        let publication = authored_schema_publication(&server.node().borrow(), base, authored);
+        server.publish_schema_with_lens(1, publication).unwrap()
+    }
+
+    fn assert_parked(server: &CoreDb, tx_id: TxId) {
+        assert!(
+            block_on(server.node().borrow_mut().transaction_state(tx_id)).is_none(),
+            "a missing authored schema must not produce an authority fate"
+        );
+        assert_eq!(
+            server
+                .node()
+                .borrow()
+                .sync_metrics()
+                .parked_catalogue_orphans,
+            1
+        );
+    }
+
+    fn assert_captured_binding(original_role: &str, later_role: &str, expected: Fate) {
+        let base = schema_with_authored_body(false);
+        let authored = schema_with_authored_body(true);
+        let alice = AuthorSubject::for_test_bytes([0xe3; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xe4; 16]);
+        let client = open_db(0xe3, alice, &authored);
+        let server = open_core(0xe5, AuthorSubject::SYSTEM, &base);
+        let (tx_id, unit) = authored_unit(&client, alice);
+        let (mut relay_transport, server_transport) = duplex();
+        let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+            server_transport,
+            alice,
+            role_claims(original_role),
+            13,
+        );
+
+        relay_transport.send(unit).unwrap();
+        block_on(subscriber.borrow_mut().tick())
+            .expect("terminal dispatch parks before trying to prove an unavailable schema");
+        assert_parked(&server, tx_id);
+        assert!(
+            std::iter::from_fn(|| relay_transport.try_recv()).all(|message| !matches!(
+                message,
+                SyncMessage::FateUpdate { tx_id: candidate, .. } if candidate == tx_id
+            )),
+            "parking is not a provisional acceptance or rejection"
+        );
+
+        // Neither a same-author compatibility cache nor another authority
+        // operation's active identity/claims may replace the parked admission.
+        let node = server.node();
+        let mut state = node.borrow_mut();
+        state.set_test_provider_claims(alice, role_claims(later_role));
+        let publication = authored_schema_publication(&state, &base, &authored);
+        let mut ambient = state.scoped_active_session_claims(bob, role_claims(later_role));
+        let updates = block_on(async {
+            let outcome = ambient
+                .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+                    author: AuthorSubject::SYSTEM,
+                    catalogue_seq: 1,
+                    publication: Box::new(publication),
+                })
+                .await?;
+            ambient.persist_and_settle_outcome(outcome).await
+        })
+        .unwrap();
+        assert!(
+            updates.iter().any(|message| matches!(
+                message,
+                SyncMessage::FateUpdate { tx_id: candidate, fate, .. }
+                    if *candidate == tx_id && *fate == expected
+            )),
+            "schema arrival must adjudicate under Alice's captured {original_role} binding: {updates:?}"
+        );
+        let (fate, global_time, _) = block_on(ambient.transaction_state(tx_id)).unwrap();
+        assert_eq!(fate, expected);
+        assert_eq!(global_time.is_some(), matches!(expected, Fate::Accepted));
+        let mut bob_values = cells("Bob's subsequent policy check", false, bob);
+        bob_values.insert("body".to_owned(), Value::String("complete body".to_owned()));
+        let bob_allowed = block_on(
+            ambient.dry_run_mergeable_write_allows_in_schema(
+                authored.version_id(),
+                MergeableCommit::new("todos", row(0xec), 1)
+                    .made_by(bob)
+                    .cells(bob_values),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            bob_allowed,
+            later_role == "editor",
+            "draining Alice's parked upload must restore Bob's ambient claims scope"
+        );
+        drop(ambient);
+        assert_eq!(state.session_claims_for(alice), role_claims(later_role));
+    }
+
+    /// Alice's editor upload parks at Core, then schema arrival accepts it even
+    /// after Alice's cache becomes viewer and Bob owns the active viewer scope.
+    /// alice/editor -> relay -> missing schema -> park -> schema -> Accepted
+    /// This protocol-level test needs raw upload ordering that Db hides.
+    #[test]
+    fn e13_terminal_relay_schema_arrival_keeps_original_editor_binding() {
+        assert_captured_binding("editor", "viewer", Fate::Accepted);
+    }
+
+    /// Alice's viewer upload parks at Core, then schema arrival denies it even
+    /// after Alice's cache becomes editor and Bob owns the active editor scope.
+    /// alice/viewer -> relay -> missing schema -> park -> schema -> Denied
+    /// This protocol-level test observes a denied fate, not a policy mock.
+    #[test]
+    fn e13_terminal_relay_schema_arrival_keeps_original_denied_binding() {
+        assert_captured_binding(
+            "viewer",
+            "editor",
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+        );
+    }
+
+    /// Alice can resend a parked upload with identical admitted claims, but a
+    /// second editor session with different claims cannot replace its binding.
+    /// alice/editor A -> park -> resend A -> same unit/editor B -> conflict
+    /// Raw Relay-trust admission is needed to distinguish the two sessions.
+    #[test]
+    fn e13_terminal_relay_parked_resend_compares_exact_claims() {
+        let base = schema_with_authored_body(false);
+        let authored = schema_with_authored_body(true);
+        let alice = AuthorSubject::for_test_bytes([0xe6; 16]);
+        let client = open_db(0xe6, alice, &authored);
+        let server = open_core(0xe7, AuthorSubject::SYSTEM, &base);
+        let (tx_id, unit) = authored_unit(&client, alice);
+        let claims = role_claims("editor");
+        let (mut first, transport) = duplex();
+        let first_subscriber = server.server.accept_scope_isolated_relay_subscriber(
+            transport,
+            alice,
+            claims.clone(),
+            14,
+        );
+        first.send(unit.clone()).unwrap();
+        block_on(first_subscriber.borrow_mut().tick()).expect("first upload parks");
+        assert_parked(&server, tx_id);
+
+        let (mut same, transport) = duplex();
+        let same_subscriber = server.server.accept_scope_isolated_relay_subscriber(
+            transport,
+            alice,
+            claims.clone(),
+            15,
+        );
+        same.send(unit.clone()).unwrap();
+        block_on(same_subscriber.borrow_mut().tick())
+            .expect("identical claims remain idempotent across admitted attachments");
+        assert_parked(&server, tx_id);
+
+        let mut changed_claims = claims;
+        changed_claims.insert(
+            crate::query::provider_claim_key("session"),
+            Value::String("another editor session".to_owned()),
+        );
+        let (mut changed, transport) = duplex();
+        let changed_subscriber = server.server.accept_scope_isolated_relay_subscriber(
+            transport,
+            alice,
+            changed_claims,
+            16,
+        );
+        changed.send(unit).unwrap();
+        let error = block_on(changed_subscriber.borrow_mut().tick())
+            .expect_err("different exact claims conflict even when both roles authorize");
+        assert_eq!(error.code, ErrorCode::Protocol);
+        assert_parked(&server, tx_id);
+        let updates = install_authored_schema(&server, &base, &authored);
+        assert!(updates.iter().any(|message| matches!(
+            message,
+            SyncMessage::FateUpdate { tx_id: candidate, fate: Fate::Accepted, .. }
+                if *candidate == tx_id
+        )));
+    }
+
+    /// Mallory's subjectless relay cannot treat its transport SYSTEM identity
+    /// as Alice's admission, even when Alice's cached claims would allow it.
+    /// alice unit -> unbound relay -> Core -> AuthorizationDenied
+    /// The host-admitted relay capability is exercised through a real link.
+    #[test]
+    fn e13_terminal_relay_without_scoped_binding_denies_write() {
+        let authored = schema_with_authored_body(true);
+        let alice = AuthorSubject::for_test_bytes([0xe8; 16]);
+        let client = open_db(0xe8, alice, &authored);
+        let server = open_core(0xe9, AuthorSubject::SYSTEM, &authored);
+        server
+            .node()
+            .borrow_mut()
+            .set_test_provider_claims(alice, role_claims("editor"));
+        let (tx_id, unit) = authored_unit(&client, alice);
+        let (mut relay, transport) = duplex();
+        let subscriber = server.server.accept_relay_subscriber(transport);
+        relay.send(unit).unwrap();
+        block_on(subscriber.borrow_mut().tick()).expect("unbound relay produces a denied fate");
+        assert!(matches!(
+            block_on(server.node().borrow_mut().transaction_state(tx_id)),
+            Some((
+                Fate::Rejected(RejectionReason::AuthorizationDenied),
+                None,
+                _
+            ))
+        ));
+    }
+
+    /// Alice's incomplete declared write count is malformed before any schema
+    /// lookup or editor proof, so Core rejects instead of parking or erroring.
+    /// alice unit/count mismatch -> relay -> Core -> MalformedCommit
+    /// Raw protocol construction is necessary to send the malformed envelope.
+    #[test]
+    fn e13_terminal_relay_count_mismatch_precedes_policy_proof() {
+        let base = schema_with_authored_body(false);
+        let authored = schema_with_authored_body(true);
+        let alice = AuthorSubject::for_test_bytes([0xea; 16]);
+        let client = open_db(0xea, alice, &authored);
+        let server = open_core(0xeb, AuthorSubject::SYSTEM, &base);
+        let (tx_id, unit) = authored_unit(&client, alice);
+        let SyncMessage::CommitUnit { mut tx, versions } = unit else {
+            unreachable!("Db authored a complete commit unit");
+        };
+        tx.n_total_writes += 1;
+        let (mut relay, transport) = duplex();
+        let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+            transport,
+            alice,
+            role_claims("editor"),
+            17,
+        );
+        relay
+            .send(SyncMessage::CommitUnit { tx, versions })
+            .unwrap();
+        block_on(subscriber.borrow_mut().tick())
+            .expect("malformed count is rejected without trying an unavailable-schema proof");
+        assert!(matches!(
+            block_on(server.node().borrow_mut().transaction_state(tx_id)),
+            Some((Fate::Rejected(RejectionReason::MalformedCommit(_)), None, _))
+        ));
+        assert_eq!(
+            server
+                .node()
+                .borrow()
+                .sync_metrics()
+                .parked_catalogue_orphans,
+            0
+        );
+        let updates = install_authored_schema(&server, &base, &authored);
+        assert!(!updates.iter().any(|message| matches!(
+            message,
+            SyncMessage::FateUpdate { tx_id: candidate, fate: Fate::Accepted, .. }
+                if *candidate == tx_id
+        )));
+    }
+
+    fn assert_parent_arrival_binding(original_role: &str, later_role: &str, expected: Fate) {
+        let schema = schema_with_authored_body(true);
+        let alice = AuthorSubject::for_test_bytes([0xf2; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xf3; 16]);
+        let client = open_db(0xf2, alice, &schema);
+        client.set_test_provider_claims(alice, role_claims("editor"));
+        let server = open_core(0xf4, AuthorSubject::SYSTEM, &schema);
+        let (_, parent) = authored_unit(&client, alice);
+        let SyncMessage::CommitUnit { tx, versions } = parent else {
+            unreachable!("parent is a complete authored unit");
+        };
+        let target = versions[0].row_uuid();
+        let child = client
+            .update(
+                "todos",
+                target,
+                BTreeMap::from([("body".to_owned(), Value::String("child body".to_owned()))]),
+                Default::default(),
+            )
+            .unwrap();
+        let child_id = child.mergeable_tx_id();
+        let child_unit = block_on(client.node.node.borrow_mut().commit_unit_for(child_id)).unwrap();
+        let (mut relay, transport) = duplex();
+        let subscriber = server.accept_scope_isolated_relay_subscriber(
+            transport,
+            alice,
+            role_claims(original_role),
+            20,
+        );
+        relay.send(child_unit).unwrap();
+        block_on(subscriber.borrow_mut().tick()).unwrap();
+        assert!(block_on(server.node().borrow_mut().transaction_state(child_id)).is_none());
+
+        let node = server.node();
+        let mut state = node.borrow_mut();
+        state.set_test_provider_claims(alice, role_claims(later_role));
+        let mut ambient = state.scoped_active_session_claims(bob, role_claims(later_role));
+        let outcome = block_on(ambient.ingest_commit_unit_with_context(
+            tx,
+            versions,
+            u64::MAX,
+            Some(crate::node::CommitUnitIngestContext {
+                identity: AuthorSubject::SYSTEM,
+                trust: CommitUnitTrust::TrustedAdmin,
+                version_receipts_validated: false,
+            }),
+        ))
+        .unwrap();
+        let updates = block_on(ambient.persist_and_settle_outcome(outcome)).unwrap();
+        assert!(updates.iter().any(|message| matches!(
+            message,
+            SyncMessage::FateUpdate { tx_id, fate, .. }
+                if *tx_id == child_id && *fate == expected
+        )));
+        let (fate, global_time, _) = block_on(ambient.transaction_state(child_id)).unwrap();
+        assert_eq!(fate, expected);
+        assert_eq!(global_time.is_some(), matches!(expected, Fate::Accepted));
+        let mut bob_values = cells("Bob after parent arrival", false, bob);
+        bob_values.insert("body".to_owned(), Value::String("Bob's body".to_owned()));
+        assert_eq!(
+            block_on(
+                ambient.dry_run_mergeable_write_allows_in_schema(
+                    schema.version_id(),
+                    MergeableCommit::new("todos", row(0xf5), 1)
+                        .made_by(bob)
+                        .cells(bob_values),
+                )
+            )
+            .unwrap(),
+            later_role == "editor",
+        );
+        drop(ambient);
+        drop(state);
+        let rows = server.read(&Query::from("todos")).unwrap();
+        let expected_body = if matches!(expected, Fate::Accepted) {
+            "child body"
+        } else {
+            "complete body"
+        };
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.row_uuid(), row.cell(&schema.tables[0], "body")))
+                .collect::<Vec<_>>(),
+            vec![(target, Some(Value::String(expected_body.to_owned())))],
+        );
+    }
+
+    /// Alice's editor child arrives before its real parent. Parent admission
+    /// under Bob's viewer scope must accept the child with Alice's captured
+    /// editor claims, then restore Bob's viewer policy outcome.
+    /// alice/editor child -> park -> parent -> Accepted; bob/viewer -> Denied
+    #[test]
+    fn terminal_relay_parent_arrival_keeps_original_editor_binding() {
+        assert_parent_arrival_binding("editor", "viewer", Fate::Accepted);
+    }
+
+    /// Alice's viewer child cannot borrow later editor claims when its parent
+    /// arrives. The accepted parent remains the visible body and Bob's editor
+    /// scope is restored after the denied child is drained.
+    /// alice/viewer child -> park -> parent -> Denied; bob/editor -> Allowed
+    #[test]
+    fn terminal_relay_parent_arrival_keeps_original_denied_binding() {
+        assert_parent_arrival_binding(
+            "viewer",
+            "editor",
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+        );
     }
 }

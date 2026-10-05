@@ -2708,13 +2708,31 @@ impl ParkedIngressRole {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(super) struct ParkedCommitUnit {
     pub(super) tx: Transaction,
     pub(super) versions: Vec<VersionRecord>,
     pub(super) now_ms: u64,
     pub(super) ingest_context: Option<CommitUnitIngestContext>,
     pub(super) ingress_role: ParkedIngressRole,
+    /// Exact operation-local admission, never the mutable author claims cache.
+    pub(super) session_claim_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+}
+
+impl std::fmt::Debug for ParkedCommitUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParkedCommitUnit")
+            .field("tx", &self.tx)
+            .field("versions", &self.versions)
+            .field("now_ms", &self.now_ms)
+            .field("ingest_context", &self.ingest_context)
+            .field("ingress_role", &self.ingress_role)
+            .field(
+                "session_claim_binding",
+                &self.session_claim_binding.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 pub(super) fn current_version_index(

@@ -261,7 +261,6 @@ where
                 Some(CommitUnitIngestContext {
                     identity: AuthorSubject::SYSTEM,
                     trust: CommitUnitTrust::TrustedBackend,
-                    admitted_write_authorization: false,
                     version_receipts_validated: false,
                 }),
             )
@@ -334,15 +333,10 @@ where
                 if matches!(peer.role(), PeerRole::ClientLink { .. })
                     || peer.role() == PeerRole::Relay =>
             {
-                // Terminal authorization belongs to the immutable session
-                // selected at request admission, never to the relay's
-                // subjectless transport identity. A scope-isolated relay has
-                // already been checked against its server-issued one-binding
-                // capability; a multiplexed relay has passed the corresponding
-                // transport admission check for this request.
-                // Both transaction kinds need this authorization. Exclusive
-                // writes also validate their read sets at terminal ingest, but
-                // that cannot replace authorization under the delegated session.
+                // Admission selects the immutable binding; Node decides write
+                // policy only after structural and dependency gates pass.
+                let admitted_relay_binding = ingest_context.trust == CommitUnitTrust::Relay
+                    && peer.admits_relay_binding(&session_claim_binding);
                 let permission_subject = match ingest_context.trust {
                     CommitUnitTrust::Session => ingest_context.identity,
                     CommitUnitTrust::Relay => session_claim_binding.0,
@@ -359,7 +353,7 @@ where
                 // that identity; multiplexed authority forwarding is not.
                 let must_bind_provenance = match ingest_context.trust {
                     CommitUnitTrust::Session => matches!(tx.made_by, AuthorSubject::SystemAt(_)),
-                    CommitUnitTrust::Relay => peer.admits_relay_binding(&session_claim_binding),
+                    CommitUnitTrust::Relay => admitted_relay_binding,
                     CommitUnitTrust::TrustedBackend
                     | CommitUnitTrust::TrustedAuthority
                     | CommitUnitTrust::TrustedAdmin => false,
@@ -384,33 +378,36 @@ where
                         ));
                     }
                 }
-                // Only a relay's terminal ingest consumes this receipt. Every
-                // other trust evaluates the write policies itself at ingest.
-                let admitted_write_authorization = if ingest_context.trust == CommitUnitTrust::Relay
-                {
-                    let mut node = node.lock().await;
-                    peer.prove_terminal_commit_authorization(
-                        &mut node,
-                        permission_subject,
-                        session_claim_binding.1,
-                        &versions,
-                        tx.tx_id,
-                    )
-                    .await?
-                } else {
-                    false
-                };
-                Ok(node
-                    .lock()
-                    .await
-                    .apply_sync_message_with_ingest_context(
-                        SyncMessage::CommitUnit { tx, versions },
-                        Some(CommitUnitIngestContext {
-                            admitted_write_authorization,
+                let mut node = node.lock().await;
+                if ingest_context.trust == CommitUnitTrust::Session || admitted_relay_binding {
+                    let context = if admitted_relay_binding {
+                        CommitUnitIngestContext {
+                            identity: session_claim_binding.0,
                             ..ingest_context
-                        }),
-                    )
-                    .await?)
+                        }
+                    } else {
+                        ingest_context
+                    };
+                    let mut node = node.scoped_active_session_claims(
+                        session_claim_binding.0,
+                        session_claim_binding.1,
+                    );
+                    Ok(node
+                        .apply_sync_message_with_ingest_context(
+                            SyncMessage::CommitUnit { tx, versions },
+                            Some(context),
+                        )
+                        .await?)
+                } else {
+                    // A subjectless relay has no delegated authority. Ingest
+                    // still runs its structural gates before the policy denial.
+                    Ok(node
+                        .apply_sync_message_with_ingest_context(
+                            SyncMessage::CommitUnit { tx, versions },
+                            Some(ingest_context),
+                        )
+                        .await?)
+                }
             }
             other => Ok(node
                 .lock()

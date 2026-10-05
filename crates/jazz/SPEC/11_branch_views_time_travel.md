@@ -310,6 +310,20 @@ inherited deletion; a head `Restored` winner may reveal inherited content; a
 head deletion hides either head or inherited content (`INV-BVIEW-9`,
 `INV-BVIEW-10`).
 
+Live one-shot `include_deleted` reads also retain a selected `Deleted` register
+when the selected view has no content winner. An exact-head read returns that
+row with the head branch values and absent non-branch cells; it does not fetch
+a body from an undeclared branch. An explicitly selected current base can
+supply the body. A register-only row takes its creation and update provenance
+from the register; a content-backed tombstone retains content creation
+provenance and takes update provenance from the selected deletion.
+
+Physical content presence is decided before compatibility projection. A head
+winner that an older reader must omit still masks base content and cannot
+become a register-only tombstone. Register-only application output does not
+establish read-policy eligibility: trusted non-System reads still require
+selected content under the effective head's policy (`INV-RLS-8`).
+
 Masking precedes predicates. If base row A has `status="open"` and head row A
 has `status="closed"`, a query for open rows must not return base A. Index plans
 must therefore anti-join base matches against all head-touched row ids for the

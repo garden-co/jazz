@@ -238,6 +238,22 @@ trusted-backend authority: persisted `made_by` still requires a non-null account
 author or the reserved system account with its originating node UUID. Anonymous
 reader identities cannot become persisted authors.
 
+An authenticated session's immutable admitted identity and claims MUST scope
+the complete authority decision, including exclusive read-set and predicate
+validation. A scope-isolated relay may use only the foreground binding admitted
+for its exact live capability; unbound relay transport grants no write authority.
+A detached write-policy preflight does not authorize later adjudication outside
+that binding.
+
+When a unit parks for parent or schema prerequisites, its authority queue entry
+retains the original exact optional binding for replay in this process. A resend
+with changed canonical content, authority context, or claims MUST conflict even
+if those prerequisites have since arrived. Replay clears any unrelated ambient
+binding when none was captured, then restores the previous scope on completion
+or cancellation. Policy rows remain current: retaining claims does not freeze a
+grant or prevent revocation. This queue does not persist admitted claims across
+process restart or change commit-unit wire/storage encoding.
+
 For an insert, `insert_check` is evaluated against the inserted row. For an
 update, `update_using` is evaluated against the previous content row and
 `update_check` is evaluated against the new content row; if both clauses are
