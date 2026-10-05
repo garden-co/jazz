@@ -322,7 +322,7 @@ impl<'a> TestingClient<'a> {
             #[cfg(feature = "rocksdb")]
             {
                 context.storage_factory = Some(std::sync::Arc::new(
-                    jazz_storage_rocksdb::RocksDbStorageFactory,
+                    jazz_storage_rocksdb::RocksDbStorageFactory::default(),
                 ));
             }
             #[cfg(not(feature = "rocksdb"))]

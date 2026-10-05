@@ -5919,19 +5919,496 @@ fn staged_streaming_rollback_drop_and_overwrite_release_claims() {
     });
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReopenReadChange {
+    None,
+    Absence,
+    Point,
+    Predicate,
+}
+
+/// Reopening a pending publication must replay its original observations, not
+/// re-read current authority state or reconstruct empty exclusive evidence.
+fn pending_exclusive_reopen_replay(change: ReopenReadChange, dependent: bool) {
+    std::thread::Builder::new()
+        .name("pending-exclusive-reopen".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || pending_exclusive_reopen_replay_on_test_stack(change, dependent))
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn pending_exclusive_reopen_replay_on_test_stack(change: ReopenReadChange, dependent: bool) {
+    block_on(async {
+        let schema = doctest_support::schema();
+        let dir = tempfile::tempdir().unwrap();
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xe8; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let open = || {
+            Db::open(DbConfig {
+                schema: schema.clone(),
+                storage: RocksDbStorage::open(dir.path(), &refs).unwrap(),
+                identity: identity.clone(),
+                id_source: None,
+            })
+        };
+        let db = open().await.unwrap();
+        let server = open_core(0xe9, AuthorSubject::SYSTEM, &schema);
+        let (up, down, sent) = duplex_with_client_outbound_tap();
+        let upstream = db.connect_upstream(up).await;
+        let peer = server.accept_subscriber_with_trust(
+            down,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::TrustedBackend,
+        );
+        let observed_row = row(0xea);
+        let absent_row = row(0xeb);
+        let published_row = row(0xec);
+        let seed = db
+            .insert(
+                "todos",
+                doctest_support::todo_cells("observed", false),
+                InsertOptions {
+                    row_id: Some(observed_row),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .mergeable_tx_id();
+        for _ in 0..32 {
+            db.tick().await.unwrap();
+            peer.borrow_mut().tick().await.unwrap();
+        }
+        assert_eq!(db.write_state(seed).unwrap().fate, Fate::Accepted);
+        assert_eq!(
+            db.write_state(seed).unwrap().durability,
+            DurabilityTier::Global
+        );
+
+        let tx = OpenTransactionId::new();
+        db.begin_exclusive(tx).await.unwrap();
+        assert_eq!(
+            db.exclusive_tx_ref(tx)
+                .read("todos", observed_row)
+                .await
+                .unwrap(),
+            Some(doctest_support::todo_cells("observed", false))
+        );
+        assert!(
+            db.exclusive_tx_ref(tx)
+                .read("todos", absent_row)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let prepared = db
+            .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("observed"))))
+            .unwrap();
+        let observed = db
+            .exclusive_tx_ref(tx)
+            .all_prepared(&prepared)
+            .await
+            .unwrap();
+        assert_eq!(
+            observed
+                .iter()
+                .map(|row| row.row_uuid())
+                .collect::<Vec<_>>(),
+            vec![observed_row]
+        );
+        db.exclusive_tx_ref(tx)
+            .insert(
+                "todos",
+                doctest_support::todo_cells("published after restart", true),
+                InsertOptions {
+                    row_id: Some(published_row),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let committed = db.commit_exclusive_handle(tx).await.unwrap();
+        let dependent_commit = if dependent {
+            // The second unit has no version-history parent edge to the first:
+            // it reads the first new root and writes a different root row.
+            let next = OpenTransactionId::new();
+            db.begin_exclusive(next).await.unwrap();
+            assert_eq!(
+                db.exclusive_tx_ref(next)
+                    .read("todos", published_row)
+                    .await
+                    .unwrap(),
+                Some(doctest_support::todo_cells("published after restart", true)),
+            );
+            let query = db
+                .prepare_query(
+                    &Query::from("todos").filter(eq(col("title"), lit("published after restart"))),
+                )
+                .unwrap();
+            let rows = db
+                .exclusive_tx_ref(next)
+                .all_prepared(&query)
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+                vec![published_row]
+            );
+            db.exclusive_tx_ref(next)
+                .insert(
+                    "todos",
+                    doctest_support::todo_cells("dependent after restart", false),
+                    InsertOptions {
+                        row_id: Some(row(0xee)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            Some(db.commit_exclusive_handle(next).await.unwrap())
+        } else {
+            None
+        };
+        // Deliberately do not tick the authority again on this connection.
+        // Capture the real upload, but close before it can receive any fate.
+        for _ in 0..32 {
+            db.tick().await.unwrap();
+        }
+        let original = sent
+            .borrow()
+            .iter()
+            .find(|message| {
+                matches!(
+                    message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == committed
+                )
+            })
+            .cloned()
+            .expect("live exclusive publication must emit its original commit unit");
+        let SyncMessage::CommitUnit {
+            tx: original_tx,
+            versions: original_versions,
+        } = original
+        else {
+            unreachable!("captured commit unit")
+        };
+        assert_eq!(original_tx.kind, crate::tx::TxKind::Exclusive);
+        assert!(original_tx.base_snapshot.is_some());
+        assert!(
+            original_tx
+                .row_read_set
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|read| {
+                    read.table == "todos" && read.row_uuid == observed_row && read.version == seed
+                })
+        );
+        assert!(
+            original_tx
+                .absent_read_set
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|read| { read.table == "todos" && read.row_uuid == absent_row })
+        );
+        assert_eq!(original_tx.predicate_read_set.as_ref().unwrap().len(), 1);
+        // A repair carrier deliberately redacts read evidence. Use the existing
+        // request-bound node seam because app reads cannot manufacture such a
+        // receipt; the subsequent public reopen/replay must retain the original.
+        let mut redacted = original_tx.clone();
+        redacted.base_snapshot = None;
+        redacted.row_read_set = None;
+        redacted.absent_read_set = None;
+        redacted.predicate_read_set = None;
+        db.node
+            .node
+            .lock()
+            .await
+            .apply_row_version_payloads_for_requests(
+                &[RowVersionRef::new("todos", published_row, committed)],
+                vec![VersionBundle {
+                    tx: redacted,
+                    versions: original_versions.clone(),
+                    scope: VersionBundleScope::ViewScoped,
+                    fate: Fate::Pending,
+                    global_time: None,
+                    durability: DurabilityTier::Local,
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            db.write_state(committed).unwrap(),
+            WriteState {
+                fate: Fate::Pending,
+                durability: DurabilityTier::Local,
+                global_time: None,
+            }
+        );
+        assert!(
+            server
+                .read(&server.table("todos"))
+                .unwrap()
+                .iter()
+                .all(|row| row.row_uuid() != published_row)
+        );
+        let original_dependent = dependent_commit.map(|dependent| {
+            assert_eq!(db.write_state(dependent).unwrap().fate, Fate::Pending);
+            assert_eq!(
+                db.write_state(dependent).unwrap().durability,
+                DurabilityTier::Local
+            );
+            let unit = sent
+                .borrow()
+                .iter()
+                .find(|message| {
+                    matches!(message,
+                SyncMessage::CommitUnit { tx, .. } if tx.tx_id == dependent)
+                })
+                .cloned()
+                .unwrap();
+            let SyncMessage::CommitUnit { tx, versions } = &unit else {
+                unreachable!()
+            };
+            assert!(
+                tx.row_read_set
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|read| read.row_uuid == published_row && read.version == committed)
+            );
+            assert!(versions.iter().all(|version| version.parents().is_empty()));
+            unit
+        });
+        db.detach_connection(&upstream);
+        drop(upstream);
+        drop(peer);
+        drop(sent);
+        drop(db);
+
+        match change {
+            ReopenReadChange::None => {}
+            ReopenReadChange::Absence => {
+                // Outside the predicate and not a write/write conflict.
+                server
+                    .insert_with_id(
+                        "todos",
+                        absent_row,
+                        doctest_support::todo_cells("concurrent", false),
+                    )
+                    .unwrap();
+            }
+            ReopenReadChange::Point => {
+                server
+                    .insert_with_id(
+                        "todos",
+                        observed_row,
+                        doctest_support::todo_cells("observed", true),
+                    )
+                    .unwrap();
+            }
+            ReopenReadChange::Predicate => {
+                // A matching phantom not named by either point/absence set.
+                server
+                    .insert_with_id(
+                        "todos",
+                        row(0xed),
+                        doctest_support::todo_cells("observed", false),
+                    )
+                    .unwrap();
+            }
+        }
+        let reopened = open().await.unwrap();
+        assert_eq!(reopened.write_state(committed).unwrap().fate, Fate::Pending);
+        let (up, down, replayed) = duplex_with_client_outbound_tap();
+        let upstream = reopened.connect_upstream(up).await;
+        let peer = server.accept_subscriber_with_trust(
+            down,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::TrustedBackend,
+        );
+        let mut replay = None;
+        let mut replayed_units = Vec::new();
+        for _ in 0..128 {
+            reopened.tick().await.unwrap();
+            for message in replayed.borrow().iter() {
+                if let SyncMessage::CommitUnit { tx, .. } = message
+                    && (tx.tx_id == committed || Some(tx.tx_id) == dependent_commit)
+                    && !replayed_units.iter().any(|seen| {
+                        matches!(seen,
+                            SyncMessage::CommitUnit { tx: seen, .. } if seen.tx_id == tx.tx_id
+                        )
+                    })
+                {
+                    replayed_units.push(message.clone());
+                }
+            }
+            if replay.is_none() {
+                replay = replayed
+                    .borrow()
+                    .iter()
+                    .find(|message| {
+                        matches!(
+                            message, SyncMessage::CommitUnit { tx, .. }
+                                if tx.kind == crate::tx::TxKind::Exclusive
+                        )
+                    })
+                    .cloned();
+            }
+            peer.borrow_mut().tick().await.unwrap();
+        }
+        let SyncMessage::CommitUnit { tx, versions } = replay.expect(
+            "pending exclusive replay withheld after reopen: original durable read evidence must survive",
+        ) else {
+            unreachable!("captured exclusive replay")
+        };
+        assert_eq!(tx.tx_id, committed, "reopen must not mint a retry identity");
+        assert_eq!(tx.base_snapshot, original_tx.base_snapshot);
+        assert_eq!(tx.row_read_set, original_tx.row_read_set);
+        assert_eq!(tx.absent_read_set, original_tx.absent_read_set);
+        assert_eq!(tx.predicate_read_set, original_tx.predicate_read_set);
+        assert_eq!(
+            tx, original_tx,
+            "the immutable transaction header must survive"
+        );
+        assert_eq!(versions, original_versions);
+
+        let state = reopened.write_state(committed).unwrap();
+        let authority_rows = server.read(&server.table("todos")).unwrap();
+        let authority_row = authority_rows
+            .iter()
+            .find(|row| row.row_uuid() == published_row);
+        let local_row = reopened
+            .local_current_row("todos", published_row)
+            .await
+            .unwrap();
+        if change != ReopenReadChange::None {
+            assert_eq!(
+                state.fate,
+                Fate::Rejected(RejectionReason::ExclusiveConflict)
+            );
+            assert!(authority_row.is_none());
+            assert!(local_row.is_none());
+            if change == ReopenReadChange::Absence {
+                assert!(
+                    authority_rows
+                        .iter()
+                        .any(|row| row.row_uuid() == absent_row)
+                );
+            }
+        } else {
+            assert_eq!(state.fate, Fate::Accepted);
+            assert_eq!(state.durability, DurabilityTier::Global);
+            assert!(state.global_time.is_some());
+            for visible in [authority_row.unwrap(), local_row.as_ref().unwrap()] {
+                assert_eq!(
+                    visible.cell(&schema.tables()[0], "title"),
+                    Some(Value::String("published after restart".into()))
+                );
+            }
+        }
+        if let Some(dependent) = dependent_commit {
+            let units = replayed_units.iter().collect::<Vec<_>>();
+            let ids = units
+                .iter()
+                .map(|message| match message {
+                    SyncMessage::CommitUnit { tx, .. } => tx.tx_id,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                vec![committed, dependent],
+                "original identities first replay in authoring order"
+            );
+            assert_eq!(
+                units[1],
+                original_dependent.as_ref().unwrap(),
+                "dependent evidence is not re-read"
+            );
+            let state = reopened.write_state(dependent).unwrap();
+            assert_eq!(state.fate, Fate::Accepted);
+            assert_eq!(state.durability, DurabilityTier::Global);
+            assert!(state.global_time > reopened.write_state(committed).unwrap().global_time);
+            assert_eq!(
+                server
+                    .read(&server.table("todos"))
+                    .unwrap()
+                    .iter()
+                    .find(|visible| visible.row_uuid() == row(0xee))
+                    .unwrap()
+                    .cell(&schema.tables()[0], "title"),
+                Some(Value::String("dependent after restart".into()))
+            );
+        }
+        reopened.detach_connection(&upstream);
+        drop(upstream);
+        drop(peer);
+        drop(reopened);
+        let settled_reopen = open().await.unwrap();
+        // Fate updates are durable mutations of the transaction row; they must
+        // not erase the evidence needed by a later explicit retry/audit.
+        let SyncMessage::CommitUnit { tx: retained, .. } = settled_reopen
+            .node
+            .node
+            .lock()
+            .await
+            .commit_unit_for(committed)
+            .await
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(retained.base_snapshot, original_tx.base_snapshot);
+        assert_eq!(retained.row_read_set, original_tx.row_read_set);
+        assert_eq!(retained.absent_read_set, original_tx.absent_read_set);
+        assert_eq!(retained.predicate_read_set, original_tx.predicate_read_set);
+    });
+}
+
+#[test]
+fn pending_exclusive_reopen_replays_exact_evidence_and_accepts() {
+    pending_exclusive_reopen_replay(ReopenReadChange::None, false);
+}
+
+#[test]
+fn pending_exclusive_reopen_rejects_changed_absence() {
+    pending_exclusive_reopen_replay(ReopenReadChange::Absence, false);
+}
+
+#[test]
+fn pending_exclusive_reopen_rejects_changed_point() {
+    pending_exclusive_reopen_replay(ReopenReadChange::Point, false);
+}
+
+#[test]
+fn pending_exclusive_reopen_rejects_changed_predicate() {
+    pending_exclusive_reopen_replay(ReopenReadChange::Predicate, false);
+}
+
+#[test]
+fn pending_exclusive_reopen_replays_dependent_new_roots_in_original_order() {
+    pending_exclusive_reopen_replay(ReopenReadChange::None, true);
+}
+
 /// Alice's authority rejects the whole publication after Bob changes a read
 /// dependency. Bytes remain readable in Alice's retry store across reopening;
 /// replay cannot erase the exclusive preconditions, and explicit discard is
 /// the only operation in this flow that removes the retained payload.
 ///
 /// Alice: stage -> read absence -> Bob: insert -> Alice: commit -> rejection
-///       -> reopen -> proofless retry rejected -> discard
+///       -> reopen -> exact-evidence retry conflicts -> discard
 #[test]
 fn staged_streaming_rejection_retains_payload_across_reopen_and_retry() {
     block_on(async {
-        // The live exclusive envelope belongs to the upload outbox, not the
-        // durable transaction row. Observe the actual protocol send while
-        // forwarding every message unchanged to the real authority.
+        // Observe the original upload independently of the durable transaction
+        // codec while forwarding it unchanged to the real authority.
         struct CaptureExclusiveUnit {
             inner: Box<dyn Transport>,
             unit: Rc<RefCell<Option<SyncMessage>>>,
@@ -6134,12 +6611,19 @@ fn staged_streaming_rejection_retains_payload_across_reopen_and_retry() {
             panic!("expected reconstructed transaction")
         };
         assert_eq!(tx.kind, crate::tx::TxKind::Exclusive);
-        assert!(tx.base_snapshot.is_none());
-        let SyncMessage::CommitUnit { versions, .. } = original else {
+        let SyncMessage::CommitUnit {
+            tx: original_tx,
+            versions,
+        } = original
+        else {
             panic!("expected original unit")
         };
-        // A fresh retry identity must not turn missing restart evidence into
-        // an empty, apparently valid read set or a mergeable write.
+        assert_eq!(tx.base_snapshot, original_tx.base_snapshot);
+        assert_eq!(tx.row_read_set, original_tx.row_read_set);
+        assert_eq!(tx.absent_read_set, original_tx.absent_read_set);
+        assert_eq!(tx.predicate_read_set, original_tx.predicate_read_set);
+        // Even an explicit fresh retry identity retains the original absence;
+        // reopening cannot erase or refresh it to bypass the authority conflict.
         tx.tx_id = TxId::new(TxTime(tx.tx_id.time.0 + 2), tx.tx_id.node);
         let retry_id = tx.tx_id;
         let outcomes = server
@@ -6148,7 +6632,7 @@ fn staged_streaming_rejection_retains_payload_across_reopen_and_retry() {
             .apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions })
             .unwrap();
         assert!(outcomes.iter().any(|outcome| matches!(outcome,
-            SyncMessage::FateUpdate { tx_id, fate: Fate::Rejected(_), .. } if *tx_id == retry_id)));
+            SyncMessage::FateUpdate { tx_id, fate: Fate::Rejected(RejectionReason::ExclusiveConflict), .. } if *tx_id == retry_id)));
         assert!(
             reopened
                 .node

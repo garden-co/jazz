@@ -194,6 +194,7 @@ impl CorrelationParent {
             for link in self.links.iter().rev() {
                 let correlation = &link.correlation;
                 up = Some(JoinVia {
+                    source_mode: crate::query::CandidateSourceMode::AcceptedOnly,
                     table: link.parent_table.clone(),
                     target: if correlation.parent_key == "id" {
                         JoinTarget::RowId

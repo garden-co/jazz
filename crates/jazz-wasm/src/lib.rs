@@ -44,6 +44,74 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
 
+#[cfg(target_arch = "wasm32")]
+fn browser_storage_admission(
+    page_store: &JsValue,
+) -> Result<jazz::groove::storage::StorageAdmission, JsValue> {
+    use jazz::groove::storage::{StorageAdmission, StorageAdmissionReceipt, StorageEpochManifest};
+    let method = js_sys::Reflect::get(page_store, &JsValue::from_str("storageAdmission"))?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| JsValue::from_str("browser store does not provide durable admission"))?;
+    let value = method.call0(page_store)?;
+    if value.as_string().as_deref() == Some("ephemeral") {
+        return Ok(StorageAdmission::Ephemeral);
+    }
+    let parts = value
+        .dyn_into::<js_sys::Array>()
+        .map_err(|_| JsValue::from_str("invalid browser storage admission"))?;
+    if parts.length() != 2 {
+        return Err(JsValue::from_str("invalid browser storage admission"));
+    }
+    let manifest_bytes = parts
+        .get(0)
+        .dyn_into::<js_sys::Uint8Array>()
+        .map_err(|_| JsValue::from_str("invalid browser manifest bytes"))?
+        .to_vec();
+    let receipt_bytes = parts
+        .get(1)
+        .dyn_into::<js_sys::Uint8Array>()
+        .map_err(|_| JsValue::from_str("invalid browser receipt bytes"))?
+        .to_vec();
+    let manifest = StorageEpochManifest::decode(&manifest_bytes).map_err(to_js_error)?;
+    let receipt = StorageAdmissionReceipt::decode(&receipt_bytes).map_err(to_js_error)?;
+    let (source, target) = browser_storage_manifests().map_err(to_js_error)?;
+    if manifest != target {
+        return Err(JsValue::from_str(
+            "browser store requires the exact Jazz epoch-two profile",
+        ));
+    }
+    receipt.validate(&source, &target).map_err(to_js_error)?;
+    StorageAdmission::durable(manifest, Some(receipt)).map_err(to_js_error)
+}
+
+fn browser_storage_manifests() -> Result<
+    (
+        jazz::groove::storage::StorageEpochManifest,
+        jazz::groove::storage::StorageEpochManifest,
+    ),
+    jazz::groove::storage::Error,
+> {
+    use jazz::groove::storage::StorageEpochManifest;
+    let (source_spec, target_spec) = jazz::storage_codec_profile::node_storage_open_specs()?;
+    let parameters = BTreeMap::from([
+        ("page-checksum".to_owned(), b"xxh3-64-le".to_vec()),
+        ("page-format-magic".to_owned(), b"IDBTREE\0".to_vec()),
+        (
+            "page-format-version".to_owned(),
+            1u16.to_be_bytes().to_vec(),
+        ),
+        ("page-size".to_owned(), 16384u32.to_be_bytes().to_vec()),
+    ]);
+    let source = StorageEpochManifest::epoch_1_with_codec_profile(
+        "jazz-idb-tree",
+        1,
+        parameters,
+        &source_spec.codec_profile,
+    )?;
+    let target = source.with_open_spec(&target_spec)?;
+    Ok((source, target))
+}
+
 mod identity;
 
 #[cfg(feature = "bench-probes")]
@@ -1843,6 +1911,40 @@ impl WasmDb {
         })
     }
 
+    /// Private host admission bridge. Only the restricted, read-only page view
+    /// is exposed while the physical-root Web Lock remains held.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = preflightBrowserEpochOne)]
+    pub async fn preflight_browser_epoch_one(page_store: JsValue) -> Result<(), JsValue> {
+        let schema = JazzSchema::empty();
+        let logical = schema.column_families();
+        let physical = jazz::groove::storage::StorageLayout::jazz_class_v1()
+            .physical_column_families(logical.iter().map(String::as_str));
+        let refs = physical.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            BrowserStorage::open_read_only(IndexedDbPageStore::from_js(page_store), &refs)
+                .await
+                .map_err(to_js_error)?;
+        jazz::storage_codec_profile::preflight_epoch_one_node_storage(
+            jazz::groove::storage::ReadOnlyStorage::new(&storage),
+        )
+        .await
+        .map_err(to_js_error)
+    }
+
+    /// Byte-corpus bridge: authoritative Groove JSA1 encoding for browser profiles.
+    #[wasm_bindgen(js_name = __browserStorageAdmissionReceipt)]
+    pub fn browser_storage_admission_receipt(completed: bool) -> Result<Vec<u8>, JsValue> {
+        use jazz::groove::storage::StorageAdmissionReceipt;
+        let (source, target) = browser_storage_manifests().map_err(to_js_error)?;
+        let receipt = if completed {
+            StorageAdmissionReceipt::CompletedE1ToE2 { source, target }
+        } else {
+            StorageAdmissionReceipt::FreshE2 { target }
+        };
+        receipt.encode().map_err(to_js_error)
+    }
+
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = openBrowser)]
     pub async fn open_browser(
@@ -1857,9 +1959,14 @@ impl WasmDb {
         validate_untrusted_open_author(&config)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
-            .await
-            .map_err(to_js_error)?;
+        let admission = browser_storage_admission(&page_store)?;
+        let storage = BrowserStorage::open_admitted(
+            IndexedDbPageStore::from_js(page_store),
+            &refs,
+            admission,
+        )
+        .await
+        .map_err(to_js_error)?;
         let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
             .await
             .map_err(to_js_error)?;
@@ -1893,9 +2000,14 @@ impl WasmDb {
             verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
-            .await
-            .map_err(to_js_error)?;
+        let admission = browser_storage_admission(&page_store)?;
+        let storage = BrowserStorage::open_admitted(
+            IndexedDbPageStore::from_js(page_store),
+            &refs,
+            admission,
+        )
+        .await
+        .map_err(to_js_error)?;
         let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
             .await
             .map_err(to_js_error)?;

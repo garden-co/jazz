@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
+use groove::storage::BoxedStorage;
 use jazz::db::{
     Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, SeededRowIdSource, SubscriptionEvent,
 };
@@ -19,7 +20,6 @@ use jazz::time::GlobalTime;
 use jazz::tools::{
     CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies, TableSchemaBuilder,
 };
-use jazz_storage_rocksdb::RocksDbStorage;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -155,12 +155,13 @@ fn open_history_complete_db_with_schema(schema: JazzSchema) -> Db {
     .unwrap()
 }
 
-fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
+fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db<BoxedStorage> {
     let families = schema.column_families();
-    let storage = RocksDbStorage::open(
-        path,
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        path.to_path_buf(),
+        families,
+    ))
     .unwrap();
     block_on(Db::open(
         DbConfig::new(
@@ -2682,7 +2683,7 @@ fn indexed_branch_view_copy_on_write_and_reopen_keep_branch_coordinates_distinct
 }
 
 fn assert_branch_view_copy_on_write_receipt(
-    db: &Db,
+    db: &Db<BoxedStorage>,
     schema: &JazzSchema,
     base: &BranchSelector,
     copied: RowUuid,

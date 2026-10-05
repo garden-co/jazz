@@ -12,12 +12,9 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
     {
         let mut node = open_node_at(&temp_dir, schema.clone());
         first_tx = node
-            .commit_mergeable_settled(
-                MergeableCommit::new("todos", row(9), 10).cells(BTreeMap::from([(
-                    "title".to_owned(),
-                    "persisted".to_owned(),
-                )])),
-            )
+            .commit_mergeable_settled(MergeableCommit::new("todos", row(9), 10).cells(
+                BTreeMap::from([("title".to_owned(), "persisted".to_owned())]),
+            ))
             .unwrap();
     }
 
@@ -39,14 +36,12 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
         reopened.transaction_state_settled(first_tx).unwrap(),
         (Fate::Pending, None, DurabilityTier::Local)
     );
-    let next_tx = reopened
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(10), 11).cells(BTreeMap::from([(
-                "title".to_owned(),
-                "after restart".to_owned(),
-            )])),
-        )
-        .unwrap();
+    let next_tx =
+        reopened
+            .commit_mergeable_settled(MergeableCommit::new("todos", row(10), 11).cells(
+                BTreeMap::from([("title".to_owned(), "after restart".to_owned())]),
+            ))
+            .unwrap();
     assert_eq!(next_tx.time, TxTime::from(11));
 }
 
@@ -59,13 +54,13 @@ fn reopening_rejects_a_colliding_durable_node_alias_before_decoding_history() {
     {
         let mut reopened_node = open_node_at(&temp_dir, schema.clone());
         let mut batch = reopened_node.database.open_batch();
-        batch.insert(
-            "jazz_nodes",
-            vec![Value::U64(999), Value::Uuid(node(1).0)],
-        );
+        batch.insert("jazz_nodes", vec![Value::U64(999), Value::Uuid(node(1).0)]);
         let applied = crate::local_executor::block_on(reopened_node.database.apply_batch(batch)).unwrap();
         let persisted = crate::local_executor::block_on(applied.persist());
-        reopened_node.database.finish_persistence(persisted).unwrap();
+        reopened_node
+            .database
+            .finish_persistence(persisted)
+            .unwrap();
         crate::local_executor::block_on(reopened_node.database.close()).unwrap();
     }
 
@@ -74,7 +69,9 @@ fn reopening_rejects_a_colliding_durable_node_alias_before_decoding_history() {
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
     assert!(matches!(
         crate::local_executor::block_on(NodeState::new(node(1), schema, storage)),
-        Err(Error::InvalidStoredValue("node UUID has conflicting durable aliases"))
+        Err(Error::InvalidStoredValue(
+            "node UUID has conflicting durable aliases"
+        ))
     ));
 }
 
@@ -104,18 +101,25 @@ fn failed_node_alias_persistence_leaves_no_resident_alias_or_dependent_history_f
     let mut failed_node = NodeState::new(node(0xd2), node_schema.clone(), storage.clone()).unwrap();
     storage.fail_nth_following_write_many(1);
 
-    assert!(failed_node
-        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
-        .is_err());
+    assert!(
+        failed_node
+            .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+            .is_err()
+    );
     assert!(
         !failed_node.node_aliases.contains_key(&foreign_tx.node),
         "a failed alias prerequisite must not become a resident alias"
     );
 
-    let mut reopened = crate::local_executor::block_on(NodeState::new(node(0xd2), node_schema, storage)).unwrap();
-    let aliases = crate::local_executor::block_on(reopened.database.primary_key_scan_raw("jazz_nodes", &[]))
-        .unwrap();
-    assert_eq!(aliases.len(), 1, "only the core's own durable alias may remain");
+    let mut reopened =
+        crate::local_executor::block_on(NodeState::new(node(0xd2), node_schema, storage)).unwrap();
+    let aliases =
+        crate::local_executor::block_on(reopened.database.primary_key_scan_raw("jazz_nodes", &[])).unwrap();
+    assert_eq!(
+        aliases.len(),
+        1,
+        "only the core's own durable alias may remain"
+    );
     assert_eq!(
         aliases[0]
             .record()
@@ -186,9 +190,8 @@ fn reopening_rejects_schema_alias_that_cannot_lower_to_a_groove_variant_tag() {
     {
         let mut opened = open_node_at(&temp_dir, schema.clone());
         let schema_version = SchemaVersionId::from_bytes([0x9d; 16]);
-        let mapping = opened.catalogue.physical_mappings
-            [&opened.catalogue.local_schema_version_id]
-            .clone();
+        let mapping =
+            opened.catalogue.physical_mappings[&opened.catalogue.local_schema_version_id].clone();
         let mut batch = opened.database.open_batch();
         batch.insert(
             "jazz_schema_versions",
@@ -209,7 +212,9 @@ fn reopening_rejects_schema_alias_that_cannot_lower_to_a_groove_variant_tag() {
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
     assert!(matches!(
         crate::local_executor::block_on(NodeState::new(node(1), schema, storage)),
-        Err(Error::InvalidStoredValue("physical table variant tag exhausted"))
+        Err(Error::InvalidStoredValue(
+            "physical table variant tag exhausted"
+        ))
     ));
 }
 
@@ -235,7 +240,12 @@ fn contribution_merge_provenance_survives_reopen() {
                 user_metadata_json: None,
                 contribution_merge: Some(provenance.clone()),
             },
-            vec![version_record(row(9), Vec::new(), title_cells("merged"), None)],
+            vec![version_record(
+                row(9),
+                Vec::new(),
+                title_cells("merged"),
+                None,
+            )],
             u64::MAX - SKEW_TOLERANCE_MS,
         )
         .unwrap();
@@ -253,6 +263,73 @@ fn contribution_merge_provenance_survives_reopen() {
             .contribution_merge,
         Some(provenance)
     );
+}
+
+/// Alice's real relay-ingested provenance remains Pending/Local across reopen,
+/// then supports both point and range transaction evaluation.
+/// Internal ingress and memo access are needed to distinguish these load paths.
+///
+/// alice ──relay ingest──► disk ──reopen──► Pending + exact provenance
+#[test]
+fn pending_contribution_provenance_survives_reopen_and_transaction_preloads() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let provenance = canonical_contribution_provenance(tx_id);
+    {
+        let mut relay = open_node_at(&temp_dir, schema.clone());
+        relay
+            .ingest_relay_commit_unit(
+                Transaction {
+                    tx_id,
+                    kind: TxKind::Mergeable,
+                    n_total_writes: 1,
+                    made_by: AuthorSubject::system_at(tx_id.node),
+                    permission_subject: None,
+                    base_snapshot: None,
+                    row_read_set: None,
+                    absent_read_set: None,
+                    predicate_read_set: None,
+                    user_metadata_json: None,
+                    contribution_merge: Some(provenance.clone()),
+                },
+                vec![version_record(
+                    row(9),
+                    Vec::new(),
+                    title_cells("merged"),
+                    None,
+                )],
+            )
+            .unwrap();
+    }
+
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_eq!(
+        reopened.transaction_state_settled(tx_id).unwrap(),
+        (Fate::Pending, None, DurabilityTier::Local)
+    );
+    assert_eq!(
+        reopened
+            .query_transaction(tx_id)
+            .unwrap()
+            .unwrap()
+            .tx
+            .contribution_merge
+            .as_ref(),
+        Some(&provenance)
+    );
+    let absent = TxId::new(TxTime::from(11), tx_id.node);
+    for tx_ids in [&[tx_id][..], &[tx_id, absent][..]] {
+        let mut context = super::super::policy::ViewEvaluationContext::default();
+        reopened
+            .preload_transaction_memo(tx_ids.iter().copied(), &mut context)
+            .unwrap();
+        let stored = context.tx_rows.get(&tx_id).unwrap().as_ref().unwrap();
+        assert_eq!(stored.fate, Fate::Pending);
+        assert_eq!(stored.global_time, None);
+        assert_eq!(stored.durability, DurabilityTier::Local);
+        assert_eq!(stored.tx.contribution_merge.as_ref(), Some(&provenance));
+    }
 }
 
 /// Storage-format corpus for the v1 branch-view copy evidence carried in the
@@ -309,9 +386,10 @@ fn branch_view_copy_evidence_uses_versioned_groove_records_and_round_trips() {
         unreachable!("fixture has a view-copy operation");
     };
     intent_evidence.source_version = TxId::new(TxTime::from(99), node(0x32));
-    assert!(core
-        .contribution_merge_storage_value(Some(&mismatched))
-        .is_err());
+    assert!(
+        core.contribution_merge_storage_value(Some(&mismatched))
+            .is_err()
+    );
 }
 
 #[test]
@@ -325,8 +403,14 @@ fn branch_view_evidence_rejects_noncanonical_branch_keys_without_codec_panic() {
         // calling `BranchKey::canonical_bytes` and panicking.
         head: BranchKey {
             values: vec![
-                ("z".to_owned(), crate::protocol::BranchColumnValue(vec![1, u8::MAX])),
-                ("a".to_owned(), crate::protocol::BranchColumnValue(vec![1, u8::MAX])),
+                (
+                    "z".to_owned(),
+                    crate::protocol::BranchColumnValue(vec![1, u8::MAX]),
+                ),
+                (
+                    "a".to_owned(),
+                    crate::protocol::BranchColumnValue(vec![1, u8::MAX]),
+                ),
             ],
         },
         base: BranchViewCopyBase::Current(BranchKey::default()),
@@ -334,11 +418,12 @@ fn branch_view_evidence_rejects_noncanonical_branch_keys_without_codec_panic() {
         row_uuid: row(0x33),
         source_version: TxId::new(TxTime::from(31), node(0x32)),
     };
-    assert!(core
-        .contribution_merge_storage_value(Some(
+    assert!(
+        core.contribution_merge_storage_value(Some(
             &ContributionMergeProvenance::branch_view_copy(malformed),
         ))
-        .is_err());
+        .is_err()
+    );
 }
 
 #[test]
@@ -349,8 +434,8 @@ fn contribution_provenance_persists_column_components_as_physical_ids() {
     let (_dir, core) = open_node_with_schema(node(1), schema.clone());
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let provenance = canonical_contribution_provenance(tx_id);
-    let title_id = core.catalogue.physical_mappings[&schema.version_id()].tables["todos"].columns
-        ["title"];
+    let title_id =
+        core.catalogue.physical_mappings[&schema.version_id()].tables["todos"].columns["title"];
 
     let stored = core
         .contribution_merge_storage_value(Some(&provenance))
@@ -386,8 +471,8 @@ fn contribution_operation_payloads_use_physical_columns_and_canonical_groove_byt
             records::ValueType::Uuid,
             Value::Uuid(uuid::Uuid::from_bytes([0x5a; 16])),
             &[
-                2, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
-                0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+                2, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+                0x5a, 0x5a, 0x5a,
             ][..],
         ),
     ];
@@ -426,14 +511,16 @@ fn contribution_operation_payloads_use_physical_columns_and_canonical_groove_byt
     for ((column, _value_type, _value, golden_identity), (physical_column_id, payload)) in
         cases.iter().zip(payloads)
     {
-        let expected_column_id = core.catalogue.physical_mappings[&schema.version_id()].tables
-            ["sets"]
-            .columns[*column]
-            .0;
+        let expected_column_id =
+            core.catalogue.physical_mappings[&schema.version_id()].tables["sets"].columns[*column]
+                .0;
         let mut expected = expected_column_id.to_le_bytes().to_vec();
         expected.extend_from_slice(golden_identity);
         assert_eq!(physical_column_id, expected_column_id);
-        assert_eq!(payload, expected, "{column} operation payload is physical-id then identity");
+        assert_eq!(
+            payload, expected,
+            "{column} operation payload is physical-id then identity"
+        );
     }
 
     let counter = ContributionCoordinate {
@@ -520,10 +607,7 @@ fn contribution_operation_schema() -> JazzSchema {
                 "text_members",
                 ColumnType::Array(Box::new(ColumnType::String)),
             ),
-            ColumnSchema::new(
-                "u64_members",
-                ColumnType::Array(Box::new(ColumnType::U64)),
-            ),
+            ColumnSchema::new("u64_members", ColumnType::Array(Box::new(ColumnType::U64))),
             ColumnSchema::new(
                 "uuid_members",
                 ColumnType::Array(Box::new(ColumnType::Uuid)),
@@ -554,15 +638,23 @@ fn stored_contribution_operation_payloads(value: Value) -> Vec<(u64, Vec<u8>)> {
                 panic!("fixture substitution is a record")
             };
             let substitution = ContributionSubstitutionStorageRecord::new(substitution);
-            let coordinate = ContributionCoordinateStorageRecord::new(substitution.target().unwrap());
+            let coordinate =
+                ContributionCoordinateStorageRecord::new(substitution.target().unwrap());
             let component = coordinate.component().unwrap();
             let payload = ContributionOperationStorageRecord::new(component.into_record());
-            (payload.physical_column_id().unwrap(), payload.record().raw().to_vec())
+            (
+                payload.physical_column_id().unwrap(),
+                payload.record().raw().to_vec(),
+            )
         })
         .collect()
 }
 
-fn operation_provenance(tx_id: TxId, column: &str, identity: Vec<u8>) -> ContributionMergeProvenance {
+fn operation_provenance(
+    tx_id: TxId,
+    column: &str,
+    identity: Vec<u8>,
+) -> ContributionMergeProvenance {
     let coordinate = ContributionCoordinate {
         branch_key: BranchKey::default(),
         table: "sets".to_owned(),
@@ -578,10 +670,7 @@ fn operation_provenance(tx_id: TxId, column: &str, identity: Vec<u8>) -> Contrib
         BranchKey::default(),
         vec![ContributionSubstitution {
             target: coordinate.clone(),
-            sources: vec![ContributionDot {
-                tx_id,
-                coordinate,
-            }],
+            sources: vec![ContributionDot { tx_id, coordinate }],
         }],
     )
     .unwrap()
@@ -628,22 +717,42 @@ fn assert_operation_rejection_retains_only_the_terminal_fate(
     // Keep the precise validator diagnostic pinned as well as the externally
     // observable terminal rejection. Invalid metadata must not become durable
     // merely because the authority retains the transaction's rejected fate.
-    let error = core.validate_contribution_merge_operation_identities(&tx).unwrap_err();
-    assert!(matches!(error, Error::InvalidStoredValue(message) if message == expected_validation_error),
-        "unexpected operation-identity validation error: {error:?}");
+    let error = core
+        .validate_contribution_merge_operation_identities(&tx)
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::InvalidStoredValue(message) if message == expected_validation_error),
+        "unexpected operation-identity validation error: {error:?}"
+    );
     let tx_id = tx.tx_id;
-    let fate = Fate::Rejected(RejectionReason::MalformedCommit("invalid contribution provenance".to_owned()));
-    let receipts = core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS).unwrap();
-    assert_eq!(receipts, vec![SyncMessage::FateUpdate {
-        tx_id,
-        fate: fate.clone(),
-        global_time: None,
-        durability: None,
-    }]);
-    let stored = core.query_transaction(tx_id).unwrap().expect("terminal fate is retained");
+    let fate = Fate::Rejected(RejectionReason::MalformedCommit(
+        "invalid contribution provenance".to_owned(),
+    ));
+    let receipts = core
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    assert_eq!(
+        receipts,
+        vec![SyncMessage::FateUpdate {
+            tx_id,
+            fate: fate.clone(),
+            global_time: None,
+            durability: None,
+        }]
+    );
+    let stored = core
+        .query_transaction(tx_id)
+        .unwrap()
+        .expect("terminal fate is retained");
     assert_eq!(stored.fate, fate);
-    assert!(stored.tx.contribution_merge.is_none(), "invalid provenance must never be stored");
-    assert!(core.query_versions_for_tx(tx_id).unwrap().is_empty(), "rejected input must not store any row versions");
+    assert!(
+        stored.tx.contribution_merge.is_none(),
+        "invalid provenance must never be stored"
+    );
+    assert!(
+        core.query_versions_for_tx(tx_id).unwrap().is_empty(),
+        "rejected input must not store any row versions"
+    );
 }
 
 #[test]
@@ -708,8 +817,10 @@ fn local_rejected_and_bulk_view_ingress_share_operation_admission_before_mutatio
     let (_local_dir, mut local) = open_node_with_schema(node(0x31), schema.clone());
     let local_result = local
         .commit_mergeable_many_at_with_schema_versions_and_provenance(
-            vec![((schema.version_id()), MergeableCommit::new("todos", row(0x61), 40)
-                .cells(title_cells("local")))],
+            vec![(
+                (schema.version_id()),
+                MergeableCommit::new("todos", row(0x61), 40).cells(title_cells("local")),
+            )],
             invalid_tx_id.time,
             Some(invalid_provenance()),
         )
@@ -741,7 +852,12 @@ fn local_rejected_and_bulk_view_ingress_share_operation_admission_before_mutatio
     let (_view_dir, mut view) = open_node_with_schema(node(0x31), schema);
     let bundle = VersionBundle {
         tx: invalid_transaction(),
-        versions: vec![version_record(row(0x61), Vec::new(), title_cells("view"), None)],
+        versions: vec![version_record(
+            row(0x61),
+            Vec::new(),
+            title_cells("view"),
+            None,
+        )],
         scope: crate::protocol::VersionBundleScope::CompleteTransaction,
         fate: Fate::Accepted,
         global_time: Some(GlobalTime(40)),
@@ -789,8 +905,8 @@ fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
     let (dir, mut core) = open_node_with_schema(node(1), base.clone());
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let provenance = canonical_contribution_provenance(tx_id);
-    let title_id = core.catalogue.physical_mappings[&base.version_id()].tables["todos"].columns
-        ["title"];
+    let title_id =
+        core.catalogue.physical_mappings[&base.version_id()].tables["todos"].columns["title"];
     core.ingest_commit_unit_settled(
         Transaction {
             tx_id,
@@ -805,7 +921,12 @@ fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
             user_metadata_json: None,
             contribution_merge: Some(provenance.clone()),
         },
-        vec![version_record(row(9), Vec::new(), title_cells("merged"), None)],
+        vec![version_record(
+            row(9),
+            Vec::new(),
+            title_cells("merged"),
+            None,
+        )],
         u64::MAX - SKEW_TOLERANCE_MS,
     )
     .unwrap();
@@ -829,7 +950,8 @@ fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
                     },
                 ],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -847,7 +969,10 @@ fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
     drop(core);
     let mut reopened = reopen_node_at(&dir, node(1), base);
     assert_eq!(
-        reopened.transaction_record(tx_id).unwrap().contribution_merge,
+        reopened
+            .transaction_record(tx_id)
+            .unwrap()
+            .contribution_merge,
         Some(provenance)
     );
 }
@@ -870,17 +995,13 @@ fn stored_contribution_coordinate_ids(value: Value) -> Vec<(u64, u64)> {
             };
             let substitution = ContributionSubstitutionStorageRecord::new(substitution);
             let target = contribution_coordinate_ids(substitution.target().unwrap());
-            let sources = substitution
-                .sources()
-                .unwrap()
-                .into_iter()
-                .map(|source| {
-                    let Value::Record(source) = source else {
-                        panic!("fixture source is a record")
-                    };
-                    let source = ContributionDotStorageRecord::new(source);
-                    contribution_coordinate_ids(source.coordinate().unwrap())
-                });
+            let sources = substitution.sources().unwrap().into_iter().map(|source| {
+                let Value::Record(source) = source else {
+                    panic!("fixture source is a record")
+                };
+                let source = ContributionDotStorageRecord::new(source);
+                contribution_coordinate_ids(source.coordinate().unwrap())
+            });
             std::iter::once(target).chain(sources)
         })
         .collect()
@@ -910,13 +1031,322 @@ fn canonical_contribution_provenance(tx_id: TxId) -> ContributionMergeProvenance
         BranchKey::default(),
         vec![ContributionSubstitution {
             target: coordinate.clone(),
-            sources: vec![ContributionDot {
-                tx_id,
-                coordinate,
-            }],
+            sources: vec![ContributionDot { tx_id, coordinate }],
         }],
     )
     .unwrap()
+}
+
+fn assert_corrupt_contribution_loads_reject(reopened: &mut NodeState, tx_id: TxId) {
+    assert!(matches!(
+        reopened.query_transaction(tx_id).resolve(),
+        Err(Error::InvalidStoredValue(_))
+    ));
+    {
+        let mut context = super::super::policy::ViewEvaluationContext::default();
+        assert!(matches!(
+            reopened
+                .preload_transaction_memo([tx_id], &mut context)
+                .resolve(),
+            Err(Error::InvalidStoredValue(_))
+        ));
+    }
+    {
+        let absent = TxId::new(TxTime::from(11), tx_id.node);
+        let mut context = super::super::policy::ViewEvaluationContext::default();
+        assert!(matches!(
+            reopened
+                .preload_transaction_memo([tx_id, absent], &mut context)
+                .resolve(),
+            Err(Error::InvalidStoredValue(_))
+        ));
+    }
+}
+
+/// Persist semantically invalid provenance through the system-table encoder:
+/// public ingress cannot construct it. Bounded startup projects metadata;
+/// subsequent full transaction loads must reject before usable publication.
+fn assert_noncanonical_contribution_loads_reject(
+    mutate: impl FnOnce(&mut ContributionMergeProvenance),
+) {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    {
+        let mut core = open_node_at(&temp_dir, schema.clone());
+        core.ingest_commit_unit_settled(
+            Transaction {
+                tx_id,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(tx_id.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: Some(canonical_contribution_provenance(tx_id)),
+            },
+            vec![version_record(
+                row(9),
+                Vec::new(),
+                title_cells("merged"),
+                None,
+            )],
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap();
+
+        let mut stored = core.query_transaction(tx_id).unwrap().unwrap();
+        mutate(
+            stored
+                .tx
+                .contribution_merge
+                .as_mut()
+                .expect("fixture stores provenance"),
+        );
+        let mut batch = core.database.open_batch();
+        batch.update(
+            "jazz_transactions",
+            transaction_values(
+                stored.node_alias,
+                &stored.tx,
+                stored.fate,
+                stored.global_time,
+                stored.durability,
+                core.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+        let applied = crate::local_executor::block_on(core.database.apply_batch(batch)).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
+        core.database.finish_persistence(persisted).unwrap();
+    }
+
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_corrupt_contribution_loads_reject(&mut reopened, tx_id);
+}
+
+fn assert_corrupt_contribution_coordinate_loads_reject(mutate: impl FnOnce(Value) -> Value) {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    {
+        let mut core = open_node_at(&temp_dir, schema.clone());
+        core.ingest_commit_unit_settled(
+            Transaction {
+                tx_id,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::system_at(tx_id.node),
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: Some(canonical_contribution_provenance(tx_id)),
+            },
+            vec![version_record(
+                row(9),
+                Vec::new(),
+                title_cells("merged"),
+                None,
+            )],
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap();
+
+        let stored = core.query_transaction(tx_id).unwrap().unwrap();
+        let contribution_merge = mutate(
+            core.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
+                .unwrap(),
+        );
+        let mut batch = core.database.open_batch();
+        batch.update(
+            "jazz_transactions",
+            transaction_values(
+                stored.node_alias,
+                &stored.tx,
+                stored.fate,
+                stored.global_time,
+                stored.durability,
+                contribution_merge,
+            )
+            .unwrap(),
+        );
+        let applied = crate::local_executor::block_on(core.database.apply_batch(batch)).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
+        core.database.finish_persistence(persisted).unwrap();
+    }
+
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_corrupt_contribution_loads_reject(&mut reopened, tx_id);
+}
+
+fn mutate_stored_contribution_target(
+    value: Value,
+    mutate: impl FnOnce(OwnedRecord) -> OwnedRecord,
+) -> Value {
+    let Value::Nullable(Some(record)) = value else {
+        panic!("fixture stores contribution provenance")
+    };
+    let Value::Record(record) = *record else {
+        panic!("fixture contribution provenance is a record")
+    };
+    let merge = ContributionMergeStorageRecord::new(record);
+    let mut substitutions = merge.substitutions().unwrap();
+    let Value::Record(substitution) = substitutions.remove(0) else {
+        panic!("fixture substitution is a record")
+    };
+    let substitution = ContributionSubstitutionStorageRecord::new(substitution);
+    let mutated = ContributionSubstitutionStorageRecord::encode(
+        substitution.record().descriptor(),
+        mutate(substitution.target().unwrap()),
+        substitution.sources().unwrap(),
+    )
+    .unwrap();
+    substitutions.insert(0, Value::Record(mutated.record().clone()));
+    let mutated = ContributionMergeStorageRecord::encode(
+        merge.record().descriptor(),
+        merge.source().unwrap(),
+        merge.target().unwrap(),
+        substitutions,
+        merge.branch_view_copy_v1().unwrap(),
+        merge.branch_write_intent_v1().unwrap(),
+    )
+    .unwrap();
+    Value::Nullable(Some(Box::new(Value::Record(mutated.record().clone()))))
+}
+
+fn assert_invalid_contribution_column_loads_reject(physical_column_id: u64) {
+    assert_corrupt_contribution_coordinate_loads_reject(|value| {
+        mutate_stored_contribution_target(value, |record| {
+            let coordinate = ContributionCoordinateStorageRecord::new(record);
+            let component = coordinate.component().unwrap();
+            let tag = component.tag();
+            let payload = component.into_record();
+            let payload = ContributionColumnStorageRecord::encode(
+                payload.descriptor(),
+                physical_column_id,
+            )
+            .unwrap();
+            ContributionCoordinateStorageRecord::encode(
+                coordinate.record().descriptor(),
+                coordinate.branch_key().unwrap(),
+                coordinate.physical_table_id().unwrap(),
+                coordinate.row_uuid().unwrap(),
+                coordinate.layer().unwrap(),
+                records::EnumValue::new(tag, payload.record().clone()),
+            )
+            .unwrap()
+            .record()
+            .clone()
+        })
+    })
+}
+
+fn assert_invalid_contribution_table_loads_reject(physical_table_id: u64) {
+    assert_corrupt_contribution_coordinate_loads_reject(|value| {
+        mutate_stored_contribution_target(value, |record| {
+            let coordinate = ContributionCoordinateStorageRecord::new(record);
+            ContributionCoordinateStorageRecord::encode(
+                coordinate.record().descriptor(),
+                coordinate.branch_key().unwrap(),
+                physical_table_id,
+                coordinate.row_uuid().unwrap(),
+                coordinate.layer().unwrap(),
+                coordinate.component().unwrap(),
+            )
+            .unwrap()
+            .record()
+            .clone()
+        })
+    })
+}
+
+/// Alice's planted zero column id rejects on full load after bounded reopen.
+/// Internal storage access is necessary because public ingress rejects the id.
+#[test]
+fn loading_reopened_transaction_rejects_zero_contribution_physical_column_id() {
+    assert_invalid_contribution_column_loads_reject(0);
+}
+
+/// Alice's unmapped column id rejects on full load after bounded reopen.
+/// Internal storage access is necessary because public ingress rejects the id.
+#[test]
+fn loading_reopened_transaction_rejects_unknown_contribution_physical_column_id() {
+    assert_invalid_contribution_column_loads_reject(u64::MAX);
+}
+
+/// Alice's planted zero table id rejects on full load after bounded reopen.
+/// Internal storage access is necessary because public ingress rejects the id.
+#[test]
+fn loading_reopened_transaction_rejects_zero_contribution_physical_table_id() {
+    assert_invalid_contribution_table_loads_reject(0);
+}
+
+/// Alice's unmapped table id rejects on full load after bounded reopen.
+/// Internal storage access is necessary because public ingress rejects the id.
+#[test]
+fn loading_reopened_transaction_rejects_unknown_contribution_physical_table_id() {
+    assert_invalid_contribution_table_loads_reject(u64::MAX);
+}
+
+/// Alice's descending source dots reject rather than normalize on full load.
+/// The internal encoder plants an ordering that public ingress cannot admit.
+#[test]
+fn loading_reopened_transaction_rejects_noncanonical_contribution_source_dots() {
+    assert_noncanonical_contribution_loads_reject(|provenance| {
+        let source = provenance.substitutions[0].sources[0].clone();
+        provenance.substitutions[0].sources.push(ContributionDot {
+            tx_id: TxId::new(TxTime::from(9), source.tx_id.node),
+            coordinate: source.coordinate,
+        });
+    });
+}
+
+/// Alice's duplicate source rejects before a merge can double-count it.
+/// The internal encoder plants a duplicate that public ingress cannot admit.
+#[test]
+fn loading_reopened_transaction_rejects_duplicate_contribution_source_dots() {
+    assert_noncanonical_contribution_loads_reject(|provenance| {
+        let source = provenance.substitutions[0].sources[0].clone();
+        provenance.substitutions[0].sources.push(source);
+    });
+}
+
+/// Alice's duplicate substitution target rejects on full load after reopen.
+/// The internal encoder plants a duplicate that public ingress cannot admit.
+#[test]
+fn loading_reopened_transaction_rejects_duplicate_contribution_substitution_targets() {
+    assert_noncanonical_contribution_loads_reject(|provenance| {
+        provenance
+            .substitutions
+            .push(provenance.substitutions[0].clone());
+    });
+}
+
+/// Alice's LWW column cannot carry an operation identity, even when canonical.
+/// Internal storage access plants a strategy mismatch impossible at ingress.
+#[test]
+fn loading_reopened_transaction_rejects_operation_identity_with_the_wrong_column_strategy() {
+    assert_noncanonical_contribution_loads_reject(|provenance| {
+        let substitution = &mut provenance.substitutions[0];
+        for coordinate in std::iter::once(&mut substitution.target).chain(
+            substitution
+                .sources
+                .iter_mut()
+                .map(|source| &mut source.coordinate),
+        ) {
+            coordinate.component = ContributionComponent::Operation {
+                column: "title".to_owned(),
+                identity: vec![0],
+            };
+        }
+    });
 }
 
 #[cfg(feature = "testing")]
@@ -938,13 +1368,8 @@ fn open_receipt_counts_physical_recovery_scans_exactly() {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let (_reopened, receipt) = NodeState::new_with_open_receipt_for_test(
-        node(1),
-        schema,
-        storage,
-        false,
-    )
-    .unwrap();
+    let (_reopened, receipt) =
+        NodeState::new_with_open_receipt_for_test(node(1), schema, storage, false).unwrap();
 
     // The nullable global-time index is the actual physical access path:
     // local pending transactions remain in its `None` bucket and must not be
@@ -965,13 +1390,8 @@ fn open_receipt_attributes_catalogue_finalization_when_aliases_are_first_persist
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let (_node, receipt) = NodeState::new_with_open_receipt_for_test(
-        node(1),
-        schema,
-        storage,
-        false,
-    )
-    .unwrap();
+    let (_node, receipt) =
+        NodeState::new_with_open_receipt_for_test(node(1), schema, storage, false).unwrap();
 
     assert!(
         !receipt.finalize_catalogue.is_zero(),
@@ -1064,7 +1484,9 @@ fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
         node.open_exclusive(tx).unwrap();
         node.tx_write(tx, "todos", row(1), title_cells("parent"), None)
             .unwrap();
-        let (parent_tx, _unit) = node.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
+        let (parent_tx, _unit) = node
+            .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+            .unwrap();
         parent = parent_tx;
         child = node
             .commit_mergeable_settled(
@@ -1095,8 +1517,11 @@ fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
     assert!(reopened.rejections.child_txs_by_parent.is_empty());
 }
 
-fn mark_accepted_without_ahead_cleanup<S>(node: &mut NodeState<S>, tx_id: TxId, global_time: GlobalTime)
-where
+fn mark_accepted_without_ahead_cleanup<S>(
+    node: &mut NodeState<S>,
+    tx_id: TxId,
+    global_time: GlobalTime,
+) where
     S: OrderedKvStorage,
 {
     let mut stored = node.query_transaction(tx_id).unwrap().unwrap();
@@ -1121,8 +1546,8 @@ where
     node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
     let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
-let persisted = crate::local_executor::block_on(applied.persist());
-node.database.finish_persistence(persisted).unwrap();
+    let persisted = crate::local_executor::block_on(applied.persist());
+    node.database.finish_persistence(persisted).unwrap();
 }
 
 #[test]
@@ -1166,7 +1591,10 @@ fn recovery_rebuilds_global_clock_from_accepted_transactions() {
         reopened.clock.committed_global_time,
         GlobalTime::new(11, 0).unwrap()
     );
-    assert_eq!(reopened.clock.global_time_register, reopened.clock.committed_global_time);
+    assert_eq!(
+        reopened.clock.global_time_register,
+        reopened.clock.committed_global_time
+    );
 }
 
 // This must remain an internal regression: reaching the last sequence requires
@@ -1185,7 +1613,8 @@ fn global_time_allocates_max_once_then_stays_exhausted() {
             MergeableCommit::new("todos", row(22), 22).cells(title_cells("last sequence")),
         )
         .unwrap();
-    node.finalize_local_mergeable_commit_settled(last_tx).unwrap();
+    node.finalize_local_mergeable_commit_settled(last_tx)
+        .unwrap();
     assert_eq!(
         node.transaction_state_settled(last_tx).unwrap(),
         (
@@ -1279,8 +1708,8 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
             .unwrap(),
         );
         let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
-let persisted = crate::local_executor::block_on(applied.persist());
-node.database.finish_persistence(persisted).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
+        node.database.finish_persistence(persisted).unwrap();
     }
 
     let cfs = schema.column_families();
@@ -1324,9 +1753,14 @@ fn seed_pending_replay_state(
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
 ) {
-    node.ingest_relay_commit_unit(pending_replay_fixture_transaction(tx_id, made_by), Vec::new())
-        .unwrap();
-    if !matches!(fate, Fate::Pending) || global_time.is_some() || durability != DurabilityTier::Local
+    node.ingest_relay_commit_unit(
+        pending_replay_fixture_transaction(tx_id, made_by),
+        Vec::new(),
+    )
+    .unwrap();
+    if !matches!(fate, Fate::Pending)
+        || global_time.is_some()
+        || durability != DurabilityTier::Local
     {
         node.apply_fate_update(tx_id, fate, global_time, Some(durability))
             .unwrap();
@@ -1374,15 +1808,35 @@ impl FailReplayScanStorage {
 }
 
 impl OrderedKvStorage for FailReplayScanStorage {
-    fn get(&self, cf: String, key: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>> {
+    fn admission(&self) -> Result<groove::storage::StorageAdmission, groove::storage::Error> {
+        self.inner.admission()
+    }
+
+    fn get(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>>
+    {
         self.inner.get(cf, key)
     }
 
-    fn put_if_absent(&self, cf: String, key: Vec<u8>, value: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>> {
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>>
+    {
         self.inner.put_if_absent(cf, key, value)
     }
 
-    fn compare_and_delete(&self, cf: String, key: Vec<u8>, expected: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<bool, groove::storage::Error>> {
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<bool, groove::storage::Error>> {
         self.inner.compare_and_delete(cf, key, expected)
     }
 
@@ -1395,18 +1849,35 @@ impl OrderedKvStorage for FailReplayScanStorage {
         self.inner.set(cf, key, value)
     }
 
-    fn delete(&self, cf: String, key: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
+    fn delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.delete(cf, key)
     }
 
-    fn scan(&self, request: groove::storage::ScanRequest) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+    fn scan(
+        &self,
+        request: groove::storage::ScanRequest,
+    ) -> groove::storage::StorageFuture<
+        '_,
+        Result<groove::storage::StorageScan<'_>, groove::storage::Error>,
+    > {
         if self.fail_scans.replace(false) {
-            return Box::pin(async { Err(groove::storage::Error::InvalidStorageLayout("injected replay index scan failure".to_owned())) });
+            return Box::pin(async {
+                Err(groove::storage::Error::InvalidStorageLayout(
+                    "injected replay index scan failure".to_owned(),
+                ))
+            });
         }
         self.inner.scan(request)
     }
 
-    fn write_many(&self, operations: Vec<groove::storage::OwnedWriteOperation>) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
+    fn write_many(
+        &self,
+        operations: Vec<groove::storage::OwnedWriteOperation>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.write_many(operations)
     }
 
@@ -1416,10 +1887,16 @@ impl OrderedKvStorage for FailReplayScanStorage {
 }
 
 impl ReopenableStorage for FailReplayScanStorage {
-    fn reopen(self, column_families: Vec<String>) -> groove::storage::StorageFuture<'static, Result<Self, groove::storage::Error>> {
+    fn reopen(
+        self,
+        column_families: Vec<String>,
+    ) -> groove::storage::StorageFuture<'static, Result<Self, groove::storage::Error>> {
         Box::pin(async move {
             let Self { inner, fail_scans } = self;
-            Ok(Self { inner: inner.reopen(column_families).await?, fail_scans })
+            Ok(Self {
+                inner: inner.reopen(column_families).await?,
+                fail_scans,
+            })
         })
     }
 }
@@ -1435,14 +1912,20 @@ fn pending_replay_index_scan_failure_is_not_treated_as_empty() {
     let storage = FailReplayScanStorage::new(&column_family_refs);
     let mut node_under_test = NodeState::new(node(1), schema, storage.clone()).unwrap();
     let tx_id = node_under_test
-        .commit_mergeable_settled(MergeableCommit::new("todos", row(4), 10).cells(title_cells("pending")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(4), 10).cells(title_cells("pending")),
+        )
         .unwrap();
 
     storage.fail_scans.set(true);
     let error = node_under_test
         .pending_transaction_ids_for(node(1), AuthorSubject::SYSTEM)
         .unwrap_err();
-    assert!(error.to_string().contains("injected replay index scan failure"));
+    assert!(
+        error
+            .to_string()
+            .contains("injected replay index scan failure")
+    );
 
     assert_eq!(
         node_under_test
@@ -1477,8 +1960,20 @@ fn pending_replay_null_slice_is_a_superset_then_filters_fate_and_identity() {
             None,
             DurabilityTier::Local,
         ),
-        (local_node, other_author, Fate::Pending, None, DurabilityTier::Local),
-        (other_node, local_author, Fate::Pending, None, DurabilityTier::Local),
+        (
+            local_node,
+            other_author,
+            Fate::Pending,
+            None,
+            DurabilityTier::Local,
+        ),
+        (
+            other_node,
+            local_author,
+            Fate::Pending,
+            None,
+            DurabilityTier::Local,
+        ),
     ];
     for (offset, (tx_node, author, fate, global_time, durability)) in states.into_iter().enumerate()
     {
@@ -1505,7 +2000,9 @@ fn pending_replay_null_slice_is_a_superset_then_filters_fate_and_identity() {
 const SERVER_UNSETTLED_OTHER_IDENTITIES: usize = 256;
 const SERVER_REJECTED_NULL_SEQUENCE: usize = 16;
 
-fn pending_replay_lookup_work(settled_history: usize) -> (PendingTransactionScan, PendingTransactionScan) {
+fn pending_replay_lookup_work(
+    settled_history: usize,
+) -> (PendingTransactionScan, PendingTransactionScan) {
     let (_dir, mut node_under_test) = open_node();
     let local_node = node(1);
     let local_author = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -1522,7 +2019,10 @@ fn pending_replay_lookup_work(settled_history: usize) -> (PendingTransactionScan
     for offset in 0..SERVER_UNSETTLED_OTHER_IDENTITIES {
         seed_pending_replay_state(
             &mut node_under_test,
-            TxId::new(TxTime::from(10_000 + offset as u64), node(0x40 + (offset / 4) as u8)),
+            TxId::new(
+                TxTime::from(10_000 + offset as u64),
+                node(0x40 + (offset / 4) as u8),
+            ),
             AuthorSubject::for_test_bytes([offset as u8; 16]),
             Fate::Pending,
             None,
@@ -1578,7 +2078,10 @@ fn pending_replay_null_slice_work_is_independent_of_settled_history() {
     assert_eq!(legacy_empty.records_visited, server_null_slice);
     assert_eq!(legacy_small.records_visited, server_null_slice + 8);
     assert_eq!(legacy_large.records_visited, server_null_slice + 128);
-    assert_eq!(legacy_large.full_transactions_decoded, legacy_large.records_visited);
+    assert_eq!(
+        legacy_large.full_transactions_decoded,
+        legacy_large.records_visited
+    );
     assert!(legacy_large.records_visited > legacy_small.records_visited);
 }
 
@@ -1587,13 +2090,17 @@ fn reopen_replay_lookup_keeps_local_pending_write() {
     let schema = schema();
     let (node_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let tx_id = writer
-        .commit_mergeable_settled(MergeableCommit::new("todos", row(4), 10).cells(title_cells("keep me")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(4), 10).cells(title_cells("keep me")),
+        )
         .unwrap();
     drop(writer);
 
     let mut reopened = reopen_node_at(&node_dir, node(1), schema);
     assert_eq!(
-        reopened.pending_transaction_ids_for(node(1), AuthorSubject::SYSTEM).unwrap(),
+        reopened
+            .pending_transaction_ids_for(node(1), AuthorSubject::SYSTEM)
+            .unwrap(),
         vec![tx_id]
     );
     assert_eq!(
@@ -1611,11 +2118,18 @@ fn reopen_replay_lookup_keeps_local_pending_write() {
         "author-wide synchronization barriers must retain pending system writes"
     );
     assert_eq!(
-        reopened.query_transaction(tx_id).unwrap().unwrap().tx.permission_subject,
+        reopened
+            .query_transaction(tx_id)
+            .unwrap()
+            .unwrap()
+            .tx
+            .permission_subject,
         Some(AuthorSubject::SYSTEM),
         "reopen must recover the locally authorized system capability separately from durable node attribution"
     );
-    reopened.finalize_local_mergeable_commit_settled(tx_id).unwrap();
+    reopened
+        .finalize_local_mergeable_commit_settled(tx_id)
+        .unwrap();
     assert!(matches!(
         reopened.transaction_state_settled(tx_id),
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
@@ -1644,10 +2158,8 @@ fn reopen_replay_deduplicates_pending_ahead_current_keys_per_table_and_layer() {
     let replay_tx = writer
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", shared_row, 10).cells(title_cells("todo")),
-            MergeableCommit::new("notes", shared_row, 10).cells(BTreeMap::from([(
-                "body".to_owned(),
-                v("note"),
-            )])),
+            MergeableCommit::new("notes", shared_row, 10)
+                .cells(BTreeMap::from([("body".to_owned(), v("note"))])),
             MergeableCommit::new("todos", shared_row, 10).deletion(DeletionEvent::Deleted),
             MergeableCommit::new("notes", shared_row, 10).deletion(DeletionEvent::Deleted),
         ])
@@ -1672,10 +2184,7 @@ fn reopen_replay_deduplicates_pending_ahead_current_keys_per_table_and_layer() {
         assert_eq!(
             writer
                 .database
-                .primary_key_scan_raw(
-                    &physical_register_ahead_current_table_name(table_id),
-                    &[],
-                )
+                .primary_key_scan_raw(&physical_register_ahead_current_table_name(table_id), &[],)
                 .unwrap()
                 .len(),
             1,
@@ -1694,7 +2203,17 @@ fn reopen_replay_deduplicates_pending_ahead_current_keys_per_table_and_layer() {
         .resolve()
         .unwrap();
     for table_id in [todos_id, notes_id] {
-        assert_eq!(ahead_current_row_count(&mut reader, if table_id == todos_id { "todos" } else { "notes" }), 2);
+        assert_eq!(
+            ahead_current_row_count(
+                &mut reader,
+                if table_id == todos_id {
+                    "todos"
+                } else {
+                    "notes"
+                }
+            ),
+            2
+        );
     }
 
     let distinct_tx = reader
@@ -1722,7 +2241,9 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     let (_dir, mut core) = open_node_with_uuid(node(0x3a));
     let mut peer = PeerState::new();
     let accepted = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row(3), 9).cells(title_cells("accepted")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(3), 9).cells(title_cells("accepted")),
+        )
         .unwrap();
     core.apply_fate_update(
         accepted,
@@ -1746,7 +2267,10 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
         )
         .unwrap();
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
-    assert!(matches!(update, SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })));
+    assert!(matches!(
+        update,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
+    ));
 
     let mut reopened = core.reopen_in_place().unwrap();
     assert_eq!(
@@ -1768,7 +2292,10 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     );
 
     let rehydrated = peer.rehydrate_current_rows(&mut reopened, "todos").unwrap();
-    assert!(matches!(rehydrated, SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })));
+    assert!(matches!(
+        rehydrated,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
+    ));
 }
 #[test]
 fn empty_string_cells_and_absent_cells_survive_restart() {
@@ -1893,7 +2420,9 @@ fn recovery_ignores_foreign_tx_ids_when_restoring_next_own_ingest_seq() {
     let schema = schema();
     let (node_dir, mut node_a) = open_node_with_schema(node(1), schema.clone());
     let own = node_a
-        .commit_mergeable_settled(MergeableCommit::new("todos", row(1), 10).cells(title_cells("own")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("own")),
+        )
         .unwrap();
     assert_eq!(own.time, TxTime::from(10));
 
@@ -1925,7 +2454,9 @@ fn recovery_ignores_foreign_tx_ids_when_restoring_next_own_ingest_seq() {
     drop(node_a);
     let mut reopened = reopen_node_at(&node_dir, node(1), schema);
     let next_own = reopened
-        .commit_mergeable_settled(MergeableCommit::new("todos", row(3), 12).cells(title_cells("next")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(3), 12).cells(title_cells("next")),
+        )
         .unwrap();
     assert_eq!(next_own.time, TxTime::new(500, 1));
 }
@@ -1962,7 +2493,9 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
     core.tx_read(tx_id, "todos", row).unwrap();
     core.tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
-    let (exclusive, _unit) = core.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 30).unwrap();
+    let (exclusive, _unit) = core
+        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 30)
+        .unwrap();
     let exclusive_global_time = core.allocate_global_time_for_test();
     core.apply_fate_update(
         exclusive,
@@ -1990,7 +2523,11 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
     let (rejected, unit) = writer_b
         .commit_exclusive_settled(rejected_tx, AuthorSubject::SYSTEM, 41)
         .unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -2002,10 +2539,12 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
     );
 
     let history = core.row_history("todos", row).unwrap();
-    assert!(history
-        .windows(2)
-        .all(|pair| pair[0].tx_id().time.sort_key(pair[0].tx_id().node)
-            <= pair[1].tx_id().time.sort_key(pair[1].tx_id().node)));
+    assert!(
+        history
+            .windows(2)
+            .all(|pair| pair[0].tx_id().time.sort_key(pair[0].tx_id().node)
+                <= pair[1].tx_id().time.sort_key(pair[1].tx_id().node))
+    );
     assert!(history.iter().any(|entry| entry.tx_id() == left));
     assert!(history.iter().any(|entry| entry.tx_id() == right));
     assert!(history.iter().any(|entry| {
@@ -2109,7 +2648,6 @@ fn transaction_metadata_round_trips_through_recovery() {
     );
 }
 
-
 #[test]
 fn known_node_alias_transaction_misses_do_not_rescan_catalogue() {
     // Internal storage-read instrumentation proves that a missing transaction
@@ -2126,8 +2664,14 @@ fn known_node_alias_transaction_misses_do_not_rescan_catalogue() {
     }
     let reads = core.take_storage_read_metrics();
     assert_eq!(reads.transactions_rows.reads, 32, "{reads:?}");
-    assert_eq!(reads.other.reads, 0, "known aliases require no catalogue reads");
-    assert_eq!(reads.other.ranges, 0, "known aliases require no catalogue scans");
+    assert_eq!(
+        reads.other.reads, 0,
+        "known aliases require no catalogue reads"
+    );
+    assert_eq!(
+        reads.other.ranges, 0,
+        "known aliases require no catalogue scans"
+    );
 
     // A miss is not an absence cache. The exact previously missing identity
     // becomes visible as soon as its transaction is applied.
@@ -2185,15 +2729,26 @@ fn absent_node_discovery_is_bounded_and_arriving_transactions_remain_visible() {
     assert_eq!(reads.other.ranges, 0, "{reads:?}");
     assert_eq!(reads.transactions_rows.reads, 0, "{reads:?}");
 
-    let (arriving, unit) = writer.commit_mergeable_unit_settled(
-        MergeableCommit::new("todos", row(7), 10).cells(title_cells("arrived")),
-    ).unwrap();
+    let (arriving, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(7), 10).cells(title_cells("arrived")),
+        )
+        .unwrap();
     assert_eq!(arriving, absent);
-    let SyncMessage::CommitUnit { tx, versions } = unit else { panic!("expected commit unit"); };
-    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS).unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
     assert!(core.query_transaction(arriving).unwrap().is_some());
-    assert_eq!(core.current_rows("todos", DurabilityTier::Local).unwrap().into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row(7), title_cells("arrived"))]));
+    assert_eq!(
+        core.current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(7), title_cells("arrived"))])
+    );
 
     // Discovering an existing alias must not depend on the queried timestamp
     // having a transaction. Subsequent missing transactions remain point reads.
@@ -2252,12 +2807,17 @@ fn cached_absent_alias_does_not_hide_a_poisoned_database() {
     let absent = TxId::new(TxTime::from(10), node(1));
     assert!(core.query_transaction(absent).unwrap().is_none());
     storage.fail_nth_following_write_many(1);
-    assert!(core.commit_mergeable_settled(
-        MergeableCommit::new("todos", row(7), 10).cells(title_cells("fails")),
-    ).is_err());
+    assert!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(7), 10).cells(title_cells("fails")),
+        )
+        .is_err()
+    );
     assert_eq!(core.absent_node_alias, Some(absent.node));
-    assert!(matches!(crate::local_executor::block_on(core.query_transaction(absent)),
-        Err(Error::Groove(groove::db::Error::DatabasePoisoned))));
+    assert!(matches!(
+        crate::local_executor::block_on(core.query_transaction(absent)),
+        Err(Error::Groove(groove::db::Error::DatabasePoisoned))
+    ));
 }
 
 #[test]
@@ -2552,4 +3112,114 @@ fn legacy_edge_acceptance_reopens_as_replayable_local_write() {
         reopened.transaction_state_settled(tx_id),
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
+}
+
+#[test]
+fn exclusive_predicate_evidence_reopen_preserves_complete_and_legacy_absence() {
+    for legacy_null_slots in [false, true] {
+        let schema = schema();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (tx_id, original) = {
+            let mut client = open_node_at(&temp_dir, schema.clone());
+            let shape = Query::from("todos")
+                .filter(crate::query::eq(
+                    crate::query::col("title"),
+                    crate::query::lit("watched"),
+                ))
+                .validate(&schema)
+                .unwrap();
+            let binding = shape.bind(BTreeMap::new()).unwrap();
+            let open = OpenTransactionId::new();
+            client.open_exclusive(open).unwrap();
+            assert!(client.tx_query(open, &shape, &binding).unwrap().is_empty());
+            client
+                .tx_write(open, "todos", row(2), title_cells("mine"), None)
+                .unwrap();
+            let (tx_id, original) = client
+                .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10)
+                .unwrap();
+            if legacy_null_slots {
+                // Only the storage seam can manufacture a genuine historical
+                // all-NULL row without changing its transaction or versions.
+                let stored = client.query_transaction(tx_id).unwrap().unwrap();
+                let mut values = transaction_values(
+                    stored.node_alias,
+                    &stored.tx,
+                    stored.fate,
+                    stored.global_time,
+                    stored.durability,
+                    Value::Nullable(None),
+                )
+                .unwrap();
+                values[5..9].fill(Value::Nullable(None));
+                let mut batch = client.database.open_batch();
+                batch.update("jazz_transactions", values);
+                let applied = crate::local_executor::block_on(client.database.apply_batch(batch)).unwrap();
+                let persisted = crate::local_executor::block_on(applied.persist());
+                client.database.finish_persistence(persisted).unwrap();
+            }
+            client.database.close().unwrap();
+            (tx_id, original)
+        };
+
+        let (_core_dir, mut core) = open_node_with_uuid(node(9));
+        let mut reopened = open_node_at(&temp_dir, schema);
+        let unit = reopened.commit_unit_for(tx_id).unwrap();
+        if legacy_null_slots {
+            let SyncMessage::CommitUnit { tx, versions } = &unit else {
+                panic!("expected commit unit");
+            };
+            let SyncMessage::CommitUnit {
+                versions: original_versions,
+                ..
+            } = &original
+            else {
+                panic!("expected original unit");
+            };
+            assert_eq!(versions, original_versions);
+            assert!(tx.base_snapshot.is_none());
+            assert!(tx.row_read_set.is_none());
+            assert!(tx.absent_read_set.is_none());
+            assert!(tx.predicate_read_set.is_none());
+        } else {
+            assert_eq!(
+                unit, original,
+                "reopen must retain exact original evidence and versions"
+            );
+        }
+        let [fate] = core
+            .apply_sync_message_settled(unit)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let SyncMessage::FateUpdate { fate: actual, .. } = &fate else {
+            panic!("expected fate update");
+        };
+        let expected_rows = if legacy_null_slots {
+            assert_eq!(actual, &Fate::Rejected(RejectionReason::ExclusiveConflict));
+            Vec::new()
+        } else {
+            assert_eq!(actual, &Fate::Accepted);
+            vec![(row(2), title_cells("mine"))]
+        };
+        assert_eq!(
+            core.current_rows("todos", DurabilityTier::Global)
+                .unwrap()
+                .into_iter()
+                .map(current_row_pair)
+                .collect::<Vec<_>>(),
+            expected_rows
+        );
+        reopened.apply_sync_message_settled(fate).unwrap();
+        assert_eq!(
+            reopened
+                .current_rows("todos", DurabilityTier::Local)
+                .unwrap()
+                .into_iter()
+                .map(current_row_pair)
+                .collect::<Vec<_>>(),
+            expected_rows
+        );
+        reopened.database.close().unwrap();
+    }
 }

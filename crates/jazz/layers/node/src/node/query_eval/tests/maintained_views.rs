@@ -8,7 +8,7 @@ use futures::executor::block_on;
 /// a peer rehydrates it; an unscoped test `Subscribe` followed by a SYSTEM
 /// peer would exercise the deliberately rejected scope-replacement path.
 fn subscribe_query_binding_as_system(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
     opts: &RegisterShapeOptions,
@@ -822,10 +822,12 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     let schema = recursive_schema();
     let core_dir = tempfile::tempdir().expect("Core store");
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(core_dir.path(), &refs, Durability::WalNoSync)
-            .expect("open Core storage");
+    let storage = block_on(crate::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        core_dir.path().to_path_buf(),
+        cfs,
+    ))
+    .expect("open admitted Core storage");
     let mut core =
         NodeState::new_history_complete(NodeUuid::from_bytes([9; 16]), schema.clone(), storage)
             .expect("open complete-history authority");
@@ -904,10 +906,12 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
         .unwrap();
     let receiver_dir = tempfile::tempdir().expect("receiver store");
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(receiver_dir.path(), &refs, Durability::WalNoSync)
-            .expect("open receiver storage");
+    let storage = block_on(crate::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        receiver_dir.path().to_path_buf(),
+        cfs,
+    ))
+    .expect("open admitted receiver storage");
     let mut receiver =
         NodeState::new_catalogue_uninitialized(NodeUuid::from_bytes([10; 16]), storage)
             .expect("open receiver before authority catalogue");

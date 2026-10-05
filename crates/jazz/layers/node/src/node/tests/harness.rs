@@ -28,12 +28,13 @@ use crate::query::{
 use crate::tx::MergeAspect;
 use groove::schema::{ColumnSchema, ColumnType};
 use groove::storage::{
-    MemoryStorage, OrderedKvStorage, ReopenableStorage, Value as StorageValue, YieldingStorage,
+    BoxedStorage, MemoryStorage, OrderedKvStorage, ReopenableStorage, Value as StorageValue,
+    YieldingStorage,
 };
 use jazz_storage_rocksdb::RocksDbStorage as ImmediateRocksDbStorage;
 use std::path::Path;
 
-type RocksDbStorage = YieldingStorage<ImmediateRocksDbStorage>;
+type RocksDbStorage = YieldingStorage<BoxedStorage>;
 
 trait TestRocksOpen: Sized {
     fn open(
@@ -47,7 +48,15 @@ impl TestRocksOpen for RocksDbStorage {
         path: impl AsRef<Path>,
         column_families: &[&str],
     ) -> Result<Self, groove::storage::Error> {
-        ImmediateRocksDbStorage::open(path, column_families).map(YieldingStorage::wrap)
+        crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
+            &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            path.as_ref().to_path_buf(),
+            column_families
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+        ))
+        .map(YieldingStorage::wrap)
     }
 }
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

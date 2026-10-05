@@ -7,6 +7,7 @@ mod support;
 
 use support::BenchFutureExt as _;
 
+use groove::storage::BoxedStorage;
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -17,7 +18,7 @@ use jazz::schema::JazzSchema;
 use jazz::tools::OpenTransactionId;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::Durability;
 use support::{emit_json_line, insert_node_metrics, phase_fields, reset_phase_counters};
 
 const TABLE: &str = "todos";
@@ -440,7 +441,7 @@ impl SyncBench {
     }
 }
 
-fn relay_ingest(node: &mut NodeState, message: &SyncMessage) {
+fn relay_ingest(node: &mut NodeState<BoxedStorage>, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -448,7 +449,11 @@ fn relay_ingest(node: &mut NodeState, message: &SyncMessage) {
         .expect("relay ingest");
 }
 
-fn core_ingest(core: &mut NodeState, message: &SyncMessage, now_ms: u64) -> SyncMessage {
+fn core_ingest(
+    core: &mut NodeState<BoxedStorage>,
+    message: &SyncMessage,
+    now_ms: u64,
+) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -461,7 +466,11 @@ fn core_ingest(core: &mut NodeState, message: &SyncMessage, now_ms: u64) -> Sync
     fate
 }
 
-fn refresh(upstream: &mut NodeState, downstream: &mut NodeState, peer: &mut PeerState) {
+fn refresh(
+    upstream: &mut NodeState<BoxedStorage>,
+    downstream: &mut NodeState<BoxedStorage>,
+    peer: &mut PeerState,
+) {
     let schema = schema();
     let (_, _, subscription) = support::table_subscription(&schema, TABLE, peer.identity());
     if peer.subscription_result_sets(subscription).is_none() {
@@ -481,7 +490,7 @@ fn content_unit_row(unit: &SyncMessage) -> Option<RowUuid> {
         .map(|version| version.row_uuid())
 }
 
-fn current_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+fn current_rows(node: &mut NodeState<BoxedStorage>) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
     node.current_rows(TABLE, DurabilityTier::Global)
@@ -534,13 +543,18 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
+fn open_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
-            .expect("open rocksdb");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        temp_dir.path().to_path_buf(),
+        cfs,
+    ))
+    .expect("open rocksdb");
     let node =
         NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).expect("single node");
     (temp_dir, node)

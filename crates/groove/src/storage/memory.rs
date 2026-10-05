@@ -351,6 +351,10 @@ impl MemoryStorage {
 }
 
 impl OrderedKvStorage for MemoryStorage {
+    fn admission(&self) -> Result<super::StorageAdmission, Error> {
+        Ok(super::StorageAdmission::Ephemeral)
+    }
+
     fn compare_value(
         &self,
         cf: String,

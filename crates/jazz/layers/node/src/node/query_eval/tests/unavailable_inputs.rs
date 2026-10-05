@@ -4,7 +4,7 @@
 
 use super::*;
 
-fn fixture() -> (tempfile::TempDir, NodeState, JazzSchema) {
+fn fixture() -> (tempfile::TempDir, NodeState<BoxedStorage>, JazzSchema) {
     let schema = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -58,7 +58,7 @@ fn fixture() -> (tempfile::TempDir, NodeState, JazzSchema) {
 }
 
 fn read(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     schema: &JazzSchema,
     query: Query,
     who: AuthorSubject,
@@ -69,7 +69,11 @@ fn read(
         .unwrap()
 }
 
-fn parent_ids(node: &mut NodeState, schema: &JazzSchema, who: AuthorSubject) -> BTreeSet<RowUuid> {
+fn parent_ids(
+    node: &mut NodeState<BoxedStorage>,
+    schema: &JazzSchema,
+    who: AuthorSubject,
+) -> BTreeSet<RowUuid> {
     read(node, schema, Query::from("parents"), who)
         .into_iter()
         .map(|row| row.row_uuid())
@@ -585,7 +589,7 @@ fn local_unavailable_inputs_also_filter_include_deleted_app_sources() {
     let scope = node.local_read_policy_binding(alice).unwrap();
     node.set_local_row_unavailable(&scope, "parents", row(1), true)
         .unwrap();
-    let read = |node: &mut NodeState, identity| {
+    let read = |node: &mut NodeState<BoxedStorage>, identity| {
         node.query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
@@ -740,11 +744,17 @@ fn local_unavailable_inputs_keep_include_deleted_limit_after_exclusion() {
     }
 }
 
-fn reopen_availability_node(dir: &tempfile::TempDir, schema: &JazzSchema) -> NodeState {
+fn reopen_availability_node(
+    dir: &tempfile::TempDir,
+    schema: &JazzSchema,
+) -> NodeState<BoxedStorage> {
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        cfs,
+    ))
+    .unwrap();
     NodeState::new(NodeUuid::from_bytes([91; 16]), schema.clone(), storage).unwrap()
 }
 

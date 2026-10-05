@@ -39,7 +39,7 @@ async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
     context.client_id = Some(ClientId::new());
     context.storage = ClientStorage::Persistent;
     context.storage_factory = Some(std::sync::Arc::new(
-        jazz_storage_rocksdb::RocksDbStorageFactory,
+        jazz_storage_rocksdb::RocksDbStorageFactory::default(),
     ));
 
     support::enroll_test_context(&mut context)

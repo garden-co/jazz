@@ -324,7 +324,7 @@ mod currency;
 mod database_slot;
 mod descriptor_roles;
 mod eviction;
-mod exclusive_read_evidence;
+use jazz_protocol::exclusive_read_evidence;
 mod global_state;
 mod ingest;
 mod node_aliases;
@@ -3452,6 +3452,17 @@ pub(super) fn is_unrepresentable_enum_projection(error: &Error) -> bool {
 impl From<QueryError> for Error {
     fn from(error: QueryError) -> Self {
         Self::Query(Box::new(error))
+    }
+}
+
+impl From<exclusive_read_evidence::Error> for Error {
+    fn from(error: exclusive_read_evidence::Error) -> Self {
+        match error {
+            exclusive_read_evidence::Error::Record(error) => Self::Record(error),
+            exclusive_read_evidence::Error::InvalidStoredValue(message) => {
+                Self::InvalidStoredValue(message)
+            }
+        }
     }
 }
 

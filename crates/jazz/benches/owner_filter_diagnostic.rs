@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
+use groove::storage::BoxedStorage;
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
     SeededRowIdSource, block_on,
@@ -18,7 +19,6 @@ use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
-use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::{Map, json};
 
 const TABLE: &str = "documents";
@@ -122,17 +122,18 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db(path: &Path, schema: JazzSchema) -> Db {
+fn open_db(path: &Path, schema: JazzSchema) -> Db<BoxedStorage> {
     let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
 
     block_on(Db::open_history_complete(
         DbConfig::new(
             schema,
-            RocksDbStorage::open(path, &refs).expect("open owner-filter RocksDB"),
+            jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+                &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                path.to_path_buf(),
+                column_families,
+            ))
+            .expect("open owner-filter RocksDB"),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x51; 16]),
                 author: author(),
@@ -143,7 +144,7 @@ fn open_db(path: &Path, schema: JazzSchema) -> Db {
     .expect("open owner-filter Jazz db")
 }
 
-fn seed_rows(db: &Db, table_rows: usize, owned_rows: usize, batch_rows: usize) {
+fn seed_rows(db: &Db<BoxedStorage>, table_rows: usize, owned_rows: usize, batch_rows: usize) {
     for batch_start in (0..table_rows).step_by(batch_rows) {
         let batch_end = table_rows.min(batch_start + batch_rows);
         let tx = block_on(db.mergeable_tx()).expect("open owner-filter seed tx");

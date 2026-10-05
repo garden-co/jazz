@@ -11,6 +11,7 @@ use std::time::Instant;
 use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
+use jazz::groove::storage::BoxedStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
@@ -31,7 +32,7 @@ use jazz_sim::fixture::{
 use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::view_accounting::version_bundle_refs;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::Durability;
 use rusqlite::{Connection, params};
 use serde_json::{Value as JsonValue, json};
 use tempfile::TempDir;
@@ -43,7 +44,7 @@ const EVENTS: &str = "events";
 
 struct WorkerHarness {
     _dir: TempDir,
-    db: Db,
+    db: Db<BoxedStorage>,
     author: AuthorSubject,
     _relay_dir: TempDir,
     relay: NodeState,
@@ -54,7 +55,7 @@ struct WorkerHarness {
     hydrated_tables: BTreeSet<String>,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection>>,
+    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection<BoxedStorage>>>,
 }
 
 struct QueueTransport {
@@ -526,7 +527,7 @@ fn next_runnable_instance(oracle: &[u64], offset: usize, config: &Config) -> Opt
 }
 
 struct AcceptState<'a> {
-    core: &'a mut NodeState,
+    core: &'a mut NodeState<BoxedStorage>,
     global_time: &'a mut u64,
     accepted_schedule: &'a mut Vec<Transition>,
     oracle: &'a mut [u64],
@@ -557,7 +558,7 @@ fn record_accept(
 
 fn apply_transition(
     client: &mut WorkerHarness,
-    core: &mut NodeState,
+    core: &mut NodeState<BoxedStorage>,
     instance: usize,
     expected_step: u64,
     steps_per_instance: usize,
@@ -628,7 +629,7 @@ fn apply_transition(
 }
 
 fn append_step_and_event(
-    core: &mut NodeState,
+    core: &mut NodeState<BoxedStorage>,
     global_time: &mut u64,
     transition: Transition,
     now_ms: u64,
@@ -680,7 +681,7 @@ fn append_step_and_event(
     accept_global(core, event_tx.0, global_time);
 }
 
-fn seed_fixture(config: &Config, core: &mut NodeState, global_time: &mut u64) {
+fn seed_fixture(config: &Config, core: &mut NodeState<BoxedStorage>, global_time: &mut u64) {
     let tx = commit_mergeable_unit_settled(
         core,
         MergeableCommit::new(WORKFLOWS, workflow_row(), 1).cells(cells_map([
@@ -956,7 +957,11 @@ fn emit_summary(input: SummaryInputs<'_>) {
     );
 }
 
-fn assert_dashboard_matches(node: &mut NodeState, oracle: &[u64], steps_per_instance: usize) {
+fn assert_dashboard_matches(
+    node: &mut NodeState<BoxedStorage>,
+    oracle: &[u64],
+    steps_per_instance: usize,
+) {
     let schema = schema();
     let table = table_schema(&schema, INSTANCES);
     let running = jazz::db::block_on(node.current_rows(INSTANCES, DurabilityTier::Local))
@@ -971,7 +976,7 @@ fn assert_dashboard_matches(node: &mut NodeState, oracle: &[u64], steps_per_inst
     assert_eq!(running, expected);
 }
 
-fn assert_tailers_gap_free(node: &mut NodeState, oracle: &[u64]) {
+fn assert_tailers_gap_free(node: &mut NodeState<BoxedStorage>, oracle: &[u64]) {
     let schema = schema();
     let table = table_schema(&schema, EVENTS);
     let mut seen = BTreeMap::<usize, BTreeSet<u64>>::new();
@@ -992,7 +997,7 @@ fn assert_tailers_gap_free(node: &mut NodeState, oracle: &[u64]) {
     }
 }
 
-fn assert_resume_matches(node: &mut NodeState, oracle: &[u64]) {
+fn assert_resume_matches(node: &mut NodeState<BoxedStorage>, oracle: &[u64]) {
     let schema = schema();
     let table = table_schema(&schema, INSTANCES);
     let rows = jazz::db::block_on(node.current_rows(INSTANCES, DurabilityTier::Local)).unwrap();
@@ -1005,7 +1010,12 @@ fn assert_resume_matches(node: &mut NodeState, oracle: &[u64]) {
     }
 }
 
-fn sync_tables(core: &mut NodeState, node: &mut NodeState, peer: &mut PeerState, tables: &[&str]) {
+fn sync_tables(
+    core: &mut NodeState<BoxedStorage>,
+    node: &mut NodeState<BoxedStorage>,
+    peer: &mut PeerState,
+    tables: &[&str],
+) {
     for table in tables {
         register_table_receiver(node, table, peer.identity());
         let update = table_query_update(core, peer, table, true);
@@ -1013,7 +1023,11 @@ fn sync_tables(core: &mut NodeState, node: &mut NodeState, peer: &mut PeerState,
     }
 }
 
-fn register_table_receiver(node: &mut NodeState, table: &str, identity: AuthorSubject) {
+fn register_table_receiver(
+    node: &mut NodeState<BoxedStorage>,
+    table: &str,
+    identity: AuthorSubject,
+) {
     let shape = Query::from(table).validate(&schema()).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     register_query_receiver(
@@ -1030,7 +1044,7 @@ fn register_table_receiver(node: &mut NodeState, table: &str, identity: AuthorSu
 }
 
 fn table_query_update(
-    core: &mut NodeState,
+    core: &mut NodeState<BoxedStorage>,
     peer: &mut PeerState,
     table: &str,
     reset: bool,
@@ -1044,7 +1058,11 @@ fn table_query_update(
     }
 }
 
-fn sync_worker_tables(core: &mut NodeState, worker: &mut WorkerHarness, tables: &[&str]) {
+fn sync_worker_tables(
+    core: &mut NodeState<BoxedStorage>,
+    worker: &mut WorkerHarness,
+    tables: &[&str],
+) {
     for table in tables {
         let reset = worker.hydrated_tables.insert((*table).to_owned());
         if reset {
@@ -1138,7 +1156,7 @@ fn open_worker(node_uuid: NodeUuid, relay_uuid: NodeUuid, schema: JazzSchema) ->
     worker
 }
 
-fn accept_global(core: &mut NodeState, tx: jazz::tx::TxId, global_time: &mut u64) {
+fn accept_global(core: &mut NodeState<BoxedStorage>, tx: jazz::tx::TxId, global_time: &mut u64) {
     jazz::db::block_on(core.apply_fate_update(
         tx,
         Fate::Accepted,
@@ -1184,12 +1202,15 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<BoxedStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
-    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        refs,
+    ))
+    .unwrap();
     let node = jazz::db::block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))
@@ -1197,12 +1218,19 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState) {
     (dir, node)
 }
 
-fn open_db(node_uuid: NodeUuid, schema: JazzSchema, author: AuthorSubject) -> (TempDir, Db) {
+fn open_db(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+    author: AuthorSubject,
+) -> (TempDir, Db<BoxedStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
-    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        refs.clone(),
+    ))
+    .unwrap();
     // These direct-message simulations bypass the transport catalogue handshake.
     // Seed the same physical catalogue before reopening through the public Db API.
     drop(
@@ -1213,8 +1241,12 @@ fn open_db(node_uuid: NodeUuid, schema: JazzSchema, author: AuthorSubject) -> (T
         ))
         .unwrap(),
     );
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        dir.path().to_path_buf(),
+        refs,
+    ))
+    .unwrap();
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,

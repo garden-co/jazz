@@ -3619,14 +3619,14 @@ pub(super) fn transaction_values_with_cardinality_scope(
     view_scoped_cardinality: bool,
     contribution_merge: Value,
 ) -> Result<Vec<Value>, Error> {
-    // Slots 5-8: `jazz.exclusive-read-evidence.v1` while an exclusive fate is
-    // pending, null otherwise (SPEC 2 §2.8).
+    // Slots 5-8 retain `jazz.exclusive-read-evidence.v1` across settlement so
+    // recovered commit units preserve the author's exact captured proof.
     let [
         base_snapshot,
         row_read_set,
         absent_read_set,
         predicate_read_set,
-    ] = super::exclusive_read_evidence::evidence_slot_values(tx, matches!(fate, Fate::Pending))?;
+    ] = super::exclusive_read_evidence::evidence_slot_values(tx)?;
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
         Value::U64(node_alias.0),
@@ -3842,6 +3842,11 @@ pub(super) fn known_transaction_payload_matches(
     existing: &Transaction,
     incoming: &Transaction,
 ) -> bool {
+    if existing.permission_subject != incoming.permission_subject
+        || !super::exclusive_read_evidence::compatible(existing, incoming)
+    {
+        return false;
+    }
     let mut redacted_existing = existing.clone();
     redacted_existing.base_snapshot = None;
     redacted_existing.row_read_set = None;
@@ -3852,10 +3857,7 @@ pub(super) fn known_transaction_payload_matches(
     redacted_incoming.row_read_set = None;
     redacted_incoming.absent_read_set = None;
     redacted_incoming.predicate_read_set = None;
-    existing == incoming
-        || &redacted_existing == incoming
-        || existing == &redacted_incoming
-        || redacted_existing == redacted_incoming
+    redacted_existing == redacted_incoming
 }
 
 /// Copy a transaction for a carrier boundary or duplicate comparison without
@@ -3877,7 +3879,8 @@ pub fn known_transaction_payload_matches_redacted_permission_subject(
     known_transaction_payload_matches(
         &transaction_without_permission_subject(existing),
         &transaction_without_permission_subject(incoming),
-    )
+    ) && super::exclusive_read_evidence::is_absent(existing)
+        == super::exclusive_read_evidence::is_absent(incoming)
 }
 
 pub(super) fn known_transaction_payload_matches_redacted_cardinality(

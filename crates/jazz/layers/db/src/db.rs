@@ -2286,6 +2286,7 @@ enum LocalReplayFrame {
 async fn plan_local_replay_commit_units<S>(
     node: &mut NodeState<S>,
     roots: &BTreeSet<TxId>,
+    pending_transaction_ids: &BTreeSet<TxId>,
     retained_replay_units: &BTreeMap<TxId, SyncMessage>,
 ) -> Result<
     (
@@ -2332,26 +2333,25 @@ where
                             Err(error) => return Err(error),
                         },
                     };
-                    let (n_total_writes, version_count, parents) = {
+                    let parents = {
                         let SyncMessage::CommitUnit { tx, versions } = &unit else {
                             unreachable!("commit_unit_for always returns a commit unit")
                         };
-                        (
-                            tx.n_total_writes,
-                            versions.len(),
-                            versions
-                                .iter()
-                                .flat_map(crate::protocol::VersionRecord::parents)
-                                .collect::<BTreeSet<_>>()
-                                .into_iter()
-                                .collect::<Vec<_>>(),
-                        )
+                        if usize::try_from(tx.n_total_writes).ok() != Some(versions.len())
+                            || (pending_transaction_ids.contains(&tx_id)
+                                && !tx.has_complete_exclusive_evidence())
+                        {
+                            statuses.insert(tx_id, LocalReplayStatus::Blocked);
+                            continue;
+                        }
+                        versions
+                            .iter()
+                            .flat_map(crate::protocol::VersionRecord::parents)
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect::<Vec<_>>()
                     };
                     units.insert(tx_id, unit);
-                    if usize::try_from(n_total_writes).ok() != Some(version_count) {
-                        statuses.insert(tx_id, LocalReplayStatus::Blocked);
-                        continue;
-                    }
                     parents_by_tx.insert(tx_id, parents.clone());
                     statuses.insert(tx_id, LocalReplayStatus::Visiting);
                     frames.push(LocalReplayFrame::Exit(tx_id));
@@ -2429,8 +2429,13 @@ where
     let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
     let mut roots = pending_set.clone();
     roots.extend(retained_replay_roots);
-    let (statuses, blocked_units, replay_units) =
-        plan_local_replay_commit_units(&mut node_state, &roots, &retained_replay_units).await?;
+    let (statuses, blocked_units, replay_units) = plan_local_replay_commit_units(
+        &mut node_state,
+        &roots,
+        &pending_set,
+        &retained_replay_units,
+    )
+    .await?;
     drop(node_state);
 
     let mut outbox_units = outbox
@@ -2474,6 +2479,7 @@ where
         register_local_replay_route(routes, tx_id, downstream_fates, author, unit.clone());
         if pending_set.contains(&tx_id)
             && let Some(unit) = unit
+            && matches!(&unit, SyncMessage::CommitUnit { tx, .. } if tx.has_complete_exclusive_evidence())
         {
             if outbox_units.insert(tx_id) {
                 queue_pending_upload_in(outbox, tx_id, Some(unit));
