@@ -1,6 +1,7 @@
 import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
+import { e2eeForDb, type E2ee } from "../e2ee/lifecycle.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
@@ -1818,6 +1819,9 @@ export interface ShutdownOptions {
 }
 
 export class Db {
+  get e2ee(): E2ee {
+    return e2eeForDb(this);
+  }
   private config: DbConfig;
   private readonly runtimeSource: AnyRuntimeSource;
   private readonly authStateStore;

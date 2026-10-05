@@ -280,19 +280,6 @@ fn bind_scope_claim_operand(
     *operand = Operand::Param(param);
 }
 
-pub(super) fn disambiguate_policy_claim_params(
-    query: &mut JazzQuery,
-    schema: &RuntimeSchema,
-    binding_values: &mut BTreeMap<String, Value>,
-) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
-    disambiguate_policy_claim_params_with_outer_slots(
-        query,
-        schema,
-        binding_values,
-        &BTreeMap::new(),
-    )
-}
-
 /// Give a policy-local claim parameter a stable binding slot. A nested policy
 /// which is lowered under an already-prepared outer source must reuse that
 /// source's slot when its claim path and validated type are identical. Creating
@@ -747,6 +734,7 @@ pub(super) fn retarget_binding_value_sources(
             mode: ValueSourceMode::Binding,
             ..
         } = node
+            && shape.as_str() != binding_source_shape
         {
             *shape = binding_source_shape.to_owned();
         }
@@ -781,23 +769,6 @@ pub(super) fn binding_claim_params_for_shape(
         collect_claim_field_params_from_node(node, param_types, &mut params);
     }
     params
-}
-
-pub(super) fn normalized_source_tables(shape: &NormalizedRowSetShape) -> BTreeSet<String> {
-    shape
-        .nodes
-        .values()
-        .filter_map(|node| match node {
-            RowSetExpr::Source { source, .. } => Some(source.table.clone()),
-            _ => None,
-        })
-        .chain(
-            shape
-                .auxiliary_sources
-                .iter()
-                .map(|source| source.table.clone()),
-        )
-        .collect()
 }
 
 pub(super) fn collect_reachable_seed_claim_params(

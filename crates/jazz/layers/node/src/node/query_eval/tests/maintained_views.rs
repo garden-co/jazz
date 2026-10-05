@@ -3,18 +3,6 @@
 use super::*;
 use futures::executor::block_on;
 
-fn covered_input_rows(update: &SyncMessage) -> BTreeSet<RowUuid> {
-    let SyncMessage::ViewUpdate(payload) = update else {
-        panic!("expected ViewUpdate");
-    };
-    payload
-        .supporting_rows
-        .added_rows()
-        .iter()
-        .map(|row| row.row)
-        .collect()
-}
-
 /// These direct controls model an actual trusted backend reader.  The
 /// subscription's immutable policy binding must therefore be installed before
 /// a peer rehydrates it; an unscoped test `Subscribe` followed by a SYSTEM
@@ -821,33 +809,62 @@ fn maintained_aggregate_order_preserves_raw_nullable_keys_and_reports_corrupt_ro
     );
 }
 
+/// Alice's recursive team subscription derives its rows from the Core's
+/// supporting inputs, then retains the same receiver through grant and revoke.
+///
+/// core ──initial r1──► alice ──grant r2──► r1,r2 ──revoke path──► empty
+///
+/// This direct-message seam is needed to exercise cold physical-input admission
+/// and the retained ClientLocal terminal, rather than confuse supporting rows
+/// or delta additions with application membership.
 #[test]
 fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
-    let (_dir, mut core) = open_recursive_node();
     let schema = recursive_schema();
+    let core_dir = tempfile::tempdir().expect("Core store");
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage =
+        RocksDbStorage::open_with_durability(core_dir.path(), &refs, Durability::WalNoSync)
+            .expect("open Core storage");
+    let mut core =
+        NodeState::new_history_complete(NodeUuid::from_bytes([9; 16]), schema.clone(), storage)
+            .expect("open complete-history authority");
+    let commit_core_cells = |core: &mut NodeState,
+                             table: &str,
+                             row_uuid: RowUuid,
+                             cells: BTreeMap<String, Value>,
+                             now_ms: u64| {
+        let tx = core
+            .commit_mergeable_settled(
+                MergeableCommit::new(table, row_uuid, now_ms)
+                    .made_by(AuthorSubject::SYSTEM)
+                    .cells(cells),
+            )
+            .expect("commit Core row");
+        core.accept_global_for_test(tx)
+            .expect("mint accepted Core cut");
+    };
     let team1 = row(1);
     let team2 = row(2);
     let team3 = row(3);
     let team4 = row(4);
     let resource1 = row(101);
     let resource2 = row(102);
-    commit_global_cells(
+    commit_core_cells(
         &mut core,
         "resources",
         resource1,
         BTreeMap::from([("name".to_owned(), Value::String("r1".to_owned()))]),
         10,
-        1,
     );
-    commit_global_cells(
+    commit_core_cells(
         &mut core,
         "resources",
         resource2,
         BTreeMap::from([("name".to_owned(), Value::String("r2".to_owned()))]),
         11,
-        2,
     );
-    commit_global_cells(
+    commit_core_cells(
         &mut core,
         "resourceAccess",
         row(201),
@@ -856,9 +873,8 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
             ("team".to_owned(), Value::Uuid(team3.0)),
         ]),
         12,
-        3,
     );
-    commit_global_cells(
+    commit_core_cells(
         &mut core,
         "resourceAccess",
         row(202),
@@ -867,10 +883,9 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
             ("team".to_owned(), Value::Uuid(team4.0)),
         ]),
         13,
-        4,
     );
     for (idx, member, parent, seq) in [(301, team1, team2, 5), (302, team2, team3, 6)] {
-        commit_global_cells(
+        commit_core_cells(
             &mut core,
             "teamTeamMemberships",
             row(idx),
@@ -880,7 +895,6 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
                 ("onlyAdmins".to_owned(), Value::Bool(false)),
             ]),
             10 + seq,
-            seq,
         );
     }
 
@@ -888,13 +902,94 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     let binding = shape
         .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team1.0))]))
         .unwrap();
+    let receiver_dir = tempfile::tempdir().expect("receiver store");
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage =
+        RocksDbStorage::open_with_durability(receiver_dir.path(), &refs, Durability::WalNoSync)
+            .expect("open receiver storage");
+    let mut receiver =
+        NodeState::new_catalogue_uninitialized(NodeUuid::from_bytes([10; 16]), storage)
+            .expect("open receiver before authority catalogue");
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .expect("admit authority physical identities");
+    receiver.set_non_durable_client();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        ..RegisterShapeOptions::default()
+    };
+    register_query_shape(&mut receiver, &shape, opts.clone());
+    subscribe_query_binding_as_system(&mut receiver, &shape, &binding, &opts);
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
+    let resource_table = schema
+        .tables()
+        .iter()
+        .find(|table| table.name == "resources")
+        .unwrap();
+    let resource_names = |rows: Vec<CurrentRow>| {
+        rows.into_iter()
+            .map(|row| {
+                (
+                    row.row_uuid(),
+                    row.cell(resource_table, "name").expect("resource name"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
     let mut peer = PeerState::new();
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let initial_rows = covered_input_rows(&initial);
-    assert!(initial_rows.contains(&resource1));
-    assert!(!initial_rows.contains(&resource2));
+    let SyncMessage::ViewUpdate(initial_payload) = &initial else {
+        panic!("expected initial ViewUpdate");
+    };
+    assert_eq!(initial_payload.subscription, subscription);
+    assert!(initial_payload.supporting_rows.is_snapshot());
+    let mut revision = initial_payload.supporting_rows.revision();
+    receiver.apply_sync_message_settled(initial).unwrap();
+    let authority_key = receiver
+        .authority_result_key_for_subscription(subscription)
+        .expect("admitted exact authority receipt");
+    let (local_shape, local_binding, plan) = receiver
+        .prepare_query_binding_for_link_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    let (mut local, _) = receiver
+        .open_maintained_view_subscription_in_authorization_mode(
+            &local_shape,
+            &local_binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Global,
+            &ReadViewSpec::default(),
+            Some(plan),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    receiver.drive_query_runtime().unwrap();
+    receiver
+        .drain_local_maintained_view_subscription(&mut local, Some(authority_key.clone()))
+        .unwrap();
+    assert!(local.initial_snapshot_received());
+    let initial_rows = receiver
+        .materialize_local_maintained_relation_snapshot_with_occurrences(&local)
+        .unwrap()
+        .snapshot
+        .rows;
+    assert_eq!(
+        resource_names(initial_rows),
+        BTreeMap::from([(resource1, Value::String("r1".to_owned()))]),
+        "Alice's cold initial terminal contains only the reachable resource"
+    );
 
-    commit_global_cells(
+    commit_core_cells(
         &mut core,
         "teamTeamMemberships",
         row(303),
@@ -904,14 +999,67 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
             ("onlyAdmins".to_owned(), Value::Bool(false)),
         ]),
         17,
-        7,
     );
     let grant = peer.query_update(&mut core, &shape, &binding).unwrap();
-    assert!(covered_input_rows(&grant).contains(&resource2));
+    let SyncMessage::ViewUpdate(grant_payload) = &grant else {
+        panic!("expected grant ViewUpdate");
+    };
+    assert_eq!(grant_payload.subscription, subscription);
+    if let crate::protocol::SupportingRowsUpdate::Delta { predecessor, .. } =
+        &grant_payload.supporting_rows
+    {
+        assert_eq!(*predecessor, revision);
+    }
+    revision = grant_payload.supporting_rows.revision();
+    receiver.apply_sync_message_settled(grant).unwrap();
+    receiver
+        .drain_local_maintained_view_subscription(&mut local, Some(authority_key.clone()))
+        .unwrap();
+    let granted_rows = receiver
+        .materialize_local_maintained_relation_snapshot_with_occurrences(&local)
+        .unwrap()
+        .snapshot
+        .rows;
+    assert_eq!(
+        resource_names(granted_rows),
+        BTreeMap::from([
+            (resource1, Value::String("r1".to_owned())),
+            (resource2, Value::String("r2".to_owned())),
+        ]),
+        "Alice's retained terminal adds the newly reachable resource"
+    );
 
-    delete_global(&mut core, "teamTeamMemberships", row(302), 18, 8);
+    let revoke_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("teamTeamMemberships", row(302), 18)
+                .made_by(AuthorSubject::SYSTEM)
+                .deletion(crate::tx::DeletionEvent::Deleted),
+        )
+        .expect("revoke membership");
+    core.accept_global_for_test(revoke_tx)
+        .expect("settle Core revocation");
     let revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let remaining = covered_input_rows(&revoke);
-    assert!(!remaining.contains(&resource1));
-    assert!(!remaining.contains(&resource2));
+    let SyncMessage::ViewUpdate(revoke_payload) = &revoke else {
+        panic!("expected revoke ViewUpdate");
+    };
+    assert_eq!(revoke_payload.subscription, subscription);
+    if let crate::protocol::SupportingRowsUpdate::Delta { predecessor, .. } =
+        &revoke_payload.supporting_rows
+    {
+        assert_eq!(*predecessor, revision);
+    }
+    receiver.apply_sync_message_settled(revoke).unwrap();
+    receiver
+        .drain_local_maintained_view_subscription(&mut local, Some(authority_key))
+        .unwrap();
+    let revoked_rows = receiver
+        .materialize_local_maintained_relation_snapshot_with_occurrences(&local)
+        .unwrap()
+        .snapshot
+        .rows;
+    assert_eq!(
+        resource_names(revoked_rows),
+        BTreeMap::new(),
+        "Alice's same retained terminal retracts both resources"
+    );
 }
