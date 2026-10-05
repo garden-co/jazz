@@ -6,7 +6,7 @@ import { encodeCryptoContext } from "./context.js";
 import { deviceRequestApp as app } from "./device-requests.js";
 import type { DeviceTables } from "./device-requests.js";
 import { accountEpochContext, confirmAccountEpoch } from "./first-epoch.js";
-import type { LocalDevice } from "./local-device.js";
+import type { LocalDevice, LocalDeviceProvider } from "./local-device.js";
 import type { DeviceSigner, KeyEnvelope } from "./types.js";
 import {
   decodeEpochDeliveries,
@@ -21,10 +21,15 @@ import {
 } from "./account-successor.js";
 import type { AccountSuccessor } from "./account-successor.js";
 import { publicDeviceApprovalBytes } from "./public-device-approval.js";
-import { readPublicMembershipHistory, replayAccountMembership } from "./public-membership.js";
+import {
+  initialAccountAuthority,
+  readPublicMembershipHistory,
+  replayAccountMembership,
+  type AccountMembership,
+} from "./public-membership.js";
 
 type EpochSnapshot = Awaited<ReturnType<DeviceApproval["snapshot"]>> & {
-  publicState: Awaited<ReturnType<typeof replayAccountMembership>>;
+  publicState: AccountMembership;
   epochPosition: bigint;
   baseMembers: Set<string>;
   revoked: Set<string>;
@@ -71,7 +76,7 @@ export class DeviceApproval {
     private readonly signer: DeviceSigner,
     private readonly assertOpen: () => void,
     private readonly tables: DeviceTables = app,
-    private readonly device?: { id: string; load: () => Promise<LocalDevice> },
+    private readonly device?: LocalDeviceProvider,
   ) {
     // Recovery inspection has no device and must never start a handshake responder.
     if (!device) return;
@@ -172,7 +177,6 @@ export class DeviceApproval {
       approvals: approvals.rows,
       deliveries: deliveries.rows,
       order: {
-        identities: positions(identities.settlements),
         successors: positions(successors.settlements),
         challenges: positions(challenges.settlements),
         requests: positions(requests.settlements),
@@ -285,6 +289,14 @@ export class DeviceApproval {
 
   private async currentSnapshot(transaction?: E2eeTransactionScope): Promise<EpochSnapshot> {
     const raw = await this.snapshot(transaction);
+    const initial = initialAccountAuthority(raw.publicHistory);
+    if (
+      initial.root.accountId !== raw.identity.id ||
+      initial.root.deviceId !== raw.identity.deviceId ||
+      initial.root.epochId !== raw.identity.epochId ||
+      initial.root.ledgerVersion !== raw.identity.ledgerVersion
+    )
+      throw new Error("E2EE public and private account roots disagree");
     const publicState = await replayAccountMembership(
       raw.publicHistory,
       this.application,
@@ -294,7 +306,7 @@ export class DeviceApproval {
     let view: EpochSnapshot = {
       ...raw,
       publicState,
-      epochPosition: raw.order.identities.get(raw.identity.id)!,
+      epochPosition: initial.position,
       baseMembers: new Set([raw.identity.deviceId]),
       revoked: new Set(),
     };
@@ -567,18 +579,24 @@ export class DeviceApproval {
     ) => {
       let secret: Uint8Array | undefined;
       try {
+        this.assertOpen();
         secret = await this.keys.open(device, context, envelope).catch(unavailableDelivery);
+        this.assertOpen();
         await this.confirmEpoch(snapshot, secret);
+        this.assertOpen();
         await this.authenticateHistory(snapshot, secret);
+        this.assertOpen();
         if (challenge) {
           if (!verification || !deliveryVerification)
             throw new UnavailableDelivery("Missing E2EE delivery authentication");
           await this.marker(secret, this.context(challenge, "approval"), verification);
+          this.assertOpen();
           await this.marker(
             secret,
             this.deliveryContext(challenge, envelope),
             deliveryVerification,
           );
+          this.assertOpen();
           if (!(await this.eligibleApprovals(snapshot, secret, true)).has(challenge.id))
             throw new UnavailableDelivery("Unauthenticated E2EE approval ancestry");
         }
@@ -590,6 +608,7 @@ export class DeviceApproval {
       }
     };
     try {
+      this.assertOpen();
       if (snapshot.successor && snapshot.baseMembers.has(this.deviceId)) {
         let envelope: Uint8Array | undefined;
         try {
@@ -639,8 +658,7 @@ export class DeviceApproval {
       if (!(error instanceof UnavailableDelivery)) throw error;
       return undefined;
     } finally {
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
+      this.device!.release(device);
     }
   }
 
@@ -703,6 +721,7 @@ export class DeviceApproval {
     const device = await this.loadDevice();
     let secret: Uint8Array | undefined;
     try {
+      this.assertOpen();
       try {
         secret = await this.keys.open(
           device,
@@ -713,11 +732,13 @@ export class DeviceApproval {
         this.assertOpen();
         return;
       }
+      this.assertOpen();
       const proof = await this.keys.wrap(
         secret,
         this.context(challenge, "proof"),
         new Uint8Array(32),
       );
+      this.assertOpen();
       const signature = await this.signer.sign(
         device.signing.privateKey,
         this.proofContext(challenge, proof),
@@ -748,19 +769,19 @@ export class DeviceApproval {
           if (!(error instanceof UnavailableDelivery)) throw error;
           return;
         }
-        if (
-          !(await this.signer.verify(
-            device.signing.publicKey,
-            this.proofContext(challenge, accepted.proof),
-            accepted.signature,
-          ))
-        )
-          return; // A forged proof is rejected by the approver, not by device listing.
+        this.assertOpen();
+        const valid = await this.signer.verify(
+          device.signing.publicKey,
+          this.proofContext(challenge, accepted.proof),
+          accepted.signature,
+        );
+        this.assertOpen();
+        if (!valid) return; // A forged proof is rejected by the approver, not by device listing.
       }
+      this.assertOpen();
     } finally {
       secret?.fill(0);
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
+      this.device!.release(device);
     }
   }
 
@@ -813,12 +834,15 @@ export class DeviceApproval {
       throw error;
     });
     try {
+      this.assertOpen();
       const revision = await this.eligibleApprovals(snapshot, secret);
+      this.assertOpen();
       const members = this.members(snapshot, revision);
       if (!members.has(this.deviceId) || !members.delete(deviceId))
         throw new Error("Unknown or inactive E2EE device");
       const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
         const existing = await tx.all(this.tables.__e2ee_account_successors, { tier: "global" });
+        this.assertOpen();
         if (
           existing.length !== snapshot.successors.length ||
           existing.some((row) => !snapshot.successors.some((old) => old.id === row.id))
@@ -832,6 +856,7 @@ export class DeviceApproval {
           tx.all(this.tables.__e2ee_device_approvals, { tier: "global" }),
           tx.all(this.tables.__e2ee_device_deliveries, { tier: "global" }),
         ]);
+        this.assertOpen();
         const expected = [
           snapshot.requests,
           snapshot.challenges,
@@ -846,6 +871,7 @@ export class DeviceApproval {
           this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }),
           { tier: "global" },
         );
+        this.assertOpen();
         if (ids(recoveryRoots) !== ids(snapshot.publicHistory.recovery.rows))
           throw new Error("Stale E2EE recovery revision");
         const publicApprovals = await tx.all(
@@ -855,6 +881,7 @@ export class DeviceApproval {
           }),
           { tier: "global" },
         );
+        this.assertOpen();
         const nextSecret = runtimeRandomBytes(32);
         try {
           const coordinates = {
@@ -880,29 +907,36 @@ export class DeviceApproval {
                 nextSecret,
               ),
             );
+            this.assertOpen();
           }
+          const verification = await this.keys.wrap(
+            nextSecret,
+            successorContext(this.application, coordinates, "verification"),
+            new Uint8Array(32),
+          );
+          this.assertOpen();
+          const history = await this.keys.wrap(
+            nextSecret,
+            successorContext(this.application, coordinates, "history"),
+            secret,
+          );
+          this.assertOpen();
           const row = {
             ...coordinates,
             signerId: this.deviceId,
             removedDeviceId: deviceId,
             membership: encodeEpochIds(members),
             revision: encodeEpochIds(revision),
-            verification: await this.keys.wrap(
-              nextSecret,
-              successorContext(this.application, coordinates, "verification"),
-              new Uint8Array(32),
-            ),
-            history: await this.keys.wrap(
-              nextSecret,
-              successorContext(this.application, coordinates, "history"),
-              secret,
-            ),
+            verification,
+            history,
             deliveries: encodeEpochDeliveries(deliveries),
           };
           const record = successorSigningBytes(this.application, row);
           const signature = await this.signer.sign(device.signing.privateKey, record);
+          this.assertOpen();
           if (!(await this.signer.verify(device.signing.publicKey, record, signature)))
             throw new Error("Invalid E2EE successor signature");
+          this.assertOpen();
           const publicRow = {
             ...coordinates,
             signerId: row.signerId,
@@ -912,6 +946,7 @@ export class DeviceApproval {
           };
           const publicRecord = publicSuccessorSigningBytes(this.application, publicRow);
           const publicSignature = await this.signer.sign(device.signing.privateKey, publicRecord);
+          this.assertOpen();
           if (!(await this.signer.verify(device.signing.publicKey, publicRecord, publicSignature)))
             throw new Error("Invalid E2EE public successor signature");
           this.assertOpen();
@@ -937,8 +972,7 @@ export class DeviceApproval {
       this.assertOpen();
     } finally {
       secret.fill(0);
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
+      this.device!.release(device);
     }
   }
 
@@ -991,12 +1025,13 @@ export class DeviceApproval {
         ))
       )
         throw new Error("Invalid E2EE device signature");
+      this.assertOpen();
       const authorised = await this.keys.wrap(
         accountKey,
         this.context(challenge, "approval"),
         new Uint8Array(32),
       );
-      const signingDevice = await this.loadDevice();
+      this.assertOpen();
       let signature: Uint8Array;
       const publicApproval = {
         id: crypto.randomUUID(),
@@ -1006,13 +1041,18 @@ export class DeviceApproval {
         signerId: this.deviceId,
       };
       let publicSignature: Uint8Array;
+      const signingDevice = await this.loadDevice();
       try {
+        this.assertOpen();
         const record = this.approvalContext({ ...challenge, envelope }, this.deviceId, authorised);
         signature = await this.signer.sign(signingDevice.signing.privateKey, record);
+        this.assertOpen();
         if (!(await this.signer.verify(signingDevice.signing.publicKey, record, signature)))
           throw new Error("Invalid E2EE approving device signature");
+        this.assertOpen();
         const publicRecord = publicDeviceApprovalBytes(this.application, publicApproval);
         publicSignature = await this.signer.sign(signingDevice.signing.privateKey, publicRecord);
+        this.assertOpen();
         if (
           !(await this.signer.verify(
             signingDevice.signing.publicKey,
@@ -1022,8 +1062,7 @@ export class DeviceApproval {
         )
           throw new Error("Invalid E2EE public approval signature");
       } finally {
-        signingDevice.privateKey.fill(0);
-        signingDevice.signing.privateKey.fill(0);
+        this.device!.release(signingDevice);
       }
       this.assertOpen();
       const publication = await this.db.transaction((tx) => {

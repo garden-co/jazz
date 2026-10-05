@@ -60,6 +60,7 @@ export async function firstAccountEpoch(
   app: DeviceTables = deviceRequestApp,
 ): Promise<string> {
   const identities = app.__e2ee_account_identities;
+  const roots = app.__e2ee_account_roots;
   const context = (epoch: string, recipient: string, column = "envelope") =>
     accountEpochContext(application, accountId, epoch, recipient, column);
   for (let attempt = 0; ; attempt++) {
@@ -79,24 +80,30 @@ export async function firstAccountEpoch(
             new Uint8Array(32),
           );
           assertOpen();
-          return tx.insert(
+          const identity = tx.insert(
             identities,
             { deviceId: device.id, epochId, envelope, verification, ledgerVersion: 1 },
             { id: accountId },
           );
+          tx.insert(roots, {
+            accountId,
+            deviceId: device.id,
+            epochId,
+            ledgerVersion: 1,
+          });
+          return identity;
         } finally {
           secret.fill(0);
         }
       });
-      // Even an existing identity is validated by a read-only exclusive commit:
-      // local/optimistic observations alone must not select the active device.
+      // New identities and their public activation settle atomically. Even an
+      // existing identity is validated by a globally accepted exclusive commit.
       const accepted = await proposal.wait({ tier: "global" });
       assertOpen();
       if (accepted.ledgerVersion !== 1)
         throw new Error("E2EE account requires public ledger migration");
-      // The insert policy validates against the already accepted private identity.
-      // This projection never selects or replaces that identity.
-      const roots = app.__e2ee_account_roots;
+      // Repair an existing identity whose public root was never published.
+      // Its initial authority begins only when this root is accepted.
       if (!(await db.one(roots.where({ accountId }), { tier: "global" }))) {
         assertOpen();
         // Concurrent publications may duplicate the same policy-checked binding.
@@ -129,7 +136,9 @@ export async function firstAccountEpoch(
       if (
         attempt >= 2 ||
         !(error instanceof PersistedWriteRejectedError) ||
-        (error.code !== "transaction_conflict" && error.code !== "permission_denied")
+        (error.code !== "transaction_conflict" &&
+          error.code !== "permission_denied" &&
+          error.code !== "exclusive_conflict")
       )
         throw error;
       if (!(await db.one(identities.where({ id: accountId }), { tier: "global" }))) throw error;

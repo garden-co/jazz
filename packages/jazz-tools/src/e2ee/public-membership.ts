@@ -5,13 +5,81 @@ import type { DeviceSigner } from "./types.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
 import { deviceRequestApp as app } from "./device-requests.js";
 import type { DeviceTables } from "./device-requests.js";
-import { publicDeviceApprovalBytes } from "./public-device-approval.js";
+import { publicDeviceApprovalBytes, type PublicDeviceApproval } from "./public-device-approval.js";
 import { recoveryRootBytes, type RecoveryRoot } from "./recovery-format.js";
 import {
   decodeEpochIds,
   encodePublicApprovalRevision,
   publicSuccessorSigningBytes,
+  type PublicAccountSuccessor,
 } from "./account-successor.js";
+
+type SettledAuthority<T extends { id: string }> = {
+  rows: T[];
+  settlements: RowSettlement[];
+};
+
+type PublicAccountRoot = {
+  id: string;
+  accountId: string;
+  deviceId: string;
+  epochId: string;
+  ledgerVersion: number;
+};
+
+/** Covered, accepted public history; positions identify authority transactions. */
+export type PublicMembershipHistory = {
+  roots: SettledAuthority<PublicAccountRoot>;
+  keys: SettledAuthority<{
+    id: string;
+    deviceId: string;
+    signingPublicKey: Uint8Array;
+    signingMechanism: string;
+    signingVersion: number;
+    publicKey: Uint8Array;
+    mechanism: string;
+    version: number;
+  }>;
+  approvals: SettledAuthority<
+    PublicDeviceApproval & {
+      signature: Uint8Array;
+      recoverySignature?: Uint8Array | null;
+    }
+  >;
+  successors: SettledAuthority<PublicAccountSuccessor & { signature: Uint8Array }>;
+  recovery: SettledAuthority<RecoveryRoot>;
+};
+
+/** One canonical initial activation shared by public and private replay. */
+export type InitialAccountAuthority = {
+  root: PublicAccountRoot;
+  position: bigint;
+};
+
+export function initialAccountAuthority(
+  history: Pick<PublicMembershipHistory, "roots">,
+): InitialAccountAuthority {
+  const order = positions(history.roots);
+  let root = history.roots.rows[0];
+  if (!root) throw new Error("Missing accepted E2EE account root");
+  let position = order.get(root.id)!;
+  for (const candidate of history.roots.rows) {
+    if (candidate.ledgerVersion !== 1)
+      throw new Error("E2EE account requires public ledger migration");
+    if (
+      candidate.accountId !== root.accountId ||
+      candidate.deviceId !== root.deviceId ||
+      candidate.epochId !== root.epochId
+    )
+      throw new Error("Conflicting E2EE account roots");
+    const candidatePosition = order.get(candidate.id)!;
+    if (candidatePosition < position) {
+      root = candidate;
+      position = candidatePosition;
+    }
+  }
+  return { root, position };
+}
 
 /** Internal recipient discovery. Never reads another account's private handshake. */
 export async function readAccountMembership(
@@ -51,9 +119,9 @@ export async function prefetchPublicMembershipHistory(
 
 /** Strict authority cutoff: a grant cannot authorise another grant in the same transaction. */
 export function historyBefore(
-  history: Awaited<ReturnType<typeof readPublicMembershipHistory>>,
+  history: PublicMembershipHistory,
   cut: bigint,
-): Awaited<ReturnType<typeof readPublicMembershipHistory>> {
+): PublicMembershipHistory {
   const before = <T extends { id: string }>(snapshot: {
     rows: T[];
     settlements: RowSettlement[];
@@ -77,7 +145,7 @@ export async function readPublicMembershipHistory(
   tx: E2eeTransactionScope,
   accountId: string,
   tables: DeviceTables = app,
-) {
+): Promise<PublicMembershipHistory> {
   const [roots, keys, approvals, successors, recovery] = await Promise.all([
     tx.allSettledForE2ee(tables.__e2ee_account_roots.where({ accountId })),
     tx.allSettledForE2ee(tables.__e2ee_device_keys.where({ "$createdBy.account": accountId })),
@@ -88,7 +156,7 @@ export async function readPublicMembershipHistory(
   return { roots, keys, approvals, successors, recovery };
 }
 
-type AccountMembership = {
+export type AccountMembership = {
   epochId: string;
   active: Set<string>;
   revoked: Set<string>;
@@ -97,9 +165,8 @@ type AccountMembership = {
   recoveryRoots: RecoveryRoot[];
 };
 
-type History = Awaited<ReturnType<typeof readPublicMembershipHistory>>;
 type ValidatedAccount = {
-  history: History;
+  history: PublicMembershipHistory;
   application: string;
   mechanism: DeviceSigner["mechanism"];
   verify: DeviceSigner["verify"];
@@ -110,7 +177,7 @@ type ValidatedAccount = {
 const validatedAccounts = new WeakMap<DeviceSigner, ValidatedAccount[]>();
 
 export async function replayAccountMembership(
-  history: History,
+  history: PublicMembershipHistory,
   application: string,
   signer: DeviceSigner,
   recoveryMemo?: Map<string, boolean>,
@@ -140,20 +207,26 @@ export async function replayAccountMembership(
 }
 
 async function replay(
-  history: Awaited<ReturnType<typeof readPublicMembershipHistory>>,
+  history: PublicMembershipHistory,
   application: string,
   signer: DeviceSigner,
   recoveryMemo = new Map<string, boolean>(),
 ): Promise<AccountMembership> {
+  const initial = initialAccountAuthority(history);
   const recoveryPositions = positions(history.recovery);
   // Each recursive cutoff strictly precedes its root. Cache roots to avoid
   // re-verifying the same recovery ancestry for every subsequent approval.
   const validRecovery = async (root: RecoveryRoot): Promise<boolean> => {
     const cached = recoveryMemo.get(root.id);
     if (cached !== undefined) return cached;
-    const prior = historyBefore(history, recoveryPositions.get(root.id)!);
-    // Immutable projections can be published after the binding they establish.
-    prior.roots = history.roots;
+    const position = recoveryPositions.get(root.id)!;
+    if (position <= initial.position) {
+      recoveryMemo.set(root.id, false);
+      return false;
+    }
+    const prior = historyBefore(history, position);
+    // Device keys are immutable evidence, but a future account root cannot
+    // establish authority at an earlier registration.
     prior.keys = history.keys;
     const atRegistration = await replayAccountMembership(prior, application, signer, recoveryMemo);
     let valid = false;
@@ -176,23 +249,12 @@ async function replay(
     recoveryMemo.set(root.id, valid);
     return valid;
   };
-  const rootPositions = positions(history.roots);
   positions(history.keys);
   const approvalPositions = positions(history.approvals);
   const successorPositions = positions(history.successors);
-  const roots = [...history.roots.rows].sort((a, b) =>
-    compare(rootPositions.get(a.id)!, rootPositions.get(b.id)!),
-  );
-  const root = roots[0];
-  if (!root) throw new Error("Missing accepted E2EE account root");
-  if (roots.some((row) => row.ledgerVersion !== 1))
-    throw new Error("E2EE account requires public ledger migration");
-  if (roots.some((row) => row.deviceId !== root.deviceId || row.epochId !== root.epochId))
-    throw new Error("Conflicting E2EE account roots");
+  const root = initial.root;
   let epochId = root.epochId;
-  // Root publication can be delayed. Insert policies require the private identity
-  // and immutable requests to exist before any public approval or successor.
-  let epochPosition = -1n;
+  let epochPosition = initial.position;
   let base = new Set([root.deviceId]);
   const revoked = new Set<string>();
   const approvalIds = new Set<string>();

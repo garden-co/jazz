@@ -18,3 +18,10 @@ acceptance, preserving the meaning of the retired edge-tier calls.
 Align recursive prepared sources with their final policy and execution binding.
 Cold trusted-backend subscriptions receive their initial reachable rows and
 retain correct grant and revocation updates.
+
+Use the first accepted public account root as the shared initial-epoch authority
+cutoff, including recovery replay, and publish new identities and roots atomically.
+Clear all session-owned device-key copies during shutdown, including in-flight
+operations. Accept schema-only E2EE application configuration and dispose failed
+account contexts without masking the initialization error. Reuse one canonical
+session-scoped prepared-source identity for creation and lookup.
