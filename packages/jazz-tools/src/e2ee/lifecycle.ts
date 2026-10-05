@@ -4,7 +4,8 @@ import type { WasmSchema } from "../drivers/types.js";
 import { accountRegistry, exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import { openRecoveryMaterial, protectRecoveryMaterial } from "./recovery-protection.js";
-import { E2eeRecoveryError } from "./recovery-error.js";
+import { E2eeRecoveryError, RecoveryCandidateError } from "./recovery-error.js";
+import { recoveryMaterialRootId } from "./recovery-format.js";
 import type { AccountHandle } from "../accounts/state.js";
 import type { Db } from "../runtime/db.js";
 import { resolveSchemaSource } from "../schema-source.js";
@@ -130,7 +131,7 @@ export class E2ee {
             const cipher =
               this.config.crypto?.cellCipher ??
               (await (await import("./browser.js")).createBrowserCellCipher());
-            const rootId: string = JSON.parse(result.material).rootId;
+            const rootId = recoveryMaterialRootId(result.material);
             const target = { application: this.scope, accountId: this.account.id, rootId };
             const material = await protectRecoveryMaterial(cipher, secret, target, result.material);
             if ((await openRecoveryMaterial(cipher, secret, target, material)) !== result.material)
@@ -206,7 +207,7 @@ export class E2ee {
             { application: this.scope, accountId: this.account.id, rootId: row.rootId },
             row.material,
           );
-          if (JSON.parse(material).rootId !== row.rootId)
+          if (recoveryMaterialRootId(material) !== row.rootId)
             throw new Error("E2EE recovery protector root mismatch");
         } catch {
           this.assertOpen();
@@ -217,6 +218,14 @@ export class E2ee {
           return await consume(material);
         } catch (error) {
           this.assertOpen();
+          if (
+            !(error instanceof RecoveryCandidateError) ||
+            (error.code !== "recovery-material-unusable" &&
+              error.code !== "recovery-root-mismatch" &&
+              error.code !== "recovery-delivery-missing" &&
+              error.code !== "recovery-delivery-unusable")
+          )
+            throw error;
           failure = error;
         }
       }

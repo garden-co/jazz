@@ -17,3 +17,16 @@ export class E2eeRecoveryError extends Error {
     this.name = "E2eeRecoveryError";
   }
 }
+
+/** Internal provenance: only recovery-owned candidate failures permit fallback. */
+export class RecoveryCandidateError extends E2eeRecoveryError {
+  constructor(
+    code:
+      | "recovery-material-unusable"
+      | "recovery-root-mismatch"
+      | "recovery-delivery-missing"
+      | "recovery-delivery-unusable",
+  ) {
+    super(code);
+  }
+}

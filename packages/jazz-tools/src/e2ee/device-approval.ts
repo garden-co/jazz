@@ -33,8 +33,9 @@ import {
   recoveryDeliveryContext,
   encodeRecoveryMaterial,
   decodeRecoveryMaterial,
+  type DecodedRecoveryMaterial,
 } from "./recovery-format.js";
-import { E2eeRecoveryError } from "./recovery-error.js";
+import { RecoveryCandidateError } from "./recovery-error.js";
 
 type EpochSnapshot = Awaited<ReturnType<DeviceApproval["snapshot"]>> & {
   publicState: AccountMembership;
@@ -251,7 +252,12 @@ export class DeviceApproval {
 
   private async marker(key: Uint8Array, context: Uint8Array, envelope: Uint8Array): Promise<void> {
     this.assertOpen();
-    const value = await this.keys.unwrap(key, context, envelope).catch(unavailableDelivery);
+    let value: Uint8Array;
+    try {
+      value = await this.keys.unwrap(key, context, envelope);
+    } catch (error) {
+      unavailableDelivery(error);
+    }
     try {
       if (value.length !== 32 || value.some((byte) => byte !== 0))
         throw new UnavailableDelivery("Invalid E2EE device approval proof");
@@ -441,13 +447,13 @@ export class DeviceApproval {
 
   private async authenticateHistory(snapshot: EpochSnapshot, secret: Uint8Array): Promise<void> {
     if (!snapshot.successor || !snapshot.previous) return;
-    const previousSecret = await this.keys
-      .unwrap(
-        secret,
-        successorContext(this.application, snapshot.successor, "history"),
-        snapshot.successor.history,
-      )
-      .catch(unavailableDelivery);
+    const context = successorContext(this.application, snapshot.successor, "history");
+    let previousSecret: Uint8Array;
+    try {
+      previousSecret = await this.keys.unwrap(secret, context, snapshot.successor.history);
+    } catch (error) {
+      unavailableDelivery(error);
+    }
     try {
       await this.confirmEpoch(snapshot.previous, previousSecret);
       const prior = this.revisionView(snapshot.previous, snapshot.successor);
@@ -1063,7 +1069,7 @@ export class DeviceApproval {
 
   private async openRecovery(
     snapshot: EpochSnapshot,
-    material: Awaited<ReturnType<typeof decodeRecoveryMaterial>>,
+    material: DecodedRecoveryMaterial,
   ): Promise<Uint8Array> {
     const root = snapshot.publicState.recoveryRoots.find((row) => row.id === material.rootId);
     const same = (a: Uint8Array, b: Uint8Array) =>
@@ -1077,28 +1083,30 @@ export class DeviceApproval {
       !same(root.publicKey, material.recipient.publicKey) ||
       !same(root.signingPublicKey, material.signing.publicKey)
     )
-      throw new E2eeRecoveryError("recovery-root-mismatch");
+      throw new RecoveryCandidateError("recovery-root-mismatch");
     let present = false;
     for (const delivery of snapshot.recoveryDeliveries) {
       if (delivery.rootId !== root.id || delivery.epochId !== snapshot.identity.epochId) continue;
       present = true;
       let candidate: Uint8Array | undefined;
+      const context = recoveryDeliveryContext(this.application, this.accountId, delivery);
       try {
-        candidate = await this.keys.open(
-          material.recipient,
-          recoveryDeliveryContext(this.application, this.accountId, delivery),
-          delivery.envelope,
-        );
+        try {
+          candidate = await this.keys.open(material.recipient, context, delivery.envelope);
+        } catch (error) {
+          unavailableDelivery(error);
+        }
         await this.confirmEpoch(snapshot, candidate);
         await this.authenticateHistory(snapshot, candidate);
         this.assertOpen();
         return candidate;
-      } catch {
+      } catch (error) {
         candidate?.fill(0);
         this.assertOpen();
+        if (!(error instanceof UnavailableDelivery)) throw error;
       }
     }
-    throw new E2eeRecoveryError(
+    throw new RecoveryCandidateError(
       present ? "recovery-delivery-unusable" : "recovery-delivery-missing",
     );
   }

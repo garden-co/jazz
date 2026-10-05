@@ -3,7 +3,30 @@ import { encodeEnvelope } from "./envelope.js";
 import { frameCryptoRecord } from "./record-frame.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import type { DeviceKeyPair, DeviceSigner, KeyEnvelope } from "./types.js";
-import { E2eeRecoveryError } from "./recovery-error.js";
+import { RecoveryCandidateError } from "./recovery-error.js";
+
+/** Owned private buffers: the recovery operation must clear them in finally. */
+export type DecodedRecoveryMaterial = {
+  rootId: string;
+  recipient: DeviceKeyPair;
+  signing: DeviceKeyPair;
+};
+
+/** Untrusted coordinate only; full material and authority validation remain required. */
+export function recoveryMaterialRootId(value: string): string {
+  let privateFields: Record<string, unknown> | null | undefined;
+  try {
+    if (typeof value !== "string" || value.length > 2_000_000)
+      throw new Error("Invalid E2EE recovery material size");
+    const parsed = JSON.parse(value) as Record<string, unknown> | null;
+    privateFields = parsed;
+    if (typeof parsed?.rootId !== "string") throw new Error("Invalid E2EE recovery root ID");
+    return parsed.rootId;
+  } finally {
+    if (Array.isArray(privateFields?.privateKey)) privateFields.privateKey.fill(0);
+    if (Array.isArray(privateFields?.signingPrivateKey)) privateFields.signingPrivateKey.fill(0);
+  }
+}
 
 /** Owned private buffers: the recovery operation must clear them in finally. */
 export async function decodeRecoveryMaterial(
@@ -11,9 +34,9 @@ export async function decodeRecoveryMaterial(
   expectedScope: string,
   keys: KeyEnvelope,
   signer: DeviceSigner,
-): Promise<{ rootId: string; recipient: DeviceKeyPair; signing: DeviceKeyPair }> {
+): Promise<DecodedRecoveryMaterial> {
   let privateFields: Record<string, unknown> | null | undefined;
-  let material: { rootId: string; recipient: DeviceKeyPair; signing: DeviceKeyPair } | undefined;
+  let material: DecodedRecoveryMaterial | undefined;
   try {
     if (typeof value !== "string" || value.length > 2_000_000)
       throw new Error("Invalid E2EE recovery material size");
@@ -102,7 +125,7 @@ export async function decodeRecoveryMaterial(
   } catch {
     material?.recipient.privateKey.fill(0);
     material?.signing.privateKey.fill(0);
-    throw new E2eeRecoveryError("recovery-material-unusable");
+    throw new RecoveryCandidateError("recovery-material-unusable");
   } finally {
     if (Array.isArray(privateFields?.privateKey)) privateFields.privateKey.fill(0);
     if (Array.isArray(privateFields?.signingPrivateKey)) privateFields.signingPrivateKey.fill(0);
