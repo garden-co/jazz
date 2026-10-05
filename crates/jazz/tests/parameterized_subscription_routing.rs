@@ -581,7 +581,7 @@ fn local_request_scope_reuses_prepared_source_after_literal_subscriber_retires()
         .filter(eq(col("team"), param("team")))
         .order_by("updated_at", OrderDirection::Desc)
         .limit(2);
-    let prepare = |team| {
+    let prepare = |team: u64| {
         team_binding(&db, &query, row(1_000 + team)).with_identity_claims(alice, BTreeMap::new())
     };
     let prepared_a = prepare(0);
