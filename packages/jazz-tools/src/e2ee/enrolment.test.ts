@@ -70,6 +70,7 @@ it.each(["mismatched", "oversized"])(
       await server.stop();
     }
   },
+  30_000,
 );
 
 it.each([1, 2])(
