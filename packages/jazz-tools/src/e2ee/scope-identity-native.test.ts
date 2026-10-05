@@ -161,6 +161,10 @@ it("preserves accepted scope identities across a server-published table rename",
       expect(await owner.tableIdentity("unknown")).toBeNull();
       expect(await owner.columnIdentity("initiatives", "unknown")).toBeNull();
     }
+    for (const db of [alice, bob]) {
+      expect(await db.tableIdentity(oldApp.projects)).toBeNull();
+      expect(await db.columnIdentity(oldApp.projects, "title")).toBeNull();
+    }
     for (const oldView of oldViews) {
       expect(await oldView.tableIdentity("projects")).toBe(tableIdentity);
       expect(await oldView.columnIdentity("projects", "title")).toBe(columnEpoch);
@@ -173,6 +177,46 @@ it("preserves accepted scope identities across a server-published table rename",
     for (const oldView of oldViews) await oldView.close();
     await bob?.shutdown();
     await alice?.shutdown();
+    await server.stop();
+  }
+}, 30_000);
+
+it("refreshes a column identity immediately after reconnecting to a renamed column", async () => {
+  const before = { projects: s.table({ title: s.string() }, {}) };
+  const after = { projects: s.table({ body: s.string() }, {}) };
+  const oldApp = s.defineApp(before);
+  const newApp = s.defineApp(after);
+  const migration = s.defineMigration({
+    from: before,
+    to: after,
+    migrate: { projects: { body: s.renameFrom("title") } },
+  });
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let db: Db | undefined;
+  try {
+    const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
+    await deploy({
+      ...target,
+      schema: oldApp,
+      permissions: definePermissions(oldApp, ({ policy }) => policy.projects.allowRead.always()),
+    });
+    db = await createDb(await localAccountConfig(server.appId, server.url));
+    const table = await db.tableIdentity(oldApp.projects);
+    const column = await db.columnIdentity(oldApp.projects, "title");
+    expect(column).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    await db.disconnect();
+    await deploy({
+      ...target,
+      schema: newApp,
+      permissions: definePermissions(newApp, ({ policy }) => policy.projects.allowRead.always()),
+      migration,
+    });
+    await db.reconnect();
+    expect(await db.columnIdentity(oldApp.projects, "body")).toBe(column);
+    expect(await db.columnIdentity(oldApp.projects, "title")).toBeNull();
+    expect(await db.tableIdentity(oldApp.projects)).toBe(table);
+  } finally {
+    await db?.shutdown();
     await server.stop();
   }
 }, 30_000);
