@@ -29,6 +29,128 @@ describe.each([
   ["browser", createBrowserCrypto],
   ["native", createNativeCrypto],
 ] as const)("%s stream conformance", (_name, createCrypto) => {
+  it.each([
+    ["encrypt", "header", 1],
+    ["encrypt", "data", 2],
+    ["decrypt", "data", 1],
+  ] as const)("cancels %s while paused after its %s record", async (operation, _record, pulls) => {
+    const cipher = (await createCrypto()).largeValueCipher!;
+    const key = new Uint8Array(32);
+    const context = new Uint8Array();
+    const plaintext = new Uint8Array(65_536).fill(7);
+    const input =
+      operation === "encrypt"
+        ? plaintext
+        : await collect(cipher.encrypt(key, context, chunks(plaintext, plaintext.length)));
+    for (const cleanup of ["stalls", "rejects", "throws"] as const) {
+      const controller = new AbortController();
+      const reason = new Error("Cancelled while the consumer is paused");
+      let cleanupRequests = 0;
+      const source: AsyncIterable<Uint8Array> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next: async () => ({ value: input, done: false }),
+            return() {
+              cleanupRequests++;
+              if (cleanup === "throws") throw new Error("Cleanup failure");
+              if (cleanup === "rejects") return Promise.reject(new Error("Cleanup failure"));
+              return new Promise<IteratorResult<Uint8Array>>(() => {});
+            },
+          };
+        },
+      };
+      const stream = cipher[operation](key, context, source, {
+        signal: controller.signal,
+      })[Symbol.asyncIterator]();
+      let yielded!: Uint8Array;
+      try {
+        for (let index = 0; index < pulls; index++) {
+          const result = await stream.next();
+          expect(result.done).toBe(false);
+          yielded = result.value!;
+        }
+        const retained = Uint8Array.from(yielded);
+        controller.abort(reason);
+        expect(cleanupRequests).toBe(1);
+        await expect(stream.next()).rejects.toBe(reason);
+        expect(yielded).toEqual(retained);
+      } finally {
+        await stream.return!();
+      }
+      expect(cleanupRequests).toBe(1);
+    }
+  });
+
+  it("rejects cancellation after yielding the final encrypted record", async () => {
+    const cipher = (await createCrypto()).largeValueCipher!;
+    const controller = new AbortController();
+    const reason = new Error("Cancelled before completion");
+    let cleanupRequests = 0;
+    const source: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => ({ done: true, value: undefined }),
+          async return() {
+            cleanupRequests++;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    const stream = cipher
+      .encrypt(new Uint8Array(32), new Uint8Array(), source, {
+        signal: controller.signal,
+      })
+      [Symbol.asyncIterator]();
+    try {
+      expect((await stream.next()).done).toBe(false); // Header.
+      expect((await stream.next()).done).toBe(false); // Authenticated final record.
+      controller.abort(reason);
+      await expect(stream.next()).rejects.toBe(reason);
+    } finally {
+      await stream.return!();
+    }
+    expect(cleanupRequests).toBe(0); // The source already reached natural EOF.
+  });
+
+  it("rejects cancellation while observing the final decrypted EOF", async () => {
+    const cipher = (await createCrypto()).largeValueCipher!;
+    const key = new Uint8Array(32);
+    const context = new Uint8Array();
+    const encrypted = await collect(cipher.encrypt(key, context, chunks(new Uint8Array(), 1)));
+    const controller = new AbortController();
+    const reason = new Error("Cancelled at EOF");
+    let cleanupRequests = 0;
+    const source: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]() {
+        let supplied = false;
+        return {
+          async next() {
+            if (!supplied) {
+              supplied = true;
+              return { done: false as const, value: encrypted };
+            }
+            return {
+              get done(): true {
+                controller.abort(reason);
+                return true;
+              },
+              value: undefined,
+            };
+          },
+          async return() {
+            cleanupRequests++;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    await expect(
+      collect(cipher.decrypt(key, context, source, { signal: controller.signal })),
+    ).rejects.toBe(reason);
+    expect(cleanupRequests).toBe(1);
+  });
+
   it.each(["stalls", "rejects"])(
     "preserves the read failure when source cleanup %s",
     async (cleanup) => {
