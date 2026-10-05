@@ -77,7 +77,10 @@ export function connect(
     onUpdate: (rows) => {
       enqueue(() => {
         if (closed) return;
-        for (const row of rows) applyLog(row.id, row.contentLog);
+        // Batch replay so an already-mounted editor observes only one change.
+        doc.transact(() => {
+          for (const row of rows) applyLog(row.id, row.contentLog);
+        }, origin);
         ready();
       });
     },

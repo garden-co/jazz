@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "bench": "vitest bench --run --config vitest.config.bench.ts",
     "dev": "vite",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
     "typecheck": "tsc --noEmit",
@@ -22,6 +23,7 @@
     "yjs": "^13.6.27"
   },
   "devDependencies": {
+    "@codspeed/vitest-plugin": "^5.7.1",
     "@playwright/test": "^1.58.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
