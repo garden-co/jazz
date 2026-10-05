@@ -16,7 +16,7 @@ type StoredDevice = {
   signingPublicKey: number[];
   signingPrivateKey: number[];
 };
-type StoredDevices = { format: "jazz-e2ee-local-devices-v2"; devices: StoredDevice[] };
+export type StoredDevices = { format: "jazz-e2ee-local-devices-v2"; devices: StoredDevice[] };
 export type LocalDevice = DeviceKeyPair & {
   id: string;
   challenge: Uint8Array;
@@ -85,7 +85,7 @@ function validate(device: StoredDevice): void {
 }
 
 /** Decoded arrays never escape synchronous use, including malformed/other-scope records. */
-function withLocalDeviceStore<T>(
+export function withLocalDeviceStore<T>(
   value: string | null,
   lifetime: DeviceKeyLifetime,
   use: (stored: StoredDevices) => T,

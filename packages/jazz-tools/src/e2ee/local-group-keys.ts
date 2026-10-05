@@ -1,12 +1,14 @@
 import type { AccountStore } from "../accounts/persistence.js";
-import { decodeLocalDeviceStore } from "./local-device.js";
+import {
+  withLocalDeviceStore,
+  type DeviceKeyLifetime,
+  type StoredDevices,
+} from "./local-device.js";
 
 type StagedKey = { scope: string; groupId: string; epochId: string; payload: number[] };
+type GroupStore = StoredDevices & { stagedGroupKeysV1?: StagedKey[] };
 
-function decode(value: string | null) {
-  const state = decodeLocalDeviceStore(value) as ReturnType<typeof decodeLocalDeviceStore> & {
-    stagedGroupKeysV1?: StagedKey[];
-  };
+function stagedStore(state: GroupStore) {
   const entries = state.stagedGroupKeysV1 ?? [];
   if (!Array.isArray(entries)) throw new Error("Invalid staged E2EE group keys");
   const ids = new Set<string>();
@@ -33,11 +35,15 @@ export async function loadStagedGroupKey(
   scope: string,
   groupId: string,
   assertOpen: () => void,
+  keyLifetime: DeviceKeyLifetime,
 ): Promise<{ epochId: string; secret: Uint8Array } | undefined> {
-  const { entries } = decode(await store.read());
+  const current = await store.read();
   assertOpen();
-  const entry = entries.find((entry) => entry.scope === scope && entry.groupId === groupId);
-  return entry ? { epochId: entry.epochId, secret: Uint8Array.from(entry.payload) } : undefined;
+  return withLocalDeviceStore(current, keyLifetime, (parsed) => {
+    const { entries } = stagedStore(parsed);
+    const entry = entries.find((entry) => entry.scope === scope && entry.groupId === groupId);
+    return entry ? { epochId: entry.epochId, secret: Uint8Array.from(entry.payload) } : undefined;
+  });
 }
 
 /** Private write-ahead staging only; no entry establishes an accepted group. */
@@ -48,6 +54,7 @@ export async function stageGroupKey(
   epochId: string,
   payload: Uint8Array | null,
   assertOpen: () => void,
+  keyLifetime: DeviceKeyLifetime,
 ): Promise<void> {
   if (payload && payload.length !== 32) throw new Error("Invalid staged E2EE group key");
   const encoded = payload ? Array.from(payload) : undefined;
@@ -55,24 +62,28 @@ export async function stageGroupKey(
   try {
     await store.update((current) => {
       assertOpen();
-      const { state, entries } = decode(current);
-      const existing = entries.find((entry) => entry.scope === scope && entry.groupId === groupId);
-      if (encoded && existing) {
-        if (
-          existing.epochId !== epochId ||
-          existing.payload.some((byte, index) => byte !== encoded[index])
-        )
-          throw new Error("E2EE group key is already staged");
+      return withLocalDeviceStore(current, keyLifetime, (parsed) => {
+        const { state, entries } = stagedStore(parsed);
+        const existing = entries.find(
+          (entry) => entry.scope === scope && entry.groupId === groupId,
+        );
+        if (encoded && existing) {
+          if (
+            existing.epochId !== epochId ||
+            existing.payload.some((byte, index) => byte !== encoded[index])
+          )
+            throw new Error("E2EE group key is already staged");
+          updated = true;
+          return current!;
+        }
+        if (existing && existing.epochId !== epochId)
+          throw new Error("Staged E2EE group epoch does not match");
+        state.stagedGroupKeysV1 = entries.filter((entry) => entry !== existing);
+        if (encoded) state.stagedGroupKeysV1.push({ scope, groupId, epochId, payload: encoded });
+        const result = JSON.stringify(state);
         updated = true;
-        return current!;
-      }
-      if (existing && existing.epochId !== epochId)
-        throw new Error("Staged E2EE group epoch does not match");
-      state.stagedGroupKeysV1 = entries.filter((entry) => entry !== existing);
-      if (encoded) state.stagedGroupKeysV1.push({ scope, groupId, epochId, payload: encoded });
-      const result = JSON.stringify(state);
-      updated = true;
-      return result;
+        return result;
+      });
     });
     if (!updated) throw new Error("E2EE key store did not perform the update");
     assertOpen();

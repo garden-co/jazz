@@ -25,7 +25,7 @@ import {
 } from "./public-membership.js";
 import { Groups } from "./group-lifecycle.js";
 import type { GroupRecoveryPath } from "./group-lifecycle.js";
-import type { GroupTables } from "./groups.js";
+import { groupSchema, type GroupTables } from "./groups.js";
 import type { DeviceSigner, JazzCrypto, KeyEnvelope } from "./types.js";
 
 export type E2eeConfig = {
@@ -358,6 +358,14 @@ export class E2ee {
       // uses the same builders against its full schema, including user tables.
       tables[name] =
         name in app ? (app as DeviceTables)[name] : new TypedTableQueryBuilder(name, schema!);
+    }
+    for (const name of Object.keys(groupSchema) as (keyof GroupTables)[]) {
+      if (schema ? name in schema : name in app) {
+        tables[name] =
+          name in app
+            ? (app as DeviceTables & Partial<GroupTables>)[name]
+            : new TypedTableQueryBuilder(name, schema!);
+      }
     }
     this.app = tables as DeviceTables;
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);

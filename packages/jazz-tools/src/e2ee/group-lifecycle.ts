@@ -6,7 +6,7 @@ import type { AccountStore } from "../accounts/persistence.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { replayGroupGraph, validGroupGraph } from "./group-graph.js";
 import type { DeviceTables } from "./device-requests.js";
-import type { LocalDevice } from "./local-device.js";
+import type { DeviceKeyLifetime, LocalDevice } from "./local-device.js";
 import type { DeviceSigner, KeyEnvelope } from "./types.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
 import type {
@@ -24,6 +24,7 @@ import {
   prefetchPublicMembershipHistory,
   replayAccountMembership,
   historyBefore,
+  type PublicMembershipHistory,
 } from "./public-membership.js";
 import {
   groupContext,
@@ -34,7 +35,7 @@ import {
   groupRepairBytes,
 } from "./group-format.js";
 import { loadStagedGroupKey, stageGroupKey } from "./local-group-keys.js";
-import { decodeRecoveryMaterial } from "./recovery-format.js";
+import { decodeRecoveryMaterial, type DecodedRecoveryMaterial } from "./recovery-format.js";
 import { E2eeRecoveryError } from "./recovery-error.js";
 import { groupRecoveryContext, groupRecoveryBytes } from "./group-recovery-format.js";
 import {
@@ -48,15 +49,16 @@ type GroupKey = Pick<
   "id" | "accountId" | "epochId" | "mechanism" | "version" | "verification"
 >;
 
-type History = Awaited<ReturnType<typeof readPublicMembershipHistory>>;
 type GroupDevice = {
   store: AccountStore;
   isKnownRevoked(): boolean;
   load(): Promise<LocalDevice>;
+  release(device: LocalDevice): void;
+  readonly keyLifetime: DeviceKeyLifetime;
   states(transaction?: E2eeTransactionScope): Promise<{
     active: Set<string>;
     epochId: string;
-    publicHistory: History;
+    publicHistory: PublicMembershipHistory;
   }>;
 };
 export type GroupRecoveryPath = { groupId: string; epochId: string } & (
@@ -71,7 +73,7 @@ type MembershipSnapshot = {
   targetRoots: { rows: GroupRoot[]; settlements: RowSettlement[] };
   records: { rows: GroupMembership[]; settlements: RowSettlement[] };
   successors: { rows: GroupSuccessor[]; settlements: RowSettlement[] };
-  histories: Map<string, History>;
+  histories: Map<string, PublicMembershipHistory>;
 };
 
 class UnavailableGroupKey extends Error {}
@@ -191,8 +193,8 @@ export class Groups {
   }
 
   private async checkRecoveryAuthority(
-    material: Awaited<ReturnType<typeof decodeRecoveryMaterial>>,
-    history: History,
+    material: DecodedRecoveryMaterial,
+    history: PublicMembershipHistory,
   ) {
     const own = await replayAccountMembership(history, this.application, this.signer);
     const root = own.recoveryRoots.find((row) => row.id === material.rootId);
@@ -215,7 +217,7 @@ export class Groups {
     epochId: string,
     group: MembershipSnapshot,
     deliveries: { rows: GroupRecoveryDelivery[]; settlements: RowSettlement[] },
-    material: Awaited<ReturnType<typeof decodeRecoveryMaterial>>,
+    material: DecodedRecoveryMaterial,
   ): Promise<Uint8Array | undefined> {
     for (const row of deliveries.rows) {
       if (
@@ -340,6 +342,7 @@ export class Groups {
             keyRoot.epochId,
             secret,
             this.assertOpen,
+            this.requireDevice().keyLifetime,
           );
         } finally {
           secret.fill(0);
@@ -352,8 +355,7 @@ export class Groups {
     } finally {
       material.recipient.privateKey.fill(0);
       material.signing.privateKey.fill(0);
-      device?.privateKey.fill(0);
-      device?.signing.privateKey.fill(0);
+      if (device) this.requireDevice().release(device);
     }
   }
 
@@ -440,8 +442,7 @@ export class Groups {
       this.assertOpen();
       await this.explain(id);
     } finally {
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
+      this.requireDevice().release(device);
     }
   }
 
@@ -458,7 +459,15 @@ export class Groups {
         groupContext(this.application, binding, "verification"),
         new Uint8Array(32),
       );
-      await stageGroupKey(this.store, this.application, id, epochId, secret, this.assertOpen);
+      await stageGroupKey(
+        this.store,
+        this.application,
+        id,
+        epochId,
+        secret,
+        this.assertOpen,
+        this.requireDevice().keyLifetime,
+      );
       const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
         const membership = await this.deviceStates(tx);
         if (!membership.active.has(device.id))
@@ -489,8 +498,7 @@ export class Groups {
       return { id };
     } finally {
       secret.fill(0);
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
+      this.requireDevice().release(device);
     }
   }
 
@@ -536,7 +544,13 @@ export class Groups {
         await this.acceptedMembership(root, position, snapshot.group);
       if (sealed) return { state: "refused", reason: "group-sealed" };
       if (!members.has(this.accountId)) return { state: "refused", reason: "not-a-group-member" };
-      const staged = await loadStagedGroupKey(this.store, this.application, id, this.assertOpen);
+      const staged = await loadStagedGroupKey(
+        this.store,
+        this.application,
+        id,
+        this.assertOpen,
+        this.requireDevice().keyLifetime,
+      );
       if (staged) {
         try {
           if (staged.epochId !== keyRoot.epochId && !successor)
@@ -663,8 +677,7 @@ export class Groups {
       }
       return { state: "unavailable", reason: "group-key-pending" };
     } finally {
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
+      this.requireDevice().release(device);
     }
   }
 
@@ -950,11 +963,25 @@ export class Groups {
       }
     });
     await delivery.wait({ tier: "global" });
-    const staged = await loadStagedGroupKey(this.store, this.application, id, this.assertOpen);
+    const staged = await loadStagedGroupKey(
+      this.store,
+      this.application,
+      id,
+      this.assertOpen,
+      this.requireDevice().keyLifetime,
+    );
     if (staged) {
       staged.secret.fill(0);
       if (staged.epochId === epochId)
-        await stageGroupKey(this.store, this.application, id, epochId, null, this.assertOpen);
+        await stageGroupKey(
+          this.store,
+          this.application,
+          id,
+          epochId,
+          null,
+          this.assertOpen,
+          this.requireDevice().keyLifetime,
+        );
     }
   }
 
@@ -1166,7 +1193,7 @@ export class Groups {
   async readMembership(
     tx: E2eeTransactionScope,
     root: Pick<GroupRoot, "id" | "accountId"> | null,
-    ownHistory: History,
+    ownHistory: PublicMembershipHistory,
   ): Promise<MembershipSnapshot> {
     const [roots, records, successors] = await Promise.all([
       tx.allSettledForE2ee(this.tables.__e2ee_groups),
@@ -1325,7 +1352,7 @@ export class Groups {
 
   private async acceptedRoot(
     roots: { rows: GroupRoot[]; settlements: RowSettlement[] },
-    history: History,
+    history: PublicMembershipHistory,
   ) {
     const root = roots.rows[0];
     if (!root || roots.rows.length !== 1) throw new Error("Invalid accepted E2EE group root");
@@ -1374,7 +1401,7 @@ export class Groups {
   }
 
   private async verifySigner(
-    history: History,
+    history: PublicMembershipHistory,
     id: string,
     bytes: Uint8Array,
     signature: Uint8Array,
