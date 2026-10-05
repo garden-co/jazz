@@ -1,0 +1,115 @@
+---
+title: "Collaborative text editing"
+description: Combine Yjs text merging with Jazz persistence and sync, including offline editing.
+reviewedAt: "e39f0156ca"
+---
+
+Having text fields that can be edited by multiple users at the same time is a common need.
+
+A string column works well for replacing a value, but concurrent replacements use Jazz's last-writer-wins
+(LWW) conflict resolution. This can lead to content written by some of the users to _seem_ lost (even
+though those changes are still part of the row's history).
+
+A text CRDT (short for Conflict-free Replicated Data Type) instead preserves the individual insertions and deletions needed to merge edits within the same text. You can use any CRDT library that supports collaborative text editing (e.g. [Automerge](https://automerge.org/), [Loro](https://loro.dev/) or [Yjs](https://yjs.dev/)), and let Jazz persist and sync the updates.
+
+This recipe follows the [React and CodeMirror example](https://github.com/garden-co/jazz/tree/main/examples/text-editor), which combines Jazz with Yjs and its CodeMirror integration.
+
+## Storing CRDT updates in Jazz
+
+Yjs can generate incremental updates for each change made to a `Y.Text`. Updates are just binary blobs that you
+can persist and sync using Jazz.
+
+Use a document row for metadata and a related table for update logs:
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/text-editor/schema.ts
+</include>
+
+Each editor creates its own log row when it first makes an edit. Later edits append bytes to that same row.
+If Alice and Bob both edit offline, they append to different rows. After reconnection, Jazz delivers both logs and Yjs merges their updates. Putting both writers' updates in one byte column would lead to one user's changes overriding the other's.
+
+## Permissions
+
+The example allows everyone to read documents and create documents and logs. Only the account that created a log can update it:
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/text-editor/permissions.ts
+</include>
+
+Jazz populates `$createdBy` automatically. These rules restrict log updates by account. For private documents, apply your document membership rules to both documents and logs; see [group permissions](/docs/recipes/access-control/group-permissions).
+
+## Connect a Yjs document to Jazz
+
+Install Yjs and the decoder used by the log reader:
+
+```sh
+pnpm add yjs lib0
+```
+
+The example concatenates the Yjs updates emitted by `doc.on("update")`. `lib0` supplies the decoder that `Y.readUpdate` consumes:
+
+<include cwd lang="ts" meta='title="src/log.ts"'>
+  ../examples/text-editor/src/log.ts
+</include>
+
+[Yjs updates](https://docs.yjs.dev/api/document-updates) can be applied in any order and more than once. Once every client has received all the updates, their documents converge.
+
+To persist and sync Yjs updates, append them to the session's log using Jazz's [partial updates](TODO: link to "Editing a page of a large value" section in /writing-data.mdx). Keep track of the current append position in the log to avoid overriding your own changes.
+
+To receive updates from other collaborators, subscribe to the current document's logs and remember how many bytes of each log have been processed. Apply only the new tail. Mark updates received from Jazz with a transaction origin, so they are not written back as new local updates.
+
+<Accordions type="single">
+<Accordion title="Complete provider">
+
+<include cwd lang="ts" meta='title="src/provider.ts"'>
+  ../examples/text-editor/src/provider.ts
+</include>
+
+</Accordion>
+</Accordions>
+
+## Attach an editor
+
+Use a Yjs binding for your editor so that typing changes the shared text and remote updates change the view. The example uses CodeMirror 6 with `y-codemirror.next`:
+
+```sh
+pnpm add @codemirror/state @codemirror/view @codemirror/commands y-codemirror.next
+```
+
+Inside a React effect, create the Yjs document, connect it to Jazz, and attach CodeMirror on the provider's first notification. Here, `db` comes from `useDb()`, `id` identifies the Jazz document, and `parent` is a ref to the editor container:
+
+```tsx
+useEffect(() => {
+  const doc = new Y.Doc();
+  let view: EditorView | undefined;
+  const disconnect = connect(
+    db,
+    id,
+    doc,
+    () => {
+      if (view) return;
+      const text = doc.getText("text");
+      view = new EditorView({
+        parent: parent.current!,
+        state: EditorState.create({
+          doc: text.toString(),
+          extensions: [yCollab(text, null)],
+        }),
+      });
+    },
+    (error) => {
+      setError(String(error));
+      view?.destroy();
+      view = undefined;
+    },
+  );
+
+  return () => {
+    disconnect();
+    view?.destroy();
+    doc.destroy();
+  };
+}, [db, id]);
+```
+
+Import `EditorState` from `@codemirror/state`, `EditorView` from `@codemirror/view`, `yCollab` from `y-codemirror.next`, and `connect` from your provider. Import Yjs as `Y` and the React hooks as usual. The [complete editor](https://github.com/garden-co/jazz/blob/main/examples/text-editor/src/main.tsx) also includes keyboard shortcuts, loading and error states, and the Jazz session provider.
