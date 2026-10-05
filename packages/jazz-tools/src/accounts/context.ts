@@ -16,6 +16,7 @@ import {
   parseJwtPayload,
 } from "../runtime/client-session.js";
 import { setTrustedReservedSession } from "../runtime/db-internal-session.js";
+import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 
 /** Public clients always select an enrolled account, never an unverified principal. */
 export type AccountDbConfig = Omit<
@@ -154,7 +155,22 @@ export async function createAccountDbWithRuntimeSource(
     return opened;
   } catch (error) {
     unsubscribe();
-    if (!db) await runtimeSource.shutdown();
+    try {
+      if (db) {
+        db.abortGracefulShutdown();
+        try {
+          await db.shutdown();
+        } catch (cleanupError) {
+          // A cancelled sync wait resets the shutdown gate before disposal.
+          // Only that recoverable phase needs a second, non-graceful close.
+          if (cleanupError instanceof GracefulShutdownSyncError) await db.shutdown();
+        }
+      } else {
+        await runtimeSource.shutdown();
+      }
+    } catch {
+      // The initialization failure remains the caller's actionable error.
+    }
     throw error;
   }
 }

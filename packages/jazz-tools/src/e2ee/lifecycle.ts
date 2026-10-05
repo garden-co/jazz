@@ -3,11 +3,14 @@ import type { WasmSchema } from "../drivers/types.js";
 import { accountRegistry } from "../accounts/enrollment.js";
 import type { AccountHandle } from "../accounts/state.js";
 import type { Db } from "../runtime/db.js";
+import { resolveSchemaSource } from "../schema-source.js";
+import { TypedTableQueryBuilder } from "../typed-app.js";
 import { deviceRequestApp, deviceRequestSchema } from "./device-requests.js";
 import type { DeviceTables } from "./device-requests.js";
 import { encodeEnvelope } from "./envelope.js";
 import type { CryptoMechanism } from "./envelope.js";
-import { localDevice } from "./local-device.js";
+import { DeviceKeyLifetime, localDevice } from "./local-device.js";
+import type { LocalDeviceProvider } from "./local-device.js";
 import { firstAccountEpoch } from "./first-epoch.js";
 import { DeviceApproval } from "./device-approval.js";
 import type { JazzCrypto } from "./types.js";
@@ -47,6 +50,7 @@ export function e2eeForDb(db: Db): E2ee {
 export class E2ee {
   private approval: DeviceApproval | undefined;
   private closed = false;
+  private readonly deviceKeys = new DeviceKeyLifetime();
   private preparation: Promise<void> | undefined;
   private readonly scope: string;
   private readonly app: DeviceTables;
@@ -91,15 +95,22 @@ export class E2ee {
     private readonly env: string,
   ) {
     const app = config.app ?? deviceRequestApp;
-    for (const name of Object.keys(deviceRequestSchema)) {
-      if (!(name in app)) {
+    const schema = "wasmSchema" in app ? resolveSchemaSource(app) : undefined;
+    const tables: Record<string, unknown> = {};
+    for (const name of Object.keys(deviceRequestSchema) as (keyof DeviceTables)[]) {
+      if (schema ? !(name in schema) : !(name in app)) {
         throw new Error(`E2EE application is missing managed table "${name}"`);
       }
+      // Keep supplied query builders and their transforms. A schema-only app
+      // uses the same builders against its full schema, including user tables.
+      tables[name] =
+        name in app ? (app as DeviceTables)[name] : new TypedTableQueryBuilder(name, schema!);
     }
-    this.app = app as DeviceTables;
+    this.app = tables as DeviceTables;
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);
     db.onShutdown(() => {
       this.closed = true;
+      this.deviceKeys.close();
     });
   }
 
@@ -126,8 +137,13 @@ export class E2ee {
       this.config.crypto?.deviceSigner ??
       (await (await import("./browser.js")).createBrowserDeviceSigner());
     encodeEnvelope(signer.mechanism, new Uint8Array());
-    const device = await localDevice(this.config.store, this.scope, envelope, signer, () =>
-      this.assertOpen(),
+    const device = await localDevice(
+      this.config.store,
+      this.scope,
+      envelope,
+      signer,
+      this.deviceKeys,
+      () => this.assertOpen(),
     );
     try {
       this.assertOpen();
@@ -206,30 +222,54 @@ export class E2ee {
       }
       // Reconnection enrols once without adding another responder or key owner.
       if (this.approval) return;
-      const retainedKey = device.privateKey.slice();
-      const retainedSigningKey = device.signing.privateKey.slice();
-      this.db.onShutdown(() => {
-        retainedKey.fill(0);
-        retainedSigningKey.fill(0);
-      });
-      const loadDevice = async () => ({
-        ...device,
-        privateKey: retainedKey.slice(),
-        signing: { ...device.signing, privateKey: retainedSigningKey.slice() },
-      });
-      this.approval = new DeviceApproval(
-        this.db,
-        this.account.id,
-        this.scope,
-        envelope,
-        signer,
-        () => this.assertOpen(),
-        this.app,
-        { id: device.id, load: loadDevice },
-      );
+      this.assertOpen();
+      const retainedKey = this.deviceKeys.own(device.privateKey.slice());
+      let retainedSigningKey: Uint8Array | undefined;
+      try {
+        const signingKey = this.deviceKeys.own(device.signing.privateKey.slice());
+        retainedSigningKey = signingKey;
+        const provider: LocalDeviceProvider = {
+          id: device.id,
+          load: async () => {
+            this.assertOpen();
+            const privateKey = this.deviceKeys.own(retainedKey.slice());
+            try {
+              return {
+                ...device,
+                privateKey,
+                signing: {
+                  ...device.signing,
+                  privateKey: this.deviceKeys.own(signingKey.slice()),
+                },
+              };
+            } catch (error) {
+              this.deviceKeys.release(privateKey);
+              throw error;
+            }
+          },
+          release: (loaded) => {
+            this.deviceKeys.release(loaded.privateKey);
+            this.deviceKeys.release(loaded.signing.privateKey);
+          },
+        };
+        this.approval = new DeviceApproval(
+          this.db,
+          this.account.id,
+          this.scope,
+          envelope,
+          signer,
+          () => this.assertOpen(),
+          this.app,
+          provider,
+        );
+      } catch (error) {
+        this.deviceKeys.release(retainedKey);
+        if (retainedSigningKey) this.deviceKeys.release(retainedSigningKey);
+        throw error;
+      }
     } finally {
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
+      this.deviceKeys.release(device.privateKey);
+      this.deviceKeys.release(device.signing.privateKey);
     }
   }
 }

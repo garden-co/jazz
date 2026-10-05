@@ -51,11 +51,28 @@ not protection from an adapter that deliberately defeats its own checks. This
 amends the unpublished initial identity format: earlier experimental identities
 without verification are refused, never silently reset or upgraded.
 
-Creation and existing-identity validation use exclusive transactions with
-explicit global waits. A matching local device must open the sealed epoch and
-authenticate its verification marker before reporting itself active.
-Temporary generated/opened secrets and marker buffers are cleared;
-other devices remain pending and cannot cause an existing identity to reset.
+New identity creation inserts the private identity and its public
+`__e2ee_account_roots` binding in one exclusive transaction and waits for global
+acceptance. Existing-identity validation also uses an exclusive transaction and
+an explicit global wait. If an existing identity has no public root, enrolment
+publishes the missing binding and waits globally before proceeding; this does
+not confer authority before the root's acceptance.
+
+The earliest accepted, consistent public root establishes the initial epoch's
+activation position for both public and private membership replay. Identical
+later roots do not move that position. Conflicting account, device or epoch
+bindings fail closed, as do unsupported ledger versions or missing authority
+coverage. No private identity acceptance position substitutes for public
+activation. This is a direct amendment to unpublished ledger version one; no
+deployed-data migration or version bump is required.
+
+A matching local device must open the sealed epoch and authenticate its
+verification marker before reporting itself active. Temporary generated/opened
+secrets and marker buffers are cleared; other devices remain pending and cannot
+cause an existing identity to reset. Concurrent initialisers reconcile
+`transaction_conflict`, `permission_denied` or `exclusive_conflict` only after
+globally observing a persisted identity winner, with at most two reconciliation
+attempts. This is not a general retry policy.
 
 ## Device approval records, version 1
 
@@ -152,8 +169,12 @@ The current operation is not a resumable background job: closing its context
 cancels a proof wait, and retrying approval starts a fresh challenge. A pending
 device must have its E2EE context open to answer. `devices.approve(id)` returns
 synchronously; its `wait()` resolves after accepted delivery or rejects on
-failure. Session copies of retained device keys are cleared on Db shutdown;
-account invalidation already shuts down its Db contexts.
+failure. The E2EE session owns retained device keys and every in-flight operation
+copy. Db teardown synchronously clears all currently owned device-private
+buffers, including copies held across asynchronous crypto calls. Keys returned
+after teardown are cleared on acquisition, and resumed work rejects. Account
+invalidation already shuts down its Db contexts. This does not cancel opaque
+crypto operations or erase copies retained internally by their adapters.
 
 ## Account successor records, version 1
 
@@ -192,10 +213,13 @@ transaction. A supplied subset is not proof of complete membership.
 
 A key-free approval confers eligibility at its accepted transaction position,
 not when its key delivery arrives. Its epoch must have been established by an
-earlier authority transaction, including for the first account epoch: pre-epoch
-and same-transaction grants cannot become eligible retroactively.
-The signer must be eligible before that
-transaction; a grant cannot authorise another grant in the same transaction.
+earlier authority transaction, including for the first account epoch: its
+public root must precede every approval, successor and recovery registration
+strictly. Pre-root and same-transaction records cannot become eligible
+retroactively. For example, with the initial root at position 10, a correctly
+signed grant at position 9 or 10 remains ineligible, while one at position 11
+can qualify. The signer must be eligible before that transaction; a grant
+cannot authorise another grant in the same transaction.
 Challenges, proofs and referenced requests must exist no later than the grant.
 Competing successors for one predecessor in the same transaction are rejected
 together, and a successor cannot depend on another successor in that transaction.
@@ -260,7 +284,8 @@ fields: UTF-8 predecessor, UTF-8 removed device ID, membership bytes and revisio
 bytes. `fixtures/e2ee-public-account-successor.c` independently pins this frame.
 
 The public revision contains every observed public approval statement ID for
-this account and predecessor epoch, including unverified candidates. It is not
+this account and predecessor epoch strictly before the successor, including
+unverified and preactivation candidates that confer no membership. It is not
 the private revision, which contains eligible private approval IDs. The producer
 reads the public revision inside the same exclusive transaction that publishes
 both successor records. Both records share a proposal ID and acceptance point.
@@ -305,9 +330,13 @@ recipient keypairs must open a sealed challenge and signing keypairs must pass
 a sign/verify check before any durable update. Restored and
 concurrently selected keypairs are also checked before publication. A failed
 generation check leaves the store untouched and allows a new attempt; it never
-replaces a corrupt retained record. Temporary private-key buffers are cleared.
-New records are durably selected by `AccountStore.update` before publishing a
-pending request; concurrent contexts retain the winner's record.
+replaces a corrupt retained record. Temporary decoded and generated private-key
+arrays and typed buffers are cleared after synchronous conversion, operation
+completion, or attempt cleanup. Retried store transforms release displaced
+selections without closing the reusable session. Clearing these buffers does
+not erase strings or host storage. New records are durably selected by
+`AccountStore.update` before publishing a pending request; concurrent contexts
+retain the winner's record.
 
 The unpublished version-one format lacks a signing identity and is rejected
 without rewriting it or generating replacement keys. Existing immutable requests
@@ -350,10 +379,13 @@ length, in this order:
 The registering device signs these bytes. Its signature is stored separately.
 The codec does not establish authority: replay must establish that the
 registering device was eligible at the root's accepted authority position.
-Recovery replay uses one globally accepted covered snapshot. Only approvals and
-successors strictly before registration establish the registering device's
-membership and account epoch. Immutable account-root and device-key projections
-remain evidence even when published later; their publication is not activation.
+Recovery replay uses one globally accepted covered snapshot. The initial public
+root, approvals and successors must precede registration strictly to establish
+the registering device's membership and account epoch. Registration at or
+before the initial public root is invalid. Historical replay never restores a
+future account root into an earlier snapshot. Immutable device-key projections
+remain evidence even when published later; unlike the account root, their
+publication is not activation.
 The root's epoch must match that historical epoch, and the registered device's
 signature must verify. Malformed candidates are skipped; adapter failures fail
 the read. This validation does not itself deliver keys or qualify recovery use.
@@ -396,9 +428,10 @@ recovery signature.
 Replay requires the root's accepted registration to precede the approval
 strictly. Root registration is validated against the account epoch and active
 devices strictly before registration, recursively including earlier valid
-recovery approvals. Immutable account-root and device-key projections remain
-available as evidence. This permits a recovered device to register a new root
-without permitting a root to authorise its own registration.
+recovery approvals. Only earlier account roots establish authority; immutable
+device-key projections remain available as evidence even when published later.
+This permits a recovered device to register a new root without permitting a
+root to authorise its own registration.
 
 ## Qualification and open questions
 

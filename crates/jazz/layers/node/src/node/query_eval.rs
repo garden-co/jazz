@@ -1200,8 +1200,8 @@ where
     }
 
     // Prepared source names identify both the complete descriptor and the
-    // authenticated claim scope. Equal author identities can own independent
-    // sessions; retiring one must not replace another session's binding.
+    // effective admitted author/claim scope. Distinct scopes stay isolated;
+    // equal scopes may share a compatible prepared source.
     fn query_binding_source_shape_for_identity(
         &self,
         param_types: &BTreeMap<String, ColumnType>,
@@ -1692,16 +1692,6 @@ where
                 &binding_claim_params,
             )?;
         }
-        // Prepared binding-source names are runtime identities. Claim values
-        // normally route independent bindings through one shape, but equal
-        // author identities may hold distinct authenticated sessions. Give
-        // their claim scopes separate source identities so a later session
-        // cannot replace an already-maintained sibling binding.
-        let source_shape = source_shape.map(|source_shape| {
-            self.active_session_claim_scope_key(identity)
-                .map(|scope| format!("{source_shape}:session:{scope}"))
-                .unwrap_or(source_shape)
-        });
         let root_has_read_policy = self
             .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .read_policy
@@ -2579,7 +2569,7 @@ where
 
     /// The binding-source name a prepared Local-tier client-local plan of
     /// this query would share, or `None` when the query has no binding slot.
-    /// Mirrors the derivation in
+    /// Uses the canonical identity helper shared with
     /// [`Self::current_query_program_request_with_prepared_claim_mode`].
     fn client_local_prepared_source_name(
         &self,
@@ -2591,22 +2581,17 @@ where
         let (shape, binding) = residual
             .as_ref()
             .map_or((shape, binding), |(shape, binding)| (shape, binding));
-        let source_shape = if matches!(
+        let claim_params = if matches!(
             self.query_program_policy_context(identity),
             PolicyContext::System
         ) {
-            query_binding_source_shape_for_parts_if_needed(shape.params(), &BTreeMap::new())
+            BTreeMap::new()
         } else {
             let input_shape = self.normalized_row_set_shape(shape, binding)?;
-            let claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
-            query_binding_source_shape_for_parts_if_needed(shape.params(), &claim_params).map(
-                |source_shape| {
-                    self.active_session_claim_scope_key(identity)
-                        .map(|scope| format!("{source_shape}:session:{scope}"))
-                        .unwrap_or(source_shape)
-                },
-            )
+            binding_claim_params_for_shape(&input_shape, shape.params())
         };
+        let source_shape =
+            self.query_binding_source_shape_for_identity(shape.params(), &claim_params, identity);
         Ok(source_shape.map(|source_shape| format!("{source_shape}:client-local")))
     }
 
