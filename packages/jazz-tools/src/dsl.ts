@@ -868,12 +868,10 @@ class DropBuilder {
 }
 
 // ============================================================================
-// col namespace
+// Schema column and migration operation builders
 // ============================================================================
 
-export const col = {
-  // Schema context
-
+export const schemaColumns = {
   string: () => new ScalarBuilder("TEXT") as unknown as StringColumn,
   uuid: () => new ScalarBuilder("UUID") as unknown as UuidColumn,
   boolean: () => new ScalarBuilder("BOOLEAN") as unknown as BooleanColumn,
@@ -924,9 +922,9 @@ export const col = {
       false,
       ColumnBuilderReferences<Builder>
     >,
+};
 
-  // Migration context
-
+export const migrationOperations = {
   /**
    * Add a new column to the table
    */

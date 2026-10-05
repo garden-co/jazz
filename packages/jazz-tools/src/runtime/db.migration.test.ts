@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { schema as s, migration as m } from "../index.js";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { type Db } from "./db.js";
@@ -57,12 +57,12 @@ const newPermissions = s.definePermissions(newApp, ({ policy }) => [
   policy.todos.allowDelete.always(),
 ]);
 
-const migration = s.defineMigration({
+const migration = m.defineMigration({
   from: oldSchema,
   to: newSchema,
   migrate: {
     todos: {
-      tags: s.add.array({ of: s.string(), default: [] }),
+      tags: m.add.array({ of: s.string(), default: [] }),
     },
   },
 });
@@ -208,7 +208,7 @@ it("publishes UUID reference identity lenses and relates rows written before pub
         reviewerId: null,
       })
       .wait({ tier: "global" });
-    const migration = s.defineMigration({ from: before, to: after });
+    const migration = m.defineMigration({ from: before, to: after });
     expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
     await deploy({
       appId,

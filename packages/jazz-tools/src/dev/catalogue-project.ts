@@ -1212,13 +1212,26 @@ async function bundleToPrivateTempFile(
   }
 }
 
+// Migration builders that moved from `schema` (or the removed `col` export) to `migration`.
+const LEGACY_MIGRATION_DSL_PATTERN =
+  /\b(?:s|schema|col)\.(?:add|drop|renameFrom|defineMigration|renameTableFrom)\b|\bimport\s*\{[^}]*\bcol\b[^}]*\}\s*from\s*["']jazz-tools["']/;
+
 export async function loadDefinedMigration(filePath: string): Promise<DefinedMigration> {
   const { outFile, tempDir } = await bundleToPrivateTempFile(filePath);
   try {
-    const loaded = (await import(pathToFileURL(outFile).href)) as {
-      default?: unknown;
-      migration?: unknown;
-    };
+    let loaded: { default?: unknown; migration?: unknown };
+    try {
+      loaded = await import(pathToFileURL(outFile).href);
+    } catch (error) {
+      const source = await readFile(filePath, "utf8");
+      const hint = LEGACY_MIGRATION_DSL_PATTERN.test(source)
+        ? " The migration DSL moved to `migration as m` from jazz-tools: use m.defineMigration, m.add, m.drop, m.renameFrom and m.renameTableFrom, and s.* for schema columns."
+        : "";
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to load migration ${basename(filePath)}: ${reason}.${hint}`, {
+        cause: error,
+      });
+    }
     const migration = unwrapMigrationExport(loaded.default ?? loaded.migration);
     if (!isDefinedMigration(migration)) {
       throw new Error(

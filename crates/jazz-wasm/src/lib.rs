@@ -127,6 +127,67 @@ pub fn subscribe_trace_entries(callback: js_sys::Function) -> js_sys::Function {
     wasm_tracing::subscribe_trace_entries(callback)
 }
 
+/// Install the JSON Schema validator for JSON columns.
+///
+/// The browser build leaves the Rust validator out to keep the binary small.
+/// `compile` takes a declared schema as JSON text and returns a check that
+/// takes a value as JSON text and returns why it does not match, or
+/// `undefined`. `compile` throws when the schema itself is invalid; a check
+/// that throws is reported as the validator failing, not as a mismatch.
+/// Until this is called, JSON column schemas are reported as unavailable.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[wasm_bindgen(js_name = setJsonSchemaValidator)]
+pub fn set_json_schema_validator(compile: js_sys::Function) {
+    jazz::model::json_schema::install_host_validator(Box::new(JsJsonSchemaValidator { compile }));
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+struct JsJsonSchemaValidator {
+    compile: js_sys::Function,
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+struct JsCompiledJsonSchema {
+    check: js_sys::Function,
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl jazz::model::json_schema::HostJsonSchemaValidator for JsJsonSchemaValidator {
+    fn compile(
+        &self,
+        schema_json: &str,
+    ) -> Result<Box<dyn jazz::model::json_schema::HostCompiledJsonSchema>, String> {
+        let check = self
+            .compile
+            .call1(&JsValue::NULL, &JsValue::from_str(schema_json))
+            .map_err(|error| js_error_message(&error))?;
+        let check = check
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| "the JSON Schema validator did not return a function".to_owned())?;
+        Ok(Box::new(JsCompiledJsonSchema { check }))
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl jazz::model::json_schema::HostCompiledJsonSchema for JsCompiledJsonSchema {
+    fn validate(&self, instance_json: &str) -> Result<Option<String>, String> {
+        let outcome = self
+            .check
+            .call1(&JsValue::NULL, &JsValue::from_str(instance_json))
+            .map_err(|error| js_error_message(&error))?;
+        Ok(outcome.as_string())
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn js_error_message(error: &JsValue) -> String {
+    error
+        .dyn_ref::<js_sys::Error>()
+        .map(|error| String::from(error.message()))
+        .or_else(|| error.as_string())
+        .unwrap_or_else(|| format!("{error:?}"))
+}
+
 /// Exact build/ABI fingerprint for this generated WASM artifact.
 #[wasm_bindgen(js_name = nativeArtifactFingerprint)]
 pub fn native_artifact_fingerprint() -> String {
@@ -1008,7 +1069,16 @@ impl WasmDbInner {
             ($db:expr) => {{
                 let owner = Rc::clone($db);
                 let release_db = Rc::clone($db);
+                // The coverage budget runs from the first wait on the server.
+                // A Global read that first waits for its own preceding writes
+                // to go out has not asked yet (#3839).
+                let coverage_budget_ms = if coverage_deadline_ms.is_finite() {
+                    coverage_deadline_ms - js_sys::Date::now()
+                } else {
+                    coverage_deadline_ms
+                };
                 let future = async move {
+                    let coverage_started = std::cell::Cell::new(None::<f64>);
                     owner
                         .all_serialized_query(
                             &query,
@@ -1017,7 +1087,14 @@ impl WasmDbInner {
                             request_scope,
                             author,
                             require_coverage,
-                            || js_sys::Date::now() >= coverage_deadline_ms,
+                            || {
+                                let started = coverage_started.get().unwrap_or_else(|| {
+                                    let now = js_sys::Date::now();
+                                    coverage_started.set(Some(now));
+                                    now
+                                });
+                                js_sys::Date::now() - started >= coverage_budget_ms
+                            },
                             move |attachment| release_db.detach_query(attachment),
                         )
                         .await
@@ -1328,6 +1405,60 @@ impl WasmDb {
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => db
                 .enqueue_transaction_update(open_transaction_id, table, row_id, patch, options)
+                .map_err(to_js_error)?,
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
+    /// Typed partial-value updates staged inside an open transaction. The
+    /// transaction's bound identity authors them.
+    #[wasm_bindgen(js_name = updateLargeValuesInTransaction)]
+    pub fn update_large_values_in_transaction(
+        &self,
+        open_transaction_id: String,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        mutations: JsValue,
+        updated_at_ms: Option<f64>,
+    ) -> Result<(), JsValue> {
+        let open_transaction_id = open_transaction_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let patch = decode_cells(&patch)?;
+        let mutations: Vec<LargeValueUpdate> =
+            serde_wasm_bindgen::from_value(mutations).map_err(|error| {
+                JsValue::from_str(&format!("invalid partial-value update descriptor: {error}"))
+            })?;
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_js_u64(value, "updatedAtMs"))
+            .transpose()?;
+        let inner = self.open_inner()?;
+        match &inner {
+            WasmDbInner::Memory(db) => {
+                db.enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
+                .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db
+                .enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
                 .map_err(to_js_error)?,
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         }

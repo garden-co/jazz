@@ -67,10 +67,10 @@ it("validates all branches before writing, deploys the converged history, and se
         migrationsDir,
         `20260922-add-${column}-${versions[from]!.hash.slice(0, 12)}-${versions[to]!.hash.slice(0, 12)}.ts`,
       ),
-      `import { schema as s } from "jazz-tools";
-    export default s.defineMigration({ fromHash: "${versions[from]!.hash}", toHash: "${versions[to]!.hash}",
+      `import { schema as s, migration as m } from "jazz-tools";
+    export default m.defineMigration({ fromHash: "${versions[from]!.hash}", toHash: "${versions[to]!.hash}",
       from: { notes: s.table({ ${fields(from)} }, {}) }, to: { notes: s.table({ ${fields(to)} }, {}) },
-      migrate: { notes: { ${column}: s.add.string({ default: "" }) } } });`,
+      migrate: { notes: { ${column}: m.add.string({ default: "" }) } } });`,
     );
   await writeMigration(0, 1, "a");
   await writeMigration(0, 2, "b");

@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 import { computeSchemaHash, deploy } from "./catalogue.js";
 import type { DeploymentRequest } from "./catalogue-api.js";
 
@@ -74,15 +75,15 @@ it("includes historical schemas and multiple migrations in a single request", as
     [app, middle, target].map((app) => computeSchemaHash(app.wasmSchema)),
   );
   const migrations = [
-    s.defineMigration({
+    m.defineMigration({
       from: { notes: s.table({ title: s.string() }, {}) },
       to: { notes: s.table({ title: s.string(), a: s.string() }, {}) },
-      migrate: { notes: { a: s.add.string({ default: "" }) } },
+      migrate: { notes: { a: m.add.string({ default: "" }) } },
     }),
-    s.defineMigration({
+    m.defineMigration({
       from: { notes: s.table({ title: s.string(), a: s.string() }, {}) },
       to: { notes: s.table({ title: s.string(), a: s.string(), b: s.string() }, {}) },
-      migrate: { notes: { b: s.add.string({ default: "" }) } },
+      migrate: { notes: { b: m.add.string({ default: "" }) } },
     }),
   ];
   vi.stubGlobal(
@@ -120,13 +121,13 @@ it("preserves bigint and byte defaults in the deployment JSON", async () => {
   const to = { notes: s.table({ title: s.string(), count: s.bigint(), data: s.bytes() }, {}) };
   const target = s.defineApp(to);
   const fromHash = await computeSchemaHash(app.wasmSchema);
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: { notes: s.table({ title: s.string() }, {}) },
     to,
     migrate: {
       notes: {
-        count: s.add.bigint({ default: 9223372036854775807n }),
-        data: s.add.bytes({ default: new Uint8Array([0, 128, 255]) }),
+        count: m.add.bigint({ default: 9223372036854775807n }),
+        data: m.add.bytes({ default: new Uint8Array([0, 128, 255]) }),
       },
     },
   });

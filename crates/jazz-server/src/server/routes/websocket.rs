@@ -904,8 +904,11 @@ async fn handle_ws_connection(
             }
             eviction = admission_registration.evict_rx.recv() => {
                 if eviction.is_some() {
+                    // A newer connection for this identity superseded this
+                    // one. Retrying would only evict that newer connection in
+                    // turn, so this link is told not to come back.
                     queue_ws_error(&writer_tx, WireError::new(
-                        WireErrorCode::Backpressure, WireRetry::Later,
+                        WireErrorCode::Backpressure, WireRetry::Never,
                         "websocket peer_identity connection cap exceeded",
                     ));
                     let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
@@ -4275,7 +4278,7 @@ mod tests {
                 for frame in decode_ws_message(&msg) {
                     if let WireFrame::Error(error) = frame {
                         saw_backpressure = error.code == WireErrorCode::Backpressure
-                            && error.retry == WireRetry::Later
+                            && error.retry == WireRetry::Never
                             && error.message.contains("connection cap exceeded");
                     }
                 }

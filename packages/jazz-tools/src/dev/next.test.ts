@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFile, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
 import * as catalogueProject from "./catalogue-project.js";
@@ -122,6 +124,54 @@ describe("withJazz", () => {
       expect.arrayContaining(["better-sqlite3", "jazz-napi"]),
     );
     expect(resolved.serverExternalPackages).not.toContain("jazz-tools");
+  });
+
+  it("loads a workspace-linked jazz-napi through Node at runtime under Turbopack", async () => {
+    // In this monorepo jazz-napi is a workspace link, which Turbopack will not
+    // externalize via serverExternalPackages, so withJazz aliases it instead.
+    const runtimeModule = fileURLToPath(new URL("./napi-runtime.js", import.meta.url));
+    const fromProject = relative(process.cwd(), runtimeModule);
+    const expectedAlias = fromProject.startsWith(".") ? fromProject : `./${fromProject}`;
+
+    for (const phase of [PRODUCTION_BUILD_PHASE, DEVELOPMENT_PHASE]) {
+      const resolved = (await resolveWrappedConfig(
+        withJazz({ turbopack: { resolveAlias: { existing: "./existing" } } }, { server: false }),
+        phase,
+      )) as NextConfigLike & { turbopack?: { resolveAlias?: Record<string, string> } };
+
+      expect(resolved.serverExternalPackages).toContain("jazz-napi");
+      expect(resolved.turbopack?.resolveAlias).toEqual({
+        existing: "./existing",
+        "jazz-napi": expectedAlias,
+      });
+      expect(resolved.webpack).toBeUndefined();
+    }
+  });
+
+  it("lets an app's own jazz-napi alias win over the workspace runtime alias", async () => {
+    const resolved = (await resolveWrappedConfig(
+      withJazz({ turbopack: { resolveAlias: { "jazz-napi": "./custom-napi.js" } } }),
+      PRODUCTION_BUILD_PHASE,
+    )) as NextConfigLike & { turbopack?: { resolveAlias?: Record<string, string> } };
+
+    expect(resolved.turbopack?.resolveAlias?.["jazz-napi"]).toBe("./custom-napi.js");
+  });
+
+  it("keeps the runtime jazz-napi stand-in's exports in step with jazz-napi", async () => {
+    const exportedNames = (source: string) =>
+      /export const \{([^}]*)\}/
+        .exec(source)?.[1]
+        ?.split(",")
+        .map((name) => name.trim())
+        .filter(Boolean)
+        .sort();
+    const napiEntry = createRequire(import.meta.url).resolve("jazz-napi");
+    const napiEsm = await readFile(join(dirname(napiEntry), "index.mjs"), "utf8");
+    const standIn = await readFile(new URL("./napi-runtime.ts", import.meta.url), "utf8");
+
+    expect(exportedNames(napiEsm)?.length).toBeGreaterThan(0);
+    expect(exportedNames(standIn)).toEqual(exportedNames(napiEsm));
+    expect(standIn).toContain("export default napi;");
   });
 
   it("does not inject Jazz env vars outside the development phase", async () => {

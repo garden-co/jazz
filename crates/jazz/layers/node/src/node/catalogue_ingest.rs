@@ -424,7 +424,7 @@ where
         }
         let persistence = async {
             let applied = self.database.apply_batch(batch).await?;
-            let persisted = applied.persist().await;
+            let persisted = self.database.persist_with_progress(&applied).await;
             self.database.finish_persistence(persisted)?;
             Ok::<_, groove::db::Error>(())
         }

@@ -13,6 +13,7 @@ vi.mock("jazz-wasm", async () => {
     initSync: wasmInitSync,
     nativeArtifactFingerprint: () => EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS.wasm,
     WasmDb: class {},
+    setJsonSchemaValidator: () => {},
   };
 });
 

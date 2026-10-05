@@ -29,6 +29,19 @@ const WINDOWS: [usize; 6] = [
     1024 * 1024,
     1024 * 1024,
 ];
+/// All channel-frame credit (charged at [`channel_frame_credit_cost`]) that a
+/// conforming sender can have outstanding on one connection, across classes.
+/// A receiver that queues raw inbound channel frames must admit at least this
+/// much, or a peer that honours every window can still overrun it.
+pub const MAX_OUTSTANDING_CHANNEL_CREDIT: usize = {
+    let mut total = 0;
+    let mut index = 0;
+    while index < WINDOWS.len() {
+        total += WINDOWS[index];
+        index += 1;
+    }
+    total
+};
 fn bucket(class: ChannelClass) -> usize {
     match class {
         ChannelClass::Control => 0,
@@ -455,6 +468,7 @@ mod tests {
         receiver.consumed(ChannelClass::Requests, 7).unwrap();
         let bytes = receiver.peek_grant().unwrap().unwrap();
         assert_eq!(hex::encode(&bytes), "05040100010080800100");
+        assert!(crate::wire::is_channel_credit_frame(&bytes));
         assert_eq!(receiver.peek_grant().unwrap().unwrap(), bytes);
         let WireFrame::ChannelCredit(grant) = decode_frame(&bytes).unwrap() else {
             panic!("credit frame")
