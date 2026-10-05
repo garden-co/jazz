@@ -7,7 +7,7 @@ import { createNativeCrypto } from "./native.js";
 import { recoveryRootBytes } from "./recovery-format.js";
 import { readAccountMembership } from "./public-membership.js";
 
-it("accepts recovery registration when immutable public projections are published later", async () => {
+it("accepts recovery after account activation with a later device-key projection", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const crypto = await createNativeCrypto();
@@ -53,7 +53,15 @@ it("accepts recovery registration when immutable public projections are publishe
         { id: account.account.id },
       )
       .wait({ tier: "global" });
-    // The immutable private identity exists. Public projections are deliberately delayed.
+    await owner
+      .insert(app.__e2ee_account_roots, {
+        accountId: account.account.id,
+        deviceId: device.id,
+        epochId,
+        ledgerVersion: 1,
+      })
+      .wait({ tier: "global" });
+    // The public root activates the account; immutable device-key evidence may arrive later.
     const root = {
       id: globalThis.crypto.randomUUID(),
       accountId: account.account.id,
@@ -83,14 +91,6 @@ it("accepts recovery registration when immutable public projections are publishe
         signingPublicKey: device.signingPublicKey,
         signingMechanism: device.signingMechanism,
         signingVersion: device.signingVersion,
-      })
-      .wait({ tier: "global" });
-    await owner
-      .insert(app.__e2ee_account_roots, {
-        accountId: account.account.id,
-        deviceId: device.id,
-        epochId,
-        ledgerVersion: 1,
       })
       .wait({ tier: "global" });
     const result = await readAccountMembership(
