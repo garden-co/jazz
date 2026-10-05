@@ -5832,9 +5832,13 @@ fn inline_current_values_with_source_metadata_and_deletion(
         row_author_value(provenance.updated_by)?,
         Value::U64(provenance.updated_at),
     ]);
-    let (tx_time, tx_node_alias) = row
-        .projected_tx_alias()
-        .unwrap_or((TxTime(0), NodeAlias(0)));
+    let (schema_version_alias, tx_time, tx_node_alias) =
+        row.content_witness().unwrap_or_else(|| {
+            let (tx_time, tx_node_alias) = row
+                .projected_tx_alias()
+                .unwrap_or((TxTime(0), NodeAlias(0)));
+            (schema_version_alias, tx_time, tx_node_alias)
+        });
     values.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
     append_author_projection_values(
         &mut values,

@@ -29,8 +29,10 @@ import type {
 import {
   DefinedTable,
   unwrapTableDefinition,
+  withManagedEncryptionTables,
   definitionToSchema as compileSchemaDefinition,
 } from "./typed-app.js";
+import { encryptedTableToPhysical, equalityIndexColumn } from "./e2ee/encrypted-schema.js";
 
 type SchemaLike = SchemaDefinition | AppSchema<any>;
 
@@ -165,16 +167,25 @@ type RemovedColumnName<
   TTable extends MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>,
 > = Exclude<SourceColumnName<TFrom, TTo, TRenameTables, TTable>, ColumnName<TTo, TTable>>;
 
-type BuilderIdentity<TBuilder extends AnyTypedColumnBuilder> = readonly [
+type SourceReferenceFor<TReference, TRenameTables> =
+  TReference extends keyof RenameTables<TRenameTables>
+    ? RenameTables<TRenameTables>[TReference] extends RenameTableFromOp<infer TOldName>
+      ? TOldName
+      : TReference
+    : TReference;
+
+type BuilderIdentity<TBuilder extends AnyTypedColumnBuilder, TRenameTables = undefined> = readonly [
   ColumnBuilderSqlType<TBuilder>,
   ColumnBuilderOptional<TBuilder>,
-  ColumnBuilderReferences<TBuilder>,
+  SourceReferenceFor<ColumnBuilderReferences<TBuilder>, TRenameTables>,
 ];
 
-type BuildersEqual<TLeft extends AnyTypedColumnBuilder, TRight extends AnyTypedColumnBuilder> = [
-  BuilderIdentity<TLeft>,
-] extends [BuilderIdentity<TRight>]
-  ? [BuilderIdentity<TRight>] extends [BuilderIdentity<TLeft>]
+type BuildersEqual<
+  TLeft extends AnyTypedColumnBuilder,
+  TRight extends AnyTypedColumnBuilder,
+  TRenameTables,
+> = [BuilderIdentity<TLeft>] extends [BuilderIdentity<TRight, TRenameTables>]
+  ? [BuilderIdentity<TRight, TRenameTables>] extends [BuilderIdentity<TLeft>]
     ? true
     : false
   : false;
@@ -182,8 +193,9 @@ type BuildersEqual<TLeft extends AnyTypedColumnBuilder, TRight extends AnyTypedC
 type SharedBuildersCompatible<
   TLeft extends AnyTypedColumnBuilder,
   TRight extends AnyTypedColumnBuilder,
+  TRenameTables,
 > =
-  BuildersEqual<TLeft, TRight> extends true
+  BuildersEqual<TLeft, TRight, TRenameTables> extends true
     ? true
     : ColumnBuilderReferences<TLeft> extends undefined
       ? [ColumnBuilderSqlType<TLeft>, ColumnBuilderOptional<TLeft>] extends [
@@ -348,7 +360,8 @@ type ValidateAddedColumnOperation<
           ? TOldName extends RemovedColumnName<TFrom, TTo, TRenameTables, TTable>
             ? BuildersEqual<
                 BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TOldName>,
-                BuilderForTargetColumn<TTo, TTable, TColumn>
+                BuilderForTargetColumn<TTo, TTable, TColumn>,
+                TRenameTables
               > extends true
               ? never
               : {
@@ -450,7 +463,8 @@ type UnsupportedSharedColumnChanges<
       SourceColumnName<TFrom, TTo, TRenameTables, TTable>
     >]: SharedBuildersCompatible<
       BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TColumn>,
-      BuilderForTargetColumn<TTo, TTable, TColumn>
+      BuilderForTargetColumn<TTo, TTable, TColumn>,
+      TRenameTables
     > extends true
       ? never
       : {
@@ -559,18 +573,18 @@ function normalizeSchemaDefinition(
   );
 }
 
-function assertUnencryptedMigrationSchema(definition: SchemaDefinition): void {
-  if (
-    Object.values(definition).some(
-      (table) => table instanceof DefinedTable && table.encryption !== undefined,
-    )
-  )
-    throw new Error("Encrypted schema migrations are not supported yet");
-}
-
 function definitionToSchema(definition: SchemaDefinition): SchemaAst {
-  assertUnencryptedMigrationSchema(definition);
-  return compileSchemaDefinition(definition);
+  const normalizedDefinition = withManagedEncryptionTables(normalizeSchemaDefinition(definition));
+  const logical = compileSchemaDefinition(normalizedDefinition);
+  return {
+    tables: logical.tables.map((table) => {
+      const tableDefinition = normalizedDefinition[table.name];
+      return encryptedTableToPhysical(
+        table,
+        tableDefinition instanceof DefinedTable ? tableDefinition.encryption : undefined,
+      );
+    }),
+  };
 }
 
 export function renameTableFrom<const TOldName extends string>(
@@ -690,12 +704,19 @@ function buildRemovedTableSet(
   return set;
 }
 
-function columnShapeSignature(builder: AnyTypedColumnBuilder, omitReference = false): string {
+function columnShapeSignature(
+  builder: AnyTypedColumnBuilder,
+  omitReference = false,
+  tableRenames?: ReadonlyMap<string, string>,
+): string {
   const column = builder._build("__migration_shape__");
   return JSON.stringify({
     sqlType: columnTypeSignature(sqlTypeToWasm(column.sqlType)),
     nullable: column.nullable,
-    references: omitReference ? null : (column.references ?? null),
+    references:
+      omitReference || !column.references
+        ? null
+        : (tableRenames?.get(column.references) ?? column.references),
   });
 }
 
@@ -716,10 +737,33 @@ function columnMetadataEqual(left: AnyTypedColumnBuilder, right: AnyTypedColumnB
   return source.mergeStrategy === target.mergeStrategy && columnDefaultsEqual(left, right);
 }
 
+function encryptionShapeSignature(
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+  columnRenames?: ReadonlyMap<string, string>,
+  tableRenames?: ReadonlyMap<string, string>,
+): string | undefined {
+  if (!(definition instanceof DefinedTable) || !definition.encryption) return undefined;
+  const { space, columns, indexes } = definition.encryption;
+  const scope = Object.values(definition.relations).find(
+    (relation) => relation.kind === "forward" && relation.column === space,
+  )!.table;
+  const originalName = (name: string) => columnRenames?.get(name) ?? name;
+  return JSON.stringify({
+    space: [originalName(space), tableRenames?.get(scope) ?? scope],
+    columns: columns
+      .map((name) => [originalName(name), columnShapeSignature(definition.columns[name]!)])
+      .sort(([left], [right]) => left!.localeCompare(right!)),
+    indexes: Object.keys(indexes ?? {})
+      .map((name) => [originalName(name), indexes![name]])
+      .sort(([left], [right]) => left!.localeCompare(right!)),
+  });
+}
+
 function tableMatchesAfterApplyingColumnOperations(
   sourceTable: Record<string, AnyTypedColumnBuilder>,
   targetTable: Record<string, AnyTypedColumnBuilder>,
   tableOps: Record<string, AddOp | DropOp | RenameOp>,
+  tableRenames: ReadonlyMap<string, string>,
   allowReferenceAdditions = false,
 ): boolean {
   const transformed = new Map<string, AnyTypedColumnBuilder>(Object.entries(sourceTable));
@@ -768,8 +812,12 @@ function tableMatchesAfterApplyingColumnOperations(
     if (allowReferenceAdditions && !columnMetadataEqual(sourceBuilder, targetBuilder)) return false;
     const omitReference = allowReferenceAdditions && !sourceBuilder._build(columnName).references;
     if (
-      columnShapeSignature(sourceBuilder, omitReference) !==
-      columnShapeSignature(targetBuilder, omitReference)
+      columnShapeSignature(
+        sourceBuilder,
+        omitReference,
+        // Added columns already use the destination witness's reference names.
+        tableOps[columnName]?._type === "add" ? tableRenames : undefined,
+      ) !== columnShapeSignature(targetBuilder, omitReference, tableRenames)
     ) {
       return false;
     }
@@ -841,6 +889,31 @@ function buildForwardLenses<
     renamedSources,
   );
 
+  // Check before the empty-lens shortcut: encryption is client-side metadata,
+  // not a server lens capable of converting existing values.
+  for (const [tableName, target] of Object.entries(toDefinition)) {
+    const source = (fromDefinition as SchemaDefinition)[renameTableMap.get(tableName) ?? tableName];
+    if (!source) continue;
+    const columnRenames = new Map<string, string>();
+    const operations = (
+      migrate as Record<string, Record<string, AddOp | DropOp | RenameOp>> | undefined
+    )?.[tableName];
+    for (const [name, operation] of Object.entries(operations ?? {})) {
+      if (operation._type === "rename") columnRenames.set(name, operation.oldName);
+    }
+    if (
+      encryptionShapeSignature(source) !==
+      encryptionShapeSignature(
+        target as TableDefinition | DefinedTable<TableDefinition>,
+        columnRenames,
+        renameTableMap,
+      )
+    ) {
+      throw new Error(
+        `Migration for ${tableName} changes encryption; convert existing data through an authorised client instead.`,
+      );
+    }
+  }
   const sourceTables = unwrapSchemaTables(fromDefinition);
   const targetTables = unwrapSchemaTables(toDefinition);
   const referenceAdditionTables = new Set<string>();
@@ -860,7 +933,10 @@ function buildForwardLenses<
       if (!sourceBuilder) continue;
       const source = sourceBuilder._build(sourceColumn);
       const target = targetBuilder._build(columnName);
-      if (source.references === target.references) continue;
+      const targetReference = target.references
+        ? (renameTableMap.get(target.references) ?? target.references)
+        : target.references;
+      if (source.references === targetReference) continue;
       if (
         !source.references &&
         target.references &&
@@ -932,6 +1008,9 @@ function buildForwardLenses<
     const renamedSources = new Set<string>();
     const droppedColumns = new Set<string>();
     const sourceTableName = renamedFrom ?? tableName;
+    const sourceDefinition = (fromDefinition as SchemaDefinition)[sourceTableName];
+    const sourceEncryption =
+      sourceDefinition instanceof DefinedTable ? sourceDefinition.encryption : undefined;
 
     for (const [columnName, operation] of operationEntries) {
       switch (operation._type) {
@@ -953,6 +1032,13 @@ function buildForwardLenses<
             column: operation.oldName,
             value: columnName,
           });
+          if (sourceEncryption?.indexes?.[operation.oldName]) {
+            operations.push({
+              type: "rename",
+              column: equalityIndexColumn(operation.oldName),
+              value: equalityIndexColumn(columnName),
+            });
+          }
           break;
         }
         case "add": {
@@ -1001,6 +1087,7 @@ function buildForwardLenses<
         sourceTables[sourceTableName]!,
         targetTables[tableName]!,
         tableOps,
+        renameTableMap,
         true,
       )
     ) {
@@ -1019,7 +1106,14 @@ function buildForwardLenses<
         );
       }
 
-      if (!tableMatchesAfterApplyingColumnOperations(sourceTable, targetTable, tableOps)) {
+      if (
+        !tableMatchesAfterApplyingColumnOperations(
+          sourceTable,
+          targetTable,
+          tableOps,
+          renameTableMap,
+        )
+      ) {
         throw new Error(
           `Table rename ${sourceTableName} -> ${tableName} does not match the target table after applying its column migrations.`,
         );
@@ -1115,8 +1209,6 @@ export function defineMigration<
     migrate?: TMigrate;
   } & ValidateMigrationConfig<TFrom, TTo, TRenameTables, TCreateTables, TDropTables, TMigrate>,
 ): DefinedMigration<TFrom, TTo> {
-  assertUnencryptedMigrationSchema(config.from as SchemaDefinition);
-  assertUnencryptedMigrationSchema(config.to as SchemaDefinition);
   const fromDefinition = normalizeSchemaDefinition(
     config.from as SchemaDefinition,
   ) as NormalizedSchema<TFrom>;
@@ -1124,18 +1216,20 @@ export function defineMigration<
     config.to as SchemaDefinition,
   ) as NormalizedSchema<TTo>;
 
+  const forward = buildForwardLenses(
+    config.migrate,
+    config.renameTables,
+    config.createTables,
+    config.dropTables,
+    fromDefinition,
+    toDefinition,
+  );
+
   return {
     from: config.from,
     to: config.to,
     fromHash: config.fromHash,
     toHash: config.toHash,
-    forward: buildForwardLenses(
-      config.migrate,
-      config.renameTables,
-      config.createTables,
-      config.dropTables,
-      fromDefinition,
-      toDefinition,
-    ),
+    forward,
   };
 }
