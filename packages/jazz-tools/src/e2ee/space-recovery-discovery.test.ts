@@ -157,12 +157,8 @@ it.each(["status", "create", "use"] as const)(
   async (operation) => {
     const f = await fixture();
     try {
-      const direct = await f.project("Direct noncreator access");
-      const inherited = await f.project("Nested recipient access");
-      await f.owner.e2ee.spaces
-        .grant(app.projects, direct.identifier, f.recipientAccount.account.id)
-        .wait();
-      await f.owner.e2ee.spaces.grant(app.projects, inherited.identifier, f.parent.id).wait();
+      const direct = await f.project("Direct noncreator access", f.recipientAccount.account.id);
+      const inherited = await f.project("Nested recipient access", f.parent.id);
       expect(await f.recipient.e2ee.explain(direct)).toEqual({ state: "ready" });
       expect(await f.recipient.e2ee.explain(inherited)).toEqual({ state: "ready" });
       const { material } = await f.recipient.e2ee.recovery.create().wait();
