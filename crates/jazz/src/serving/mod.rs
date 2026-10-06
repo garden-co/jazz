@@ -479,10 +479,14 @@ impl ShellDb {
         }
     }
 
-    fn enable_authoritative_scalar_exit_refresh(&self) {
+    fn enable_authoritative_scalar_exit_refresh(&self) -> ShellResult<()> {
         match self {
-            Self::Memory(db) => db.enable_authoritative_scalar_exit_refresh(),
-            Self::Durable(db) => db.enable_authoritative_scalar_exit_refresh(),
+            Self::Memory(db) => db
+                .enable_authoritative_scalar_exit_refresh()
+                .map_err(Into::into),
+            Self::Durable(db) => db
+                .enable_authoritative_scalar_exit_refresh()
+                .map_err(Into::into),
         }
     }
 
@@ -493,10 +497,17 @@ impl ShellDb {
         }
     }
 
-    fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
+    fn set_large_value_staging_policy(
+        &self,
+        policy: crate::node::LargeValueStagingPolicy,
+    ) -> ShellResult<()> {
         match self {
-            Self::Memory(db) => db.set_large_value_staging_policy(policy),
-            Self::Durable(db) => db.set_large_value_staging_policy(policy),
+            Self::Memory(db) => db
+                .set_large_value_staging_policy(policy)
+                .map_err(Into::into),
+            Self::Durable(db) => db
+                .set_large_value_staging_policy(policy)
+                .map_err(Into::into),
         }
     }
 
@@ -520,24 +531,24 @@ impl ShellDb {
         }
     }
 
-    fn catalogue_schema(&self, schema: SchemaVersionId) -> Option<JazzSchema> {
+    fn catalogue_schema(&self, schema: SchemaVersionId) -> ShellResult<Option<JazzSchema>> {
         match self {
-            Self::Memory(db) => db.catalogue_schema(schema),
-            Self::Durable(db) => db.catalogue_schema(schema),
+            Self::Memory(db) => db.catalogue_schema(schema).map_err(Into::into),
+            Self::Durable(db) => db.catalogue_schema(schema).map_err(Into::into),
         }
     }
 
-    fn active_catalogue_seq(&self) -> u64 {
+    fn active_catalogue_seq(&self) -> ShellResult<u64> {
         match self {
-            Self::Memory(db) => db.active_catalogue_seq(),
-            Self::Durable(db) => db.active_catalogue_seq(),
+            Self::Memory(db) => db.active_catalogue_seq().map_err(Into::into),
+            Self::Durable(db) => db.active_catalogue_seq().map_err(Into::into),
         }
     }
 
-    fn catalogue_lens(&self, lens: MigrationLensId) -> Option<MigrationLens> {
+    fn catalogue_lens(&self, lens: MigrationLensId) -> ShellResult<Option<MigrationLens>> {
         match self {
-            Self::Memory(db) => db.catalogue_lens(lens),
-            Self::Durable(db) => db.catalogue_lens(lens),
+            Self::Memory(db) => db.catalogue_lens(lens).map_err(Into::into),
+            Self::Durable(db) => db.catalogue_lens(lens).map_err(Into::into),
         }
     }
 
@@ -902,11 +913,11 @@ impl InMemoryServerShell {
             }
         };
         if role == NodeRole::Core {
-            db.enable_authoritative_scalar_exit_refresh();
+            db.enable_authoritative_scalar_exit_refresh()?;
             // A Core shell is the root until `connect_upstream` says otherwise.
             db.declare_upload_root();
         }
-        db.set_large_value_staging_policy(large_value_staging_policy);
+        db.set_large_value_staging_policy(large_value_staging_policy)?;
 
         let mut shell = Self {
             db,
@@ -986,15 +997,18 @@ impl InMemoryServerShell {
         &self,
         schema: SchemaVersionId,
         lens: MigrationLensId,
-    ) -> (bool, bool) {
-        (
-            self.db.catalogue_schema(schema).is_some(),
-            self.db.catalogue_lens(lens).is_some(),
-        )
+    ) -> ShellResult<(bool, bool)> {
+        Ok((
+            self.db.catalogue_schema(schema)?.is_some(),
+            self.db.catalogue_lens(lens)?.is_some(),
+        ))
     }
 
-    pub(crate) fn runtime_catalogue_contains_schema(&self, schema: SchemaVersionId) -> bool {
-        self.db.catalogue_schema(schema).is_some()
+    pub(crate) fn runtime_catalogue_contains_schema(
+        &self,
+        schema: SchemaVersionId,
+    ) -> ShellResult<bool> {
+        Ok(self.db.catalogue_schema(schema)?.is_some())
     }
 
     fn bootstrap_runtime_schema(&mut self, _schema: JazzSchema) -> ShellResult<()> {
@@ -1014,8 +1028,8 @@ impl InMemoryServerShell {
     ) -> ShellResult<SchemaVersionId> {
         let schema_version = SchemaVersion::new(schema);
         let schema_id = schema_version.id;
-        if self.db.catalogue_schema(schema_id).is_some() {
-            if self.db.catalogue_lens(lens.id).as_ref() == Some(&lens) {
+        if self.db.catalogue_schema(schema_id)?.is_some() {
+            if self.db.catalogue_lens(lens.id)?.as_ref() == Some(&lens) {
                 return Ok(schema_id);
             }
             return Err(ShellError::MissingEvent("atomic schema lineage"));
@@ -1026,7 +1040,7 @@ impl InMemoryServerShell {
             new_tables,
             dropped_tables,
         )?;
-        let catalogue_seq = self.db.active_catalogue_seq().saturating_add(1);
+        let catalogue_seq = self.db.active_catalogue_seq()?.saturating_add(1);
         let acks = catalogue_acks_from_messages(
             self.db
                 .publish_schema_with_lens(catalogue_seq, publication)?,
@@ -1034,7 +1048,7 @@ impl InMemoryServerShell {
         if !acks
             .iter()
             .any(|ack| ack.applied && ack.schema == Some(schema_id))
-            || self.db.catalogue_schema(schema_id).is_none()
+            || self.db.catalogue_schema(schema_id)?.is_none()
         {
             return Err(ShellError::MissingEvent("CatalogueAck"));
         }
@@ -1073,7 +1087,7 @@ impl InMemoryServerShell {
         >,
     ) -> ShellResult<SchemaVersionId> {
         let schema_id = schema.version_id();
-        if self.db.catalogue_schema(schema_id).is_none() {
+        if self.db.catalogue_schema(schema_id)?.is_none() {
             return Err(ShellError::MissingEvent("active schema structural lineage"));
         }
         self.db.activate_schema(revision, schema, permissions)?;
@@ -1542,8 +1556,11 @@ impl InMemoryServerShell {
     }
 
     /// Replace the Jazz-owned staging policy used by this server shell.
-    pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
-        self.db.set_large_value_staging_policy(policy);
+    pub fn set_large_value_staging_policy(
+        &self,
+        policy: crate::node::LargeValueStagingPolicy,
+    ) -> ShellResult<()> {
+        self.db.set_large_value_staging_policy(policy)
     }
 
     /// Run one expiry pass from the host's maintenance timer.
@@ -2430,7 +2447,7 @@ mod tests {
             assert_eq!(snapshot.current_write_schema.revision, revision);
             assert_eq!(snapshot.current_write_schema.schema, schema_id);
             assert_eq!(
-                shell.db.catalogue_schema(schema_id),
+                shell.db.catalogue_schema(schema_id).unwrap(),
                 Some(structural.clone())
             );
         };

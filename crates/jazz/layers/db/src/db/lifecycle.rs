@@ -108,13 +108,16 @@ where
 
     /// Core-shell capability; partial caches and relays must leave it disabled.
     #[cfg(feature = "runtime")]
-    pub fn enable_authoritative_scalar_exit_refresh(&self) {
-        self.node.enable_authoritative_scalar_exit_refresh();
+    pub fn enable_authoritative_scalar_exit_refresh(&self) -> Result<(), Error> {
+        self.node.enable_authoritative_scalar_exit_refresh()
     }
 
     /// Configure Jazz-owned ingress and expiry policy for unpublished large values.
-    pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
-        self.node.set_large_value_staging_policy(policy);
+    pub fn set_large_value_staging_policy(
+        &self,
+        policy: crate::node::LargeValueStagingPolicy,
+    ) -> Result<(), Error> {
+        self.node.set_large_value_staging_policy(policy)
     }
 
     /// Run one host-driven staging-expiry maintenance pass.
@@ -448,7 +451,7 @@ where
         let outcome = crate::local_executor::block_on(
             self.node
                 .node
-                .borrow_mut()
+                .try_borrow_mut()?
                 .apply_trusted_catalogue_snapshot(snapshot),
         )?;
         crate::local_executor::block_on(self.finish_publication_outcome(outcome))
@@ -483,7 +486,7 @@ where
     /// snapshot-only transport exchange.
     #[cfg(feature = "runtime")]
     pub fn trusted_catalogue_snapshot(&self) -> Result<crate::protocol::CatalogueSnapshot, Error> {
-        Ok(self.node.node.borrow().catalogue_snapshot()?)
+        Ok(self.node.node.try_borrow()?.catalogue_snapshot()?)
     }
 
     /// Register a typed schema view on this database owner.
@@ -501,7 +504,7 @@ where
         self.ensure_open_schema_admitted()?;
         self.admit_local_schema_view_if_needed(&schema).await?;
         {
-            let node = self.node.node.borrow();
+            let node = self.node.node.lock().await;
             let admitted = node
                 .schema_with_active_permissions(schema_version_id)
                 .ok_or_else(|| Error::new(ErrorCode::Schema, "registered schema is missing"))?;
@@ -581,7 +584,7 @@ where
         let empty_id = empty_schema.version_id();
         let target_id = schema.version_id();
         let (source, catalogue_seq, bootstrap_current) = {
-            let node = self.node.node.borrow();
+            let node = self.node.node.lock().await;
             if node.catalogue_schemas().contains_key(&target_id) {
                 return Ok(());
             }
@@ -867,7 +870,7 @@ where
         Ok(crate::local_executor::block_on(
             self.node
                 .node
-                .borrow_mut()
+                .try_borrow_mut()?
                 .set_initial_sync_flush_cadence(cadence.writes()),
         )?)
     }
@@ -902,7 +905,7 @@ where
             }
         }
         let published = crate::local_executor::block_on(
-            self.node.node.borrow_mut().commit_mergeable_in_schema(
+            self.node.node.try_borrow_mut()?.commit_mergeable_in_schema(
                 write_schema_version,
                 MergeableCommit::new(table, row, self.next_now_ms())
                     .made_by(made_by)
@@ -916,7 +919,7 @@ where
         let outcome = crate::local_executor::block_on(
             self.node
                 .node
-                .borrow_mut()
+                .try_borrow_mut()?
                 .finalize_local_mergeable_commit(tx_id),
         )?;
         crate::local_executor::block_on(self.finish_publication_outcome(outcome))?;
@@ -934,7 +937,7 @@ where
         let outcome = crate::local_executor::block_on(
             self.node
                 .node
-                .borrow_mut()
+                .try_borrow_mut()?
                 .finalize_local_mergeable_commit(tx_id),
         )?;
         crate::local_executor::block_on(self.finish_publication_outcome(outcome))?;
@@ -947,9 +950,9 @@ where
         if let Some(state) = self.node.queued_mutation_write_state(tx_id) {
             return state;
         }
-        let Some((fate, global_time, durability)) =
-            crate::local_executor::block_on(self.node.node.borrow_mut().transaction_state(tx_id))
-        else {
+        let Some((fate, global_time, durability)) = crate::local_executor::block_on(
+            self.node.node.try_borrow_mut()?.transaction_state(tx_id),
+        ) else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("transaction {tx_id:?} is not known locally"),
@@ -1146,7 +1149,8 @@ where
     ) -> Result<crate::ids::GlobalPhysicalTableId, String> {
         self.node
             .node()
-            .borrow()
+            .try_borrow()
+            .map_err(|error| error.to_string())?
             .local_availability_table_id(schema, table)
             .map_err(|error| error.to_string())
     }

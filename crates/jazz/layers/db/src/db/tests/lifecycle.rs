@@ -143,3 +143,29 @@ fn synchronous_reservations_are_definitive_and_advance_the_shared_hlc() {
         "ordinary minting must share the reservation high-water clock",
     );
 }
+
+#[test]
+fn synchronous_owner_mutating_setters_return_busy_when_owner_is_held() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let owner = db
+        .node
+        .node
+        .try_lock()
+        .expect("test must acquire the node owner before the setters");
+
+    let policy_error = db
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy::default())
+        .expect_err("staging policy setter must return Busy while the owner is held");
+    assert_eq!(policy_error.code, ErrorCode::Busy);
+
+    let refresh_error = db
+        .enable_authoritative_scalar_exit_refresh()
+        .expect_err("authoritative refresh setter must return Busy while the owner is held");
+    assert_eq!(refresh_error.code, ErrorCode::Busy);
+
+    drop(owner);
+    db.set_large_value_staging_policy(crate::node::LargeValueStagingPolicy::default())
+        .expect("uncontended staging policy setter");
+    db.enable_authoritative_scalar_exit_refresh()
+        .expect("uncontended authoritative refresh setter");
+}

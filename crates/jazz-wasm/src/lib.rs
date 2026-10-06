@@ -2242,6 +2242,7 @@ impl WasmDb {
             WasmDbInner::Browser(db) => db.set_large_value_staging_policy(policy),
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         }
+        .map_err(to_js_error)?;
         Ok(())
     }
 

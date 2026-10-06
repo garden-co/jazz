@@ -1162,6 +1162,102 @@ fn db_sync_surface_round_trips_subscription_to_client() {
     assert_eq!(prepared_read(&client, &query).len(), 2);
 }
 
+/// Alice closes her final Global usage before uploading a write. Bob's Core
+/// must finish that unsubscribe without waiting on its own node owner, then
+/// accept the write and keep Alice's distinct healthy query live.
+///
+/// Alice -- Unsubscribe(all), CommitUnit --> Bob -- Global fate + healthy delta --> Alice
+///
+/// Immediate MemoryStorage makes a pending Core turn evidence of lost owner
+/// progress rather than the yielding storage used by the shared fixtures.
+#[test]
+fn final_global_usage_retirement_does_not_block_following_commit() {
+    use groove::storage::MemoryStorage;
+
+    let schema = schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let alice = AuthorSubject::for_test_bytes([0xd3; 16]);
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage: MemoryStorage::new(&refs).unwrap(),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd3; 16]),
+            author: alice,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd3))),
+    }))
+    .unwrap();
+    let server = Node::new(
+        block_on(NodeState::new_history_complete(
+            NodeUuid::from_bytes([0xd4; 16]),
+            schema.clone(),
+            MemoryStorage::new(&refs).unwrap(),
+        ))
+        .unwrap(),
+    );
+    let (client_transport, server_transport) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, alice);
+    let all_query = Query::from("todos");
+    let healthy_query = Query::from("todos").filter(eq(
+        col("title"),
+        lit(Value::String("after close".to_owned())),
+    ));
+    let mut retiring = prepared_subscribe(&client, &all_query, global_subscribe_opts()).unwrap();
+    let mut healthy = prepared_subscribe(&client, &healthy_query, global_subscribe_opts()).unwrap();
+    for _ in 0..4 {
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    block_on(client.tick()).unwrap();
+    assert!(opened_rows(next_settled_opening(&mut retiring)).is_empty());
+    assert!(opened_rows(next_settled_opening(&mut healthy)).is_empty());
+
+    block_on(retiring.close()).unwrap();
+    let write = client
+        .insert(
+            "todos",
+            cells("after close", false, alice),
+            Default::default(),
+        )
+        .unwrap();
+    let expected_row = write.row_uuid();
+    let expected_tx = write.mergeable_tx_id();
+    block_on(client.tick()).unwrap();
+    let mut context = Context::from_waker(Waker::noop());
+    {
+        let mut authority_turn = pin!(server.tick());
+        assert!(
+            matches!(
+                authority_turn.as_mut().poll(&mut context),
+                Poll::Ready(Ok(_))
+            ),
+            "retiring the final usage must finish before the following commit can settle"
+        );
+    }
+    block_on(client.tick()).unwrap();
+    let mut settled = pin!(write.wait(DurabilityTier::Global));
+    assert!(
+        matches!(settled.as_mut().poll(&mut context), Poll::Ready(Ok(tx)) if tx == expected_tx),
+        "the queued write must observe its own authority-assigned Global receipt"
+    );
+    let mut visible = RelationSnapshot::default();
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+        block_on(client.tick()).unwrap();
+        while let Some(event) = healthy.try_next_event() {
+            apply_subscription_event(&mut visible, event);
+        }
+    }
+    assert_eq!(row_ids(&visible.rows), vec![expected_row]);
+    assert_eq!(
+        visible.rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("after close".to_owned())),
+        "retiring another coverage group must preserve the healthy query's exact answer"
+    );
+}
+
 /// Refresh is a post-durability publication effect for an inbound authority
 /// batch. This stays internal because the fault boundary and per-peer progress
 /// receipt are not exposed through the public client API.
@@ -1798,7 +1894,10 @@ fn owner_local_subscription_reconciles_peer_delete_without_reset() {
     let owner = AuthorSubject::for_test_bytes([0x50; 16]);
     let client_author = owner;
     let server = open_core(0x52, AuthorSubject::SYSTEM, &schema);
-    server.server.enable_authoritative_scalar_exit_refresh();
+    server
+        .server
+        .enable_authoritative_scalar_exit_refresh()
+        .expect("enable authoritative scalar exit refresh");
     server
         .node()
         .borrow_mut()
@@ -1938,7 +2037,10 @@ fn assert_account_owned_subscription_reconciles_peer_delete(opts: ReadOpts) {
     let owner = AuthorSubject::for_test_bytes([0x50; 16]);
     let client_author = owner;
     let server = open_core(0x52, owner, &schema);
-    server.server.enable_authoritative_scalar_exit_refresh();
+    server
+        .server
+        .enable_authoritative_scalar_exit_refresh()
+        .expect("enable authoritative scalar exit refresh");
     server
         .node()
         .borrow_mut()

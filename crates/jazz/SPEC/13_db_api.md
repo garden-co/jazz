@@ -705,16 +705,21 @@ Facade errors carry an `ErrorCode` plus a message:
 | `NotObserved`   | the requested durability tier is not yet locally observed                                  |
 | `Storage`       | the storage backend failed                                                                 |
 | `Protocol`      | a local node / protocol operation failed                                                   |
+| `Busy`          | a synchronous owner-dependent operation cannot acquire the local node owner immediately    |
 
 **Callable today:** `Db::open`; the mutation methods (§13.4), including
 `mergeable_tx`, `exclusive_tx`, attributed writes, and `can_*` dry-runs; `table` /
 `read` / `one` / `all` / `subscribe` (§13.3); and the binding sync surface
-(§13.5). Read policies evaluate `claim("user")` plus admission/session-provided
-runtime claims (ch. 7); client query bindings never supply policy claims.
-`Db::open_history_complete` and `Db::at` provide history-complete facade reads;
-ordinary client facades remain history-incomplete (`crates/jazz/layers/db/src/db.rs:383`,
-`crates/jazz/layers/db/src/db.rs:637`). Branch operations otherwise remain at the `Node`
-level (ch. 11). The initial binding ABI design is below; remaining
+(§13.5). Synchronous owner-mutating configuration operations, including
+`Db::set_large_value_staging_policy` and runtime-gated
+`Db::enable_authoritative_scalar_exit_refresh`, also return `Busy` rather than
+waiting or panicking when another operation owns the Node. Read policies
+evaluate `claim("user")` plus admission/session-provided runtime claims (ch. 7);
+client query bindings never supply policy claims. `Db::open_history_complete`
+and `Db::at` provide history-complete facade reads; ordinary client facades
+remain history-incomplete (`crates/jazz/layers/db/src/db.rs:383`,
+`crates/jazz/layers/db/src/db.rs:637`). Branch operations otherwise remain at
+the `Node` level (ch. 11). The initial binding ABI design is below; remaining
 **designed but not yet on the facade** surface stays in the Open questions
 section.
 
@@ -830,16 +835,20 @@ Error {
 
 Initial `ErrorCode` values are:
 
-| code            | maps from / raised when                             |
-| --------------- | --------------------------------------------------- |
-| `Schema`        | schema/table/column validation failure              |
-| `Query`         | query validation or binding failure                 |
-| `WriteRejected` | authority rejected a write fate                     |
-| `NotObserved`   | requested durability/tier not locally observed      |
-| `Storage`       | storage backend failure or unavailable backend      |
-| `Protocol`      | local node/protocol invariant failure               |
-| `Backpressure`  | bounded queue or transport cannot accept more bytes |
+| code            | maps from / raised when                                                                 |
+| --------------- | --------------------------------------------------------------------------------------- |
+| `Schema`        | schema/table/column validation failure                                                  |
+| `Query`         | query validation or binding failure                                                     |
+| `WriteRejected` | authority rejected a write fate                                                         |
+| `NotObserved`   | requested durability/tier not locally observed                                          |
+| `Storage`       | storage backend failure or unavailable backend                                          |
+| `Protocol`      | local node/protocol invariant failure                                                   |
+| `Backpressure`  | bounded queue or transport cannot accept more bytes                                     |
+| `Busy`          | a synchronous owner-dependent operation cannot acquire the local node owner immediately |
 
+The stable string spelling of `Busy` is `busy`. Sync owner access never waits;
+async owner-dependent operations await the owner instead. The `Busy` variant is
+appended to the serialized `ErrorCode` order to preserve existing ordinals.
 Wire transport errors use `WireError { code: WireErrorCode, retry: WireRetry,
 message }`.
 

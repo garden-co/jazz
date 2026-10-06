@@ -13,7 +13,7 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 /// Every variant, spelled out. The exhaustive `match` in `pinned` stops this
 /// file compiling when a variant is added, so a new code must be pinned here.
-const ALL: [ErrorCode; 9] = [
+const ALL: [ErrorCode; 10] = [
     ErrorCode::Schema,
     ErrorCode::Query,
     ErrorCode::WriteRejected,
@@ -23,6 +23,7 @@ const ALL: [ErrorCode; 9] = [
     ErrorCode::Backpressure,
     ErrorCode::NotObserved,
     ErrorCode::HistoricalReadRequiresServer,
+    ErrorCode::Busy,
 ];
 
 fn pinned(code: ErrorCode) -> &'static str {
@@ -36,6 +37,7 @@ fn pinned(code: ErrorCode) -> &'static str {
         ErrorCode::Backpressure => "backpressure",
         ErrorCode::NotObserved => "not_observed",
         ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
+        ErrorCode::Busy => "busy",
     }
 }
 

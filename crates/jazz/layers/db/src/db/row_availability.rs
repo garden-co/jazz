@@ -234,22 +234,26 @@ impl Drop for CurrentRowsGuard {
 }
 
 impl<S: OrderedKvStorage + ReopenableStorage + 'static> PeerConnection<S> {
-    fn send_current_rows(&mut self, message: SyncMessage) -> Result<bool, Error> {
+    async fn send_current_rows(&mut self, message: SyncMessage) -> Result<bool, Error> {
         match self.transport.send(message) {
             Ok(()) => Ok(true),
-            Err(error)
-                if super::peer_connection::handle_transport_backpressure(
+            Err(error) => {
+                if super::peer_connection::handle_transport_backpressure_async(
                     &self.node,
                     &self.scheduler,
                     &error,
-                ) =>
-            {
-                Ok(false)
+                )
+                .await
+                {
+                    Ok(false)
+                } else {
+                    Err(transport_error(error))
+                }
             }
-            Err(error) => Err(transport_error(error)),
         }
     }
-    pub(super) fn pump_current_rows(&mut self) -> Result<(), Error> {
+
+    pub(super) async fn pump_current_rows(&mut self) -> Result<(), Error> {
         if matches!(self.link, ConnectionLink::Subscriber(_)) {
             loop {
                 let response = self
@@ -311,15 +315,24 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> PeerConnection<S> {
             .filter_map(|(id, route)| route.upstream.is_none().then_some(*id))
             .collect::<Vec<_>>();
         for id in ids {
+            let identity = self
+                .current_rows
+                .borrow()
+                .routes
+                .get(&id)
+                .unwrap()
+                .context
+                .identity;
+            let scoped_session = self
+                .node
+                .lock()
+                .await
+                .client_relay_scope()
+                .is_some_and(|scope| scope.admits_session(identity));
             let request = {
                 let router = self.current_rows.borrow();
                 let route = router.routes.get(&id).unwrap();
                 let mut request = route.request.clone();
-                let scoped_session = self
-                    .node
-                    .borrow()
-                    .client_relay_scope()
-                    .is_some_and(|scope| scope.admits_session(route.context.identity));
                 if self.transport.permits_delegated_sessions() || scoped_session {
                     request.delegated_session = Some(crate::protocol::DelegatedSessionBinding {
                         identity: route.context.identity,
@@ -332,7 +345,10 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> PeerConnection<S> {
                 }
                 request
             };
-            if !self.send_current_rows(SyncMessage::CurrentRowsRequest(request))? {
+            if !self
+                .send_current_rows(SyncMessage::CurrentRowsRequest(request))
+                .await?
+            {
                 return Ok(());
             }
             if let Some(route) = self.current_rows.borrow_mut().routes.get_mut(&id) {
@@ -350,7 +366,10 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> PeerConnection<S> {
                 break;
             };
             let (_, id) = self.current_rows.borrow().cancels[index];
-            if !self.send_current_rows(SyncMessage::CurrentRowsCancel { request_id: id })? {
+            if !self
+                .send_current_rows(SyncMessage::CurrentRowsCancel { request_id: id })
+                .await?
+            {
                 return Ok(());
             }
             self.current_rows.borrow_mut().cancels.remove(index);

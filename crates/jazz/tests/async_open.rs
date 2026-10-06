@@ -662,3 +662,104 @@ fn prepared_request_claims_survive_owner_wait_and_same_subject_reentry() {
     assert!(block_on(db.all_for_identity(&a, opts, wrong_subject)).is_err());
     block_on(subscription.close()).unwrap();
 }
+trait BusyResult {
+    fn assert_busy(self, api: &str);
+}
+
+impl<T> BusyResult for Result<T, jazz::db::Error> {
+    fn assert_busy(self, api: &str) {
+        match self {
+            Err(error) => assert_eq!(
+                error.code.as_str(),
+                "busy",
+                "{api} returned the wrong typed error: {error:?}"
+            ),
+            Ok(_) => panic!("{api} returned success instead of Busy"),
+        }
+    }
+}
+
+impl<T> BusyResult for Option<T> {
+    fn assert_busy(self, api: &str) {
+        panic!(
+            "{api} returned absence ({}) instead of typed Busy",
+            self.is_none()
+        );
+    }
+}
+
+impl BusyResult for u64 {
+    fn assert_busy(self, api: &str) {
+        panic!("{api} returned sequence {self} instead of typed Busy");
+    }
+}
+
+fn assert_busy_without_unwind<T: BusyResult>(api: &str, call: impl FnOnce() -> T) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call))
+        .unwrap_or_else(|_| panic!("{api} unwound while the async owner was held"));
+    result.assert_busy(api);
+}
+
+/// Sync owner-dependent APIs return typed `busy` without unwinding, while an
+/// async write-state read waits for the same owner and completes after release.
+///
+/// ```text
+/// alice ──hold owner──► sync reads/planning/state/attach/auth/catalogue ──✗ busy
+/// alice ──write_state_async───────────────────────────────────────────────► pending
+///                          release owner ────────────────────────────────► complete
+/// ```
+#[test]
+fn sync_owner_contention_returns_busy_while_async_write_state_waits() {
+    use jazz::ids::{MigrationLensId, RowUuid, SchemaVersionId};
+    use jazz::tx::TxId;
+
+    let schema = schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let db = block_on(Db::open(config(TestStorage::new(&refs)))).expect("open test db");
+    let prepared = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare before holding the owner");
+    let tx_id = TxId::new(jazz::time::TxTime(0x51), NodeUuid::from_bytes([0x52; 16]));
+    let row = RowUuid::from_bytes([0x53; 16]);
+    let author = AuthorSubject::for_test_bytes([0x54; 16]);
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut owner = Box::pin(db.hold_node_owner_for_test());
+    assert!(owner.as_mut().poll(&mut context).is_pending());
+
+    assert_busy_without_unwind("read", || db.read(&prepared));
+    assert_busy_without_unwind("prepare_query", || db.prepare_query(&db.table("todos")));
+    assert_busy_without_unwind("write_state", || db.write_state(tx_id));
+    assert_busy_without_unwind("attach_query", || db.attach_query(&prepared));
+    assert_busy_without_unwind("authorize_read_for_identity", || {
+        db.authorize_read_for_identity("todos", row, author)
+    });
+    assert_busy_without_unwind("catalogue_schema", || {
+        db.catalogue_schema(SchemaVersionId::from_bytes([0x55; 16]))
+    });
+    assert_busy_without_unwind("active_catalogue_seq", || db.active_catalogue_seq());
+    assert_busy_without_unwind("catalogue_lens", || {
+        db.catalogue_lens(MigrationLensId::from_bytes([0x56; 16]))
+    });
+
+    let mut async_state = Box::pin(db.write_state_async(tx_id));
+    assert!(
+        async_state.as_mut().poll(&mut context).is_pending(),
+        "the async owner-dependent operation must wait rather than report Busy"
+    );
+
+    drop(owner);
+    assert_eq!(
+        block_on(async_state)
+            .expect_err("the unknown transaction completes with NotObserved")
+            .code
+            .as_str(),
+        "not_observed"
+    );
+    assert!(
+        db.read(&prepared)
+            .expect("sync read works after release")
+            .is_empty()
+    );
+}

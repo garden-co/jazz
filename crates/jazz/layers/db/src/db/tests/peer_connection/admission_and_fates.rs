@@ -422,14 +422,14 @@ fn downstream_fate_retries_after_bounded_transport_backpressure() {
         .borrow()
         .downstream_fates
         .borrow_mut()
-        .push(fate.clone());
+        .push_back(fate.clone());
 
     subscriber
         .borrow_mut()
         .tick()
         .expect("backpressure retains the fate and schedules a retry");
     assert_eq!(
-        subscriber.borrow().downstream_fates.borrow().as_slice(),
+        subscriber.borrow().downstream_fates.borrow().as_slices().0,
         std::slice::from_ref(&fate),
         "a rejected wire admission leaves the exact fate at its semantic producer"
     );
@@ -1385,7 +1385,7 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
     let mut peer = PeerState::new();
     let (_receiver, mut transport) = duplex();
     let local_fate_routes = Rc::new(RefCell::new(BTreeMap::new()));
-    let downstream_fates = Rc::new(RefCell::new(Vec::new()));
+    let downstream_fates = Rc::new(RefCell::new(VecDeque::new()));
     let tx_id = TxId::new(TxTime(7), NodeUuid::from_bytes([0x61; 16]));
     let tx = Transaction {
         tx_id,
@@ -1421,14 +1421,14 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
         supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
     });
 
-    send_subscriber_with_sync_context(
+    crate::local_executor::block_on(send_subscriber_with_sync_context(
         &node,
         &mut peer,
         transport.as_mut(),
         &local_fate_routes,
         &downstream_fates,
         update,
-    )
+    ))
     .expect("canonical sibling update is accepted");
 
     let routes = local_fate_routes.borrow();
@@ -1442,6 +1442,39 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
             .upgrade()
             .expect("downstream fate queue remains live"),
         &downstream_fates,
+    ));
+}
+
+/// A subscriber catalogue send waits for the async Node owner instead of synchronously re-entering it.
+///
+/// ```text
+/// async writer owns Node ──catalogue send polls──► Pending
+/// release Node ──► the exact catalogue snapshot is accepted
+/// ```
+#[test]
+fn catalogue_snapshot_send_waits_for_async_node_owner() {
+    use std::task::{Context, Poll, Waker};
+
+    let core = open_core(0x60, AuthorSubject::SYSTEM, &schema());
+    let node = core.node();
+    let mut peer = PeerState::new();
+    let (mut receiver, mut transport) = duplex();
+    let owner = crate::local_executor::block_on(node.lock());
+    let mut send = Box::pin(
+        crate::db::peer_connection::send_catalogue_snapshot_if_needed(
+            &node,
+            &mut peer,
+            transport.as_mut(),
+        ),
+    );
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(send.as_mut().poll(&mut context), Poll::Pending));
+
+    drop(owner);
+    crate::local_executor::block_on(send).expect("catalogue snapshot sends after owner release");
+    assert!(matches!(
+        receiver.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
     ));
 }
 

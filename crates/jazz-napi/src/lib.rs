@@ -3389,6 +3389,8 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => db.set_large_value_staging_policy(policy),
             NapiDbInnerStorage::Persistent(db) => db.set_large_value_staging_policy(policy),
         }
+        .map_err(napi_error)
+        .map_err(BindingError::from)?;
         Ok(())
     }
 
