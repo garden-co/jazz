@@ -1,4 +1,5 @@
 import type { MutationErrorEvent } from "../runtime/client.js";
+import type { NativeTerminalEventEnvelope } from "../drivers/types.js";
 
 type ForegroundMutationKind = "insert" | "update" | "upsert" | "delete" | "restore";
 type ForegroundMutationOptions = {
@@ -113,7 +114,7 @@ type ForegroundEvent =
       settled: boolean;
       tier: string;
       delta: Uint8Array;
-      terminalOperations?: unknown[];
+      terminalOperations?: NativeTerminalEventEnvelope;
     }
   | { type: "rejected"; reason: string }
   | { type: "closed" };

@@ -1272,10 +1272,17 @@ pub struct SubscriptionDeltaEvent {
     pub reset: bool,
     pub delta: Uint8Array,
     #[napi(js_name = "terminalOperations")]
-    pub terminal_operations: Vec<SubscriptionTerminalOperation>,
+    pub terminal_operations: SubscriptionTerminalEventEnvelope,
     pub settled: bool,
     #[napi(ts_type = "'None' | 'Local' | 'Global'")]
     pub tier: String,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalEventEnvelope {
+    pub version: u32,
+    pub layouts: Vec<JsonValue>,
+    pub operations: Vec<SubscriptionTerminalOperation>,
 }
 
 #[napi(object)]
@@ -1330,6 +1337,8 @@ pub struct SubscriptionTerminalOperation {
     pub root_key: Uint8Array,
     pub path: Vec<SubscriptionTerminalPathSegment>,
     pub edit: SubscriptionTerminalEdit,
+    #[napi(js_name = "payload_layout", ts_type = "number | undefined")]
+    pub payload_layout: Option<u32>,
 }
 
 #[napi(object)]
@@ -4593,10 +4602,18 @@ fn core_subscription_event_to_napi(
         } => {
             let delta =
                 encode_core_subscription_delta(added, updated, removed).map_err(napi_error)?;
-            let terminal_operations = terminal_operations
+            let layout_table = jazz::binding_codec::terminal_event_layouts(terminal_operations)
+                .map_err(napi::Error::from_reason)?;
+            let operations = terminal_operations
                 .iter()
-                .map(core_terminal_operation_to_napi)
-                .collect::<std::result::Result<_, _>>()?;
+                .zip(layout_table.operation_layouts.iter())
+                .map(|(operation, layout)| core_terminal_operation_to_napi(operation, *layout))
+                .collect::<napi::Result<_>>()?;
+            let terminal_operations = SubscriptionTerminalEventEnvelope {
+                version: u32::from(jazz::binding_codec::TERMINAL_EVENT_ENVELOPE_VERSION),
+                layouts: layout_table.layouts,
+                operations,
+            };
             Ok(Either3::A(SubscriptionDeltaEvent {
                 event_type: "delta".to_string(),
                 reset: *reset,
@@ -4683,17 +4700,12 @@ mod test_fixture_export {
 }
 
 /// Convert terminal edits without serde_json so binary subscription deltas keep
-/// their typed-array representation. Root descriptors retain the upstream
-/// postcard encoding; ordered keys and edit payloads cross as one `Uint8Array`
-/// each, not one N-API element per byte (#3369).
+/// their typed-array representation. Shared Jazz layout metadata is paired with
+/// each operation while ordered keys and payloads remain one `Uint8Array` each.
 fn core_terminal_operation_to_napi(
     operation: &jazz::groove::ivm::TerminalOperation,
+    payload_layout: Option<u32>,
 ) -> napi::Result<SubscriptionTerminalOperation> {
-    if operation.path.is_empty() {
-        return Err(napi::Error::from_reason(
-            "native producer emitted a root terminal operation".to_owned(),
-        ));
-    }
     use jazz::groove::ivm::{TerminalEdit, TerminalPathSegment};
 
     let path = operation
@@ -4741,6 +4753,7 @@ fn core_terminal_operation_to_napi(
         root_key: terminal_bytes(&operation.root_key),
         path,
         edit,
+        payload_layout,
     })
 }
 
@@ -7449,28 +7462,26 @@ mod tests {
             panic!("expected delta payload");
         };
         assert!(!payload.delta.is_empty());
-        assert!(payload.terminal_operations.is_empty());
+        assert_eq!(payload.terminal_operations.version, 1);
+        assert!(payload.terminal_operations.layouts.is_empty());
+        assert!(payload.terminal_operations.operations.is_empty());
         assert_eq!(payload.tier, "Local");
     }
 
     #[test]
     fn subscription_payload_preserves_descendant_terminal_operations() {
-        let descriptor = RecordDescriptor::new([
-            ("row_uuid", ValueType::Uuid),
-            (
-                "user_title",
-                ValueType::Nullable(Box::new(ValueType::String)),
-            ),
-        ]);
+        let child_descriptor =
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
+        let descriptor = RecordDescriptor::new([(
+            "children",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(child_descriptor)))),
+        )]);
         let child_path = vec![TerminalPathSegment::Collection("children".to_owned())];
         let operations = vec![
             TerminalOperation {
                 root_descriptor: descriptor,
                 root_key: vec![0, 255],
-                path: vec![
-                    TerminalPathSegment::Collection("children".to_owned()),
-                    TerminalPathSegment::Key(vec![1, 254]),
-                ],
+                path: child_path.clone(),
                 edit: TerminalEdit::Insert {
                     index: 3,
                     key: vec![2, 253],
@@ -7480,7 +7491,10 @@ mod tests {
             TerminalOperation {
                 root_descriptor: descriptor,
                 root_key: vec![4],
-                path: child_path.clone(),
+                path: vec![
+                    TerminalPathSegment::Collection("children".to_owned()),
+                    TerminalPathSegment::Key(vec![5]),
+                ],
                 edit: TerminalEdit::Update {
                     key: vec![5],
                     value: vec![6],
@@ -7518,13 +7532,27 @@ mod tests {
             panic!("expected delta payload");
         };
         assert_eq!(payload.tier, "Global");
-        assert_eq!(payload.terminal_operations.len(), 4);
-        let insert = &payload.terminal_operations[0];
+        assert_eq!(payload.terminal_operations.version, 1);
+        assert_eq!(payload.terminal_operations.layouts.len(), 1);
+        assert_eq!(payload.terminal_operations.operations.len(), 4);
+        assert_eq!(
+            payload.terminal_operations.layouts[0]["fields"][0]["identity"]["name"],
+            "row_uuid"
+        );
+        assert_eq!(
+            payload.terminal_operations.layouts[0]["fields"][1]["identity"]["name"],
+            "title"
+        );
+        assert_eq!(
+            payload.terminal_operations.layouts[0]["fields"][1]["value_type"],
+            json!({ "tag": 8 })
+        );
+        let insert = &payload.terminal_operations.operations[0];
         assert_eq!(insert.root_key.as_ref(), [0, 255]);
+        assert_eq!(insert.payload_layout, Some(0));
         assert!(matches!(
             insert.path.as_slice(),
-            [Either::A(collection), Either::B(key)]
-                if collection.collection == "children" && key.key.as_ref() == [1, 254]
+            [Either::A(collection)] if collection.collection == "children"
         ));
         assert!(matches!(
             &insert.edit,
@@ -7533,16 +7561,35 @@ mod tests {
                     && edit.insert.key.as_ref() == [2, 253]
                     && edit.insert.value.as_ref() == (0_u8..=u8::MAX).collect::<Vec<_>>()
         ));
+        assert_eq!(
+            payload.terminal_operations.operations[1].payload_layout,
+            Some(0)
+        );
         assert!(matches!(
-            &payload.terminal_operations[1].edit,
+            payload.terminal_operations.operations[1].path.as_slice(),
+            [Either::A(collection), Either::B(key)]
+                if collection.collection == "children" && key.key.as_ref() == [5]
+        ));
+        assert!(matches!(
+            &payload.terminal_operations.operations[1].edit,
             Either4::B(edit) if edit.update.key.as_ref() == [5] && edit.update.value.as_ref() == [6]
         ));
+        assert!(
+            payload.terminal_operations.operations[2]
+                .payload_layout
+                .is_none()
+        );
         assert!(matches!(
-            &payload.terminal_operations[2].edit,
+            &payload.terminal_operations.operations[2].edit,
             Either4::C(edit) if edit.remove.key.as_ref() == [8]
         ));
+        assert!(
+            payload.terminal_operations.operations[3]
+                .payload_layout
+                .is_none()
+        );
         assert!(matches!(
-            &payload.terminal_operations[3].edit,
+            &payload.terminal_operations.operations[3].edit,
             Either4::D(edit) if edit.move_edit.key.as_ref() == [10] && edit.move_edit.index == 11.0
         ));
     }

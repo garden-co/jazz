@@ -291,24 +291,280 @@ pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::E
     Ok(batches)
 }
 
-/// Encode terminal operations in the JavaScript-native object shape.
+/// Version of the JSON-native terminal event envelope shared by native hosts.
+pub const TERMINAL_EVENT_ENVELOPE_VERSION: u8 = 1;
+
+/// Event-local payload layouts and the payload layout selected by each edit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerminalEventLayoutTable {
+    /// Deduplicated logical descriptor layouts referenced by the event.
+    pub layouts: Vec<serde_json::Value>,
+    /// Layout-table index for each operation; `None` for key-only edits.
+    pub operation_layouts: Vec<Option<u32>>,
+}
+
+/// Build the event-local layout table after validating every descendant path.
+pub fn terminal_event_layouts(
+    operations: &[TerminalOperation],
+) -> Result<TerminalEventLayoutTable, String> {
+    let mut layouts: Vec<serde_json::Value> = Vec::new();
+    let mut layout_indices = std::collections::HashMap::new();
+    let mut operation_layouts = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let descriptor = terminal_descendant_value_descriptor(operation)?;
+        if matches!(
+            &operation.edit,
+            groove::ivm::TerminalEdit::Remove { .. } | groove::ivm::TerminalEdit::Move { .. }
+        ) {
+            operation_layouts.push(None);
+            continue;
+        }
+        if let Some(index) = layout_indices.get(&descriptor).copied() {
+            operation_layouts.push(Some(index));
+            continue;
+        }
+        let index =
+            u32::try_from(layouts.len()).map_err(|_| "too many terminal payload layouts")?;
+        layouts.push(terminal_payload_layout(&descriptor)?);
+        layout_indices.insert(descriptor, index);
+        operation_layouts.push(Some(index));
+    }
+    Ok(TerminalEventLayoutTable {
+        layouts,
+        operation_layouts,
+    })
+}
+
+/// Encode one complete terminal event envelope for the React Native relay.
 pub fn terminal_operations_to_json(
     operations: &[TerminalOperation],
-) -> Result<serde_json::Value, serde_json::Error> {
-    let mut encoded = serde_json::to_value(operations)?;
-    if operations.is_empty() {
-        return Ok(encoded);
-    }
+) -> Result<serde_json::Value, String> {
+    let table = terminal_event_layouts(operations)?;
+    let mut encoded = serde_json::to_value(operations).map_err(|error| error.to_string())?;
     let encoded_operations = encoded
         .as_array_mut()
-        .expect("terminal operations serialize as an array");
-    for wire in encoded_operations {
+        .ok_or("terminal operations must serialize as an array")?;
+    for (wire, payload_layout) in encoded_operations.iter_mut().zip(table.operation_layouts) {
         let serde_json::Value::Object(wire) = wire else {
-            unreachable!("terminal operation serializes as an object");
+            return Err("terminal operation must serialize as an object".to_owned());
         };
         wire.remove("root_descriptor");
+        if let Some(payload_layout) = payload_layout {
+            wire.insert("payload_layout".to_owned(), payload_layout.into());
+        }
     }
-    Ok(encoded)
+    Ok(serde_json::json!({
+        "version": TERMINAL_EVENT_ENVELOPE_VERSION,
+        "layouts": table.layouts,
+        "operations": encoded,
+    }))
+}
+
+/// Resolve the packed payload descriptor from the operation's root descriptor
+/// and named collection path. Root operations use the root descriptor; Insert/Update
+/// values in descendant operations contain only the selected child.
+pub(crate) fn terminal_operation_value_descriptor(
+    operation: &TerminalOperation,
+) -> Result<groove::records::RecordDescriptor, String> {
+    if operation.path.is_empty() {
+        return Ok(operation.root_descriptor);
+    }
+    terminal_descendant_value_descriptor(operation)
+}
+
+fn terminal_descendant_value_descriptor(
+    operation: &TerminalOperation,
+) -> Result<groove::records::RecordDescriptor, String> {
+    validate_terminal_operation_path(operation)?;
+    let mut descriptor = operation.root_descriptor;
+    for segment in &operation.path {
+        let groove::ivm::TerminalPathSegment::Collection(name) = segment else {
+            continue;
+        };
+        let field = descriptor
+            .fields()
+            .iter()
+            .find(|field| field.name.as_deref() == Some(name))
+            .ok_or("terminal operation references an unknown collection field")?;
+        let groove::records::ValueType::Array(element) = &field.value_type else {
+            return Err("terminal operation collection field is not an array".to_owned());
+        };
+        let groove::records::ValueType::Record(child) = element.as_ref() else {
+            return Err("terminal operation collection does not contain records".to_owned());
+        };
+        descriptor = **child;
+    }
+    Ok(descriptor)
+}
+
+fn validate_terminal_operation_path(operation: &TerminalOperation) -> Result<(), String> {
+    use groove::ivm::{TerminalEdit, TerminalPathSegment};
+
+    if operation.path.is_empty() {
+        return Err("terminal operation path must not be empty".to_owned());
+    }
+    let mut expects_collection = true;
+    for segment in &operation.path {
+        match (expects_collection, segment) {
+            (true, TerminalPathSegment::Collection(_)) => expects_collection = false,
+            (false, TerminalPathSegment::Key(_)) => expects_collection = true,
+            (true, TerminalPathSegment::Key(_)) => {
+                return Err("terminal operation path starts with or repeats a key".to_owned());
+            }
+            (false, TerminalPathSegment::Collection(_)) => {
+                return Err("terminal operation path is missing a child key".to_owned());
+            }
+        }
+    }
+    match (&operation.edit, operation.path.last()) {
+        (TerminalEdit::Insert { .. }, Some(TerminalPathSegment::Collection(_)))
+        | (TerminalEdit::Remove { .. }, Some(TerminalPathSegment::Collection(_)))
+        | (TerminalEdit::Move { .. }, Some(TerminalPathSegment::Collection(_))) => Ok(()),
+        (TerminalEdit::Update { key, .. }, Some(TerminalPathSegment::Key(path_key)))
+            if path_key == key =>
+        {
+            Ok(())
+        }
+        (TerminalEdit::Update { .. }, Some(TerminalPathSegment::Key(_))) => {
+            Err("terminal update path key does not match edit key".to_owned())
+        }
+        (TerminalEdit::Update { .. }, _) => {
+            Err("terminal update path must end with a key".to_owned())
+        }
+        (TerminalEdit::Insert { .. }, _) => {
+            Err("terminal insert path must end with a collection".to_owned())
+        }
+        (TerminalEdit::Remove { .. } | TerminalEdit::Move { .. }, _) => {
+            Err("terminal remove/move path must end with a collection".to_owned())
+        }
+    }
+}
+
+fn terminal_payload_layout(
+    descriptor: &groove::records::RecordDescriptor,
+) -> Result<serde_json::Value, String> {
+    use groove::records::{FieldIdentity, ValueType};
+
+    let mut seen_names = std::collections::BTreeSet::new();
+    let mut fields = Vec::with_capacity(descriptor.fields().len());
+    for (slot, field) in descriptor.fields().iter().enumerate() {
+        let Some(FieldIdentity::Name(name)) = field.identity.as_ref() else {
+            return Err("terminal payload fields require named logical identities".to_owned());
+        };
+        if field.name.as_deref() != Some(name.as_str()) || !seen_names.insert(name.as_str()) {
+            return Err(
+                "terminal payload field identities must be unique and match their names".to_owned(),
+            );
+        }
+        let role = if slot == 0 {
+            if name != "row_uuid" || !matches!(&field.value_type, ValueType::Uuid) {
+                return Err("terminal payload slot zero must be the row_uuid UUID key".to_owned());
+            }
+            "RowKey"
+        } else {
+            if name == "row_uuid" {
+                return Err("terminal payload must contain exactly one row_uuid key".to_owned());
+            }
+            "Value"
+        };
+        fields.push(serde_json::json!({
+            "identity": { "kind": "Name", "name": name },
+            "role": role,
+            "value_type": terminal_value_type_json(&field.value_type)?,
+        }));
+    }
+    if fields.is_empty() {
+        return Err("terminal payload is missing its row_uuid key".to_owned());
+    }
+    Ok(serde_json::json!({
+        "carrier": "Logical",
+        "key_slot": 0,
+        "fields": fields,
+    }))
+}
+
+fn terminal_value_type_json(
+    value_type: &groove::records::ValueType,
+) -> Result<serde_json::Value, String> {
+    use groove::records::ValueType;
+
+    let tag = match value_type {
+        ValueType::U8 => 0,
+        ValueType::U16 => 1,
+        ValueType::U32 => 2,
+        ValueType::U64 => 3,
+        ValueType::I32 => 4,
+        ValueType::I64 => 5,
+        ValueType::F64 => 6,
+        ValueType::Bool => 7,
+        ValueType::String => 8,
+        ValueType::Bytes => 9,
+        ValueType::Internal(_) => {
+            return Err("terminal payload cannot publish an internal value type".to_owned());
+        }
+        ValueType::Uuid => 11,
+        ValueType::EnumTag(schema) => {
+            return Ok(serde_json::json!({
+                "tag": 12,
+                "enumSchema": {
+                    "registryId": schema.registry_id(),
+                    "name": schema.name,
+                    "variants": schema.variants,
+                },
+            }));
+        }
+        ValueType::Tuple(members) => {
+            return Ok(serde_json::json!({
+                "tag": 13,
+                "members": members.iter().map(terminal_value_type_json)
+                    .collect::<Result<Vec<_>, _>>()?,
+            }));
+        }
+        ValueType::Array(inner) => {
+            return Ok(serde_json::json!({
+                "tag": 14,
+                "inner": terminal_value_type_json(inner)?,
+            }));
+        }
+        ValueType::Nullable(inner) => {
+            return Ok(serde_json::json!({
+                "tag": 15,
+                "inner": terminal_value_type_json(inner)?,
+            }));
+        }
+        ValueType::Record(record) => {
+            return Ok(serde_json::json!({
+                "tag": 16,
+                "record": record.fields().iter().map(|field| {
+                    Ok(serde_json::json!({
+                        "name": field.name.as_deref(),
+                        "valueType": terminal_value_type_json(&field.value_type)?,
+                    }))
+                }).collect::<Result<Vec<_>, String>>()?,
+            }));
+        }
+        ValueType::Enum(schema) => {
+            return Ok(serde_json::json!({
+                "tag": 17,
+                "enumSchema": {
+                    "registryId": schema.registry_id,
+                    "name": schema.name,
+                    "cases": schema.cases.iter().map(|enum_case| {
+                        Ok(serde_json::json!({
+                            "name": enum_case.name,
+                            "payload": enum_case.payload.fields().iter().map(|field| {
+                                Ok(serde_json::json!({
+                                    "name": field.name.as_deref(),
+                                    "valueType": terminal_value_type_json(&field.value_type)?,
+                                }))
+                            }).collect::<Result<Vec<_>, String>>()?,
+                        }))
+                    }).collect::<Result<Vec<_>, String>>()?,
+                },
+            }));
+        }
+    };
+    Ok(serde_json::json!({ "tag": tag }))
 }
 
 #[cfg(test)]
@@ -790,5 +1046,80 @@ mod tests {
             batches[0].descriptor[1].name,
             RowDescriptorFieldName::ResultField { name: "title" }
         ));
+    }
+    // Internal because malformed descriptor/path validation fails before any
+    // binding can expose a public row; public subscription tests cover
+    // producer-visible Insert/Update layouts.
+    #[test]
+    fn terminal_event_layouts_deduplicate_payloads_and_validate_update_paths() {
+        use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
+
+        let child = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("second", ValueType::String),
+            ("first", ValueType::String),
+        ]);
+        let root = RecordDescriptor::new([(
+            "children",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        )]);
+        let key = vec![1, 2, 3];
+        let collection = TerminalPathSegment::Collection("children".to_owned());
+        let insert = TerminalOperation {
+            root_descriptor: root,
+            root_key: vec![9],
+            path: vec![collection.clone()],
+            edit: TerminalEdit::Insert {
+                index: 0,
+                key: key.clone(),
+                value: Vec::new(),
+            },
+        };
+        let update = TerminalOperation {
+            root_descriptor: root,
+            root_key: vec![9],
+            path: vec![collection.clone(), TerminalPathSegment::Key(key.clone())],
+            edit: TerminalEdit::Update {
+                key: key.clone(),
+                value: Vec::new(),
+            },
+        };
+        let remove = TerminalOperation {
+            root_descriptor: root,
+            root_key: vec![9],
+            path: vec![collection.clone()],
+            edit: TerminalEdit::Remove { key: key.clone() },
+        };
+        let table = terminal_event_layouts(&[insert.clone(), update.clone(), remove]).unwrap();
+        assert_eq!(table.layouts.len(), 1);
+        assert_eq!(table.operation_layouts, vec![Some(0), Some(0), None]);
+        assert_eq!(table.layouts[0]["fields"][1]["identity"]["name"], "second");
+        assert_eq!(table.layouts[0]["fields"][2]["identity"]["name"], "first");
+
+        let mut invalid_update = update;
+        invalid_update.path[1] = TerminalPathSegment::Key(vec![4]);
+        assert_eq!(
+            terminal_event_layouts(&[invalid_update]).unwrap_err(),
+            "terminal update path key does not match edit key"
+        );
+
+        let mut invalid_insert = insert;
+        invalid_insert
+            .path
+            .push(TerminalPathSegment::Key(key.clone()));
+        assert_eq!(
+            terminal_event_layouts(&[invalid_insert]).unwrap_err(),
+            "terminal insert path must end with a collection"
+        );
+        let invalid_remove = TerminalOperation {
+            root_descriptor: root,
+            root_key: vec![9],
+            path: vec![TerminalPathSegment::Collection("missing".to_owned())],
+            edit: TerminalEdit::Remove { key },
+        };
+        assert_eq!(
+            terminal_event_layouts(&[invalid_remove]).unwrap_err(),
+            "terminal operation references an unknown collection field"
+        );
     }
 }

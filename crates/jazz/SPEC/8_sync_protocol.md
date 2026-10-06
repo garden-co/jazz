@@ -316,10 +316,11 @@ present authority endpoints and one- and multi-byte feature masks; supported
 Core cases additionally pass through the production TypeScript WebSocket
 negotiation path. Its
 binding companion, `binding_codec_golden.json`, covers NAPI/WASM's shared
-Rust-produced relation-snapshot and subscription-delta byte ABI, consumed by
-the production TypeScript decoder. These corpora are compatibility evidence,
-not a permissive migration input. Adding a new case requires a SPEC decision,
-an invariant citation, and a review of every language consumer.
+Rust-produced relation-snapshot and subscription-delta byte ABI plus the
+versioned terminal event envelope consumed by the production TypeScript
+decoder. These corpora are compatibility evidence, not a permissive migration
+input. Adding a new case requires a SPEC decision, an invariant citation, and
+a review of every language consumer.
 
 Inside Rust, `Db` and `PeerConnection` keep the semantic `Transport` surface over
 `SyncMessage`. Binding/server byte transports use `WireFrame` and are bridged at

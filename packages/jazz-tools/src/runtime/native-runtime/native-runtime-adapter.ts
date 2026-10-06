@@ -9,7 +9,7 @@ import type {
   ColumnType,
   InsertValues,
   NativeTerminalBytes,
-  NativeTerminalOperation,
+  NativeTerminalEventEnvelope,
   RuntimeSubscriptionDelta,
   RuntimeTerminalOperation,
   TablePolicies,
@@ -89,7 +89,7 @@ import {
 import {
   createRecord,
   createRecordValueDecoder,
-  decodeNativeTerminalRow,
+  decodeNativeTerminalRowByLayout,
   decodeNativeRowValues,
   encodeNativeColumnValue,
   encodeNativeNullValue,
@@ -4716,77 +4716,196 @@ function subscriptionOutputColumns(
  * into the logical edit shape consumed by the TypeScript materializer.
  */
 function decodeRuntimeTerminalOperations(
-  operations: readonly NativeTerminalOperation[] | undefined,
+  envelope: NativeTerminalEventEnvelope | undefined,
   rootColumns: readonly ColumnDescriptor[] | undefined,
 ): RuntimeTerminalOperation[] | undefined {
-  if (!operations || operations.length === 0) return undefined;
+  if (!envelope) return undefined;
+  if (
+    envelope.version !== 1 ||
+    !Array.isArray(envelope.layouts) ||
+    !Array.isArray(envelope.operations)
+  ) {
+    throw new Error("malformed native terminal event envelope");
+  }
+  if (envelope.operations.length === 0) {
+    if (envelope.layouts.length !== 0) {
+      throw new Error("terminal event layout table contains unused layouts");
+    }
+    return undefined;
+  }
 
-  return operations.map((operation) => {
+  const usedLayouts = new Set<number>();
+  const decoded = envelope.operations.map((operation) => {
+    if (
+      !isRecord(operation) ||
+      !isNativeTerminalBytes(operation.root_key) ||
+      !Array.isArray(operation.path) ||
+      !isRecord(operation.edit) ||
+      Object.keys(operation.edit).length !== 1 ||
+      !["Insert", "Update", "Remove", "Move"].includes(Object.keys(operation.edit)[0] ?? "")
+    ) {
+      throw new Error("malformed native terminal operation");
+    }
     let columns = rootColumns;
     let targetColumns: readonly ColumnDescriptor[] | undefined;
-    const path: RuntimeTerminalOperation["path"] = operation.path.map((segment) => {
-      if ("Key" in segment) return { Key: terminalKey(segment.Key) };
-
-      if (!columns) {
-        throw new Error("native terminal collection path requires subscription output columns");
+    let expectsCollection = true;
+    let lastPathKey: NativeTerminalBytes | undefined;
+    const path: RuntimeTerminalOperation["path"] = [];
+    for (const rawSegment of operation.path as unknown[]) {
+      if (!isRecord(rawSegment) || Object.keys(rawSegment).length !== 1) {
+        throw new Error("malformed native terminal path segment");
       }
-
-      const collectionName = segment.Collection.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX)
-        ? segment.Collection.slice(HIDDEN_INCLUDE_COLUMN_PREFIX.length)
-        : segment.Collection;
-      const collectionIndex = columns.findIndex((column) => column.name === collectionName);
-      const collectionType = columns[collectionIndex]?.column_type;
-      if (collectionType?.type !== "Array" || collectionType.element.type !== "Row") {
-        throw new Error(`native terminal operation addressed unknown collection ${collectionName}`);
+      if ("Collection" in rawSegment) {
+        if (!expectsCollection || typeof rawSegment.Collection !== "string") {
+          throw new Error("malformed native terminal collection path");
+        }
+        if (!columns) {
+          throw new Error("native terminal collection path requires subscription output columns");
+        }
+        const collectionName = rawSegment.Collection.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX)
+          ? rawSegment.Collection.slice(HIDDEN_INCLUDE_COLUMN_PREFIX.length)
+          : rawSegment.Collection;
+        const collectionIndex = columns.findIndex((column) => column.name === collectionName);
+        const collectionType = columns[collectionIndex]?.column_type;
+        if (collectionType?.type !== "Array" || collectionType.element.type !== "Row") {
+          throw new Error(
+            `native terminal operation addressed unknown collection ${collectionName}`,
+          );
+        }
+        columns = collectionType.element.columns;
+        targetColumns = columns;
+        path.push({ Collection: collectionIndex });
+        expectsCollection = false;
+        lastPathKey = undefined;
+      } else if ("Key" in rawSegment) {
+        if (expectsCollection || !isNativeTerminalBytes(rawSegment.Key)) {
+          throw new Error("malformed native terminal key path");
+        }
+        path.push({ Key: terminalKey(rawSegment.Key) });
+        lastPathKey = rawSegment.Key;
+        expectsCollection = true;
+      } else {
+        throw new Error("malformed native terminal path segment");
       }
-      columns = collectionType.element.columns;
-      targetColumns = columns;
-      return { Collection: collectionIndex };
-    });
+    }
+    if (path.length === 0) throw new Error("native terminal operation path must not be empty");
 
+    const payloadLayout = (index: unknown) => {
+      if (!Number.isSafeInteger(index) || (index as number) < 0) {
+        throw new Error("terminal payload operation is missing its layout reference");
+      }
+      const layout = envelope.layouts[index as number];
+      if (!layout || !Array.isArray(layout.fields)) {
+        throw new Error("terminal operation references an unknown payload layout");
+      }
+      usedLayouts.add(index as number);
+      return layout;
+    };
     const edit = operation.edit;
     if ("Insert" in edit) {
-      if (!targetColumns) throw new Error("native terminal insert has no collection target");
-      const id = terminalPayloadRowId(edit.Insert.key);
+      const insert = edit.Insert;
+      if (
+        expectsCollection ||
+        !targetColumns ||
+        !isRecord(insert) ||
+        typeof insert.index !== "number" ||
+        !isNativeTerminalBytes(insert.key) ||
+        !isNativeTerminalBytes(insert.value)
+      ) {
+        throw new Error("malformed native terminal insert");
+      }
+      if (operation.payload_layout === undefined) {
+        throw new Error("terminal insert is missing its payload layout reference");
+      }
+      const layout = payloadLayout(operation.payload_layout);
+      const id = terminalPayloadRowId(insert.key);
       return {
         root_key: terminalKey(operation.root_key),
         path,
         edit: {
           Insert: {
-            index: edit.Insert.index,
-            key: terminalKey(edit.Insert.key),
-            row: decodeNativeTerminalRow(id, targetColumns, terminalBytes(edit.Insert.value)),
+            index: insert.index,
+            key: terminalKey(insert.key),
+            row: decodeNativeTerminalRowByLayout(
+              id,
+              layout,
+              targetColumns,
+              terminalBytes(insert.value),
+            ),
           },
         },
       };
     }
     if ("Update" in edit) {
-      if (!targetColumns) throw new Error("native terminal update has no collection target");
-      const id = terminalPayloadRowId(edit.Update.key);
+      const update = edit.Update;
+      if (
+        !expectsCollection ||
+        !targetColumns ||
+        !isRecord(update) ||
+        !isNativeTerminalBytes(update.key) ||
+        !isNativeTerminalBytes(update.value) ||
+        !lastPathKey ||
+        !terminalBytesEqual(lastPathKey, update.key)
+      ) {
+        throw new Error("malformed native terminal update path or payload");
+      }
+      if (operation.payload_layout === undefined) {
+        throw new Error("terminal update is missing its payload layout reference");
+      }
+      const layout = payloadLayout(operation.payload_layout);
+      const id = terminalPayloadRowId(update.key);
       return {
         root_key: terminalKey(operation.root_key),
         path,
         edit: {
           Update: {
-            key: terminalKey(edit.Update.key),
-            row: decodeNativeTerminalRow(id, targetColumns, terminalBytes(edit.Update.value)),
+            key: terminalKey(update.key),
+            row: decodeNativeTerminalRowByLayout(
+              id,
+              layout,
+              targetColumns,
+              terminalBytes(update.value),
+            ),
           },
         },
       };
     }
     if ("Remove" in edit) {
+      const remove = edit.Remove;
+      if (
+        expectsCollection ||
+        !isRecord(remove) ||
+        !isNativeTerminalBytes(remove.key) ||
+        operation.payload_layout !== undefined
+      ) {
+        throw new Error("malformed native terminal remove");
+      }
       return {
         root_key: terminalKey(operation.root_key),
         path,
-        edit: { Remove: { key: terminalKey(edit.Remove.key) } },
+        edit: { Remove: { key: terminalKey(remove.key) } },
       };
+    }
+    const move = edit.Move;
+    if (
+      expectsCollection ||
+      !isRecord(move) ||
+      !isNativeTerminalBytes(move.key) ||
+      typeof move.index !== "number" ||
+      operation.payload_layout !== undefined
+    ) {
+      throw new Error("malformed native terminal move");
     }
     return {
       root_key: terminalKey(operation.root_key),
       path,
-      edit: { Move: { key: terminalKey(edit.Move.key), index: edit.Move.index } },
+      edit: { Move: { key: terminalKey(move.key), index: move.index } },
     };
   });
+  if (usedLayouts.size !== envelope.layouts.length) {
+    throw new Error("terminal event layout table contains unused layouts");
+  }
+  return decoded;
 }
 
 /** Materializer keys stay number arrays; NAPI and WASM hand over `Uint8Array`s. */
@@ -4797,6 +4916,22 @@ function terminalKey(bytes: NativeTerminalBytes): number[] {
 /** Row payloads are decoded straight from a native `Uint8Array` without a copy. */
 function terminalBytes(bytes: NativeTerminalBytes): Uint8Array {
   return bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
+}
+
+function isNativeTerminalBytes(value: unknown): value is NativeTerminalBytes {
+  return (
+    value instanceof Uint8Array ||
+    (Array.isArray(value) &&
+      value.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255))
+  );
+}
+
+function terminalBytesEqual(left: NativeTerminalBytes, right: NativeTerminalBytes): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 /** Decode the leading UUID key field from Groove's ordered record-key carrier. */
@@ -6421,7 +6556,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       type: "delta";
       reset?: boolean;
       delta: NativeSubscriptionDelta;
-      terminalOperations?: NativeTerminalOperation[];
+      terminalOperations?: NativeTerminalEventEnvelope;
     }
   | {
       type: "rejected";
@@ -6450,9 +6585,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       delta: readNativeSubscriptionDelta(
         new PostcardReader(assertBytes(record.delta, "subscription delta")),
       ),
-      terminalOperations: Array.isArray(record.terminalOperations)
-        ? (record.terminalOperations as NativeTerminalOperation[])
-        : undefined,
+      terminalOperations: normalizeTerminalEventEnvelope(record.terminalOperations),
     };
   }
   if (record.type === "rejected" || record.type === "Rejected") {
@@ -6462,6 +6595,26 @@ function normalizeSubscriptionChunk(chunk: unknown):
     };
   }
   throw new Error("unknown subscription chunk");
+}
+
+function normalizeTerminalEventEnvelope(value: unknown): NativeTerminalEventEnvelope | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    !Array.isArray(value.layouts) ||
+    !Array.isArray(value.operations) ||
+    value.layouts.some(
+      (layout) =>
+        !isRecord(layout) ||
+        layout.carrier !== "Logical" ||
+        layout.key_slot !== 0 ||
+        !Array.isArray(layout.fields),
+    )
+  ) {
+    throw new Error("malformed native terminal event envelope");
+  }
+  return value as unknown as NativeTerminalEventEnvelope;
 }
 
 function normalizeSubscriptionRejectionReason(
