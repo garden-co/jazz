@@ -30,3 +30,9 @@ grant. Treat synchronous and asynchronous candidate-envelope failures alike,
 without hiding failures in confirmed predecessor history. Protected recovery
 can try another root after space-owned delivery exhaustion; operational errors
 and public diagnostic-code collisions still abort.
+
+Discover recovery obligations from settled direct and inherited recipient grants
+in bounded ID batches, not all application roots. Isolate canonical roots from
+wrong-ID proposals during creation and lookup, and exclude covered ineligible
+authors without hiding authority or verifier failures. Reject incomplete managed
+group configuration while preserving account-only spaces.

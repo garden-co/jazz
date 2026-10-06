@@ -480,6 +480,13 @@ export class E2ee {
             : new TypedTableQueryBuilder(name, schema!);
       }
     }
+    const groupTables = Object.keys(groupSchema);
+    if (groupTables.some((name) => name in tables)) {
+      for (const name of groupTables) {
+        if (!(name in tables))
+          throw new Error(`E2EE application is missing managed table "${name}"`);
+      }
+    }
     this.app = tables as DeviceTables;
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);
     initialSpacePrerequisites.set(db, async (recipientIds) => {

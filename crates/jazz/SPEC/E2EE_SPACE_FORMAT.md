@@ -15,6 +15,9 @@ hyphenated UUID. The UUID-v8 value names the root for this portable scope/row pa
 The random epoch and signed initial grant remain independent IDs.
 Replay recomputes this identity before accepting a root. A different ID is invalid
 even when its signature and initial grant are otherwise consistent.
+Creation and subsequent point lookups select the computed canonical ID.
+A wrong-ID proposal at the same address neither blocks canonical creation nor
+shadows an existing accepted root.
 
 Independent Python `hashlib` byte corpus (not a runtime qualification receipt):
 
@@ -65,6 +68,10 @@ the same authenticated graph replay as later group grants, not the initialiser.
 This extends initial selection without changing the signed field layout.
 Earlier self-grant-only readers reject non-creator initial grants, and earlier
 account-only readers reject initial group grants.
+A covered strict-before creator history with no accepted account root, an
+inactive author device or a mismatched author epoch makes a root ineligible.
+Missing authority coverage or history, unsupported verification mechanisms and
+operational verifier errors still fail the operation.
 Delivery requires a later accepted position and active
 sender/recipient devices in the preceding authenticated account history.
 The exact root author/device/account epoch may deliver the original space
@@ -171,6 +178,16 @@ enclosing status result and distinguishes missing, unusable and maintenance
 paths. Status never repairs a missing delivery or rotates a stale epoch.
 Its results describe the accepted per-path snapshots, not one atomic snapshot
 of all spaces or a guarantee against later changes.
+
+Recovery discovery reads raw grants to the recovering account and its accepted
+effective groups, including nested membership. The group graph and recipient-grant
+predicates share one globally accepted exclusive read; root IDs are fetched in
+bounded batches without limiting the result set. Each canonical candidate then
+receives fresh per-path replay. Removed grants remain discovery candidates, and
+missing key delivery does not hide a required path. Root authorship and delivered
+keys alone are not membership; unrelated application roots are not enumerated.
+The configured application may omit all group tables for account-only spaces,
+but a partial `groupSchema` is rejected rather than treated as empty membership.
 
 Recovery and device-delivery selection can skip a candidate that cannot be opened
 or whose current key cannot be confirmed. Synchronous adapter throws and rejected
