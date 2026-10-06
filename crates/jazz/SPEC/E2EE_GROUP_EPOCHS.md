@@ -133,6 +133,13 @@ Only authenticated replay determines effective recipients. This bounds the
 history materialised and verified by the SDK, not underlying database scan
 work: frozen-snapshot source reads can still scan unrelated table history.
 
+Expand membership frontiers with bounded UUID `IN` predicates, then read roots
+and successor history for the complete discovered component. Drain every input
+chunk within the same authoritative transaction, retaining empty predicates and
+paired settlement metadata. Chunking limits query registration size, not result
+count or traversal depth. Roots already returned by that invocation's account
+seed need not be read again.
+
 ### Required topology visibility
 
 Agreed: package-defined read policies expose group roots, membership edges
