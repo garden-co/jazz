@@ -72,6 +72,8 @@ pub enum UnauthenticatedCode {
     Missing,
     Invalid,
     Disabled,
+    /// Authentication could not be checked because its key service is unavailable.
+    Unavailable,
 }
 
 /// Structured unauthenticated response for runtime-facing HTTP endpoints.
@@ -111,6 +113,14 @@ impl UnauthenticatedResponse {
         Self {
             error: "unauthenticated",
             code: UnauthenticatedCode::Disabled,
+            message: message.into(),
+        }
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            error: "unauthenticated",
+            code: UnauthenticatedCode::Unavailable,
             message: message.into(),
         }
     }

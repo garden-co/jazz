@@ -42,7 +42,7 @@ use crate::server::ServerState;
 use jazz::tools::AppId;
 use jazz::tools::Session;
 use jazz::tools::identity;
-use jazz::tools::transport_error::UnauthenticatedResponse;
+use jazz::tools::transport_error::{UnauthenticatedCode, UnauthenticatedResponse};
 
 /// JWKS cache TTL — 5 minutes, matching the cloud server.
 pub const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -260,6 +260,8 @@ pub enum JwtError {
     Expired,
     /// Invalid token format or signature.
     Invalid(String),
+    /// No bounded keyset is available to decide whether the token is valid.
+    Unavailable(String),
 }
 
 impl std::fmt::Display for JwtError {
@@ -268,6 +270,7 @@ impl std::fmt::Display for JwtError {
             JwtError::NoKeyConfigured => write!(f, "No JWT validation key configured"),
             JwtError::Expired => write!(f, "JWT has expired"),
             JwtError::Invalid(msg) => write!(f, "Invalid JWT: {}", msg),
+            JwtError::Unavailable(msg) => write!(f, "JWT verification unavailable: {}", msg),
         }
     }
 }
@@ -766,6 +769,7 @@ impl FromRequestParts<Arc<ServerState>> for JwtAuth {
                 Err((StatusCode::UNAUTHORIZED, "JWT has expired".to_string()))
             }
             Err(JwtError::Invalid(message)) => Err((StatusCode::UNAUTHORIZED, message)),
+            Err(JwtError::Unavailable(message)) => Err((StatusCode::SERVICE_UNAVAILABLE, message)),
         }
     }
 }
@@ -833,7 +837,13 @@ impl FromRequestParts<Arc<ServerState>> for RequestSession {
             state.jwt_verifier.as_deref(),
         )
         .await
-        .map_err(|error| (StatusCode::UNAUTHORIZED, error.message))?;
+        .map_err(|error| {
+            let status = match error.code {
+                UnauthenticatedCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::UNAUTHORIZED,
+            };
+            (status, error.message)
+        })?;
         Ok(RequestSession(session))
     }
 }
@@ -1054,9 +1064,12 @@ pub async fn validate_jwt_with_cache_at(
     config: &AuthConfig,
     now_seconds: u64,
 ) -> Result<VerifiedJwt, JwtError> {
+    // A malformed header is a definitive denial even when JWKS is unavailable.
+    decode_header(token)
+        .map_err(|error| JwtError::Invalid(format!("invalid JWT header: {error}")))?;
     let cached_jwks = cache.load(false).await.map_err(|e| {
         warn!(error = %e, "failed to load cached JWKS");
-        JwtError::Invalid("unable to load JWKS".to_string())
+        JwtError::Unavailable("unable to load JWKS".to_string())
     })?;
 
     match verify_jwt_signature_with_jwks(token, &cached_jwks) {
@@ -1075,7 +1088,7 @@ pub async fn validate_jwt_with_cache_at(
 
     let refreshed_jwks = cache.load(true).await.map_err(|e| {
         warn!(error = %e, "failed to refresh JWKS");
-        JwtError::Invalid("unable to refresh JWKS".to_string())
+        JwtError::Unavailable("unable to refresh JWKS".to_string())
     })?;
 
     match verify_jwt_signature_with_jwks(token, &refreshed_jwks) {
@@ -1311,6 +1324,9 @@ pub async fn extract_session(
             }
             Err(JwtError::Invalid(message)) => {
                 return Err(UnauthenticatedResponse::invalid(message));
+            }
+            Err(JwtError::Unavailable(message)) => {
+                return Err(UnauthenticatedResponse::unavailable(message));
             }
         }
     }
