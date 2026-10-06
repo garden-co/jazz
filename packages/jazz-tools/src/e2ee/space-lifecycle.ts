@@ -213,8 +213,9 @@ export class Spaces {
     await this.groups?.warmMembership({ accountId: this.accountId });
     const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
       const own = await readPublicMembershipHistory(tx, this.accountId, this.tables);
+      // Deleted grants seed discovery only; live replay still proves membership.
       const direct = await tx.allSettledForE2ee(
-        this.tables.__e2ee_space_grants.where({
+        this.tables.__e2ee_space_grants.includeDeleted().where({
           recipientKind: "account",
           recipientId: this.accountId,
         }),
@@ -230,7 +231,7 @@ export class Spaces {
         let start = 0;
         do {
           const grants = await tx.allSettledForE2ee(
-            this.tables.__e2ee_space_grants.where({
+            this.tables.__e2ee_space_grants.includeDeleted().where({
               recipientKind: "group",
               recipientId: { in: groupIds.slice(start, start + recoveryIdBatchSize) },
             }),

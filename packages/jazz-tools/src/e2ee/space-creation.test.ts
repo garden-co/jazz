@@ -148,7 +148,7 @@ it("initialises a scoped space explicitly and delivers its key to approved devic
       await tx.commit().wait({ tier: "global" });
       await expect(
         creator.e2ee.explain({ scope: app.projects, identifier: other.id }),
-      ).rejects.toThrow();
+      ).resolves.toEqual({ state: "unavailable", reason: "space-not-found" });
       expect(await creator.e2ee.explain(target)).toEqual({ state: "ready" });
     } finally {
       key.fill(0);
