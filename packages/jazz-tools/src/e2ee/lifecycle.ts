@@ -687,6 +687,7 @@ export class E2ee {
             (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
             () => this.assertOpen(),
             {
+              id: provider.id,
               store: this.config.store,
               isKnownRevoked: () => this.approval!.isKnownRevoked(),
               load: provider.load,

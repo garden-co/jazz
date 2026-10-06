@@ -197,13 +197,24 @@ it("tries another protected recovery root when the first space delivery is unusa
     const implicit = await capture(() => observer.e2ee.recovery.use().wait());
     armed = false;
     const readiness = implicit.ok ? await observer.e2ee.explain(f.target) : undefined;
-    expect(failedRoot).toBeDefined();
     const other = f.roots.find((root) => root.rootId !== failedRoot);
+    if (!implicit.ok) {
+      // Diagnose a broken baseline without repeating recovery on the passing path.
+      try {
+        if (!failedRoot || !other) throw new Error("Missing independent second protector");
+        await observer.e2ee.recovery.use(other.material).wait();
+        expect(await observer.e2ee.explain(f.target)).toEqual({ state: "ready" });
+      } catch (diagnosticError) {
+        throw new AggregateError(
+          [implicit.error, diagnosticError],
+          "Implicit recovery and its independent-root diagnostic failed",
+          { cause: implicit.error },
+        );
+      }
+      throw implicit.error;
+    }
+    expect(failedRoot).toBeDefined();
     if (!other) throw new Error("Missing independent second protector");
-    // Prove the independent root works even on the baseline that aborts implicit use.
-    await observer.e2ee.recovery.use(other.material).wait();
-    expect(await observer.e2ee.explain(f.target)).toEqual({ state: "ready" });
-    if (!implicit.ok) throw implicit.error;
     expect(readiness).toEqual({ state: "ready" });
     expect(attempts).toContain(other.rootId);
     expect(opened).toContain(other.rootId);

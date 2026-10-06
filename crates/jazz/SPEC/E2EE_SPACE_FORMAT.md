@@ -154,8 +154,17 @@ sender's active device, both account epochs and the registered recovery root.
 The original-key initial-author exception is the same as for device delivery;
 it does not extend to successor keys. A valid signature alone is insufficient.
 
-Recovery creation backfills existing effective space memberships and opens
-their recovery envelopes before returning. Recovery use matches the material's
+Recovery creation captures accepted active-device and account-epoch state, then
+backfills effective space memberships. Its final read-only inspection opens the
+recovery envelopes and validates both every initially required space and every
+current path at that account epoch. It does not restore already-held keys into
+the creator's store or repeat maintenance during that proof. Lost required
+coverage, an epoch change or an unvalidated current path rejects creation.
+Recovery-root authority and epoch are checked even when discovery finds no
+spaces. These are accepted per-path observations, not an atomic all-space
+snapshot or a guarantee against changes after inspection.
+
+Recovery use matches the material's
 public keys and mechanisms to an accepted root, then confirms the current
 space key and its complete predecessor chain. It excludes removed memberships
 and sealed spaces, and rechecks current state before delivery or rotation.
