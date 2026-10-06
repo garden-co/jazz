@@ -2,8 +2,9 @@ import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
+import { createAccountManager } from "../accounts/create-account-manager.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { groupSchema } from "./groups.js";
 import { spaceSchema } from "./spaces.js";
@@ -39,7 +40,14 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
     policy.__e2ee_group_repairs.allowRead.always();
     policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const issuer = await startTestJwtIssuer();
+  const server = await startLocalJazzServer({
+    allowLocalFirstAuth: true,
+    inMemory: true,
+    jwksUrl: issuer.jwksUrl,
+    jwtIssuer: issuer.issuer,
+    jwtAudience: issuer.audience,
+  });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const store = () => {
     let value: string | null = null;
@@ -73,7 +81,17 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
       },
     });
     const alice = await localAccountConfig(server.appId, server.url);
-    const bob = await localAccountConfig(server.appId, server.url);
+    const bobAccounts = await createAccountManager({
+      appId: server.appId,
+      serverUrl: server.url,
+      store: store(),
+    });
+    const bob = {
+      appId: server.appId,
+      serverUrl: server.url,
+      account: await bobAccounts.registerJWT(issuer.jwtForUser("bob")),
+      driver: { type: "memory" as const },
+    };
     const creator = await createDb({ ...alice, e2ee: { app, store: store() } });
     const bobStore = store();
     const recipient = await createDb({ ...bob, e2ee: { app, store: bobStore } });
@@ -153,5 +171,6 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
+    await issuer.stop();
   }
 }, 60_000);
