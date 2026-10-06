@@ -52,6 +52,7 @@ type GroupKey = Pick<
 >;
 
 type GroupDevice = {
+  readonly id: string;
   store: AccountStore;
   isKnownRevoked(): boolean;
   load(): Promise<LocalDevice>;
@@ -260,23 +261,35 @@ export class Groups {
     await this.warmMembership(null);
     const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
       const own = await this.deviceStates(tx);
-      return this.readMembership(tx, null, own.publicHistory);
+      return { own, group: await this.readMembership(tx, null, own.publicHistory) };
     });
     const snapshot = await read.wait({ tier: "global" });
     this.assertOpen();
-    const graph = await this.acceptedGraph(snapshot);
-    const required: string[] = [];
+    if (!snapshot.own.active.has(this.requireDevice().id))
+      throw new Error("Group recovery requires an active device");
+    const graph = await this.acceptedGraph(snapshot.group);
+    const required = new Set<string>();
     for (const [id, membership] of graph) {
       if (!membership.members.has(this.accountId)) continue;
       const state = await this.explain(id);
       if (state.state !== "ready") throw new Error("Group key unavailable while creating recovery");
-      required.push(id);
+      required.add(id);
     }
-    await this.restoreRecovery(value, required);
+    // The creator already has ready keys. Prove the new recovery path without
+    // staging those keys again or repeating device-delivery maintenance.
+    const paths = await this.inspectRecovery(value, snapshot.own.epochId);
+    let allValidated = true;
+    for (const path of paths) {
+      required.delete(path.groupId);
+      if (path.validation !== "validated") allValidated = false;
+    }
+    if (required.size)
+      throw new Error("Required recovery group is no longer available to this member");
+    if (!allValidated) throw new Error("Group key unavailable while creating recovery");
   }
 
   /** Recovery private keys are used only for this operation, never saved to the device store. */
-  async restoreRecovery(value: string, required: string[] = []): Promise<void> {
+  async restoreRecovery(value: string): Promise<void> {
     const material = await decodeRecoveryMaterial(value, this.application, this.keys, this.signer);
     let device: LocalDevice | undefined;
     try {
@@ -292,25 +305,15 @@ export class Groups {
         throw new Error("Group recovery requires an active device");
       await this.checkRecoveryAuthority(material, discovered.own.publicHistory);
       const graph = await this.acceptedGraph(discovered.group);
-      const requiredIds = new Set(required);
-      for (const id of requiredIds) {
-        const state = graph.get(id);
-        if (!state || state.sealed || !state.members.has(this.accountId))
-          throw new Error("Required recovery group is no longer available to this member");
-      }
-      const ids = new Set(requiredIds);
+      const ids: string[] = [];
       for (const [id, state] of graph) {
-        if (!state.sealed && state.members.has(this.accountId)) ids.add(id);
+        if (!state.sealed && state.members.has(this.accountId)) ids.push(id);
       }
       for (const id of ids) {
         const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), {
           tier: "global",
         });
-        if (!observed) {
-          if (requiredIds.has(id))
-            throw new Error("Required recovery group is no longer available");
-          continue;
-        }
+        if (!observed) continue;
         await this.warmMembership(observed);
         const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
           const own = await this.deviceStates(tx);
@@ -334,11 +337,7 @@ export class Groups {
           throw new Error("Group recovery requires an active device");
         await this.checkRecoveryAuthority(material, snapshot.own.publicHistory);
         const membership = (await this.acceptedGraph(snapshot.group)).get(id);
-        if (!membership || membership.sealed || !membership.members.has(this.accountId)) {
-          if (requiredIds.has(id))
-            throw new Error("Required recovery group is no longer available to this member");
-          continue;
-        }
+        if (!membership || membership.sealed || !membership.members.has(this.accountId)) continue;
         if (snapshot.roots.rows[0]?.accountId !== observed.accountId)
           throw new Error("E2EE group creator changed");
         const { root, position } = await this.acceptedRoot(
@@ -370,7 +369,7 @@ export class Groups {
         }
         // Revalidate current membership and ordinary write permissions before delivery.
         const state = await this.explain(id);
-        if (state.state !== "ready" && (requiredIds.has(id) || state.state !== "refused"))
+        if (state.state !== "ready" && state.state !== "refused")
           throw new Error("Recovered group requires maintenance");
       }
     } finally {
