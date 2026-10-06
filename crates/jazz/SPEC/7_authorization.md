@@ -527,6 +527,16 @@ row and its filters hold under the same identity (`INV-RLS-9`).
 Policy joins may carry additional source-row equality correlations beyond their
 primary join key; these are part of the same join and must be enforced in direct
 evaluation, one-shot reads, and maintained subscription views.
+For a compound `ExistsRel` join, all ON equalities MUST hold for one tuple of
+participating source rows; separate witnesses for separate equalities do not
+authorize the protected row.
+This remains one witness tuple when relation groups occur in policy branches or
+under inherited-policy joins; lowering MUST preserve each group's source
+occurrences and equalities together.
+Secondary `ExistsRel` ON columns MUST resolve to declared columns of their exact
+source tables, and each secondary equality's logical column types MUST be
+comparable during public-schema conversion. The primary join equality remains
+subject to the existing query-join validation contract.
 
 Read and write policies are compiled as small boolean programs over policy
 atoms. The current atoms include plain column predicates, `reachable_via`, and
@@ -769,6 +779,33 @@ verified route/request correlation precede this internal receipt application.
   correlation id plus the advice value, never supporting rows, policy reasons,
   or hidden dependency facts. Advice is non-mutating and does not reserve or
   authorize the ordinary optimistic write that may follow (`INV-API-28`).
+- **Support-clause identity and lifetime.** One operation may require multiple
+  policy clauses. Each clause is identified by policy slot, canonical shape and
+  binding, so distinct slots remain separate even when their public shape and
+  binding IDs coincide. The aggregate receipt settles only after every clause
+  view is hydrated. Retained terminal support is bounded and reusable only for
+  the exact scope key, clause identity and captured authority cut; changed
+  policy provenance requires rehydrating its maintained view. Cached hydration
+  also retains the runtime token and physical-identity generation that produced
+  it, rather than relabelling old frames with current metadata. Every pending
+  frame revalidates that context and its admitted claim source: direct-link
+  claims, immutable delegated request claims, or a scope-isolated relay
+  capability and admission epoch. A stale sequence returns `Unknown` without
+  emitting its old aggregate receipt. Terminal-only proof subscriptions never
+  enter resume cursors; their old node owner releases them on detach.
+  Direct advice also retains its first-dispatch canonical claim values and
+  local revision through backpressure, retry, coalescing and reconnect. Both
+  must remain current before accepting support or a decision, including a
+  zero-clause decision; an A→B→A transition retires the original request as
+  `Unknown`. Delegated snapshots do not consult the local author-keyed map.
+  Local and serving-connection claim revisions are independent domains.
+  Authority receipt revisions advance the admitted authority floor only after
+  same-authority/epoch, support and monotonic-context registry admission; the
+  Core-owned active catalogue sequence remains a shared freshness check.
+  Claim-specific pruning keeps each alternative paired with its provenance;
+  it never turns an unsatisfiable OR policy into an unrestricted one.
+  Inherited compound witnesses resolve the referenced parent's row and column
+  correlations before admitting the child, preserving one same-parent witness.
 - **Safe local permission fail-fast.** A future client-local `Denied` may be
   added only when it is mechanically proven that every fact required for that
   rejection is locally complete (for example, proposed-row or structural facts).

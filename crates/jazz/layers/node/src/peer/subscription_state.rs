@@ -20,13 +20,18 @@ use super::super::node::{
     CoveredInputReceiver, LocalAuthorityReconciliation, PreparedQueryPlanHandle,
 };
 use super::super::protocol::{
-    AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, SubscriptionKey,
+    AuthorityResultKey, AuthorizationSupportScopeKey, KnownStateCompleteness,
+    KnownStateDeclaration, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, SubscriptionKey,
 };
-use super::super::query::{Binding, ValidatedQuery};
-use super::super::schema::TableSchema;
+use super::super::query::{Binding, BindingId, ShapeId, ValidatedQuery};
+use super::super::schema::{PolicySlot, TableSchema};
 use super::super::tx::{DurabilityTier, TxId};
 use crate::object::OutputOccurrenceId;
+
+pub(super) type AuthorizationSupportIdentity = (
+    AuthorizationSupportScopeKey,
+    (PolicySlot, ShapeId, BindingId),
+);
 
 pub(super) fn fast_current_membership_position(
     known_state: &Option<KnownStateDeclaration>,
@@ -133,6 +138,10 @@ pub(super) struct PeerSubscriptionState {
     /// deliberately separate from the source key: direct authorities may
     /// retain a D source without awaiting an upstream handoff.
     pub(super) awaiting_selected_authority_source: bool,
+    pub(super) authorization_support_identity: Option<AuthorizationSupportIdentity>,
+    /// Committed cut whose complete authorization support was installed by a
+    /// fresh maintained snapshot. A wire update's cut alone cannot advance it.
+    pub(super) authorization_support_materialized_cut: Option<super::super::time::GlobalTime>,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
     pub(super) supporting_revision: Option<[u8; 16]>,
     /// Shared Local-plus-authority provenance. Receiver/materialization state
@@ -151,6 +160,7 @@ pub(super) struct PeerSubscriptionState {
 
 impl PeerSubscriptionState {
     pub(super) fn clear_groove_runtime_handles(&mut self) {
+        self.authorization_support_materialized_cut = None;
         self.supporting_revision = None;
         self.maintained_subscription_view = None;
         if let Some(prepared_query) = &mut self.prepared_query {

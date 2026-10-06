@@ -183,6 +183,153 @@ pub(super) fn nested_join_source_id(join: &JoinVia, path: &str) -> SourceId {
         },
     }
 }
+fn policy_provenance_sources(
+    query: &JazzQuery,
+    provenance: &crate::schema::PolicyRelationProvenance,
+    join_prefix: &str,
+    branch_prefix: &str,
+) -> Result<BTreeMap<u32, SourceId>, Error> {
+    fn collect_join(
+        join: &JoinVia,
+        annotation: Option<&crate::schema::PolicyJoinProvenance>,
+        path: &str,
+        sources: &mut BTreeMap<u32, SourceId>,
+        occurrence_groups: &mut BTreeMap<u32, Option<u32>>,
+    ) -> Result<(), Error> {
+        if let Some(annotation) = annotation {
+            if annotation.table != join.table
+                || sources
+                    .insert(annotation.occurrence, nested_join_source_id(join, path))
+                    .is_some()
+                || occurrence_groups
+                    .insert(annotation.occurrence, annotation.group)
+                    .is_some()
+            {
+                return Err(Error::InvalidStoredValue(
+                    "policy join provenance is duplicate or table-mismatched",
+                ));
+            }
+            if annotation.nested.len() != join.nested_joins.len() {
+                return Err(Error::InvalidStoredValue(
+                    "policy nested-join provenance is incomplete",
+                ));
+            }
+            for (index, (nested, nested_annotation)) in
+                join.nested_joins.iter().zip(&annotation.nested).enumerate()
+            {
+                collect_join(
+                    nested,
+                    nested_annotation.as_ref(),
+                    &format!("{path}:nested:{index}"),
+                    sources,
+                    occurrence_groups,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_list(
+        joins: &[JoinVia],
+        annotations: &[Option<crate::schema::PolicyJoinProvenance>],
+        prefix: &str,
+        sources: &mut BTreeMap<u32, SourceId>,
+        occurrence_groups: &mut BTreeMap<u32, Option<u32>>,
+    ) -> Result<(), Error> {
+        if joins.len() != annotations.len() {
+            return Err(Error::InvalidStoredValue(
+                "policy join provenance does not match the canonical query",
+            ));
+        }
+        for (index, (join, annotation)) in joins.iter().zip(annotations).enumerate() {
+            let path = format!("{prefix}:join_via:{index}");
+            collect_join(join, annotation.as_ref(), &path, sources, occurrence_groups)?;
+        }
+        Ok(())
+    }
+
+    let mut sources = BTreeMap::new();
+    let mut occurrence_groups = BTreeMap::new();
+    collect_list(
+        &query.joins,
+        &provenance.joins,
+        join_prefix,
+        &mut sources,
+        &mut occurrence_groups,
+    )?;
+    if query.policy_branches.len() != provenance.branches.len() {
+        return Err(Error::InvalidStoredValue(
+            "policy branch provenance does not match the canonical query",
+        ));
+    }
+    for (index, (branch, annotation)) in query
+        .policy_branches
+        .iter()
+        .zip(&provenance.branches)
+        .enumerate()
+    {
+        match annotation {
+            Some(annotation) => collect_list(
+                &branch.joins,
+                &annotation.joins,
+                &format!("{branch_prefix}:{index}"),
+                &mut sources,
+                &mut occurrence_groups,
+            )?,
+            None if branch.joins.is_empty() => {}
+            None => {
+                return Err(Error::InvalidStoredValue(
+                    "policy branch joins are missing provenance",
+                ));
+            }
+        }
+    }
+    fn collect_groups<'a>(
+        provenance: &'a crate::schema::PolicyRelationProvenance,
+        groups: &mut Vec<&'a crate::schema::PolicyJoinGroup>,
+    ) {
+        groups.extend(&provenance.groups);
+        for branch in provenance.branches.iter().flatten() {
+            collect_groups(branch, groups);
+        }
+    }
+
+    let mut groups = Vec::new();
+    collect_groups(provenance, &mut groups);
+    let mut group_ids = BTreeSet::new();
+    for group in groups {
+        let members = group.occurrences.iter().copied().collect::<BTreeSet<_>>();
+        let tagged_members = occurrence_groups
+            .iter()
+            .filter_map(|(occurrence, group_id)| {
+                (*group_id == Some(group.id)).then_some(*occurrence)
+            })
+            .collect::<BTreeSet<_>>();
+        if !group_ids.insert(group.id)
+            || members.len() != group.occurrences.len()
+            || group.occurrences.iter().any(|id| !sources.contains_key(id))
+            || group.equalities.iter().any(|equality| {
+                !members.contains(&equality.left_occurrence)
+                    || !members.contains(&equality.right_occurrence)
+            })
+            || tagged_members != members
+        {
+            return Err(Error::InvalidStoredValue(
+                "policy join group provenance is incomplete",
+            ));
+        }
+    }
+    if occurrence_groups
+        .values()
+        .flatten()
+        .any(|group_id| !group_ids.contains(group_id))
+    {
+        return Err(Error::InvalidStoredValue(
+            "policy join annotation references a missing group",
+        ));
+    }
+    Ok(sources)
+}
 
 fn join_lookup_source_id(lookup: &crate::query::JoinSourceLookup, path: &str) -> SourceId {
     SourceId {
@@ -1754,8 +1901,18 @@ fn normalize_join_via_right(
     nested_contributions: &mut Vec<JoinContribution>,
     schema: &RuntimeSchema,
     join: &JoinVia,
+    annotation: Option<&crate::schema::PolicyJoinProvenance>,
+    groups: &[crate::schema::PolicyJoinGroup],
+    provenance_sources: Option<&BTreeMap<u32, SourceId>>,
     path: &str,
 ) -> Result<(RowSetNodeId, SourceId), Error> {
+    if let Some(annotation) = annotation
+        && (annotation.table != join.table || annotation.nested.len() != join.nested_joins.len())
+    {
+        return Err(Error::InvalidStoredValue(
+            "policy nested-join provenance is incomplete or table-mismatched",
+        ));
+    }
     let join_source = nested_join_source_id(join, path);
     auxiliary_sources.insert(join_source.clone());
     let table = table_schema(schema, &join.table)?;
@@ -1780,35 +1937,17 @@ fn normalize_join_via_right(
         current = filter_node;
     }
 
-    if let Some(lookup) = &join.source_lookup {
-        let lookup_source = join_lookup_source_id(lookup, path);
-        auxiliary_sources.insert(lookup_source.clone());
-        let lookup_source_node = RowSetNodeId(format!("{path}:lookup_source"));
-        nodes.insert(
-            lookup_source_node.clone(),
-            RowSetExpr::Source {
-                source: lookup_source.clone(),
-                visibility: RowVisibility::Visible,
-            },
-        );
-        let lookup_join_node = RowSetNodeId(format!("{path}:lookup_join"));
-        nodes.insert(
-            lookup_join_node.clone(),
-            RowSetExpr::Join {
-                left: current,
-                right: lookup_source_node,
-                mode: NormalizedJoinMode::Inner,
-                on: NormalizedPredicateExpr::Compare {
-                    left: join_via_target_key(&join_source, join),
-                    op: NormalizedComparisonOp::Eq,
-                    right: source_column_value(
-                        &lookup_source,
-                        &lookup.value_column,
-                        JoinTarget::Column,
-                    ),
-                },
-            },
-        );
+    let (lookup_input, lookup_source) = normalize_join_source_lookup(
+        nodes,
+        auxiliary_sources,
+        join,
+        &join_source,
+        current,
+        path,
+        &[],
+    );
+    current = lookup_input;
+    if let (Some(lookup_source), Some(lookup)) = (lookup_source, &join.source_lookup) {
         let lookup_project_node = RowSetNodeId(format!("{path}:lookup_project"));
         let mut columns = source_public_field_projections(table, &join_source);
         columns.push(RowProjection {
@@ -1818,7 +1957,7 @@ fn normalize_join_via_right(
         nodes.insert(
             lookup_project_node.clone(),
             RowSetExpr::Project {
-                input: lookup_join_node,
+                input: current,
                 columns,
             },
         );
@@ -1827,6 +1966,52 @@ fn normalize_join_via_right(
 
     for (nested_index, nested) in join.nested_joins.iter().enumerate() {
         let nested_path = format!("{path}:nested:{nested_index}");
+        let nested_annotation = annotation
+            .and_then(|annotation| annotation.nested.get(nested_index))
+            .and_then(Option::as_ref);
+        if let Some(nested_annotation) =
+            nested_annotation.filter(|annotation| annotation.group.is_some())
+        {
+            let group_id = nested_annotation.group.expect("checked above");
+            let mut matching_groups = groups.iter().filter(|group| group.id == group_id);
+            let group = matching_groups.next().ok_or(Error::InvalidStoredValue(
+                "policy join annotation has no group",
+            ))?;
+            if matching_groups.next().is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "policy join group id is duplicated",
+                ));
+            }
+            let all_sources = provenance_sources.ok_or(Error::InvalidStoredValue(
+                "policy join group sources are missing",
+            ))?;
+            current = normalize_policy_join_group(
+                nodes,
+                auxiliary_sources,
+                nested_contributions,
+                schema,
+                &join_source,
+                current,
+                &nested_path,
+                nested,
+                nested_annotation,
+                group,
+                all_sources,
+                true,
+                Some(join_source.clone()),
+            )?;
+            let project_node = RowSetNodeId(format!("{nested_path}:parent_project"));
+            nodes.insert(
+                project_node.clone(),
+                RowSetExpr::Project {
+                    input: current,
+                    columns: source_public_field_projections(table, &join_source),
+                },
+            );
+            current = project_node;
+            continue;
+        }
+
         let mut descendants = Vec::new();
         let (nested_right, nested_source) = normalize_join_via_right(
             nodes,
@@ -1834,10 +2019,11 @@ fn normalize_join_via_right(
             &mut descendants,
             schema,
             nested,
+            nested_annotation,
+            groups,
+            provenance_sources,
             &nested_path,
         )?;
-        // Publish parents before descendants so each nested source can be
-        // constrained to parent rows that actually contribute to visible roots.
         nested_contributions.push(JoinContribution {
             parent: Some(join_source.clone()),
             id: nested_path.clone(),
@@ -2392,6 +2578,9 @@ fn inherited_parent_source_id(table: &str, prefix: &str) -> SourceId {
 struct FilterJoinChain<'a> {
     pub(super) filters: &'a [Predicate],
     pub(super) joins: &'a [JoinVia],
+    pub(super) join_provenance: Option<&'a [Option<crate::schema::PolicyJoinProvenance>]>,
+    pub(super) groups: &'a [crate::schema::PolicyJoinGroup],
+    pub(super) provenance_sources: Option<&'a BTreeMap<u32, SourceId>>,
 }
 
 struct PolicyAtomChain<'a> {
@@ -2399,6 +2588,8 @@ struct PolicyAtomChain<'a> {
     pub(super) joins: &'a [JoinVia],
     pub(super) inherits: &'a [crate::query::InheritsVia],
     pub(super) reachable: &'a [crate::query::ReachableVia],
+    pub(super) provenance: Option<&'a crate::schema::PolicyRelationProvenance>,
+    pub(super) provenance_sources: Option<&'a BTreeMap<u32, SourceId>>,
 }
 
 /// The inheritance atoms expanded on the current policy-composition path.
@@ -2455,6 +2646,420 @@ fn normalize_false_policy_branch(
     node
 }
 
+fn collect_policy_join_group_sources<'a>(
+    join: &'a JoinVia,
+    annotation: &'a crate::schema::PolicyJoinProvenance,
+    group_id: u32,
+    all_sources: &BTreeMap<u32, SourceId>,
+    output: &mut BTreeMap<u32, (&'a JoinVia, SourceId)>,
+) -> Result<(), Error> {
+    if annotation.table != join.table {
+        return Err(Error::InvalidStoredValue(
+            "policy join provenance is table-mismatched",
+        ));
+    }
+    if annotation.group == Some(group_id) {
+        let source =
+            all_sources
+                .get(&annotation.occurrence)
+                .cloned()
+                .ok_or(Error::InvalidStoredValue(
+                    "policy join group source is missing",
+                ))?;
+        if output
+            .insert(annotation.occurrence, (join, source))
+            .is_some()
+        {
+            return Err(Error::InvalidStoredValue(
+                "policy join group source is duplicated",
+            ));
+        }
+    }
+    if annotation.nested.len() != join.nested_joins.len() {
+        return Err(Error::InvalidStoredValue(
+            "policy nested-join provenance is incomplete",
+        ));
+    }
+    for (nested, nested_annotation) in join.nested_joins.iter().zip(&annotation.nested) {
+        if let Some(nested_annotation) = nested_annotation {
+            collect_policy_join_group_sources(
+                nested,
+                nested_annotation,
+                group_id,
+                all_sources,
+                output,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve an inherited join's parent without discarding its source identity.
+/// Grouped witnesses need the parent's columns for outer correlations until the
+/// whole witness tuple has been checked; ordinary joins project afterwards.
+fn normalize_join_source_lookup(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
+    join: &JoinVia,
+    source: &SourceId,
+    input: RowSetNodeId,
+    path: &str,
+    parent_correlations: &[crate::query::JoinCorrelation],
+) -> (RowSetNodeId, Option<SourceId>) {
+    let Some(lookup) = &join.source_lookup else {
+        return (input, None);
+    };
+    let lookup_source = join_lookup_source_id(lookup, path);
+    auxiliary_sources.insert(lookup_source.clone());
+    let lookup_source_node = RowSetNodeId(format!("{path}:lookup_source"));
+    nodes.insert(
+        lookup_source_node.clone(),
+        RowSetExpr::Source {
+            source: lookup_source.clone(),
+            visibility: RowVisibility::Visible,
+        },
+    );
+    let mut predicate = NormalizedPredicateExpr::Compare {
+        left: join_via_target_key(source, join),
+        op: NormalizedComparisonOp::Eq,
+        right: source_column_value(&lookup_source, &lookup.value_column, JoinTarget::Column),
+    };
+    if !parent_correlations.is_empty() {
+        let mut predicates = Vec::with_capacity(1 + parent_correlations.len());
+        predicates.push(predicate);
+        predicates.extend(parent_correlations.iter().map(|correlation| {
+            NormalizedPredicateExpr::Compare {
+                left: source_column_value(source, &correlation.join_column, JoinTarget::Column),
+                op: NormalizedComparisonOp::Eq,
+                right: source_column_value(
+                    &lookup_source,
+                    &correlation.source_column,
+                    JoinTarget::Column,
+                ),
+            }
+        }));
+        predicate = NormalizedPredicateExpr::And(predicates);
+    }
+    let lookup_join_node = RowSetNodeId(format!("{path}:lookup_join"));
+    nodes.insert(
+        lookup_join_node.clone(),
+        RowSetExpr::Join {
+            left: input,
+            right: lookup_source_node,
+            mode: NormalizedJoinMode::Inner,
+            on: predicate,
+        },
+    );
+    (lookup_join_node, Some(lookup_source))
+}
+
+fn policy_join_source_input(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
+    schema: &RuntimeSchema,
+    join: &JoinVia,
+    source: &SourceId,
+    prefix: &str,
+    occurrence: u32,
+) -> Result<(RowSetNodeId, Option<SourceId>), Error> {
+    let source_node = RowSetNodeId(format!("{prefix}:occurrence:{occurrence}:source"));
+    nodes.insert(
+        source_node.clone(),
+        RowSetExpr::Source {
+            source: source.clone(),
+            visibility: RowVisibility::Visible,
+        },
+    );
+    let mut current = source_node;
+    if !join.filters.is_empty() {
+        let filter_node = RowSetNodeId(format!("{prefix}:occurrence:{occurrence}:filter"));
+        nodes.insert(
+            filter_node.clone(),
+            RowSetExpr::Filter {
+                input: current,
+                predicate: normalize_predicates(schema, source, &join.filters, false)?,
+            },
+        );
+        current = filter_node;
+    }
+    Ok(normalize_join_source_lookup(
+        nodes,
+        auxiliary_sources,
+        join,
+        source,
+        current,
+        &format!("{prefix}:occurrence:{occurrence}"),
+        &join.correlated_filters,
+    ))
+}
+
+fn policy_group_equality_predicate(
+    equality: &crate::schema::PolicyJoinEquality,
+    sources: &BTreeMap<u32, SourceId>,
+) -> Result<NormalizedPredicateExpr, Error> {
+    let left = sources
+        .get(&equality.left_occurrence)
+        .ok_or(Error::InvalidStoredValue(
+            "policy join equality has no left source",
+        ))?;
+    let right = sources
+        .get(&equality.right_occurrence)
+        .ok_or(Error::InvalidStoredValue(
+            "policy join equality has no right source",
+        ))?;
+    Ok(NormalizedPredicateExpr::Compare {
+        left: source_column_value(left, &equality.left_column, JoinTarget::Column),
+        op: NormalizedComparisonOp::Eq,
+        right: source_column_value(right, &equality.right_column, JoinTarget::Column),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalize_policy_join_group(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
+    join_contributions: &mut Vec<JoinContribution>,
+    schema: &RuntimeSchema,
+    root_source: &SourceId,
+    start: RowSetNodeId,
+    prefix: &str,
+    root_join: &JoinVia,
+    root_annotation: &crate::schema::PolicyJoinProvenance,
+    group: &crate::schema::PolicyJoinGroup,
+    all_sources: &BTreeMap<u32, SourceId>,
+    record_join_contributions: bool,
+    contribution_parent: Option<SourceId>,
+) -> Result<RowSetNodeId, Error> {
+    let mut group_sources = BTreeMap::new();
+    collect_policy_join_group_sources(
+        root_join,
+        root_annotation,
+        group.id,
+        all_sources,
+        &mut group_sources,
+    )?;
+    let members = group.occurrences.iter().copied().collect::<BTreeSet<_>>();
+    if members.len() != group.occurrences.len()
+        || group_sources.keys().copied().collect::<BTreeSet<_>>() != members
+        || !members.contains(&root_annotation.occurrence)
+    {
+        return Err(Error::InvalidStoredValue(
+            "policy join group sources do not match their annotation",
+        ));
+    }
+
+    let root_occurrence = root_annotation.occurrence;
+    let (root_relation_join, root_relation_source) =
+        group_sources
+            .get(&root_occurrence)
+            .ok_or(Error::InvalidStoredValue(
+                "policy join group root source is missing",
+            ))?;
+    auxiliary_sources.insert(root_relation_source.clone());
+    let (mut relation_current, root_lookup_source) = policy_join_source_input(
+        nodes,
+        auxiliary_sources,
+        schema,
+        root_relation_join,
+        root_relation_source,
+        prefix,
+        root_occurrence,
+    )?;
+    let mut lookup_projection = None;
+    let mut outer_membership = if let (Some(lookup_source), Some(lookup)) =
+        (&root_lookup_source, &root_join.source_lookup)
+    {
+        let mut columns = source_public_field_projections(
+            table_schema(schema, &root_relation_join.table)?,
+            root_relation_source,
+        );
+        columns.push(RowProjection {
+            output: typed_output_field(lookup.row_id_source_column.clone(), ColumnType::Uuid),
+            value: NormalizedValueRef::RowId(RowIdRef::Source(lookup_source.clone())),
+        });
+        lookup_projection = Some(columns);
+        NormalizedPredicateExpr::Compare {
+            left: source_column_value(
+                root_source,
+                &lookup.row_id_source_column,
+                JoinTarget::Column,
+            ),
+            op: NormalizedComparisonOp::Eq,
+            right: source_column_value(
+                root_relation_source,
+                &lookup.row_id_source_column,
+                JoinTarget::Column,
+            ),
+        }
+    } else {
+        join_via_predicate(root_source, root_relation_source, root_join)
+    };
+
+    let mut included = BTreeSet::from([root_occurrence]);
+    let mut remaining = members;
+    remaining.remove(&root_occurrence);
+    while !remaining.is_empty() {
+        let next_occurrence = remaining.iter().copied().find(|candidate| {
+            group.equalities.iter().any(|equality| {
+                (equality.left_occurrence == *candidate
+                    && included.contains(&equality.right_occurrence))
+                    || (equality.right_occurrence == *candidate
+                        && included.contains(&equality.left_occurrence))
+            })
+        });
+        let Some(next_occurrence) = next_occurrence else {
+            return Err(Error::InvalidStoredValue(
+                "policy join group is not connected to its root",
+            ));
+        };
+        let (next_join, next_source) =
+            group_sources
+                .get(&next_occurrence)
+                .ok_or(Error::InvalidStoredValue(
+                    "policy join group source is missing",
+                ))?;
+        auxiliary_sources.insert(next_source.clone());
+        let (next_input, next_lookup_source) = policy_join_source_input(
+            nodes,
+            auxiliary_sources,
+            schema,
+            next_join,
+            next_source,
+            prefix,
+            next_occurrence,
+        )?;
+        if let (Some(lookup_source), Some(lookup)) = (&next_lookup_source, &next_join.source_lookup)
+        {
+            if lookup_projection.is_none() {
+                lookup_projection = Some(source_public_field_projections(
+                    table_schema(schema, &root_relation_join.table)?,
+                    root_relation_source,
+                ));
+            }
+            if let Some(columns) = &mut lookup_projection {
+                columns.push(RowProjection {
+                    output: typed_output_field(
+                        lookup.row_id_source_column.clone(),
+                        ColumnType::Uuid,
+                    ),
+                    value: NormalizedValueRef::RowId(RowIdRef::Source(lookup_source.clone())),
+                });
+            }
+            let membership = NormalizedPredicateExpr::Compare {
+                left: source_column_value(
+                    root_source,
+                    &lookup.row_id_source_column,
+                    JoinTarget::Column,
+                ),
+                op: NormalizedComparisonOp::Eq,
+                right: source_column_value(
+                    root_relation_source,
+                    &lookup.row_id_source_column,
+                    JoinTarget::Column,
+                ),
+            };
+            outer_membership = match outer_membership {
+                NormalizedPredicateExpr::And(mut predicates) => {
+                    predicates.push(membership);
+                    NormalizedPredicateExpr::And(predicates)
+                }
+                predicate => NormalizedPredicateExpr::And(vec![predicate, membership]),
+            };
+        }
+        let mut predicates = group
+            .equalities
+            .iter()
+            .filter(|equality| {
+                (equality.left_occurrence == next_occurrence
+                    && included.contains(&equality.right_occurrence))
+                    || (equality.right_occurrence == next_occurrence
+                        && included.contains(&equality.left_occurrence))
+            })
+            .map(|equality| policy_group_equality_predicate(equality, all_sources))
+            .collect::<Result<Vec<_>, _>>()?;
+        if next_lookup_source.is_none() {
+            predicates.extend(next_join.correlated_filters.iter().map(|correlation| {
+                NormalizedPredicateExpr::Compare {
+                    left: source_column_value(
+                        root_source,
+                        &correlation.source_column,
+                        JoinTarget::Column,
+                    ),
+                    op: NormalizedComparisonOp::Eq,
+                    right: source_column_value(
+                        next_source,
+                        &correlation.join_column,
+                        JoinTarget::Column,
+                    ),
+                }
+            }));
+        }
+        if predicates.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "policy join group source has no equality to its witness",
+            ));
+        }
+        let next_node = RowSetNodeId(format!(
+            "{prefix}:group:{}:occurrence:{next_occurrence}:join",
+            group.id
+        ));
+        nodes.insert(
+            next_node.clone(),
+            RowSetExpr::Join {
+                left: relation_current,
+                right: next_input,
+                mode: NormalizedJoinMode::Inner,
+                on: if predicates.len() == 1 {
+                    predicates.remove(0)
+                } else {
+                    NormalizedPredicateExpr::And(predicates)
+                },
+            },
+        );
+        relation_current = next_node;
+        included.insert(next_occurrence);
+        remaining.remove(&next_occurrence);
+    }
+    if let Some(columns) = lookup_projection {
+        // Finish checking the same witness tuple before publishing the looked-up
+        // parent ID as a named right-relation key, as ordinary lookup joins do.
+        let project_node = RowSetNodeId(format!("{prefix}:group:{}:lookup_project", group.id));
+        nodes.insert(
+            project_node.clone(),
+            RowSetExpr::Project {
+                input: relation_current,
+                columns,
+            },
+        );
+        relation_current = project_node;
+    }
+
+    if record_join_contributions {
+        join_contributions.push(JoinContribution {
+            parent: contribution_parent.clone(),
+            id: format!("{prefix}:join_via:group:{}", group.id),
+            source: root_relation_source.clone(),
+            input: relation_current.clone(),
+            membership: outer_membership.clone(),
+        });
+    }
+    let join_node = RowSetNodeId(format!("{prefix}:join_via:group:{}:join", group.id));
+    nodes.insert(
+        join_node.clone(),
+        RowSetExpr::Join {
+            left: start,
+            right: relation_current,
+            mode: if root_join.target == JoinTarget::Uncorrelated {
+                NormalizedJoinMode::Semi
+            } else {
+                NormalizedJoinMode::Inner
+            },
+            on: outer_membership,
+        },
+    );
+    Ok(join_node)
+}
+
 fn normalize_filter_join_chain(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
@@ -2485,6 +3090,42 @@ fn normalize_filter_join_chain(
         } else {
             format!("{prefix}:join_via:{index}")
         };
+        let annotation = chain
+            .join_provenance
+            .and_then(|annotations| annotations.get(index))
+            .and_then(Option::as_ref);
+        if let Some(annotation) = annotation {
+            if let Some(group_id) = annotation.group {
+                let mut matching_groups = chain.groups.iter().filter(|group| group.id == group_id);
+                let group = matching_groups.next().ok_or(Error::InvalidStoredValue(
+                    "policy join annotation has no group",
+                ))?;
+                if matching_groups.next().is_some() {
+                    return Err(Error::InvalidStoredValue(
+                        "policy join group id is duplicated",
+                    ));
+                }
+                let all_sources = chain.provenance_sources.ok_or(Error::InvalidStoredValue(
+                    "policy join group sources are missing",
+                ))?;
+                current = normalize_policy_join_group(
+                    nodes,
+                    auxiliary_sources,
+                    join_contributions,
+                    schema,
+                    root_source,
+                    current,
+                    &path,
+                    join,
+                    annotation,
+                    group,
+                    all_sources,
+                    record_join_contributions,
+                    None,
+                )?;
+                continue;
+            }
+        }
         let mut nested_contributions = Vec::new();
         let (right, join_source) = normalize_join_via_right(
             nodes,
@@ -2492,6 +3133,9 @@ fn normalize_filter_join_chain(
             &mut nested_contributions,
             schema,
             join,
+            annotation,
+            chain.groups,
+            chain.provenance_sources,
             &path,
         )?;
         let join_predicate = join_via_predicate(root_source, &join_source, join);
@@ -2553,6 +3197,13 @@ fn normalize_policy_atom_chain(
         FilterJoinChain {
             filters: chain.filters,
             joins: chain.joins,
+            join_provenance: chain
+                .provenance
+                .map(|provenance| provenance.joins.as_slice()),
+            groups: chain
+                .provenance
+                .map_or(&[], |provenance| provenance.groups.as_slice()),
+            provenance_sources: chain.provenance_sources,
         },
         record_join_contributions,
     )?;
@@ -2649,6 +3300,27 @@ fn normalize_inherited_parent_policy(
             parent_table.write_policies.delete_using.as_ref()
         }
     };
+    let parent_policy_slot = match inherits.operation {
+        crate::query::InheritsOperation::Select => crate::schema::PolicySlot::SelectUsing,
+        crate::query::InheritsOperation::Insert => crate::schema::PolicySlot::InsertWithCheck,
+        crate::query::InheritsOperation::Update => crate::schema::PolicySlot::UpdateUsing,
+        crate::query::InheritsOperation::Delete => crate::schema::PolicySlot::DeleteUsing,
+    };
+    let parent_policy_provenance = schema
+        .policy_provenance
+        .get(&(parent_table_name.clone(), parent_policy_slot));
+    let parent_policy_provenance_sources =
+        if let (Some(policy), Some(provenance)) = (parent_policy, parent_policy_provenance) {
+            let policy_prefix = format!("{prefix}:parent_policy");
+            Some(policy_provenance_sources(
+                policy,
+                provenance,
+                &policy_prefix,
+                &format!("{policy_prefix}:policy_branch"),
+            )?)
+        } else {
+            None
+        };
     if let Some(policy) = parent_policy {
         parent_current = if !policy.policy_branches.is_empty() {
             normalize_policy_branch_authorization(
@@ -2662,6 +3334,8 @@ fn normalize_inherited_parent_policy(
                 parent_current,
                 &format!("{prefix}:parent_policy"),
                 policy,
+                parent_policy_provenance,
+                parent_policy_provenance_sources.as_ref(),
                 binding_source_shape,
                 param_types,
                 &parent_inheritance_path,
@@ -2682,6 +3356,8 @@ fn normalize_inherited_parent_policy(
                     joins: &policy.joins,
                     inherits: &policy.inherits,
                     reachable: &policy.reachable,
+                    provenance: parent_policy_provenance,
+                    provenance_sources: parent_policy_provenance_sources.as_ref(),
                 },
                 binding_source_shape,
                 param_types,
@@ -2738,6 +3414,8 @@ fn normalize_policy_branch_authorization(
     current: RowSetNodeId,
     prefix: &str,
     policy: &JazzQuery,
+    provenance: Option<&crate::schema::PolicyRelationProvenance>,
+    provenance_sources: Option<&BTreeMap<u32, SourceId>>,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
     inheritance_path: &InheritanceExpansionPath,
@@ -2767,6 +3445,8 @@ fn normalize_policy_branch_authorization(
                 joins: &policy.joins,
                 inherits: &policy.inherits,
                 reachable: &policy.reachable,
+                provenance,
+                provenance_sources,
             },
             binding_source_shape,
             param_types,
@@ -2814,6 +3494,10 @@ fn normalize_policy_branch_authorization(
                 joins: &branch.joins,
                 inherits: &branch.inherits,
                 reachable: &branch.reachable,
+                provenance: provenance
+                    .and_then(|provenance| provenance.branches.get(index))
+                    .and_then(Option::as_ref),
+                provenance_sources,
             },
             binding_source_shape,
             param_types,
@@ -2973,7 +3657,14 @@ where
                 .schema
         };
         let query = shape.query();
-        if let Some(relation) = &query.relation
+        let provenance_sources = shape
+            .policy_provenance()
+            .map(|provenance| {
+                policy_provenance_sources(query, provenance, "query", "policy_branch")
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if let Some(relation) = query.relation.as_ref()
             && crate::query::relation_union_parts(&relation.rel).is_some()
         {
             return self.normalized_relation_union_row_set_shape(shape, relation, _binding, schema);
@@ -3002,7 +3693,8 @@ where
             &query.filters
         };
         let unsupported_policy_branch = unsupported_policy_branch_reason(query);
-        let policy_factors = (unsupported_policy_branch.is_none()
+        let policy_factors = (shape.policy_provenance().is_none()
+            && unsupported_policy_branch.is_none()
             && policy_branch_base_is_converter_false(query))
         .then(|| super::policy_factoring::factor_policy_branches(&query.policy_branches))
         .flatten();
@@ -3037,6 +3729,8 @@ where
                             joins: &alternative.joins,
                             inherits: &alternative.inherits,
                             reachable: &alternative.reachable,
+                            provenance: None,
+                            provenance_sources: None,
                         },
                         &binding_source_shape,
                         shape.params(),
@@ -3112,6 +3806,8 @@ where
                         joins: &query.joins,
                         inherits: &query.inherits,
                         reachable: &query.reachable,
+                        provenance: shape.policy_provenance(),
+                        provenance_sources: shape.policy_provenance().map(|_| &provenance_sources),
                     },
                     &binding_source_shape,
                     shape.params(),
@@ -3159,6 +3855,11 @@ where
                         joins: &branch.joins,
                         inherits: &branch.inherits,
                         reachable: &branch.reachable,
+                        provenance: shape
+                            .policy_provenance()
+                            .and_then(|provenance| provenance.branches.get(index))
+                            .and_then(Option::as_ref),
+                        provenance_sources: shape.policy_provenance().map(|_| &provenance_sources),
                     },
                     &binding_source_shape,
                     shape.params(),
@@ -3223,6 +3924,8 @@ where
                     joins: &query.joins,
                     inherits: &query.inherits,
                     reachable: &query.reachable,
+                    provenance: shape.policy_provenance(),
+                    provenance_sources: shape.policy_provenance().map(|_| &provenance_sources),
                 },
                 &binding_source_shape,
                 shape.params(),
@@ -3518,10 +4221,17 @@ where
             current = aggregate_node;
         }
 
+        let mut canonical = shape.canonical_bytes().to_vec();
+        if let Some(provenance) = shape.policy_provenance() {
+            let encoded = postcard::to_allocvec(provenance)
+                .map_err(|_| Error::InvalidStoredValue("policy provenance serialization failed"))?;
+            canonical.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+            canonical.extend_from_slice(&encoded);
+        }
         let mut normalized = NormalizedRowSetShape {
             identity: NormalizedShapeIdentity {
                 shape_id: shape.shape_id(),
-                canonical: shape.canonical_bytes().to_vec(),
+                canonical,
             },
             root: current,
             result: ResultId::RealRow {

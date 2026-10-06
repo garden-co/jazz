@@ -464,6 +464,10 @@ first non-pending update is a complete supporting snapshot. Ordinary successors
 carry physical additions/removals and an exact predecessor revision; they do not
 resend the complete scope. An independent recovery snapshot can replace a lost
 chain. Opening-pending is a lifecycle notification, not an empty dataset.
+An admitted subscription awaiting a published permissions head MUST still
+receive this pending progress through the ordinary retained delivery path,
+including when its first transport admission is backpressured. The notification
+MUST NOT establish settled coverage or replace the later complete opening.
 
 Each supporting row identifies its permanent physical table UUID, authored
 record table name, row UUID, transaction, concrete content or deletion layer,

@@ -1,43 +1,69 @@
 fn normalize_query(query: &Query) -> Query {
+    normalize_query_with_provenance(query, None)
+        .expect("queries without provenance always have aligned annotations")
+}
+
+fn normalize_policy_query(
+    query: &Query,
+    provenance: &mut crate::schema::PolicyRelationProvenance,
+) -> Result<Query, QueryError> {
+    normalize_query_with_provenance(query, Some(provenance))
+}
+
+fn normalize_query_with_provenance(
+    query: &Query,
+    provenance: Option<&mut crate::schema::PolicyRelationProvenance>,
+) -> Result<Query, QueryError> {
     let mut query = query.clone();
     query.filters.sort_by_key(canonical_predicate_key);
-    for join in &mut query.joins {
-        join.filters.sort_by_key(canonical_predicate_key);
-        normalize_join(join);
-    }
-    query.joins.sort_by_key(canonical_join_key);
-    for branch in &mut query.policy_branches {
-        branch.filters.sort_by_key(canonical_predicate_key);
-        for join in &mut branch.joins {
-            join.filters.sort_by_key(canonical_predicate_key);
-            normalize_join(join);
+    if let Some(provenance) = provenance {
+        normalize_join_list(&mut query.joins, Some(&mut provenance.joins))?;
+        if query.policy_branches.len() != provenance.branches.len() {
+            return Err(QueryError::UnsupportedRelationQuery(
+                "policy provenance does not match canonical policy branches".to_owned(),
+            ));
         }
-        branch.joins.sort_by_key(canonical_join_key);
-        for reachable in &mut branch.reachable {
-            reachable
-                .access_filters
-                .sort_by_key(canonical_predicate_key);
-            reachable.edge_filters.sort_by_key(canonical_predicate_key);
-            if let Some(seed) = &mut reachable.seed {
-                seed.filters.sort_by_key(canonical_predicate_key);
+        let mut branches = query
+            .policy_branches
+            .into_iter()
+            .zip(std::mem::take(&mut provenance.branches))
+            .collect::<Vec<_>>();
+        for (branch, branch_provenance) in &mut branches {
+            branch.filters.sort_by_key(canonical_predicate_key);
+            if let Some(branch_provenance) = branch_provenance {
+                normalize_join_list(&mut branch.joins, Some(&mut branch_provenance.joins))?;
+            } else {
+                normalize_join_list(&mut branch.joins, None)?;
             }
+            normalize_reachable(&mut branch.reachable);
+            branch.reachable.sort_by_key(canonical_reachable_key);
+            branch.inherits.sort_by_key(canonical_inherits_key);
+            branch.inherits.dedup();
         }
-        branch.reachable.sort_by_key(canonical_reachable_key);
-        branch.inherits.sort_by_key(canonical_inherits_key);
-        branch.inherits.dedup();
-    }
-    query
-        .policy_branches
-        .sort_by_key(canonical_policy_branch_key);
-    for reachable in &mut query.reachable {
-        reachable
-            .access_filters
-            .sort_by_key(canonical_predicate_key);
-        reachable.edge_filters.sort_by_key(canonical_predicate_key);
-        if let Some(seed) = &mut reachable.seed {
-            seed.filters.sort_by_key(canonical_predicate_key);
+        branches.sort_by_key(|(branch, _)| canonical_policy_branch_key(branch));
+        query.policy_branches = branches
+            .iter()
+            .map(|(branch, _)| branch.clone())
+            .collect();
+        provenance.branches = branches
+            .into_iter()
+            .map(|(_, provenance)| provenance)
+            .collect();
+    } else {
+        normalize_join_list(&mut query.joins, None)?;
+        for branch in &mut query.policy_branches {
+            branch.filters.sort_by_key(canonical_predicate_key);
+            normalize_join_list(&mut branch.joins, None)?;
+            normalize_reachable(&mut branch.reachable);
+            branch.reachable.sort_by_key(canonical_reachable_key);
+            branch.inherits.sort_by_key(canonical_inherits_key);
+            branch.inherits.dedup();
         }
+        query
+            .policy_branches
+            .sort_by_key(canonical_policy_branch_key);
     }
+    normalize_reachable(&mut query.reachable);
     query.reachable.sort_by_key(canonical_reachable_key);
     query.inherits.sort_by_key(canonical_inherits_key);
     query.inherits.dedup();
@@ -57,7 +83,55 @@ fn normalize_query(query: &Query) -> Query {
     if let Some(aggregate) = &mut query.aggregate {
         aggregate.aggregates.sort_by_key(canonical_aggregate_key);
     }
-    query
+    Ok(query)
+}
+
+fn normalize_reachable(reachable: &mut [ReachableVia]) {
+    for item in reachable {
+        item.access_filters.sort_by_key(canonical_predicate_key);
+        item.edge_filters.sort_by_key(canonical_predicate_key);
+        if let Some(seed) = &mut item.seed {
+            seed.filters.sort_by_key(canonical_predicate_key);
+        }
+    }
+}
+
+fn normalize_join_list(
+    joins: &mut Vec<JoinVia>,
+    provenance: Option<&mut Vec<Option<crate::schema::PolicyJoinProvenance>>>,
+) -> Result<(), QueryError> {
+    if let Some(provenance) = provenance {
+        if joins.len() != provenance.len() {
+            return Err(QueryError::UnsupportedRelationQuery(
+                "policy provenance does not match canonical joins".to_owned(),
+            ));
+        }
+        let mut pairs = joins
+            .drain(..)
+            .zip(std::mem::take(provenance))
+            .collect::<Vec<_>>();
+        for (join, annotation) in &mut pairs {
+            join.filters.sort_by_key(canonical_predicate_key);
+            join.correlated_filters
+                .sort_by_key(canonical_join_correlation_key);
+            if let Some(annotation) = annotation {
+                normalize_join_list(&mut join.nested_joins, Some(&mut annotation.nested))?;
+            } else {
+                normalize_join_list(&mut join.nested_joins, None)?;
+            }
+        }
+        pairs.sort_by_key(|(join, _)| canonical_join_key(join));
+        *joins = pairs.iter().map(|(join, _)| join.clone()).collect();
+        *provenance = pairs.into_iter().map(|(_, annotation)| annotation).collect();
+        Ok(())
+    } else {
+        for join in joins.iter_mut() {
+            join.filters.sort_by_key(canonical_predicate_key);
+            normalize_join(join);
+        }
+        joins.sort_by_key(canonical_join_key);
+        Ok(())
+    }
 }
 
 fn normalize_array_subquery(subquery: &mut ArraySubquery) {

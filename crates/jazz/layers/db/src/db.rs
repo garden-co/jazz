@@ -2691,6 +2691,10 @@ enum PendingUpstreamCommand {
         /// A fresh request binds its claims when its selected authority admits
         /// it; a reconnect must preserve the original immutable binding.
         session_claim_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        /// Captured with direct claim values at first dispatch, then preserved
+        /// across backpressure/reconnect. None is also used before allocation
+        /// and for delegated immutable snapshots.
+        local_claim_revision: Option<u64>,
         /// A backend-selected snapshot which must cross the upstream boundary.
         /// This remains separate from the locally captured lease binding: direct
         /// sessions authenticate at transport admission and never self-delegate.
@@ -2817,21 +2821,6 @@ struct RelaySubscriptionRejection {
     reason: SubscribeRejectReason,
 }
 
-/// Authority-derived scope identity retained for a support subscription.
-/// Never constructed from the caller's wire payload.
-#[derive(Clone, Debug, PartialEq)]
-struct AuthorizedScopePurpose {
-    key: crate::protocol::AuthorizationSupportScopeKey,
-    operation: crate::protocol::AuthorizationOperationKey,
-    action: PermissionAdviceAction,
-    expected_support: BTreeSet<(ShapeId, BindingId)>,
-}
-
-// Compatibility spelling retained for module-local tests while the actual
-// implementation is the shared authority proof primitive.
-#[cfg(test)]
-type ScopeAggregate = AuthorityScopeAggregate;
-
 /// One receipt-bound authorization operation owned by one admitted upstream.
 ///
 /// This state deliberately lives on `ConnectionLink::Upstream`: a receipt is
@@ -2844,6 +2833,10 @@ struct AuthorizationScopeLeaseRequest {
     /// operation is allocated. Receipts are evaluated on an Upstream link,
     /// which has no subscriber-side ambient claims to consult.
     session_claim_binding: (AuthorSubject, BTreeMap<String, Value>),
+    /// Some for direct claims, captured in the local Node revision domain.
+    /// None means a delegated immutable snapshot, not unchecked direct claims.
+    /// This stamp never supplies an authority receipt revision.
+    local_claim_revision: Option<u64>,
     /// Present only for a host-admitted backend or scope-isolated relay request.
     delegated_session: Option<crate::protocol::DelegatedSessionBinding>,
     /// Every local caller sharing this authority hydration.  The first id is
@@ -2861,6 +2854,22 @@ struct AuthorizationScopeLeaseRequest {
     applied_clauses: BTreeMap<u16, (SubscriptionKey, crate::time::GlobalTime, u64)>,
 }
 
+/// NodeState's monotone setter advances the revision on every global claim
+/// value change. Values and revision are captured under one borrow at first
+/// dispatch, so revision equality also proves those values remain unchanged.
+/// A missing stamp is valid only for an immutable delegated request.
+fn authorization_scope_claim_binding_is_current<S: OrderedKvStorage>(
+    node: &NodeState<S>,
+    binding: &(AuthorSubject, BTreeMap<String, Value>),
+    local_claim_revision: Option<u64>,
+    delegated_session: bool,
+) -> bool {
+    match local_claim_revision {
+        Some(revision) => !delegated_session && node.session_claim_revision(binding.0) == revision,
+        None => delegated_session,
+    }
+}
+
 /// Per-upstream admission manager for scope receipts and their retained leases.
 #[derive(Default)]
 struct AuthorizationScopeLeaseManager {
@@ -2869,13 +2878,16 @@ struct AuthorizationScopeLeaseManager {
 }
 
 /// One authority-compiled support hydration retained only while every
-/// authority revision and global cut it represents remains current.  It is
-/// keyed by the support scope rather than the candidate operation, so distinct
-/// rows/patches can reuse hydration but still evaluate their own action.
+/// authority revision, global cut, runtime and physical catalogue generation
+/// it represents remains current. It is keyed by the support scope rather than
+/// the candidate operation, so rows/patches can reuse hydration but still
+/// evaluate their own action.
 #[derive(Clone)]
 struct ServedAuthorizationScopeHydration {
     clauses: Vec<ServedAuthorizationScopeClause>,
     receipt: AuthorizationScopeReceipt,
+    runtime_token: u64,
+    physical_identity_generation: u64,
 }
 
 #[derive(Clone)]
@@ -6951,4 +6963,4 @@ fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
 mod tests;
 
 #[cfg(test)]
-use crate::{protocol::VersionRecord, tx::Transaction};
+use crate::tx::Transaction;

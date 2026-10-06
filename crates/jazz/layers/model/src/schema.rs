@@ -88,6 +88,7 @@ impl JazzSchema {
             table.read_policy = None;
             table.write_policies = Default::default();
         }
+        schema.runtime.policy_provenance.clear();
         schema
     }
 
@@ -134,6 +135,7 @@ impl JazzSchema {
             table.read_policy = selected.read_policy.clone();
             table.write_policies = selected.write_policies.clone();
         }
+        schema.runtime.policy_provenance = selected.runtime.policy_provenance.clone();
         schema
     }
 
@@ -188,17 +190,71 @@ impl Deref for JazzSchema {
     }
 }
 
+/// Exact operation slot from which a runtime policy query was compiled.
+#[doc(hidden)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum PolicySlot {
+    SelectUsing,
+    InsertWithCheck,
+    UpdateUsing,
+    UpdateWithCheck,
+    DeleteUsing,
+}
+
+/// Source-occurrence identity attached to one generated policy join.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PolicyJoinProvenance {
+    pub occurrence: u32,
+    pub table: String,
+    pub group: Option<u32>,
+    pub nested: Vec<Option<PolicyJoinProvenance>>,
+}
+
+/// One source column equality in a compound ExistsRel join.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PolicyJoinEquality {
+    pub left_occurrence: u32,
+    pub left_column: String,
+    pub right_occurrence: u32,
+    pub right_column: String,
+}
+
+/// Same-witness relation occurrences and ON equalities for one ExistsRel.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PolicyJoinGroup {
+    pub id: u32,
+    pub occurrences: Vec<u32>,
+    pub equalities: Vec<PolicyJoinEquality>,
+}
+
+/// Provenance aligned with a compiled policy query and its alternatives.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PolicyRelationProvenance {
+    pub joins: Vec<Option<PolicyJoinProvenance>>,
+    pub branches: Vec<Option<PolicyRelationProvenance>>,
+    pub groups: Vec<PolicyJoinGroup>,
+}
+
 /// Compiled logical schema used internally by the Jazz engine.
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct RuntimeSchema {
     /// Application tables in the schema.
     pub tables: Vec<TableSchema>,
+    /// Derived, private annotations paired with policy queries by exact slot.
+    #[doc(hidden)]
+    pub policy_provenance: BTreeMap<(String, PolicySlot), PolicyRelationProvenance>,
 }
 
 impl PartialEq for RuntimeSchema {
     fn eq(&self, other: &Self) -> bool {
-        self.tables == other.tables
+        self.tables == other.tables && self.policy_provenance == other.policy_provenance
     }
 }
 
@@ -208,10 +264,13 @@ impl RuntimeSchema {
     pub fn new(tables: impl IntoIterator<Item = TableSchema>) -> Self {
         Self {
             tables: tables.into_iter().collect(),
+            policy_provenance: BTreeMap::new(),
         }
         .validated()
     }
+}
 
+impl RuntimeSchema {
     /// Project a named selector onto one table and validate its exact branch key.
     pub fn project_branch_selector(
         &self,
