@@ -4,6 +4,16 @@ This layer exposes explicit lifecycle and atomic preparation, not automatic encr
 ordinary operations. Every history decision completes an authority-settled read; no
 durable accepted-history cache exists yet.
 
+Completed public replay proofs may be reused only for matching authority input,
+account contexts, verifier identity and mechanism, with distinct authority cutoffs.
+The snapshot-owned cache basis is detached from working replay bytes and returned
+states. Cache admission rechecks working input and verifier configuration after
+replay; changed input cannot publish a proof for the pristine basis. This includes
+nested group replay. Coverage, device eligibility and private keys remain live
+checks. Delivery rows are authenticated independently rather than included in
+the membership-cache comparison for every candidate; settlement indexes remain
+table-qualified.
+
 ## Deterministic root identity, version 1
 
 Before signing an initial root, encode the exact compact JSON array
