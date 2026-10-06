@@ -88,6 +88,13 @@ devices; it does not add a different envelope encoding. Historical delivery
 validation replays group membership strictly before the delivery position.
 Relevant group roots, membership records, successors and account histories are
 covered by the same enclosing exclusive transaction as the space records.
+Discovery uses explicit recipient-ID scopes, not the initializer's own group
+memberships. Initial preparation covers the complete requested set; later reads
+cover every historical group-grant candidate plus prospective recipients,
+including removed grants needed for historical replay. Account histories remain
+independently checked for ambiguity. Filtering malformed query operands must not
+discard raw grant records or turn an empty group scope into application-wide
+discovery. Only authenticated replay establishes recipient eligibility.
 An explicit account grant is retained separately from inherited group access.
 Stale/sealed groups or changed pinned epochs require maintenance. Space
 successors are described below. Space inspection attempts one eligible group
