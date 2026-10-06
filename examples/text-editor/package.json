@@ -1,0 +1,35 @@
+{
+  "name": "text-editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "vitest bench --run --config vitest.config.bench.ts",
+    "dev": "vite",
+    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.10.0",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.38.0",
+    "jazz-tools": "workspace:*",
+    "lib0": "^0.2.119",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "y-codemirror.next": "^0.3.5",
+    "yjs": "^13.6.27"
+  },
+  "devDependencies": {
+    "@codspeed/vitest-plugin": "^5.7.1",
+    "@playwright/test": "^1.58.2",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

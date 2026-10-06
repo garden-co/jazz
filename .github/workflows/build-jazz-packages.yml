@@ -89,12 +89,46 @@ jobs:
           zig objcopy --strip-debug debug-symbols/${{ matrix.output }} dist/${{ matrix.output }}
           ls -l debug-symbols/${{ matrix.output }} dist/${{ matrix.output }}
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+          if-no-files-found: error
+
+      # Named outside the `jazz-tools-*` pattern the package job downloads.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: debug-symbols-${{ matrix.output }}
+          path: debug-symbols/${{ matrix.output }}
+          if-no-files-found: error
+
+  check-linux-heap-profile:
+    name: Check heap profiling in the Linux CLI (${{ matrix.arch }})
+    needs: build-linux
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: blacksmith-4vcpu-ubuntu-2404
+            artifact: jazz-tools-linux-x64
+          # Jazz Cloud runs the arm64 build.
+          - arch: arm64
+            os: blacksmith-4vcpu-ubuntu-2404-arm
+            artifact: jazz-tools-linux-arm64
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+
       - name: Check heap profiling in the shipped binary
-        if: matrix.arch == 'x64'
         run: |
           set -euo pipefail
+          chmod +x ./dist/${{ matrix.artifact }}
           # Sample every allocation so startup allocations are always present.
-          JAZZ_HEAP_PROFILE_SAMPLE_BYTES=1 ./dist/${{ matrix.output }} server 00000000-0000-0000-0000-000000000001 \
+          JAZZ_HEAP_PROFILE_SAMPLE_BYTES=1 ./dist/${{ matrix.artifact }} server 00000000-0000-0000-0000-000000000001 \
             --in-memory --port 1625 --admin-secret heap-check \
             --diagnostics-listen 127.0.0.1:6060 --diagnostics-token heap-scrape \
             > server.log 2>&1 &
@@ -111,23 +145,12 @@ jobs:
             --header 'Authorization: Bearer heap-scrape' \
             http://127.0.0.1:6060/debug/pprof/heap
           for profile in public.pb.gz diagnostics.pb.gz; do
-            # Function names come from the stripped binary's symbol table.
+            # Function names come from the stripped binary's symbol table,
+            # and frame-pointer stacks reach the threads' entry points.
             gzip --decompress --stdout "$profile" > profile.pb
             grep --quiet --text 'jazz_server' profile.pb
+            grep --quiet --text '__rust_begin_short_backtrace' profile.pb
           done
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ${{ matrix.output }}
-          path: dist/${{ matrix.output }}
-          if-no-files-found: error
-
-      # Named outside the `jazz-tools-*` pattern the package job downloads.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: debug-symbols-${{ matrix.output }}
-          path: debug-symbols/${{ matrix.output }}
-          if-no-files-found: error
 
   build-macos:
     name: Build CLI macOS (${{ matrix.arch }})
@@ -356,6 +379,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs:
       - build-linux
+      - check-linux-heap-profile
       - build-macos
       - build-wasm
       - build-napi

@@ -288,7 +288,7 @@ After `reconnect()`, pending writes are sent to the server and writes missed fro
 a migration between the current server schema and the new schema. This makes it possible to test clients with different schemas.
 
 ```typescript custom="noscroll"
-import { createDb, schema as s, type Db } from "jazz-tools";
+import { createDb, schema as s, migration as m, type Db } from "jazz-tools";
 import { deploy, startLocalJazzServer } from "jazz-tools/testing";
 import { describe, expect, it, vi } from "vitest";
 
@@ -335,14 +335,14 @@ describe("migrations", () => {
     let oldDb: Db | undefined;
     let newDb: Db | undefined;
 
-    const migration = s.defineMigration({
+    const migration = m.defineMigration({
       fromHash: await oldApp.schemaHash,
       toHash: await newApp.schemaHash,
       from: oldSchema,
       to: newSchema,
       migrate: {
         todos: {
-          tags: s.add.array({ of: s.string(), default: [] }),
+          tags: m.add.array({ of: s.string(), default: [] }),
         },
       },
     });

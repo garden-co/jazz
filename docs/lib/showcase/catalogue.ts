@@ -1,4 +1,13 @@
 import { formatTime } from "../perf-timeline/model.ts";
+import bandBookWalkthrough from "../../scripts/example-videos/walkthroughs/band-book.storyboard.ts";
+import bandChatWalkthrough from "../../scripts/example-videos/walkthroughs/band-chat.storyboard.ts";
+import bigLabelWalkthrough from "../../scripts/example-videos/walkthroughs/big-label.storyboard.ts";
+import epicDropWalkthrough from "../../scripts/example-videos/walkthroughs/epic-drop.storyboard.ts";
+import jamazonWalkthrough from "../../scripts/example-videos/walkthroughs/jamazon.storyboard.ts";
+import posterShopWalkthrough from "../../scripts/example-videos/walkthroughs/poster-shop.storyboard.ts";
+import stagePlanWalkthrough from "../../scripts/example-videos/walkthroughs/stage-plan.storyboard.ts";
+import wequencerWalkthrough from "../../scripts/example-videos/walkthroughs/wequencer.storyboard.ts";
+import worldTourWalkthrough from "../../scripts/example-videos/walkthroughs/world-tour.storyboard.ts";
 
 /** Looks up another benchmark's headline seconds, for metrics that compare two cases. */
 export type Lookup = (benchmarkName: string) => number | null;
@@ -19,10 +28,11 @@ export type HeroMetric = {
 export type HeroVideo = {
   /**
    * An H.264 MP4 under docs/public, at most MAX_BYTES (scripts/example-videos/encode.mjs).
-   * Written by `pnpm --filter docs capture:example-videos` or encoded from a walkthrough recording.
+   * Rendered by `pnpm render:walkthroughs <id>` from scripts/example-videos/walkthroughs/.
    */
   src: string;
   poster: string;
+  /** The storyboard's `summary`, so it always describes what the video shows. */
   caption: string;
 };
 
@@ -49,7 +59,7 @@ export type HeroExample = {
   plannedMetrics?: string;
 };
 
-// Interpretations are given the /5 estimate like every displayed time.
+// Interpretations receive native /5 estimates or measured browser wall time.
 // Ratios need none: the divisor cancels out.
 const t = (seconds: number) => formatTime(seconds);
 const rate = (count: number, seconds: number) =>
@@ -78,8 +88,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/band-chat.mp4",
       poster: "/examples/videos/band-chat.jpg",
-      caption:
-        "A guest asks to join a room, the creator admits them, history appears, and after removal the guest's offline send is rejected.",
+      caption: bandChatWalkthrough.summary,
     },
     metrics: [
       {
@@ -132,8 +141,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/stage-plan.mp4",
       poster: "/examples/videos/stage-plan.jpg",
-      caption:
-        "A crew chief and a crew member in two browsers: the invite link, card moves on each other's board, and edits made with Sync off arriving once it's back on.",
+      caption: stagePlanWalkthrough.summary,
     },
     metrics: [
       {
@@ -181,8 +189,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/band-book.mp4",
       poster: "/examples/videos/band-book.jpg",
-      caption:
-        'A bandmate shares one song with a "Can edit" link; the guest sees only that song and its subpage, and typing shows up in both copies live.',
+      caption: bandBookWalkthrough.summary,
     },
     metrics: [
       {
@@ -219,8 +226,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/world-tour.mp4",
       poster: "/examples/videos/world-tour.jpg",
-      caption:
-        "The tour manager sees all 12 stops while a fan with the public link sees only the confirmed ones; a stop the manager confirms appears on the fan's globe live.",
+      caption: worldTourWalkthrough.summary,
     },
     metrics: [
       {
@@ -250,8 +256,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/wequencer.mp4",
       poster: "/examples/videos/wequencer.jpg",
-      caption:
-        "Two bandmates in one session: pattern edits, Play, tempo and mutes follow on both screens.",
+      caption: wequencerWalkthrough.summary,
     },
     metrics: [
       {
@@ -275,6 +280,45 @@ export const heroExamples: HeroExample[] = [
     ],
   },
   {
+    id: "text-editor",
+    title: "Collaborative text editor",
+    tagline: "Yjs text editing with incremental updates stored in Jazz.",
+    description:
+      "A minimal React and CodeMirror editor. Each editing session appends Yjs updates to its own binary log in Jazz, so separate offline sessions can merge their changes when they reconnect.",
+    highlights: [
+      "Edit the same document in multiple browsers",
+      "Keep editing offline and merge changes on reconnect",
+      "Restore text and CRDT state from incremental binary logs",
+    ],
+    sources: [
+      { label: "React app", path: "examples/text-editor" },
+      { label: "Browser benchmarks", path: "examples/text-editor/benchmarks" },
+    ],
+    benchmarks: "examples/text-editor/benchmarks",
+    video: null,
+    plannedVideo: "Two browsers edit a shared document, go offline, and merge their changes.",
+    metrics: [
+      {
+        benchmark: "text_editor_open_browser[100000]",
+        label: "Open 100,000 edits",
+        interpret: (s) =>
+          `A fresh browser context opens a document with 100,000 stored Yjs updates and reaches an editable CodeMirror view in ${t(s)}. Includes application startup, Jazz delivery and Yjs replay on a localhost server.`,
+      },
+      {
+        benchmark: "text_editor_reload_browser[100000]",
+        label: "Reload while offline",
+        interpret: (s) =>
+          `Reloading the same history from the browser's local database, with WebSockets blocked, takes ${t(s)}. The Yjs document is reconstructed on every reload.`,
+      },
+      {
+        benchmark: "text_editor_sync_edit_browser[100000]",
+        label: "Sync one new edit",
+        interpret: (s) =>
+          `Inserting one character in a loaded document until a second browser displays it takes ${t(s)}. Both browsers already hold the 100,000-edit history.`,
+      },
+    ],
+  },
+  {
     id: "poster-shop",
     title: "PosterShop",
     tagline: "A collaborative gig-poster canvas with layers, shapes and live cursors.",
@@ -293,8 +337,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/poster-shop.mp4",
       poster: "/examples/videos/poster-shop.jpg",
-      caption:
-        "A second editor joins by invite link; her cursor and edits arrive live, then an image upload, a checkpoint and a reload with everything kept.",
+      caption: posterShopWalkthrough.summary,
     },
     metrics: [
       {
@@ -371,8 +414,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/epic-drop.mp4",
       poster: "/examples/videos/epic-drop.jpg",
-      caption:
-        'Uploads and previews in a shared folder; a second account joins by "Can edit" link, and uploads and renames sync both ways.',
+      caption: epicDropWalkthrough.summary,
     },
     metrics: [
       {
@@ -410,8 +452,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/jamazon.mp4",
       poster: "/examples/videos/jamazon.jpg",
-      caption:
-        "A guest cart carried into a new account, a quantity change arriving from a second device, an offline edit, then checkout and the order's timeline updating live.",
+      caption: jamazonWalkthrough.summary,
     },
     metrics: [],
     plannedMetrics:
@@ -502,8 +543,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/big-label.mp4",
       poster: "/examples/videos/big-label.jpg",
-      caption:
-        "An admin adds a viewer by email; the label appears in the viewer's menu live, read-only, and a new artist shows up without a reload.",
+      caption: bigLabelWalkthrough.summary,
     },
     metrics: [
       {

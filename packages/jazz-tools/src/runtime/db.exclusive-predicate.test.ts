@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
@@ -41,7 +42,7 @@ it("inserts an ordinary parent and child atomically after adding a table", async
       ...target,
       schema: newApp,
       permissions: newPermissions,
-      migration: s.defineMigration({ from: before, to: after, createTables: { notes: true } }),
+      migration: m.defineMigration({ from: before, to: after, createTables: { notes: true } }),
     });
     db = await createDb(account);
     await db.all(newApp.projects, { tier: "remote" });

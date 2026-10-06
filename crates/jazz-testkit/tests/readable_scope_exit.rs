@@ -935,7 +935,6 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                 authority.admin_secret(),
                 &schema,
                 [("tasks".into(), denied)],
-                None,
             )
             .await;
             wait_for_subscription_update(
@@ -963,7 +962,6 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                 authority.admin_secret(),
                 &schema,
                 restored,
-                None,
             )
             .await;
             wait_for_subscription_update(
