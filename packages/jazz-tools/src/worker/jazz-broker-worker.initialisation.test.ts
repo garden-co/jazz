@@ -470,6 +470,9 @@ async function subscriberResponses(port: TestPort): Promise<unknown[]> {
   return event.frames.map((frame) => JSON.parse(new TextDecoder().decode(frame)));
 }
 
+/** Tabs present a credential upstream; only a retained account's tab opens without one. */
+const TAB_AUTH = '{"jwt_token":"tab-token"}';
+
 function options(dbName: string): BrowserWorkerInitOptions {
   return {
     schema: {},
@@ -479,7 +482,7 @@ function options(dbName: string): BrowserWorkerInitOptions {
     appId: "worker-initialization-test",
     storageOwner: "worker-initialization-test-owner",
     authSessionKey: "session",
-    authJson: "{}",
+    authJson: TAB_AUTH,
     sessionClaims: {},
   };
 }
@@ -2774,7 +2777,7 @@ describe("broker worker context initialization", () => {
     editor.port.emitMessage({
       type: "reconnect",
       id: 2,
-      authJson: "{}",
+      authJson: TAB_AUTH,
       sessionClaims: {},
     });
     await Promise.resolve();
@@ -2793,6 +2796,64 @@ describe("broker worker context initialization", () => {
         explicitlyDisconnected: false,
       });
     }
+  });
+
+  it("dials the server only once a retained account's tab supplies its first credential", async () => {
+    const base = { ...options("retained-first-credential"), serverUrl: "ws://server.test" };
+    // A tab reopening a retained account before its provider answers. The
+    // server would reject a credential-less connection as a terminal failure
+    // and end every remote subscription, so nothing may dial yet.
+    const retained = await connect({ ...base, authJson: '{"jwt_token":null}' }, "retained-tab");
+    await initializeFollower(retained.port, 1);
+    const runtime = mocks.runtimes[0]!;
+    retained.port.emitMessage({
+      type: "reconnect",
+      id: 2,
+      authJson: '{"jwt_token":null}',
+      sessionClaims: {},
+    });
+    await retained.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    expect(runtime.connect).not.toHaveBeenCalled();
+
+    // Revalidation binds the provider JWT: that update dials, with it.
+    const restored = retained.port.waitForEvent((event) => event.type === "auth-restored");
+    retained.port.emitMessage({
+      type: "update-auth",
+      authJson: '{"jwt_token":"revalidated"}',
+      sessionClaims: { role: "editor" },
+    });
+    await restored;
+    expect(runtime.connect).toHaveBeenCalledOnce();
+    expect(runtime.connect).toHaveBeenCalledWith("ws://server.test", '{"jwt_token":"revalidated"}');
+    expect(runtime.updateAuth).not.toHaveBeenCalled();
+  });
+
+  it("keeps a sibling tab's credential when a tab joins without one, but takes any real credential", async () => {
+    const base = { ...options("retained-tab-credential"), serverUrl: "ws://server.test" };
+    const signedIn = await connect(
+      { ...base, authJson: '{"jwt_token":"sibling"}' },
+      "signed-in-tab",
+    );
+    await initializeFollower(signedIn.port, 1);
+    const runtime = mocks.runtimes[0]!;
+    await vi.waitFor(() =>
+      expect(runtime.connect).toHaveBeenCalledWith("ws://server.test", '{"jwt_token":"sibling"}'),
+    );
+    runtime.updateAuth.mockClear();
+
+    // A tab reopening a retained account before its provider answers.
+    await connect({ ...base, authJson: '{"jwt_token":null}' }, "retained-tab");
+    expect(runtime.updateAuth).not.toHaveBeenCalled();
+
+    for (const authJson of [
+      '{"jwt_token":null,"admin_secret":"admin"}',
+      '{"jwt_token":null,"backend_secret":"backend"}',
+      '{"jwt_token":"fresh"}',
+    ]) {
+      await connect({ ...base, authJson }, `credential-tab-${authJson.length}`);
+      expect(runtime.updateAuth).toHaveBeenLastCalledWith(authJson);
+    }
+    expect(runtime.updateAuth).toHaveBeenCalledTimes(3);
   });
 
   it("publishes reconnected claims to every tab only after upstream admission", async () => {

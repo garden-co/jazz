@@ -67,6 +67,7 @@ import {
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
+  isRetainedAccountSessionInput,
 } from "./client-session.js";
 import { createBrowserPhysicalDatabaseName } from "./browser-worker-config.js";
 import {
@@ -3256,7 +3257,15 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       resolvedConfig = { ...configWithoutAuth, jwtToken };
       setTrustedReservedSession(resolvedConfig, trustedReservedSession);
     }
-  } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
+  } else if (
+    !config.jwtToken &&
+    !config.cookieSession &&
+    !config.adminSecret &&
+    !isRetainedAccountSessionInput({
+      ...config,
+      trustedReservedSession: getTrustedReservedSession(config),
+    })
+  ) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
     // Admin-secret clients intentionally stay sessionless so local policy
     // evaluation does not preempt backend-authorized transport writes.
