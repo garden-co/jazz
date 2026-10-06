@@ -1615,7 +1615,7 @@ mod tests {
                 .await
                 .expect("joined request must receive completion without hanging");
             assert_eq!(
-                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(actual.map(|loaded| loaded.set)).unwrap(),
                 serde_json::to_value(&expected).unwrap()
             );
         }
