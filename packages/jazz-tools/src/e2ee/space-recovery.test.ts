@@ -11,6 +11,7 @@ import fixture from "./fixtures/local-space-recovery-v1.json";
 for (const scenario of [
   "ordinary",
   "read-only-recovered-device",
+  "read-only-creator-store",
   "malformed-recovery-candidates",
   "unrelated-invalid-root",
 ] as const) {
@@ -55,12 +56,18 @@ for (const scenario of [
       const clients: Awaited<ReturnType<typeof createDb>>[] = [];
       const store = () => {
         let saved: string | null = JSON.stringify(fixture);
+        let readOnly = false;
         return {
           async read() {
             return saved;
           },
           async update(transform: (current: string | null) => string) {
-            saved = transform(saved);
+            const next = transform(saved);
+            if (readOnly && next !== saved) throw new Error("Creator key store is read-only");
+            saved = next;
+          },
+          freeze() {
+            readOnly = true;
           },
         };
       };
@@ -73,7 +80,8 @@ for (const scenario of [
           permissions: { ...deviceRequestPermissions, ...policies },
         });
         const account = await localAccountConfig(server.appId, server.url);
-        const first = await createDb({ ...account, e2ee: { app, store: store() } });
+        const creatorStore = store();
+        const first = await createDb({ ...account, e2ee: { app, store: creatorStore } });
         clients.push(first);
         await first.e2ee.devices.list();
         const project = await first
@@ -82,6 +90,7 @@ for (const scenario of [
         await first.e2ee.spaces.grant(app.projects, project.id, account.account.id).wait();
         const target = { scope: app.projects, identifier: project.id };
         expect(await first.e2ee.explain(target)).toEqual({ state: "ready" });
+        if (scenario === "read-only-creator-store") creatorStore.freeze();
         const { material } = await first.e2ee.recovery.create().wait();
         if (scenario === "unrelated-invalid-root") {
           const [root] = await first.all(app.__e2ee_spaces, { tier: "remote" });
