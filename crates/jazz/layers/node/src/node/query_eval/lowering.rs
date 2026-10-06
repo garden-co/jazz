@@ -317,7 +317,6 @@ pub(super) fn fact_public_fields(
             let mut fields = vec![
                 schema.synthetic.table_field.clone(),
                 schema.synthetic.row_field.clone(),
-                schema.synthetic.replacement_field.clone(),
             ];
             fields.extend(
                 schema
