@@ -54,7 +54,7 @@ The example concatenates the Yjs updates emitted by `doc.on("update")`. `lib0` s
 
 [Yjs updates](https://docs.yjs.dev/api/document-updates) can be applied in any order and more than once. Once every client has received all the updates, their documents converge.
 
-To persist and sync Yjs updates, append them to the session's log using Jazz's [partial updates](TODO: link to "Editing a page of a large value" section in /writing-data.mdx). Keep track of the current append position in the log to avoid overriding your own changes.
+To persist and sync Yjs updates, append them to the session's log using Jazz's [partial updates](/docs/writing/writing-data#editing-a-page-of-a-large-value). Keep track of the current append position in the log to avoid overriding your own changes.
 
 To receive updates from other collaborators, subscribe to the current document's logs and remember how many bytes of each log have been processed. Apply only the new tail. Mark updates received from Jazz with a transaction origin, so they are not written back as new local updates.
 
@@ -111,5 +111,3 @@ useEffect(() => {
   };
 }, [db, id]);
 ```
-
-Import `EditorState` from `@codemirror/state`, `EditorView` from `@codemirror/view`, `yCollab` from `y-codemirror.next`, and `connect` from your provider. Import Yjs as `Y` and the React hooks as usual. The [complete editor](https://github.com/garden-co/jazz/blob/main/examples/text-editor/src/main.tsx) also includes keyboard shortcuts, loading and error states, and the Jazz session provider.
