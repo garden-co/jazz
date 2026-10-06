@@ -79,6 +79,16 @@ new recovery path to verify it. A missing
 key or denied required publication rejects the operation; already accepted
 account recovery records are not rolled back by a later group failure.
 
+Creation then reuses the read-only recovery inspector to authenticate the new
+path for every current effective membership. It retains the initially ready
+group IDs and rejects if any is absent or any current path is unavailable.
+The creating device must be active in the initial globally accepted snapshot,
+even when there are no groups; final inspection must observe the same account
+epoch. This proves protection without restaging keys on an already-ready
+creator or repeating device-delivery maintenance solely for verification.
+The proof is relative to its accepted snapshots, not a guarantee against later
+membership changes.
+
 Explicit and local-first protected recovery both validate the retained root,
 current group membership, delivery eligibility at its acceptance position, and
 the decrypted epoch and predecessor chain. The recovered group key is staged
@@ -89,9 +99,9 @@ private-key buffers are cleared in `finally` and are not saved in that store.
 Restoration discovers work from accepted effective membership, never from an
 unvalidated delivery's group ID. An unrelated ineligible proposal therefore
 cannot force direct authentication of a group outside the recovery set.
-Required groups remain required through discovery, per-group settled reads and
-final readiness. Ordinary recovery may skip a non-required membership that was
-removed, but protection cannot report success after losing a required group.
+Ordinary restoration may skip a membership that has since been removed.
+Creation retains its required group set through final inspection and cannot
+report successful protection after losing required coverage.
 
 When eligible group delivery candidates are exhausted, the group owner reports
 `recovery-group-delivery-unavailable`. Local-first recovery may then try another
@@ -130,9 +140,9 @@ capable member supplies the key. The retry protects both groups; a fresh device
 then restores the child and inherited parent after all old clients shut down.
 A required group becoming refused or unavailable during protection rejects the
 operation rather than silently shrinking its coverage.
-`group-recovery-membership.test.ts` pauses restoration after readiness collection,
-removes membership through another authorised account, and requires protection
-to reject after the removal is globally accepted.
+`group-recovery-membership.test.ts` pauses final recovery-path verification after
+readiness collection, removes membership through another authorised account,
+and requires protection to reject after the removal is globally accepted.
 
 ### Read-only recovery coverage
 

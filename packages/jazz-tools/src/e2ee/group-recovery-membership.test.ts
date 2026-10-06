@@ -265,7 +265,7 @@ it("rejects recovery creation when a required ready group loses membership", asy
       expect(first).toBe("gate");
       expect(hits).toBe(1);
       expect(completed).toBe(false);
-      // This material check belongs to restoration, after protection collected ready groups.
+      // Final recovery-path verification starts after protection collected ready groups.
       // Public removal waits for global acceptance before the native adapter resumes.
       await administrator.e2ee.groups
         .remove(groupId, { kind: "account", id: ownerAccount.account.id })

@@ -32,3 +32,8 @@ operational errors.
 Batch scoped topology reads instead of reopening root and epoch queries for
 every visited group. Drain bounded UUID-input chunks without limiting graph
 coverage or weakening exclusive acceptance.
+
+Verify newly created group recovery coverage without restaging the creator's
+already-ready keys or repeating delivery maintenance. Preserve required-group
+coverage, active-device eligibility and account-epoch consistency; ordinary
+device restoration remains unchanged.
