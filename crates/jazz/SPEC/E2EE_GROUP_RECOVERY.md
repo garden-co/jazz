@@ -86,6 +86,18 @@ in the existing account-scoped local store. Normal group loading revalidates
 membership and performs ordinary-policy-governed device delivery. Recovery
 private-key buffers are cleared in `finally` and are not saved in that store.
 
+Restoration discovers work from accepted effective membership, never from an
+unvalidated delivery's group ID. An unrelated ineligible proposal therefore
+cannot force direct authentication of a group outside the recovery set.
+Required groups remain required through discovery, per-group settled reads and
+final readiness. Ordinary recovery may skip a non-required membership that was
+removed, but protection cannot report success after losing a required group.
+
+When eligible group delivery candidates are exhausted, the group owner reports
+`recovery-group-delivery-unavailable`. Local-first recovery may then try another
+protector. This candidate classification does not include required-group loss,
+coverage, staging, maintenance or signature-verifier failures.
+
 A recovered staged key must authenticate the accepted epoch and predecessor
 history before readiness can tolerate a maintenance write being rejected.
 If ordinary policy denies device delivery with `permission_denied`, an otherwise
@@ -117,8 +129,10 @@ that parent. Validated graph discovery now rejects the recovery wait until a
 capable member supplies the key. The retry protects both groups; a fresh device
 then restores the child and inherited parent after all old clients shut down.
 A required group becoming refused or unavailable during protection rejects the
-operation rather than silently shrinking its coverage. Concurrent membership
-changes during that process still require dedicated qualification.
+operation rather than silently shrinking its coverage.
+`group-recovery-membership.test.ts` pauses restoration after readiness collection,
+removes membership through another authorised account, and requires protection
+to reject after the removal is globally accepted.
 
 ### Read-only recovery coverage
 
@@ -138,10 +152,12 @@ memberships are excluded. Authority/coverage failures reject the inspection;
 they are not interpreted as an empty group set or an unusable delivery. This
 includes signer failures while replaying predecessor history. Candidate key
 opening, unwrapping and key-confirmation failures instead make that delivery
-unusable. The key-envelope interface does not distinguish authentication failures
-from other rejected adapter reads. A changed account epoch during inspection
-requires retry. Status does not guarantee that state remains current after the
-reported snapshots or that another registered root was checked.
+unusable, whether the adapter throws before returning or rejects its Promise.
+The key-envelope interface does not distinguish authentication failures from
+other failed adapter reads. These guards surround only the key operation, not
+framing, authority replay or signature verification. A changed account epoch
+during inspection requires retry. Status does not guarantee that state remains
+current after the reported snapshots or that another registered root was checked.
 
 ## Qualification and open questions
 

@@ -5,6 +5,7 @@ import { PersistedWriteRejectedError } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { replayGroupGraph, validGroupGraph } from "./group-graph.js";
+import { collectGroupHistory } from "./group-history.js";
 import type { DeviceTables } from "./device-requests.js";
 import type { DeviceKeyLifetime, LocalDevice } from "./local-device.js";
 import type { DeviceSigner, KeyEnvelope } from "./types.js";
@@ -12,6 +13,7 @@ import { sameSnapshotValue } from "./public-snapshot.js";
 import type {
   GroupTables,
   GroupRoot,
+  GroupMember,
   GroupMembership,
   GroupDelivery,
   GroupRecoveryDelivery,
@@ -36,7 +38,7 @@ import {
 } from "./group-format.js";
 import { loadStagedGroupKey, stageGroupKey } from "./local-group-keys.js";
 import { decodeRecoveryMaterial, type DecodedRecoveryMaterial } from "./recovery-format.js";
-import { E2eeRecoveryError } from "./recovery-error.js";
+import { E2eeRecoveryError, RecoveryCandidateError } from "./recovery-error.js";
 import { groupRecoveryContext, groupRecoveryBytes } from "./group-recovery-format.js";
 import {
   encodeGroupMembership,
@@ -229,15 +231,14 @@ export class Groups {
         continue;
       const at = deliveries.settlements.find((entry) => entry.rowId === row.id)?.position;
       if (!(await this.acceptedDelivery(root, position, group, row, at))) continue;
+      const context = groupRecoveryContext(this.accountContext(root.accountId), row);
       let secret: Uint8Array | undefined;
       try {
-        secret = await this.keys
-          .open(
-            material.recipient,
-            groupRecoveryContext(this.accountContext(root.accountId), row),
-            row.envelope,
-          )
-          .catch(unavailableGroupKey);
+        try {
+          secret = await this.keys.open(material.recipient, context, row.envelope);
+        } catch (error) {
+          unavailableGroupKey(error);
+        }
         await this.confirmHistory(root, position, group, secret);
         this.assertOpen();
         return secret;
@@ -250,8 +251,8 @@ export class Groups {
     return undefined;
   }
 
-  add(id: string, memberId: string): Promise<void> {
-    return this.changeMembership(id, memberId, "add");
+  add(id: string, member: GroupMember): Promise<void> {
+    return this.changeMembership(id, member, "add");
   }
 
   /** Backfill effective memberships, including inherited paths, then verify recovery. */
@@ -280,19 +281,36 @@ export class Groups {
     let device: LocalDevice | undefined;
     try {
       device = await this.loadDevice();
-      const candidates = await this.db.all(
-        this.tables.__e2ee_group_recovery_deliveries.where({
-          recipientAccountId: this.accountId,
-          recoveryRootId: material.rootId,
-        }),
-        { tier: "global" },
-      );
-      const ids = new Set([...required, ...candidates.map((row) => row.groupId)]);
+      await this.warmMembership(null);
+      const discovery = await exclusiveE2eeTransaction(this.db, async (tx) => {
+        const own = await this.deviceStates(tx);
+        return { own, group: await this.readMembership(tx, null, own.publicHistory) };
+      });
+      const discovered = await discovery.wait({ tier: "global" });
+      this.assertOpen();
+      if (!discovered.own.active.has(device.id))
+        throw new Error("Group recovery requires an active device");
+      await this.checkRecoveryAuthority(material, discovered.own.publicHistory);
+      const graph = await this.acceptedGraph(discovered.group);
+      const requiredIds = new Set(required);
+      for (const id of requiredIds) {
+        const state = graph.get(id);
+        if (!state || state.sealed || !state.members.has(this.accountId))
+          throw new Error("Required recovery group is no longer available to this member");
+      }
+      const ids = new Set(requiredIds);
+      for (const [id, state] of graph) {
+        if (!state.sealed && state.members.has(this.accountId)) ids.add(id);
+      }
       for (const id of ids) {
         const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), {
           tier: "global",
         });
-        if (!observed) throw new Error("Recovery group not available");
+        if (!observed) {
+          if (requiredIds.has(id))
+            throw new Error("Required recovery group is no longer available");
+          continue;
+        }
         await this.warmMembership(observed);
         const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
           const own = await this.deviceStates(tx);
@@ -315,15 +333,19 @@ export class Groups {
         if (!snapshot.own.active.has(device.id))
           throw new Error("Group recovery requires an active device");
         await this.checkRecoveryAuthority(material, snapshot.own.publicHistory);
+        const membership = (await this.acceptedGraph(snapshot.group)).get(id);
+        if (!membership || membership.sealed || !membership.members.has(this.accountId)) {
+          if (requiredIds.has(id))
+            throw new Error("Required recovery group is no longer available to this member");
+          continue;
+        }
         if (snapshot.roots.rows[0]?.accountId !== observed.accountId)
           throw new Error("E2EE group creator changed");
         const { root, position } = await this.acceptedRoot(
           snapshot.roots,
           snapshot.group.histories.get(observed.accountId)!,
         );
-        const { members, keyRoot } = await this.acceptedMembership(root, position, snapshot.group);
-        // Retained material cannot restore membership that has since been removed.
-        if (!members.has(this.accountId)) continue;
+        const { keyRoot } = membership;
         const secret = await this.openRecovery(
           root,
           position,
@@ -332,8 +354,7 @@ export class Groups {
           snapshot.deliveries,
           material,
         );
-        if (!secret)
-          throw new Error("No authenticated group recovery delivery for the current epoch");
+        if (!secret) throw new RecoveryCandidateError("recovery-group-delivery-unavailable");
         try {
           await stageGroupKey(
             this.store,
@@ -349,7 +370,7 @@ export class Groups {
         }
         // Revalidate current membership and ordinary write permissions before delivery.
         const state = await this.explain(id);
-        if (state.state !== "ready" && state.state !== "refused")
+        if (state.state !== "ready" && (requiredIds.has(id) || state.state !== "refused"))
           throw new Error("Recovered group requires maintenance");
       }
     } finally {
@@ -359,22 +380,34 @@ export class Groups {
     }
   }
 
-  remove(id: string, memberId: string): Promise<void> {
-    return this.changeMembership(id, memberId, "remove");
+  remove(id: string, member: GroupMember): Promise<void> {
+    return this.changeMembership(id, member, "remove");
   }
 
   private async changeMembership(
     id: string,
-    memberId: string,
+    member: GroupMember,
     operation: "add" | "remove",
   ): Promise<void> {
+    if (
+      !member ||
+      (member.kind !== "account" && member.kind !== "group") ||
+      typeof member.id !== "string" ||
+      !member.id
+    )
+      throw new Error("Invalid E2EE group member selector");
+    const { kind: memberKind, id: memberId } = member;
     const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "global" });
     if (!observed) throw new Error("E2EE group not found");
-    const child = await this.db.one(this.tables.__e2ee_groups.where({ id: memberId }), {
-      tier: "global",
-    });
+    const child =
+      memberKind === "group"
+        ? await this.db.one(this.tables.__e2ee_groups.where({ id: memberId }), { tier: "global" })
+        : null;
+    if (memberKind === "group" && !child) throw new Error("Missing E2EE child group");
     await Promise.all(
-      [observed.accountId, child?.accountId ?? memberId].map((accountId) =>
+      [
+        ...new Set([observed.accountId, memberKind === "account" ? memberId : child!.accountId]),
+      ].map((accountId) =>
         readAccountMembership(
           this.db,
           accountId,
@@ -384,14 +417,15 @@ export class Groups {
         ),
       ),
     );
-    await this.warmMembership(observed);
+    const relatedGroupId = memberKind === "group" ? memberId : undefined;
+    await this.warmMembership(observed, relatedGroupId);
     const device = await this.loadDevice();
     try {
       const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
         const author = await this.deviceStates(tx);
         if (!author.active.has(device.id))
           throw new Error("An active device must author group membership changes");
-        const group = await this.readMembership(tx, observed, author.publicHistory);
+        const group = await this.readMembership(tx, observed, author.publicHistory, relatedGroupId);
         const roots = group.targetRoots;
         if (roots.rows[0]?.accountId !== observed.accountId)
           throw new Error("E2EE group creator changed");
@@ -401,9 +435,6 @@ export class Groups {
         // must not stand in for the authority-settled account binding.
         const { keyRoot, sealed, graph } = await this.acceptedMembership(root, position, group);
         if (sealed) throw new Error("E2EE group is sealed");
-        const memberKind = group.roots.rows.some((candidate) => candidate.id === memberId)
-          ? "group"
-          : "account";
         if (memberKind === "group") {
           const recipient = graph.get(memberId);
           if (!recipient || (operation === "add" && recipient.sealed))
@@ -579,19 +610,19 @@ export class Groups {
       }
       let candidateFailure: { error: unknown } | undefined;
       if (successor?.authorAccountId === this.accountId && successor.authorDeviceId === device.id) {
+        const context = groupSuccessorContext(
+          this.accountContext(root.accountId),
+          successor,
+          "author-envelope",
+          device.id,
+        );
         try {
-          const payload = await this.keys
-            .open(
-              device,
-              groupSuccessorContext(
-                this.accountContext(root.accountId),
-                successor,
-                "author-envelope",
-                device.id,
-              ),
-              successor.authorEnvelope,
-            )
-            .catch(unavailableGroupKey);
+          let payload: Uint8Array;
+          try {
+            payload = await this.keys.open(device, context, successor.authorEnvelope);
+          } catch (error) {
+            unavailableGroupKey(error);
+          }
           try {
             await this.confirmHistory(root, position, snapshot.group, payload);
             try {
@@ -631,15 +662,19 @@ export class Groups {
           !(await this.acceptedDelivery(root, position, snapshot.group, delivery, deliveryPosition))
         )
           continue;
+        const context = groupDeliveryContext(
+          this.accountContext(root.accountId),
+          keyRoot,
+          delivery,
+        );
         let usable = false;
         try {
-          const payload = await this.keys
-            .open(
-              device,
-              groupDeliveryContext(this.accountContext(root.accountId), keyRoot, delivery),
-              delivery.envelope,
-            )
-            .catch(unavailableGroupKey);
+          let payload: Uint8Array;
+          try {
+            payload = await this.keys.open(device, context, delivery.envelope);
+          } catch (error) {
+            unavailableGroupKey(error);
+          }
           try {
             await this.confirmHistory(root, position, snapshot.group, payload);
             usable = true;
@@ -831,15 +866,14 @@ export class Groups {
         const at = existing.settlements.find((entry) => entry.rowId === row.id)?.position;
         if (!(await this.acceptedDelivery(root, position, group, row, at))) continue;
         if (row.recipientAccountId === this.accountId && row.recipientDeviceId === device.id) {
+          const context = groupDeliveryContext(this.accountContext(root.accountId), keyRoot, row);
           let opened: Uint8Array | undefined;
           try {
-            opened = await this.keys
-              .open(
-                device,
-                groupDeliveryContext(this.accountContext(root.accountId), keyRoot, row),
-                row.envelope,
-              )
-              .catch(unavailableGroupKey);
+            try {
+              opened = await this.keys.open(device, context, row.envelope);
+            } catch (error) {
+              unavailableGroupKey(error);
+            }
             await this.confirmHistory(root, position, group, opened);
           } catch (error) {
             this.assertOpen();
@@ -1116,20 +1150,29 @@ export class Groups {
   }
 
   /** Internal key-free discovery shared with scoped-space membership. */
-  async warmMembership(root: Pick<GroupRoot, "id" | "accountId"> | null) {
-    const [roots, rows] = await Promise.all([
-      this.db.all(this.tables.__e2ee_groups, { tier: "global" }),
-      this.db.all(this.tables.__e2ee_group_membership, { tier: "global" }),
-      this.db.all(this.tables.__e2ee_group_successors, { tier: "global" }),
-    ]);
+  async warmMembership(root: Pick<GroupRoot, "id" | "accountId"> | null, relatedGroupId?: string) {
+    const { roots, records, successors } = await collectGroupHistory(
+      root
+        ? { groupIds: relatedGroupId === undefined ? [root.id] : [root.id, relatedGroupId] }
+        : { accountId: this.accountId },
+      {
+        roots: (selector) =>
+          this.db.all(this.tables.__e2ee_groups.where(selector), { tier: "global" }),
+        members: (selector) =>
+          this.db.all(this.tables.__e2ee_group_membership.where(selector), { tier: "global" }),
+        successors: (groupId) =>
+          this.db.all(this.tables.__e2ee_group_successors.where({ groupId }), { tier: "global" }),
+      },
+    );
     const accounts = new Set([this.accountId]);
     if (root) accounts.add(root.accountId);
     for (const group of roots) accounts.add(group.accountId);
-    for (const row of rows) {
+    for (const row of records) {
       accounts.add(row.authorAccountId);
       const recipient = accountMemberId(row);
       if (recipient) accounts.add(recipient);
     }
+    for (const row of successors) accounts.add(row.authorAccountId);
     await Promise.all(
       [...accounts].map((accountId) =>
         prefetchPublicMembershipHistory(this.db, accountId, this.tables),
@@ -1194,12 +1237,41 @@ export class Groups {
     tx: E2eeTransactionScope,
     root: Pick<GroupRoot, "id" | "accountId"> | null,
     ownHistory: PublicMembershipHistory,
+    relatedGroupId?: string,
   ): Promise<MembershipSnapshot> {
-    const [roots, records, successors] = await Promise.all([
-      tx.allSettledForE2ee(this.tables.__e2ee_groups),
-      tx.allSettledForE2ee(this.tables.__e2ee_group_membership),
-      tx.allSettledForE2ee(this.tables.__e2ee_group_successors),
-    ]);
+    const rootSettlements = new Map<string, RowSettlement>();
+    const memberSettlements = new Map<string, RowSettlement>();
+    const successorSettlements = new Map<string, RowSettlement>();
+    const capture = async <T>(
+      read: Promise<{ rows: T[]; settlements: RowSettlement[] }>,
+      settlements: Map<string, RowSettlement>,
+    ): Promise<T[]> => {
+      const result = await read;
+      for (const entry of result.settlements) settlements.set(entry.rowId, entry);
+      return result.rows;
+    };
+    const rows = await collectGroupHistory(
+      root
+        ? { groupIds: relatedGroupId === undefined ? [root.id] : [root.id, relatedGroupId] }
+        : { accountId: this.accountId },
+      {
+        roots: (selector) =>
+          capture(tx.allSettledForE2ee(this.tables.__e2ee_groups.where(selector)), rootSettlements),
+        members: (selector) =>
+          capture(
+            tx.allSettledForE2ee(this.tables.__e2ee_group_membership.where(selector)),
+            memberSettlements,
+          ),
+        successors: (groupId) =>
+          capture(
+            tx.allSettledForE2ee(this.tables.__e2ee_group_successors.where({ groupId })),
+            successorSettlements,
+          ),
+      },
+    );
+    const roots = { rows: rows.roots, settlements: [...rootSettlements.values()] };
+    const records = { rows: rows.records, settlements: [...memberSettlements.values()] };
+    const successors = { rows: rows.successors, settlements: [...successorSettlements.values()] };
     const accounts = new Set(root ? [root.accountId] : []);
     for (const group of roots.rows) accounts.add(group.accountId);
     for (const row of records.rows) {
@@ -1207,6 +1279,7 @@ export class Groups {
       const recipient = accountMemberId(row);
       if (recipient) accounts.add(recipient);
     }
+    for (const row of successors.rows) accounts.add(row.authorAccountId);
     const histories = new Map([[this.accountId, ownHistory]]);
     await Promise.all(
       [...accounts]
@@ -1430,13 +1503,17 @@ export class Groups {
         await this.confirm(state.keyRoot, secret);
         if (!state.successor) return;
         const successor = state.successor;
-        const previous = await this.keys
-          .unwrap(
-            secret,
-            groupSuccessorContext(this.accountContext(root.accountId), successor, "history"),
-            successor.history,
-          )
-          .catch(unavailableGroupKey);
+        const context = groupSuccessorContext(
+          this.accountContext(root.accountId),
+          successor,
+          "history",
+        );
+        let previous: Uint8Array;
+        try {
+          previous = await this.keys.unwrap(secret, context, successor.history);
+        } catch (error) {
+          unavailableGroupKey(error);
+        }
         owned?.fill(0);
         owned = previous;
         secret = previous;
@@ -1453,13 +1530,13 @@ export class Groups {
     if (root.mechanism !== this.keys.mechanism.id || root.version !== this.keys.mechanism.version)
       throw new UnavailableGroupKey("Unsupported E2EE group key mechanism");
     if (payload.length !== 32) throw new UnavailableGroupKey("Invalid E2EE group key");
-    const confirmation = await this.keys
-      .unwrap(
-        payload,
-        groupContext(this.accountContext(root.accountId), root, "verification"),
-        root.verification,
-      )
-      .catch(unavailableGroupKey);
+    const context = groupContext(this.accountContext(root.accountId), root, "verification");
+    let confirmation: Uint8Array;
+    try {
+      confirmation = await this.keys.unwrap(payload, context, root.verification);
+    } catch (error) {
+      unavailableGroupKey(error);
+    }
     try {
       if (confirmation.length !== 32 || confirmation.some((byte) => byte !== 0))
         throw new UnavailableGroupKey("Invalid E2EE group key confirmation");

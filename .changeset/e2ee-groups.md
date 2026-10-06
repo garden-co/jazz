@@ -16,3 +16,15 @@ retired edge query tier.
 Group operations reuse session-owned device keys and scoped private-store
 decoding. Optional group tables remain available in schema-only application
 configuration.
+
+Require explicit `{ kind: "account" | "group", id }` selectors for group
+membership changes; `leave()` always removes the current account. Limit SDK
+history collection to relevant historical group components, retain complete
+descendant epoch revisions, reject competing successors at one authority
+position, and validate initial root coordinates.
+
+Discover recovery groups from accepted membership rather than delivery
+proposals. Reject loss of required group coverage, handle synchronous and
+asynchronous key-envelope failures consistently, and try later recovery
+protectors after group-owned unusable-delivery failures without hiding
+operational errors.

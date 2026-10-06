@@ -36,6 +36,12 @@ transaction, derive the exact effective membership, and verify an active signing
 device belonging to a remaining member. A stale revision or competing successor
 must not activate. Readers independently validate the same accepted chain.
 
+Raw successors for the same group, predecessor and authority position compete:
+reject all such contenders, including malformed proposals. A later uncontested
+position can still advance. Validate each position's successors against the
+prior graph before activating that batch; a successor cannot depend on a
+descendant successor at the same position, regardless of row-ID order.
+
 Generate a fresh 32-byte key. The verification envelope wraps 32 zero bytes under
 that key using the ordinary group verification context for the new epoch. The
 history envelope wraps the predecessor key under the fresh key with successor
@@ -62,8 +68,15 @@ This record does not grant membership or Jazz permissions. Applications retain
 ordinary successor-insert and delivery policies. Removed members can retain old
 keys, but those keys cannot authenticate a successor or obtain its new secret.
 
-`db.e2ee.groups.leave(groupId)` delegates to `remove(groupId, account.id)` and
-returns the same synchronous mutation handle. Its `wait()` confirms acceptance
+`add(groupId, member)` and `remove(groupId, member)` take an explicit
+`GroupMember`: `{ kind: "account" | "group", id: string }`, exported from
+`jazz-tools/e2ee`. Account and group UUIDs are separate namespaces; the presence
+of a group row never changes the meaning of an account selector. String
+selectors are not supported.
+
+`db.e2ee.groups.leave(groupId)` delegates to
+`remove(groupId, { kind: "account", id: account.id })` and returns the same
+synchronous mutation handle. Its `wait()` confirms acceptance
 of the removal, not completion of another member's rotation. Ordinary Jazz
 policies must permit self-removal; the helper does not bypass them. A departing
 account cannot rotate the group after removal. A remaining authorised group
@@ -110,6 +123,16 @@ an incomplete graph. Signed raw candidates must undergo the same semantic
 validation during replay; a valid device signature is not proof of a valid DAG.
 Do not recursively trust unvalidated candidate edges to discover recipients.
 
+SDK history collection follows the raw historical component in both directions,
+including removed or invalid candidate edges. Group operations seed the target;
+group-recipient additions and removals also seed the selected child. Account
+recovery seeds creator-owned roots and direct account-membership candidates,
+then discovers inherited ancestors. Every boundary predicate is reread inside
+the exclusive transaction, including empty results; warming is not authority.
+Only authenticated replay determines effective recipients. This bounds the
+history materialised and verified by the SDK, not underlying database scan
+work: frozen-snapshot source reads can still scan unrelated table history.
+
 ### Required topology visibility
 
 Agreed: package-defined read policies expose group roots, membership edges
@@ -140,9 +163,11 @@ composition; adding the helper does not install policies on an existing app.
 
 Nested successor revisions retain bare membership row IDs, preserving flat
 group transcripts. Descendant roots use `__e2ee_groups:<id>` and accepted
-descendant successors use `__e2ee_group_successors:<id>`. These namespaced
-entries cannot collapse into a membership row with the same UUID. The complete
-set remains canonically sorted and covered by the successor signature.
+descendant successors use `__e2ee_group_successors:<id>`, retaining every accepted
+successor in each relevant descendant lineage, not just its latest epoch.
+These namespaced entries cannot collapse into a membership row with the same
+UUID. The complete set remains canonically sorted and covered by the successor
+signature.
 
 ### Eight-edge depth checkpoint
 

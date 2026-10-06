@@ -64,7 +64,7 @@ it("does not omit an undelivered inherited group from recovery protection and la
     await child.wait();
     // An authorised administrator without the parent key can record this edge,
     // but cannot deliver the parent's key to its new inherited member.
-    await admin.e2ee.groups.add(parent.id, child.id).wait();
+    await admin.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
     expect(await admin.e2ee.explain({ groupId: parent.id })).toMatchObject({ state: "refused" });
     expect(
       await bob.all(

@@ -5,6 +5,9 @@ import type { deviceRequestSchema } from "./device-requests.js";
 export { groupSchema } from "./managed-schema.js";
 import { groupSchema } from "./managed-schema.js";
 
+/** Account and group UUIDs occupy separate namespaces. */
+export type GroupMember = Readonly<{ kind: "account" | "group"; id: string }>;
+
 export type GroupTables = Pick<
   App<typeof deviceRequestSchema & typeof groupSchema>,
   keyof typeof groupSchema

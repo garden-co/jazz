@@ -233,7 +233,9 @@ it("rejects recovery creation when a required ready group loses membership", asy
     const administratorAccount = await account();
     const administrator = await open(administratorAccount);
     const groupId = await readyGroup(owner);
-    await owner.e2ee.groups.add(groupId, administratorAccount.account.id).wait();
+    await owner.e2ee.groups
+      .add(groupId, { kind: "account", id: administratorAccount.account.id })
+      .wait();
     expect(await administrator.e2ee.explain({ groupId })).toEqual({ state: "ready" });
     const control = await owner.e2ee.recovery.create().wait();
     await expectRecoveryPath(owner, control.material, groupId);
@@ -265,7 +267,9 @@ it("rejects recovery creation when a required ready group loses membership", asy
       expect(completed).toBe(false);
       // This material check belongs to restoration, after protection collected ready groups.
       // Public removal waits for global acceptance before the native adapter resumes.
-      await administrator.e2ee.groups.remove(groupId, ownerAccount.account.id).wait();
+      await administrator.e2ee.groups
+        .remove(groupId, { kind: "account", id: ownerAccount.account.id })
+        .wait();
       expect(await owner.e2ee.explain({ groupId })).toEqual({
         state: "refused",
         reason: "not-a-group-member",

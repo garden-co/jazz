@@ -58,7 +58,9 @@ it("seals a group after its last account leaves instead of restoring its old lin
     expect(await db.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "refused" });
     // Ordinary policy still permits this account to administer the group.
     // Empty accepted membership must nevertheless make the lineage terminal.
-    await expect(db.e2ee.groups.add(group.id, account.account.id).wait()).rejects.toThrow("sealed");
+    await expect(
+      db.e2ee.groups.add(group.id, { kind: "account", id: account.account.id }).wait(),
+    ).rejects.toThrow("sealed");
     expect(await db.e2ee.explain({ groupId: group.id })).toEqual({
       state: "refused",
       reason: "group-sealed",
