@@ -173,9 +173,14 @@ Its results describe the accepted per-path snapshots, not one atomic snapshot
 of all spaces or a guarantee against later changes.
 
 Recovery and device-delivery selection can skip a candidate that cannot be opened
-or whose current key cannot be confirmed. Once that key is confirmed, failures
-while replaying membership or processing predecessor history propagate to the
-caller; they are not reported as a missing or unusable delivery.
+or whose current key cannot be confirmed. Synchronous adapter throws and rejected
+promises have the same candidate classification; context construction and authority
+verification remain outside it. Once that key is confirmed, failures while replaying
+membership or processing predecessor history propagate to the caller; they are not
+reported as a missing or unusable delivery.
+Space-owned recovery delivery exhaustion reports the fixed diagnostic
+`recovery-space-delivery-unavailable` and permits trying another protected recovery
+root. A public diagnostic with that code from an operational adapter does not.
 
 ## Space successor transcript
 
@@ -226,6 +231,10 @@ the current accepted account epoch. A successor must respond to required
 maintenance; stale group state must first be reconciled. Accepted removal and
 successor events are replayed by authority position, not local arrival order.
 Subsequent grants and deliveries bind the accepted current space epoch.
+If effective membership becomes empty before the first later space event, the
+lineage is sealed permanently. Later grants cannot reactivate it. Initial grants
+and later events sharing one accepted authority position are processed as a batch,
+without treating an intermediate recipient set as a separate accepted state.
 `fixtures/e2ee-space-successor.c` independently emits the pinned signature
 transcript. Its matching TypeScript test also checks transplanted coordinates,
 author, predecessor, revision, membership and ciphertext bytes. Adversarial

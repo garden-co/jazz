@@ -405,7 +405,8 @@ export class E2ee {
               error.code !== "recovery-root-mismatch" &&
               error.code !== "recovery-delivery-missing" &&
               error.code !== "recovery-delivery-unusable" &&
-              error.code !== "recovery-group-delivery-unavailable")
+              error.code !== "recovery-group-delivery-unavailable" &&
+              error.code !== "recovery-space-delivery-unavailable")
           )
             throw error;
           failure = error;

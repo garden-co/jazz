@@ -5,7 +5,7 @@ import type { RowSettlement } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
 import { decodeRecoveryMaterial, type DecodedRecoveryMaterial } from "./recovery-format.js";
-import { E2eeRecoveryError } from "./recovery-error.js";
+import { E2eeRecoveryError, RecoveryCandidateError } from "./recovery-error.js";
 import { spaceRecoveryContext, spaceRecoveryBytes } from "./space-recovery-format.js";
 import { loadRecoveredSpaceKey, retainRecoveredSpaceKey } from "./local-space-keys.js";
 import { PersistedWriteRejectedError } from "../runtime/client.js";
@@ -288,15 +288,18 @@ export class Spaces {
         !(await this.acceptedDelivery(snapshot, root, position, row, positionOf(recovery, row.id)))
       )
         continue;
+      const context = spaceRecoveryContext(
+        this.accountContext(root.accountId),
+        { ...root, epochId },
+        row,
+      );
       let secret: Uint8Array | undefined;
       try {
-        secret = await this.keys
-          .open(
-            material.recipient,
-            spaceRecoveryContext(this.accountContext(root.accountId), { ...root, epochId }, row),
-            row.envelope,
-          )
-          .catch(unavailableSpaceKey);
+        try {
+          secret = await this.keys.open(material.recipient, context, row.envelope);
+        } catch (error) {
+          unavailableSpaceKey(error);
+        }
         await this.confirmHistory(snapshot, root, secret);
         this.assertOpen();
         return secret;
@@ -371,8 +374,7 @@ export class Spaces {
           material,
         );
         try {
-          if (!secret)
-            throw new Error("No authenticated space recovery delivery for the current epoch");
+          if (!secret) throw new RecoveryCandidateError("recovery-space-delivery-unavailable");
           await retainRecoveredSpaceKey(
             this.requireDevice().store,
             this.accountContext(this.accountId),
@@ -1064,7 +1066,7 @@ export class Spaces {
               ? 1
               : 0,
     );
-    let previousPosition: bigint | undefined;
+    let previousPosition = BigInt(position);
     for (const event of events) {
       const { row, at } = event;
       if (
@@ -1085,12 +1087,7 @@ export class Spaces {
           event.row.authorEpochId !== root.accountEpochId)
       )
         continue;
-      if (
-        previousPosition !== undefined &&
-        previousPosition !== at &&
-        (await effective(at)).members.size === 0
-      )
-        sealed = true;
+      if (previousPosition !== at && (await effective(at)).members.size === 0) sealed = true;
       previousPosition = at;
       if (sealed) continue;
       if (event.kind === "successor") {
@@ -1322,15 +1319,18 @@ export class Spaces {
             ))
           )
             continue;
+          const context = spaceDeliveryContext(
+            this.accountContext(root.accountId),
+            keyRoot,
+            delivery,
+          );
           let opened: Uint8Array | undefined;
           try {
-            opened = await this.keys
-              .open(
-                device,
-                spaceDeliveryContext(this.accountContext(root.accountId), keyRoot, delivery),
-                delivery.envelope,
-              )
-              .catch(unavailableSpaceKey);
+            try {
+              opened = await this.keys.open(device, context, delivery.envelope);
+            } catch (error) {
+              unavailableSpaceKey(error);
+            }
             await this.confirmHistory(snapshot, root, opened);
             secret = opened;
             opened = undefined;
@@ -1538,7 +1538,12 @@ export class Spaces {
     let state = await this.validate(snapshot, root);
     // Only the candidate's current key can be unavailable. Once it is confirmed,
     // predecessor processing and historical replay failures belong to the operation.
-    await this.confirm(state.keyRoot, payload).catch(unavailableSpaceKey);
+    const currentContext = spaceContext(
+      this.accountContext(root.accountId),
+      state.keyRoot,
+      "verification",
+    );
+    await this.confirm(state.keyRoot, payload, currentContext).catch(unavailableSpaceKey);
     let secret = payload;
     let owned: Uint8Array | undefined;
     try {
@@ -1800,6 +1805,7 @@ export class Spaces {
       | "verification"
     >,
     secret: Uint8Array,
+    context?: Uint8Array,
   ) {
     if (
       secret.length !== 32 ||
@@ -1809,7 +1815,7 @@ export class Spaces {
       throw new Error("Invalid or unsupported E2EE space key");
     const opened = await this.keys.unwrap(
       secret,
-      spaceContext(this.accountContext(root.accountId), root, "verification"),
+      context ?? spaceContext(this.accountContext(root.accountId), root, "verification"),
       root.verification,
     );
     try {
