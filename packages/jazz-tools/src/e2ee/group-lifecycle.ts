@@ -1160,8 +1160,10 @@ export class Groups {
           this.db.all(this.tables.__e2ee_groups.where(selector), { tier: "global" }),
         members: (selector) =>
           this.db.all(this.tables.__e2ee_group_membership.where(selector), { tier: "global" }),
-        successors: (groupId) =>
-          this.db.all(this.tables.__e2ee_group_successors.where({ groupId }), { tier: "global" }),
+        successors: (groupIds) =>
+          this.db.all(this.tables.__e2ee_group_successors.where({ groupId: { in: groupIds } }), {
+            tier: "global",
+          }),
       },
     );
     const accounts = new Set([this.accountId]);
@@ -1262,9 +1264,11 @@ export class Groups {
             tx.allSettledForE2ee(this.tables.__e2ee_group_membership.where(selector)),
             memberSettlements,
           ),
-        successors: (groupId) =>
+        successors: (groupIds) =>
           capture(
-            tx.allSettledForE2ee(this.tables.__e2ee_group_successors.where({ groupId })),
+            tx.allSettledForE2ee(
+              this.tables.__e2ee_group_successors.where({ groupId: { in: groupIds } }),
+            ),
             successorSettlements,
           ),
       },

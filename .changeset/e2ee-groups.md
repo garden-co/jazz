@@ -28,3 +28,7 @@ proposals. Reject loss of required group coverage, handle synchronous and
 asynchronous key-envelope failures consistently, and try later recovery
 protectors after group-owned unusable-delivery failures without hiding
 operational errors.
+
+Batch scoped topology reads instead of reopening root and epoch queries for
+every visited group. Drain bounded UUID-input chunks without limiting graph
+coverage or weakening exclusive acceptance.
