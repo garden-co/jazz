@@ -19,3 +19,8 @@ Space operations share session-owned device keys and synchronous private-store
 decoding with the account and group lifecycles. Preserve recovered-key tuples
 and unrelated store fields, and support optional space tables in schema-only
 application configuration.
+
+Resolve space group recipients through explicit historical scopes, including
+groups outside the initializer's memberships. Preserve account/group ambiguity
+checks and complete accepted-history validation without application-wide group
+discovery.

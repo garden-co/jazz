@@ -14,7 +14,7 @@ import { encodeGroupMembership } from "./group-successor.js";
 import { spaceSuccessorBytes, spaceSuccessorContext } from "./space-successor.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
-import type { Groups } from "./group-lifecycle.js";
+import type { GroupMembershipSnapshot, Groups } from "./group-lifecycle.js";
 import type { DeviceTables } from "./device-requests.js";
 import type { DeviceKeyLifetime, LocalDevice } from "./local-device.js";
 import type { DeviceSigner, KeyEnvelope } from "./types.js";
@@ -80,7 +80,7 @@ type Snapshot = {
   deliveries: Settled<SpaceDelivery>;
   successors: Settled<SpaceSuccessor>;
   histories: Map<string, PublicMembershipHistory>;
-  group?: Awaited<ReturnType<Groups["readMembership"]>>;
+  group?: GroupMembershipSnapshot;
 };
 export type SpaceRecoveryPath = Address & { spaceId: string; epochId: string } & (
     | { validation: "validated" }
@@ -440,10 +440,11 @@ export class Spaces {
   }
 
   async warmInitialRecipients(recipientIds: readonly string[] = [this.accountId]): Promise<void> {
-    for (const recipientId of initialRecipientIds(recipientIds))
+    const ids = initialRecipientIds(recipientIds);
+    for (const recipientId of ids)
       if (recipientId !== this.accountId)
         await prefetchPublicMembershipHistory(this.db, recipientId, this.tables);
-    await this.groups?.warmMembership(null);
+    await this.groups?.warmMembership({ groupIds: ids });
   }
 
   /** Internal preparation only: the caller owns the enclosing transaction and acceptance. */
@@ -500,10 +501,15 @@ export class Spaces {
     const state = await this.requireDevice().states(tx);
     if (!state.active.has(device.id))
       throw new Error("An active approved device must initialise a space");
-    const groupSnapshot = await this.groups?.readMembership(tx, null, state.publicHistory);
+    const ids = initialRecipientIds(recipientIds);
+    const groupSnapshot = await this.groups?.readMembership(
+      tx,
+      { groupIds: ids },
+      state.publicHistory,
+    );
     const graph = groupSnapshot && (await this.groups!.acceptedGraph(groupSnapshot));
     const recipients: Pick<SpaceGrant, "recipientId" | "recipientKind" | "recipientEpochId">[] = [];
-    for (const recipientId of initialRecipientIds(recipientIds)) {
+    for (const recipientId of ids) {
       const recipientHistory =
         recipientId === this.accountId
           ? state.publicHistory
@@ -668,10 +674,10 @@ export class Spaces {
       tx.allSettledForE2ee(this.tables.__e2ee_space_successors.where({ spaceId: id })),
     ]);
     const histories = new Map([[this.accountId, ownHistory]]);
+    const groupIds = this.groupHistoryIds(grants.rows, extraAccounts);
     const group =
-      this.groups &&
-      (extraAccounts.length > 0 || grants.rows.some((row) => row.recipientKind === "group"))
-        ? await this.groups.readMembership(tx, null, ownHistory)
+      this.groups && groupIds !== undefined
+        ? await this.groups.readMembership(tx, { groupIds }, ownHistory)
         : undefined;
     for (const [accountId, history] of group?.histories ?? []) histories.set(accountId, history);
     for (const accountId of this.accounts(roots.rows, grants.rows, [
@@ -698,6 +704,22 @@ export class Spaces {
     );
   }
 
+  private groupHistoryIds(grants: SpaceGrant[], extra: string[]): string[] | undefined {
+    const candidates = [
+      ...extra,
+      ...grants.flatMap((row) => (row.recipientKind === "group" ? [row.recipientId] : [])),
+    ];
+    // Raw grants still require group replay even when every query operand is invalid.
+    if (candidates.length === 0) return undefined;
+    return [
+      ...new Set(
+        candidates.filter((id) =>
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id),
+        ),
+      ),
+    ];
+  }
+
   private async warm(observed: SpaceRoot, extraAccounts: string[] = []): Promise<void> {
     const [grants, successors] = await Promise.all([
       this.db.all(this.tables.__e2ee_space_grants.where({ spaceId: observed.id }), {
@@ -710,8 +732,8 @@ export class Spaces {
         tier: "global",
       }),
     ]);
-    if (extraAccounts.length > 0 || grants.some((row) => row.recipientKind === "group"))
-      await this.groups?.warmMembership(null);
+    const groupIds = this.groupHistoryIds(grants, extraAccounts);
+    if (groupIds !== undefined) await this.groups?.warmMembership({ groupIds });
     await Promise.all(
       [
         ...this.accounts([observed], grants, [
