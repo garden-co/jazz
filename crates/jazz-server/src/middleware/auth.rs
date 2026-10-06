@@ -31,7 +31,9 @@ use axum::{
 };
 use base64::Engine;
 use jsonwebtoken::{
-    Algorithm, DecodingKey, Validation, decode, decode_header,
+    Algorithm, DecodingKey, Validation,
+    dangerous::insecure_decode,
+    decode, decode_header,
     jwk::{Jwk, JwkSet, KeyAlgorithm},
 };
 use serde::{Deserialize, Serialize};
@@ -1064,9 +1066,16 @@ pub async fn validate_jwt_with_cache_at(
     config: &AuthConfig,
     now_seconds: u64,
 ) -> Result<VerifiedJwt, JwtError> {
-    // A malformed header is a definitive denial even when JWKS is unavailable.
-    decode_header(token)
-        .map_err(|error| JwtError::Invalid(format!("invalid JWT header: {error}")))?;
+    // Check syntax only; these unverified claims must never establish identity.
+    // Definitively malformed tokens do not become retryable during a JWKS outage.
+    insecure_decode::<DecodedJwtClaims>(token)
+        .map_err(|error| JwtError::Invalid(format!("invalid JWT structure: {error}")))?;
+    let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token.rsplit('.').next().unwrap_or_default())
+        .map_err(|error| JwtError::Invalid(format!("invalid JWT signature encoding: {error}")))?;
+    if signature.is_empty() {
+        return Err(JwtError::Invalid("JWT signature is missing".to_owned()));
+    }
     let cached_jwks = cache.load(false).await.map_err(|e| {
         warn!(error = %e, "failed to load cached JWKS");
         JwtError::Unavailable("unable to load JWKS".to_string())
