@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +26,14 @@ use uuid::Uuid;
 
 const SIGNING_KEY: &str = "synthetic-jwks-retry-test-signing-key";
 const KEY_ID: &str = "synthetic-jwks-retry-key";
+const STEP_TIMEOUT: Duration = Duration::from_secs(5);
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+async fn bounded<T>(operation: &str, future: impl Future<Output = T>) -> T {
+    tokio::time::timeout(STEP_TIMEOUT, future)
+        .await
+        .unwrap_or_else(|_| panic!("test fixture timed out while {operation}"))
+}
 
 struct JwksService {
     addr: SocketAddr,
@@ -39,9 +47,12 @@ impl JwksService {
         let router = Router::new()
             .route("/jwks", get(jwks))
             .with_state(available.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind local JWKS service");
+        let listener = bounded(
+            "binding the local JWKS service",
+            tokio::net::TcpListener::bind("127.0.0.1:0"),
+        )
+        .await
+        .expect("bind local JWKS service");
         let addr = listener.local_addr().expect("JWKS address");
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.expect("serve JWKS");
@@ -104,9 +115,12 @@ async fn connect(server: &JazzServer, subject: &str, token: &str, account: Accou
         server.base_url().replace("http://", "ws://"),
         server.app_id(),
     );
-    let (mut socket, _) = connect_async(url).await.expect("open WebSocket");
-    socket
-        .send(Message::Binary(
+    let (mut socket, _) = bounded("opening the WebSocket", connect_async(url))
+        .await
+        .expect("open WebSocket");
+    bounded(
+        "sending the auth prelude",
+        socket.send(Message::Binary(
             json!({
                 "peer_identity": identity.canonical(),
                 "auth": { "jwt_token": token },
@@ -114,16 +128,16 @@ async fn connect(server: &JazzServer, subject: &str, token: &str, account: Accou
             .to_string()
             .into_bytes()
             .into(),
-        ))
-        .await
-        .expect("send auth prelude");
+        )),
+    )
+    .await
+    .expect("send auth prelude");
     socket
 }
 
 async fn receive(socket: &mut Socket) -> WireFrame {
-    let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+    let message = bounded("receiving the handshake response", socket.next())
         .await
-        .expect("bounded handshake response")
         .expect("handshake frame")
         .expect("read WebSocket response");
     let Message::Binary(bytes) = message else {
@@ -149,12 +163,15 @@ struct Assignment {
 #[tokio::test]
 async fn jwks_outage_is_retryable_and_recovery_preserves_credential_denials() {
     let jwks = JwksService::start().await;
-    let server = JazzServer::builder()
-        .with_jwks_url(jwks.endpoint())
-        .with_schema(Schema::new())
-        .start()
-        .await
-        .expect("start isolated server");
+    let server = bounded(
+        "starting the isolated server",
+        JazzServer::builder()
+            .with_jwks_url(jwks.endpoint())
+            .with_schema(Schema::new())
+            .start(),
+    )
+    .await
+    .expect("start isolated server");
     let mut malformed = connect(&server, "mallory", "not-a-jwt", AccountId(Uuid::new_v4())).await;
     assert!(matches!(
         receive(&mut malformed).await,
@@ -181,14 +198,16 @@ async fn jwks_outage_is_retryable_and_recovery_preserves_credential_denials() {
 
     jwks.available.store(true, Ordering::SeqCst);
     // Enrol Alice through the public API, not by editing the registry.
-    let assignment: Assignment = reqwest::Client::new()
+    let assignment: Assignment = reqwest::Client::builder()
+        .timeout(STEP_TIMEOUT)
+        .build()
+        .expect("build bounded enrolment client")
         .post(format!(
             "{}/apps/{}/accounts/login-or-register",
             server.base_url(),
             server.app_id(),
         ))
         .bearer_auth(&alice_token)
-        .timeout(Duration::from_secs(5))
         .send()
         .await
         .expect("enrol Alice after JWKS recovery")
@@ -208,16 +227,20 @@ async fn jwks_outage_is_retryable_and_recovery_preserves_credential_denials() {
         WirePeerRole::Client,
         FEATURE_STRUCTURED_ERRORS | FEATURE_SYNC_MESSAGE_PAYLOAD,
     ));
-    alice
-        .send(Message::Binary(
+    bounded(
+        "sending the client hello",
+        alice.send(Message::Binary(
             encode_websocket_frame_batch(&[encode_frame(&hello).expect("encode client hello")])
                 .expect("encode hello batch")
                 .into(),
-        ))
-        .await
-        .expect("send client hello");
+        )),
+    )
+    .await
+    .expect("send client hello");
     assert!(matches!(receive(&mut alice).await, WireFrame::Hello(_)));
-    alice.close(None).await.expect("close Alice's session");
+    bounded("closing Alice's session", alice.close(None))
+        .await
+        .expect("close Alice's session");
 
     let mallory_token = token("mallory", "synthetic-wrong-signing-key");
     let mut mallory = connect(
@@ -235,5 +258,5 @@ async fn jwks_outage_is_retryable_and_recovery_preserves_credential_denials() {
             ..
         })
     ));
-    server.shutdown().await;
+    bounded("shutting down the isolated server", server.shutdown()).await;
 }
