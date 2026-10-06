@@ -62,6 +62,16 @@ function unavailableSpaceKey(cause: unknown): never {
   throw new UnavailableSpaceKey("Unable to confirm E2EE space key", { cause });
 }
 
+const recoveryIdBatchSize = 128;
+
+function isTransactionConflict(error: unknown): boolean {
+  return (
+    (error instanceof PersistedWriteRejectedError &&
+      (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
+    (error instanceof Error && error.message.startsWith("(transaction_conflict):"))
+  );
+}
+
 function spaceRootId(address: Address): string {
   const digest = sha256(
     new TextEncoder().encode(
@@ -178,6 +188,55 @@ export class Spaces {
     return address;
   }
 
+  private async discoverRecoveryRoots(): Promise<SpaceRoot[]> {
+    await prefetchPublicMembershipHistory(this.db, this.accountId, this.tables);
+    await this.groups?.warmMembership({ accountId: this.accountId });
+    const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const own = await readPublicMembershipHistory(tx, this.accountId, this.tables);
+      const direct = await tx.allSettledForE2ee(
+        this.tables.__e2ee_space_grants.where({
+          recipientKind: "account",
+          recipientId: this.accountId,
+        }),
+      );
+      const spaceIds = new Set(direct.rows.map((row) => row.spaceId));
+      if (this.groups) {
+        const membership = await this.groups.readMembership(tx, { accountId: this.accountId }, own);
+        const graph = await this.groups.acceptedGraph(membership);
+        const groupIds = [...graph]
+          .filter(([, state]) => state.members.has(this.accountId))
+          .map(([id]) => id);
+        // Keep the empty predicate covered too; never widen an empty group scope.
+        let start = 0;
+        do {
+          const grants = await tx.allSettledForE2ee(
+            this.tables.__e2ee_space_grants.where({
+              recipientKind: "group",
+              recipientId: { in: groupIds.slice(start, start + recoveryIdBatchSize) },
+            }),
+          );
+          for (const row of grants.rows) spaceIds.add(row.spaceId);
+          start += recoveryIdBatchSize;
+        } while (start < groupIds.length);
+      }
+      const ids = [...spaceIds];
+      const roots: SpaceRoot[] = [];
+      for (let start = 0; start < ids.length; start += recoveryIdBatchSize) {
+        const found = await tx.allSettledForE2ee(
+          this.tables.__e2ee_spaces.where({
+            id: { in: ids.slice(start, start + recoveryIdBatchSize) },
+          }),
+        );
+        roots.push(...found.rows);
+      }
+      return roots;
+    });
+    const roots = await read.wait({ tier: "global" });
+    this.assertOpen();
+    // Discovery is a candidate superset. Fresh per-path replay establishes entitlement.
+    return roots.filter((root) => root.id === spaceRootId(root));
+  }
+
   /** Read-only coverage: no device state, private store, delivery or maintenance writes. */
   async inspectRecovery(value: string, accountEpochId: string): Promise<SpaceRecoveryPath[]> {
     const material = await decodeRecoveryMaterial(
@@ -187,7 +246,7 @@ export class Spaces {
       this.signer,
     );
     try {
-      const roots = await this.db.all(this.tables.__e2ee_spaces, { tier: "global" });
+      const roots = await this.discoverRecoveryRoots();
       const paths: SpaceRecoveryPath[] = [];
       for (const observed of roots) {
         await this.warm(observed);
@@ -314,7 +373,7 @@ export class Spaces {
 
   /** Backfill existing memberships before reporting recovery material as usable. */
   async protectRecovery(material: string): Promise<void> {
-    const roots = await this.db.all(this.tables.__e2ee_spaces, { tier: "global" });
+    const roots = await this.discoverRecoveryRoots();
     const required: string[] = [];
     for (const observed of roots) {
       await this.warm(observed);
@@ -343,7 +402,7 @@ export class Spaces {
     let device: LocalDevice | undefined;
     try {
       device = await this.loadDevice();
-      const roots = await this.db.all(this.tables.__e2ee_spaces, { tier: "global" });
+      const roots = await this.discoverRecoveryRoots();
       if (required.some((id) => !roots.some((root) => root.id === id)))
         throw new Error("Recovery space is unavailable");
       for (const observed of roots) {
@@ -407,7 +466,7 @@ export class Spaces {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(recipientId))
       throw new Error("Invalid E2EE space recipient");
     const address = await this.address(scope, identifier);
-    const roots = this.tables.__e2ee_spaces.where(address);
+    const roots = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
     const observed = await this.db.one(roots, { tier: "global" });
     if (observed) {
       await this.changeRecipient(address, observed, recipientId, "add");
@@ -492,8 +551,8 @@ export class Spaces {
     device: LocalDevice,
     secret: Uint8Array,
   ): Promise<SpaceRoot> {
-    const roots = this.tables.__e2ee_spaces.where(address);
     const rootId = spaceRootId(address);
+    const roots = this.tables.__e2ee_spaces.where({ id: rootId });
     if (
       await tx.one(this.tables.__e2ee_spaces.includeDeleted().where({ id: rootId }), {
         tier: "global",
@@ -614,7 +673,9 @@ export class Spaces {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(recipientId))
       throw new Error("Invalid E2EE space recipient");
     const address = await this.address(scope, identifier);
-    const root = await this.db.one(this.tables.__e2ee_spaces.where(address), { tier: "global" });
+    const root = await this.db.one(this.tables.__e2ee_spaces.where({ id: spaceRootId(address) }), {
+      tier: "global",
+    });
     if (!root) throw new Error("E2EE space not found");
     await this.changeRecipient(address, root, recipientId, "remove");
     for (let attempt = 0; ; attempt++) {
@@ -624,11 +685,7 @@ export class Spaces {
       } catch (error) {
         // The removal is already accepted. Another reader may win follow-up
         // maintenance; revalidate its result without publishing removal again.
-        const conflict =
-          (error instanceof PersistedWriteRejectedError &&
-            (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
-          (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
-        if (!conflict || attempt >= 2) throw error;
+        if (!isTransactionConflict(error) || attempt >= 2) throw error;
       }
     }
   }
@@ -663,12 +720,7 @@ export class Spaces {
     includeDeliveries = true,
   ): Promise<Snapshot> {
     const [roots, grants, deliveries, successors] = await Promise.all([
-      tx.allSettledForE2ee(
-        this.tables.__e2ee_spaces.where({
-          scopeId: address.scopeId,
-          identifier: address.identifier,
-        }),
-      ),
+      tx.allSettledForE2ee(this.tables.__e2ee_spaces.where({ id: spaceRootId(address) })),
       tx.allSettledForE2ee(this.tables.__e2ee_space_grants.where({ spaceId: id })),
       includeDeliveries
         ? tx.allSettledForE2ee(this.tables.__e2ee_space_deliveries.where({ spaceId: id }))
@@ -891,13 +943,15 @@ export class Spaces {
     const position = positionOf(snapshot.roots, root.id);
     if (!position) throw new Error("E2EE space root lacks authority coverage");
     const initialHistory = historyBefore(history, BigInt(position));
+    if (!initialHistory.roots.rows.length)
+      throw new InvalidSpaceRoot("Ineligible E2EE space creator");
     const initial = await replayAccountMembership(
       initialHistory,
       this.accountContext(root.accountId),
       this.signer,
     );
     if (!initial.active.has(root.deviceId) || initial.epochId !== root.accountEpochId)
-      throw new Error("Unauthorised E2EE space creator");
+      throw new InvalidSpaceRoot("Unauthorised E2EE space creator");
     const signingKey = initialHistory.keys.rows.find((row) => row.deviceId === root.deviceId);
     if (
       !signingKey ||
@@ -1235,10 +1289,7 @@ export class Spaces {
     this.assertOpen();
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
     const observed = await this.db.one(
-      this.tables.__e2ee_spaces.where({
-        scopeId: address.scopeId,
-        identifier: address.identifier,
-      }),
+      this.tables.__e2ee_spaces.where({ id: spaceRootId(address) }),
       { tier: "global" },
     );
     if (!observed) return { state: "unavailable", reason: "space-not-found" };
@@ -1376,11 +1427,7 @@ export class Spaces {
         // Key preparation may follow another client's completed maintenance.
         // Delivery may race another maintainer. Explicit rotation still reports
         // its losing contender; never retry use() itself.
-        const conflict =
-          (error instanceof PersistedWriteRejectedError &&
-            (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
-          (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
-        if (conflict && (use || !state.rotationRequired) && conflicts < 2)
+        if (isTransactionConflict(error) && (use || !state.rotationRequired) && conflicts < 2)
           return this.explainAddress(address, use, includeHistory, conflicts + 1);
         if (!(error instanceof PersistedWriteRejectedError) || error.code !== "permission_denied")
           throw error;
@@ -1408,11 +1455,7 @@ export class Spaces {
         this.assertOpen();
         return snapshot;
       } catch (error) {
-        const conflict =
-          (error instanceof PersistedWriteRejectedError &&
-            (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
-          (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
-        if (!conflict || attempt >= 2) throw error;
+        if (!isTransactionConflict(error) || attempt >= 2) throw error;
       }
     }
   }
