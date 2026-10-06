@@ -3,6 +3,7 @@ import {
   JazzClient,
   ExclusiveWriteHandle,
   WriteResult,
+  WriteHandle,
   setWriteWaitReadiness,
   ReadTier,
   resolveDefaultDurabilityTier,
@@ -931,6 +932,28 @@ describe("JazzClient transaction query plumbing", () => {
 });
 
 describe("JazzClient runtime transaction waits", () => {
+  it.each(["handle", "result"])(
+    "rejects edge waits before reaching the runtime (%s)",
+    async (kind) => {
+      const runtime = makeFakeRuntime();
+      const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+      const handle =
+        kind === "handle"
+          ? new WriteHandle("removed-edge" as TxId, client)
+          : new WriteResult("value", "removed-edge" as TxId, client);
+      const ready = vi.fn(async () => {});
+      setWriteWaitReadiness(handle, ready);
+      const options = { tier: "edge" } as unknown as { tier: "global" };
+      await expect(handle.wait(options)).rejects.toThrow(TypeError);
+      await expect(handle.wait(options)).rejects.toThrow('The "edge" write tier was removed');
+      await expect(handle.wait(options)).rejects.toThrow(
+        "The write was already applied: do not retry it.",
+      );
+      expect(ready).not.toHaveBeenCalled();
+      expect(runtime.waitForTransaction).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([false, true])(
     "registers a wait before readiness but gates completion (mapped=%s)",
     async (mapped) => {

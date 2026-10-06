@@ -19,4 +19,4 @@ Outside the browser, a client with a server now reads `"remote"` by default, whe
 
 TypeScript rejects `firstLoadRemoteWaitMs` on a `"remote"` read; `tier` selects which options a read accepts.
 
-Write durability is unchanged: `wait({ tier: "local" | "global" })` keeps its tiers.
+Write waits now accept only `"local"` and `"global"`. The deprecated `"edge"` overload is removed from TypeScript, and `wait({ tier: "edge" })` rejects at runtime with a `TypeError` instead of warning and waiting for `"global"`. Use `wait({ tier: "global" })` for server confirmation. The error rejects only the wait: the write was already applied, so wait on the existing handle with a valid tier rather than retrying the write. The durability semantics of `"local"` and `"global"` are unchanged.

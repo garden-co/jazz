@@ -887,34 +887,16 @@ function copyWriteWaitReadiness<T extends WriteHandle<unknown, unknown>>(
   return target;
 }
 
-let warnedRemovedEdgeWriteTier = false;
-
-const writeWaitTiers: ReadonlySet<string> = new Set<DurabilityTier>(["local", "global"]);
-
-/**
- * The write has already been applied by the time a caller picks a wait tier,
- * so a removed tier must not reject: a caller that retries on rejection would
- * duplicate the write. `"edge"` waits for the stronger `"global"` instead.
- *
- * Any other unknown tier (a typo from plain JavaScript or a cast) is rejected
- * here, before reaching the native runtime, with a `TypeError` that says the
- * write was already applied, so it cannot be mistaken for a rejected write.
- */
-function resolveWriteWaitTier(tier: DurabilityTier | "edge"): DurabilityTier {
-  if (tier !== "edge") {
-    if (!writeWaitTiers.has(tier)) {
-      throw new TypeError(
-        `Unknown wait tier ${JSON.stringify(tier)}; expected "local" or "global". ` +
-          "The write was already applied: do not retry it.",
-      );
-    }
-    return tier;
-  }
-  if (!warnedRemovedEdgeWriteTier) {
-    warnedRemovedEdgeWriteTier = true;
-    console.warn('The "edge" tier was removed. wait({ tier: "edge" }) now waits for "global".');
-  }
-  return "global";
+/** Validate JavaScript callers before passing a wait tier to the runtime. */
+function resolveWriteWaitTier(tier: unknown): DurabilityTier {
+  if (tier === "local" || tier === "global") return tier;
+  const message =
+    tier === "edge"
+      ? 'The "edge" write tier was removed. Use wait({ tier: "global" }) instead.'
+      : `Unknown wait tier ${JSON.stringify(tier)}; expected "local" or "global".`;
+  // Choosing a wait tier happens after applying the write. Rejecting the wait
+  // must not be mistaken for a rejected write and prompt a duplicate insert.
+  throw new TypeError(`${message} The write was already applied: do not retry it.`);
 }
 
 /**
@@ -936,17 +918,11 @@ export class WriteHandle<T = void, WaitResult = void> {
   }
 
   /**
-   * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
-   * `"edge"` now waits for `"global"`.
-   */
-  wait(options: { tier: "edge" }): Promise<WaitResult>;
-  /**
    * Wait for the write to be persisted at a given durability tier.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
-  wait(options: { tier: DurabilityTier }): Promise<WaitResult>;
-  async wait(options: { tier: DurabilityTier | "edge" }): Promise<WaitResult> {
+  async wait(options: { tier: DurabilityTier }): Promise<WaitResult> {
     const tier = resolveWriteWaitTier(options.tier);
     const ready = writeWaitReadiness.get(this)?.(tier);
     return this.#client.waitForTransaction(this.txId, tier, ready) as Promise<WaitResult>;
@@ -968,19 +944,13 @@ export class WriteResult<T> extends WriteHandle<T, T> {
   }
 
   /**
-   * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
-   * `"edge"` now waits for `"global"`.
-   */
-  override wait(options: { tier: "edge" }): Promise<T>;
-  /**
    * Wait for the write to be persisted at a given durability tier.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    * @returns the inserted row.
    */
-  override wait(options: { tier: DurabilityTier }): Promise<T>;
-  override async wait(options: { tier: DurabilityTier | "edge" }): Promise<T> {
-    await super.wait({ tier: resolveWriteWaitTier(options.tier) });
+  override async wait(options: { tier: DurabilityTier }): Promise<T> {
+    await super.wait(options);
     return this.value;
   }
 
