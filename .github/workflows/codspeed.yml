@@ -218,3 +218,78 @@ jobs:
           mode: walltime
           # Features were fixed at build time; cargo-codspeed rejects them on run.
           run: ${{ steps.install.outputs.run-command }}
+
+  text-editor-browser-build:
+    name: Build text editor browser benchmark runtime
+    needs: native-workloads-plan
+    if: github.event_name != 'schedule' && inputs.suite != 'nightly'
+    runs-on: blacksmith-16vcpu-ubuntu-2204-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: codspeed-text-editor-release-v1
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+      - name: Build and verify release runtime
+        run: |
+          pnpm --filter jazz-wasm build
+          pnpm --filter jazz-napi build
+          node dev/artifacts/stage-native-fingerprints.mjs --workspace
+          pnpm --filter jazz-tools build:runtime
+          node dev/artifacts/verify-starter-e2e-artifacts.mjs
+      - name: Package the runtime for the measurement host
+        run: |
+          tar -czf text-editor-runtime.tar.gz \
+            packages/jazz-tools/dist crates/jazz-wasm/pkg \
+            crates/jazz-napi/.native-artifacts \
+            crates/jazz-napi/*.cjs crates/jazz-napi/*.js \
+            crates/jazz-napi/*.mjs crates/jazz-napi/*.d.ts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: text-editor-runtime-${{ github.sha }}
+          path: text-editor-runtime.tar.gz
+          retention-days: 7
+
+  text-editor-browser-walltime:
+    name: Text editor browser wall time
+    needs: text-editor-browser-build
+    runs-on: codspeed-macro
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: text-editor-runtime-${{ github.sha }}
+      - name: Restore and verify this commit's runtime
+        run: |
+          tar -xzf text-editor-runtime.tar.gz
+          node dev/artifacts/verify-starter-e2e-artifacts.mjs
+      - run: pnpm --filter text-editor exec playwright install --with-deps chromium
+      - name: Measure text editor user flows
+        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
+        with:
+          mode: walltime
+          run: pnpm --filter text-editor bench
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: text-editor-browser-results-${{ github.sha }}
+          path: examples/text-editor/benchmarks/.generated/results.json
+          retention-days: 14

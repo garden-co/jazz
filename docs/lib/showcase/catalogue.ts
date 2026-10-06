@@ -59,7 +59,7 @@ export type HeroExample = {
   plannedMetrics?: string;
 };
 
-// Interpretations are given the /5 estimate like every displayed time.
+// Interpretations receive native /5 estimates or measured browser wall time.
 // Ratios need none: the divisor cancels out.
 const t = (seconds: number) => formatTime(seconds);
 const rate = (count: number, seconds: number) =>
@@ -276,6 +276,45 @@ export const heroExamples: HeroExample[] = [
         label: "100 bandmates open their patterns",
         interpret: (s) =>
           `100 pattern views of the same query shape, each bound to a different pattern, open and hydrate in ${t(s)}, about ${each(100, s)} per view.`,
+      },
+    ],
+  },
+  {
+    id: "text-editor",
+    title: "Collaborative text editor",
+    tagline: "Yjs text editing with incremental updates stored in Jazz.",
+    description:
+      "A minimal React and CodeMirror editor. Each editing session appends Yjs updates to its own binary log in Jazz, so separate offline sessions can merge their changes when they reconnect.",
+    highlights: [
+      "Edit the same document in multiple browsers",
+      "Keep editing offline and merge changes on reconnect",
+      "Restore text and CRDT state from incremental binary logs",
+    ],
+    sources: [
+      { label: "React app", path: "examples/text-editor" },
+      { label: "Browser benchmarks", path: "examples/text-editor/benchmarks" },
+    ],
+    benchmarks: "examples/text-editor/benchmarks",
+    video: null,
+    plannedVideo: "Two browsers edit a shared document, go offline, and merge their changes.",
+    metrics: [
+      {
+        benchmark: "text_editor_open_browser[100000]",
+        label: "Open 100,000 edits",
+        interpret: (s) =>
+          `A fresh browser context opens a document with 100,000 stored Yjs updates and reaches an editable CodeMirror view in ${t(s)}. Includes application startup, Jazz delivery and Yjs replay on a localhost server.`,
+      },
+      {
+        benchmark: "text_editor_reload_browser[100000]",
+        label: "Reload while offline",
+        interpret: (s) =>
+          `Reloading the same history from the browser's local database, with WebSockets blocked, takes ${t(s)}. The Yjs document is reconstructed on every reload.`,
+      },
+      {
+        benchmark: "text_editor_sync_edit_browser[100000]",
+        label: "Sync one new edit",
+        interpret: (s) =>
+          `Inserting one character in a loaded document until a second browser displays it takes ${t(s)}. Both browsers already hold the 100,000-edit history.`,
       },
     ],
   },
