@@ -265,8 +265,9 @@ Feature bits are also permanent: `SyncMessagePayload=1<<0`,
 `SessionFrame=1<<1`, `StructuredErrors=1<<2`, `PayloadLz4=1<<3`,
 `PayloadZstd=1<<4`, `MessageFragmentation=1<<5`,
 `AuthorizationScopeReceipts=1<<6`, `AuthorizationScopeViews=1<<7`, and
-`AuxiliaryChunks=1<<8`, `ScopeIsolatedClientRelay=1<<9`, and
-retired `AuthorityPublications=1<<10` (never advertised). `Hello` negotiates
+`AuxiliaryChunks=1<<8`, `ScopeIsolatedClientRelay=1<<9`,
+retired `AuthorityPublications=1<<10` (never advertised), and
+`QueryResultProtocol=1<<11`. `Hello` negotiates
 only the intersection. A message
 envelope or fragment MUST NOT declare a bit outside that intersection. Feature
 masks are postcard `u64` values and MUST be decoded and compared across all 64
@@ -597,6 +598,35 @@ lowering `CapabilityReport`. After `SubscribeRejected`, that subscription is not
 active, the requester must not expect `ViewUpdate`s for it, and `Unsubscribe`
 for the same key is a no-op. The connection and any other subscriptions on it
 remain live (`INV-SYNC-23`).
+
+Prepared current-result projection failures are terminal for only the affected
+served coverage group. The server queues one rejection for each usage-site key
+in that group, retires its served usages and maintained query ownership, and
+leaves unrelated groups and transaction fate processing unchanged. The
+rejection uses `SubscribeRejectReason::ServerFailure { code:
+SubscribeServerFailureCode::QueryResultProtocol }`, which appends discriminant
+`6` after the existing failure-code values and carries no diagnostic or row
+data. The public runtime client's `SubscriptionServerFailureCode` also appends
+this variant (a source-compatibility change for exhaustive Rust matches). This
+code is sent only when `QueryResultProtocol` was negotiated; wire-v3 peers
+without the feature receive the existing `Internal` code. The client delivers
+the typed rejection and terminates only that query stream. For a legacy
+`Internal` rejection, the server route is still retired but the client stream
+remains nonterminal; the application must detach it and issue a fresh
+`Subscribe` to recover the committed current result. At the low-level
+`Db::SubscriptionStream` interface, the retryable
+`ShapeRegistrationPendingCatalogueAdmission`, `InvalidAuthoritySourceClosure`,
+and `ServerFailure::Internal` reasons do not terminate the stream.
+
+`InvalidAuthoritySourceClosure` rejects the local authority frame atomically,
+not the live low-level `Db::SubscriptionStream`. A later valid authority frame
+may publish on that same stream. If a non-reset change was withheld before
+rejection, its publication baseline remains the last emitted result, so the
+valid completion's row and occurrence movements are relative to that result.
+Rejection or close still releases a withheld `LocalFirstUnlessEmpty` opening
+as specified in ch. 13, except pending catalogue admission; that local reset is
+published before the rejection. This low-level continuity does not change
+runtime-client or binding teardown and does not promise relay recovery.
 
 `Unsubscribe` detaches one usage-site subscription. When the last usage-site
 subscription for a canonical program instance detaches, the serving side may drop

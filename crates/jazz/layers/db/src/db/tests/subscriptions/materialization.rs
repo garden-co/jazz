@@ -2,6 +2,103 @@
 
 use super::*;
 
+/// Core advertises `QueryResultProtocol` to a current peer and falls back to
+/// `Internal` for an older peer. This lower-level helper test isolates the
+/// feature-gated rejection construction; connection delivery is covered
+/// separately.
+///
+/// ```text
+/// Core ──typed rejection──► current peer
+///      └─legacy rejection─► older peer
+/// ```
+#[test]
+fn query_result_protocol_rejection_downgrades_for_older_peers() {
+    let subscription = crate::protocol::SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([0xa1; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0xa2; 16])),
+        read_view: Default::default(),
+    };
+    let error = crate::node::Error::QueryResultProtocol;
+    let old_peer = super::super::super::server_subscription_failure_rejection_message_with_feature(
+        subscription.clone(),
+        &error,
+        crate::wire::FEATURE_NONE,
+    );
+    assert!(matches!(
+        old_peer,
+        SyncMessage::SubscribeRejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            },
+            ..
+        }
+    ));
+
+    let current_peer =
+        super::super::super::server_subscription_failure_rejection_message_with_feature(
+            subscription,
+            &error,
+            crate::wire::FEATURE_QUERY_RESULT_PROTOCOL,
+        );
+    assert!(matches!(
+        current_peer,
+        SyncMessage::SubscribeRejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::QueryResultProtocol,
+            },
+            ..
+        }
+    ));
+}
+
+/// An Edge relay downgrades only `QueryResultProtocol` for an older downstream
+/// peer and preserves unrelated rejection reasons. This helper-level test pins
+/// the narrow egress conversion; relay routing is exercised end to end elsewhere.
+///
+/// ```text
+/// Core ──rejection──► Edge ──feature-aware reason──► downstream peer
+/// ```
+#[test]
+fn relay_egress_downgrades_only_query_result_protocol() {
+    let old_peer_reason = super::super::super::relay_subscription_rejection_reason_with_feature(
+        SubscribeRejectReason::ServerFailure {
+            code: SubscribeServerFailureCode::QueryResultProtocol,
+        },
+        crate::wire::FEATURE_NONE,
+    );
+    assert_eq!(
+        old_peer_reason,
+        SubscribeRejectReason::ServerFailure {
+            code: SubscribeServerFailureCode::Internal,
+        }
+    );
+
+    let query_validation = SubscribeRejectReason::ServerFailure {
+        code: SubscribeServerFailureCode::QueryValidation,
+    };
+    assert_eq!(
+        super::super::super::relay_subscription_rejection_reason_with_feature(
+            query_validation.clone(),
+            crate::wire::FEATURE_NONE,
+        ),
+        query_validation,
+        "featureless relay egress preserves non-target server failures"
+    );
+
+    let current_peer_reason = super::super::super::relay_subscription_rejection_reason_with_feature(
+        SubscribeRejectReason::ServerFailure {
+            code: SubscribeServerFailureCode::QueryResultProtocol,
+        },
+        crate::wire::FEATURE_QUERY_RESULT_PROTOCOL,
+    );
+    assert_eq!(
+        current_peer_reason,
+        SubscribeRejectReason::ServerFailure {
+            code: SubscribeServerFailureCode::QueryResultProtocol,
+        }
+    );
+}
+
 #[test]
 fn maintained_physical_point_subscription_stays_live_for_only_its_row() {
     let schema = schema();
