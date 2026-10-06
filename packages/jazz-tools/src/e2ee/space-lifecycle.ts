@@ -171,6 +171,7 @@ export class Spaces {
     private readonly accountContext: (accountId: string) => string,
     private readonly assertOpen: () => void,
     private readonly device?: {
+      readonly id: string;
       store: AccountStore;
       isKnownRevoked(): boolean;
       load(): Promise<LocalDevice>;
@@ -208,7 +209,10 @@ export class Spaces {
     return address;
   }
 
-  private async discoverRecoveryRoots(): Promise<SpaceRoot[]> {
+  private async discoverRecoveryRoots(): Promise<{
+    own: PublicMembershipHistory;
+    roots: SpaceRoot[];
+  }> {
     await prefetchPublicMembershipHistory(this.db, this.accountId, this.tables);
     await this.groups?.warmMembership({ accountId: this.accountId });
     const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
@@ -250,12 +254,12 @@ export class Spaces {
         );
         roots.push(...found.rows);
       }
-      return roots;
+      return { own, roots };
     });
-    const roots = await read.wait({ tier: "global" });
+    const { own, roots } = await read.wait({ tier: "global" });
     this.assertOpen();
     // Discovery is a candidate superset. Fresh per-path replay establishes entitlement.
-    return roots.filter((root) => root.id === spaceRootId(root));
+    return { own, roots: roots.filter((root) => root.id === spaceRootId(root)) };
   }
 
   /** Read-only coverage: no device state, private store, delivery or maintenance writes. */
@@ -267,9 +271,11 @@ export class Spaces {
       this.signer,
     );
     try {
-      const roots = await this.discoverRecoveryRoots();
+      const discovery = await this.discoverRecoveryRoots();
+      if ((await this.checkRecoveryAuthority(material, discovery.own)).epochId !== accountEpochId)
+        throw new E2eeRecoveryError("recovery-state-changed");
       const paths: SpaceRecoveryPath[] = [];
-      for (const observed of roots) {
+      for (const observed of discovery.roots) {
         await this.warm(observed);
         const query = this.tables.__e2ee_space_recovery_deliveries.where({
           spaceId: observed.id,
@@ -394,8 +400,14 @@ export class Spaces {
 
   /** Backfill existing memberships before reporting recovery material as usable. */
   async protectRecovery(material: string): Promise<void> {
-    const roots = await this.discoverRecoveryRoots();
-    const required: string[] = [];
+    const provider = this.requireDevice();
+    await prefetchPublicMembershipHistory(this.db, this.accountId, this.tables);
+    const initial = await exclusiveE2eeTransaction(this.db, (tx) => provider.states(tx));
+    const own = await initial.wait({ tier: "global" });
+    this.assertOpen();
+    if (!own.active.has(provider.id)) throw new Error("Space recovery requires an active device");
+    const { roots } = await this.discoverRecoveryRoots();
+    const required = new Set<string>();
     for (const observed of roots) {
       await this.warm(observed);
       const read = await exclusiveE2eeTransaction(this.db, (tx) =>
@@ -407,13 +419,28 @@ export class Spaces {
       if (!state || state.sealed || !state.members.has(this.accountId)) continue;
       if ((await this.explainAddress(observed)).state !== "ready")
         throw new Error("Space key unavailable while creating recovery");
-      required.push(observed.id);
+      required.add(observed.id);
     }
-    await this.restoreRecovery(material, required);
+    // Ready creators need proof of recovery coverage, not local recovery-key
+    // restaging or another delivery/maintenance pass.
+    const paths = await this.inspectRecovery(material, own.epochId);
+    let maintenance = false;
+    let unavailableDelivery = false;
+    for (const path of paths) {
+      required.delete(path.spaceId);
+      if (path.validation === "unavailable") {
+        if (path.reason === "maintenance-required") maintenance = true;
+        else unavailableDelivery = true;
+      }
+    }
+    if (required.size) throw new Error("Recovery space is unavailable");
+    if (maintenance) throw new Error("Space key unavailable while creating recovery");
+    if (unavailableDelivery)
+      throw new RecoveryCandidateError("recovery-space-delivery-unavailable");
   }
 
   /** Recovery material restores keys, never removed membership or revoked devices. */
-  async restoreRecovery(value: string, required: string[] = []): Promise<void> {
+  async restoreRecovery(value: string): Promise<void> {
     const material = await decodeRecoveryMaterial(
       value,
       this.accountContext(this.accountId),
@@ -423,9 +450,7 @@ export class Spaces {
     let device: LocalDevice | undefined;
     try {
       device = await this.loadDevice();
-      const roots = await this.discoverRecoveryRoots();
-      if (required.some((id) => !roots.some((root) => root.id === id)))
-        throw new Error("Recovery space is unavailable");
+      const { roots } = await this.discoverRecoveryRoots();
       for (const observed of roots) {
         await this.warm(observed);
         const query = this.tables.__e2ee_space_recovery_deliveries.where({

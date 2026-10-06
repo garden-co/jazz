@@ -45,3 +45,9 @@ adapter-mutated space or group replay from contaminating later cached proofs.
 Keep deleted account and group recipient grants as scoped discovery candidates,
 so incomplete live membership still rejects recovery status, use and creation.
 Deleted records never grant access or replace authoritative live replay.
+
+Verify recovery creation through read-only coverage inspection rather than
+restoring keys the creator already holds. Preserve active-device, account-epoch
+and required-path checks, including empty discovery, and reject material whose
+authority or required coverage changes during the final proof. Actual recovery
+use still retains keys for later reopening.
