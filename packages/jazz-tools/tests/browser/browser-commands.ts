@@ -5,8 +5,6 @@ import type { JazzServerInfo } from "./testing-server.js";
 export interface JazzServerBrowserCommands {
   jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
   jazzServerStop(serverUrl: string): Promise<void>;
-  jazzServerBlockNetwork(serverUrl: string): Promise<void>;
-  jazzServerUnblockNetwork(serverUrl: string): Promise<void>;
   jazzServerJwtForUser(
     userId: string,
     claims?: Record<string, unknown>,
@@ -14,21 +12,23 @@ export interface JazzServerBrowserCommands {
   ): Promise<string>;
 }
 
-export interface JazzServerHoldingProxyBrowserCommands {
-  jazzServerHoldingProxyStart(serverUrl: string): Promise<string>;
-  jazzServerHoldingProxySetHeld(proxyUrl: string, held: boolean): Promise<void>;
-  jazzServerHoldingProxyStop(proxyUrl: string): Promise<void>;
+export interface JazzServerTransportControlBrowserCommands {
+  jazzServerTransportControlCreate(serverUrl: string): Promise<string>;
+  jazzServerTransportControlBlock(url: string, direction: "both" | "inbound"): Promise<void>;
+  jazzServerTransportControlUnblock(url: string): Promise<void>;
+  jazzServerTransportControlStop(proxyUrl: string): Promise<void>;
 }
 
-export function jazzServerHoldingProxyBrowserCommands(): JazzServerHoldingProxyBrowserCommands {
+export function jazzServerTransportControlBrowserCommands(): JazzServerTransportControlBrowserCommands {
   if (
-    !hasFunction(commands, "jazzServerHoldingProxyStart") ||
-    !hasFunction(commands, "jazzServerHoldingProxySetHeld") ||
-    !hasFunction(commands, "jazzServerHoldingProxyStop")
+    !hasFunction(commands, "jazzServerTransportControlCreate") ||
+    !hasFunction(commands, "jazzServerTransportControlBlock") ||
+    !hasFunction(commands, "jazzServerTransportControlUnblock") ||
+    !hasFunction(commands, "jazzServerTransportControlStop")
   ) {
-    throw new Error("Browser test project is missing the Jazz server holding-proxy commands.");
+    throw new Error("Browser test project is missing the Jazz server transport-control commands.");
   }
-  return commands as unknown as JazzServerHoldingProxyBrowserCommands;
+  return commands as unknown as JazzServerTransportControlBrowserCommands;
 }
 
 export interface JazzTopologyBrowserCommands {
@@ -60,8 +60,6 @@ function isJazzServerBrowserCommands(value: unknown): value is JazzServerBrowser
     value !== null &&
     hasFunction(value, "jazzServerInfo") &&
     hasFunction(value, "jazzServerStop") &&
-    hasFunction(value, "jazzServerBlockNetwork") &&
-    hasFunction(value, "jazzServerUnblockNetwork") &&
     hasFunction(value, "jazzServerJwtForUser")
   );
 }
@@ -83,7 +81,7 @@ export function jazzServerBrowserCommands(): JazzServerBrowserCommands {
   if (!isJazzServerBrowserCommands(commands)) {
     throw new Error(
       "Browser test project is missing Jazz server commands. Configure jazzServerInfo, " +
-        "jazzServerStop, jazzServerBlockNetwork, jazzServerUnblockNetwork, and " +
+        "jazzServerStop, and " +
         "jazzServerJwtForUser.",
     );
   }

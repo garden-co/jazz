@@ -1,6 +1,6 @@
 import {
   jazzServerBrowserCommands,
-  jazzServerHoldingProxyBrowserCommands,
+  jazzServerTransportControlBrowserCommands,
 } from "./browser-commands.js";
 
 export interface JazzServerInfo {
@@ -9,27 +9,12 @@ export interface JazzServerInfo {
   adminSecret: string;
 }
 
-export interface JazzServerNetworkDebugState {
-  contextId: number;
-  pattern: string;
-  blocked: boolean;
-  activePatterns: string[];
-}
-
 export function getJazzServerInfo(appId?: string): Promise<JazzServerInfo> {
   return jazzServerBrowserCommands().jazzServerInfo(appId);
 }
 
 export function stopJazzServer(serverUrl: string): Promise<void> {
   return jazzServerBrowserCommands().jazzServerStop(serverUrl);
-}
-
-export function blockJazzServerNetwork(serverUrl: string): Promise<void> {
-  return jazzServerBrowserCommands().jazzServerBlockNetwork(serverUrl);
-}
-
-export function unblockJazzServerNetwork(serverUrl: string): Promise<void> {
-  return jazzServerBrowserCommands().jazzServerUnblockNetwork(serverUrl);
 }
 
 export async function getJazzServerJwtForUser(
@@ -49,25 +34,27 @@ export async function getJazzServerJwtForUser(
 }
 
 /**
- * A proxy in front of a test server that can hold back everything the server
- * sends while keeping the client's connection open (see `startHoldingProxy`).
+ * Browser bridge to the shared TransportControl: buffer delivery without
+ * disconnecting, using the same block/blockInbound/unblock operations as Rust.
  */
-export interface JazzServerHoldingProxy {
+export interface JazzServerTransportControl {
   url: string;
-  hold(): Promise<void>;
-  release(): Promise<void>;
+  block(): Promise<void>;
+  blockInbound(): Promise<void>;
+  unblock(): Promise<void>;
   stop(): Promise<void>;
 }
 
-export async function startJazzServerHoldingProxy(
+export async function createJazzServerTransportControl(
   serverUrl: string,
-): Promise<JazzServerHoldingProxy> {
-  const commands = jazzServerHoldingProxyBrowserCommands();
-  const url = await commands.jazzServerHoldingProxyStart(serverUrl);
+): Promise<JazzServerTransportControl> {
+  const commands = jazzServerTransportControlBrowserCommands();
+  const url = await commands.jazzServerTransportControlCreate(serverUrl);
   return {
     url,
-    hold: () => commands.jazzServerHoldingProxySetHeld(url, true),
-    release: () => commands.jazzServerHoldingProxySetHeld(url, false),
-    stop: () => commands.jazzServerHoldingProxyStop(url),
+    block: () => commands.jazzServerTransportControlBlock(url, "both"),
+    blockInbound: () => commands.jazzServerTransportControlBlock(url, "inbound"),
+    unblock: () => commands.jazzServerTransportControlUnblock(url),
+    stop: () => commands.jazzServerTransportControlStop(url),
   };
 }

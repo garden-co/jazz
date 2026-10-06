@@ -5,7 +5,7 @@ import { ReadTier } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { startHoldingProxy } from "./testing/holding-proxy.js";
+import { createTransportControl } from "./testing/transport-control.js";
 
 const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) });
 const permissions = definePermissions(app, ({ policy }) => {
@@ -142,7 +142,7 @@ it("gives an empty client the server's rows as its first delivery", async () => 
 
 it("shows local rows at the deadline when a live server has not answered", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  const proxy = await startHoldingProxy(server.url);
+  const transport = await createTransportControl(server.url);
   const dbs: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
     await deploy({
@@ -156,12 +156,12 @@ it("shows local rows at the deadline when a live server has not answered", async
     dbs.push(writer);
     await writer.insert(app.entries, { title: "Only on the server" }).wait({ tier: "global" });
 
-    const reader = await createDb(await localAccountConfig(server.appId, proxy.url));
+    const reader = await createDb(await localAccountConfig(server.appId, transport.url));
     dbs.push(reader);
     // The reader's own write reaching the server proves its link is live.
     await reader.insert(app.entries, { title: "Written by the reader" }).wait({ tier: "global" });
 
-    proxy.hold();
+    transport.blockInbound();
     const waitMs = 1_500;
     const started = Date.now();
     const deliveries: string[][] = [];
@@ -184,15 +184,15 @@ it("shows local rows at the deadline when a live server has not answered", async
     expect(Date.now() - oneShotStarted).toBeGreaterThanOrEqual(waitMs - 50);
 
     // The late answer arrives as an ordinary change.
-    proxy.release();
+    transport.unblock();
     await expect
       .poll(() => deliveries.at(-1), { timeout: 10_000 })
       .toEqual(["Only on the server", "Written by the reader"]);
     unsubscribe();
   } finally {
-    proxy.release();
+    transport.unblock();
     for (const db of dbs) await db.shutdown();
-    await proxy.stop();
+    await transport.stop();
     await server.stop();
   }
 }, 60_000);

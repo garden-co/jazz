@@ -28,11 +28,7 @@ import {
   INDEXEDDB_STORAGE_MANIFEST_STORE,
   IndexedDbPageStore,
 } from "../../src/runtime/indexeddb-page-store.js";
-import {
-  blockJazzServerNetwork,
-  getJazzServerInfo,
-  unblockJazzServerNetwork,
-} from "./testing-server.js";
+import { createJazzServerTransportControl, getJazzServerInfo } from "./testing-server.js";
 import {
   createBrowserTestDb as createDb,
   sleep,
@@ -92,6 +88,7 @@ describe("browser Jazz storage compatibility corpus", () => {
   // root that the public Db actually opened.
   const databaseNames = new Set<string>();
   const openDbs: Db[] = [];
+  const transportCleanup = new TestCleanup();
   const openDbLabels = new Map<Db, string>();
   let pinnedCorpusPhase = "not started";
 
@@ -137,6 +134,7 @@ describe("browser Jazz storage compatibility corpus", () => {
         .reverse()
         .map((db) => shutdownTrackedDb(db, openDbLabels.get(db) ?? "unlabeled")),
     );
+    await transportCleanup.cleanup();
     receipt(`cleanup:dbs-done; pinned-phase=${pinnedCorpusPhase}`);
     await Promise.all([...databaseNames].map((name) => IndexedDbPageStore.destroy(name)));
     databaseNames.clear();
@@ -195,11 +193,14 @@ describe("browser Jazz storage compatibility corpus", () => {
       schema: app.wasmSchema,
       permissions,
     });
+    const transport = transportCleanup.trackTransport(
+      await createJazzServerTransportControl(server.serverUrl),
+    );
     const dbName = uniqueDbName("browser-storage-current-producer");
     const config = await persistentConfig(
       dbName,
       "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-      server,
+      { ...server, serverUrl: transport.url },
     );
     let db = await openPersistentDb(config);
     const physicalDbName = await trackPhysicalDatabase(dbName);
@@ -249,7 +250,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     expect(
       rawManifest(candidate).find(([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY)?.[1],
     ).toEqual(INDEXEDDB_STORAGE_MANIFEST);
-    await blockJazzServerNetwork(server.serverUrl);
+    await transport.block();
     try {
       db = await openPersistentDb(config);
       await db.disconnect();
@@ -262,7 +263,7 @@ describe("browser Jazz storage compatibility corpus", () => {
       await db.shutdown();
       openDbs.splice(openDbs.indexOf(db), 1);
     } finally {
-      await unblockJazzServerNetwork(server.serverUrl);
+      await transport.unblock();
     }
     // Export only after actual public reopen has validated the raw candidate.
     await jazzStorageCorpusBrowserCommands().writeBrowserStorageCorpus(candidate);
@@ -440,47 +441,41 @@ describe("browser Jazz storage compatibility corpus", () => {
       rawAfterReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE],
     );
 
-    // Network isolation makes this a persistence receipt: the server cannot
-    // repair lost current pages before the post-reopen assertions.
-    await pinnedPhase("block-network", () => blockJazzServerNetwork(registry.origin));
-    try {
-      db = await pinnedPhase("offline-open", () => openPersistentDb(config, "pinned-offline"));
-      expect(await pinnedPhase("offline-physical-root", () => trackPhysicalDatabase(dbName))).toBe(
-        physicalDbName,
-      );
-      const mixedMain = await pinnedPhase("offline-main-query", () =>
-        db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
-      );
-      const mixedDraft = await pinnedPhase("offline-draft-query", () =>
-        db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
-      );
-      const mixedProjects = await pinnedPhase("offline-projects-query", () =>
-        db.all(app.projects, { tier: ReadTier.LocalFirst }),
-      );
-      expect(mixedMain).toHaveLength(2);
-      expect(mixedMain).toEqual(expect.arrayContaining(reopenedMain));
-      expect(mixedMain).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            title: "current writer document",
-            branch: "main",
-            body: currentBody,
-          }),
-        ]),
-      );
-      expect(mixedDraft).toEqual(reopenedDraft);
-      expect(mixedProjects).toHaveLength(historicalProjects.length + 1);
-      expect(mixedProjects).toEqual(expect.arrayContaining(historicalProjects));
-      const currentProject = mixedProjects.find(
-        (project) => project.name === "current writer project",
-      );
-      expect(currentProject).toBeDefined();
-      expect(
-        mixedMain.find((document) => document.title === "current writer document")?.projectId,
-      ).toBe(currentProject!.id);
-    } finally {
-      await pinnedPhase("unblock-network", () => unblockJazzServerNetwork(registry.origin));
-    }
+    // config has no serverUrl: upstream cannot repair lost pages on reopen.
+    db = await pinnedPhase("offline-open", () => openPersistentDb(config, "pinned-offline"));
+    expect(await pinnedPhase("offline-physical-root", () => trackPhysicalDatabase(dbName))).toBe(
+      physicalDbName,
+    );
+    const mixedMain = await pinnedPhase("offline-main-query", () =>
+      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
+    );
+    const mixedDraft = await pinnedPhase("offline-draft-query", () =>
+      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
+    );
+    const mixedProjects = await pinnedPhase("offline-projects-query", () =>
+      db.all(app.projects, { tier: ReadTier.LocalFirst }),
+    );
+    expect(mixedMain).toHaveLength(2);
+    expect(mixedMain).toEqual(expect.arrayContaining(reopenedMain));
+    expect(mixedMain).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "current writer document",
+          branch: "main",
+          body: currentBody,
+        }),
+      ]),
+    );
+    expect(mixedDraft).toEqual(reopenedDraft);
+    expect(mixedProjects).toHaveLength(historicalProjects.length + 1);
+    expect(mixedProjects).toEqual(expect.arrayContaining(historicalProjects));
+    const currentProject = mixedProjects.find(
+      (project) => project.name === "current writer project",
+    );
+    expect(currentProject).toBeDefined();
+    expect(
+      mixedMain.find((document) => document.title === "current writer document")?.projectId,
+    ).toBe(currentProject!.id);
     pinnedCorpusPhase = "pinned-test:complete";
     receipt(pinnedCorpusPhase);
   }, 90_000);

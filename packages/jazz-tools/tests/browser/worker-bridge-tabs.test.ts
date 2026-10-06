@@ -26,10 +26,9 @@ import { Db, resolveDefaultPersistentDbName, type QueryBuilder } from "../../src
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
-  blockJazzServerNetwork,
+  createJazzServerTransportControl,
   getJazzServerJwtForUser,
   stopJazzServer,
-  unblockJazzServerNetwork,
 } from "./testing-server.js";
 import {
   createRemoteBrowserDb,
@@ -298,7 +297,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-recover");
     const sharedLocalAuthToken = generateAuthSecret();
     const { appId, serverUrl } = syncServer;
-    const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedLocalAuthToken, syncServer);
+    const transport = ctx.trackTransport(await createJazzServerTransportControl(serverUrl));
+    const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedLocalAuthToken, {
+      ...syncServer,
+      serverUrl: transport.url,
+    });
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-recover-remote"));
     await createRemoteBrowserDb({
       id: remoteDbId,
@@ -324,9 +327,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
       20000,
     );
 
-    await blockJazzServerNetwork(serverUrl);
+    await transport.block();
+    await dbA.disconnect();
     await sleep(500);
-    await unblockJazzServerNetwork(serverUrl);
+    await transport.unblock();
+    await dbA.reconnect();
     await sleep(250);
 
     const recoveredTitle = `network-recovered-${Date.now()}`;
@@ -405,6 +410,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("edge-late-attach");
     const sharedLocalAuthToken = generateAuthSecret();
     const { serverUrl } = syncServer;
+    const transport = ctx.trackTransport(await createJazzServerTransportControl(serverUrl));
     const dbWriter = await createSyncedDb(
       ctx,
       "edge-late-attach-writer",
@@ -428,15 +434,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
         "remote",
       );
 
-      await blockJazzServerNetwork(serverUrl);
+      await transport.block();
       await sleep(250);
 
-      const dbProbe = await createSyncedDb(
-        ctx,
-        "edge-late-attach-probe",
-        sharedLocalAuthToken,
-        syncServer,
-      );
+      const dbProbe = await createSyncedDb(ctx, "edge-late-attach-probe", sharedLocalAuthToken, {
+        ...syncServer,
+        serverUrl: transport.url,
+      });
       const probeRowsPromise = waitForTodos(
         dbProbe,
         (rows) => rows.some((row) => row.title === baselineTitle),
@@ -446,13 +450,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
       );
 
       await sleep(500);
-      await unblockJazzServerNetwork(serverUrl);
+      await transport.unblock();
       await sleep(250);
 
       const rowsOnProbe = await probeRowsPromise;
       expect(rowsOnProbe.some((row) => row.title === baselineTitle)).toBe(true);
     } finally {
-      await unblockJazzServerNetwork(serverUrl);
+      await transport.unblock();
     }
   }, 60000);
 
@@ -467,7 +471,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-offline");
     const sharedLocalAuthToken = generateAuthSecret();
     const { appId, serverUrl } = syncServer;
-    const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken, syncServer);
+    const transport = ctx.trackTransport(await createJazzServerTransportControl(serverUrl));
+    const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken, {
+      ...syncServer,
+      serverUrl: transport.url,
+    });
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-offline-remote"));
     await createRemoteBrowserDb({
       id: remoteDbId,
@@ -493,10 +501,9 @@ describe("SharedWorker bridge with IndexedDB", () => {
       20000,
     );
 
-    await blockJazzServerNetwork(serverUrl);
-    // Disconnect the WS transport so the block takes effect immediately.
-    // Playwright route blocking only intercepts new connections; the existing
-    // WebSocket must be closed explicitly for the offline simulation to hold.
+    await transport.block();
+    // Explicitly disconnect too: this test exercises replay after reconnect,
+    // including a replacement connection through the same delivery gate.
     await dbA.disconnect();
     await sleep(250);
 
@@ -524,7 +531,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       ),
     ).rejects.toThrow();
 
-    await unblockJazzServerNetwork(serverUrl);
+    await transport.unblock();
     // Re-establish the worker's upstream WebSocket now that the network is live again.
     await dbA.reconnect();
     await sleep(250);

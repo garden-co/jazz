@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
-import { startHoldingProxy } from "../../src/runtime/testing/holding-proxy.js";
+import { createTransportControl } from "../../src/runtime/testing/transport-control.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 const app = schema.defineApp({
@@ -271,7 +271,7 @@ it("shows local rows at the deadline when a live server has not answered", async
     jwtIssuer: issuer.issuer,
     jwtAudience: issuer.audience,
   });
-  const proxy = await startHoldingProxy(server.url);
+  const transport = await createTransportControl(server.url);
   try {
     const permissions = schema.definePermissions(app, ({ policy }) => [
       policy.todos.allowRead.always(),
@@ -315,7 +315,7 @@ it("shows local rows at the deadline when a live server has not answered", async
           .insert(app.todos, { title: "Written by the reader", done: false })
           .wait({ tier: "global" });
 
-        proxy.hold();
+        transport.blockInbound();
         const waitMs = 1_500;
         const started = Date.now();
         const deliveries: string[][] = [];
@@ -339,7 +339,7 @@ it("shows local rows at the deadline when a live server has not answered", async
           expect(Date.now() - oneShotStarted).toBeGreaterThanOrEqual(waitMs - 50);
 
           // The late answer arrives as an ordinary change.
-          proxy.release();
+          transport.unblock();
           await expect
             .poll(() => deliveries.at(-1), { timeout: 10_000 })
             .toEqual(["Only on the server", "Written by the reader"]);
@@ -347,11 +347,11 @@ it("shows local rows at the deadline when a live server has not answered", async
           stop();
         }
       },
-      nativeOptions("rn-deadline-reader", proxy.url),
+      nativeOptions("rn-deadline-reader", transport.url),
     );
   } finally {
-    proxy.release();
-    await proxy.stop();
+    transport.unblock();
+    await transport.stop();
     await server.stop();
     await issuer.stop();
   }

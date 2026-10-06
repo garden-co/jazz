@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import { generateAuthSecret, schema, ReadTier } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
-import { getJazzServerInfo, startJazzServerHoldingProxy } from "./testing-server.js";
+import { getJazzServerInfo, createJazzServerTransportControl } from "./testing-server.js";
 
 const app = schema.defineApp({ entries: schema.table({ title: schema.string() }, {}) });
 const permissions = schema.definePermissions(app, ({ policy }) => [
@@ -20,7 +20,7 @@ it("shows local rows at the deadline when a live server has not answered", async
     uniqueDbName("local-first-server-wait-deadline"),
   );
   await deploy({ appId, serverUrl, adminSecret, schema: app.wasmSchema, permissions });
-  const proxy = await startJazzServerHoldingProxy(serverUrl);
+  const transport = await createJazzServerTransportControl(serverUrl);
   try {
     const writer = ctx.track(
       await createBrowserTestDb({
@@ -35,7 +35,7 @@ it("shows local rows at the deadline when a live server has not answered", async
     const reader = ctx.track(
       await createBrowserTestDb({
         appId,
-        serverUrl: proxy.url,
+        serverUrl: transport.url,
         secret: generateAuthSecret(),
         driver: { type: "memory" },
       }),
@@ -43,7 +43,7 @@ it("shows local rows at the deadline when a live server has not answered", async
     // The reader's own write reaching the server proves its link is live.
     await reader.insert(app.entries, { title: "Written by the reader" }).wait({ tier: "global" });
 
-    await proxy.hold();
+    await transport.blockInbound();
     const waitMs = 1_500;
     const started = Date.now();
     const deliveries: string[][] = [];
@@ -72,7 +72,7 @@ it("shows local rows at the deadline when a live server has not answered", async
     expect(Date.now() - oneShotStarted).toBeGreaterThanOrEqual(waitMs - 50);
 
     // The late answer arrives as an ordinary change.
-    await proxy.release();
+    await transport.unblock();
     await waitForCondition(
       async () =>
         JSON.stringify(deliveries.at(-1)) ===
@@ -81,6 +81,6 @@ it("shows local rows at the deadline when a live server has not answered", async
       "the late server answer as a change",
     );
   } finally {
-    await proxy.stop();
+    await transport.stop();
   }
 }, 60_000);

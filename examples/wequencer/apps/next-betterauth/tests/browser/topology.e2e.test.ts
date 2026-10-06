@@ -18,10 +18,10 @@ import {
   TopologyEnvelopeScheduler,
 } from "../../../../../../packages/jazz-tools/tests/browser/topology-harness.js";
 import {
-  blockJazzServerNetwork,
+  createJazzServerTransportControl,
+  type JazzServerTransportControl,
   getJazzServerInfo,
   getJazzServerJwtForUser,
-  unblockJazzServerNetwork,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app, type Step } from "../../schema.js";
@@ -67,6 +67,7 @@ describe("Wequencer cross-topology recovery", () => {
     let server: Awaited<ReturnType<typeof getJazzServerInfo>>;
     let owner: Db;
     let editor: Db;
+    let editorTransport: JazzServerTransportControl;
     let ownerToken: string;
     let ownerAccount: AccountHandle;
     let ownerDbName: string;
@@ -114,18 +115,23 @@ describe("Wequencer cross-topology recovery", () => {
               let networkNeedsRestore = true;
               const restoreNetwork = async () => {
                 if (!networkNeedsRestore) return;
-                await unblockJazzServerNetwork(server.serverUrl);
+                await editorTransport.unblock();
                 networkNeedsRestore = false;
               };
-              // Register before acquiring the route block so partial failure
+              // Register before blocking the transport so partial failure
               // is compensated by the topology runner as well.
               defer("restore Wequencer editor network", async () => restoreNetwork());
               restoreEditorNetwork = restoreNetwork;
-              await blockJazzServerNetwork(server.serverUrl);
+              await editorTransport.block();
               await editor.disconnect();
               await editor.shutdown();
               ctx.untrack(editor);
-              editor = await openClient(server, "editor", editorAccount, editorDbName);
+              editor = await openClient(
+                { ...server, serverUrl: editorTransport.url },
+                "editor",
+                editorAccount,
+                editorDbName,
+              );
             },
           },
           authorization: {
@@ -171,12 +177,23 @@ describe("Wequencer cross-topology recovery", () => {
               ]);
               ownerToken = issuedOwnerToken;
               ownerDbName = uniqueDbName("wequencer-owner");
+              editorTransport = ctx.trackTransport(
+                await createJazzServerTransportControl(server.serverUrl),
+              );
               editorToken = issuedEditorToken;
               editorDbName = uniqueDbName("wequencer-editor");
               ownerAccount = await registerAccount(server, ownerToken);
-              editorAccount = await registerAccount(server, editorToken);
+              editorAccount = await registerAccount(
+                { ...server, serverUrl: editorTransport.url },
+                editorToken,
+              );
               owner = await openClient(server, "owner", ownerAccount, ownerDbName);
-              editor = await openClient(server, "editor", editorAccount, editorDbName);
+              editor = await openClient(
+                { ...server, serverUrl: editorTransport.url },
+                "editor",
+                editorAccount,
+                editorDbName,
+              );
               ownerProfile = await owner
                 .insert(app.profiles, {
                   author: ownerAccount.id,

@@ -171,7 +171,14 @@ export function makeQuery<T>(table: string, wasmSchema: WasmSchema): QueryBuilde
  */
 export class TestCleanup {
   private dbs: Db[] = [];
+  private transports: Array<{ stop(): Promise<void> }> = [];
   private subscriptions: Array<() => void> = [];
+
+  /** Stop controlled transports after their clients during cleanup. */
+  trackTransport<T extends { stop(): Promise<void> }>(transport: T): T {
+    this.transports.push(transport);
+    return transport;
+  }
 
   /** Register a Db for shutdown during cleanup. Returns the same Db. */
   track(db: Db): Db {
@@ -218,6 +225,7 @@ export class TestCleanup {
         // Best effort
       }
     }
+    for (const transport of this.transports.splice(0)) await transport.stop();
   }
 }
 

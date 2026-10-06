@@ -14,11 +14,7 @@ import type { Db, TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import {
-  getJazzServerInfo,
-  unblockJazzServerNetwork,
-  type JazzServerInfo,
-} from "./testing-server.js";
+import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
 import {
   TestCleanup,
   createSyncedDb,
@@ -73,7 +69,6 @@ describe("History & Conflict Management", () => {
   beforeEach(async () => {
     testingServer = await getJazzServerInfo(uniqueDbName("history-conflict-app"));
     const { appId, serverUrl, adminSecret } = testingServer;
-    await unblockJazzServerNetwork(serverUrl);
     await deploy({
       appId,
       serverUrl,

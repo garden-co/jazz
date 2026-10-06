@@ -21,14 +21,13 @@ import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
 import { readCorrectnessArtifactSnapshot } from "../../dev/artifacts/test-artifact-store.mjs";
 import {
-  blockJazzServerNetwork,
   jazzServerInfo,
   jazzServerJwtForUser,
   stopJazzServerByUrl,
-  unblockJazzServerNetwork,
-  setJazzServerAnswersHeld,
-  startJazzServerHoldingProxy,
-  stopJazzServerHoldingProxy,
+  blockJazzServerTransport,
+  unblockJazzServerTransport,
+  createJazzServerTransportControl,
+  stopJazzServerTransportControl,
 } from "./tests/browser/testing-server-node.js";
 import {
   closeRemoteBrowserDb,
@@ -185,16 +184,13 @@ export default defineConfig({
         },
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
-        jazzServerBlockNetwork: async ({ context }, serverUrl) =>
-          blockJazzServerNetwork(context, serverUrl),
-        jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
-          unblockJazzServerNetwork(context, serverUrl),
-        jazzServerHoldingProxyStart: async (_context, serverUrl) =>
-          startJazzServerHoldingProxy(serverUrl),
-        jazzServerHoldingProxySetHeld: async (_context, proxyUrl, held) =>
-          setJazzServerAnswersHeld(proxyUrl, held),
-        jazzServerHoldingProxyStop: async (_context, proxyUrl) =>
-          stopJazzServerHoldingProxy(proxyUrl),
+        jazzServerTransportControlCreate: async (_context, serverUrl) =>
+          createJazzServerTransportControl(serverUrl),
+        jazzServerTransportControlBlock: async (_context, url, direction: "both" | "inbound") =>
+          blockJazzServerTransport(url, direction),
+        jazzServerTransportControlUnblock: async (_context, url) => unblockJazzServerTransport(url),
+        jazzServerTransportControlStop: async (_context, proxyUrl) =>
+          stopJazzServerTransportControl(proxyUrl),
         createRemoteBrowserDb: async ({ context, page }, input) =>
           createRemoteBrowserDb(context, page, input),
         waitForRemoteBrowserDbTitle: async (_commandContext, input) =>

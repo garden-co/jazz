@@ -6,11 +6,9 @@ import { playwright } from "@vitest/browser-playwright";
 import { resolve } from "node:path";
 import { topologyReceipt } from "./vitest-receipts.mjs";
 import {
-  blockJazzServerNetwork,
   jazzServerInfo,
   jazzServerJwtForUser,
   stopJazzServerByUrl,
-  unblockJazzServerNetwork,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
 const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
@@ -61,10 +59,6 @@ export default defineConfig({
         jazzBrowserTopologyLog,
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
-        jazzServerBlockNetwork: async ({ context }, serverUrl) =>
-          blockJazzServerNetwork(context, serverUrl),
-        jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
-          unblockJazzServerNetwork(context, serverUrl),
         jazzServerJwtForUser: async (_context, userId, claims, appId) =>
           jazzServerJwtForUser(userId, claims, appId),
       },

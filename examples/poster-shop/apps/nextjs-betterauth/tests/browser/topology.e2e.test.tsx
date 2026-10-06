@@ -1,3 +1,7 @@
+import {
+  createAccountManager,
+  type AccountHandle,
+} from "../../../../../../packages/jazz-tools/src/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import type { Db } from "../../../../../../packages/jazz-tools/src/runtime/index.js";
@@ -15,10 +19,10 @@ import {
   runTopologyScenario,
 } from "../../../../../../packages/jazz-tools/tests/browser/topology-harness.js";
 import {
-  blockJazzServerNetwork,
+  createJazzServerTransportControl,
+  type JazzServerTransportControl,
   getJazzServerInfo,
   getJazzServerJwtForUser,
-  unblockJazzServerNetwork,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
@@ -61,6 +65,8 @@ describe("PosterShop cross-topology recovery", () => {
     const seed = Number.isSafeInteger(requestedSeed) ? requestedSeed : 47;
     let server: Awaited<ReturnType<typeof getJazzServerInfo>>;
     let owner: Db;
+    let ownerTransport: JazzServerTransportControl;
+    let ownerAccount: AccountHandle;
     let editor: Db;
     let reader: Db;
     let ownerToken: string;
@@ -86,14 +92,14 @@ describe("PosterShop cross-topology recovery", () => {
         targets: {
           owner: {
             disconnect: async ({ defer }) => {
-              defer("unblock PosterShop Jazz server route", async () => {
-                await unblockJazzServerNetwork(server.serverUrl);
+              defer("unblock PosterShop owner transport", async () => {
+                await ownerTransport.unblock();
               });
-              await blockJazzServerNetwork(server.serverUrl);
+              await ownerTransport.block();
               await owner.disconnect();
             },
             reconnect: async () => {
-              await unblockJazzServerNetwork(server.serverUrl);
+              await ownerTransport.unblock();
               await owner.reconnect();
             },
             restart: async () => {
@@ -101,10 +107,11 @@ describe("PosterShop cross-topology recovery", () => {
               ctx.untrack(owner);
               owner = await openClient(
                 server.appId,
-                server.serverUrl,
+                ownerTransport.url,
                 "owner",
                 ownerToken,
                 ownerDbName,
+                ownerAccount,
               );
             },
           },
@@ -141,14 +148,23 @@ describe("PosterShop cross-topology recovery", () => {
                 getJazzServerJwtForUser("poster-editor", undefined, server.appId),
                 getJazzServerJwtForUser("poster-reader", undefined, server.appId),
               ]);
+              ownerTransport = ctx.trackTransport(
+                await createJazzServerTransportControl(server.serverUrl),
+              );
+              const ownerAccounts = await createAccountManager({
+                appId: server.appId,
+                serverUrl: ownerTransport.url,
+              });
+              ownerAccount = await ownerAccounts.registerJWT(issuedOwnerToken);
               ownerToken = issuedOwnerToken;
               ownerDbName = uniqueDbName("poster-shop-owner");
               owner = await openClient(
                 server.appId,
-                server.serverUrl,
+                ownerTransport.url,
                 "owner",
                 ownerToken,
                 ownerDbName,
+                ownerAccount,
               );
               editor = await openClient(server.appId, server.serverUrl, "editor", editorToken);
               reader = await openClient(server.appId, server.serverUrl, "reader", readerToken);
@@ -451,13 +467,15 @@ async function openClient(
   label: string,
   jwtToken: string,
   dbName = uniqueDbName(`poster-shop-${label}`),
+  account?: AccountHandle,
 ): Promise<Db> {
   return ctx.track(
     await createBrowserTestDb({
       appId,
       serverUrl,
-      jwtToken,
-      registerJwt: true,
+      jwtToken: account ? undefined : jwtToken,
+      registerJwt: !account,
+      account,
       driver: { type: "persistent", dbName },
     }),
   );
