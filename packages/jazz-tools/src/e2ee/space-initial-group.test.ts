@@ -78,6 +78,10 @@ it("initialises a space for a group without implicitly granting its creator", as
     await creator.e2ee.devices.list();
     await recipient.e2ee.devices.list();
     const group = await recipient.e2ee.groups.create().wait();
+    expect(await creator.e2ee.explain({ groupId: group.id })).toMatchObject({
+      state: "refused",
+      reason: "not-a-group-member",
+    });
     const project = await creator
       .insert(app.projects, { title: "Initial group scope" })
       .wait({ tier: "global" });
