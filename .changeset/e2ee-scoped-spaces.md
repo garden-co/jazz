@@ -24,3 +24,9 @@ Resolve space group recipients through explicit historical scopes, including
 groups outside the initializer's memberships. Preserve account/group ambiguity
 checks and complete accepted-history validation without application-wide group
 discovery.
+
+Keep a space sealed when its initial recipient group empties before a later
+grant. Treat synchronous and asynchronous candidate-envelope failures alike,
+without hiding failures in confirmed predecessor history. Protected recovery
+can try another root after space-owned delivery exhaustion; operational errors
+and public diagnostic-code collisions still abort.
