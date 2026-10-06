@@ -18,7 +18,7 @@ const app = s.defineApp({
   projects: s.table({ title: s.string() }, {}),
 });
 
-async function fixture() {
+async function fixture(allowGrantDeletion = false) {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients = new Set<Db>();
   const cleanup = async () => {
@@ -37,6 +37,8 @@ async function fixture() {
       policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
       policy.__e2ee_space_grants.allowRead.where(authenticated);
       policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
+      if (allowGrantDeletion)
+        policy.__e2ee_space_grants.allowDelete.where({ authorAccountId: session.user.account });
       policy.__e2ee_space_deliveries.allowRead.where(authenticated);
       policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
       policy.__e2ee_space_successors.allowRead.where(authenticated);
@@ -120,9 +122,9 @@ async function fixture() {
       .add(child.id, { kind: "account", id: recipientAccount.account.id })
       .wait();
     await owner.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
-    const project = async (title: string) => {
+    const project = async (title: string, recipientId = ownerAccount.account.id) => {
       const row = await owner.insert(app.projects, { title }).wait({ tier: "global" });
-      await owner.e2ee.spaces.grant(app.projects, row.id, ownerAccount.account.id).wait();
+      await owner.e2ee.spaces.grant(app.projects, row.id, recipientId).wait();
       return { scope: app.projects, identifier: row.id };
     };
     const close = async (db: Db) => {
@@ -261,6 +263,47 @@ it("requires an undelivered nested recipient space and excludes it after members
       state: "refused",
       reason: "not-a-space-recipient",
     });
+  } finally {
+    await f.cleanup();
+  }
+}, 180_000);
+
+it("fails closed when the only initial group-recipient grant is deleted", async () => {
+  const f = await fixture(true);
+  try {
+    const target = await f.project("Deleted initial group grant", f.parent.id);
+    expect(await f.owner.e2ee.explain(target)).toEqual({ state: "ready" });
+    const { material } = await f.owner.e2ee.recovery.create().wait();
+    const root = await f.owner.one(app.__e2ee_spaces.where({ identifier: target.identifier }), {
+      tier: "global",
+    });
+    expect(root).not.toBeNull();
+    const grants = await f.owner.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), {
+      tier: "global",
+    });
+    expect(grants).toEqual([
+      expect.objectContaining({
+        id: root!.initialGrantId,
+        recipientKind: "group",
+        recipientId: f.parent.id,
+      }),
+    ]);
+    await f.owner.delete(app.__e2ee_space_grants, root!.initialGrantId).wait({ tier: "global" });
+    // Inspect from the deleting client, with no cross-client propagation race.
+    expect(
+      await f.owner.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), {
+        tier: "global",
+      }),
+    ).toEqual([]);
+    await expect
+      .soft(f.owner.e2ee.recovery.status(material))
+      .rejects.toThrow("Invalid or unsupported E2EE space membership");
+    await expect
+      .soft(f.owner.e2ee.recovery.use(material).wait())
+      .rejects.toThrow("Invalid or unsupported E2EE space membership");
+    await expect
+      .soft(f.owner.e2ee.recovery.create().wait())
+      .rejects.toThrow("Invalid or unsupported E2EE space membership");
   } finally {
     await f.cleanup();
   }

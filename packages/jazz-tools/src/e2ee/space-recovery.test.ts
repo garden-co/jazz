@@ -192,9 +192,15 @@ for (const scenario of [
             .wait({ tier: "global" });
           // This root's signature is genuine. Incomplete membership is not evidence
           // that the caller has no recovery obligations, so discovery must fail closed.
-          await expect(reopened.e2ee.recovery.status(material)).rejects.toThrow(
-            "Invalid or unsupported E2EE space membership",
-          );
+          await expect
+            .soft(reopened.e2ee.recovery.status(material))
+            .rejects.toThrow("Invalid or unsupported E2EE space membership");
+          await expect
+            .soft(reopened.e2ee.recovery.use(material).wait())
+            .rejects.toThrow("Invalid or unsupported E2EE space membership");
+          await expect
+            .soft(reopened.e2ee.recovery.create().wait())
+            .rejects.toThrow("Invalid or unsupported E2EE space membership");
         }
       } finally {
         await Promise.all(clients.map((client) => client.shutdown()));
