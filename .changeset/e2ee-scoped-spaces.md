@@ -41,3 +41,7 @@ Index table-qualified settlement positions and capture space replay authority
 once per covered snapshot, avoiding repeated delivery-byte comparisons.
 Preserve cutoff-specific validation and live eligibility checks, and prevent
 adapter-mutated space or group replay from contaminating later cached proofs.
+
+Keep deleted account and group recipient grants as scoped discovery candidates,
+so incomplete live membership still rejects recovery status, use and creation.
+Deleted records never grant access or replace authoritative live replay.

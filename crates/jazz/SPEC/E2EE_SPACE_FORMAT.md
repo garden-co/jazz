@@ -193,8 +193,10 @@ Recovery discovery reads raw grants to the recovering account and its accepted
 effective groups, including nested membership. The group graph and recipient-grant
 predicates share one globally accepted exclusive read; root IDs are fetched in
 bounded batches without limiting the result set. Each canonical candidate then
-receives fresh per-path replay. Removed grants remain discovery candidates, and
-missing key delivery does not hide a required path. Root authorship and delivered
+receives fresh per-path replay. Removed and deleted grants remain discovery
+candidates, but deleted rows never authenticate membership. A surviving root
+with a missing initial grant is incomplete history, not an empty recovery
+obligation. Missing key delivery does not hide a required path. Root authorship and delivered
 keys alone are not membership; unrelated application roots are not enumerated.
 The configured application may omit all group tables for account-only spaces,
 but a partial `groupSchema` is rejected rather than treated as empty membership.
