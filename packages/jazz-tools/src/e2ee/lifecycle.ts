@@ -28,8 +28,8 @@ import { Groups } from "./group-lifecycle.js";
 import type { GroupRecoveryPath } from "./group-lifecycle.js";
 import { groupSchema, type GroupMember, type GroupTables } from "./groups.js";
 import { Spaces } from "./space-lifecycle.js";
-import type { SpaceRecoveryPath } from "./space-lifecycle.js";
-import type { SpaceTables } from "./spaces.js";
+import type { SpaceDataPreparation, SpaceRecoveryPath } from "./space-lifecycle.js";
+import { spaceSchema, type SpaceTables } from "./spaces.js";
 import type { JazzCrypto } from "./types.js";
 
 export type E2eeConfig = {
@@ -75,7 +75,7 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
   tx: Transaction<"exclusive">,
   scope: TableProxy<T, Init>,
   identifier: string,
-  prepareData: Parameters<Spaces["prepareInitial"]>[3],
+  prepareData: SpaceDataPreparation,
   recipientIds?: readonly string[],
 ): Promise<void> {
   const recipients = recipientIds?.slice();
@@ -99,7 +99,7 @@ export async function prepareInitialSpaceRows<T, Init>(
   tx: E2eeTransactionScope,
   scope: TableProxy<T, Init>,
   identifier: string,
-  prepareData: Parameters<Spaces["prepareInitial"]>[3],
+  prepareData: SpaceDataPreparation,
   recipientIds?: readonly string[],
 ): Promise<void> {
   e2eeForDb(db);
@@ -468,11 +468,14 @@ export class E2ee {
       tables[name] =
         name in app ? (app as DeviceTables)[name] : new TypedTableQueryBuilder(name, schema!);
     }
-    for (const name of Object.keys(groupSchema) as (keyof GroupTables)[]) {
+    for (const name of [...Object.keys(groupSchema), ...Object.keys(spaceSchema)] as (
+      | keyof GroupTables
+      | keyof SpaceTables
+    )[]) {
       if (schema ? name in schema : name in app) {
         tables[name] =
           name in app
-            ? (app as DeviceTables & Partial<GroupTables>)[name]
+            ? (app as DeviceTables & Partial<GroupTables & SpaceTables>)[name]
             : new TypedTableQueryBuilder(name, schema!);
       }
     }
@@ -661,33 +664,35 @@ export class E2ee {
             },
           );
         }
+        if (
+          "__e2ee_spaces" in this.app &&
+          "__e2ee_space_grants" in this.app &&
+          "__e2ee_space_successors" in this.app &&
+          "__e2ee_space_deliveries" in this.app
+        ) {
+          this.spaceLifecycle = new Spaces(
+            this.db,
+            this.account.id,
+            this.app as DeviceTables & SpaceTables,
+            envelope,
+            signer,
+            (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
+            () => this.assertOpen(),
+            {
+              store: this.config.store,
+              isKnownRevoked: () => this.approval!.isKnownRevoked(),
+              load: provider.load,
+              release: provider.release,
+              keyLifetime: this.deviceKeys,
+              states: (transaction) => this.approval!.deviceStates(transaction),
+            },
+            this.groupLifecycle,
+          );
+        }
       } catch (error) {
         this.deviceKeys.release(retainedKey);
         if (retainedSigningKey) this.deviceKeys.release(retainedSigningKey);
         throw error;
-      }
-      if (
-        "__e2ee_spaces" in this.app &&
-        "__e2ee_space_grants" in this.app &&
-        "__e2ee_space_successors" in this.app &&
-        "__e2ee_space_deliveries" in this.app
-      ) {
-        this.spaceLifecycle = new Spaces(
-          this.db,
-          this.account.id,
-          this.app as DeviceTables & SpaceTables,
-          envelope,
-          signer,
-          (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
-          () => this.assertOpen(),
-          {
-            store: this.config.store,
-            isKnownRevoked: () => this.approval!.isKnownRevoked(),
-            load: loadDevice,
-            states: (transaction) => this.approval!.deviceStates(transaction),
-          },
-          this.groupLifecycle,
-        );
       }
     } finally {
       this.deviceKeys.release(device.privateKey);

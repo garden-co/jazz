@@ -101,7 +101,7 @@ it("accepts one competing group reconciliation and converges the space on its ac
     const removed = clients[2]!;
     const group = await owner.e2ee.groups.create().wait();
     for (const account of accounts.slice(1))
-      await owner.e2ee.groups.add(group.id, account.account.id).wait();
+      await owner.e2ee.groups.add(group.id, { kind: "account", id: account.account.id }).wait();
     const project = await owner
       .insert(app.projects, { title: "Contended rotation" })
       .wait({ tier: "global" });

@@ -79,8 +79,8 @@ it("reconciles a stale nested recipient group when a remaining member loads the 
     await recipient.e2ee.devices.list();
     const group = await creator.e2ee.groups.create().wait();
     const child = await creator.e2ee.groups.create().wait();
-    await creator.e2ee.groups.add(child.id, bob.account.id).wait();
-    await creator.e2ee.groups.add(group.id, child.id).wait();
+    await creator.e2ee.groups.add(child.id, { kind: "account", id: bob.account.id }).wait();
+    await creator.e2ee.groups.add(group.id, { kind: "group", id: child.id }).wait();
     const project = await creator
       .insert(app.projects, { title: "Reconciled scope" })
       .wait({ tier: "global" });

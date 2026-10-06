@@ -91,7 +91,7 @@ it("native Node keeps a space in maintenance when Jazz denies recipient-group ro
     await creator.e2ee.devices.list();
     await recipient.e2ee.devices.list();
     const group = await creator.e2ee.groups.create().wait();
-    await creator.e2ee.groups.add(group.id, bob.account!.id).wait();
+    await creator.e2ee.groups.add(group.id, { kind: "account", id: bob.account!.id }).wait();
     const project = await creator
       .insert(app.projects, { title: "Native reconciled scope" })
       .wait({ tier: "global" });

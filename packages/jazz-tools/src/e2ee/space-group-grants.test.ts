@@ -76,7 +76,7 @@ it("shares a space through a parent group and follows later child-group addition
     await recipient.e2ee.devices.list();
     const parent = await creator.e2ee.groups.create().wait();
     const child = await creator.e2ee.groups.create().wait();
-    await creator.e2ee.groups.add(parent.id, child.id).wait();
+    await creator.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
     const project = await creator
       .insert(app.projects, { title: "Group scope" })
       .wait({ tier: "global" });
@@ -92,7 +92,7 @@ it("shares a space through a parent group and follows later child-group addition
       (device) => device.state === "pending",
     );
     expect(request).toBeDefined();
-    await creator.e2ee.groups.add(child.id, bob.account.id).wait();
+    await creator.e2ee.groups.add(child.id, { kind: "account", id: bob.account.id }).wait();
     expect(await creator.e2ee.explain(target)).toEqual({ state: "ready" });
     expect(await recipient.e2ee.explain(target)).toEqual({ state: "ready" });
     expect(await pending.e2ee.explain(target)).toMatchObject({ state: "refused" });
