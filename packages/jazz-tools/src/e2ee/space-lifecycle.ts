@@ -4,7 +4,7 @@ import type { Db, TableProxy, E2eeTransactionScope } from "../runtime/db.js";
 import type { RowSettlement } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
-import { decodeRecoveryMaterial } from "./recovery-format.js";
+import { decodeRecoveryMaterial, type DecodedRecoveryMaterial } from "./recovery-format.js";
 import { E2eeRecoveryError } from "./recovery-error.js";
 import { spaceRecoveryContext, spaceRecoveryBytes } from "./space-recovery-format.js";
 import { loadRecoveredSpaceKey, retainRecoveredSpaceKey } from "./local-space-keys.js";
@@ -14,10 +14,9 @@ import { encodeGroupMembership } from "./group-successor.js";
 import { spaceSuccessorBytes, spaceSuccessorContext } from "./space-successor.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
-import type { DeviceApproval } from "./device-approval.js";
 import type { Groups } from "./group-lifecycle.js";
 import type { DeviceTables } from "./device-requests.js";
-import type { LocalDevice } from "./local-device.js";
+import type { DeviceKeyLifetime, LocalDevice } from "./local-device.js";
 import type { DeviceSigner, KeyEnvelope } from "./types.js";
 import type {
   SpaceTables,
@@ -32,6 +31,7 @@ import {
   prefetchPublicMembershipHistory,
   readPublicMembershipHistory,
   replayAccountMembership,
+  type PublicMembershipHistory,
 } from "./public-membership.js";
 import {
   spaceContext,
@@ -41,7 +41,16 @@ import {
   spaceDeliveryBytes,
 } from "./space-format.js";
 
-type DeviceState = Awaited<ReturnType<DeviceApproval["deviceStates"]>>;
+type DeviceState = {
+  active: Set<string>;
+  epochId: string;
+  publicHistory: PublicMembershipHistory;
+};
+export type SpaceDataPreparation = (
+  key: Uint8Array,
+  root: SpaceRoot,
+  tx: E2eeTransactionScope,
+) => Promise<void>;
 type Settled<T> = { rows: T[]; settlements: RowSettlement[] };
 type Address = { scopeId: string; identifier: string };
 // An identity mismatch, malformed transcript or checked signature mismatch invalidates a root.
@@ -70,7 +79,7 @@ type Snapshot = {
   grants: Settled<SpaceGrant>;
   deliveries: Settled<SpaceDelivery>;
   successors: Settled<SpaceSuccessor>;
-  histories: Map<string, DeviceState["publicHistory"]>;
+  histories: Map<string, PublicMembershipHistory>;
   group?: Awaited<ReturnType<Groups["readMembership"]>>;
 };
 export type SpaceRecoveryPath = Address & { spaceId: string; epochId: string } & (
@@ -135,6 +144,8 @@ export class Spaces {
       store: AccountStore;
       isKnownRevoked(): boolean;
       load(): Promise<LocalDevice>;
+      release(device: LocalDevice): void;
+      readonly keyLifetime: DeviceKeyLifetime;
       states(tx?: E2eeTransactionScope): Promise<DeviceState>;
     },
     private readonly groups?: Groups,
@@ -143,6 +154,18 @@ export class Spaces {
   private requireDevice() {
     if (!this.device) throw new Error("Device enrolment is required for this space operation");
     return this.device;
+  }
+
+  private async loadDevice(): Promise<LocalDevice> {
+    const provider = this.requireDevice();
+    const device = await provider.load();
+    try {
+      this.assertOpen();
+      return device;
+    } catch (error) {
+      provider.release(device);
+      throw error;
+    }
   }
 
   private async address<T, Init>(scope: TableProxy<T, Init>, identifier: string): Promise<Address> {
@@ -227,8 +250,8 @@ export class Spaces {
   }
 
   private async checkRecoveryAuthority(
-    material: Awaited<ReturnType<typeof decodeRecoveryMaterial>>,
-    history: DeviceState["publicHistory"],
+    material: DecodedRecoveryMaterial,
+    history: PublicMembershipHistory,
   ) {
     const own = await replayAccountMembership(
       history,
@@ -255,7 +278,7 @@ export class Spaces {
     position: string,
     epochId: string,
     recovery: Settled<SpaceRecoveryDelivery>,
-    material: Awaited<ReturnType<typeof decodeRecoveryMaterial>>,
+    material: DecodedRecoveryMaterial,
   ): Promise<Uint8Array | undefined> {
     for (const row of recovery.rows) {
       if (
@@ -316,7 +339,7 @@ export class Spaces {
     );
     let device: LocalDevice | undefined;
     try {
-      device = await this.requireDevice().load();
+      device = await this.loadDevice();
       const roots = await this.db.all(this.tables.__e2ee_spaces, { tier: "global" });
       if (required.some((id) => !roots.some((root) => root.id === id)))
         throw new Error("Recovery space is unavailable");
@@ -357,6 +380,7 @@ export class Spaces {
             state.keyRoot.epochId,
             secret,
             this.assertOpen,
+            this.requireDevice().keyLifetime,
           );
         } finally {
           secret?.fill(0);
@@ -369,8 +393,7 @@ export class Spaces {
     } finally {
       material.recipient.privateKey.fill(0);
       material.signing.privateKey.fill(0);
-      device?.privateKey.fill(0);
-      device?.signing.privateKey.fill(0);
+      if (device) this.requireDevice().release(device);
     }
   }
 
@@ -397,20 +420,22 @@ export class Spaces {
       { tier: "global" },
     );
     await this.warmInitialRecipients([recipientId]);
-    const device = await this.requireDevice().load();
-    const secret = runtimeRandomBytes(32);
+    const device = await this.loadDevice();
     try {
-      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
-        return this.stageInitial(tx, scope, identifier, [recipientId], address, device, secret);
-      });
-      const accepted = await proposal.wait({ tier: "global" });
-      this.assertOpen();
-      await this.deliver(address, accepted, secret, device);
-      await this.explain(scope, identifier);
+      const secret = runtimeRandomBytes(32);
+      try {
+        const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+          return this.stageInitial(tx, scope, identifier, [recipientId], address, device, secret);
+        });
+        const accepted = await proposal.wait({ tier: "global" });
+        this.assertOpen();
+        await this.deliver(address, accepted, secret, device);
+        await this.explain(scope, identifier);
+      } finally {
+        secret.fill(0);
+      }
     } finally {
-      secret.fill(0);
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
+      this.requireDevice().release(device);
     }
   }
 
@@ -426,30 +451,32 @@ export class Spaces {
     tx: E2eeTransactionScope,
     scope: TableProxy<T, Init>,
     identifier: string,
-    prepareData: (key: Uint8Array, root: SpaceRoot, tx: E2eeTransactionScope) => Promise<void>,
+    prepareData: SpaceDataPreparation,
     recipientIds: readonly string[] = [this.accountId],
   ): Promise<void> {
     if (tx.kind !== "exclusive")
       throw new Error("E2EE initialisation requires an exclusive transaction");
     const address = await this.address(scope, identifier);
-    const device = await this.requireDevice().load();
-    const secret = runtimeRandomBytes(32);
+    const device = await this.loadDevice();
     try {
-      const root = await this.stageInitial(
-        tx,
-        scope,
-        identifier,
-        recipientIds,
-        address,
-        device,
-        secret,
-      );
-      await prepareData(secret, root, tx);
-      this.assertOpen();
+      const secret = runtimeRandomBytes(32);
+      try {
+        const root = await this.stageInitial(
+          tx,
+          scope,
+          identifier,
+          recipientIds,
+          address,
+          device,
+          secret,
+        );
+        await prepareData(secret, root, tx);
+        this.assertOpen();
+      } finally {
+        secret.fill(0);
+      }
     } finally {
-      secret.fill(0);
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
+      this.requireDevice().release(device);
     }
   }
 
@@ -623,7 +650,7 @@ export class Spaces {
     tx: E2eeTransactionScope,
     address: Address,
     id: string,
-    ownHistory: DeviceState["publicHistory"],
+    ownHistory: PublicMembershipHistory,
     extraAccounts: string[] = [],
     includeDeliveries = true,
   ): Promise<Snapshot> {
@@ -702,7 +729,7 @@ export class Spaces {
     operation: "add" | "remove",
   ): Promise<void> {
     await this.warm(observed, [recipientId]);
-    const device = await this.requireDevice().load();
+    const device = await this.loadDevice();
     try {
       const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
         // Envelopes do not establish membership authority. Reading them here
@@ -771,8 +798,7 @@ export class Spaces {
       await proposal.wait({ tier: "global" });
       this.assertOpen();
     } finally {
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
+      this.requireDevice().release(device);
     }
   }
 
@@ -1198,7 +1224,7 @@ export class Spaces {
     );
     if (!observed) return { state: "unavailable", reason: "space-not-found" };
     await this.warm(observed);
-    const device = await this.requireDevice().load();
+    const device = await this.loadDevice();
     let secret: Uint8Array | undefined;
     try {
       let snapshot = await this.readAcceptedSnapshot(address, observed.id);
@@ -1303,6 +1329,7 @@ export class Spaces {
           root.id,
           keyRoot.epochId,
           this.assertOpen,
+          this.requireDevice().keyLifetime,
         );
         if (secret) await this.confirmHistory(snapshot, root, secret);
       }
@@ -1345,8 +1372,7 @@ export class Spaces {
       return { state: "ready" };
     } finally {
       secret?.fill(0);
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
+      this.requireDevice().release(device);
     }
   }
 
@@ -1778,7 +1804,7 @@ export class Spaces {
     return signature;
   }
   private async verify(
-    history: DeviceState["publicHistory"],
+    history: PublicMembershipHistory,
     deviceId: string,
     bytes: Uint8Array,
     signature: Uint8Array,

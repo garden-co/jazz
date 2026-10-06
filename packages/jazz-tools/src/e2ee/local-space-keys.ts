@@ -1,11 +1,14 @@
 import type { AccountStore } from "../accounts/persistence.js";
-import { decodeLocalDeviceStore } from "./local-device.js";
+import {
+  withLocalDeviceStore,
+  type DeviceKeyLifetime,
+  type StoredDevices,
+} from "./local-device.js";
 
 type Entry = { scope: string; spaceId: string; epochId: string; payload: number[] };
-function decode(value: string | null) {
-  const state = decodeLocalDeviceStore(value) as ReturnType<typeof decodeLocalDeviceStore> & {
-    recoveredSpaceKeysV1?: Entry[];
-  };
+type SpaceStore = StoredDevices & { recoveredSpaceKeysV1?: Entry[] };
+
+function recoveredStore(state: SpaceStore) {
   const entries = state.recoveredSpaceKeysV1 ?? [];
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   if (!Array.isArray(entries)) throw new Error("Invalid recovered E2EE space keys");
@@ -38,13 +41,17 @@ export async function loadRecoveredSpaceKey(
   spaceId: string,
   epochId: string,
   assertOpen: () => void,
+  keyLifetime: DeviceKeyLifetime,
 ): Promise<Uint8Array | undefined> {
-  const { entries } = decode(await store.read());
+  const current = await store.read();
   assertOpen();
-  const entry = entries.find(
-    (entry) => entry.scope === scope && entry.spaceId === spaceId && entry.epochId === epochId,
-  );
-  return entry ? Uint8Array.from(entry.payload) : undefined;
+  return withLocalDeviceStore(current, keyLifetime, (parsed) => {
+    const { entries } = recoveredStore(parsed);
+    const entry = entries.find(
+      (entry) => entry.scope === scope && entry.spaceId === spaceId && entry.epochId === epochId,
+    );
+    return entry ? Uint8Array.from(entry.payload) : undefined;
+  });
 }
 
 export async function retainRecoveredSpaceKey(
@@ -54,6 +61,7 @@ export async function retainRecoveredSpaceKey(
   epochId: string,
   secret: Uint8Array,
   assertOpen: () => void,
+  keyLifetime: DeviceKeyLifetime,
 ): Promise<void> {
   if (secret.length !== 32) throw new Error("Invalid recovered E2EE space key");
   const payload = Array.from(secret);
@@ -61,19 +69,22 @@ export async function retainRecoveredSpaceKey(
   try {
     await store.update((value) => {
       assertOpen();
-      const { state, entries } = decode(value);
-      const existing = entries.find(
-        (entry) => entry.scope === scope && entry.spaceId === spaceId && entry.epochId === epochId,
-      );
-      if (existing && existing.payload.some((byte, i) => byte !== payload[i]))
-        throw new Error("Conflicting recovered E2EE space key");
-      state.recoveredSpaceKeysV1 = existing
-        ? entries
-        : [...entries, { scope, spaceId, epochId, payload }];
-      const result = JSON.stringify(state);
-      decode(result);
-      updated = true;
-      return result;
+      return withLocalDeviceStore(value, keyLifetime, (parsed) => {
+        const { state, entries } = recoveredStore(parsed);
+        const existing = entries.find(
+          (entry) =>
+            entry.scope === scope && entry.spaceId === spaceId && entry.epochId === epochId,
+        );
+        if (existing && existing.payload.some((byte, i) => byte !== payload[i]))
+          throw new Error("Conflicting recovered E2EE space key");
+        state.recoveredSpaceKeysV1 = existing
+          ? entries
+          : [...entries, { scope, spaceId, epochId, payload }];
+        recoveredStore(state);
+        const result = JSON.stringify(state);
+        updated = true;
+        return result;
+      });
     });
     if (!updated) throw new Error("E2EE key store did not perform the update");
     assertOpen();
