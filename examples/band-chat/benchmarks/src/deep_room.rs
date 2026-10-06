@@ -637,16 +637,21 @@ fn next_event(db: &Db, stream: &mut SubscriptionStream) -> SubscriptionEvent {
     }
 }
 
-/// Rows a delta adds, and rows it changes: updated rows plus structural
-/// edits inside rows already shown (an included array gaining a child).
-fn changed_rows(event: &SubscriptionEvent) -> (usize, usize) {
+/// Rows a delta adds, changes, and removes. Structural edits inside rows
+/// already shown count as changes (for example, an included array gaining a child).
+fn changed_rows(event: &SubscriptionEvent) -> (usize, usize, usize) {
     match event {
         SubscriptionEvent::Delta {
             added,
             updated,
+            removed,
             terminal_operations,
             ..
-        } => (added.len(), updated.len() + terminal_operations.len()),
+        } => (
+            added.len(),
+            updated.len() + terminal_operations.len(),
+            removed.len(),
+        ),
         other => panic!("BandChat subscription ended: {other:?}"),
     }
 }
@@ -799,7 +804,7 @@ impl DeepRoom {
     ) -> (SubscriptionStream, usize) {
         let mut stream = block_on(self.db.subscribe_for_identity(query, local_opts(), author))
             .expect("open BandChat view");
-        let (added, _) = changed_rows(&next_event(&self.db, &mut stream));
+        let (added, _, _) = changed_rows(&next_event(&self.db, &mut stream));
         (stream, added)
     }
 
@@ -995,15 +1000,20 @@ impl LiveWindow {
     /// Another member sends `count` messages; each is accepted and reaches
     /// the reader's open page before the next.
     pub fn member_sends(&mut self, count: usize) -> usize {
+        let mut received = 0;
         for _ in 0..count {
             self.room.member_sends(DEEP_ROOM, 1);
             let mut added = 0;
             while added == 0 {
-                added = changed_rows(&next_event(&self.room.db, &mut self.stream)).0;
+                let (newly_added, _, removed) =
+                    changed_rows(&next_event(&self.room.db, &mut self.stream));
+                self.shown += newly_added;
+                self.shown -= removed;
+                added = newly_added;
             }
-            self.shown += added;
+            received += added;
         }
-        count
+        received
     }
 }
 
@@ -1034,7 +1044,7 @@ impl LiveInbox {
         self.room.member_sends(room, sender);
         let mut updated = 0;
         while updated == 0 {
-            let (added, changed) = changed_rows(&next_event(&self.room.db, &mut self.stream));
+            let (added, changed, _) = changed_rows(&next_event(&self.room.db, &mut self.stream));
             updated = added + changed;
         }
         self.updates += updated;
@@ -1113,8 +1123,8 @@ impl ReceiptsFanout {
             block_on(self.room.db.tick()).expect("drive receipts");
             pending.retain(|&view| match self.streams[view].try_next_event() {
                 Some(event) => {
-                    let (added, updated) = changed_rows(&event);
-                    added + updated == 0
+                    let (added, updated, removed) = changed_rows(&event);
+                    added + updated + removed == 0
                 }
                 None => true,
             });

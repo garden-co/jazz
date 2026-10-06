@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
+import { historyQuery } from "../src/components/RoomView";
 import { app } from "../schema";
 import permissions from "../permissions";
 
@@ -102,24 +103,16 @@ it("does not lose messages when a history page boundary shares a timestamp", asy
   });
   await messages.wait({ tier: "global" });
 
-  const firstPage = await owner.all(
-    app.messages
-      .where({ roomId: room.id })
-      .select("id", "$createdAt")
-      .orderBy("$createdAt", "desc")
-      .limit(50),
-    { tier: "global" },
-  );
+  const firstPage = await owner.all(historyQuery(room.id, {}), { tier: "global" });
   expect(firstPage).toHaveLength(50);
   expect(new Set(firstPage.map((message) => message.$createdAt.getTime())).size).toBe(1);
 
   const oldest = firstPage.at(-1)!;
+  const offset = firstPage.filter(
+    (message) => message.$createdAt.getTime() === oldest.$createdAt.getTime(),
+  ).length;
   const olderPage = await owner.all(
-    app.messages
-      .where({ roomId: room.id, $createdAt: { lt: oldest.$createdAt } })
-      .select("id", "$createdAt")
-      .orderBy("$createdAt", "desc")
-      .limit(50),
+    historyQuery(room.id, { before: { at: oldest.$createdAt, offset } }),
     { tier: "global" },
   );
   expect(new Set([...firstPage, ...olderPage].map((message) => message.id)).size).toBe(55);

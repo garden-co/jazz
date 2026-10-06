@@ -56,16 +56,14 @@ export type MessageSummary = {
 
 export type ShownMessage = MessageSummary & { reactionsViaMessage: Reaction[] };
 
-/**
- * Messages of a room, newest first, each with its reactions. Without
- * `before` this is the newest page; with it, the page before that time.
- * With `from` it is every message since then, unlimited.
- */
-function historyQuery(roomId: string, bound: { before?: Date; from?: Date }) {
+export type HistoryCursor = { at: Date; offset: number };
+
+/** Messages of a room, newest first. A cursor includes rows sharing its timestamp. */
+export function historyQuery(roomId: string, bound: { before?: HistoryCursor; from?: Date }) {
   const query = app.messages
     .where(
       bound.before
-        ? { roomId, $createdAt: { lt: bound.before } }
+        ? { roomId, $createdAt: { lte: bound.before.at } }
         : bound.from
           ? { roomId, $createdAt: { gte: bound.from } }
           : { roomId },
@@ -82,8 +80,16 @@ function historyQuery(roomId: string, bound: { before?: Date; from?: Date }) {
       "$createdAt",
     )
     .include({ reactionsViaMessage: true })
-    .orderBy("$createdAt", "desc");
-  return bound.from ? query : query.limit(HISTORY_PAGE);
+    .orderBy("$createdAt", "desc")
+    .orderBy("id", "desc");
+  if (bound.from) return query;
+  return bound.before
+    ? query.offset(bound.before.offset).limit(HISTORY_PAGE)
+    : query.limit(HISTORY_PAGE);
+}
+
+function cursorKey(cursor: HistoryCursor) {
+  return `${cursor.at.getTime()}:${cursor.offset}`;
 }
 
 export function RoomView({ summary, author }: { summary: RoomSummary; author: string }) {
@@ -96,24 +102,28 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   // the first older page when new messages arrive.
   const [pinnedFrom, setPinnedFrom] = useState<Date | undefined>(undefined);
   const { data: newestFirst = [] } = useAll(historyQuery(roomId, { from: pinnedFrom }));
-  const [olderCursors, setOlderCursors] = useState<Date[]>([]);
-  const [olderPages, setOlderPages] = useState<ReadonlyMap<number, ShownMessage[]>>(new Map());
-  const onOlderPage = useCallback((before: Date, rows: ShownMessage[]) => {
-    setOlderPages((pages) => new Map(pages).set(before.getTime(), rows));
+  const [olderCursors, setOlderCursors] = useState<HistoryCursor[]>([]);
+  const [olderPages, setOlderPages] = useState<ReadonlyMap<string, ShownMessage[]>>(new Map());
+  const onOlderPage = useCallback((cursor: HistoryCursor, rows: ShownMessage[]) => {
+    setOlderPages((pages) => new Map(pages).set(cursorKey(cursor), rows));
   }, []);
   const messages = useMemo(() => {
     const all: ShownMessage[] = [...newestFirst];
-    for (const cursor of olderCursors) all.push(...(olderPages.get(cursor.getTime()) ?? []));
+    for (const cursor of olderCursors) all.push(...(olderPages.get(cursorKey(cursor)) ?? []));
     return all.reverse();
   }, [newestFirst, olderCursors, olderPages]);
   const lastCursor = olderCursors.at(-1);
-  const lastPage = lastCursor ? olderPages.get(lastCursor.getTime()) : newestFirst;
+  const lastPage = lastCursor ? olderPages.get(cursorKey(lastCursor)) : newestFirst;
   const hasOlder = !!lastPage && lastPage.length >= HISTORY_PAGE;
   function loadOlder() {
     const oldest = messages[0];
     if (!oldest) return;
     if (!pinnedFrom) setPinnedFrom(oldest.$createdAt);
-    setOlderCursors((cursors) => [...cursors, oldest.$createdAt]);
+    const at = oldest.$createdAt;
+    const offset = messages.filter(
+      (message) => message.$createdAt.getTime() === at.getTime(),
+    ).length;
+    setOlderCursors((cursors) => [...cursors, { at, offset }]);
   }
   const { data: loadedMembers } = useAll(app.roomMembers.where({ roomId }));
   const members = loadedMembers ?? [];
@@ -275,11 +285,11 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
             />
           }
         >
-          {olderCursors.map((before) => (
+          {olderCursors.map((cursor) => (
             <OlderPage
-              key={before.getTime()}
+              key={cursorKey(cursor)}
               roomId={roomId}
-              before={before}
+              cursor={cursor}
               onRows={onOlderPage}
             />
           ))}
@@ -344,17 +354,17 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
 /** Loads one older page and hands its rows up; it renders nothing itself. */
 function OlderPage({
   roomId,
-  before,
+  cursor,
   onRows,
 }: {
   roomId: string;
-  before: Date;
-  onRows: (before: Date, rows: ShownMessage[]) => void;
+  cursor: HistoryCursor;
+  onRows: (cursor: HistoryCursor, rows: ShownMessage[]) => void;
 }) {
-  const { data } = useAll(historyQuery(roomId, { before }));
+  const { data } = useAll(historyQuery(roomId, { before: cursor }));
   useEffect(() => {
-    if (data) onRows(before, data);
-  }, [data, before, onRows]);
+    if (data) onRows(cursor, data);
+  }, [data, cursor, onRows]);
   return null;
 }
 
