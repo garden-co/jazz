@@ -151,7 +151,7 @@ it.each([
         ),
       ).toEqual([]);
       corruptNextEnvelope = scenario === "repair";
-      await owner.e2ee.groups.add(id, bob.account.id).wait();
+      await owner.e2ee.groups.add(id, { kind: "account", id: bob.account.id }).wait();
       if (scenario === "repair") {
         expect(corruptNextEnvelope).toBe(false);
         const delivered = await recipient.all(
@@ -204,7 +204,7 @@ it.each([
             : scenario === "removal-invalid-history"
               ? "history"
               : undefined;
-        const removal = owner.e2ee.groups.remove(id, bob.account.id);
+        const removal = owner.e2ee.groups.remove(id, { kind: "account", id: bob.account.id });
         expect(removal).not.toHaveProperty("then");
         if (scenario.startsWith("removal-invalid-")) {
           await expect(removal.wait()).rejects.toThrow();

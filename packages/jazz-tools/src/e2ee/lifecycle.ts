@@ -25,7 +25,7 @@ import {
 } from "./public-membership.js";
 import { Groups } from "./group-lifecycle.js";
 import type { GroupRecoveryPath } from "./group-lifecycle.js";
-import { groupSchema, type GroupTables } from "./groups.js";
+import { groupSchema, type GroupMember, type GroupTables } from "./groups.js";
 import type { DeviceSigner, JazzCrypto, KeyEnvelope } from "./types.js";
 
 export type E2eeConfig = {
@@ -86,19 +86,19 @@ export class E2ee {
   private readonly app: DeviceTables;
   readonly groups = {
     leave: (groupId: string): { wait(): Promise<void> } =>
-      this.groups.remove(groupId, this.account.id),
-    remove: (groupId: string, memberId: string): { wait(): Promise<void> } => {
+      this.groups.remove(groupId, { kind: "account", id: this.account.id }),
+    remove: (groupId: string, member: GroupMember): { wait(): Promise<void> } => {
       const completion = (async () => {
         await this.prepare();
-        return this.requireGroups().remove(groupId, memberId);
+        return this.requireGroups().remove(groupId, member);
       })();
       completion.catch(() => {});
       return { wait: () => completion };
     },
-    add: (groupId: string, memberId: string): { wait(): Promise<void> } => {
+    add: (groupId: string, member: GroupMember): { wait(): Promise<void> } => {
       const completion = (async () => {
         await this.prepare();
-        return this.requireGroups().add(groupId, memberId);
+        return this.requireGroups().add(groupId, member);
       })();
       completion.catch(() => {});
       return { wait: () => completion };
@@ -296,7 +296,8 @@ export class E2ee {
             (error.code !== "recovery-material-unusable" &&
               error.code !== "recovery-root-mismatch" &&
               error.code !== "recovery-delivery-missing" &&
-              error.code !== "recovery-delivery-unusable")
+              error.code !== "recovery-delivery-unusable" &&
+              error.code !== "recovery-group-delivery-unavailable")
           )
             throw error;
           failure = error;

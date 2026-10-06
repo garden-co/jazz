@@ -32,6 +32,7 @@ type State = {
   keyRoot: KeyRoot;
   epochPosition: bigint;
   successor?: GroupSuccessor;
+  successorIds: string[];
   usedEpochs: Set<string>;
   revisionIds: string[];
   sealed: boolean;
@@ -79,6 +80,21 @@ export async function replayGroupGraph(
     const rank = { root: 0, epoch: 1, member: 2 };
     return rank[a.kind] - rank[b.kind] || a.row.id.localeCompare(b.row.id);
   });
+  const contenderCounts = new Map<string, Map<string, Map<bigint, number>>>();
+  for (const event of events) {
+    if (event.kind !== "epoch") continue;
+    let predecessors = contenderCounts.get(event.row.groupId);
+    if (!predecessors) {
+      predecessors = new Map();
+      contenderCounts.set(event.row.groupId, predecessors);
+    }
+    let positions = predecessors.get(event.row.predecessor);
+    if (!positions) {
+      positions = new Map();
+      predecessors.set(event.row.predecessor, positions);
+    }
+    positions.set(event.at, (positions.get(event.at) ?? 0) + 1);
+  }
   const states = new Map<string, State>();
   const revision = (state: State): Uint8Array => {
     const ids = new Set(state.revisionIds);
@@ -90,7 +106,7 @@ export async function replayGroupGraph(
       // Membership IDs retain the flat transcript; other tables need a namespace.
       ids.add(`__e2ee_groups:${child.root.id}`);
       for (const id of child.revisionIds) ids.add(id);
-      if (child.successor) ids.add(`__e2ee_group_successors:${child.successor.id}`);
+      for (const id of child.successorIds) ids.add(`__e2ee_group_successors:${id}`);
       for (const id of child.children) visit(id);
     };
     for (const id of state.children) visit(id);
@@ -122,9 +138,32 @@ export async function replayGroupGraph(
       if (next.size === 0) state.sealed = true;
     }
   };
+  const pendingEpochs: {
+    state: State;
+    row: GroupSuccessor;
+    at: bigint;
+    members: Map<string, string>;
+  }[] = [];
+  const applyEpochs = () => {
+    for (const { state, row, at, members } of pendingEpochs) {
+      state.members = members;
+      for (const accountId of state.direct.keys())
+        state.direct.set(accountId, members.get(accountId)!);
+      state.keyRoot = { ...state.keyRoot, epochId: row.epochId, verification: row.verification };
+      state.epochPosition = at;
+      state.successor = row;
+      state.successorIds.push(row.id);
+      state.usedEpochs.add(row.epochId);
+      state.rotationRequired = false;
+    }
+    pendingEpochs.length = 0;
+  };
   let previousPosition: bigint | undefined;
   for (const event of events) {
     if (cutoff !== undefined && event.at >= cutoff) break;
+    // All epoch proposals at a position observe the same prior graph. Activate
+    // the batch before membership records, without reconciling mid-position.
+    if (event.kind !== "epoch" || event.at !== previousPosition) applyEpochs();
     if (previousPosition !== undefined && event.at !== previousPosition) reconcile();
     previousPosition = event.at;
     if (event.kind === "root") {
@@ -137,6 +176,7 @@ export async function replayGroupGraph(
         members: new Map([[root.accountId, root.accountEpochId]]),
         keyRoot: root,
         epochPosition: event.at,
+        successorIds: [],
         usedEpochs: new Set([root.epochId]),
         revisionIds: [],
         sealed: false,
@@ -149,6 +189,8 @@ export async function replayGroupGraph(
     if (event.kind === "epoch") {
       const row = event.row;
       if (
+        // Raw competition rejects every contender, even an invalidly signed one.
+        contenderCounts.get(row.groupId)!.get(row.predecessor)!.get(event.at)! > 1 ||
         event.at <= state.epochPosition ||
         row.predecessor !== state.keyRoot.epochId ||
         state.usedEpochs.has(row.epochId) ||
@@ -169,14 +211,7 @@ export async function replayGroupGraph(
         !(await authority.successor(state.root, row, event.at))
       )
         continue;
-      state.members = next;
-      for (const accountId of state.direct.keys())
-        state.direct.set(accountId, next.get(accountId)!);
-      state.keyRoot = { ...state.keyRoot, epochId: row.epochId, verification: row.verification };
-      state.epochPosition = event.at;
-      state.successor = row;
-      state.usedEpochs.add(row.epochId);
-      state.rotationRequired = false;
+      pendingEpochs.push({ state, row, at: event.at, members: next });
       continue;
     }
     const row = event.row;
@@ -201,6 +236,7 @@ export async function replayGroupGraph(
       }
     }
   }
+  applyEpochs();
   reconcile();
   return new Map(
     await Promise.all(

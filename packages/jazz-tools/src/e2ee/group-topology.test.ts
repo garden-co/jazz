@@ -83,8 +83,8 @@ it("makes topology readable outside group membership without granting administra
     const group = owner.db.e2ee.groups.create();
     await group.wait();
     await owner.db.insert(app.notes, { text: "private" }).wait({ tier: "global" });
-    await owner.db.e2ee.groups.add(group.id, outsider.id).wait();
-    await owner.db.e2ee.groups.remove(group.id, outsider.id).wait();
+    await owner.db.e2ee.groups.add(group.id, { kind: "account", id: outsider.id }).wait();
+    await owner.db.e2ee.groups.remove(group.id, { kind: "account", id: outsider.id }).wait();
     const roots = await owner.db.all(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" });
     const members = await owner.db.all(app.__e2ee_group_membership.where({ groupId: group.id }), {
       tier: "remote",
@@ -112,7 +112,9 @@ it("makes topology readable outside group membership without granting administra
     expect(await outsider.db.e2ee.explain({ groupId: group.id })).toMatchObject({
       state: "refused",
     });
-    await expect(outsider.db.e2ee.groups.add(group.id, outsider.id).wait()).rejects.toThrow();
+    await expect(
+      outsider.db.e2ee.groups.add(group.id, { kind: "account", id: outsider.id }).wait(),
+    ).rejects.toThrow();
     expect(
       await owner.db.all(app.__e2ee_group_membership.where({ groupId: group.id }), {
         tier: "remote",

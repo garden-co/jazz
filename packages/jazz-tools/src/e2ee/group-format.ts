@@ -94,6 +94,15 @@ export function groupRootBytes(
   application: string,
   root: Omit<GroupRoot, "signature">,
 ): Uint8Array {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  if (
+    ![root.id, root.epochId, root.deviceId, root.accountEpochId].every(
+      (id) => typeof id === "string" && uuid.test(id),
+    ) ||
+    typeof root.accountId !== "string" ||
+    !root.accountId
+  )
+    throw new Error("Invalid E2EE group root");
   return frameCryptoRecord([
     groupContext(
       application,

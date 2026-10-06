@@ -134,7 +134,7 @@ it.each(["ordinary", "forged-candidate", "forged-malformed-id"])(
         else await proposal();
       }
       expect(await administrator.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
-      await administrator.e2ee.groups.add(id, bob.account.id).wait();
+      await administrator.e2ee.groups.add(id, { kind: "account", id: bob.account.id }).wait();
       // Acceptance changes desired membership; an administrator without the key
       // cannot deliver it. Loading on a capable member performs reconciliation.
       expect(await recipient.e2ee.explain({ groupId: id })).toMatchObject({ state: "unavailable" });
@@ -148,10 +148,12 @@ it.each(["ordinary", "forged-candidate", "forged-malformed-id"])(
         ),
       ).toEqual([]);
       // Having the group key must not grant this account administration rights.
-      await expect(recipient.e2ee.groups.add(id, admin.account.id).wait()).rejects.toThrow();
+      await expect(
+        recipient.e2ee.groups.add(id, { kind: "account", id: admin.account.id }).wait(),
+      ).rejects.toThrow();
       expect(await administrator.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
       if (scenario === "ordinary") {
-        await administrator.e2ee.groups.add(id, admin.account.id).wait();
+        await administrator.e2ee.groups.add(id, { kind: "account", id: admin.account.id }).wait();
         // Bob can read with his accepted key, but policy permits only Alice to
         // deliver the key to the newly added administrator.
         expect(await recipient.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });

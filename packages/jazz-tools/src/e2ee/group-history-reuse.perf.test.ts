@@ -76,7 +76,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
       await other.e2ee.devices.list();
       const otherId = sessions[1]!.getSnapshot().account!.id;
       const group = await owner.e2ee.groups.create().wait();
-      await owner.e2ee.groups.add(group.id, otherId).wait();
+      await owner.e2ee.groups.add(group.id, { kind: "account", id: otherId }).wait();
       const target = { groupId: group.id };
       expect(await other.e2ee.explain(target)).toEqual({ state: "ready" });
       const membership = await owner.one(
@@ -94,7 +94,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
       for (let sample = 0; sample < 3; sample++)
         expect(await owner.e2ee.explain(target)).toEqual({ state: "ready" });
       expect(membershipVerifications).toBe(0);
-      await owner.e2ee.groups.remove(group.id, otherId).wait();
+      await owner.e2ee.groups.remove(group.id, { kind: "account", id: otherId }).wait();
       expect(await other.e2ee.explain(target)).toMatchObject({ state: "refused" });
       expect(await owner.e2ee.explain(target)).toEqual({ state: "ready" });
     } finally {

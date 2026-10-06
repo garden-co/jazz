@@ -9,6 +9,10 @@ creator generates a random 32-byte symmetric epoch secret; no extra group
 asymmetric keypair is needed. `verification` wraps 32 zero bytes under that
 secret, using the configured key-envelope adapter.
 
+Root framing rejects non-UUIDv4 group, initial-epoch, device or account-epoch
+coordinates before signature acceptance. The creator account ID must be a
+non-empty string; it is not required to be a UUID.
+
 Group contexts use canonical context version one. `application` is the creator's
 verified account scope tuple, `policy` is `jazz.e2ee.group.v1`, `scope` is `group`,
 `identifier` and `row` are the group ID, `table` is `__e2ee_groups`, and `epoch`
@@ -103,8 +107,9 @@ The epoch is the group epoch ID; recipient is `[memberKind, memberId]`, also
 compact JSON. Operations are `add` or `remove`; member kinds are `account` or
 `group`. Candidate, epoch, author-device and author-epoch IDs are UUID v4.
 Account and member IDs must be non-empty; context field limits also apply.
-The record stores these fields plus the device signature. Public API member
-type inference is separate from this explicit signed representation.
+The record stores these fields plus the device signature. Public `add` and
+`remove` require the same explicit account/group kind in a `GroupMember`
+selector; they do not infer it from another table's row IDs.
 
 `group-membership-format.test.ts` pins independently framed literal bytes and
 checks signature failure after changes to every coordinate, operation or

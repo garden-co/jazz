@@ -124,7 +124,7 @@ it("inspects inherited recovery coverage without repairing or staging group keys
     const child = bob.e2ee.groups.create();
     await child.wait();
     // Bob may administer this edge through ordinary policy, but has no parent key to share.
-    await bob.e2ee.groups.add(parent.id, child.id).wait();
+    await bob.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
     const observer = await open(bobAccount, true);
     const requests = await bob.all(app.__e2ee_device_requests, { tier: "remote" });
     const deliveries = await bob.all(app.__e2ee_group_recovery_deliveries, { tier: "remote" });
@@ -218,7 +218,7 @@ it("inspects inherited recovery coverage without repairing or staging group keys
         }),
       ]),
     });
-    await alice.e2ee.groups.remove(parent.id, child.id).wait();
+    await alice.e2ee.groups.remove(parent.id, { kind: "group", id: child.id }).wait();
     const removed = await observer.db.e2ee.recovery.status(material);
     if (removed.groups.validation !== "checked") throw new Error("Group coverage was not checked");
     expect(removed.groups.paths).toHaveLength(1);

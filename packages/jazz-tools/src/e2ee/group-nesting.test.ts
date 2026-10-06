@@ -69,11 +69,11 @@ it("inherits child-group access, preserves an alternate path, and rotates after 
     await parent.wait();
     const child = owner.e2ee.groups.create();
     await child.wait();
-    await owner.e2ee.groups.add(child.id, bobId).wait();
+    await owner.e2ee.groups.add(child.id, { kind: "account", id: bobId }).wait();
     expect(await recipient.e2ee.explain({ groupId: parent.id })).toMatchObject({
       state: "refused",
     });
-    await owner.e2ee.groups.add(parent.id, child.id).wait();
+    await owner.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
     expect(await recipient.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
     const deliveries = await recipient.all(
       app.__e2ee_group_deliveries.where({
@@ -83,8 +83,8 @@ it("inherits child-group access, preserves an alternate path, and rotates after 
       { tier: "remote" },
     );
     expect(deliveries.length).toBeGreaterThan(0);
-    await owner.e2ee.groups.add(parent.id, bobId).wait();
-    await owner.e2ee.groups.remove(child.id, bobId).wait();
+    await owner.e2ee.groups.add(parent.id, { kind: "account", id: bobId }).wait();
+    await owner.e2ee.groups.remove(child.id, { kind: "account", id: bobId }).wait();
     expect(await owner.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
     expect(await recipient.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
     const before = await recipient.all(
@@ -124,7 +124,7 @@ it("inherits child-group access, preserves an alternate path, and rotates after 
         { id: child.id },
       )
       .wait({ tier: "global" });
-    await owner.e2ee.groups.remove(parent.id, bobId).wait();
+    await owner.e2ee.groups.remove(parent.id, { kind: "account", id: bobId }).wait();
     expect(await owner.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
     expect(await recipient.e2ee.explain({ groupId: parent.id })).toMatchObject({
       state: "refused",

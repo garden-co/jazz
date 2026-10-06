@@ -88,11 +88,13 @@ it("accepts only one of two overlapping group edges that would form a cycle", as
     };
     const a = await open();
     const b = await open();
-    await expect(a.db.e2ee.groups.add(a.id, a.id).wait()).rejects.toThrow("cycle or depth");
+    await expect(a.db.e2ee.groups.add(a.id, { kind: "group", id: a.id }).wait()).rejects.toThrow(
+      "cycle or depth",
+    );
     armed = true;
     const results = await Promise.allSettled([
-      a.db.e2ee.groups.add(a.id, b.id).wait(),
-      b.db.e2ee.groups.add(b.id, a.id).wait(),
+      a.db.e2ee.groups.add(a.id, { kind: "group", id: b.id }).wait(),
+      b.db.e2ee.groups.add(b.id, { kind: "group", id: a.id }).wait(),
     ]);
     expect(arrivals).toBe(2);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
@@ -106,9 +108,9 @@ it("accepts only one of two overlapping group edges that would form a cycle", as
     expect(await parent.db.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
     expect(await child.db.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
     expect(await parent.db.e2ee.explain({ groupId: child.id })).toMatchObject({ state: "refused" });
-    await expect(child.db.e2ee.groups.add(child.id, parent.id).wait()).rejects.toThrow(
-      "cycle or depth",
-    );
+    await expect(
+      child.db.e2ee.groups.add(child.id, { kind: "group", id: parent.id }).wait(),
+    ).rejects.toThrow("cycle or depth");
     expect(await a.db.all(app.__e2ee_group_membership, { tier: "remote" })).toEqual(edges);
     const root = (await child.db.one(app.__e2ee_groups.where({ id: child.id }), {
       tier: "remote",

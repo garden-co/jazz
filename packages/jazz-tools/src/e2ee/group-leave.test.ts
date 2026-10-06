@@ -65,14 +65,16 @@ it("lets an account leave under self-removal policy without receiving the replac
     await recipient.e2ee.devices.list();
     const group = owner.e2ee.groups.create();
     await group.wait();
-    await owner.e2ee.groups.add(group.id, bob.account.id).wait();
+    await owner.e2ee.groups.add(group.id, { kind: "account", id: bob.account.id }).wait();
     expect(await recipient.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
     const before = await recipient.all(
       app.__e2ee_group_deliveries.where({ groupId: group.id, recipientAccountId: bob.account.id }),
       { tier: "remote" },
     );
     expect(before).toHaveLength(1);
-    await expect(recipient.e2ee.groups.remove(group.id, alice.account.id).wait()).rejects.toThrow();
+    await expect(
+      recipient.e2ee.groups.remove(group.id, { kind: "account", id: alice.account.id }).wait(),
+    ).rejects.toThrow();
     const leaving = recipient.e2ee.groups.leave(group.id);
     expect(leaving).not.toBeInstanceOf(Promise);
     await leaving.wait();
