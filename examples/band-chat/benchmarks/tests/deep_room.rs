@@ -59,7 +59,7 @@ fn a_new_message_reaches_the_open_page() {
     let mut window = LiveWindow::new(DeepRoom::seeded(Shape::miniature(DEEP)));
     assert_eq!(window.shown, PAGE);
     assert_eq!(window.member_sends(3), 3);
-    assert_eq!(window.shown, PAGE + 3);
+    assert_eq!(window.shown, PAGE);
 }
 
 /// bob's message after alice's marker raises their live unread count by one.

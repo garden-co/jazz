@@ -64,3 +64,63 @@ it("creates a room with its creator's membership, then a sketch with its message
     ),
   ).toEqual([canvas.id]);
 });
+
+it("does not lose messages when a history page boundary shares a timestamp", async () => {
+  const ownerAuthor = "00000000-0000-4000-8000-000000000031";
+  const owner = testApp.as({
+    issuer: "https://bandchat.example",
+    user_id: "pagination-owner",
+    account_id: ownerAuthor,
+    claims: {},
+    authMode: "external",
+  });
+  const profile = await owner
+    .insert(app.profiles, { author: ownerAuthor, displayName: "Pagination owner" })
+    .wait({ tier: "global" });
+  const roomResult = await owner.transaction((tx) => {
+    const room = tx.insert(app.rooms, { name: "Same timestamp" });
+    tx.insert(app.roomMembers, {
+      roomId: room.id,
+      memberAuthor: ownerAuthor,
+      memberProfileId: profile.id,
+    });
+    return room;
+  });
+  const room = await roomResult.wait({ tier: "global" });
+  const messages = await owner.transaction((tx) => {
+    const inserted = [];
+    for (let index = 0; index < 55; index++) {
+      inserted.push(
+        tx.insert(app.messages, {
+          roomId: room.id,
+          senderId: profile.id,
+          text: `message ${index}`,
+        }),
+      );
+    }
+    return inserted;
+  });
+  await messages.wait({ tier: "global" });
+
+  const firstPage = await owner.all(
+    app.messages
+      .where({ roomId: room.id })
+      .select("id", "$createdAt")
+      .orderBy("$createdAt", "desc")
+      .limit(50),
+    { tier: "global" },
+  );
+  expect(firstPage).toHaveLength(50);
+  expect(new Set(firstPage.map((message) => message.$createdAt.getTime())).size).toBe(1);
+
+  const oldest = firstPage.at(-1)!;
+  const olderPage = await owner.all(
+    app.messages
+      .where({ roomId: room.id, $createdAt: { lt: oldest.$createdAt } })
+      .select("id", "$createdAt")
+      .orderBy("$createdAt", "desc")
+      .limit(50),
+    { tier: "global" },
+  );
+  expect(new Set([...firstPage, ...olderPage].map((message) => message.id)).size).toBe(55);
+});
