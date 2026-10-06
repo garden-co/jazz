@@ -36,3 +36,8 @@ in bounded ID batches, not all application roots. Isolate canonical roots from
 wrong-ID proposals during creation and lookup, and exclude covered ineligible
 authors without hiding authority or verifier failures. Reject incomplete managed
 group configuration while preserving account-only spaces.
+
+Index table-qualified settlement positions and capture space replay authority
+once per covered snapshot, avoiding repeated delivery-byte comparisons.
+Preserve cutoff-specific validation and live eligibility checks, and prevent
+adapter-mutated space or group replay from contaminating later cached proofs.

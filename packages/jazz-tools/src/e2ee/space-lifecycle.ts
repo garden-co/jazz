@@ -92,6 +92,13 @@ type Snapshot = {
   histories: Map<string, PublicMembershipHistory>;
   group?: GroupMembershipSnapshot;
 };
+type AuthoritySnapshot = Omit<Snapshot, "deliveries">;
+type ReplayInput = {
+  snapshot: AuthoritySnapshot;
+  address: Address;
+  contexts: Map<string, string>;
+  mechanism: DeviceSigner["mechanism"];
+};
 export type SpaceRecoveryPath = Address & { spaceId: string; epochId: string } & (
     | { validation: "validated" }
     | {
@@ -103,8 +110,20 @@ type SpaceState = {
   state: "ready" | "refused" | "unavailable" | "maintenance-required";
   reason?: string;
 };
-const positionOf = <T>(snapshot: Settled<T>, id: string) =>
-  snapshot.settlements.find((entry) => entry.rowId === id)?.position;
+// Settlements are internal read metadata, never passed to crypto adapters.
+// Each table wrapper owns its index, even when row IDs overlap across tables.
+const positions = new WeakMap<Settled<unknown>, Map<string, string>>();
+function positionOf<T>(snapshot: Settled<T>, id: string): string | undefined {
+  let index = positions.get(snapshot);
+  if (!index) {
+    index = new Map();
+    for (const entry of snapshot.settlements) {
+      if (!index.has(entry.rowId)) index.set(entry.rowId, entry.position);
+    }
+    positions.set(snapshot, index);
+  }
+  return index.get(id);
+}
 
 // Initialisation knows the first secret without conferring recipient membership.
 // This authority belongs to that exact author/device/account epoch, never a successor.
@@ -137,10 +156,11 @@ export function initialRecipientIds(ids: readonly string[]): string[] {
 /** Scoped roots and accepted-only device delivery. Jazz policies own every write. */
 export class Spaces {
   private validated?: {
-    input: unknown;
+    input: ReplayInput;
     verify: DeviceSigner["verify"];
     states: Map<bigint | undefined, Awaited<ReturnType<Spaces["replay"]>>>;
   };
+  private readonly replayContexts = new WeakMap<Snapshot, NonNullable<Spaces["validated"]>>();
 
   constructor(
     private readonly db: Db,
@@ -888,25 +908,54 @@ export class Spaces {
     }
   }
 
-  private async validate(snapshot: Snapshot, address: Address, before?: bigint) {
-    // Reuse only the latest complete public snapshot; never coverage receipts,
-    // device eligibility or decrypted keys. Each authority cutoff stays distinct.
-    const input = {
-      address: { scopeId: address.scopeId, identifier: address.identifier },
+  private sameReplayAdapter(cache: NonNullable<Spaces["validated"]>): boolean {
+    const { mechanism, verify } = this.signer;
+    return (
+      cache.verify === verify &&
+      cache.input.mechanism.id === mechanism.id &&
+      cache.input.mechanism.version === mechanism.version
+    );
+  }
+
+  private replayContext(snapshot: Snapshot, address: Address) {
+    const previous = this.replayContexts.get(snapshot);
+    if (
+      previous &&
+      previous.input.address.scopeId === address.scopeId &&
+      previous.input.address.identifier === address.identifier &&
+      this.sameReplayAdapter(previous)
+    )
+      return previous;
+
+    // Capture authority once per covered read, not once per delivery candidate.
+    // Delivery rows are authenticated separately and cannot change membership replay.
+    const authority: AuthoritySnapshot = previous?.input.snapshot ?? {
       roots: snapshot.roots,
       grants: snapshot.grants,
-      deliveries: snapshot.deliveries,
       successors: snapshot.successors,
       histories: snapshot.histories,
       group: snapshot.group,
-      contexts: [
-        ...new Set([...snapshot.histories.keys(), ...(snapshot.group?.histories.keys() ?? [])]),
-      ].map((id) => [id, this.accountContext(id)]),
-      mechanism: this.signer.mechanism,
+    };
+    const contexts =
+      previous?.input.contexts ??
+      new Map(
+        [
+          ...new Set([
+            ...authority.roots.rows.map((root) => root.accountId),
+            ...authority.histories.keys(),
+            ...(authority.group?.histories.keys() ?? []),
+          ]),
+        ].map((id) => [id, this.accountContext(id)]),
+      );
+    const input: ReplayInput = {
+      snapshot: authority,
+      address: { scopeId: address.scopeId, identifier: address.identifier },
+      contexts,
+      mechanism: { ...this.signer.mechanism },
     };
     if (
       !this.validated ||
-      this.validated.verify !== this.signer.verify ||
+      !this.sameReplayAdapter(this.validated) ||
       !sameSnapshotValue(input, this.validated.input)
     ) {
       this.validated = {
@@ -916,23 +965,43 @@ export class Spaces {
       };
     }
     const cache = this.validated;
+    this.replayContexts.set(snapshot, cache);
+    return cache;
+  }
+
+  private async validate(snapshot: Snapshot, address: Address, before?: bigint) {
+    const cache = this.replayContext(snapshot, address);
     const cached = cache.states.get(before);
     if (cached) return structuredClone(cached);
-    const state = await this.replay(snapshot, address, before);
-    // Keep completed results only, isolated from caller mutation and concurrent
-    // reads of a different snapshot. The working set is a count, not byte, bound.
-    cache.states.set(before, structuredClone(state));
-    if (cache.states.size > 8) cache.states.delete(cache.states.keys().next().value);
+    // The immutable basis never reaches adapters. Clone shared histories together
+    // only on a genuine cutoff miss, preserving their aliases within this replay.
+    const working = structuredClone(cache.input);
+    const state = await this.replay(working.snapshot, working.address, working.contexts, before);
+    // Completed, unmodified proofs only; coverage, device eligibility and keys stay live.
+    if (this.sameReplayAdapter(cache) && sameSnapshotValue(working, cache.input)) {
+      cache.states.set(before, structuredClone(state));
+      if (cache.states.size > 8) cache.states.delete(cache.states.keys().next().value);
+    }
     return state;
   }
 
-  private async replay(snapshot: Snapshot, address: Address, before?: bigint) {
+  private async replay(
+    snapshot: AuthoritySnapshot,
+    address: Address,
+    contexts: ReadonlyMap<string, string>,
+    before?: bigint,
+  ) {
+    const accountContext = (id: string): string => {
+      const context = contexts.get(id);
+      if (context === undefined) throw new Error("Missing E2EE space account context");
+      return context;
+    };
     const root = snapshot.roots.rows[0];
     if (!root || snapshot.roots.rows.length !== 1)
       throw new Error("Invalid or unsupported E2EE space membership");
     let rootBytes: Uint8Array;
     try {
-      rootBytes = spaceRootBytes(this.accountContext(root.accountId), root);
+      rootBytes = spaceRootBytes(accountContext(root.accountId), root);
     } catch {
       throw new InvalidSpaceRoot("Malformed E2EE space root transcript");
     }
@@ -947,7 +1016,7 @@ export class Spaces {
       throw new InvalidSpaceRoot("Ineligible E2EE space creator");
     const initial = await replayAccountMembership(
       initialHistory,
-      this.accountContext(root.accountId),
+      accountContext(root.accountId),
       this.signer,
     );
     if (!initial.active.has(root.deviceId) || initial.epochId !== root.accountEpochId)
@@ -980,7 +1049,7 @@ export class Spaces {
       !(await this.verify(
         history,
         grant.authorDeviceId,
-        spaceGrantBytes(this.accountContext(root.accountId), root, grant),
+        spaceGrantBytes(accountContext(root.accountId), root, grant),
         grant.signature,
       ))
     )
@@ -1018,7 +1087,7 @@ export class Spaces {
           ? initial
           : await replayAccountMembership(
               historyBefore(recipientHistory, BigInt(position)),
-              this.accountContext(grant.recipientId),
+              accountContext(grant.recipientId),
               this.signer,
             );
       if (recipient.epochId !== grant.recipientEpochId)
@@ -1038,7 +1107,7 @@ export class Spaces {
           if (!known) return undefined;
           const history = cut === undefined ? known : historyBefore(known, cut);
           if (!history.roots.rows.length) return undefined;
-          return replayAccountMembership(history, this.accountContext(id), this.signer);
+          return replayAccountMembership(history, accountContext(id), this.signer);
         })();
         accounts.set(key, result);
       }
@@ -1175,7 +1244,7 @@ export class Spaces {
           continue;
         let bytes: Uint8Array;
         try {
-          bytes = spaceSuccessorBytes(this.accountContext(root.accountId), root, row);
+          bytes = spaceSuccessorBytes(accountContext(root.accountId), root, row);
         } catch {
           continue;
         }
@@ -1208,7 +1277,7 @@ export class Spaces {
         continue;
       let bytes: Uint8Array;
       try {
-        bytes = spaceGrantBytes(this.accountContext(root.accountId), keyRoot, record);
+        bytes = spaceGrantBytes(accountContext(root.accountId), keyRoot, record);
       } catch {
         continue;
       }

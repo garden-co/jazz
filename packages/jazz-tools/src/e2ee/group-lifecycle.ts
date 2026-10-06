@@ -1362,10 +1362,16 @@ export class Groups {
     const cached = cache.graphs.get(cutoff);
     if (cached) return structuredClone(cached);
     const graph = await this.replayGraph(snapshot, cutoff);
-    // Successful public replay only. Coverage and key opening remain live checks.
-    // Retain a small cutoff working set, isolated from other concurrent snapshots.
-    cache.graphs.set(cutoff, structuredClone(graph));
-    if (cache.graphs.size > 8) cache.graphs.delete(cache.graphs.keys().next().value);
+    // A verifier may mutate its borrowed bytes or replace its configuration.
+    // Such a replay cannot publish a proof for the pristine pre-replay input.
+    if (
+      cache.verify === this.signer.verify &&
+      sameSnapshotValue(input.mechanism, this.signer.mechanism) &&
+      sameSnapshotValue(input, cache.input)
+    ) {
+      cache.graphs.set(cutoff, structuredClone(graph));
+      if (cache.graphs.size > 8) cache.graphs.delete(cache.graphs.keys().next().value);
+    }
     return graph;
   }
 
