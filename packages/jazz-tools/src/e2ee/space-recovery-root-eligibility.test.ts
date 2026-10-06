@@ -45,6 +45,7 @@ function canonicalId(scopeId: string, identifier: string): string {
 
 it.each([
   "wrong-ID same-address",
+  "wrong-ID before canonical",
   "covered-empty strict-before creator",
   "inactive creator",
   "wrong-epoch creator",
@@ -180,7 +181,7 @@ it.each([
               ).id;
         const coordinates = {
           id:
-            scenario === "wrong-ID same-address"
+            scenario === "wrong-ID same-address" || scenario === "wrong-ID before canonical"
               ? crypto.randomUUID()
               : canonicalId(accepted.scopeId, identifier),
           scopeId: accepted.scopeId,
@@ -267,6 +268,24 @@ it.each([
               tier: "global",
             }),
           ).toHaveLength(1);
+        }
+        if (scenario === "wrong-ID before canonical") {
+          const canonical = app.__e2ee_spaces.where({
+            id: canonicalId(accepted.scopeId, identifier),
+          });
+          expect(await db.one(canonical, { tier: "global" })).toBeNull();
+          await db.e2ee.spaces.grant(app.projects, identifier, accountId).wait();
+          expect(await db.one(canonical, { tier: "global" })).toMatchObject({
+            scopeId: accepted.scopeId,
+            identifier,
+          });
+          const created = { scope: app.projects, identifier };
+          expect(await db.e2ee.explain(created)).toEqual({ state: "ready" });
+          await db.e2ee.spaces.revoke(app.projects, identifier, accountId).wait();
+          expect(await db.e2ee.explain(created)).toMatchObject({
+            state: "refused",
+            reason: "space-sealed",
+          });
         }
         if (scenario === "wrong-ID same-address") {
           expect(
