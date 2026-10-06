@@ -7,6 +7,8 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { groupSchema } from "./groups.js";
 import { spaceSchema } from "./spaces.js";
+import { createBrowserDeviceSigner } from "./browser.js";
+import { spaceGrantBytes } from "./space-format.js";
 
 it("initialises a space for a group without implicitly granting its creator", async () => {
   const app = s.defineApp({
@@ -39,6 +41,7 @@ it("initialises a space for a group without implicitly granting its creator", as
   });
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
+  let signingKey: Uint8Array | undefined;
   const store = () => {
     let value: string | null = null;
     return {
@@ -72,11 +75,13 @@ it("initialises a space for a group without implicitly granting its creator", as
     });
     const alice = await localAccountConfig(server.appId, server.url);
     const bob = await localAccountConfig(server.appId, server.url);
-    const creator = await createDb({ ...alice, e2ee: { app, store: store() } });
-    const recipient = await createDb({ ...bob, e2ee: { app, store: store() } });
+    const aliceStore = store();
+    const bobStore = store();
+    const creator = await createDb({ ...alice, e2ee: { app, store: aliceStore } });
+    const recipient = await createDb({ ...bob, e2ee: { app, store: bobStore } });
     clients.push(creator, recipient);
     await creator.e2ee.devices.list();
-    await recipient.e2ee.devices.list();
+    const [bobDevice] = await recipient.e2ee.devices.list();
     const group = await recipient.e2ee.groups.create().wait();
     expect(await creator.e2ee.explain({ groupId: group.id })).toMatchObject({
       state: "refused",
@@ -136,7 +141,66 @@ it("initialises a space for a group without implicitly granting its creator", as
         tier: "remote",
       }),
     ).toHaveLength(1);
+
+    // Ordinary policy can admit a real signed regrant, but cannot reopen a
+    // space whose only recipient group has already become empty.
+    const stored = JSON.parse((await bobStore.read())!).devices[0];
+    const application = JSON.parse((await aliceStore.read())!).devices[0].scope as string;
+    const bobRoot = (await recipient.one(
+      app.__e2ee_account_roots.where({ accountId: bob.account.id }),
+      { tier: "remote" },
+    ))!;
+    signingKey = Uint8Array.from(stored.signingPrivateKey);
+    const signer = await createBrowserDeviceSigner();
+    const record = {
+      id: crypto.randomUUID(),
+      spaceId: root!.id,
+      epochId: root!.epochId,
+      authorAccountId: bob.account.id,
+      authorDeviceId: bobDevice!.id,
+      authorEpochId: bobRoot.epochId,
+      operation: "add",
+      recipientKind: "account",
+      recipientId: bob.account.id,
+      recipientEpochId: bobRoot.epochId,
+    };
+    const bytes = spaceGrantBytes(application, root!, record);
+    const signature = await signer.sign(signingKey, bytes);
+    expect(await signer.verify(Uint8Array.from(stored.signingPublicKey), bytes, signature)).toBe(
+      true,
+    );
+    expect(
+      (await recipient.e2ee.devices.list()).find((row) => row.id === bobDevice!.id),
+    ).toMatchObject({ state: "active" });
+    const { id, ...values } = record;
+    await recipient
+      .insert(app.__e2ee_space_grants, { ...values, signature }, { id })
+      .wait({ tier: "global" });
+    const acceptedGrants = await creator.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), {
+      tier: "remote",
+    });
+    expect(acceptedGrants).toHaveLength(2);
+    expect(acceptedGrants.find((row) => row.id === id)).toMatchObject({ ...record, signature });
+    expect(await creator.e2ee.explain(target)).toMatchObject({
+      state: "refused",
+      reason: "space-sealed",
+    });
+    expect(await recipient.e2ee.explain(target)).toMatchObject({
+      state: "refused",
+      reason: "space-sealed",
+    });
+    expect(
+      await creator.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), {
+        tier: "remote",
+      }),
+    ).toEqual([]);
+    expect(
+      await creator.all(app.__e2ee_space_deliveries.where({ spaceId: root!.id }), {
+        tier: "remote",
+      }),
+    ).toEqual(deliveries);
   } finally {
+    signingKey?.fill(0);
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
