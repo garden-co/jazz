@@ -153,6 +153,50 @@ struct Assignment {
     account: Uuid,
 }
 
+/// Mallory's malformed JWT remains a permanent denial even when Alice's issuer
+/// is unavailable. An outage must not hide invalid payload or signature encoding.
+///
+/// mallory -> core -> malformed JWT -> never retry
+#[tokio::test]
+async fn malformed_jwt_is_a_permanent_denial_during_jwks_outage() {
+    let jwks = JwksService::start().await;
+    let server = bounded(
+        "starting the isolated server",
+        JazzServer::builder()
+            .with_jwks_url(jwks.endpoint())
+            .with_schema(Schema::new())
+            .start(),
+    )
+    .await
+    .expect("start isolated server");
+    let valid = token("mallory", SIGNING_KEY);
+    let parts: Vec<_> = valid.split('.').collect();
+    let invalid_json = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("not-json");
+    for (case, malformed) in [
+        ("payload encoding", format!("{}.!.{}", parts[0], parts[2])),
+        (
+            "payload JSON",
+            format!("{}.{invalid_json}.{}", parts[0], parts[2]),
+        ),
+        ("signature encoding", format!("{}.{}.!", parts[0], parts[1])),
+    ] {
+        let mut mallory = connect(&server, "mallory", &malformed, AccountId(Uuid::new_v4())).await;
+        let denial = receive(&mut mallory).await;
+        assert!(
+            matches!(
+                denial,
+                WireFrame::Error(WireError {
+                    code: WireErrorCode::AuthFailed,
+                    retry: WireRetry::Never,
+                    ..
+                })
+            ),
+            "malformed {case} must be a permanent denial during an outage: {denial:?}",
+        );
+    }
+    bounded("shutting down the isolated server", server.shutdown()).await;
+}
+
 /// Alice receives a retryable denial while her issuer's JWKS service is down,
 /// reconnects with the same token after recovery, and Mallory's bad signature
 /// remains a permanent credential denial.
