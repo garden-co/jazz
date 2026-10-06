@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,6 +26,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungsten
 use uuid::Uuid;
 
 const SIGNING_KEY: &str = "synthetic-jwks-retry-test-signing-key";
+const ROTATED_SIGNING_KEY: &str = "synthetic-jwks-rotated-signing-key";
 const KEY_ID: &str = "synthetic-jwks-retry-key";
 const STEP_TIMEOUT: Duration = Duration::from_secs(5);
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -38,15 +40,26 @@ async fn bounded<T>(operation: &str, future: impl Future<Output = T>) -> T {
 struct JwksService {
     addr: SocketAddr,
     available: Arc<AtomicBool>,
+    signing_key: Arc<RwLock<&'static str>>,
     task: JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct JwksState {
+    available: Arc<AtomicBool>,
+    signing_key: Arc<RwLock<&'static str>>,
 }
 
 impl JwksService {
     async fn start() -> Self {
         let available = Arc::new(AtomicBool::new(false));
+        let signing_key = Arc::new(RwLock::new(SIGNING_KEY));
         let router = Router::new()
             .route("/jwks", get(jwks))
-            .with_state(available.clone());
+            .with_state(JwksState {
+                available: available.clone(),
+                signing_key: signing_key.clone(),
+            });
         let listener = bounded(
             "binding the local JWKS service",
             tokio::net::TcpListener::bind("127.0.0.1:0"),
@@ -60,6 +73,7 @@ impl JwksService {
         Self {
             addr,
             available,
+            signing_key,
             task,
         }
     }
@@ -75,16 +89,20 @@ impl Drop for JwksService {
     }
 }
 
-async fn jwks(State(available): State<Arc<AtomicBool>>) -> axum::response::Response {
-    if !available.load(Ordering::SeqCst) {
+async fn jwks(State(state): State<JwksState>) -> axum::response::Response {
+    if !state.available.load(Ordering::SeqCst) {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
+    let signing_key = *state
+        .signing_key
+        .read()
+        .expect("read synthetic signing key");
     Json(json!({
         "keys": [{
             "kty": "oct",
             "kid": KEY_ID,
             "alg": "HS256",
-            "k": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(SIGNING_KEY),
+            "k": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing_key),
         }],
     }))
     .into_response()
@@ -151,6 +169,114 @@ async fn receive(socket: &mut Socket) -> WireFrame {
 #[derive(Deserialize)]
 struct Assignment {
     account: Uuid,
+}
+
+/// Alice's rotated-key JWT receives retry-later during a forced-refresh outage,
+/// including reconnects during cooldown. Her cached-key JWT still works, and the
+/// unchanged rotated-key JWT authenticates after the provider recovers.
+///
+/// alice -> core -> old JWKS -> account
+///       -> core -> new signature -> JWKS 500 -> retry later / HTTP 503
+///       -> core -> cached old signature -> authenticated hello
+///       -> core -> recovered JWKS -> new signature -> authenticated hello
+#[tokio::test]
+async fn rotated_key_outage_is_retryable_without_disabling_cached_keys() {
+    let jwks = JwksService::start().await;
+    jwks.available.store(true, Ordering::SeqCst);
+    let server = bounded(
+        "starting the isolated server",
+        JazzServer::builder()
+            .with_jwks_url(jwks.endpoint())
+            .with_schema(Schema::new())
+            .start(),
+    )
+    .await
+    .expect("start isolated server");
+    let alice_token = token("alice", SIGNING_KEY);
+    let client = reqwest::Client::builder()
+        .timeout(STEP_TIMEOUT)
+        .build()
+        .expect("build bounded enrolment client");
+    let account_url = format!(
+        "{}/apps/{}/accounts/login-or-register",
+        server.base_url(),
+        server.app_id(),
+    );
+    let assignment: Assignment = client
+        .post(&account_url)
+        .bearer_auth(&alice_token)
+        .send()
+        .await
+        .expect("enrol Alice with the original key")
+        .error_for_status()
+        .expect("original JWT is valid")
+        .json()
+        .await
+        .expect("public account assignment");
+    let account = AccountId(assignment.account);
+
+    *jwks.signing_key.write().expect("rotate synthetic key") = ROTATED_SIGNING_KEY;
+    jwks.available.store(false, Ordering::SeqCst);
+    let rotated_token = token("alice", ROTATED_SIGNING_KEY);
+    for attempt in 1..=2 {
+        let mut alice = connect(&server, "alice", &rotated_token, account).await;
+        let outage = receive(&mut alice).await;
+        assert!(
+            matches!(
+                outage,
+                WireFrame::Error(WireError {
+                    code: WireErrorCode::NotReady,
+                    retry: WireRetry::Later,
+                    ..
+                })
+            ),
+            "rotated-key attempt {attempt} must remain retryable during an outage: {outage:?}",
+        );
+    }
+    assert_eq!(
+        client
+            .post(&account_url)
+            .bearer_auth(&rotated_token)
+            .send()
+            .await
+            .expect("request with unavailable rotated key")
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+    );
+
+    let hello = WireFrame::Hello(WireHello::current(
+        WirePeerRole::Client,
+        FEATURE_STRUCTURED_ERRORS | FEATURE_SYNC_MESSAGE_PAYLOAD,
+    ));
+    let hello_bytes = encode_websocket_frame_batch(&[encode_frame(&hello).expect("encode hello")])
+        .expect("encode hello batch");
+    let mut alice = connect(&server, "alice", &alice_token, account).await;
+    bounded(
+        "sending the cached-key client hello",
+        alice.send(Message::Binary(hello_bytes.clone().into())),
+    )
+    .await
+    .expect("send cached-key hello");
+    assert!(matches!(receive(&mut alice).await, WireFrame::Hello(_)));
+    bounded("closing the cached-key session", alice.close(None))
+        .await
+        .expect("close cached-key session");
+
+    jwks.available.store(true, Ordering::SeqCst);
+    // The public server retains its ten-second forced-refresh cooldown.
+    tokio::time::sleep(Duration::from_millis(10_100)).await;
+    let mut alice = connect(&server, "alice", &rotated_token, account).await;
+    bounded(
+        "sending the rotated-key client hello",
+        alice.send(Message::Binary(hello_bytes.into())),
+    )
+    .await
+    .expect("send rotated-key hello");
+    assert!(matches!(receive(&mut alice).await, WireFrame::Hello(_)));
+    bounded("closing the rotated-key session", alice.close(None))
+        .await
+        .expect("close rotated-key session");
+    bounded("shutting down the isolated server", server.shutdown()).await;
 }
 
 /// Mallory's malformed JWT remains a permanent denial even when Alice's issuer
