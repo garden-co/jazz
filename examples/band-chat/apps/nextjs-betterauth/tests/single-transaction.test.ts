@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { historyQuery } from "../src/components/RoomView";
 import { app } from "../schema";
@@ -88,24 +88,31 @@ it("does not lose messages when a history page boundary shares a timestamp", asy
     return room;
   });
   const room = await roomResult.wait({ tier: "global" });
-  const messages = await owner.transaction((tx) => {
-    const inserted = [];
-    for (let index = 0; index < 55; index++) {
-      inserted.push(
-        tx.insert(app.messages, {
-          roomId: room.id,
-          senderId: profile.id,
-          text: `message ${index}`,
-        }),
-      );
+  const realNow = Date.now();
+  const messages = await (async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(realNow);
+    try {
+      return await owner.transaction((tx) => {
+        const inserted = [];
+        for (let index = 0; index < 55; index++) {
+          inserted.push(
+            tx.insert(app.messages, {
+              roomId: room.id,
+              senderId: profile.id,
+              text: `message ${index}`,
+            }),
+          );
+        }
+        return inserted;
+      });
+    } finally {
+      clock.mockRestore();
     }
-    return inserted;
-  });
+  })();
   await messages.wait({ tier: "global" });
 
   const firstPage = await owner.all(historyQuery(room.id, {}), { tier: "global" });
   expect(firstPage).toHaveLength(50);
-  expect(new Set(firstPage.map((message) => message.$createdAt.getTime())).size).toBe(1);
 
   const oldest = firstPage.at(-1)!;
   const offset = firstPage.filter(
@@ -115,5 +122,6 @@ it("does not lose messages when a history page boundary shares a timestamp", asy
     historyQuery(room.id, { before: { at: oldest.$createdAt, offset } }),
     { tier: "global" },
   );
+  expect(olderPage[0].$createdAt.getTime()).toBe(oldest.$createdAt.getTime());
   expect(new Set([...firstPage, ...olderPage].map((message) => message.id)).size).toBe(55);
 });
