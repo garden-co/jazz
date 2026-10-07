@@ -296,6 +296,7 @@ it("repairs a missing initial root without granting authority to pre-root succes
       predecessor: epochId,
       epochId: crypto.randomUUID(),
       signerId: device.id,
+      action: "remove-device" as const,
       removedDeviceId: device.id,
       membership: encodeEpochIds([]),
       revision: encodePublicApprovalRevision([]),

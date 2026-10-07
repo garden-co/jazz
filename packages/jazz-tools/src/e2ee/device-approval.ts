@@ -17,6 +17,7 @@ import {
   successorContext,
   successorSigningBytes,
   publicSuccessorSigningBytes,
+  successorTargetId,
   verifySuccessor,
 } from "./account-successor.js";
 import type { AccountSuccessor } from "./account-successor.js";
@@ -27,6 +28,14 @@ import {
   replayAccountMembership,
   type AccountMembership,
 } from "./public-membership.js";
+import {
+  recoveryRootBytes,
+  recoveryDeliveryContext,
+  encodeRecoveryMaterial,
+  decodeRecoveryMaterial,
+  type DecodedRecoveryMaterial,
+} from "./recovery-format.js";
+import { RecoveryCandidateError } from "./recovery-error.js";
 
 type EpochSnapshot = Awaited<ReturnType<DeviceApproval["snapshot"]>> & {
   publicState: AccountMembership;
@@ -141,6 +150,7 @@ export class DeviceApproval {
       proofs,
       approvals,
       deliveries,
+      recoveryDeliveries,
       publicHistory,
     ] = await Promise.all([
       tx.allSettledForE2ee(
@@ -162,6 +172,9 @@ export class DeviceApproval {
       tx.allSettledForE2ee(
         this.tables.__e2ee_device_deliveries.where({ "$createdBy.account": this.accountId }),
       ),
+      tx.allSettledForE2ee(
+        this.tables.__e2ee_recovery_deliveries.where({ "$createdBy.account": this.accountId }),
+      ),
       readPublicMembershipHistory(tx, this.accountId, this.tables),
     ]);
     this.assertOpen();
@@ -170,6 +183,7 @@ export class DeviceApproval {
     return {
       publicHistory,
       identity,
+      recoveryDeliveries: recoveryDeliveries.rows,
       successors: successors.rows,
       challenges: challenges.rows,
       requests: requests.rows,
@@ -200,6 +214,7 @@ export class DeviceApproval {
           this.db.all(this.tables.__e2ee_device_proofs, { tier: "global" }),
           this.db.all(this.tables.__e2ee_device_approvals, { tier: "global" }),
           this.db.all(this.tables.__e2ee_device_deliveries, { tier: "global" }),
+          this.db.all(this.tables.__e2ee_recovery_deliveries, { tier: "global" }),
           this.db.all(this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }), {
             tier: "global",
           }),
@@ -237,7 +252,12 @@ export class DeviceApproval {
 
   private async marker(key: Uint8Array, context: Uint8Array, envelope: Uint8Array): Promise<void> {
     this.assertOpen();
-    const value = await this.keys.unwrap(key, context, envelope).catch(unavailableDelivery);
+    let value: Uint8Array;
+    try {
+      value = await this.keys.unwrap(key, context, envelope);
+    } catch (error) {
+      unavailableDelivery(error);
+    }
     try {
       if (value.length !== 32 || value.some((byte) => byte !== 0))
         throw new UnavailableDelivery("Invalid E2EE device approval proof");
@@ -325,7 +345,10 @@ export class DeviceApproval {
         publicRecord.epochId !== successor.epochId ||
         publicRecord.predecessor !== successor.predecessor ||
         publicRecord.signerId !== successor.signerId ||
-        publicRecord.removedDeviceId !== successor.removedDeviceId ||
+        publicRecord.action !== successor.action ||
+        (publicRecord.removedDeviceId ?? null) !== (successor.removedDeviceId ?? null) ||
+        (publicRecord.retiredRecoveryRootId ?? null) !==
+          (successor.retiredRecoveryRootId ?? null) ||
         publicRecord.membership.length !== successor.membership.length ||
         !publicRecord.membership.every((byte, i) => byte === successor.membership[i])
       )
@@ -346,7 +369,9 @@ export class DeviceApproval {
         continue;
       let revision: string[];
       let recorded: string[];
+      let targetId: string;
       try {
+        targetId = successorTargetId(successor);
         successorSigningBytes(this.application, successor);
         revision = decodeEpochIds(successor.revision);
         recorded = decodeEpochIds(successor.membership);
@@ -361,16 +386,17 @@ export class DeviceApproval {
       if (revision.length !== eligible.size || revision.some((id) => !eligible.has(id))) continue;
       const members = this.members(prior, eligible);
       const signer = raw.requests.find((row) => row.id === successor.signerId);
+      const removesDevice = successor.action === "remove-device";
       if (
         !signer ||
         !members.has(signer.id) ||
-        !members.has(successor.removedDeviceId) ||
+        (removesDevice && !members.has(targetId)) ||
         signer.signingMechanism !== this.signer.mechanism.id ||
         signer.signingVersion !== this.signer.mechanism.version ||
         !(await verifySuccessor(this.application, successor, this.signer, signer.signingPublicKey))
       )
         continue;
-      members.delete(successor.removedDeviceId);
+      if (removesDevice) members.delete(targetId);
       if (recorded.length !== members.size || recorded.some((id) => !members.has(id))) continue;
       view = {
         ...view,
@@ -378,7 +404,7 @@ export class DeviceApproval {
         successor,
         epochPosition: position,
         baseMembers: members,
-        revoked: new Set([...view.revoked, successor.removedDeviceId]),
+        revoked: removesDevice ? new Set([...view.revoked, targetId]) : view.revoked,
         identity: {
           ...view.identity,
           epochId: successor.epochId,
@@ -421,13 +447,13 @@ export class DeviceApproval {
 
   private async authenticateHistory(snapshot: EpochSnapshot, secret: Uint8Array): Promise<void> {
     if (!snapshot.successor || !snapshot.previous) return;
-    const previousSecret = await this.keys
-      .unwrap(
-        secret,
-        successorContext(this.application, snapshot.successor, "history"),
-        snapshot.successor.history,
-      )
-      .catch(unavailableDelivery);
+    const context = successorContext(this.application, snapshot.successor, "history");
+    let previousSecret: Uint8Array;
+    try {
+      previousSecret = await this.keys.unwrap(secret, context, snapshot.successor.history);
+    } catch (error) {
+      unavailableDelivery(error);
+    }
     try {
       await this.confirmEpoch(snapshot.previous, previousSecret);
       const prior = this.revisionView(snapshot.previous, snapshot.successor);
@@ -822,12 +848,23 @@ export class DeviceApproval {
   }
 
   async revoke(deviceId: string): Promise<void> {
+    await this.rotateAccountKey("remove-device", deviceId);
+  }
+
+  async retireRecoveryRoot(rootId: string): Promise<void> {
+    await this.rotateAccountKey("retire-recovery-root", rootId);
+  }
+
+  private async rotateAccountKey(
+    action: "remove-device" | "retire-recovery-root",
+    targetId: string,
+  ): Promise<void> {
     this.throwBackgroundError();
     const snapshot = await this.currentSnapshot();
     const secret = await this.accountKey(snapshot);
     if (!secret || snapshot.revoked.has(this.deviceId)) {
       secret?.fill(0);
-      throw new Error("An active E2EE device must revoke devices");
+      throw new Error("An active E2EE device must rotate the account key");
     }
     const device = await this.loadDevice().catch((error: unknown) => {
       secret.fill(0);
@@ -838,8 +875,13 @@ export class DeviceApproval {
       const revision = await this.eligibleApprovals(snapshot, secret);
       this.assertOpen();
       const members = this.members(snapshot, revision);
-      if (!members.has(this.deviceId) || !members.delete(deviceId))
-        throw new Error("Unknown or inactive E2EE device");
+      if (!members.has(this.deviceId))
+        throw new Error("An active E2EE device must rotate the account key");
+      if (action === "remove-device") {
+        if (!members.delete(targetId)) throw new Error("Unknown or inactive E2EE device");
+      } else if (!snapshot.publicState.recoveryRoots.some((root) => root.id === targetId)) {
+        throw new Error("Unknown or inactive E2EE recovery root");
+      }
       const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
         const existing = await tx.all(this.tables.__e2ee_account_successors, { tier: "global" });
         this.assertOpen();
@@ -921,10 +963,15 @@ export class DeviceApproval {
             secret,
           );
           this.assertOpen();
+          const actionTarget =
+            action === "remove-device"
+              ? { removedDeviceId: targetId }
+              : { retiredRecoveryRootId: targetId };
           const row = {
             ...coordinates,
             signerId: this.deviceId,
-            removedDeviceId: deviceId,
+            action,
+            ...actionTarget,
             membership: encodeEpochIds(members),
             revision: encodeEpochIds(revision),
             verification,
@@ -940,7 +987,8 @@ export class DeviceApproval {
           const publicRow = {
             ...coordinates,
             signerId: row.signerId,
-            removedDeviceId: row.removedDeviceId,
+            action: row.action,
+            ...actionTarget,
             membership: row.membership,
             revision: encodePublicApprovalRevision(publicApprovals.map((approval) => approval.id)),
           };
@@ -952,6 +1000,26 @@ export class DeviceApproval {
           this.assertOpen();
           const { id, ...columns } = row;
           const { id: publicId, ...publicColumns } = publicRow;
+          for (const root of snapshot.publicState.recoveryRoots) {
+            if (action === "retire-recovery-root" && root.id === targetId) continue;
+            if (
+              root.mechanism !== this.keys.mechanism.id ||
+              root.version !== this.keys.mechanism.version
+            )
+              throw new Error("Unsupported E2EE recovery recipient");
+            const delivery = { id: crypto.randomUUID(), rootId: root.id, epochId: row.epochId };
+            const envelope = await this.keys.seal(
+              root.publicKey,
+              recoveryDeliveryContext(this.application, this.accountId, delivery),
+              nextSecret,
+            );
+            this.assertOpen();
+            tx.insert(
+              this.tables.__e2ee_recovery_deliveries,
+              { rootId: root.id, epochId: row.epochId, envelope },
+              { id: delivery.id },
+            );
+          }
           tx.insert(
             this.tables.__e2ee_public_account_successors,
             { ...publicColumns, signature: publicSignature },
@@ -973,6 +1041,295 @@ export class DeviceApproval {
     } finally {
       secret.fill(0);
       this.device!.release(device);
+    }
+  }
+
+  /** Read-only: validates the same account recovery path as useRecovery. */
+  async inspectRecovery(value: string) {
+    this.assertOpen();
+    const material = await decodeRecoveryMaterial(value, this.application, this.keys, this.signer);
+    let secret: Uint8Array | undefined;
+    try {
+      const snapshot = await this.currentSnapshot();
+      secret = await this.openRecovery(snapshot, material);
+      this.assertOpen();
+      return {
+        epochId: snapshot.identity.epochId,
+        activeDeviceIds: [...snapshot.publicState.active].sort(),
+        recoveryRootIds: snapshot.publicState.recoveryRoots.map((root) => root.id).sort(),
+        validation: "validated" as const,
+        validatedRootId: material.rootId,
+      };
+    } finally {
+      secret?.fill(0);
+      material.recipient.privateKey.fill(0);
+      material.signing.privateKey.fill(0);
+    }
+  }
+
+  private async openRecovery(
+    snapshot: EpochSnapshot,
+    material: DecodedRecoveryMaterial,
+  ): Promise<Uint8Array> {
+    const root = snapshot.publicState.recoveryRoots.find((row) => row.id === material.rootId);
+    const same = (a: Uint8Array, b: Uint8Array) =>
+      a.length === b.length && a.every((byte, i) => byte === b[i]);
+    if (
+      !root ||
+      root.mechanism !== this.keys.mechanism.id ||
+      root.version !== this.keys.mechanism.version ||
+      root.signingMechanism !== this.signer.mechanism.id ||
+      root.signingVersion !== this.signer.mechanism.version ||
+      !same(root.publicKey, material.recipient.publicKey) ||
+      !same(root.signingPublicKey, material.signing.publicKey)
+    )
+      throw new RecoveryCandidateError("recovery-root-mismatch");
+    let present = false;
+    for (const delivery of snapshot.recoveryDeliveries) {
+      if (delivery.rootId !== root.id || delivery.epochId !== snapshot.identity.epochId) continue;
+      present = true;
+      let candidate: Uint8Array | undefined;
+      const context = recoveryDeliveryContext(this.application, this.accountId, delivery);
+      try {
+        try {
+          candidate = await this.keys.open(material.recipient, context, delivery.envelope);
+        } catch (error) {
+          unavailableDelivery(error);
+        }
+        await this.confirmEpoch(snapshot, candidate);
+        await this.authenticateHistory(snapshot, candidate);
+        this.assertOpen();
+        return candidate;
+      } catch (error) {
+        candidate?.fill(0);
+        this.assertOpen();
+        if (!(error instanceof UnavailableDelivery)) throw error;
+      }
+    }
+    throw new RecoveryCandidateError(
+      present ? "recovery-delivery-unusable" : "recovery-delivery-missing",
+    );
+  }
+
+  async useRecovery(value: string): Promise<void> {
+    this.throwBackgroundError();
+    const material = await decodeRecoveryMaterial(value, this.application, this.keys, this.signer);
+    let device: LocalDevice | undefined;
+    let secret: Uint8Array | undefined;
+    let challengeSecret: Uint8Array | undefined;
+    try {
+      challengeSecret = runtimeRandomBytes(32);
+      device = await this.loadDevice();
+      const snapshot = await this.currentSnapshot();
+      if (snapshot.revoked.has(this.deviceId))
+        throw new Error("Revoked device requires fresh enrolment");
+      const same = (a: Uint8Array, b: Uint8Array) =>
+        a.length === b.length && a.every((byte, i) => byte === b[i]);
+      secret = await this.openRecovery(snapshot, material);
+      const challenge = {
+        id: crypto.randomUUID(),
+        deviceId: this.deviceId,
+        epochId: snapshot.identity.epochId,
+      };
+      const envelope = await this.keys.seal(
+        device.publicKey,
+        this.context(challenge, "challenge"),
+        challengeSecret,
+      );
+      this.assertOpen();
+      await this.db
+        .insert(
+          this.tables.__e2ee_device_challenges,
+          { deviceId: this.deviceId, epochId: challenge.epochId, envelope },
+          { id: challenge.id },
+        )
+        .wait({ tier: "global" });
+      await this.respond(challenge.id);
+      const proved = await this.currentSnapshot();
+      const proof = proved.proofs.find((row) => row.id === challenge.id);
+      if (
+        !proof ||
+        proved.identity.epochId !== challenge.epochId ||
+        proved.revoked.has(this.deviceId)
+      )
+        throw new Error("Stale recovery enrolment");
+      await this.marker(challengeSecret, this.context(challenge, "proof"), proof.proof);
+      if (
+        !(await this.signer.verify(
+          device.signing.publicKey,
+          this.proofContext(challenge, proof.proof),
+          proof.signature,
+        ))
+      )
+        throw new Error("Invalid recovering device proof");
+      const verification = await this.keys.wrap(
+        secret,
+        this.context(challenge, "approval"),
+        new Uint8Array(32),
+      );
+      const privateBytes = this.approvalContext(
+        { ...challenge, envelope },
+        this.deviceId,
+        verification,
+      );
+      const signature = await this.signer.sign(device.signing.privateKey, privateBytes);
+      if (!(await this.signer.verify(device.signing.publicKey, privateBytes, signature)))
+        throw new Error("Invalid recovery private approval signature");
+      const approval = {
+        id: crypto.randomUUID(),
+        accountId: this.accountId,
+        epochId: challenge.epochId,
+        deviceId: this.deviceId,
+        signerId: this.deviceId,
+        recoveryRootId: material.rootId,
+      };
+      const bytes = publicDeviceApprovalBytes(this.application, approval);
+      const publicSignature = await this.signer.sign(device.signing.privateKey, bytes);
+      const recoverySignature = await this.signer.sign(material.signing.privateKey, bytes);
+      if (
+        !(await this.signer.verify(device.signing.publicKey, bytes, publicSignature)) ||
+        !(await this.signer.verify(material.signing.publicKey, bytes, recoverySignature))
+      )
+        throw new Error("Invalid recovery approval signature");
+      this.assertOpen();
+      const publication = await this.db.transaction((tx) => {
+        tx.insert(
+          this.tables.__e2ee_device_approvals,
+          { challengeId: challenge.id, signerId: this.deviceId, verification, signature },
+          { id: challenge.id },
+        );
+        const { id, ...columns } = approval;
+        tx.insert(
+          this.tables.__e2ee_public_device_approvals,
+          { ...columns, signature: publicSignature, recoverySignature },
+          { id },
+        );
+      });
+      await publication.wait({ tier: "global" });
+      const accepted = await this.currentSnapshot();
+      if (
+        accepted.identity.epochId !== challenge.epochId ||
+        !(await this.eligibleApprovals(accepted, secret)).has(challenge.id)
+      )
+        throw new Error("Stale or refused recovery approval");
+      const delivered = await this.keys.seal(
+        device.publicKey,
+        this.context(challenge, "delivery"),
+        secret,
+      );
+      const opened = await this.keys.open(device, this.context(challenge, "delivery"), delivered);
+      try {
+        if (!same(opened, secret)) throw new Error("Invalid recovery device delivery");
+      } finally {
+        opened.fill(0);
+      }
+      const verificationOfDelivery = await this.keys.wrap(
+        secret,
+        this.deliveryContext(challenge, delivered),
+        new Uint8Array(32),
+      );
+      await this.marker(secret, this.deliveryContext(challenge, delivered), verificationOfDelivery);
+      this.assertOpen();
+      await this.db
+        .insert(
+          this.tables.__e2ee_device_deliveries,
+          { challengeId: challenge.id, envelope: delivered, verification: verificationOfDelivery },
+          { id: challenge.id },
+        )
+        .wait({ tier: "global" });
+      this.assertOpen();
+    } finally {
+      secret?.fill(0);
+      challengeSecret?.fill(0);
+      if (device) this.device!.release(device);
+      material.recipient.privateKey.fill(0);
+      material.signing.privateKey.fill(0);
+    }
+  }
+
+  async createRecovery(): Promise<{ material: string }> {
+    this.throwBackgroundError();
+    // Populate history coverage before opening the exclusive publication transaction.
+    await this.currentSnapshot();
+    const pair = await this.keys.createKeyPair();
+    let recoverySigner: Awaited<ReturnType<DeviceSigner["createKeyPair"]>> | undefined;
+    let device: LocalDevice | undefined;
+    try {
+      device = await this.loadDevice();
+      const author = device;
+      recoverySigner = await this.signer.createKeyPair();
+      const signing = recoverySigner;
+      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+        const snapshot = await this.currentSnapshot(tx);
+        if (!snapshot.publicState.active.has(this.deviceId))
+          throw new Error("Recovery creation requires an active device");
+        const secret = await this.accountKey(snapshot);
+        if (!secret) throw new Error("Recovery creation requires an accepted account key");
+        try {
+          const root = {
+            id: crypto.randomUUID(),
+            accountId: this.accountId,
+            signerId: this.deviceId,
+            epochId: snapshot.identity.epochId,
+            publicKey: pair.publicKey,
+            mechanism: this.keys.mechanism.id,
+            version: this.keys.mechanism.version,
+            signingPublicKey: signing.publicKey,
+            signingMechanism: this.signer.mechanism.id,
+            signingVersion: this.signer.mechanism.version,
+          };
+          const record = recoveryRootBytes(this.application, root);
+          const proof = await this.signer.sign(signing.privateKey, record);
+          if (!(await this.signer.verify(signing.publicKey, record, proof)))
+            throw new Error("Invalid E2EE recovery signing keypair");
+          const signature = await this.signer.sign(author.signing.privateKey, record);
+          if (!(await this.signer.verify(author.signing.publicKey, record, signature)))
+            throw new Error("Invalid E2EE recovery root signature");
+          const delivery = { id: crypto.randomUUID(), rootId: root.id, epochId: root.epochId };
+          const context = recoveryDeliveryContext(this.application, this.accountId, delivery);
+          const envelope = await this.keys.seal(pair.publicKey, context, secret);
+          const opened = await this.keys.open(pair, context, envelope);
+          try {
+            if (opened.length !== secret.length || !opened.every((byte, i) => byte === secret[i]))
+              throw new Error("Invalid E2EE recovery keypair or delivery");
+          } finally {
+            opened.fill(0);
+          }
+          const material = encodeRecoveryMaterial(
+            this.application,
+            root,
+            pair.privateKey,
+            signing.privateKey,
+          );
+          this.assertOpen();
+          const { id, ...columns } = root;
+          tx.insert(this.tables.__e2ee_recovery_roots, { ...columns, signature }, { id });
+          return { material, delivery, envelope };
+        } finally {
+          secret.fill(0);
+        }
+      });
+      const result = await proposal.wait({ tier: "global" });
+      this.assertOpen();
+      // The ordinary insert policy resolves an already accepted recovery root.
+      // Keep the encrypted delivery local until that root's global wait succeeds.
+      await this.db
+        .insert(
+          this.tables.__e2ee_recovery_deliveries,
+          {
+            rootId: result.delivery.rootId,
+            epochId: result.delivery.epochId,
+            envelope: result.envelope,
+          },
+          { id: result.delivery.id },
+        )
+        .wait({ tier: "global" });
+      this.assertOpen();
+      return { material: result.material };
+    } finally {
+      pair.privateKey.fill(0);
+      recoverySigner?.privateKey.fill(0);
+      if (device) this.device!.release(device);
     }
   }
 
