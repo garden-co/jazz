@@ -10,7 +10,7 @@ inventory are `current-native-jazz-corpus-v1.md`.
 Its settlement-baseline logical-receipt SHA-256 is:
 
 ```text
-d17d153c3338a3596826b36a68f62e99dc09bdd059de4f2763788bcc939a1a0b
+ec3ab71bc681d3675c19c48fd0c12e7b7ff6648a233c03f2b908896bf3bae07a
 ```
 
 The digest is over sorted system and physical application store names and, for
@@ -58,11 +58,11 @@ opened family cannot look the same as an empty one.
 The same current producer has two backend-specific positive physical receipts:
 
 - `current-native-jazz.sqlite.gz.base64` — gzip payload SHA-256
-  `dd635273be299e5d7cc70aa9a0dc0463962cc9a230945c5ef6eb17db498e6974`,
+  `3a9c896de9cc6d86fcf9f37cfd1deafd17ae31d9e0e30e79060b7ec900363527`,
   decompressed SQLite SHA-256
-  `ec77e11c4208049ba63022c098065bdb6f97c28404b1eeb878bdc6b1a9c01c97`.
+  `7c11847f9b8dd5876567457298ee3ed5328897134d59450165ebaa121522a8f6`.
 - `current-native-jazz-rocksdb.tar.gz.base64` — archive SHA-256
-  `459c168aeec168221d8ccbffc3ea3dc3ab8485280aec6e16d4abca3dfa5ff166`.
+  `d314625728e5941adf05e191f71c1c912f5b1be676d08ed83f31a9cb6307df01`.
 
 The historical `epoch-1-native-jazz-*` artifacts, and the DAG-layout
 `pre-linear-native-jazz-*` artifacts that were current before the linear

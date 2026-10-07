@@ -30,8 +30,8 @@ History records carry an empty `counter_signs` byte string after
 `authored_columns` (SPEC 4 §4.3), so the history bytes and every digest below
 were regenerated when that field was added.
 History records are keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`
-and end with the ancestor-merge fields `seq`, `base_seq`, `base_pending` and
-`lost_cells` (SPEC 4 §4.6); no record carries column stamps any more. The
+and end with the merge fields `seq`, `base_seq` and `base_pending` (SPEC 4
+§4.6); no record carries column stamps any more. The
 corpus was regenerated again for that layout.
 
 | Store                               | Entries |
@@ -74,7 +74,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `82d525cee1fb5b194887b93e971b1511a871d65d8a72943ea574be03d01bae53` |
-| SQLite payload      | `ec77e11c4208049ba63022c098065bdb6f97c28404b1eeb878bdc6b1a9c01c97` |
-| gzip SQLite archive | `dd635273be299e5d7cc70aa9a0dc0463962cc9a230945c5ef6eb17db498e6974` |
-| RocksDB archive     | `459c168aeec168221d8ccbffc3ea3dc3ab8485280aec6e16d4abca3dfa5ff166` |
+| logical pack        | `efd20b07e7236434434f6a0425f01bed8c9743cbb3a0a3ae1b891ff2c060b8f2` |
+| SQLite payload      | `7c11847f9b8dd5876567457298ee3ed5328897134d59450165ebaa121522a8f6` |
+| gzip SQLite archive | `3a9c896de9cc6d86fcf9f37cfd1deafd17ae31d9e0e30e79060b7ec900363527` |
+| RocksDB archive     | `d314625728e5941adf05e191f71c1c912f5b1be676d08ed83f31a9cb6307df01` |
