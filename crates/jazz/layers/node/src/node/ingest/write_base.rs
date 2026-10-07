@@ -13,17 +13,22 @@ fn deletion_cell_type() -> ValueType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::node) struct WriteConflict {
-    /// The write's resolved base seq: the larger of its base seq and its
-    /// pending predecessor's resolved seq. `None` for a write without a
-    /// base, and for a chain whose every predecessor Core rejected.
+    /// The write's resolved base seq: the newest accepted record of the row
+    /// its writer had seen. That is its seen seq (the larger of its own base
+    /// seq and its chain root's settled base seq), moved forward over the
+    /// writer's own chain records that directly follow it. `None` for a
+    /// write without a base, and for a chain with no settled image under it
+    /// whose first accepted record is not the writer's own.
     pub(in crate::node) resolved_base: Option<GlobalTime>,
     /// The seq of the row's accepted record immediately before the write.
     pub(in crate::node) previous: Option<GlobalTime>,
-    /// The write has a base, and it does not resolve to `previous`.
+    /// The write has a base, and another writer's accepted record lies
+    /// between its seen seq and the write; equivalently, `resolved_base`
+    /// is not `previous`.
     pub(in crate::node) maybe_conflicting: bool,
-    /// The conflict analysis: the accepted writes after the resolved base
-    /// and before the write whose authored columns overlap the write's, in
-    /// seq order.
+    /// The conflict analysis: the other writers' accepted writes after the
+    /// seen seq and before the write whose authored columns overlap the
+    /// write's, in seq order. The writer's own chain records never appear.
     pub(in crate::node) overlapping: Vec<TxId>,
 }
 
@@ -205,12 +210,17 @@ where
             }
         }
         history.sort_by_key(|(seq, ..)| *seq);
+        // Per record, the seq its writer had seen everything up to: the
+        // larger of its own base seq (the settled image its node held) and
+        // its chain root's settled base seq. `None` for an empty base.
+        let mut seen: Vec<Option<GlobalTime>> = Vec::with_capacity(history.len());
         let mut conflicts = Vec::with_capacity(history.len());
         for (index, (_, tx, base, authored)) in history.iter().enumerate() {
             let earlier = &history[..index];
             let previous = earlier.last().map(|(seq, ..)| *seq);
             if base.is_empty() {
                 // An insert or a blind update.
+                seen.push(None);
                 conflicts.push((
                     *tx,
                     WriteConflict {
@@ -224,22 +234,38 @@ where
             }
             // A writer's writes to a row reach Core in its own order, and a
             // write Core rejected is not in history: the pending predecessor
-            // resolves to its own seq when Core accepted it, and otherwise to
-            // the newest accepted write of the same node before it (its own
-            // resolved base).
+            // is the newest accepted write of the same node no newer than it
+            // (itself when Core accepted it, otherwise the rejected
+            // predecessor's own predecessor). The writer saw the settled
+            // image its chain rests on, never a predecessor's later seq: a
+            // write another writer got accepted before the predecessor
+            // landed was not in that image.
             let predecessor = base.pending.and_then(|pending| {
                 earlier
                     .iter()
-                    .rev()
-                    .find(|(_, id, ..)| id.node == pending.node && id.time <= pending.time)
-                    .map(|(seq, ..)| *seq)
+                    .rposition(|(_, id, ..)| id.node == pending.node && id.time <= pending.time)
             });
-            let resolved_base = base.seq.max(predecessor);
-            let after_base =
-                resolved_base.map_or(0, |base| earlier.partition_point(|(seq, ..)| *seq <= base));
-            let overlapping = earlier[after_base..]
+            let seen_seq = base.seq.max(predecessor.and_then(|at| seen[at]));
+            seen.push(seen_seq);
+            // The writer's own chain: its accepted writes no newer than the
+            // pending predecessor. They never count against the write.
+            let own_chain = |id: &TxId| {
+                base.pending
+                    .is_some_and(|pending| id.node == pending.node && id.time <= pending.time)
+            };
+            let after_seen =
+                seen_seq.map_or(0, |seen| earlier.partition_point(|(seq, ..)| *seq <= seen));
+            let walk = &earlier[after_seen..];
+            let first_foreign = walk.iter().position(|(_, id, ..)| !own_chain(id));
+            let resolved_base = match first_foreign.unwrap_or(walk.len()) {
+                0 => seen_seq,
+                own => Some(walk[own - 1].0),
+            };
+            let overlapping = walk
                 .iter()
-                .filter(|(.., other)| authored_overlap(authored.as_ref(), other.as_ref()))
+                .filter(|(_, id, _, other)| {
+                    !own_chain(id) && authored_overlap(authored.as_ref(), other.as_ref())
+                })
                 .map(|(_, id, ..)| *id)
                 .collect();
             conflicts.push((
@@ -247,7 +273,7 @@ where
                 WriteConflict {
                     resolved_base,
                     previous,
-                    maybe_conflicting: resolved_base != previous,
+                    maybe_conflicting: first_foreign.is_some(),
                     overlapping,
                 },
             ));

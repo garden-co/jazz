@@ -6,9 +6,10 @@
 > root and every client resyncs from it. Data that exists only in the old
 > stores is not carried over. See [What users must do](#what-users-must-do).
 
-Comparison: main `eb772f48d` (alpha.59 formats) against the #3281 branch,
-checked at `8635b5ad8`. These revisions are **not storage compatible and not
-wire compatible**. There is **no migration, dual read or downgrade path**.
+Comparison: main `eb772f48d` (alpha.59 formats) against the #3281 branch.
+This document names no verified branch revision: the refusal proofs below
+are its receipts, and they check whichever revision they run on. The two
+lines are **not storage compatible and not wire compatible**. There is **no migration, dual read or downgrade path**.
 Old stores must be deleted by the user or app; the new build refuses them
 before it decodes or mutates any record, on native roots and in the browser
 alike, with a typed error that names the missing codec families.

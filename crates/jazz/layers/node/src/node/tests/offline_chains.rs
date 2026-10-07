@@ -148,9 +148,11 @@ fn core_with_seeded_todo(
 
 /// INV-HIST-8, INV-HIST-21: a 1000-edit offline chain applies in order, every
 /// write of it, with other writers editing before, between and after it.
-/// Only the chain's first write and the first write after dave's
-/// interruption are maybe conflicting, and only the second has a conflict
-/// analysis: dave's title, which it overrides.
+/// carol never receives Core's image while offline, so every write of her
+/// chain was made over the seed and is maybe conflicting: dave's first body
+/// was accepted before any of it. Each names the dave writes it overrides:
+/// her 500th (title and body) both of his first two, the later ones his
+/// title, the earlier ones nothing.
 ///
 /// carol edits offline 1000 times: every edit retitles the row, and her
 /// 500th also rewrites the body. dave changes the body before carol's chain
@@ -159,9 +161,9 @@ fn core_with_seeded_todo(
 ///
 /// ```text
 /// dave  ──body="dave before"──► core
-/// carol ═offline═ title c0..c499 ──► core            title=c499   c0 flagged
+/// carol ═offline═ title c0..c499 ──► core            title=c499   all flagged
 /// dave  ──title="dave between"──► core
-/// carol ═offline═ title c500..c999, body ──► core     title=c999   c500 flagged
+/// carol ═offline═ title c500..c999, body ──► core     title=c999   all flagged
 /// dave  ──body="dave after"──► core                  body="dave after"
 /// ```
 #[test]
@@ -229,13 +231,22 @@ fn thousand_edit_offline_chain_applies_in_order_and_flags_only_interrupted_write
         .collect::<BTreeSet<_>>();
     assert_eq!(
         flagged,
-        BTreeSet::from([first_half[0], second_half[0]]),
-        "only the writes whose base an other writer's write had moved past"
+        first_half.iter().chain(&second_half).copied().collect::<BTreeSet<_>>(),
+        "every chained write, none of dave's"
     );
-    // carol's first edit missed dave's body, which it does not touch.
-    assert!(conflicts[&first_half[0]].overlapping.is_empty());
-    // Her first edit after the interruption overrides dave's title.
-    assert_eq!(conflicts[&second_half[0]].overlapping, vec![between_tx]);
+    // The first half retitles only; dave changed only the body.
+    for tx in &first_half {
+        assert!(conflicts[tx].overlapping.is_empty());
+    }
+    // carol's 500th edit overrides dave's body, which she never saw, and his
+    // title; the later ones his title. Her own writes never appear.
+    assert_eq!(
+        conflicts[&second_half[0]].overlapping,
+        vec![before_tx, between_tx]
+    );
+    for tx in &second_half[1..] {
+        assert_eq!(conflicts[tx].overlapping, vec![between_tx]);
+    }
     for tx in [before_tx, between_tx, after_tx] {
         assert!(!conflicts[&tx].maybe_conflicting, "dave wrote over the latest image");
     }
@@ -311,14 +322,16 @@ fn chained_write_over_a_rejected_predecessor_resolves_to_the_predecessors_base()
 
 /// A chain spanning several rows and transactions is ordered and flagged per
 /// row: a two-row transaction, then edits of each row, with a concurrent
-/// writer touching only one cell of one row before the chain arrives.
+/// writer touching only one cell of one row before the chain arrives. Every
+/// chained write to that row is maybe conflicting; those retitling it name
+/// dave's write.
 ///
 /// ```text
 /// dave  ──B.title="dave"──► core
 /// carol ═offline═ tx1 {A.title="c1", B.title="c1"}
 ///                 tx2 {A.body="c2", B.body="c2"}
 ///                 tx3 {B.title="c3"} ──► core
-///       A = {c1, c2}; B = {c3, c2}; only tx1's write to B is flagged
+///       A = {c1, c2}; B = {c3, c2}; every write to B is flagged
 /// ```
 #[test]
 fn offline_chain_over_several_rows_and_transactions_flags_each_row() {
@@ -373,11 +386,14 @@ fn offline_chain_over_several_rows_and_transactions_flags_each_row() {
     for tx in &txs[..2] {
         assert!(!flagged(&mut core, first, *tx), "nobody else wrote row A");
     }
-    let tx1 = conflict(&mut core, second, txs[0]);
-    assert!(tx1.maybe_conflicting);
-    assert_eq!(tx1.overlapping, vec![dave_tx]);
-    for tx in &txs[1..] {
-        assert!(!flagged(&mut core, second, *tx), "the chain continues tx1 on row B");
+    for (tx, overlapping) in [
+        (txs[0], vec![dave_tx]),
+        (txs[1], Vec::new()),
+        (txs[2], vec![dave_tx]),
+    ] {
+        let on_b = conflict(&mut core, second, tx);
+        assert!(on_b.maybe_conflicting, "carol never saw dave's title");
+        assert_eq!(on_b.overlapping, overlapping);
     }
 }
 
@@ -418,13 +434,14 @@ fn offline_chain_resent_after_reconnect_is_idempotent() {
 
 /// `_deletion` is a cell like any other: an offline chain that deletes and
 /// then restores the row applies both, keeps a concurrent body edit, and
-/// applies its own title. The chain's first write (the delete) is maybe
-/// conflicting, since dave's body was accepted after its base.
+/// applies its own title. Every write of the chain is maybe conflicting,
+/// since dave's body was accepted after the seed it rests on; none overlaps
+/// dave's body.
 ///
 /// ```text
 /// dave  ──body="dave"──► core
 /// carol ═offline═ e1 delete; e2 restore; e3 title="c2" ──► core
-///       = {c2, dave}, not deleted; e1 flagged
+///       = {c2, dave}, not deleted; e1, e2, e3 flagged
 /// ```
 #[test]
 fn offline_chain_deletes_and_restores_over_a_concurrent_edit() {
@@ -453,23 +470,22 @@ fn offline_chain_deletes_and_restores_over_a_concurrent_edit() {
         rows_at(&mut core, "todos", DurabilityTier::Global),
         BTreeMap::from([(target, todo_cells("c2", "dave"))])
     );
-    let delete_conflict = conflict(&mut core, target, delete_tx);
-    assert!(delete_conflict.maybe_conflicting);
-    assert!(delete_conflict.overlapping.is_empty(), "dave touched only the body");
-    for tx in [restore_tx, retitle_tx] {
-        assert!(!flagged(&mut core, target, tx));
+    for tx in [delete_tx, restore_tx, retitle_tx] {
+        let chained = conflict(&mut core, target, tx);
+        assert!(chained.maybe_conflicting);
+        assert!(chained.overlapping.is_empty(), "dave touched only the body");
     }
 }
 
 /// INV-HIST-8, INV-HIST-21: an edit whose base predates a delete Core
 /// already accepted does not resurrect the row. An update does not author
 /// `_deletion`, so the row stays deleted; the edits are accepted, recorded
-/// in history and applied underneath the deletion, and the first of them is
-/// maybe conflicting. A later restore reveals them.
+/// in history and applied underneath the deletion, and both are maybe
+/// conflicting (neither overlaps the delete). A later restore reveals them.
 ///
 /// ```text
 /// dave  ──delete──► core
-/// carol ═offline═ e1 title="c1"; e2 title="c2" ──► core   still deleted, e1 flagged
+/// carol ═offline═ e1 title="c1"; e2 title="c2" ──► core   still deleted, both flagged
 /// erin  ──restore──► core                                 = {c2, base}
 /// ```
 #[test]
@@ -495,13 +511,14 @@ fn edit_after_an_accepted_delete_stays_deleted_and_is_flagged() {
     );
 
     assert!(!flagged(&mut core, target, delete_tx));
-    let e1_conflict = conflict(&mut core, target, e1_tx);
-    assert!(e1_conflict.maybe_conflicting, "the delete came after e1's base");
-    assert!(
-        e1_conflict.overlapping.is_empty(),
-        "the delete authored only `_deletion`"
-    );
-    assert!(!flagged(&mut core, target, e2_tx), "e2 continues e1");
+    for tx in [e1_tx, e2_tx] {
+        let edit = conflict(&mut core, target, tx);
+        assert!(edit.maybe_conflicting, "the delete came after the chain's base");
+        assert!(
+            edit.overlapping.is_empty(),
+            "the delete authored only `_deletion`"
+        );
+    }
 
     // erin restores the row over the image she holds, the seed: an
     // explicitly authored `_deletion` applies by arrival.
@@ -1083,7 +1100,8 @@ fn authored_cells_apply_by_physical_column_across_schema_versions() {
 /// A chained write over a predecessor that Core accepted after a concurrent
 /// edit: the predecessor is maybe conflicting (it overrides dave's title),
 /// while the chained write, made over dave's image plus the predecessor,
-/// resolves to the predecessor's seq, the record before it, so it is not.
+/// only has its own predecessor after its seen seq (dave's): it resolves to
+/// the predecessor's seq, the record before it, so it is not.
 ///
 /// ```text
 /// carol ═offline═ p1 title="a" (base: seed)
@@ -1126,12 +1144,12 @@ fn chained_write_over_a_predecessor_accepted_after_a_concurrent_edit() {
     assert!(!w_conflict.maybe_conflicting);
 }
 
-/// INV-HIST-21: a write's resolved base is the larger of its base seq and its
-/// pending predecessor's seq. carol's first edit is accepted, but its fate
-/// has not reached her when she receives Core's newer image (which counts it
-/// and dave's later edit); her next edit names that image's seq and her
-/// still-pending first edit. She saw everything before it, so it is not
-/// maybe conflicting.
+/// INV-HIST-21: a write's seen seq is the larger of its own base seq and its
+/// chain root's settled base seq. carol's first edit is accepted, but its
+/// fate has not reached her when she receives Core's newer image (which
+/// counts it and dave's later edit); her next edit names that image's seq
+/// and her still-pending first edit. She saw everything up to that seq, so
+/// it is not maybe conflicting.
 ///
 /// ```text
 /// carol ═offline═ p title="p" ──► core          accepted; fate not delivered
@@ -1167,6 +1185,120 @@ fn chained_write_over_an_image_newer_than_its_predecessor_is_not_flagged() {
     assert_eq!(w_conflict.previous, Some(dave_seq));
     assert!(!w_conflict.maybe_conflicting);
     assert!(w_conflict.overlapping.is_empty());
+}
+
+/// INV-HIST-21: a chained write's seen seq is the settled image its chain
+/// rests on, never its predecessor's later accepted seq. carol, offline over
+/// the seed, retitles (p1) and then rewrites the body (w); dave's body edit
+/// reaches Core first and never reaches carol. Core applies all three by
+/// arrival, so w overwrites dave's body: w is maybe conflicting and names
+/// dave's write, although the record right before it is carol's own p1.
+///
+/// ```text
+/// carol ═offline═ p1 title="a" (base: seed)
+/// carol ═offline═ w  body="w"  (base: seed, pending p1)
+/// dave  ──body="dave"──► core                    body=dave
+/// carol ──p1──► core   title=a, flagged, overlaps nothing
+/// carol ──w ──► core   body=w,  flagged: dave
+/// ```
+#[test]
+fn chained_write_over_a_foreign_edit_its_writer_never_saw_is_flagged() {
+    let target = row(0x99);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
+    let (p1, p1_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "a")]);
+    let (w, w_unit) = offline_edit(&mut writers[0].1, target, 101, &[("body", "w")]);
+    let (dave, dave_unit) = offline_edit(&mut writers[1].1, target, 50, &[("body", "dave")]);
+    let dave_seq = accepted_seq(&core_fate(&mut core, dave_unit));
+    let seed_seq = conflict(&mut core, target, dave).previous;
+    let SyncMessage::CommitUnit { versions, .. } = &w_unit else {
+        panic!("expected a commit unit");
+    };
+    assert_eq!(versions[0].base().pending, Some(p1));
+    assert_eq!(versions[0].base().seq, seed_seq, "carol never saw dave's write");
+    let p1_seq = accepted_seq(&core_fate(&mut core, p1_unit));
+    assert_accepted(&core_fate(&mut core, w_unit));
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("a", "w"),
+        "w's body overwrites dave's by arrival"
+    );
+
+    assert!(!flagged(&mut core, target, dave));
+    let p1_conflict = conflict(&mut core, target, p1);
+    assert!(p1_conflict.maybe_conflicting);
+    assert!(p1_conflict.overlapping.is_empty(), "dave did not touch the title");
+    let w_conflict = conflict(&mut core, target, w);
+    assert!(w_conflict.maybe_conflicting);
+    assert_eq!(w_conflict.overlapping, vec![dave]);
+    assert_eq!(w_conflict.resolved_base, seed_seq);
+    assert_eq!(w_conflict.previous, Some(p1_seq));
+    assert!(seed_seq.is_some_and(|seed| seed < dave_seq && dave_seq < p1_seq));
+}
+
+/// INV-HIST-21: every write of a long offline chain made over the seed is
+/// maybe conflicting once another writer's write lands before the chain's
+/// first, and each names every foreign write since the seed that it
+/// overlaps; carol's own chain writes are never named. erin edits over the
+/// latest image between the chain's second and third writes, so only the
+/// chain writes after her name her.
+///
+/// ```text
+/// dave  ──title="dave"──► core                         over the seed
+/// carol ═offline═ c0 title; c1 body ──► core            (base: seed)
+/// erin  ──body="erin"──► core                          over the latest image
+/// carol ═offline═ c2 title; c3 title, body; c4 body ──► core
+///       = {c3, c4}; c0: dave  c1: -  c2: dave  c3: dave, erin  c4: erin
+/// ```
+#[test]
+fn every_write_of_an_interrupted_chain_names_the_foreign_writes_it_overlaps() {
+    let target = row(0x9a);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 3);
+    let edits: [&[(&str, &str)]; 5] = [
+        &[("title", "c0")],
+        &[("body", "c1")],
+        &[("title", "c2")],
+        &[("title", "c3"), ("body", "c3")],
+        &[("body", "c4")],
+    ];
+    let mut chain = Vec::new();
+    for (index, cells) in (0_u64..).zip(edits) {
+        chain.push(offline_edit(&mut writers[0].1, target, 100 + index, cells));
+    }
+    let dave = accept_edit(&mut core, &mut writers[1].1, target, 50, &[("title", "dave")]);
+    let seed_seq = conflict(&mut core, target, dave).previous;
+    let mut carol = Vec::new();
+    let mut units = chain.into_iter();
+    for (tx, unit) in units.by_ref().take(2) {
+        assert_accepted(&core_fate(&mut core, unit));
+        carol.push(tx);
+    }
+    sync_table_rows_to(&mut core, &mut writers[2].1, "todos");
+    let erin = accept_edit(&mut core, &mut writers[2].1, target, 200, &[("body", "erin")]);
+    for (tx, unit) in units {
+        assert_accepted(&core_fate(&mut core, unit));
+        carol.push(tx);
+    }
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("c3", "c4")
+    );
+
+    let conflicts = row_conflicts(&mut core, target);
+    assert!(!conflicts[&dave].maybe_conflicting);
+    assert!(!conflicts[&erin].maybe_conflicting, "erin saw the latest image");
+    let expected = [
+        vec![dave],
+        Vec::new(),
+        vec![dave],
+        vec![dave, erin],
+        vec![erin],
+    ];
+    for (tx, overlapping) in carol.iter().zip(expected) {
+        let chained = &conflicts[tx];
+        assert!(chained.maybe_conflicting);
+        assert_eq!(chained.resolved_base, seed_seq, "carol saw only the seed");
+        assert_eq!(chained.overlapping, overlapping);
+    }
 }
 
 /// Core accepts `writer`'s edit of `target` in `todos`.
@@ -1316,13 +1448,13 @@ fn base_names_the_writers_own_pending_write_over_a_relayed_one() {
 /// so B's `b` (authored tag 1) is physical tag 3. carol and dave write under
 /// B; carol wrote the seed. carol's first edit sets `b` over the seed after
 /// dave already did, so it is maybe conflicting with dave's write; her
-/// chained edit then sets `base` and is not.
+/// chained edit then sets `base` over the same seed, and is too.
 ///
 /// ```text
 /// carol ──status=base──► core                  seed
 /// dave  ──status=b──► core                     status=b (physical 3)
 /// carol ═offline═ e1 status=b ──► core          flagged: dave
-/// carol ═offline═ e2 status=base ──► core       status=base
+/// carol ═offline═ e2 status=base ──► core       status=base, flagged: dave
 /// ```
 #[test]
 fn enum_cells_apply_by_arrival_under_a_branched_registry() {
@@ -1383,7 +1515,9 @@ fn enum_cells_apply_by_arrival_under_a_branched_registry() {
     let e1_conflict = conflict_in(&mut core, "items", target, e1);
     assert!(e1_conflict.maybe_conflicting);
     assert_eq!(e1_conflict.overlapping, vec![dave_tx]);
-    assert!(!conflict_in(&mut core, "items", target, e2).maybe_conflicting);
+    let e2_conflict = conflict_in(&mut core, "items", target, e2);
+    assert!(e2_conflict.maybe_conflicting);
+    assert_eq!(e2_conflict.overlapping, vec![dave_tx], "never e1, carol's own");
     let rows = core
         .current_rows_for_schema("items", b.id, DurabilityTier::Global)
         .resolve()

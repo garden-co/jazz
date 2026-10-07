@@ -24,7 +24,7 @@ Invariant digest:
 - `INV-HIST-15`: Core's post-image MUST be a deterministic function of the accepted writes in seq order: no wall clock, writer clock or other node-local state enters a merged value. Concurrent writes to different cells give the same post-image in any seq order, merge-strategy ops commute, and when two writes change one plain cell the one Core sequences last keeps it.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
 - `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another base. A write whose pending predecessor has no fate at Core yet MUST NOT be held or stored by Core: after its cheap admission checks pass, Core MUST answer `RetryLater` naming that predecessor and store nothing for the write. Its writer MUST keep it pending, MUST NOT let a later upload of the same writer node on that link overtake it (other writers' uploads are not held back), MUST send it again from the predecessor (when it still holds the predecessor pending) after a backoff, and only its author MUST fail it with a surfaced "predecessor lost" error when the predecessor can no longer reach Core; a relay never fates it and forwards the `RetryLater` towards its author.
-- `INV-HIST-21`: Whether a write maybe conflicts MUST be derived from the row's accepted history and never stored: a write is maybe conflicting iff it has a base and its resolved base seq (the larger of its base seq and its pending predecessor's accepted seq, or, when Core rejected the predecessor, the predecessor's own resolved base seq) differs from the seq of the row's accepted history record immediately before it. Inserts and blind updates are never maybe conflicting. Its conflict analysis MUST be the row's accepted writes after the resolved base seq and before the write whose authored columns overlap the write's.
+- `INV-HIST-21`: Whether a write maybe conflicts MUST be derived from the row's accepted history and never stored: a write is maybe conflicting iff it has a base and an accepted record of the row that is not of the writer's own chain (the accepted writes of its pending predecessor's node with a transaction time at most the predecessor's) lies after its seen seq and before it. The seen seq is the larger of its base seq and its chain root's settled base seq (followed through accepted predecessors, and through a rejected predecessor to that one's own predecessor), never a predecessor's later accepted seq. Inserts and blind updates are never maybe conflicting. Its conflict analysis MUST be the row's accepted writes after the seen seq and before the write, outside its own chain, whose authored columns overlap the write's.
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
 
@@ -352,37 +352,62 @@ overridden values its writer never saw is derived from the row's accepted
 history, not stored: there is no flag bit and no copy of an overridden
 value (`INV-HIST-21`).
 
-- The **resolved base seq** of a base `{seq: S, pending: P}` is the larger of
-  `S` and `P`'s resolved seq. `P`'s resolved seq is the seq Core accepted `P`
-  at, or, when Core rejected `P`, the resolved base seq of `P`'s own base;
-  without `P` it is none. Taking the larger matters when the writer's node
-  received Core's image at `S` before `P`'s fate: the writer then saw
-  everything up to `S`, `P` included.
-- A write is **maybe conflicting** iff it has a base and its resolved base
-  seq differs from the seq of the row's accepted history record immediately
-  before it (none when it is the row's first accepted record).
+- **What a writer saw.** A write's base names everything its writer had
+  seen of the row: the accepted records up to its base seq `S` (the settled
+  image its node held), plus its own pending chain. A predecessor's accepted
+  seq is not part of that: Core may accept another writer's write after the
+  chain's settled image and before the predecessor, and the writer saw none
+  of it. So a write's **seen seq** is the larger of `S` and its chain root's
+  settled base seq: following `P` to the newest accepted write of `P`'s node
+  to the row whose transaction time is at most `P`'s (`P` itself when Core
+  accepted it; when Core rejected `P`, which is not in history, `P`'s own
+  predecessor), and from it along its own base the same way, to the first
+  write whose base has no `P`; without `P` it is `S`. `S` is never older than
+  the chain root's base (a node's settled image only moves forward), and is
+  newer when the writer received Core's image at `S` before `P`'s fate: the
+  writer then saw everything up to `S`, `P` included if accepted by then.
+- The writer's **own chain** is the accepted writes of `P`'s node to the
+  row whose transaction time is at most `P`'s. They are the writer's own
+  pending writes it wrote over, so they never count against the write.
+- A write is **maybe conflicting** iff it has a base and an accepted record
+  of the row that is not of its own chain lies after its seen seq and before
+  it. Its **resolved base seq** is the newest accepted record its writer had
+  seen: the seen seq, moved forward over the own-chain records that directly
+  follow it (none when the seen seq is none and the row's first accepted
+  record is not of its own chain). A write is maybe conflicting exactly when
+  its resolved base seq differs from the seq of the row's accepted history
+  record immediately before it (none when it is the row's first accepted
+  record).
 - A write with an empty base (an insert or a blind update) is never maybe
   conflicting. Neither is a write whose base is its own author's
-  immediately preceding accepted write of the row, nor any later write of an
-  offline chain that nobody else interrupted: in each case the record before
-  it is the one its base resolves to.
+  immediately preceding accepted write of the row, nor any write of an
+  offline chain that nobody else interrupted: in each case only the
+  writer's own chain lies between what it saw and the write. Once another
+  writer's write lands after a chain's settled image, every later write of
+  that chain is maybe conflicting, not only the first: each overrode the
+  row without having seen that write.
 
-A writer's writes to one row reach Core in its own order and a rejected
-write is not in history, so `P`'s resolved seq is the seq of the newest
-accepted write of `P`'s node to the row whose transaction time is at most
-`P`'s (none if there is none): one walk of the row's history computes it,
-and any node holding the row's accepted history records (their seq,
-transaction id, base and authored columns) derives the same answer.
+For example, carol, offline over the seed at `S`, writes `p1` (title) and
+then `w` (body, base `{seq: S, pending: p1}`); dave's body edit is accepted
+first, then `p1`, then `w`. `p1` is maybe conflicting with an empty conflict
+analysis (dave touched only the body). `w` is maybe conflicting and its
+conflict analysis names dave's write: `w`'s body overrode dave's, which
+carol never saw, although the record right before `w` is her own `p1`.
+
+One walk of the row's history computes every write's seen seq (each chained
+write reuses its predecessor's), and any node holding the row's accepted
+history records (their seq, transaction id, base and authored columns)
+derives the same answer.
 
 A write's **conflict analysis** is a walk of the row's history from its
-resolved base to the write: the accepted writes with a seq greater than the
-resolved base seq (every earlier accepted write when it resolves to none) and
-less than the write's own, whose authored columns overlap the write's (a
-full image authors every column; `_deletion` counts as a column). A maybe
-conflicting write whose intervening writes all touched other columns has an
-empty conflict analysis. The flag and the walk are exposed by the node
-(`NodeState::write_conflict`); no public read API or TypeScript surface
-carries them yet.
+seen seq to the write: the accepted records with a seq greater than the seen
+seq (every earlier accepted record when it is none) and less than the
+write's own, not of its own chain, whose authored columns overlap the
+write's (a full image authors every column; `_deletion` counts as a column).
+A maybe conflicting write whose intervening foreign writes all touched other
+columns has an empty conflict analysis. The flag and the walk are exposed by
+the node (`NodeState::write_conflict`); no public read API or TypeScript
+surface carries them yet.
 
 **Across schema versions.** Cells are matched by physical column id, so a
 lens rename keeps its cell, and every authored cell applies whatever layout
