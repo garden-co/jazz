@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createDb, schema } from "../index.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { createAccountDbWithRuntimeSource } from "./context.js";
+import { Db } from "../runtime/db.js";
+import { DefaultRuntimeSource } from "../runtime/default-runtime-source.js";
 
 describe("account context authority", () => {
   it("opens locally without activating its registry transport and rejects another app or authority", async () => {
@@ -64,4 +67,87 @@ describe("account context authority", () => {
       await db.shutdown();
     }
   });
+
+  it.each([
+    { cleanupFails: false, graceful: false },
+    { cleanupFails: true, graceful: false },
+    { cleanupFails: false, graceful: true },
+    { cleanupFails: true, graceful: true },
+  ])(
+    "disposes the live Db after attachment fails (cleanup fails: $cleanupFails, graceful: $graceful)",
+    async ({ cleanupFails, graceful }) => {
+      const { serverUrl: _serverUrl, ...config } = await localAccountConfig(
+        `failed-e2ee-attachment-${crypto.randomUUID()}`,
+      );
+      const app = schema.defineApp({ notes: schema.table({ text: schema.string() }, {}) });
+      const source = new DefaultRuntimeSource();
+      let opened: Db | undefined;
+      let gracefulShutdown: Promise<void> | undefined;
+      let syncSignal: AbortSignal | undefined;
+      source.waitForPendingWrites = (signal) => {
+        syncSignal = signal;
+        return new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("Sync cancelled")), {
+            once: true,
+          });
+        });
+      };
+      const disposeSource = source.shutdown.bind(source);
+      if (cleanupFails) {
+        source.shutdown = async () => {
+          await disposeSource();
+          throw new Error("Source cleanup failed");
+        };
+      }
+      // Capture the real Db and materialize its runtime before attachment fails.
+      // A shutdown-call assertion alone would miss a cancelled graceful wait
+      // that leaves the Db usable.
+      const createDirect = Db.createWithDirectConnection;
+      const creation = vi
+        .spyOn(Db, "createWithDirectConnection")
+        .mockImplementationOnce(async (resolved, runtime) => {
+          opened = await createDirect(resolved, runtime);
+          await opened.all(app.notes, { tier: "local" });
+          if (graceful) {
+            gracefulShutdown = opened.shutdown({ waitForSync: true });
+            gracefulShutdown.catch(() => {});
+          }
+          return opened;
+        });
+      try {
+        await expect(
+          createAccountDbWithRuntimeSource(
+            {
+              ...config,
+              e2ee: {
+                app: { wasmSchema: app.wasmSchema },
+                store: {
+                  async read() {
+                    return null;
+                  },
+                  async update() {
+                    throw new Error("Invalid attachment must not prepare device keys");
+                  },
+                },
+              },
+            },
+            source,
+          ),
+        ).rejects.toThrow("E2EE application is missing managed table");
+        expect(opened).toBeDefined();
+        if (graceful) {
+          expect(syncSignal?.aborted).toBe(true);
+          await expect(gracefulShutdown).rejects.toThrow("Graceful shutdown");
+        }
+        await expect(opened!.all(app.notes, { tier: "local" })).rejects.toThrow(
+          /shutting down or closed/,
+        );
+      } finally {
+        creation.mockRestore();
+        opened?.abortGracefulShutdown();
+        await gracefulShutdown?.catch(() => {});
+        await opened?.shutdown().catch(() => {});
+      }
+    },
+  );
 });
