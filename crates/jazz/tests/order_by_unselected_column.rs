@@ -270,3 +270,304 @@ fn include_read_does_not_return_the_unselected_order_key() {
     read.sort();
     assert_eq!(read, ["a", "b", "c", "d"]);
 }
+
+/// Alice reads one metric through prepared queries. Non-null scalar double
+/// predicates use numeric ordering and equality, whether literals are bare or
+/// nullable-present; column predicates provide the same observable membership.
+#[test]
+fn float_literal_comparisons_match_numeric_order() {
+    use jazz::query::{
+        Operand, Predicate, col, eq, gt, gte, in_list, is_null, lit, lt, lte, ne, not,
+    };
+
+    // One source row suffices: constant predicates retain its exact identity or
+    // exclude it. No NaN is stored; unordered cases use query literals only.
+    let stored = [
+        ("score", -2.0),
+        ("negative", -1.0),
+        ("zero", -0.0),
+        ("positive_zero", 0.0),
+        ("one", 1.0),
+        ("two", 2.0),
+        ("negative_infinity", f64::NEG_INFINITY),
+        ("positive_infinity", f64::INFINITY),
+    ];
+    let mut table = TableSchemaBuilder::new("metrics")
+        .nullable_column("optional_score", ColumnType::Double)
+        .nullable_column("null_score", ColumnType::Double)
+        .policies(allow_all_policies());
+    for (name, _) in stored {
+        table = table.column(name, ColumnType::Double);
+    }
+    let schema = compile_schema(&SchemaBuilder::new().table(table).build());
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        TestStorage::new(&refs),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x6f; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .expect("open metrics db");
+    let metric = RowUuid::from_bytes([0x42; 16]);
+    let mut cells = stored
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), Value::F64(value)))
+        .collect::<BTreeMap<_, _>>();
+    cells.insert(
+        "optional_score".to_owned(),
+        Value::Nullable(Some(Box::new(Value::F64(-2.0)))),
+    );
+    cells.insert("null_score".to_owned(), Value::Nullable(None));
+    block_on(db.insert(
+        "metrics",
+        cells,
+        InsertOptions {
+            row_id: Some(metric),
+            ..Default::default()
+        },
+    ))
+    .expect("insert metric");
+
+    let operators: [(&str, fn(Operand, Operand) -> Predicate); 6] = [
+        ("eq", eq),
+        ("ne", ne),
+        ("lt", lt),
+        ("lte", lte),
+        ("gt", gt),
+        ("gte", gte),
+    ];
+    // Worked numeric outcomes in operator order, independent of the comparator.
+    let less = [false, true, true, true, false, false];
+    let equal = [true, false, false, true, false, true];
+    let greater = [false, true, false, false, true, true];
+    let unordered = [false; 6];
+    let pairs = [
+        ("negative ascending", -2.0, -1.0, "score", "negative", less),
+        (
+            "negative descending",
+            -1.0,
+            -2.0,
+            "negative",
+            "score",
+            greater,
+        ),
+        (
+            "negative to zero",
+            -1.0,
+            0.0,
+            "negative",
+            "positive_zero",
+            less,
+        ),
+        (
+            "zero to negative",
+            0.0,
+            -1.0,
+            "positive_zero",
+            "negative",
+            greater,
+        ),
+        ("cross-sign", -2.0, 1.0, "score", "one", less),
+        ("positive ascending", 1.0, 2.0, "one", "two", less),
+        ("positive descending", 2.0, 1.0, "two", "one", greater),
+        ("finite equal", -2.0, -2.0, "score", "score", equal),
+        (
+            "negative zero to positive zero",
+            -0.0,
+            0.0,
+            "zero",
+            "positive_zero",
+            equal,
+        ),
+        (
+            "positive zero to negative zero",
+            0.0,
+            -0.0,
+            "positive_zero",
+            "zero",
+            equal,
+        ),
+        (
+            "negative infinity",
+            f64::NEG_INFINITY,
+            -2.0,
+            "negative_infinity",
+            "score",
+            less,
+        ),
+        (
+            "positive infinity",
+            f64::INFINITY,
+            2.0,
+            "positive_infinity",
+            "two",
+            greater,
+        ),
+        (
+            "infinite equal",
+            f64::INFINITY,
+            f64::INFINITY,
+            "positive_infinity",
+            "positive_infinity",
+            equal,
+        ),
+        ("NaN left", f64::NAN, 1.0, "", "one", unordered),
+        ("NaN right", 1.0, f64::NAN, "one", "", unordered),
+        ("NaN both", f64::NAN, f64::NAN, "", "", unordered),
+    ];
+    let float = |value, present| {
+        let value = Value::F64(value);
+        lit(if present {
+            Value::Nullable(Some(Box::new(value)))
+        } else {
+            value
+        })
+    };
+    let mut failures = Vec::new();
+    let mut exercised = 0;
+    let mut check = |label: String, predicate, matches, allow_rejection| {
+        let query = Query::from("metrics").filter(predicate);
+        let prepared = match db.prepare_query(&query) {
+            Ok(prepared) => prepared,
+            Err(error) if allow_rejection => {
+                println!("{label}: public preparation rejected nonfinite literal: {error:?}");
+                return;
+            }
+            Err(error) => panic!("{label}: prepare numeric query: {error:?}"),
+        };
+        let identities = block_on(db.all(&prepared, local()))
+            .unwrap_or_else(|error| panic!("{label}: read numeric query: {error:?}"))
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        let expected = if matches { vec![metric] } else { vec![] };
+        println!("{label}: expected={expected:?}, actual={identities:?}");
+        exercised += 1;
+        if identities != expected {
+            failures.push((label, expected, identities));
+        }
+    };
+    for (label, left, right, left_column, right_column, outcomes) in pairs {
+        for ((name, compare), matches) in operators.into_iter().zip(outcomes) {
+            for (left_present, right_present) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                check(
+                    format!("{label} {name} literals present=({left_present},{right_present})"),
+                    compare(float(left, left_present), float(right, right_present)),
+                    matches,
+                    !left.is_finite() || !right.is_finite(),
+                );
+            }
+            if !left_column.is_empty() && !right_column.is_empty() {
+                check(
+                    format!("{label} {name} field/literal"),
+                    compare(col(left_column), float(right, false)),
+                    matches,
+                    !right.is_finite(),
+                );
+                check(
+                    format!("{label} {name} literal/field"),
+                    compare(float(left, false), col(right_column)),
+                    matches,
+                    !left.is_finite(),
+                );
+            }
+        }
+    }
+    for ((name, compare), (forward, reverse)) in
+        operators.into_iter().zip(less.into_iter().zip(greater))
+    {
+        for present in [false, true] {
+            check(
+                format!("nullable Double {name} field/literal present={present}"),
+                compare(col("optional_score"), float(-1.0, present)),
+                forward,
+                false,
+            );
+            check(
+                format!("nullable Double {name} literal/field present={present}"),
+                compare(float(-1.0, present), col("optional_score")),
+                reverse,
+                false,
+            );
+        }
+    }
+    let controls = [
+        (
+            "integer ordering",
+            lt(lit(Value::I32(-2)), lit(Value::I32(-1))),
+            true,
+        ),
+        (
+            "integer equality",
+            eq(lit(Value::I32(1)), lit(Value::I32(2))),
+            false,
+        ),
+        ("text ordering", lt(lit("a"), lit("b")), true),
+        ("boolean inequality", ne(lit(true), lit(false)), true),
+        (
+            "null equality",
+            eq(lit(Value::Nullable(None)), lit(Value::Nullable(None))),
+            true,
+        ),
+        (
+            "null inequality",
+            ne(lit(Value::Nullable(None)), lit(Value::Nullable(None))),
+            false,
+        ),
+        ("null Double column", is_null(col("null_score")), true),
+        (
+            "present Double column",
+            is_null(col("optional_score")),
+            false,
+        ),
+        (
+            "present integer equality",
+            eq(
+                lit(Value::Nullable(Some(Box::new(Value::I32(1))))),
+                lit(Value::Nullable(Some(Box::new(Value::I32(1))))),
+            ),
+            true,
+        ),
+        (
+            "In signed zero",
+            in_list(float(-0.0, false), [float(1.0, false), float(0.0, false)]),
+            true,
+        ),
+        (
+            "In mixed signed zero",
+            in_list(float(0.0, true), [float(-0.0, false)]),
+            true,
+        ),
+        (
+            "In absent value",
+            in_list(float(-2.0, false), [float(-1.0, false), float(0.0, false)]),
+            false,
+        ),
+        (
+            "negated true negative ordering",
+            not(lt(float(-2.0, false), float(-1.0, false))),
+            false,
+        ),
+        (
+            "negated false cross-sign ordering",
+            not(gt(float(-1.0, false), float(0.0, false))),
+            true,
+        ),
+    ];
+    for (label, predicate, matches) in controls {
+        check(label.to_owned(), predicate, matches, false);
+    }
+    println!(
+        "exercised {exercised} prepared memberships; {} mismatches",
+        failures.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "prepared float predicates must preserve numeric semantics: {failures:#?}"
+    );
+}
