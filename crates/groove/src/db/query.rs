@@ -1172,6 +1172,33 @@ impl Database {
             .map_err(Error::IvmRuntime)
     }
 
+    /// Bind a retained subscription and transfer the shape's ownership to
+    /// its bindings. The last unsubscribe or receiver cleanup retires it.
+    ///
+    /// An error or cancellation does not transfer caller ownership. A successful
+    /// handle may already carry a terminal hydration error; its unreferenced
+    /// shape is retired before returning. Ordinary [`Self::bind_shape`] does
+    /// not transfer ownership.
+    pub async fn bind_shape_owned_with_root_values(
+        &mut self,
+        shape: PreparedShapeId,
+        binding_values: &[Value],
+        root_indirect_values: RootIndirectValues,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error> {
+        let subscription = self
+            .bind_shape_with_lifetime_and_root_values(
+                shape,
+                binding_values,
+                SubscriptionLifetime::Retained,
+                root_indirect_values,
+                progress_waker,
+            )
+            .await?;
+        self.ivm_runtime.transfer_prepared_shape_to_bindings(shape);
+        Ok(subscription)
+    }
+
     /// Run a one-shot SQL-ish query against the current storage snapshot.
     ///
     /// ```rust

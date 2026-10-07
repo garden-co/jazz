@@ -749,6 +749,221 @@ async fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe()
     assert_eq!(final_stats.arrangement_count, baseline.arrangement_count);
 }
 
+/// Alice's duplicate bindings and Bob collectively own one private shape.
+/// Its last close must preserve a caller-owned sibling sharing the same graph.
+///
+/// alice + alice + bob -> close alice twice -> update bob -> close bob -> reuse sibling
+#[futures_test::test]
+async fn owned_prepared_shape_retires_after_last_binding_without_retiring_caller_sibling() {
+    let storage = TestStorage::new(&["albums", "artists"]);
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::U64(7),
+            Value::String("Alice".to_owned()),
+        ],
+    );
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(2),
+            Value::U64(9),
+            Value::String("Bob".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+    let baseline = database.runtime_stats();
+    let terminal = || {
+        crate::ivm::RoutedMultisinkTerminal::new(
+            "albums",
+            artist_album_shape_graph(),
+            ["artist_id"],
+            ["artist_id", "id", "title"],
+        )
+    };
+    let owned = database
+        .prepare([terminal()], "artist_params", artist_binding_descriptor())
+        .await
+        .unwrap();
+    let caller_owned = database
+        .prepare([terminal()], "artist_params", artist_binding_descriptor())
+        .await
+        .unwrap();
+    let alice = database
+        .bind_shape_owned_with_root_values(
+            owned.id(),
+            &[Value::U64(7)],
+            crate::db::RootIndirectValues::Materialize,
+            None,
+        )
+        .await
+        .unwrap();
+    let alice_duplicate = database
+        .bind_shape_owned_with_root_values(
+            owned.id(),
+            &[Value::U64(7)],
+            crate::db::RootIndirectValues::Materialize,
+            None,
+        )
+        .await
+        .unwrap();
+    let bob = database
+        .bind_shape_owned_with_root_values(
+            owned.id(),
+            &[Value::U64(9)],
+            crate::db::RootIndirectValues::Materialize,
+            None,
+        )
+        .await
+        .unwrap();
+    database.drive_progress().await.unwrap();
+    let rows = |subscription: &crate::ivm::MultisinkSubscription| {
+        let mut rows = subscription.try_recv().unwrap().sinks["albums"]
+            .to_values()
+            .unwrap();
+        rows.sort_by_key(|(values, _)| match &values[1] {
+            Value::U64(id) => *id,
+            _ => panic!("album IDs are u64"),
+        });
+        rows
+    };
+    let alice_initial = vec![(
+        vec![
+            Value::U64(7),
+            Value::U64(1),
+            Value::String("Alice".to_owned()),
+        ],
+        1,
+    )];
+    assert_eq!(rows(&alice), alice_initial);
+    assert_eq!(rows(&alice_duplicate), alice_initial);
+    assert_eq!(
+        rows(&bob),
+        vec![(
+            vec![
+                Value::U64(9),
+                Value::U64(2),
+                Value::String("Bob".to_owned())
+            ],
+            1,
+        )]
+    );
+    database.unsubscribe(alice.id());
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(3),
+            Value::U64(7),
+            Value::String("Alice again".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        rows(&alice_duplicate),
+        vec![(
+            vec![
+                Value::U64(7),
+                Value::U64(3),
+                Value::String("Alice again".to_owned())
+            ],
+            1,
+        )]
+    );
+    assert!(matches!(bob.try_recv(), Err(TryRecvError::Empty)));
+    database.unsubscribe(alice_duplicate.id());
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(4),
+            Value::U64(9),
+            Value::String("Bob again".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        rows(&bob),
+        vec![(
+            vec![
+                Value::U64(9),
+                Value::U64(4),
+                Value::String("Bob again".to_owned())
+            ],
+            1,
+        )]
+    );
+    database.unsubscribe(bob.id());
+    assert_eq!(
+        database.runtime_stats().active_prepared_shapes,
+        baseline.active_prepared_shapes + 1,
+        "only the caller-owned sibling remains registered"
+    );
+    assert!(matches!(
+        database
+            .bind_shape_owned_with_root_values(
+                owned.id(),
+                &[Value::U64(7)],
+                crate::db::RootIndirectValues::Materialize,
+                None,
+            )
+            .await,
+        Err(Error::IvmRuntime(IvmRuntimeError::PreparedShapeNotFound(id))) if id == owned.id()
+    ));
+    let sibling = database
+        .bind_shape_with_lifetime_and_root_values(
+            caller_owned.id(),
+            &[Value::U64(7)],
+            crate::db::SubscriptionLifetime::Retained,
+            crate::db::RootIndirectValues::Materialize,
+            None,
+        )
+        .await
+        .unwrap();
+    database.drive_progress().await.unwrap();
+    assert_eq!(
+        rows(&sibling),
+        vec![
+            (
+                vec![
+                    Value::U64(7),
+                    Value::U64(1),
+                    Value::String("Alice".to_owned())
+                ],
+                1
+            ),
+            (
+                vec![
+                    Value::U64(7),
+                    Value::U64(3),
+                    Value::String("Alice again".to_owned())
+                ],
+                1
+            ),
+        ]
+    );
+    database.unsubscribe(sibling.id());
+    assert_eq!(
+        database.runtime_stats().active_prepared_shapes,
+        baseline.active_prepared_shapes + 1,
+        "ordinary binding does not transfer caller ownership"
+    );
+    database.retire_prepared_shape(caller_owned.id()).unwrap();
+    let after = database.runtime_stats();
+    assert_eq!(
+        after.active_prepared_shapes,
+        baseline.active_prepared_shapes
+    );
+    assert_eq!(after.active_subscriptions, baseline.active_subscriptions);
+    assert_eq!(after.active_shape_params, baseline.active_shape_params);
+    assert_eq!(after.graph_nodes, baseline.graph_nodes);
+}
+
 #[futures_test::test]
 async fn prepared_subscription_matches_literal_subscription_without_param_columns() {
     let storage =
