@@ -111,75 +111,83 @@ it.each(["private-signature", "device-envelope", "delivery-verification"])(
   60_000,
 );
 
-it.each(["parser", "recipient-open", "signing"])(
-  "sanitises recovery material %s failures without enrolling the device",
-  async (fault) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    const clients: Awaited<ReturnType<typeof createDb>>[] = [];
-    try {
-      await deploy({
-        serverUrl: server.url,
-        appId: server.appId,
-        adminSecret: server.adminSecret,
-        schema: deviceRequestApp,
-        permissions: deviceRequestPermissions,
-      });
-      const account = await localAccountConfig(server.appId, server.url);
-      const adapters = await createNativeCrypto();
-      const sensitive = "private-recovery-import-diagnostic";
-      const adapterError = new Error(sensitive, { cause: { privateKey: sensitive } });
-      let failImport = false;
-      const isImport = (context: Uint8Array) =>
-        new TextDecoder().decode(context).startsWith("jazz.e2ee.recovery-material-check.v1\0");
-      const open = async () => {
-        let saved: string | null = null;
-        const client = await createDb({
-          ...account,
-          e2ee: {
-            store: {
-              async read() {
-                return saved;
-              },
-              async update(transform) {
-                saved = transform(saved);
+it("sanitises recovery import failures without enrolling the device and permits retry", async () => {
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const clients: Awaited<ReturnType<typeof createDb>>[] = [];
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    const account = await localAccountConfig(server.appId, server.url);
+    const adapters = await createNativeCrypto();
+    const sensitive = "private-recovery-import-diagnostic";
+    const adapterError = new Error(sensitive, { cause: { privateKey: sensitive } });
+    let failImport = false;
+    let fault: "parser" | "recipient-open" | "signing" = "parser";
+    let injected = 0;
+    const isImport = (context: Uint8Array) =>
+      new TextDecoder().decode(context).startsWith("jazz.e2ee.recovery-material-check.v1\0");
+    const open = async () => {
+      let saved: string | null = null;
+      const client = await createDb({
+        ...account,
+        e2ee: {
+          store: {
+            async read() {
+              return saved;
+            },
+            async update(transform) {
+              saved = transform(saved);
+            },
+          },
+          crypto: {
+            ...adapters,
+            keyEnvelope: {
+              ...adapters.keyEnvelope,
+              async open(key, context, envelope) {
+                if (failImport && fault === "recipient-open" && isImport(context)) {
+                  injected++;
+                  throw adapterError;
+                }
+                return adapters.keyEnvelope.open(key, context, envelope);
               },
             },
-            crypto: {
-              ...adapters,
-              keyEnvelope: {
-                ...adapters.keyEnvelope,
-                async open(key, context, envelope) {
-                  if (failImport && fault === "recipient-open" && isImport(context))
-                    throw adapterError;
-                  return adapters.keyEnvelope.open(key, context, envelope);
-                },
-              },
-              deviceSigner: {
-                ...adapters.deviceSigner,
-                async sign(key, record) {
-                  if (failImport && fault === "signing" && isImport(record)) throw adapterError;
-                  return adapters.deviceSigner.sign(key, record);
-                },
+            deviceSigner: {
+              ...adapters.deviceSigner,
+              async sign(key, record) {
+                if (failImport && fault === "signing" && isImport(record)) {
+                  injected++;
+                  throw adapterError;
+                }
+                return adapters.deviceSigner.sign(key, record);
               },
             },
           },
-        });
-        clients.push(client);
-        return client;
-      };
-      const owner = await open();
-      const [creator] = await owner.e2ee.devices.list();
-      const { material } = await owner.e2ee.recovery.create().wait();
-      await owner.shutdown();
-      const client = await open();
-      const before = await client.e2ee.devices.list();
-      const pending = before.find((row) => row.id !== creator!.id)!;
-      const approvals = await client.all(deviceRequestApp.__e2ee_device_approvals, {
-        tier: "remote",
+        },
       });
-      const deliveries = await client.all(deviceRequestApp.__e2ee_device_deliveries, {
-        tier: "remote",
-      });
+      clients.push(client);
+      return client;
+    };
+    const owner = await open();
+    const [creator] = await owner.e2ee.devices.list();
+    const { material } = await owner.e2ee.recovery.create().wait();
+    await owner.shutdown();
+    const client = await open();
+    const before = await client.e2ee.devices.list();
+    const pending = before.find((row) => row.id !== creator!.id)!;
+    const approvals = await client.all(deviceRequestApp.__e2ee_device_approvals, {
+      tier: "remote",
+    });
+    const deliveries = await client.all(deviceRequestApp.__e2ee_device_deliveries, {
+      tier: "remote",
+    });
+    for (const nextFault of ["parser", "recipient-open", "signing"] as const) {
+      fault = nextFault;
+      injected = 0;
       failImport = true;
       const error = await client.e2ee.recovery
         .use(fault === "parser" ? `{"privateKey":"${sensitive}"` : material)
@@ -200,18 +208,18 @@ it.each(["parser", "recipient-open", "signing"])(
       expect(
         await client.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "remote" }),
       ).toEqual(deliveries);
+      expect(injected).toBe(fault === "parser" ? 0 : 1);
       failImport = false;
-      await client.e2ee.recovery.use(material).wait();
-      expect(await client.e2ee.devices.list()).toContainEqual(
-        expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
-      );
-    } finally {
-      await Promise.all(clients.map((client) => client.shutdown()));
-      await server.stop();
     }
-  },
-  60_000,
-);
+    await client.e2ee.recovery.use(material).wait();
+    expect(await client.e2ee.devices.list()).toContainEqual(
+      expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
+    );
+  } finally {
+    await Promise.all(clients.map((client) => client.shutdown()));
+    await server.stop();
+  }
+}, 60_000);
 
 it("publishes neither recovery approval when the public approval write is refused", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });

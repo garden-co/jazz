@@ -71,6 +71,7 @@ export function e2eeForDb(db: Db): E2ee {
 /** First-device activation; approval and rotation are separate lifecycle operations. */
 export class E2ee {
   private approval: DeviceApproval | undefined;
+  private recoveryReader: DeviceApproval | undefined;
   private closed = false;
   private readonly deviceKeys = new DeviceKeyLifetime();
   private preparation: Promise<void> | undefined;
@@ -161,22 +162,27 @@ export class E2ee {
   };
 
   private async inspectRecovery(material: string): Promise<RecoveryStatus> {
-    const keys =
-      this.config.crypto?.keyEnvelope ??
-      (await (await import("./browser.js")).createBrowserKeyEnvelope());
-    const signer =
-      this.config.crypto?.deviceSigner ??
-      (await (await import("./browser.js")).createBrowserDeviceSigner());
-    this.assertOpen();
-    const reader = new DeviceApproval(
-      this.db,
-      this.account.id,
-      this.scope,
-      keys,
-      signer,
-      () => this.assertOpen(),
-      this.app,
-    );
+    let reader = this.recoveryReader;
+    if (!reader) {
+      const keys =
+        this.config.crypto?.keyEnvelope ??
+        (await (await import("./browser.js")).createBrowserKeyEnvelope());
+      const signer =
+        this.config.crypto?.deviceSigner ??
+        (await (await import("./browser.js")).createBrowserDeviceSigner());
+      this.assertOpen();
+      // No device, responder or retained recovery key. Avoid repeating the initial prefetch;
+      // every inspection still reads and accepts a fresh transaction snapshot.
+      reader = this.recoveryReader = new DeviceApproval(
+        this.db,
+        this.account.id,
+        this.scope,
+        keys,
+        signer,
+        () => this.assertOpen(),
+        this.app,
+      );
+    }
     const account = await reader.inspectRecovery(material);
     this.assertOpen();
     return { configured: true, account };
@@ -290,6 +296,7 @@ export class E2ee {
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);
     db.onShutdown(() => {
       this.closed = true;
+      this.recoveryReader = undefined;
       this.deviceKeys.close();
     });
   }
