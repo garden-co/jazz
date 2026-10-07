@@ -123,18 +123,31 @@ it.each([
       const creator = (await first.e2ee.devices.list()).find(
         (device) => device.state === "active",
       )!;
-      const second = await createDb({ ...account, e2ee: { app, store: store() } });
-      clients.push(second);
-      const request = (await second.e2ee.devices.list()).find(
-        (device) => device.state === "pending",
-      )!;
-      expect(request).toBeDefined();
-      await first.e2ee.devices.approve(request.id).wait();
-      const pending = await createDb({ ...account, e2ee: { app, store: store() } });
-      clients.push(pending);
+      const needsApprovedSecond =
+        scenario !== "root-signature" &&
+        scenario !== "delivery-signature" &&
+        !scenario.endsWith("history-race");
+      let second: Awaited<ReturnType<typeof createDb>> | undefined;
+      if (needsApprovedSecond) {
+        second = await createDb({ ...account, e2ee: { app, store: store() } });
+        clients.push(second);
+        const request = (await second!.e2ee.devices.list()).find(
+          (device) => device.state === "pending",
+        )!;
+        expect(request).toBeDefined();
+        await first.e2ee.devices.approve(request.id).wait();
+      }
+      // Most resume cases only need an independent reader after the creator closes.
+      // Malformed-candidate, history-race and inactive-creator checks retain a pending client.
+      const pending =
+        second && scenario.startsWith("resume") && scenario !== "resume-signed-malformed"
+          ? second
+          : await createDb({ ...account, e2ee: { app, store: store() } });
+      if (pending !== second) clients.push(pending);
       const pendingDevice = (await pending.e2ee.devices.list()).find(
         (device) => device.state === "pending",
       )!;
+      if (pending !== second) expect(pendingDevice).toBeDefined();
       let injected = false;
       if (scenario.endsWith("history-race")) {
         const root = await pending.one(
@@ -248,7 +261,7 @@ it.each([
             else staged.epochId = "99999999-9999-4999-8999-999999999999";
             return JSON.stringify(state);
           });
-        if (scenario === "resume-revoked") await second.e2ee.devices.revoke(creator.id).wait();
+        if (scenario === "resume-revoked") await second!.e2ee.devices.revoke(creator.id).wait();
         let badEnvelope = false;
         const reopened = await createDb({
           ...account,
@@ -288,7 +301,7 @@ it.each([
         expect(await reopened.e2ee.explain({ groupId: group.id })).toMatchObject({
           state: "ready",
         });
-        expect(await second.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "ready" });
+        expect(await second!.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "ready" });
         expect(
           await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
         ).toEqual(original);
@@ -342,7 +355,7 @@ it.each([
           stagedFixture.stagedGroupKeysV1,
         );
       expect(await first.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "ready" });
-      expect(await second.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "ready" });
+      expect(await second!.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "ready" });
       await first.shutdown();
 
       const reopened = await createDb({ ...account, e2ee: { app, store: retained } });

@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createAccountManager } from "../accounts/create-account-manager.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -87,13 +87,13 @@ async function fixture() {
       store: memoryStore(),
     });
     const account = manager.createLocalFirst();
-    const open = async (crypto: JazzCrypto = native) => {
+    const open = async (crypto: JazzCrypto = native, store = memoryStore()) => {
       const db = await createDb({
         appId: server.appId,
         serverUrl: server.url,
         account,
         driver: { type: "memory" },
-        e2ee: { app, store: memoryStore(), crypto },
+        e2ee: { app, store, crypto },
       });
       clients.add(db);
       await db.e2ee.devices.list();
@@ -113,7 +113,7 @@ async function fixture() {
       result.rootId = added[0]!.id;
       return result;
     };
-    return { native, open, close, recovery, cleanup };
+    return { native, open, close, recovery, memoryStore, cleanup };
   } catch (error) {
     await cleanup();
     throw error;
@@ -150,132 +150,166 @@ async function capture<T>(action: () => Promise<T>) {
   }
 }
 
-it.each([
-  { surface: "status", method: "open" },
-  { surface: "status", method: "unwrap" },
-  { surface: "use", method: "open" },
-  { surface: "explain", method: "open" },
-] as const)(
-  "classifies synchronous and rejected group envelope faults identically through $surface/$method",
-  async ({ surface, method }) => {
-    const f = await fixture();
-    try {
-      const envelopeFault = new Error("Synthetic group envelope fault");
-      const signerFault = new Error("Synthetic group recovery signer fault");
-      let kind: "sync" | "async" | undefined;
-      let hits = 0;
-      let signerArmed = false;
-      let signerHits = 0;
-      const matches = (operation: "open" | "unwrap", context: Uint8Array) => {
-        if (method !== operation) return false;
-        const text = decoder.decode(context);
-        if (operation === "unwrap")
-          return text.includes("__e2ee_groups") && text.includes("verification");
-        return surface === "explain"
-          ? text.includes("jazz.e2ee.group.v1") && text.includes('["delivery",')
-          : text.includes("__e2ee_group_recovery_deliveries");
-      };
-      const adapters: JazzCrypto = {
-        ...f.native,
-        keyEnvelope: {
-          ...f.native.keyEnvelope,
-          // Non-async on purpose: a Promise-returning adapter can throw before returning.
-          open(pair, context, envelope) {
-            if (kind && matches("open", context)) {
-              hits++;
-              if (kind === "sync") throw envelopeFault;
-              return Promise.reject(envelopeFault);
-            }
-            return f.native.keyEnvelope.open(pair, context, envelope);
-          },
-          unwrap(key, context, envelope) {
-            if (kind && matches("unwrap", context)) {
-              hits++;
-              if (kind === "sync") throw envelopeFault;
-              return Promise.reject(envelopeFault);
-            }
-            return f.native.keyEnvelope.unwrap(key, context, envelope);
-          },
-        },
-        deviceSigner: {
-          ...f.native.deviceSigner,
-          verify(publicKey, bytes, signature) {
-            if (signerArmed && decoder.decode(bytes).includes("__e2ee_group_recovery_deliveries")) {
-              signerHits++;
-              return Promise.reject(signerFault);
-            }
-            return f.native.deviceSigner.verify(publicKey, bytes, signature);
-          },
-        },
-      };
-      const owner = await f.open(adapters);
-      const groupId = await createReadyGroup(owner);
-      const root = await f.recovery(owner);
-      // The control uses the native adapters themselves, not the fault wrapper.
-      const normal = await f.open();
-      await readyStatus(normal, root, groupId);
-      await normal.e2ee.recovery.use(root.material).wait();
-      expect(await normal.e2ee.explain({ groupId })).toEqual({ state: "ready" });
-      await f.close(normal);
-      const observer = await f.open(adapters);
-      await readyStatus(observer, root, groupId);
-      await observer.e2ee.recovery.use(root.material).wait();
-      expect(await owner.e2ee.explain({ groupId })).toEqual({ state: "ready" });
-      const invoke = async () => {
-        if (surface === "status") return recoveryPath(observer, root, groupId);
-        if (surface === "use") return observer.e2ee.recovery.use(root.material).wait();
-        return owner.e2ee.explain({ groupId });
-      };
-      const attempt = async (fault: "sync" | "async") => {
-        kind = fault;
-        hits = 0;
-        try {
-          const result = await capture(invoke);
-          expect(hits).toBeGreaterThan(0);
-          return result;
-        } finally {
-          kind = undefined;
-        }
-      };
-      const rejected = await attempt("async");
-      const thrown = await attempt("sync");
-      // Signer failures are operational, never unusable-envelope candidate failures.
-      signerArmed = true;
+async function prepareAdapterMatrix() {
+  const f = await fixture();
+  try {
+    const ownerStore = f.memoryStore();
+    const owner = await f.open(f.native, ownerStore);
+    const groupId = await createReadyGroup(owner);
+    const root = await f.recovery(owner);
+    // One successful control with unwrapped native adapters for this fixed history.
+    const normal = await f.open();
+    await readyStatus(normal, root, groupId);
+    await normal.e2ee.recovery.use(root.material).wait();
+    expect(await normal.e2ee.explain({ groupId })).toEqual({ state: "ready" });
+    const ownerRecord = (await ownerStore.read())!;
+    await f.close(normal);
+    await f.close(owner);
+    return { f, groupId, root, ownerRecord };
+  } catch (error) {
+    await f.cleanup();
+    throw error;
+  }
+}
+
+describe("group recovery adapter classification", () => {
+  let prepared: Awaited<ReturnType<typeof prepareAdapterMatrix>>;
+  beforeAll(async () => {
+    prepared = await prepareAdapterMatrix();
+  }, 180_000);
+  afterAll(async () => {
+    if (prepared) await prepared.f.cleanup();
+  });
+  it.each([
+    { surface: "status", method: "open" },
+    { surface: "status", method: "unwrap" },
+    { surface: "use", method: "open" },
+    { surface: "explain", method: "open" },
+  ] as const)(
+    "classifies synchronous and rejected group envelope faults identically through $surface/$method",
+    async ({ surface, method }) => {
+      const { f, groupId, root, ownerRecord } = prepared;
+      let owner: Db | undefined;
+      let observer: Db | undefined;
       try {
-        await expect(observer.e2ee.recovery.status(root.material)).rejects.toBe(signerFault);
-        expect(signerHits).toBeGreaterThan(0);
-      } finally {
-        signerArmed = false;
-      }
-      await readyStatus(observer, root, groupId);
-      if (surface === "status") {
-        expect(rejected).toMatchObject({
-          ok: true,
-          value: { validation: "unavailable", reason: "unusable-recovery-delivery" },
-        });
-        expect(thrown).toEqual(rejected);
-      } else {
-        expect(rejected.ok).toBe(false);
-        expect(thrown.ok).toBe(false);
-        if (rejected.ok || thrown.ok) throw new Error("Faulty group envelope was accepted");
-        const message = surface === "use" ? exhausted : "Unable to authenticate E2EE group key";
-        expect(rejected.error).toBeInstanceOf(Error);
-        expect(rejected.error).toMatchObject({ message });
-        expect(thrown.error).toMatchObject({ message });
-        expect(thrown.error).not.toBe(envelopeFault);
-        expect(rejected.error).not.toBe(envelopeFault);
-        if (surface === "explain") {
-          expect((rejected.error as Error).cause).toBe(envelopeFault);
-          expect((thrown.error as Error).cause).toBe(envelopeFault);
+        const envelopeFault = new Error("Synthetic group envelope fault");
+        const signerFault = new Error("Synthetic group recovery signer fault");
+        let kind: "sync" | "async" | undefined;
+        let hits = 0;
+        let signerArmed = false;
+        let signerHits = 0;
+        const matches = (operation: "open" | "unwrap", context: Uint8Array) => {
+          if (method !== operation) return false;
+          const text = decoder.decode(context);
+          if (operation === "unwrap")
+            return text.includes("__e2ee_groups") && text.includes("verification");
+          return surface === "explain"
+            ? text.includes("jazz.e2ee.group.v1") && text.includes('["delivery",')
+            : text.includes("__e2ee_group_recovery_deliveries");
+        };
+        const adapters: JazzCrypto = {
+          ...f.native,
+          keyEnvelope: {
+            ...f.native.keyEnvelope,
+            // Non-async on purpose: a Promise-returning adapter can throw before returning.
+            open(pair, context, envelope) {
+              if (kind && matches("open", context)) {
+                hits++;
+                if (kind === "sync") throw envelopeFault;
+                return Promise.reject(envelopeFault);
+              }
+              return f.native.keyEnvelope.open(pair, context, envelope);
+            },
+            unwrap(key, context, envelope) {
+              if (kind && matches("unwrap", context)) {
+                hits++;
+                if (kind === "sync") throw envelopeFault;
+                return Promise.reject(envelopeFault);
+              }
+              return f.native.keyEnvelope.unwrap(key, context, envelope);
+            },
+          },
+          deviceSigner: {
+            ...f.native.deviceSigner,
+            verify(publicKey, bytes, signature) {
+              if (
+                signerArmed &&
+                decoder.decode(bytes).includes("__e2ee_group_recovery_deliveries")
+              ) {
+                signerHits++;
+                return Promise.reject(signerFault);
+              }
+              return f.native.deviceSigner.verify(publicKey, bytes, signature);
+            },
+          },
+        };
+        const ownerStore = f.memoryStore();
+        await ownerStore.update(() => ownerRecord);
+        owner = await f.open(adapters, ownerStore);
+        observer = await f.open(adapters);
+        await readyStatus(observer, root, groupId);
+        await observer.e2ee.recovery.use(root.material).wait();
+        expect(await owner.e2ee.explain({ groupId })).toEqual({ state: "ready" });
+        const activeOwner = owner;
+        const activeObserver = observer;
+        const invoke = async () => {
+          if (surface === "status") return recoveryPath(activeObserver, root, groupId);
+          if (surface === "use") return activeObserver.e2ee.recovery.use(root.material).wait();
+          return activeOwner.e2ee.explain({ groupId });
+        };
+        const attempt = async (fault: "sync" | "async") => {
+          kind = fault;
+          hits = 0;
+          try {
+            const result = await capture(invoke);
+            expect(hits).toBeGreaterThan(0);
+            return result;
+          } finally {
+            kind = undefined;
+          }
+        };
+        const rejected = await attempt("async");
+        const thrown = await attempt("sync");
+        // Signer failures are operational, never unusable-envelope candidate failures.
+        signerArmed = true;
+        try {
+          await expect(observer.e2ee.recovery.status(root.material)).rejects.toBe(signerFault);
+          expect(signerHits).toBeGreaterThan(0);
+        } finally {
+          signerArmed = false;
         }
-        expect(thrown.error).toEqual(rejected.error);
+        await readyStatus(observer, root, groupId);
+        if (surface === "status") {
+          expect(rejected).toMatchObject({
+            ok: true,
+            value: { validation: "unavailable", reason: "unusable-recovery-delivery" },
+          });
+          expect(thrown).toEqual(rejected);
+        } else {
+          expect(rejected.ok).toBe(false);
+          expect(thrown.ok).toBe(false);
+          if (rejected.ok || thrown.ok) throw new Error("Faulty group envelope was accepted");
+          const message = surface === "use" ? exhausted : "Unable to authenticate E2EE group key";
+          expect(rejected.error).toBeInstanceOf(Error);
+          expect(rejected.error).toMatchObject({ message });
+          expect(thrown.error).toMatchObject({ message });
+          expect(thrown.error).not.toBe(envelopeFault);
+          expect(rejected.error).not.toBe(envelopeFault);
+          if (surface === "explain") {
+            expect((rejected.error as Error).cause).toBe(envelopeFault);
+            expect((thrown.error as Error).cause).toBe(envelopeFault);
+          }
+          expect(thrown.error).toEqual(rejected.error);
+        }
+      } finally {
+        await Promise.all(
+          [owner, observer].filter((db): db is Db => db !== undefined).map((db) => f.close(db)),
+        );
       }
-    } finally {
-      await f.cleanup();
-    }
-  },
-  180000,
-);
+    },
+    180000,
+  );
+});
 
 it("tries another protected recovery root when the first group delivery is unusable", async () => {
   const f = await fixture();
