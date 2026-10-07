@@ -1503,6 +1503,98 @@ fn retired_shared_shape_handoff_releases_its_admitted_binding() {
     );
 }
 
+/// Cancelling Alice's cold receiver pruning cannot orphan her owned shape or
+/// lose its retraction while Bob retains the same recursive graph prefix.
+///
+/// drop alice -> detach + cold retraction waits -> cancel prune -> bob receives next row
+#[test]
+fn cancelled_cold_receiver_pruning_retires_owned_shape_before_waiting() {
+    let (storage, control) = TestStorage::controlled(&["edges"]);
+    let mut database = block_on(Database::new(edges_schema(), storage.clone())).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let empty = database.runtime_stats();
+    let binding = RecordDescriptor::new([("start", ColumnType::U64)]);
+    let terminal = |sink: &str| {
+        groove::ivm::RoutedMultisinkTerminal::new(
+            sink,
+            bound_cold_reachability_graph("cold_prune_reach", binding),
+            ["src"],
+            ["src", "dst"],
+        )
+    };
+    let bob_shape =
+        block_on(database.prepare_shared([terminal("bob")], "cold_prune_reach", binding)).unwrap();
+    let bob = block_on(database.bind_shape(bob_shape.id(), &[Value::U64(9)])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        bob.try_recv().unwrap().sinks["bob"].to_values().unwrap(),
+        Vec::new()
+    );
+    let before = database.runtime_stats();
+    let alice_shape =
+        block_on(database.prepare_shared([terminal("alice")], "cold_prune_reach", binding))
+            .unwrap();
+    assert_ne!(alice_shape.id(), bob_shape.id());
+    let alice = block_on(database.bind_shape(alice_shape.id(), &[Value::U64(1)])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    let mut rows = alice.try_recv().unwrap().sinks["alice"]
+        .to_values()
+        .unwrap();
+    rows.sort_by_key(|(values, _)| match &values[1] {
+        Value::U64(destination) => *destination,
+        _ => panic!("destinations are u64"),
+    });
+    assert_eq!(
+        rows,
+        vec![
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(1), Value::U64(3)], 1),
+        ]
+    );
+    assert!(bob.try_recv().is_err());
+
+    storage.evict_scans("edges");
+    control.take_observed();
+    let polls_before = control.poll_count(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    drop(alice);
+    let mut pruning = Box::pin(database.prune_dropped_subscriptions());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(pruning.as_mut().poll(&mut context), Poll::Pending));
+    assert!(control.poll_count(TestStorageOperation::ScanOpen) > polls_before);
+    drop(pruning);
+    // Rows alone cannot detect the now-ownerless shape retained across cancellation.
+    let cancelled = database.runtime_stats();
+    assert_eq!(
+        cancelled.active_prepared_shapes,
+        before.active_prepared_shapes
+    );
+    assert_eq!(cancelled.active_subscriptions, before.active_subscriptions);
+    assert_eq!(cancelled.active_shape_params, before.active_shape_params);
+    assert_eq!(cancelled.graph_nodes, before.graph_nodes);
+
+    control.resume();
+    let mut update = database.open_batch();
+    update.insert("edges", vec![Value::U64(3), Value::U64(9), Value::U64(10)]);
+    block_on(database.commit_batch(update)).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        bob.try_recv().unwrap().sinks["bob"].to_values().unwrap(),
+        vec![(vec![Value::U64(9), Value::U64(10)], 1)]
+    );
+    database.unsubscribe(bob.id());
+    block_on(database.drive_progress()).unwrap();
+    let after = database.runtime_stats();
+    assert_eq!(after.active_prepared_shapes, empty.active_prepared_shapes);
+    assert_eq!(after.active_subscriptions, empty.active_subscriptions);
+    assert_eq!(after.active_shape_params, empty.active_shape_params);
+    assert_eq!(after.graph_nodes, empty.graph_nodes);
+}
+
 #[test]
 fn cancelled_one_shot_query_discards_ephemeral_graph_and_hydration_state() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
