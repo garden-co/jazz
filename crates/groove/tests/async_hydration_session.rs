@@ -1316,21 +1316,9 @@ fn cancelled_prepared_bind_discards_binding_tick_and_subscription_state() {
     );
 }
 
-/// Cancelling Alice's cold live admission leaves Bob's binding and future rows intact.
-///
-/// bob live -> alice admission waits on storage -> cancel alice -> bind alice again
-#[test]
-fn cancelled_cold_live_admission_releases_only_its_unpublished_binding() {
-    let (storage, control) = TestStorage::controlled(&["edges"]);
-    let mut database = block_on(Database::new(edges_schema(), storage.clone())).unwrap();
-    let mut seed = database.open_batch();
-    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
-    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
-    block_on(database.commit_batch(seed)).unwrap();
-    let empty = database.runtime_stats();
-    let binding = RecordDescriptor::new([("start", ColumnType::U64)]);
+fn bound_cold_reachability_graph(shape: &str, binding: RecordDescriptor) -> GraphBuilder {
     let seed = GraphBuilder::join(
-        GraphBuilder::binding_source("cancelled_live_reach", binding),
+        GraphBuilder::binding_source(shape, binding),
         edge_pairs(),
         ["start"],
         ["src"],
@@ -1347,7 +1335,23 @@ fn cancelled_cold_live_admission_releases_only_its_unpublished_binding() {
         ProjectField::renamed("left.src", "src"),
         ProjectField::renamed("right.dst", "dst"),
     ]);
-    let graph = GraphBuilder::recursive(seed, step, "cancelled_frontier", 16);
+    GraphBuilder::recursive(seed, step, "cancelled_frontier", 16)
+}
+
+/// Cancelling Alice's cold live admission leaves Bob's binding and future rows intact.
+///
+/// bob live -> alice admission waits on storage -> cancel alice -> bind alice again
+#[test]
+fn cancelled_cold_live_admission_releases_only_its_unpublished_binding() {
+    let (storage, control) = TestStorage::controlled(&["edges"]);
+    let mut database = block_on(Database::new(edges_schema(), storage.clone())).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let empty = database.runtime_stats();
+    let binding = RecordDescriptor::new([("start", ColumnType::U64)]);
+    let graph = bound_cold_reachability_graph("cancelled_live_reach", binding);
     let shape =
         block_on(database.prepare_one_sink(graph, "cancelled_live_reach", binding, ["src"]))
             .unwrap();
@@ -1415,6 +1419,88 @@ fn cancelled_cold_live_admission_releases_only_its_unpublished_binding() {
     assert_eq!(after.active_subscriptions, empty.active_subscriptions);
     assert_eq!(after.active_prepared_shapes, empty.active_prepared_shapes);
     assert_eq!(after.graph_nodes, empty.graph_nodes);
+}
+
+/// Alice's last receiver can retire a shared shape while a new binding is admitted.
+/// Failed handoff must still release that binding without disturbing Bob's view.
+///
+/// alice empty route -> new binding waits -> drop alice -> retire shape -> handoff error
+#[test]
+fn retired_shared_shape_handoff_releases_its_admitted_binding() {
+    let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("albums", vec![Value::U64(7), Value::String("Bob".into())]);
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let bob = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(7), Value::String("Bob".into())], 1)]
+    );
+    let before = database.runtime_stats();
+    let binding = RecordDescriptor::new([("start", ColumnType::U64)]);
+    let shape = block_on(database.prepare_shared(
+        [groove::ivm::RoutedMultisinkTerminal::new(
+            "reach",
+            bound_cold_reachability_graph("retired_live_reach", binding),
+            std::iter::empty::<&str>(),
+            ["src", "dst"],
+        )],
+        "retired_live_reach",
+        binding,
+    ))
+    .unwrap();
+    let alice = block_on(database.bind_shape(shape.id(), &[Value::U64(9)])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        alice.try_recv().unwrap().sinks["reach"]
+            .to_values()
+            .unwrap(),
+        Vec::new()
+    );
+
+    storage.evict_scans("edges");
+    control.take_observed();
+    let polls_before = control.poll_count(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let values = [Value::U64(1)];
+    let mut admission = Box::pin(database.bind_shape(shape.id(), &values));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        admission.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(control.poll_count(TestStorageOperation::ScanOpen) > polls_before);
+    drop(alice);
+    control.resume();
+    assert!(matches!(
+        block_on(admission),
+        Err(DatabaseError::IvmRuntime(groove::ivm::IvmRuntimeError::PreparedShapeNotFound(id)))
+            if id == shape.id()
+    ));
+    block_on(database.drive_progress()).unwrap();
+    // The shape ID is already gone: only the captured source identity can clean up.
+    let after = database.runtime_stats();
+    assert_eq!(after.active_shape_params, before.active_shape_params);
+    assert_eq!(after.active_prepared_shapes, before.active_prepared_shapes);
+    assert_eq!(after.active_subscriptions, before.active_subscriptions);
+    assert_eq!(after.graph_nodes, before.graph_nodes);
+    assert!(bob.try_recv().is_err());
+
+    let mut update = database.open_batch();
+    update.insert(
+        "albums",
+        vec![Value::U64(8), Value::String("Bob again".into())],
+    );
+    block_on(database.commit_batch(update)).unwrap();
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(8), Value::String("Bob again".into())], 1)]
+    );
 }
 
 #[test]
