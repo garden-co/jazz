@@ -4533,12 +4533,6 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
 fn core_read_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
     match tier {
         "local-first" | "LocalFirst" => Ok(CoreDurabilityTier::Local),
-        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => Err(napi::Error::from_reason(
-            "the local-first-unless-empty tier was removed; use local-first with first_load_remote_wait_ms",
-        )),
-        "remote-if-possible" | "RemoteIfPossible" => Err(napi::Error::from_reason(
-            "the remote-if-possible tier was removed; use local-first with first_load_remote_wait_ms, or remote for server-confirmed reads",
-        )),
         "remote" | "Remote" => Ok(CoreDurabilityTier::Global),
         _ => core_durability_tier_from_str(tier),
     }
@@ -5511,8 +5505,14 @@ mod tests {
             "RemoteIfPossible",
             "local-first-unless-empty",
             "LocalFirstUnlessEmpty",
+            "core",
+            "Core",
+            "invalid-tier",
         ] {
-            assert!(core_read_tier_from_str(name).is_err(), "{name} was removed");
+            assert_eq!(
+                core_read_tier_from_str(name).unwrap_err().reason,
+                format!("unknown durability tier {name}"),
+            );
         }
         assert!(
             super::core_durability_tier_from_str("remote").is_err(),

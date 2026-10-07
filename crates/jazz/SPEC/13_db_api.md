@@ -414,8 +414,9 @@ is already a `Global` read through the owner.
 
 Binding read-tier strings: `local-first` / `LocalFirst` with a non-zero server
 wait select the `WaitForRemote` gate; `remote` / `Remote` are strict remote.
-The removed `local-first-unless-empty` and `remote-if-possible` names are
-rejected with an error. The host bindings' internal read entrypoints (fed by
+Unsupported names use the bindings' ordinary unknown-tier errors; migration
+guidance for removed names lives in the TypeScript public boundary. The host
+bindings' internal read entrypoints (fed by
 the TypeScript runtime after it lowers the product tier) and low-level
 `ReadOpts` still take the `DurabilityTier` names `local` and `global`.
 

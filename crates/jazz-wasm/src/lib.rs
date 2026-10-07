@@ -3433,26 +3433,10 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
 /// Read-only binding lowering. Write waits keep `durability_tier_from_str`, so
 /// a product read choice can never change write-settlement semantics.
 fn read_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
-    if let Some(message) = removed_read_tier(tier) {
-        return Err(JsValue::from_str(message));
-    }
     match tier {
         "local-first" | "LocalFirst" => Ok(DurabilityTier::Local),
         "remote" | "Remote" => Ok(DurabilityTier::Global),
         _ => durability_tier_from_str(tier),
-    }
-}
-
-/// Error message for a read tier name that was removed, if `tier` is one.
-fn removed_read_tier(tier: &str) -> Option<&'static str> {
-    match tier {
-        "remote-if-possible" | "RemoteIfPossible" => Some(
-            "the remote-if-possible tier was removed; use local-first with first_load_remote_wait_ms, or remote for server-confirmed reads",
-        ),
-        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => Some(
-            "the local-first-unless-empty tier was removed; use local-first with first_load_remote_wait_ms",
-        ),
-        _ => None,
     }
 }
 
@@ -4272,19 +4256,32 @@ mod dynamic_schema_view_tests {
             read_tier_from_str("remote").expect("strict remote read tier"),
             DurabilityTier::Global
         );
-        for name in [
-            "remote-if-possible",
-            "RemoteIfPossible",
-            "local-first-unless-empty",
-            "LocalFirstUnlessEmpty",
-        ] {
-            assert!(removed_read_tier(name).is_some(), "{name} was removed");
-        }
         assert_eq!(
             durability_tier_from_str("local").expect("legacy write tier"),
             DurabilityTier::Local,
             "the write parser remains the separate legacy durability boundary"
         );
+    }
+
+    /// The JS binding must reject unsupported names through its normal parser.
+    /// This runs in WASM because constructing JsValue errors needs a JS host.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn read_tiers_reject_unknown_names() {
+        for name in [
+            "remote-if-possible",
+            "RemoteIfPossible",
+            "local-first-unless-empty",
+            "LocalFirstUnlessEmpty",
+            "core",
+            "Core",
+            "invalid-tier",
+        ] {
+            assert_eq!(
+                read_tier_from_str(name).unwrap_err().as_string().unwrap(),
+                format!("unknown durability tier {name}"),
+            );
+        }
     }
 
     #[test]

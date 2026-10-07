@@ -6868,24 +6868,6 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
         } else {
             key.as_str()
         };
-        if key == "tier"
-            && matches!(
-                item.as_str(),
-                Some("remote-if-possible" | "RemoteIfPossible")
-            )
-        {
-            return Err(failure("the remote-if-possible tier was removed; use local-first with first_load_remote_wait_ms, or remote for server-confirmed reads".to_owned()));
-        }
-        if key == "tier"
-            && matches!(
-                item.as_str(),
-                Some("local-first-unless-empty" | "LocalFirstUnlessEmpty")
-            )
-        {
-            return Err(failure(
-                "the local-first-unless-empty tier was removed; use local-first with first_load_remote_wait_ms".to_owned(),
-            ));
-        }
         let normalized = match (key, item.as_str()) {
             ("tier", Some("local" | "Local" | "local-first" | "LocalFirst")) => Some("Local"),
             ("tier", Some("remote" | "Remote")) => Some("Global"),
@@ -16444,9 +16426,9 @@ mod tests {
     fn foreground_reads_reject_unknown_tiers() {
         // Internal C-ABI receipt, like the transaction-command test above:
         // React Native reaches read options only through this byte command
-        // family, so an unknown tier must fail here with the same
-        // Core-only guidance the TypeScript client gives, rather than being
-        // silently treated as some other tier.
+        // family, so unknown tiers must fail at deserialization rather than
+        // being silently treated as another tier. Migration guidance belongs
+        // to the TypeScript public boundary.
         let directory = tempfile::tempdir().unwrap();
         let host = jazz_native_relay_host_new();
         let capability = unsafe {
@@ -16506,7 +16488,16 @@ mod tests {
         };
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
 
-        for tier in ["invalid-tier", "InvalidTier"] {
+        for tier in [
+            "invalid-tier",
+            "InvalidTier",
+            "remote-if-possible",
+            "RemoteIfPossible",
+            "local-first-unless-empty",
+            "LocalFirstUnlessEmpty",
+            "core",
+            "Core",
+        ] {
             let removed = format!(
                 "foreground NativeDb command failed: invalid read options: unknown variant `{tier}`, expected one of `None`, `Local`, `Global`"
             );
