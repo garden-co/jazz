@@ -5,8 +5,10 @@
 //! `cargo bench -p jazz-example-band-chat-benchmark --bench nightly`.
 //!
 //! Each timed input seeds its own band, so no sample sees another's writes or caches.
-//! Reads finalize the previous iteration's dropped subscription before the
-//! timing starts (`settle` as the input), so teardown is never measured.
+//! Mutating cases retain their input until the next input generation, which
+//! drops it outside timing. Read cases use `settle` as input for the same reason.
+
+use std::cell::RefCell;
 
 use jazz_example_band_chat_benchmark::deep_room::{
     self, DeepRoom, LiveInbox, LiveUnreadCount, LiveWindow, ReceiptsFanout, Shape,
@@ -78,9 +80,18 @@ fn band_chat_search_room(bencher: divan::Bencher<'_, '_>, _deep: usize) {
 /// reaches the page.
 #[divan::bench(args = [DEEP], sample_count = 10, sample_size = 1)]
 fn band_chat_live_window_new_message(bencher: divan::Bencher<'_, '_>, _deep: usize) {
+    let previous = RefCell::new(None);
     bencher
-        .with_inputs(|| LiveWindow::new(band()))
-        .bench_local_values(|mut window| window.member_sends(1));
+        .with_inputs(|| {
+            drop(previous.replace(None));
+            LiveWindow::new(band())
+        })
+        .bench_local_values(|mut window| {
+            let received = window.member_sends(1);
+            previous.replace(Some(window));
+            received
+        });
+    drop(previous.into_inner());
 }
 
 /// The reader's room list: their 100 rooms, each with its newest message and
@@ -97,9 +108,18 @@ fn band_chat_inbox_open(bencher: divan::Bencher<'_, '_>, _rooms: usize) {
 /// becomes that room's newest.
 #[divan::bench(args = [INBOX_ROOMS], sample_count = 10, sample_size = 1)]
 fn band_chat_inbox_new_message(bencher: divan::Bencher<'_, '_>, _rooms: usize) {
+    let previous = RefCell::new(None);
     bencher
-        .with_inputs(|| LiveInbox::new(band()))
-        .bench_local_values(|mut inbox| inbox.message_lands());
+        .with_inputs(|| {
+            drop(previous.replace(None));
+            LiveInbox::new(band())
+        })
+        .bench_local_values(|mut inbox| {
+            let updated = inbox.message_lands();
+            previous.replace(Some(inbox));
+            updated
+        });
+    drop(previous.into_inner());
 }
 
 /// The reader's unread count for the deep room: messages from others after
@@ -116,9 +136,18 @@ fn band_chat_unread_count_deep(bencher: divan::Bencher<'_, '_>, _deep: usize) {
 /// up.
 #[divan::bench(args = [DEEP], sample_count = 10, sample_size = 1)]
 fn band_chat_unread_count_new_message(bencher: divan::Bencher<'_, '_>, _deep: usize) {
+    let previous = RefCell::new(None);
     bencher
-        .with_inputs(|| LiveUnreadCount::new(band()))
-        .bench_local_values(|mut count| count.message_arrives());
+        .with_inputs(|| {
+            drop(previous.replace(None));
+            LiveUnreadCount::new(band())
+        })
+        .bench_local_values(|mut count| {
+            let updated = count.message_arrives();
+            previous.replace(Some(count));
+            updated
+        });
+    drop(previous.into_inner());
 }
 
 /// All 50 members have the deep room open with everyone's markers (check
@@ -126,9 +155,18 @@ fn band_chat_unread_count_new_message(bencher: divan::Bencher<'_, '_>, _deep: us
 /// journaled in one transaction, and every open view shows it.
 #[divan::bench(args = [DEEP_MEMBERS], sample_count = 10, sample_size = 1)]
 fn band_chat_marker_move_fanout(bencher: divan::Bencher<'_, '_>, open_by: usize) {
+    let previous = RefCell::new(None);
     bencher
-        .with_inputs(|| ReceiptsFanout::new(band(), open_by))
-        .bench_local_values(|mut fanout| fanout.member_reads());
+        .with_inputs(|| {
+            drop(previous.replace(None));
+            ReceiptsFanout::new(band(), open_by)
+        })
+        .bench_local_values(|mut fanout| {
+            let updated = fanout.member_reads();
+            previous.replace(Some(fanout));
+            updated
+        });
+    drop(previous.into_inner());
 }
 
 /// "Read by" on a recent message in the 50-member deep room: members whose

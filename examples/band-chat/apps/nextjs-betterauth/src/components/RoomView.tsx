@@ -93,7 +93,11 @@ function cursorKey(cursor: HistoryCursor) {
 }
 
 export function mergeHistoryPages(...pages: ShownMessage[][]) {
-  return pages.flat().reverse();
+  const byId = new Map<string, ShownMessage>();
+  for (const page of pages) {
+    for (const message of page) byId.set(message.id, message);
+  }
+  return [...byId.values()].reverse();
 }
 
 export function RoomView({ summary, author }: { summary: RoomSummary; author: string }) {
