@@ -1,4 +1,5 @@
 import { PlatformURL } from "../runtime/platform-url.js";
+import { attachE2ee, type E2eeConfig } from "../e2ee/lifecycle.js";
 import { admitAccountConfig } from "./config-capability.js";
 import type { AccountHandle } from "./state.js";
 import {
@@ -15,6 +16,7 @@ import {
   parseJwtPayload,
 } from "../runtime/client-session.js";
 import { setTrustedReservedSession } from "../runtime/db-internal-session.js";
+import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 
 /** Public clients always select an enrolled account, never an unverified principal. */
 export type AccountDbConfig = Omit<
@@ -22,6 +24,7 @@ export type AccountDbConfig = Omit<
   "secret" | "jwtToken" | "cookieSession" | "adminSecret" | "accountId" | "accountRegistryAuthority"
 > & {
   account: AccountHandle;
+  e2ee?: E2eeConfig;
 };
 
 /** One canonical application endpoint for enrollment and context scope validation. */
@@ -64,7 +67,7 @@ function accountContextScope(config: AccountDbConfig): string {
 /** @internal Resolve a handle for a host adapter; never accept copied credentials. */
 export async function resolveAccountRuntimeConfig(config: AccountDbConfig): Promise<DbConfig> {
   const registry = accountContextScope(config);
-  const { account, ...runtimeConfig } = config;
+  const { account, e2ee: _e2ee, ...runtimeConfig } = config;
   const jwtToken = await accountToken(account, registry);
   const resolved: DbConfig = {
     ...runtimeConfig,
@@ -111,6 +114,7 @@ export async function createAccountDbWithRuntimeSource(
       throw new AccountAuthError("account_logged_out");
     }
     const opened = db;
+    if (config.e2ee) attachE2ee(opened, account, config.e2ee, config.env ?? "dev");
     let timer: ReturnType<typeof setTimeout> | undefined;
     let refreshing = false;
     let stopped = false;
@@ -151,7 +155,22 @@ export async function createAccountDbWithRuntimeSource(
     return opened;
   } catch (error) {
     unsubscribe();
-    if (!db) await runtimeSource.shutdown();
+    try {
+      if (db) {
+        db.abortGracefulShutdown();
+        try {
+          await db.shutdown();
+        } catch (cleanupError) {
+          // A cancelled sync wait resets the shutdown gate before disposal.
+          // Only that recoverable phase needs a second, non-graceful close.
+          if (cleanupError instanceof GracefulShutdownSyncError) await db.shutdown();
+        }
+      } else {
+        await runtimeSource.shutdown();
+      }
+    } catch {
+      // The initialization failure remains the caller's actionable error.
+    }
     throw error;
   }
 }

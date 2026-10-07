@@ -558,6 +558,183 @@ fn local_bindings_of_one_shape_share_one_prepared_source() {
     block_on(db.close()).expect("close sharing fixture");
 }
 
+/// alice's Local-tier team windows reuse one prepared source within the same
+/// admitted request scope, even after the first literal subscriber retires:
+///
+/// ```text
+/// open A (literal) -> open B (prepared) -> drop A -> tick -> open C
+///                         B stays live ----------------------^
+/// ```
+///
+/// B and C must keep delivering their own rows and deltas under insert, move
+/// and delete. Public rows alone cannot prove graph reuse, so the established
+/// runtime-stat work-bound seam also requires C to add a binding but no
+/// arrangements while B retains the prepared source.
+#[test]
+fn local_request_scope_reuses_prepared_source_after_literal_subscriber_retires() {
+    let alice = AuthorSubject::for_test_uuid(uuid::uuid!("71000000-0000-0000-0000-0000000000a1"));
+    let db = open_db_as(alice);
+    for seed in 0..9 {
+        insert_document(&db, row(seed), row(1_000 + seed % 3), seed);
+    }
+    let query = Query::from("documents")
+        .filter(eq(col("team"), param("team")))
+        .order_by("updated_at", OrderDirection::Desc)
+        .limit(2);
+    let prepare = |team: u64| {
+        team_binding(&db, &query, row(1_000 + team)).with_identity_claims(alice, BTreeMap::new())
+    };
+    let prepared_a = prepare(0);
+    let prepared_b = prepare(1);
+    let prepared_c = prepare(2);
+    let mut stream_a =
+        block_on(db.subscribe(&prepared_a, local_read_opts())).expect("subscribe alice A");
+    assert_eq!(
+        take_initial_reset("alice A", &mut stream_a),
+        BTreeSet::from([row(3), row(6)])
+    );
+    let mut stream_b =
+        block_on(db.subscribe(&prepared_b, local_read_opts())).expect("subscribe alice B");
+    let mut rows_b = take_initial_reset("alice B", &mut stream_b);
+    assert_eq!(rows_b, BTreeSet::from([row(4), row(7)]));
+
+    drop(stream_a);
+    block_on(db.tick()).expect("retire alice's literal subscriber");
+    let before_c = db.runtime_stats_for_test();
+    let mut stream_c =
+        block_on(db.subscribe(&prepared_c, local_read_opts())).expect("subscribe alice C");
+    let mut rows_c = take_initial_reset("alice C", &mut stream_c);
+    let after_c = db.runtime_stats_for_test();
+    assert_eq!(
+        after_c.active_subscriptions,
+        before_c.active_subscriptions + 1
+    );
+    assert_eq!(
+        after_c.active_shape_params,
+        before_c.active_shape_params + 1
+    );
+    assert_eq!(
+        after_c.arrangement_count, before_c.arrangement_count,
+        "C must reuse B's prepared source after A's literal token retires"
+    );
+
+    let check = |label: &str,
+                 prepared: &PreparedQuery,
+                 stream: &mut SubscriptionStream,
+                 rows: &mut BTreeSet<RowUuid>,
+                 expected: &[u64],
+                 added: &[u64],
+                 removed: &[u64]| {
+        let delta = apply_pending_events(label, stream, rows);
+        assert_eq!(delta.resets, 0, "{label} must remain incremental");
+        assert_eq!(
+            delta.added,
+            added.iter().copied().map(row).collect(),
+            "{label} additions"
+        );
+        assert_eq!(
+            delta.removed,
+            removed.iter().copied().map(row).collect(),
+            "{label} removals"
+        );
+        assert!(delta.updated.is_empty(), "{label} unexpected updates");
+        let expected = expected.iter().copied().map(row).collect::<Vec<_>>();
+        assert_eq!(
+            *rows,
+            expected.iter().copied().collect(),
+            "{label} live rows"
+        );
+        assert_ordered_rows(&db, prepared, &expected, label);
+    };
+    check(
+        "B opening",
+        &prepared_b,
+        &mut stream_b,
+        &mut rows_b,
+        &[7, 4],
+        &[],
+        &[],
+    );
+    check(
+        "C opening",
+        &prepared_c,
+        &mut stream_c,
+        &mut rows_c,
+        &[8, 5],
+        &[],
+        &[],
+    );
+
+    insert_document(&db, row(9), row(1_001), 20);
+    check(
+        "B insert",
+        &prepared_b,
+        &mut stream_b,
+        &mut rows_b,
+        &[9, 7],
+        &[9],
+        &[4],
+    );
+    check(
+        "C after B insert",
+        &prepared_c,
+        &mut stream_c,
+        &mut rows_c,
+        &[8, 5],
+        &[],
+        &[],
+    );
+
+    block_on(db.update(
+        "documents",
+        row(9),
+        BTreeMap::from([("team".to_owned(), Value::Uuid(row(1_002).0))]),
+        Default::default(),
+    ))
+    .expect("move document from B to C");
+    check(
+        "B after move",
+        &prepared_b,
+        &mut stream_b,
+        &mut rows_b,
+        &[7, 4],
+        &[4],
+        &[9],
+    );
+    check(
+        "C after move",
+        &prepared_c,
+        &mut stream_c,
+        &mut rows_c,
+        &[9, 8],
+        &[9],
+        &[5],
+    );
+
+    block_on(db.delete("documents", row(9), Default::default())).expect("delete C document");
+    check(
+        "B after C delete",
+        &prepared_b,
+        &mut stream_b,
+        &mut rows_b,
+        &[7, 4],
+        &[],
+        &[],
+    );
+    check(
+        "C delete",
+        &prepared_c,
+        &mut stream_c,
+        &mut rows_c,
+        &[8, 5],
+        &[5],
+        &[9],
+    );
+
+    drop((stream_b, stream_c));
+    block_on(db.close()).expect("close request-scope reuse fixture");
+}
+
 /// A claim the query itself reads is bound from the reader's session on the
 /// shared Local-tier path, like an ordinary parameter:
 ///
