@@ -628,14 +628,14 @@ describe("public read tiers", () => {
     (name) => {
       const removed = name as never;
       expect(() => publicQueryExecutionOptions({ tier: removed })).toThrow(
-        `The "${name}" ${name === "local" || name === "global" || name === "core" ? "read " : ""}tier was removed`,
+        `The "${name}" ${name === "local" || name === "global" || name === "core" || name === "edge" ? "read " : ""}tier was removed`,
       );
     },
   );
 
-  it("rejects an unknown read tier", () => {
-    expect(() => publicQueryExecutionOptions({ tier: "fast" as never })).toThrow(
-      'Unknown read tier "fast"; expected "local-first" or "remote".',
+  it.each(["fast"])("rejects unknown read tier %s", (name) => {
+    expect(() => publicQueryExecutionOptions({ tier: name as never })).toThrow(
+      `Unknown read tier "${name}"; expected "local-first" or "remote".`,
     );
   });
 

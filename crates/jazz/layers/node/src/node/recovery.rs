@@ -321,8 +321,7 @@ where
     }
 }
 
-// The current API cannot author a legacy edge receipt. Only this test fixture
-// writes the retired tag; the replay tests use normal Db reopen and transport.
+// Historical exclusive-read evidence fixture support.
 #[cfg(any(test, feature = "testing"))]
 impl<S: OrderedKvStorage> NodeState<S> {
     /// Rewrite a pending transaction's audit row as a build from before
@@ -351,26 +350,6 @@ impl<S: OrderedKvStorage> NodeState<S> {
         batch.update("jazz_transactions", values);
         let applied = self.database.apply_batch(batch).await.unwrap();
         let persisted = applied.persist().await;
-        self.database.finish_persistence(persisted).unwrap();
-    }
-
-    #[doc(hidden)]
-    pub async fn persist_legacy_edge_receipt_for_test(&mut self, tx_id: TxId) {
-        let stored = self.query_transaction(tx_id).await.unwrap().unwrap();
-        let mut values = transaction_values(
-            stored.node_alias,
-            &stored.tx,
-            Fate::Accepted,
-            None,
-            DurabilityTier::Local,
-            Value::Nullable(None),
-        )
-        .unwrap();
-        values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(2);
-        let mut batch = self.database.open_batch();
-        batch.update("jazz_transactions", values);
-        let applied = self.database.apply_batch(batch).await.unwrap();
-        let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted).unwrap();
     }
 }

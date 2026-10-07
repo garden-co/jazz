@@ -218,17 +218,10 @@ Optional keys: `only` (cell names; naming an opt-in cell runs it),
 
 Checks that only make sense for some version pairs are opt-in:
 
-- `legacyEdgeTier: true`: old clients also write and read with the retired
-  `"edge"` durability name (alpha.56 and earlier).
-- `serverEdges: true`: runs the `edge` cells, which start an old server as an
-  edge (`--upstream-url`) in front of a new Core and check that the new CLI
-  refuses `--upstream-url` (alpha.56 -> alpha.57, where server edges were removed).
 - `oversized: { "count": 4800, "size": 60000, "batch": 20, "readerMinutes": 15 }`:
   runs the `oversized-first-sync-*` cells, where a fresh whole-table subscriber's
   first snapshot exceeds the routed payload limit (#3520). These take a long time;
   raise `deadlineMinutes` (150 was enough for the alpha.57 run).
-
-The alpha.56 -> alpha.57 check used all three.
 
 Every other cell runs by default. That includes the `rolling-upgrade-*` cells,
 which restart the old server as the new version on the same store and port;

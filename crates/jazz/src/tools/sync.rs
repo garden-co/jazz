@@ -3,42 +3,9 @@ use uuid::Uuid;
 
 /// Persistence tier: local storage or the authoritative Core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-#[serde(from = "DurabilityEncoding", into = "DurabilityEncoding")]
 pub enum DurabilityTier {
     Local,
     GlobalServer,
-}
-
-// Preserve the facade's existing serialized tags, independently of the core
-// transaction encoding. The removed intermediate tier is decode-only.
-#[derive(Serialize, Deserialize)]
-#[allow(deprecated)]
-enum DurabilityEncoding {
-    Local,
-    #[deprecated(
-        note = "the edge tier was removed in alpha.57; decode-only so old peers' edge acks still decode, as Local. Never encode it"
-    )]
-    EdgeServer,
-    GlobalServer,
-}
-
-#[allow(deprecated)]
-impl From<DurabilityEncoding> for DurabilityTier {
-    fn from(value: DurabilityEncoding) -> Self {
-        match value {
-            DurabilityEncoding::Local | DurabilityEncoding::EdgeServer => Self::Local,
-            DurabilityEncoding::GlobalServer => Self::GlobalServer,
-        }
-    }
-}
-
-impl From<DurabilityTier> for DurabilityEncoding {
-    fn from(value: DurabilityTier) -> Self {
-        match value {
-            DurabilityTier::Local => Self::Local,
-            DurabilityTier::GlobalServer => Self::GlobalServer,
-        }
-    }
 }
 
 /// Product-level consistency choice for reads.
@@ -102,11 +69,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn durability_preserves_facade_encoding_without_an_edge_api() {
+    fn durability_v2_has_only_local_and_global_tags() {
         for (bytes, expected, encoded) in [
             (vec![0], DurabilityTier::Local, vec![0]),
-            (vec![1], DurabilityTier::Local, vec![0]),
-            (vec![2], DurabilityTier::GlobalServer, vec![2]),
+            (vec![1], DurabilityTier::GlobalServer, vec![1]),
         ] {
             assert_eq!(
                 postcard::from_bytes::<DurabilityTier>(&bytes).unwrap(),
@@ -114,6 +80,7 @@ mod tests {
             );
             assert_eq!(postcard::to_allocvec(&expected).unwrap(), encoded);
         }
+        assert!(postcard::from_bytes::<DurabilityTier>(&[2]).is_err());
         assert_eq!(
             ReadTier::Remote.legacy_durability_tier(),
             DurabilityTier::GlobalServer

@@ -602,9 +602,7 @@ Local persistence is not permission to discard an upstream outbox entry.
 A pending upload remains until Core supplies terminal rejection or an Accepted
 receipt with both Global durability and its assigned `GlobalTime`. View
 hydration, locally replayed updates, and receipts from a detached or superseded
-connection do not release that obligation (`INV-API-34`). Legacy edge-only
-acceptance is treated as pending local work, subject to the identity checks
-above and chapter 9's migration rules.
+connection do not release that obligation (`INV-API-34`).
 
 Field-level semantics are the same regardless of the write method. An explicit
 null clears a nullable column. A JSON column accepts only syntactically valid

@@ -141,7 +141,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     receipt(`cleanup:done; pinned-phase=${pinnedCorpusPhase}`);
   });
 
-  it("opens, extends, and reopens the published alpha.54 browser corpus", async () => {
+  it("rejects the published alpha.54 browser corpus without rewriting it", async () => {
     const digest = Array.from(
       new Uint8Array(
         await crypto.subtle.digest("SHA-256", new TextEncoder().encode(publishedAlpha54Corpus)),
@@ -150,7 +150,6 @@ describe("browser Jazz storage compatibility corpus", () => {
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
     expect(digest).toBe("e1aa237f375db4d060c2a3fe13fa443659fba55c8695f99993e17e200c897b00");
-    const publishedApp = s.defineApp({ notes: s.table({ body: s.string() }, {}) });
     const appId = "00000000-0000-4000-8000-000000000054";
     const accounts = await createAccountManager({ appId, serverUrl: "http://127.0.0.1:1" });
     const dbName = uniqueDbName("published-alpha54-compat");
@@ -161,27 +160,17 @@ describe("browser Jazz storage compatibility corpus", () => {
       ),
       driver: { type: "persistent", dbName },
     };
-    let db = await openPersistentDb(config);
+    const db = await openPersistentDb(config);
     const physicalDbName = await trackPhysicalDatabase(dbName);
     await db.shutdown();
     openDbs.splice(openDbs.indexOf(db), 1);
     await IndexedDbPageStore.destroy(physicalDbName);
     await installRawRecords(physicalDbName, JSON.parse(publishedAlpha54Corpus));
     expect(await rawRecords(physicalDbName)).toEqual(JSON.parse(publishedAlpha54Corpus));
-    db = await openPersistentDb(config);
-    expect(await db.all(publishedApp.notes, { tier: ReadTier.LocalFirst })).toMatchObject([
-      { body: "published alpha.54 current" },
-    ]);
-    await db
-      .insert(publishedApp.notes, { body: "current main browser writer" })
-      .wait({ tier: "local" });
-    await db.shutdown();
-    openDbs.splice(openDbs.indexOf(db), 1);
-    db = await openPersistentDb(config);
-    const bodies = (await db.all(publishedApp.notes, { tier: ReadTier.LocalFirst }))
-      .map((row) => row.body)
-      .sort();
-    expect(bodies).toEqual(["current main browser writer", "published alpha.54 current"]);
+    await expect(createDb(config)).rejects.toThrow(
+      "Missing or invalid IndexedDB storage epoch manifest",
+    );
+    expect(await rawRecords(physicalDbName)).toEqual(JSON.parse(publishedAlpha54Corpus));
   }, 30_000);
 
   it("produces the current catalogue/history/branch/large-value corpus through public WasmDb", async () => {
@@ -254,9 +243,44 @@ describe("browser Jazz storage compatibility corpus", () => {
     try {
       db = await openPersistentDb(config);
       await db.disconnect();
+      const rawWhileReopened = await rawRecords(physicalDbName);
       expect(
         await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
       ).toMatchObject([{ branch: "main", title: "current title", body }]);
+      expect(
+        await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
+      ).toMatchObject([{ branch: "draft", title: "draft override", body }]);
+      await db.shutdown();
+      openDbs.splice(openDbs.indexOf(db), 1);
+      const afterReopen = await rawRecords(physicalDbName);
+      expectForegroundLeaseLifecycle(candidate, rawWhileReopened, afterReopen);
+      expect(normalizeRuntimeLeaseRecords(afterReopen)[INDEXEDDB_STORAGE_MANIFEST_STORE]).toEqual(
+        normalizeRuntimeLeaseRecords(candidate)[INDEXEDDB_STORAGE_MANIFEST_STORE],
+      );
+      expect(normalizeRuntimeLeaseRecords(corruptReusableLeaseHighWater(afterReopen))).not.toEqual(
+        normalizeRuntimeLeaseRecords(afterReopen),
+      );
+
+      db = await openPersistentDb(config);
+      await db.disconnect();
+      // Updates require this runtime to have observed the row after reopening.
+      expect(
+        await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
+      ).toMatchObject([{ title: "current title" }]);
+      await withTimeout(
+        db
+          .update(app.documents, initial.value, { title: "reopened writer" }, { branch: "main" })
+          .wait({ tier: "local" }),
+        10_000,
+        "reopened corpus write did not settle locally",
+      );
+      await db.shutdown();
+      openDbs.splice(openDbs.indexOf(db), 1);
+      db = await openPersistentDb(config);
+      await db.disconnect();
+      expect(
+        await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
+      ).toMatchObject([{ branch: "main", title: "reopened writer", body }]);
       expect(
         await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
       ).toMatchObject([{ branch: "draft", title: "draft override", body }]);
@@ -269,7 +293,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     await jazzStorageCorpusBrowserCommands().writeBrowserStorageCorpus(candidate);
   }, 90_000);
 
-  it("opens the pinned catalogue/history/branch/large-value corpus through public WasmDb", async () => {
+  it("rejects the pinned previous-durability corpus without rewriting it", async () => {
     pinnedCorpusPhase = "pinned-test:start";
     receipt(pinnedCorpusPhase);
     const rawBeforeReadOnlyInspection = JSON.parse(currentCorpus) as Record<string, string>;
@@ -301,8 +325,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     const secret = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
     const account = accounts.restoreLocalFirst(secret);
     expect(account.id).toBe(owner.auth.account);
-    // Omit serverUrl on the context: every pinned read and append is local,
-    // including the first open, so upstream cannot repair a missing page.
+    // Omit serverUrl: profile admission must reject using only the stored root.
     const config: DbConfig = {
       appId: owner.appId,
       account,
@@ -325,157 +348,10 @@ describe("browser Jazz storage compatibility corpus", () => {
       rawBeforeReadOnlyInspection,
     );
 
-    let db = await pinnedPhase("readonly-open", () => openPersistentDb(config, "pinned-readonly"));
-    // The persistent replica lives in the worker. Use the public local-first
-    // read across that hop. With no serverUrl, the worker cannot contact Core.
-    // Inspector LocalOnly reads only the foreground's in-memory rows.
-    const rawWhileReopened = await pinnedPhase("read-open-records", () =>
-      rawRecords(physicalDbName),
+    await expect(createDb(config)).rejects.toThrow(
+      "Missing or invalid IndexedDB storage epoch manifest",
     );
-    // Reopen must materialize the durable local replica without depending on
-    // a fresh remote-coverage round trip. The earlier global read proves the
-    // synced fixture; this is specifically the offline persistence boundary.
-    const reopenedMain = await pinnedPhase("readonly-main-query", () =>
-      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
-    );
-    const reopenedDraft = await pinnedPhase("readonly-draft-query", () =>
-      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
-    );
-    expect(reopenedMain).toHaveLength(1);
-    expect(reopenedDraft).toHaveLength(1);
-    expect(reopenedMain).toMatchObject({
-      0: { branch: "main", title: "current title", body: "large value ".repeat(20_000) },
-    });
-    expect(reopenedDraft).toMatchObject({
-      0: { branch: "draft", title: "draft override", body: "large value ".repeat(20_000) },
-    });
-    await pinnedPhase("readonly-shutdown", () => shutdownTrackedDb(db, "pinned-readonly"));
-    openDbs.splice(openDbs.indexOf(db), 1);
-    await pinnedPhase("readonly-settle", () => sleep(100));
-    const rawAfterReadOnlyInspection = await pinnedPhase("read-post-readonly-records", () =>
-      rawRecords(physicalDbName),
-    );
-    expectForegroundLeaseLifecycle(
-      rawBeforeReadOnlyInspection,
-      rawWhileReopened,
-      rawAfterReadOnlyInspection,
-    );
-    // The approved JPFK -> JSIR upgrade discards only derived scope caches and
-    // resume cursors. That first open intentionally changes B-tree pages; the
-    // storage manifest and native row semantics above must remain intact.
-    expect(
-      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection)[INDEXEDDB_STORAGE_MANIFEST_STORE],
-    ).toEqual(
-      normalizeRuntimeLeaseRecords(rawBeforeReadOnlyInspection)[INDEXEDDB_STORAGE_MANIFEST_STORE],
-    );
-    expect(rawAfterReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE]).not.toEqual(
-      rawBeforeReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE],
-    );
-
-    // Once the disposable cache generation is gone, a second read-only open
-    // must preserve the complete raw receipt, not merely decoded query rows.
-    db = await pinnedPhase("post-upgrade-readonly-open", () =>
-      openPersistentDb(config, "pinned-post-upgrade-readonly"),
-    );
-    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" })).toEqual(
-      reopenedMain,
-    );
-    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" })).toEqual(
-      reopenedDraft,
-    );
-    await pinnedPhase("post-upgrade-readonly-shutdown", () =>
-      shutdownTrackedDb(db, "pinned-post-upgrade-readonly"),
-    );
-    openDbs.splice(openDbs.indexOf(db), 1);
-    await pinnedPhase("post-upgrade-readonly-settle", () => sleep(100));
-    expect(normalizeRuntimeLeaseRecords(await rawRecords(physicalDbName))).toEqual(
-      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection),
-    );
-
-    // This planted high-water regression must remain visible through the raw
-    // receipt. In particular, normalization may hide a fresh opaque lease
-    // token, but never a node identity, retired set, or HLC floor.
-    const plantedLeaseRegression = corruptReusableLeaseHighWater(rawAfterReadOnlyInspection);
-    expect(normalizeRuntimeLeaseRecords(plantedLeaseRegression)).not.toEqual(
-      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection),
-    );
-
-    // Append with today's writer only after the historical read-only/raw-byte
-    // receipt above. Both generations must survive a fresh public open of
-    // this same authenticated principal root.
-    db = await pinnedPhase("writer-open", () => openPersistentDb(config, "pinned-writer"));
-    const historicalProjects = await pinnedPhase("writer-projects-query", () =>
-      db.all(app.projects, { tier: ReadTier.LocalFirst }),
-    );
-    const currentBody = "current writer large value ".repeat(12_000);
-    const currentWrite = await pinnedPhase("writer-transaction", () =>
-      db.transaction((tx) => {
-        const project = tx.insert(app.projects, { name: "current writer project" });
-        const document = tx.insert(
-          app.documents,
-          {
-            branch: "main",
-            title: "current writer document",
-            projectId: project.id,
-            body: currentBody,
-          },
-          { branch: "main" },
-        );
-        return { project, document };
-      }),
-    );
-    await pinnedPhase("writer-local-settlement", () =>
-      withTimeout(
-        currentWrite.wait({ tier: "local" }),
-        10_000,
-        "current corpus write did not settle locally",
-      ),
-    );
-    await pinnedPhase("writer-shutdown", () => shutdownTrackedDb(db, "pinned-writer"));
-    openDbs.splice(openDbs.indexOf(db), 1);
-    await pinnedPhase("writer-settle", () => sleep(100));
-    const rawAfterCurrentWrite = await pinnedPhase("read-post-writer-records", () =>
-      rawRecords(physicalDbName),
-    );
-    expect(rawAfterCurrentWrite[INDEXEDDB_BTREE_PAGES_STORE]).not.toEqual(
-      rawAfterReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE],
-    );
-
-    // config has no serverUrl: upstream cannot repair lost pages on reopen.
-    db = await pinnedPhase("offline-open", () => openPersistentDb(config, "pinned-offline"));
-    expect(await pinnedPhase("offline-physical-root", () => trackPhysicalDatabase(dbName))).toBe(
-      physicalDbName,
-    );
-    const mixedMain = await pinnedPhase("offline-main-query", () =>
-      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
-    );
-    const mixedDraft = await pinnedPhase("offline-draft-query", () =>
-      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
-    );
-    const mixedProjects = await pinnedPhase("offline-projects-query", () =>
-      db.all(app.projects, { tier: ReadTier.LocalFirst }),
-    );
-    expect(mixedMain).toHaveLength(2);
-    expect(mixedMain).toEqual(expect.arrayContaining(reopenedMain));
-    expect(mixedMain).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          title: "current writer document",
-          branch: "main",
-          body: currentBody,
-        }),
-      ]),
-    );
-    expect(mixedDraft).toEqual(reopenedDraft);
-    expect(mixedProjects).toHaveLength(historicalProjects.length + 1);
-    expect(mixedProjects).toEqual(expect.arrayContaining(historicalProjects));
-    const currentProject = mixedProjects.find(
-      (project) => project.name === "current writer project",
-    );
-    expect(currentProject).toBeDefined();
-    expect(
-      mixedMain.find((document) => document.title === "current writer document")?.projectId,
-    ).toBe(currentProject!.id);
+    expect(await rawRecords(physicalDbName)).toEqual(rawBeforeReadOnlyInspection);
     pinnedCorpusPhase = "pinned-test:complete";
     receipt(pinnedCorpusPhase);
   }, 90_000);

@@ -25,7 +25,7 @@ use crate::protocol_limits::{
 /// This is the sole supported wire version. It is independent of the v1
 /// storage, catalogue, and binding formats: those labels name their own
 /// formats and are not wire-protocol compatibility aliases.
-pub const WIRE_PROTOCOL_VERSION: u16 = 4;
+pub const WIRE_PROTOCOL_VERSION: u16 = 5;
 
 /// Frozen v1 full-frame artifact rejection corpus. NAPI and WASM execute every
 /// frame in the complete Rust message/Hello fixtures, plus these explicit
@@ -63,8 +63,6 @@ pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
 /// link.  This is a transport-admission capability only: a peer's advertised
 /// role and semantic frames never create the capability.
 pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
-/// Reserved legacy edge-publication bit. Never advertised by current peers.
-pub const FEATURE_AUTHORITY_PUBLICATIONS: WireFeatures = 1 << 10;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
@@ -82,9 +80,9 @@ pub enum WireFrame {
     Error(WireError),
     /// One physical extent of an encoded logical sync message.
     MessageFragment(WireMessageFragment),
-    /// One ordered channel extent. Postcard-v1 enum tag 4 within wire v4.
+    /// One ordered channel extent. Postcard-v1 enum tag 4 within wire v5.
     Channel(WireChannelEnvelope),
-    /// Receiver-consumption byte grant. Postcard-v1 enum tag 5 within wire v4.
+    /// Receiver-consumption byte grant. Postcard-v1 enum tag 5 within wire v5.
     ChannelCredit(WireChannelCredit),
 }
 
@@ -172,48 +170,14 @@ impl std::fmt::Debug for WireMessageFragment {
 
 /// Link role advertised during handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "WirePeerRoleEncoding", into = "WirePeerRoleEncoding")]
+#[serde(rename_all = "snake_case")]
 pub enum WirePeerRole {
     /// End-user or local application runtime.
     Client,
     /// Durable server or authority runtime.
     Core,
     /// Local relay/cache runtime without independent fate authority.
-    Relay = 3,
-}
-
-// Preserve the declared postcard role tags; the removed server role is never
-// constructible by callers and is rejected when decoding old handshakes.
-#[derive(Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum WirePeerRoleEncoding {
-    Client,
-    Core,
-    Edge,
     Relay,
-}
-
-impl From<WirePeerRole> for WirePeerRoleEncoding {
-    fn from(role: WirePeerRole) -> Self {
-        match role {
-            WirePeerRole::Client => Self::Client,
-            WirePeerRole::Core => Self::Core,
-            WirePeerRole::Relay => Self::Relay,
-        }
-    }
-}
-
-impl TryFrom<WirePeerRoleEncoding> for WirePeerRole {
-    type Error = &'static str;
-
-    fn try_from(role: WirePeerRoleEncoding) -> Result<Self, Self::Error> {
-        match role {
-            WirePeerRoleEncoding::Client => Ok(Self::Client),
-            WirePeerRoleEncoding::Core => Ok(Self::Core),
-            WirePeerRoleEncoding::Relay => Ok(Self::Relay),
-            WirePeerRoleEncoding::Edge => Err("server edge role is no longer supported"),
-        }
-    }
 }
 
 /// Handshake payload used to negotiate a common wire version and feature set.
@@ -1242,21 +1206,18 @@ mod tests {
 
     /// Wire layout is tested internally because enum tags are not a query API.
     #[test]
-    fn peer_role_tags_preserve_relay_and_reject_retired_edge() {
+    fn wire_v5_peer_role_tags() {
         for (role, tag, name) in [
             (WirePeerRole::Client, 0, "client"),
             (WirePeerRole::Core, 1, "core"),
-            (WirePeerRole::Relay, 3, "relay"),
+            (WirePeerRole::Relay, 2, "relay"),
         ] {
             assert_eq!(postcard::to_allocvec(&role).unwrap(), vec![tag]);
             assert_eq!(postcard::from_bytes::<WirePeerRole>(&[tag]).unwrap(), role);
             assert_eq!(serde_json::to_value(role).unwrap(), name);
         }
-        assert!(postcard::from_bytes::<WirePeerRole>(&[2]).is_err());
-        assert!(serde_json::from_str::<WirePeerRole>(r#""edge""#).is_err());
-        // Complete former Edge Hello, not merely an isolated enum decoder.
-        assert!(decode_frame(&[0, 3, 3, 32, 2, 0]).is_err());
-        assert_eq!(current_wire_features() & FEATURE_AUTHORITY_PUBLICATIONS, 0);
+        assert!(postcard::from_bytes::<WirePeerRole>(&[3]).is_err());
+        assert!(serde_json::from_str::<WirePeerRole>(r#""unknown""#).is_err());
     }
 
     #[test]
@@ -1557,7 +1518,7 @@ mod tests {
     #[test]
     fn transaction_fate_receipt_has_one_canonical_postcard_spelling() {
         const ACCEPTED_GLOBAL_RECEIPT_HEX: &str =
-            "040c10111111111111111111111111111111110101070103";
+            "040c10111111111111111111111111111111110101070102";
         let tx_id = TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16]));
         let expected = SyncMessage::FateUpdate {
             tx_id,
@@ -1572,27 +1533,17 @@ mod tests {
         // independent bytes -> semantic
         assert_eq!(decode_sync_message(&fixture).unwrap(), expected);
 
-        // Sensitivity plant: the final enum tag is durability.  A receiver
-        // must decode the legacy Edge tag as Local, never as Global.
-        let mut edge = fixture.clone();
-        *edge.last_mut().expect("non-empty fixture") = 2;
-        // The untrusted boundary also rejects this sequenced Local receipt.
-        assert!(decode_sync_message(&edge).is_err());
-        assert_eq!(
-            decode_sync_message_trusted(&edge).unwrap(),
-            SyncMessage::FateUpdate {
-                tx_id,
-                fate: Fate::Accepted,
-                global_time: Some(GlobalTime(7)),
-                durability: Some(DurabilityTier::Local),
-            }
-        );
+        // The former Global tag is invalid in the compact v2 durability encoding.
+        let mut invalid = fixture.clone();
+        *invalid.last_mut().expect("non-empty fixture") = 3;
+        assert!(decode_sync_message(&invalid).is_err());
+        assert!(decode_sync_message_trusted(&invalid).is_err());
     }
 
     #[test]
     fn transaction_fate_receipt_rejects_trailing_and_noncanonical_bytes() {
         let canonical =
-            hex::decode("040c10111111111111111111111111111111110101070103").expect("fixture hex");
+            hex::decode("040c10111111111111111111111111111111110101070102").expect("fixture hex");
 
         let mut trailing = canonical.clone();
         trailing.push(0);
@@ -2491,10 +2442,10 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_requires_an_exact_v4_advertisement_and_intersects_features() {
+    fn negotiation_requires_an_exact_v5_advertisement_and_intersects_features() {
         let remote = WireHello {
-            min_protocol_version: 4,
-            max_protocol_version: 4,
+            min_protocol_version: 5,
+            max_protocol_version: 5,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME,
             role: WirePeerRole::Relay,
             authority: None,
@@ -2558,8 +2509,8 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_rejects_version_ranges_even_when_they_include_v4() {
-        for (min_protocol_version, max_protocol_version) in [(0, 4), (3, 4), (4, 15)] {
+    fn negotiation_rejects_version_ranges_even_when_they_include_v5() {
+        for (min_protocol_version, max_protocol_version) in [(0, 5), (4, 5), (5, 15)] {
             let remote = WireHello {
                 min_protocol_version,
                 max_protocol_version,
@@ -2575,10 +2526,10 @@ mod tests {
         }
     }
 
-    /// Alice's v4 Core rejects Bob's v3 Core before predecessor snapshot decoding.
+    /// Alice's v5 Core rejects Bob's v3 Core before predecessor snapshot decoding.
     /// This internal boundary test pins negotiation, which row equality cannot observe.
     #[test]
-    fn wire_v4_rejects_single_predecessor_v3_peers() {
+    fn wire_v5_rejects_single_predecessor_v3_peers() {
         let hello = WireHello {
             min_protocol_version: 3,
             max_protocol_version: 3,
@@ -2589,9 +2540,22 @@ mod tests {
         assert!(negotiate_wire(&hello, FEATURE_SYNC_MESSAGE_PAYLOAD).is_err());
     }
 
+    /// Alice rejects Bob's previous wire layout before interpreting its tier tags.
+    /// Internal boundary coverage is required because old bytes cannot be authored by v5 APIs.
     #[test]
-    fn wire_v4_rejects_v2_before_policy_snapshot_decode() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 4);
+    fn wire_v5_rejects_v4_before_compact_durability_decode() {
+        let old = decode_frame(&[0, 4, 4, 0, 1, 0]).unwrap();
+        let WireFrame::Hello(hello) = old else {
+            panic!("historical Hello")
+        };
+        let error = negotiate_wire(&hello, FEATURE_NONE).unwrap_err();
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    #[test]
+    fn wire_v5_rejects_v2_before_policy_snapshot_decode() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
         let remote = WireHello {
             min_protocol_version: 2,
             max_protocol_version: 2,
@@ -2607,13 +2571,13 @@ mod tests {
             negotiate_wire(&current, current_wire_features())
                 .unwrap()
                 .protocol_version,
-            4
+            5
         );
     }
 
     #[test]
-    fn wire_v4_rejects_v14_without_compatibility_negotiation() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 4);
+    fn wire_v5_rejects_v14_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
         let remote = WireHello {
             min_protocol_version: 14,
             max_protocol_version: 14,
@@ -2630,7 +2594,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_v4_rejects_v15_peer_before_payload_decode() {
+    fn wire_v5_rejects_v15_peer_before_payload_decode() {
         let v15_peer = WireHello {
             min_protocol_version: 15,
             max_protocol_version: 15,
@@ -2640,9 +2604,9 @@ mod tests {
         };
 
         let error = negotiate_wire(&v15_peer, current_wire_features())
-            .expect_err("v15 encoding must fail during the v4 handshake");
+            .expect_err("v15 encoding must fail during the v5 handshake");
 
-        assert_eq!(WIRE_PROTOCOL_VERSION, 4);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
     }

@@ -13,8 +13,6 @@
 //     },
 //     "only": ["cell-name", ...],  // optional; also runs opt-in cells named here
 //     "skipLarge": false,          // optional: skip the 800KB value checks
-//     "legacyEdgeTier": false,     // old clients still accept the "edge" tier
-//     "serverEdges": false,        // run the retired server-edge cells
 //     "oversized": null,           // {count,size,batch,readerMinutes}: oversized first sync
 //     "knownFailures": {},         // {"cell:check": "#NNNN"}: recorded as known-fail
 //     "deadlineMinutes": 30        // whole-run watchdog
@@ -54,8 +52,6 @@ const CONFIG_KEYS = new Set([
   "only",
   "skipLarge",
   "largeSizes",
-  "legacyEdgeTier",
-  "serverEdges",
   "oversized",
   "knownFailures",
   "deadlineMinutes",
@@ -126,7 +122,7 @@ class Server {
     this.dataDir = join(dir, "server-data");
     this.port = 0;
   }
-  async start(version, { upstreamUrl, log = "server.log" } = {}) {
+  async start(version, { log = "server.log" } = {}) {
     const portPath = join(this.dir, "port");
     if (existsSync(portPath)) unlinkSync(portPath);
     this.version = version;
@@ -141,7 +137,6 @@ class Server {
       portPath,
       "--allow-local-first-auth",
     ];
-    if (upstreamUrl) args.push("--upstream-url", upstreamUrl);
     this.child = launch(this.dir, version.cli, args, log, {
       NODE_ENV: "production",
       JAZZ_ADMIN_SECRET: this.ctx.adminSecret,
@@ -411,24 +406,6 @@ async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
         const row = await A.call("one", { id, tier: "remote", ms: 60000 });
         assert.equal(row?.body, body);
       });
-    for (const [c, v] of [
-      [A, va],
-      [B, vb],
-    ]) {
-      if (v.key !== "old" || !legacyEdgeTier) continue;
-      // Pre-alpha.57 apps may still use the retired "edge" durability name.
-      await check(name, `${c.name}-legacy-edge-tier-write+read`, async () => {
-        const id = (
-          await c.call("insert", {
-            values: { label: "edge", body: "edge-tier", author: v.key },
-            wait: "edge",
-          })
-        ).id;
-        const other = c === A ? B : A;
-        await other.call("expectSub", { sub: "all", id, body: "edge-tier" });
-        assert.equal((await c.call("one", { id, tier: "edge" }))?.body, "edge-tier");
-      });
-    }
     await check(name, "a-offline-write->reconnect->b-sees", async () => {
       await A.call("disconnect");
       ids.r3 = (
@@ -816,80 +793,10 @@ async function oversizedCell(name, sv, writer, readers) {
   }
 }
 
-/** Legacy server-edge topologies. Edges are removed on the candidate. */
-async function edgeCells() {
-  {
-    const name = "edge-old-behind-new-core";
-    const cell = newCell(name);
-    const core = new Server(name, cell.dir, cell.ctx);
-    const edgeDir = join(cell.dir, "edge");
-    mkdirSync(edgeDir);
-    const edge = new Server(name, edgeDir, cell.ctx);
-    const clients = [];
-    try {
-      await check(name, "core-start", async () => ({ url: await core.start(V.new) }), {
-        fatal: true,
-      });
-      await check(name, "deploy", () => deploy(name, cell.dir, core, V.new), {
-        fatal: true,
-      });
-      // A retired edge must be refused explicitly by the new Core, not
-      // accepted or left hanging silently.
-      await check(name, "old-edge-rejected-explicitly-by-new-core", async () => {
-        let ready = false;
-        try {
-          await edge.start(V.old, { upstreamUrl: core.url, log: "edge.log" });
-          ready = true;
-        } catch {}
-        const edgeLog = existsSync(join(edgeDir, "edge.log"))
-          ? readFileSync(join(edgeDir, "edge.log"), "utf8")
-          : "";
-        const rejection = edgeLog
-          .split("\n")
-          .find((l) => /UnsupportedFeature|no longer supported/.test(l));
-        assert(!ready, "old edge became ready behind the new Core");
-        assert(rejection, "no explicit rejection in the edge log");
-        return { rejection: rejection.slice(0, 400) };
-      });
-    } catch (error) {
-      record(name, "cell-aborted", "fail", {
-        error: String(error?.message ?? error).slice(0, 4000),
-      });
-    } finally {
-      for (const c of clients) await c.close();
-      await edge.stop();
-      await core.stop();
-    }
-  }
-  {
-    const name = "edge-new-cli-refuses-upstream";
-    const cell = newCell(name);
-    const edge = new Server(name, cell.dir, cell.ctx);
-    await check(name, "new-cli-with-upstream-url-fails-explicitly", async () => {
-      try {
-        await edge.start(V.new, { upstreamUrl: "http://127.0.0.1:9" });
-      } catch (error) {
-        const message = String(error.message);
-        assert.match(message, /edge|upstream/i);
-        return { message: message.slice(0, 400) };
-      } finally {
-        await edge.stop();
-      }
-      throw new Error("candidate server accepted --upstream-url");
-    });
-  }
-}
-
-// Version-pair-specific behavior is opt-in so the harness fits any pair:
-//   legacyEdgeTier: old clients still accept the retired "edge" durability
-//     name (alpha.56 and earlier).
-//   serverEdges: the old CLI can run as a server edge (`--upstream-url`) and
-//     the new one has removed edges (alpha.56 -> alpha.57).
+// Version-pair-specific oversized sync behavior is opt-in.
 //   oversized: { count, size, batch, readerMinutes } enables the heavy
 //     oversized first-sync cells (default 4800 x 60KB rows, up to 15 min each).
-const legacyEdgeTier = input.legacyEdgeTier === true;
 const OPTIONAL = {
-  edge: input.serverEdges === true,
   "oversized-first-sync-new-server-old-writer": Boolean(input.oversized),
   "oversized-first-sync-old-server-new-writer": Boolean(input.oversized),
   "oversized-first-sync-new-server-new-only": Boolean(input.oversized),
@@ -930,7 +837,6 @@ const CELLS = {
     exclusiveCell("exclusive-new-server-new-client", V.new, V.new),
   "exclusive-old-server-new-client": () =>
     exclusiveCell("exclusive-old-server-new-client", V.old, V.new),
-  edge: edgeCells,
   "oversized-first-sync-new-server-old-writer": () =>
     oversizedCell("oversized-first-sync-new-server-old-writer", V.new, V.old, [V.old, V.new]),
   "oversized-first-sync-old-server-new-writer": () =>

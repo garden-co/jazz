@@ -6876,11 +6876,6 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
         {
             return Err(failure("the remote-if-possible tier was removed; use local-first with first_load_remote_wait_ms, or remote for server-confirmed reads".to_owned()));
         }
-        if key == "tier" && matches!(item.as_str(), Some("edge" | "Edge")) {
-            return Err(failure(
-                "the edge tier was removed; use remote or global for Core confirmation".to_owned(),
-            ));
-        }
         if key == "tier"
             && matches!(
                 item.as_str(),
@@ -16446,10 +16441,10 @@ mod tests {
     }
 
     #[test]
-    fn foreground_reads_reject_the_removed_edge_tier() {
+    fn foreground_reads_reject_unknown_tiers() {
         // Internal C-ABI receipt, like the transaction-command test above:
         // React Native reaches read options only through this byte command
-        // family, so the retired `edge` tier must fail here with the same
+        // family, so an unknown tier must fail here with the same
         // Core-only guidance the TypeScript client gives, rather than being
         // silently treated as some other tier.
         let directory = tempfile::tempdir().unwrap();
@@ -16461,7 +16456,7 @@ mod tests {
                 .unwrap()
                 .admit_scope(RelayScopeAdmissionRequest {
                     scope: RelayScopeRequest {
-                        app_namespace: "foreground-removed-edge-tier".to_owned(),
+                        app_namespace: "foreground-unknown-tier".to_owned(),
                         storage_namespace: "default".to_owned(),
                         auth_scope: Some("opaque-validated-subject".to_owned()),
                     },
@@ -16510,9 +16505,11 @@ mod tests {
             postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap()
         };
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
-        let removed = "foreground NativeDb command failed: invalid read options: the edge tier was removed; use remote or global for Core confirmation";
 
-        for tier in ["edge", "Edge"] {
+        for tier in ["invalid-tier", "InvalidTier"] {
+            let removed = format!(
+                "foreground NativeDb command failed: invalid read options: unknown variant `{tier}`, expected one of `None`, `Local`, `Global`"
+            );
             let options_json = format!(r#"{{"tier":"{tier}"}}"#);
             assert_eq!(
                 response(ForegroundDbCommandRequest::All {

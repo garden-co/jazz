@@ -382,8 +382,9 @@ export function normalizeFirstLoadRemoteWaitMs(value: unknown): number | undefin
   return ms > 0 ? ms : undefined;
 }
 
+// Keep removed names here solely to provide migration guidance at the public API boundary.
 const REMOVED_READ_TIERS: Readonly<Record<string, string>> = {
-  edge: 'The "edge" tier was removed. Use ReadTier.Remote for server-confirmed reads.',
+  edge: 'The "edge" tier was removed. Use ReadTier.Remote ("remote") for server-confirmed reads.',
   "remote-if-possible":
     'The "remote-if-possible" tier was removed. Use ReadTier.LocalFirst with firstLoadRemoteWaitMs, or ReadTier.Remote for server-confirmed reads.',
   "local-first-unless-empty":

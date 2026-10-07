@@ -8,7 +8,7 @@ import { localAccountConfig } from "./testing/account-fixtures.js";
 // only "local-first" and "remote"; "local" and "global" remain write tiers.
 const removedReadTiers = [
   ["remote-if-possible", 'The "remote-if-possible" tier was removed'],
-  ["edge", 'The "edge" tier was removed'],
+  ["edge", 'The "edge" read tier was removed'],
   ["local-first-unless-empty", 'The "local-first-unless-empty" tier was removed'],
   ["local", 'The "local" read tier was removed'],
   ["global", 'The "global" read tier was removed'],
@@ -39,7 +39,7 @@ it.each(removedReadTiers)("rejects Db reads at the removed %s tier", async (tier
 });
 
 it.each([
-  ["edge", 'The "edge" write tier was removed. Use wait({ tier: "global" }) instead.'],
+  ["edge", 'Unknown wait tier "edge"; expected "local" or "global".'],
   ["globl", 'Unknown wait tier "globl"; expected "local" or "global".'],
 ])("rejects wait tier %s without duplicating the applied write", async (tier, message) => {
   db = await createDb({

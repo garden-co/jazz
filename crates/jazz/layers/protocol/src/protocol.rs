@@ -2862,7 +2862,7 @@ impl ReadViewKey {
         if canonical == RegisterShapeOptions::default() {
             return Self::default();
         }
-        let bytes = canonical_register_shape_options_v1_bytes(&canonical);
+        let bytes = canonical_register_shape_options_v2_bytes(&canonical);
         Self {
             id: uuid::Uuid::new_v5(&READ_VIEW_NAMESPACE, &bytes),
         }
@@ -2873,16 +2873,16 @@ impl ReadViewKey {
 // enter durable settled-result rows, so they cannot inherit Rust/postcard enum
 // discriminants or field layout.
 const READ_VIEW_KEY_CODEC_MAGIC: &[u8; 4] = b"JRVK";
-const READ_VIEW_KEY_CODEC_VERSION: u8 = 1;
+const READ_VIEW_KEY_CODEC_VERSION: u8 = 2;
 
-fn canonical_register_shape_options_v1_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
+fn canonical_register_shape_options_v2_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(READ_VIEW_KEY_CODEC_MAGIC);
     bytes.push(READ_VIEW_KEY_CODEC_VERSION);
     bytes.push(match options.tier {
         DurabilityTier::None => 0,
         DurabilityTier::Local => 1,
-        DurabilityTier::Global => 3,
+        DurabilityTier::Global => 2,
     });
     bytes.push(u8::from(options.propagate_upstream));
     bytes.push(match options.binding_source {
@@ -7341,12 +7341,12 @@ mod tests {
             binding_source: BindingSource::RelayAuthoritySession,
         };
         assert_eq!(
-            hex::encode(canonical_register_shape_options_v1_bytes(&options)),
-            "4a52564b010300010101000000060000006272616e63681200000001070101010101010101010101010101010100"
+            hex::encode(canonical_register_shape_options_v2_bytes(&options)),
+            "4a52564b020200010101000000060000006272616e63681200000001070101010101010101010101010101010100"
         );
         assert_eq!(
             options.read_view_key().id,
-            uuid::uuid!("7922a41b-d6d5-5918-a7c0-d0ba05062ea4")
+            uuid::uuid!("86e2dfa3-ed52-5500-808c-d5f63c79173e")
         );
     }
 
@@ -7369,13 +7369,13 @@ mod tests {
 
         let ordered = options(snapshot(vec![dot_a, dot_b]));
         let permuted_and_duplicated = options(snapshot(vec![dot_b, dot_a, dot_b, dot_a]));
-        let ordered_bytes = canonical_register_shape_options_v1_bytes(&ordered);
-        let equivalent_bytes = canonical_register_shape_options_v1_bytes(&permuted_and_duplicated);
+        let ordered_bytes = canonical_register_shape_options_v2_bytes(&ordered);
+        let equivalent_bytes = canonical_register_shape_options_v2_bytes(&permuted_and_duplicated);
 
         assert_eq!(ordered_bytes, equivalent_bytes);
         assert_eq!(
             hex::encode(ordered_bytes),
-            "4a52564b0103010002707070707070707070707070707070700500000000000000060000000000000002000000070000000000000071717171717171717171717171717171090000000000000072727272727272727272727272727272"
+            "4a52564b0202010002707070707070707070707070707070700500000000000000060000000000000002000000070000000000000071717171717171717171717171717171090000000000000072727272727272727272727272727272"
         );
         assert_eq!(
             ordered.read_view_key(),
@@ -7383,7 +7383,7 @@ mod tests {
         );
         assert_eq!(
             ordered.read_view_key().id,
-            uuid::uuid!("0227f6f4-5ca2-5778-9e6d-78f33a70d750")
+            uuid::uuid!("7e5f439a-c9b3-554f-b083-791ce815e413")
         );
     }
 
