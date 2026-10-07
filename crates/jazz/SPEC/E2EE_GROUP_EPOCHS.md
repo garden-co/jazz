@@ -35,6 +35,10 @@ the accepted predecessor and complete membership history in an exclusive
 transaction, derive the exact effective membership, and verify an active signing
 device belonging to a remaining member. A stale revision or competing successor
 must not activate. Readers independently validate the same accepted chain.
+Completed graph-cache admission must compare the actual post-replay input and
+verifier configuration with their pre-replay values. A graph computed from
+changed working bytes must not be cached as a proof of the pristine history,
+including when group replay is nested inside space replay.
 
 Raw successors for the same group, predecessor and authority position compete:
 reject all such contenders, including malformed proposals. A later uncontested

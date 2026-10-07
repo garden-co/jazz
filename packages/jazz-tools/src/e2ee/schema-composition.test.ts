@@ -2,9 +2,12 @@ import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
+import type { Db } from "../runtime/db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./index.js";
+import { groupSchema } from "./groups.js";
+import { spaceSchema } from "./spaces.js";
 
 it.each([
   { devicesFirst: false, schemaOnly: false },
@@ -96,4 +99,66 @@ it.each([
     }
   },
   60000,
+);
+
+it.each([false, true])(
+  "rejects partial configured group schemas before recovery can omit group recipients (schema only: %s)",
+  async (schemaOnly) => {
+    const deployedApp = s.defineApp({
+      ...deviceRequestSchema,
+      ...groupSchema,
+      ...spaceSchema,
+    });
+    const accountOnlyApp = s.defineApp({ ...deviceRequestSchema, ...spaceSchema });
+    const groupRootSchema = deployedApp.wasmSchema.__e2ee_groups;
+    if (!groupRootSchema) throw new Error("Deployed schema is missing its group root table");
+    // Preserve real builders and relationship metadata while omitting configured tables.
+    // Defining a new partial schema would reject its relationships before E2EE sees it.
+    const partialApp = {
+      ...accountOnlyApp,
+      __e2ee_groups: deployedApp.__e2ee_groups,
+      wasmSchema: {
+        ...accountOnlyApp.wasmSchema,
+        __e2ee_groups: groupRootSchema,
+      },
+    };
+    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    const clients: Db[] = [];
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        schema: deployedApp,
+        permissions: deviceRequestPermissions,
+      });
+      const account = await localAccountConfig(server.appId, server.url);
+      const open = async () => {
+        let saved: string | null = null;
+        const db = await createDb({
+          ...account,
+          e2ee: {
+            app: schemaOnly ? { wasmSchema: partialApp.wasmSchema } : partialApp,
+            store: {
+              async read() {
+                return saved;
+              },
+              async update(transform) {
+                saved = transform(saved);
+              },
+            },
+          },
+        });
+        clients.push(db);
+        return db;
+      };
+      await expect(open()).rejects.toThrow(
+        'E2EE application is missing managed table "__e2ee_group_recovery_deliveries"',
+      );
+    } finally {
+      await Promise.all(clients.map((client) => client.shutdown()));
+      await server.stop();
+    }
+  },
+  60_000,
 );
