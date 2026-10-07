@@ -233,7 +233,7 @@ The replicated wire payload for a version (`VersionRecord`) is exactly the
 replicated-immutable fields (§2.1): `row_uuid`, the provenance cells, a nullable
 `_deletion`, and nullable `user_{col}` cells, carried in the `JVRR` version-2
 row blob (SPEC 16) and followed by the record's `authored_columns`, its
-`base` and `lost_cells` (SPEC 4 §4.6) and its `counter_signs` (SPEC 4 §4.3).
+`base` (SPEC 4 §4.6) and its `counter_signs` (SPEC 4 §4.3).
 Wire protocol v4 removed `parents`; a version-1 blob is rejected. Receiver-local currency and
 authority-state columns are excluded (`INV-DATA-16`). Mixed-version _sync_ is
 owned by ch. 8 / ch. 10.
@@ -293,7 +293,7 @@ so they sort before every accepted write of the row and are found by their
 the transaction's pending records to its key at the transaction's seq, and a
 rejected fate deletes them. A history record ends, after `authored_columns` and the `counter_signs` bytes of a
 patch's counter ops (SPEC 4 §4.3), with `seq`, the write's `base_seq` and
-`base_pending` and its `lost_cells` (SPEC 4 §4.6). Beside them: a
+`base_pending` (SPEC 4 §4.6). Beside them: a
 global-current record per row with `global_time` (the row's seq) and index
 `by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
 `(branch_key, row_uuid)` with its `ahead_shadow` copy; and `_deletion` as an
@@ -306,8 +306,10 @@ the transaction's seq (from its `jazz_transactions` record) and its
 and a range read of history (SPEC 4 §4.6). Recovery takes the transaction-clock
 high-water mark from the last `jazz_transactions` key. A history image's
 `updated_by` is null when it equals the `made_by` of the transaction its key
-names, and every read fills it in from that `jazz_transactions` record; it is
-stored only when the merge kept an earlier writer's provenance (SPEC 4 §4.6).
+names, and every read fills it in from that `jazz_transactions` record. An
+image takes `updated_by` from the write it applies, so it is the author of the
+row's latest applied write (SPEC 4 §4.6) and is stored only when that write's
+own provenance names another author than its transaction's `made_by`.
 `created_by`, `created_at` and `updated_at` stay in every image, and global
 current and the ahead overlay keep all four. It has no `parents`, no
 register tables, no shared deletion history, no `jazz_merge_heads`, no

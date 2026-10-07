@@ -156,13 +156,13 @@ is decoded; a v3 envelope on a v4 link is rejected by its version field. The v4
 baseline, frozen fresh rather than appended to v3, is:
 
 - the `JVRR` row blob is version `2` (no `parents`; `_deletion` cell), and
-  `VersionRecord` ends with `authored_columns`, `base`, `lost_cells` (SPEC 4
-  §4.6 "Wire layout") then `counter_signs` (SPEC 4 §4.3). Every row version of
-  a `CommitUnit` carries the base of the image its writer made it over (the
+  `VersionRecord` ends with `authored_columns`, `base` (SPEC 4 §4.6 "Wire
+  layout") then `counter_signs` (SPEC 4 §4.3). Every row version of a
+  `CommitUnit` carries the base of the image its writer made it over (the
   settled seq it held and its own pending predecessor to that row, each
-  optional; both absent for an insert or a blind update) and empty
-  `lost_cells`; Core resolves the base to the write's ancestor or rejects the
-  write as `MalformedCommit`. While the unit's pending predecessor has no
+  optional; both absent for an insert or a blind update); Core validates the
+  base exactly or rejects the write as `MalformedCommit`, and otherwise
+  applies the write in its own seq order. While the unit's pending predecessor has no
   fate at Core yet, Core answers with `RetryLater { tx_id, awaiting }`
   (`SyncMessage` tag 35) naming that predecessor, after the unit's cheap
   admission checks (SPEC 4 §4.6). It is not a fate: Core stores nothing,
@@ -189,7 +189,7 @@ baseline, frozen fresh rather than appended to v3, is:
   and the author's retry brings both again. The deferral belongs to the
   link: a new link starts without one and uploads every pending transaction
   again in outbox order. A history record that a view
-  update or relay forwards carries the base and lost cells Core stored, and
+  update or relay forwards carries the base Core stored, and
   takes its seq from the bundle's accepted `GlobalTime`. `FateUpdate` is
   unchanged;
 - `SyncMessage` tags 15 (`FetchRowVersions`) and 16 (`RowVersionPayloads`) are
