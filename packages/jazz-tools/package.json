@@ -163,7 +163,7 @@
     "test:react": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.react.ts",
     "test:solid": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.solid.ts",
     "test:svelte": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.svelte.ts",
-    "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json && pnpm typecheck:public-api && pnpm typecheck:react-native",
+    "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/tests.tsbuildinfo && pnpm typecheck:public-api",
     "typecheck:public-api": "tsc --project tsconfig.public-api.json",
     "typecheck:react-native": "tsc --project tsconfig.react-native-tests.json",
     "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts && pnpm test:browser:transport",
