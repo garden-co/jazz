@@ -62,6 +62,7 @@ export class DeviceApproval {
   private readonly responding = new Set<string>();
   private backgroundError: unknown;
   private knownRevoked = false;
+  private snapshotPrefetched = false;
 
   /** A completed authority read proved this device revoked; never an access grant. */
   isKnownRevoked(): boolean {
@@ -186,39 +187,50 @@ export class DeviceApproval {
     };
   }
 
+  private async prefetchSnapshot(): Promise<void> {
+    await Promise.all([
+      this.db.all(this.tables.__e2ee_account_successors, { tier: "global" }),
+      this.db.all(this.tables.__e2ee_account_identities, { tier: "global" }),
+      this.db.all(this.tables.__e2ee_device_requests, { tier: "global" }),
+      this.db.all(this.tables.__e2ee_device_challenges, { tier: "global" }),
+      this.db.all(this.tables.__e2ee_device_proofs, { tier: "global" }),
+      this.db.all(this.tables.__e2ee_device_approvals, { tier: "global" }),
+      this.db.all(this.tables.__e2ee_device_deliveries, { tier: "global" }),
+      this.db.all(this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }), {
+        tier: "global",
+      }),
+      this.db.all(this.tables.__e2ee_account_roots.where({ accountId: this.accountId }), {
+        tier: "global",
+      }),
+      this.db.all(this.tables.__e2ee_device_keys.where({ "$createdBy.account": this.accountId }), {
+        tier: "global",
+      }),
+      this.db.all(this.tables.__e2ee_public_device_approvals.where({ accountId: this.accountId }), {
+        tier: "global",
+      }),
+      this.db.all(
+        this.tables.__e2ee_public_account_successors.where({ accountId: this.accountId }),
+        { tier: "global" },
+      ),
+    ]);
+    this.snapshotPrefetched = true;
+  }
+
   private async snapshot(transaction?: E2eeTransactionScope) {
     if (transaction) return this.readSnapshot(transaction);
     // ponytail: scan this account's history; index per-device history if it grows large.
     for (let attempt = 0; ; attempt++) {
       try {
         this.assertOpen();
-        await Promise.all([
-          this.db.all(this.tables.__e2ee_account_successors, { tier: "global" }),
-          this.db.all(this.tables.__e2ee_account_identities, { tier: "global" }),
-          this.db.all(this.tables.__e2ee_device_requests, { tier: "global" }),
-          this.db.all(this.tables.__e2ee_device_challenges, { tier: "global" }),
-          this.db.all(this.tables.__e2ee_device_proofs, { tier: "global" }),
-          this.db.all(this.tables.__e2ee_device_approvals, { tier: "global" }),
-          this.db.all(this.tables.__e2ee_device_deliveries, { tier: "global" }),
-          this.db.all(this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }), {
+        if (!this.snapshotPrefetched || attempt > 0) await this.prefetchSnapshot();
+        else {
+          // Non-transactional reads drain preceding writes before opening the
+          // exclusive snapshot. Keep that ordering barrier without prefetching
+          // all twelve histories; the transaction still covers every history.
+          await this.db.one(this.tables.__e2ee_account_identities.where({ id: this.accountId }), {
             tier: "global",
-          }),
-          this.db.all(this.tables.__e2ee_account_roots.where({ accountId: this.accountId }), {
-            tier: "global",
-          }),
-          this.db.all(
-            this.tables.__e2ee_device_keys.where({ "$createdBy.account": this.accountId }),
-            { tier: "global" },
-          ),
-          this.db.all(
-            this.tables.__e2ee_public_device_approvals.where({ accountId: this.accountId }),
-            { tier: "global" },
-          ),
-          this.db.all(
-            this.tables.__e2ee_public_account_successors.where({ accountId: this.accountId }),
-            { tier: "global" },
-          ),
-        ]);
+          });
+        }
         const read = await exclusiveE2eeTransaction(this.db, (tx) => this.readSnapshot(tx));
         const snapshot = await read.wait({ tier: "global" });
         this.assertOpen();
