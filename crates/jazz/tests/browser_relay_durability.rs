@@ -3711,13 +3711,18 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_global_one_
     assert!(core.detach_connection(&core_seed_subscriber));
 }
 
-/// A write policy changes admission only; it cannot revoke read membership.
-/// A browser-authored exact-row transaction therefore uses the worker's one
-/// ordinary Global projection. Treating the write-only table as read-scoped
-/// would select a second relay-authority projection and deliver the same
-/// transaction through incompatible bundles (`ConflictingCommitUnit`).
+/// Alice's browser-authored row remains visible to her local-first subscription
+/// while the worker relays it to Core without conflicting commit units.
+/// INSERT permission allows the write to reach Global durability, but the
+/// missing SELECT policy keeps the same row out of her remote subscription.
+///
+/// ```text
+/// Alice's tab ──insert──► worker ──relay──► Core
+///     local-first: row                   INSERT: accepted
+///     remote: empty ◄────────────────── SELECT: denied
+/// ```
 #[test]
-fn browser_worker_write_only_exact_global_write_uses_one_ordinary_relay_projection() {
+fn browser_worker_write_only_exact_write_is_visible_locally_but_not_remotely() {
     let schema = write_only_policy_schema();
     let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
     let worker = open_db(0xc3, alice, &schema);
@@ -3736,19 +3741,27 @@ fn browser_worker_write_only_exact_global_write_uses_one_ordinary_relay_projecti
     let exact_query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row_id.0))));
     let todos = main_thread
         .prepare_query(&exact_query)
-        .expect("prepare exact Global query");
+        .expect("prepare exact query");
     let mut subscription = block_on(main_thread.subscribe(
+        &todos,
+        ReadOpts {
+            tier: jazz::db::ReadTier::LocalFirst,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe exact local-first query");
+    let mut remote_subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
             tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
-    .expect("subscribe exact Global query");
+    .expect("subscribe exact remote query");
 
     for _ in 0..4 {
-        main_thread.tick().expect("register exact Global coverage");
-        worker.tick().expect("relay exact Global coverage");
+        main_thread.tick().expect("register exact coverage");
+        worker.tick().expect("relay exact coverage");
         core.tick().expect("serve initial exact coverage");
         worker.tick().expect("apply initial exact coverage");
         main_thread.tick().expect("settle initial exact coverage");
@@ -3760,7 +3773,7 @@ fn browser_worker_write_only_exact_global_write_uses_one_ordinary_relay_projecti
             "todos",
             BTreeMap::from([(
                 "title".to_owned(),
-                Value::String("one ordinary projection".to_owned()),
+                Value::String("write-only row".to_owned()),
             )]),
             jazz::db::InsertOptions {
                 row_id: Some(row_id),
@@ -3787,13 +3800,34 @@ fn browser_worker_write_only_exact_global_write_uses_one_ordinary_relay_projecti
             SubscriptionEvent::Delta { added, .. }
                 if added.iter().any(|row| row.row.row_uuid() == authored.row_uuid())
         )),
-        "the public Global read must receive the authored row once: {events:?}",
+        "the local-first read must receive the authored row: {events:?}",
     );
     assert!(
         events
             .iter()
             .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. })),
-        "the authored row must settle through the ordinary projection: {events:?}",
+        "the local-first read must settle: {events:?}",
+    );
+
+    let state = block_on(authored.write_state()).expect("read authored write state");
+    assert_eq!(state.fate, Fate::Accepted);
+    assert_eq!(state.durability, DurabilityTier::Global);
+
+    let remote_events =
+        std::iter::from_fn(|| remote_subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        remote_events
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. })),
+        "the remote read must receive a settled answer: {remote_events:?}",
+    );
+    assert!(
+        remote_events.iter().all(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, updated, .. }
+                if added.is_empty() && updated.is_empty()
+        )),
+        "missing SELECT permission must hide the authored row remotely: {remote_events:?}",
     );
 }
 
