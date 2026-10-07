@@ -428,16 +428,11 @@ fn float_literal_comparisons_match_numeric_order() {
     };
     let mut failures = Vec::new();
     let mut exercised = 0;
-    let mut check = |label: String, predicate, matches, allow_rejection| {
+    let mut check = |label: String, predicate, matches| {
         let query = Query::from("metrics").filter(predicate);
-        let prepared = match db.prepare_query(&query) {
-            Ok(prepared) => prepared,
-            Err(error) if allow_rejection => {
-                println!("{label}: public preparation rejected nonfinite literal: {error:?}");
-                return;
-            }
-            Err(error) => panic!("{label}: prepare numeric query: {error:?}"),
-        };
+        let prepared = db
+            .prepare_query(&query)
+            .unwrap_or_else(|error| panic!("{label}: prepare numeric query: {error:?}"));
         let identities = block_on(db.all(&prepared, local()))
             .unwrap_or_else(|error| panic!("{label}: read numeric query: {error:?}"))
             .into_iter()
@@ -459,21 +454,32 @@ fn float_literal_comparisons_match_numeric_order() {
                     format!("{label} {name} literals present=({left_present},{right_present})"),
                     compare(float(left, left_present), float(right, right_present)),
                     matches,
-                    !left.is_finite() || !right.is_finite(),
                 );
+                if left.is_nan() || right.is_nan() {
+                    check(
+                        format!(
+                            "Not {label} {name} literals present=({left_present},{right_present})"
+                        ),
+                        not(compare(
+                            float(left, left_present),
+                            float(right, right_present),
+                        )),
+                        true,
+                    );
+                }
             }
-            if !left_column.is_empty() && !right_column.is_empty() {
+            if !left_column.is_empty() {
                 check(
                     format!("{label} {name} field/literal"),
                     compare(col(left_column), float(right, false)),
                     matches,
-                    !right.is_finite(),
                 );
+            }
+            if !right_column.is_empty() {
                 check(
                     format!("{label} {name} literal/field"),
                     compare(float(left, false), col(right_column)),
                     matches,
-                    !left.is_finite(),
                 );
             }
         }
@@ -486,13 +492,11 @@ fn float_literal_comparisons_match_numeric_order() {
                 format!("nullable Double {name} field/literal present={present}"),
                 compare(col("optional_score"), float(-1.0, present)),
                 forward,
-                false,
             );
             check(
                 format!("nullable Double {name} literal/field present={present}"),
                 compare(float(-1.0, present), col("optional_score")),
                 reverse,
-                false,
             );
         }
     }
@@ -558,9 +562,40 @@ fn float_literal_comparisons_match_numeric_order() {
             not(gt(float(-1.0, false), float(0.0, false))),
             true,
         ),
+        (
+            "negated In unordered-only",
+            not(in_list(float(f64::NAN, true), [float(1.0, false)])),
+            true,
+        ),
+        (
+            "negated In unordered and nonmatching",
+            not(in_list(
+                float(1.0, false),
+                [float(f64::NAN, true), float(2.0, false)],
+            )),
+            true,
+        ),
+        (
+            "negated In unordered and matching",
+            not(in_list(
+                float(1.0, true),
+                [float(f64::NAN, false), float(1.0, false)],
+            )),
+            false,
+        ),
+        (
+            "negated In signed-zero matching",
+            not(in_list(float(-0.0, true), [float(0.0, false)])),
+            false,
+        ),
+        (
+            "negated In empty options",
+            not(in_list(float(f64::NAN, true), [])),
+            true,
+        ),
     ];
     for (label, predicate, matches) in controls {
-        check(label.to_owned(), predicate, matches, false);
+        check(label.to_owned(), predicate, matches);
     }
     println!(
         "exercised {exercised} prepared memberships; {} mismatches",

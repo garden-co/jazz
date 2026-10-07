@@ -141,6 +141,19 @@ not a fallback to one-shot sorting. Prepared graph lowering MUST preserve the
 semantics of every accepted predicate shape and explicitly reject unsupported
 predicate shapes (`INV-LOWER-11`).
 
+Accepted non-null scalar-double predicates (`eq`, `ne`, `lt`, `lte`, `gt`,
+`gte`) MUST use numeric partial ordering, including when both operands are
+literals. Bare doubles and doubles wrapped in `Nullable(Some(...))` have the
+same comparison semantics: negative values retain numeric order and `-0.0`
+equals `+0.0`. A direct unordered comparison (a NaN operand) is false for every
+operator, including `ne`. Fully resolved constant `Not` and `Not(In)` predicates
+MUST complement the folded boolean result, so negating an unordered constant
+comparison is true rather than another false comparison with an inverted
+operator. This does not change row-dependent NaN or SQL-null negation semantics.
+The scalar predicate rule does not change structural literal identity
+(`Eq`/`Hash`/`Ord`), canonical raw-bit encodings, null semantics, or comparisons
+of composite values.
+
 The engine-owned `RowUuid` is distinct from a declared `id` user column. Its
 public query spelling is intentionally not standardized yet; see the linked
 open question below rather than treating any current partial alias as API.
