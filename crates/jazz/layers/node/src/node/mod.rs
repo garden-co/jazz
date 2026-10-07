@@ -334,6 +334,8 @@ pub mod legacy_test_future;
 #[doc(hidden)]
 pub mod maintained_subscription_view;
 mod merge_ops;
+#[doc(hidden)]
+pub mod migration_validation;
 mod open_tx;
 /// Independent semantic oracle used by tests and harnesses.
 #[cfg(any(test, feature = "testing"))]

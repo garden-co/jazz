@@ -14,25 +14,51 @@ where
     ) -> Vec<PhysicalIdentityManifest> {
         let mut parents = BTreeMap::new();
         for lineage in self.catalogue.active_lineages_by_target.values() {
-            parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+            parents.insert(
+                lineage.publication.schema.id,
+                lineage
+                    .publication
+                    .predecessors
+                    .iter()
+                    .map(|p| p.lens.source)
+                    .collect::<Vec<_>>(),
+            );
         }
         for lineage in self.catalogue.staged_lineages.values() {
-            parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+            parents.insert(
+                lineage.publication.schema.id,
+                lineage
+                    .publication
+                    .predecessors
+                    .iter()
+                    .map(|p| p.lens.source)
+                    .collect::<Vec<_>>(),
+            );
         }
         for lineage in self.catalogue.pending_lineages.values() {
-            parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+            parents.insert(
+                lineage.publication.schema.id,
+                lineage
+                    .publication
+                    .predecessors
+                    .iter()
+                    .map(|p| p.lens.source)
+                    .collect::<Vec<_>>(),
+            );
         }
         let is_descendant = |schema: SchemaVersionId| {
-            let mut cursor = schema;
+            let mut remaining = vec![schema];
             let mut visited = BTreeSet::new();
-            while visited.insert(cursor) {
-                let Some(parent) = parents.get(&cursor).copied() else {
-                    return false;
-                };
-                if parent == candidate_schema {
-                    return true;
+            while let Some(cursor) = remaining.pop() {
+                if !visited.insert(cursor) {
+                    continue;
                 }
-                cursor = parent;
+                if let Some(sources) = parents.get(&cursor) {
+                    if sources.contains(&candidate_schema) {
+                        return true;
+                    }
+                    remaining.extend(sources.iter().copied());
+                }
             }
             false
         };
@@ -63,11 +89,9 @@ where
             .collect()
     }
 
-    /// Author a descendant lineage from this authority's complete durable
-    /// catalogue history. This is the only NodeState construction path for a
-    /// non-genesis publication: it preserves mapped physical UUIDs and mints
-    /// identities only for genuinely new entities, never identities retired
-    /// by older active, staged, or parked publications.
+    /// Single-predecessor convenience entry point. Authority construction
+    /// reserves the complete durable history, preserving mapped UUIDs without
+    /// reusing identities retired by active, staged, or parked publications.
     pub fn author_schema_lineage_publication(
         &self,
         schema: SchemaVersion,
@@ -75,32 +99,102 @@ where
         new_tables: impl IntoIterator<Item = impl Into<String>>,
         dropped_tables: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<SchemaLineagePublication, Error> {
-        let source = self
-            .catalogue
-            .catalogue_schemas
-            .get(&lens.source)
-            .ok_or(Error::InvalidCatalogueUpdate(
-                "schema lineage source is missing",
-            ))?;
-        let identities = &self
-            .catalogue
-            .physical_mappings
-            .get(&lens.source)
-            .ok_or(Error::InvalidCatalogueUpdate(
-                "schema lineage source identities are missing",
-            ))?
-            .identities;
-        let history = self.physical_identity_history_for_candidate(schema.id, None);
-        SchemaLineagePublication::author_from_prior_with_history(
-            &source.schema,
-            identities,
-            history,
+        self.author_schema_from_predecessors(
             schema,
-            lens,
-            new_tables,
-            dropped_tables,
+            vec![crate::protocol::SchemaPredecessor {
+                lens,
+                new_tables: new_tables.into_iter().map(Into::into).collect(),
+                dropped_tables: dropped_tables.into_iter().map(Into::into).collect(),
+            }],
+        )
+    }
+
+    /// Author one immutable schema record containing every incoming migration.
+    pub fn author_schema_from_predecessors(
+        &self,
+        schema: SchemaVersion,
+        predecessors: Vec<crate::protocol::SchemaPredecessor>,
+    ) -> Result<SchemaLineagePublication, Error> {
+        let sources = Self::predecessor_sources(
+            &predecessors,
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.physical_mappings,
+        )?;
+        SchemaLineagePublication::author_from_predecessors(
+            schema.clone(),
+            predecessors,
+            &sources,
+            self.physical_identity_history_for_candidate(schema.id, None),
         )
         .map_err(Error::InvalidCatalogueUpdate)
+    }
+
+    fn predecessor_sources(
+        predecessors: &[crate::protocol::SchemaPredecessor],
+        schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+        mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    ) -> Result<BTreeMap<SchemaVersionId, (JazzSchema, PhysicalIdentityManifest)>, Error> {
+        let mut sources = BTreeMap::new();
+        for predecessor in predecessors {
+            let source =
+                schemas
+                    .get(&predecessor.lens.source)
+                    .ok_or(Error::InvalidCatalogueUpdate(
+                        "schema predecessor is missing",
+                    ))?;
+            let mapping = mappings
+                .get(&source.id)
+                .ok_or(Error::InvalidCatalogueUpdate(
+                    "schema predecessor identities are missing",
+                ))?;
+            sources.insert(
+                source.id,
+                (source.schema.clone(), mapping.identities.clone()),
+            );
+        }
+        Ok(sources)
+    }
+
+    fn validate_publication_sources(
+        publication: &SchemaLineagePublication,
+        schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+        mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+        history: Vec<PhysicalIdentityManifest>,
+    ) -> Result<(), Error> {
+        let sources = Self::predecessor_sources(&publication.predecessors, schemas, mappings)?;
+        for predecessor in &publication.predecessors {
+            let source = &schemas[&predecessor.lens.source];
+            Self::validate_migration_lens_between(&predecessor.lens, source, &publication.schema)?;
+            Self::validate_lineage_table_partition(
+                &source.schema,
+                &publication.schema.schema,
+                &predecessor.lens,
+                &predecessor.new_tables,
+                &predecessor.dropped_tables,
+            )?;
+        }
+        publication
+            .validate_predecessor_identities(&sources, history)
+            .map_err(Error::InvalidCatalogueUpdate)
+    }
+
+    fn reconcile_publication_mapping(
+        catalogue: &SchemaCatalogue,
+        publication: &SchemaLineagePublication,
+        provisional: &SchemaPhysicalMapping,
+    ) -> Result<SchemaPhysicalMapping, Error> {
+        let mut mapping = provisional.clone();
+        let mut predecessors = publication.predecessors.iter().collect::<Vec<_>>();
+        predecessors.sort_by_key(|p| p.lens.source);
+        for predecessor in predecessors {
+            mapping = Self::reconcile_physical_mapping_for_lens_payload_in_catalogue(
+                catalogue,
+                &predecessor.lens,
+                &publication.schema,
+                &mapping,
+            )?;
+        }
+        Ok(mapping)
     }
 
     async fn persist_catalogue_schema(&mut self, schema: &SchemaVersion) -> Result<(), Error> {
@@ -388,11 +482,12 @@ self.database.finish_persistence(persisted)?;
         &self,
         pending: &PendingSchemaLineage,
     ) -> Result<(), Error> {
-        if !self
-            .catalogue
-            .catalogue_schemas
-            .contains_key(&pending.publication.lens.source)
-        {
+        if pending.publication.predecessors.iter().any(|p| {
+            !self
+                .catalogue
+                .catalogue_schemas
+                .contains_key(&p.lens.source)
+        }) {
             return Ok(());
         }
         // Admission must not reserve durable catalogue state or consume local
@@ -407,9 +502,9 @@ self.database.finish_persistence(persisted)?;
             &mut next_table,
             &mut next_column,
         )?;
-        let mapping = self.reconcile_physical_mapping_for_lens_payload(
-            &pending.publication.lens,
-            &pending.publication.schema,
+        let mapping = Self::reconcile_publication_mapping(
+            &self.catalogue,
+            &pending.publication,
             &provisional,
         )?;
         let mut candidate_mappings = self.catalogue.physical_mappings.clone();
@@ -652,6 +747,7 @@ self.database.finish_persistence(persisted)?;
                         let mut cases = source_table
                             .scalar_enum_cases
                             .get(&id)
+                            .or_else(|| provisional_target_table.scalar_enum_cases.get(&id))
                             .cloned()
                             .unwrap_or_default();
                         if cases.len() > enum_schema.variants.len() {
@@ -667,6 +763,7 @@ self.database.finish_persistence(persisted)?;
                         let mut cases = source_table
                             .payload_enum_cases
                             .get(&id)
+                            .or_else(|| provisional_target_table.payload_enum_cases.get(&id))
                             .cloned()
                             .unwrap_or_default();
                         if cases.len() > enum_schema.cases.len() {
@@ -685,8 +782,12 @@ self.database.finish_persistence(persisted)?;
                     _ => {}
                 }
             }
-            let mut nested_scalar_enum_cases = source_table.nested_scalar_enum_cases.clone();
-            let mut nested_payload_enum_cases = source_table.nested_payload_enum_cases.clone();
+            let mut nested_scalar_enum_cases =
+                provisional_target_table.nested_scalar_enum_cases.clone();
+            nested_scalar_enum_cases.extend(source_table.nested_scalar_enum_cases.clone());
+            let mut nested_payload_enum_cases =
+                provisional_target_table.nested_payload_enum_cases.clone();
+            nested_payload_enum_cases.extend(source_table.nested_payload_enum_cases.clone());
             for column in &target_table_schema.columns {
                 let id = *columns.get(&column.name).ok_or(Error::InvalidStoredValue(
                     "nested enum physical column missing",
@@ -927,7 +1028,6 @@ self.database.finish_persistence(persisted)?;
         staged: &StagedSchemaLineage,
     ) -> Result<(), Error> {
         let schema = &staged.publication.schema;
-        let lens = &staged.publication.lens;
         // The active receipt retains the canonical staged payload as its
         // durable witness.  The pending envelope, however, is an obligation
         // to activate: leaving it behind after this batch commits would make
@@ -961,14 +1061,17 @@ self.database.finish_persistence(persisted)?;
                 Value::Bytes(codec::encode_catalogue_schema(schema)?),
             ],
         );
-        batch.update(
-            "jazz_catalogue",
-            vec![
-                Value::U64(codec::CatalogueRecordKind::Lens.key()),
-                Value::Uuid(lens.id.0),
-                Value::Bytes(codec::encode_catalogue_lens(lens)),
-            ],
-        );
+        for predecessor in &staged.publication.predecessors {
+            let lens = &predecessor.lens;
+            batch.update(
+                "jazz_catalogue",
+                vec![
+                    Value::U64(codec::CatalogueRecordKind::Lens.key()),
+                    Value::Uuid(lens.id.0),
+                    Value::Bytes(codec::encode_catalogue_lens(lens)),
+                ],
+            );
+        }
         Self::write_schema_version_mapping_to_batch(
             batch,
             staged.alias,

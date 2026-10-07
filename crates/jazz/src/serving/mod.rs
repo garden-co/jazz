@@ -464,6 +464,20 @@ impl ShellDb {
         }
     }
 
+    fn validate_deployment_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> ShellResult<()> {
+        match self {
+            Self::Memory(db) => db
+                .validate_deployment_snapshot(snapshot)
+                .map_err(Into::into),
+            Self::Durable(db) => db
+                .validate_deployment_snapshot(snapshot)
+                .map_err(Into::into),
+        }
+    }
+
     fn trusted_catalogue_snapshot(&self) -> ShellResult<crate::protocol::CatalogueSnapshot> {
         match self {
             Self::Memory(db) => db.trusted_catalogue_snapshot().map_err(Into::into),
@@ -937,6 +951,13 @@ impl InMemoryServerShell {
         &self,
     ) -> ShellResult<crate::protocol::CatalogueSnapshot> {
         self.db.trusted_catalogue_snapshot()
+    }
+
+    pub(crate) fn validate_deployment_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> ShellResult<()> {
+        self.db.validate_deployment_snapshot(snapshot)
     }
 
     /// Apply the authenticated authority catalogue to an already-open downstream server.

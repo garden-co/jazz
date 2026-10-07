@@ -234,7 +234,7 @@ replicated-immutable fields (§2.1): `row_uuid`, the provenance cells, a nullabl
 `_deletion`, and nullable `user_{col}` cells, carried in the `JVRR` version-2
 row blob (SPEC 16) and followed by the record's `authored_columns`, its
 `base` (SPEC 4 §4.6) and its `counter_signs` (SPEC 4 §4.3).
-Wire protocol v4 removed `parents`; a version-1 blob is rejected. Receiver-local currency and
+Wire protocol v5 removed `parents`; a version-1 blob is rejected. Receiver-local currency and
 authority-state columns are excluded (`INV-DATA-16`). Mixed-version _sync_ is
 owned by ch. 8 / ch. 10.
 

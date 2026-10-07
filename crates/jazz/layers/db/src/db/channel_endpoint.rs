@@ -417,7 +417,7 @@ pub mod tests {
                     settled_through: crate::time::GlobalTime(10_000 + i),
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    // Use current wire-v4 empty supporting-set successors as
+                    // Use current wire-v5 empty supporting-set successors as
                     // independently delivered control-plane messages. This is
                     // a compression roundtrip receipt, not a historical size baseline.
                     supporting_rows: crate::protocol::SupportingRowsUpdate::Delta {

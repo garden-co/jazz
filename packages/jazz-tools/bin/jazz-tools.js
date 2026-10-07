@@ -129,14 +129,12 @@ function printWrapperHelp() {
   console.log("");
   console.log("Commands:");
   console.log("  validate              Validate root schema.ts and permissions.ts");
-  console.log(
-    "  schema export         Print structural schema JSON from schema.ts or a schema hash",
-  );
+  console.log("  schema compile        Print schema JSON from local schema.ts");
   console.log("  deploy                Publish schema, permissions, and required migrations");
-  console.log("  permissions status    Show the current server permissions head for this app");
   console.log(
     "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
   );
+  console.log("  migrations graph      Visualize the full migration graph");
   console.log("  create                Create a new resource");
   console.log("  server                Run a Jazz server");
   console.log("  help                  Print this message");
@@ -159,7 +157,6 @@ if (!command || command === "--help" || command === "-h") {
   command === "validate" ||
   command === "deploy" ||
   command === "migrations" ||
-  command === "permissions" ||
   command === "schema"
 ) {
   const tsCliPath = join(here, "..", "dist", "cli.js");

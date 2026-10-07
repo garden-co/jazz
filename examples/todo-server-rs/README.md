@@ -5,7 +5,7 @@ Axum REST + SSE service backed by Jazz, using the `jazz-tools` Rust crate direct
 ## What it demonstrates
 
 - Using `jazz-tools` as a Rust crate (`JazzClient::connect`) with persistent storage and a remote sync server.
-- Loading a TypeScript schema from Rust by shelling out to the `jazz-tools` CLI (`schema export`) at startup &mdash; the schema is authored once in `schema.ts` and consumed both by the JS tooling and the Rust client.
+- Loading a TypeScript schema from Rust by shelling out to the `jazz-tools` CLI (`schema compile`) at startup &mdash; the schema is authored once in `schema.ts` and consumed both by the JS tooling and the Rust client.
 - CRUD over `/todos` (`GET`, `POST`, `PUT /:id`, `DELETE /:id`) backed by Jazz inserts / updates / deletes.
 - Server-Sent Events on `/updates` broadcasting the full todo list whenever it changes, via a `tokio::sync::broadcast` channel.
 - `mimalloc` swapped in as the global allocator for a meaningful throughput win on the Rust-side allocation-heavy paths (query / insert / observer).
@@ -32,13 +32,13 @@ cargo run -p todo-server
 
 Configurable via env vars (all optional):
 
-| Variable          | Default                                 |
-| ----------------- | --------------------------------------- |
-| `JAZZ_APP_ID`     | hard-coded fallback id (see `main.rs`)  |
-| `JAZZ_SERVER_URL` | `http://localhost:1625`                 |
-| `TODO_DATA_DIR`   | `./todo-data` (local data directory)    |
-| `TODO_PORT`       | `3000`                                  |
-| `JAZZ_TOOLS_BIN`  | `jazz-tools` (used for `schema export`) |
+| Variable          | Default                                  |
+| ----------------- | ---------------------------------------- |
+| `JAZZ_APP_ID`     | hard-coded fallback id (see `main.rs`)   |
+| `JAZZ_SERVER_URL` | `http://localhost:1625`                  |
+| `TODO_DATA_DIR`   | `./todo-data` (local data directory)     |
+| `TODO_PORT`       | `3000`                                   |
+| `JAZZ_TOOLS_BIN`  | `jazz-tools` (used for `schema compile`) |
 
 ## API
 

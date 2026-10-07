@@ -154,7 +154,7 @@ that role rather than being replaced by local numeric catalogue aliases.
 
 The concrete v1 byte contracts are:
 
-- Immutable-version row blob: ASCII `JVRR`, byte `2` (wire protocol v4; the
+- Immutable-version row blob: ASCII `JVRR`, byte `2` (wire protocol v5; the
   version-1 blob carried `parents` and is rejected), descriptor byte length as
   little-endian `U32`, exactly that many Groove persisted-descriptor bytes, then
   canonical row bytes consuming the remainder. The enclosing sync message owns

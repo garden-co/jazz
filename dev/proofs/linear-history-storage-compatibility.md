@@ -22,7 +22,7 @@ Run the refusal proofs with:
 ```sh
 dev/gates/storage-compat.sh
 RUST_MIN_STACK=4194304 cargo test -p jazz --test integration storage_format_refusal
-RUST_MIN_STACK=4194304 cargo test -p jazz --test integration wire_fixtures::pre_v4_peers_are_refused_at_hello_with_a_typed_version_mismatch
+RUST_MIN_STACK=4194304 cargo test -p jazz --test integration wire_fixtures::pre_v5_peers_are_refused_at_hello_with_a_typed_version_mismatch
 ```
 
 The browser receipts run in the TypeScript partition's "browser storage
@@ -33,13 +33,15 @@ merge.
 
 ## What changed
 
-- **Wire:** protocol v3 becomes v4 (`crates/jazz/layers/protocol/src/wire.rs`,
+- **Wire:** protocol v3 becomes v5 (`crates/jazz/layers/protocol/src/wire.rs`,
   `WIRE_PROTOCOL_VERSION`; TypeScript
   `packages/jazz-tools/src/runtime/native-runtime/websocket.ts`,
   `WIRE_PROTOCOL_VERSION`). Row payloads use `JVRR\x02` with no `parents`, a
   `_deletion` cell and trailing `base` and `counter_signs`. `SyncMessage` tags 15/16 and
   `KnownStateDeclaration` tag 2 are reserved and uninhabited. SPEC 8 records
-  the boundary ("Linear-history boundary").
+  the boundary ("Linear-history boundary"). Wire v4 (multiple schema
+  predecessors, #3651) never shipped in a release; v5 carries its predecessor
+  vector unchanged and refuses v4 peers the same way it refuses v3 ones.
 - **Storage:** every root that stores rows opens with
   `node_storage_codec_profile()`
   (`crates/jazz/layers/protocol/src/storage_codec_profile.rs`), which is the
@@ -62,17 +64,17 @@ merge.
 
 | Pair                                                 | Where it fails                                                                                                                                                                               | Exact error                                                                                                                                                                                                                                                                           |
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| alpha.59 (v3) client → new (v4) server               | Server, on the client's Hello (`crates/jazz-server/src/server/routes/websocket.rs`, `negotiate_wire` call in the websocket accept path). The server sends one `WireFrame::Error` and closes. | `WireErrorCode::UnsupportedProtocolVersion`, `WireRetry::Never`, message `unsupported wire protocol advertisement: remote 3..=3, expected 4..=4` (`wire.rs`, `negotiate_wire`). An old TS client names the code `unsupported_protocol_version` (`websocket.ts`, `wireErrorCodeName`). |
-| new (v4) client → alpha.59 (v3) server               | Old server, same path on main.                                                                                                                                                               | Same code and retry, message `unsupported wire protocol advertisement: remote 4..=4, expected 3..=3` (main `wire.rs`, `negotiate_wire`).                                                                                                                                              |
-| new TS client reading a server Hello that is not v4  | Client (`websocket.ts`, `decodeServerHello`).                                                                                                                                                | `server must advertise exactly wire protocol 4, got 3..=3`                                                                                                                                                                                                                            |
-| new NAPI binding told a different negotiated version | `crates/jazz-napi/src/lib.rs`, transport constructor.                                                                                                                                        | `server negotiated wire protocol 3, but this native binding supports only 4`                                                                                                                                                                                                          |
-| v3 message envelope on a v4 link                     | `wire.rs`, `validate_metadata`.                                                                                                                                                              | `UnsupportedProtocolVersion`, `wire message protocol version 3 does not match negotiated 4`                                                                                                                                                                                           |
+| alpha.59 (v3) client → new (v5) server               | Server, on the client's Hello (`crates/jazz-server/src/server/routes/websocket.rs`, `negotiate_wire` call in the websocket accept path). The server sends one `WireFrame::Error` and closes. | `WireErrorCode::UnsupportedProtocolVersion`, `WireRetry::Never`, message `unsupported wire protocol advertisement: remote 3..=3, expected 5..=5` (`wire.rs`, `negotiate_wire`). An old TS client names the code `unsupported_protocol_version` (`websocket.ts`, `wireErrorCodeName`). |
+| new (v5) client → alpha.59 (v3) server               | Old server, same path on main.                                                                                                                                                               | Same code and retry, message `unsupported wire protocol advertisement: remote 5..=5, expected 3..=3` (main `wire.rs`, `negotiate_wire`).                                                                                                                                              |
+| new TS client reading a server Hello that is not v5  | Client (`websocket.ts`, `decodeServerHello`).                                                                                                                                                | `server must advertise exactly wire protocol 5, got 3..=3`                                                                                                                                                                                                                            |
+| new NAPI binding told a different negotiated version | `crates/jazz-napi/src/lib.rs`, transport constructor.                                                                                                                                        | `server negotiated wire protocol 3, but this native binding supports only 5`                                                                                                                                                                                                          |
+| v3 message envelope on a v5 link                     | `wire.rs`, `validate_metadata`.                                                                                                                                                              | `UnsupportedProtocolVersion`, `wire message protocol version 3 does not match negotiated 5`                                                                                                                                                                                           |
 | v3 `KnownStateDeclaration::ExactVersionSet` (tag 2)  | Payload decode (`protocol.rs`, `KnownStateDeclaration::Reserved2`).                                                                                                                          | Decode failure; tag 2 is uninhabited.                                                                                                                                                                                                                                                 |
 
 Nothing reaches payload decoding across versions, so no old frame can be
 reinterpreted. Receipt: `crates/jazz/tests/wire_fixtures.rs`,
-`pre_v4_peers_are_refused_at_hello_with_a_typed_version_mismatch` replays frozen
-v3 Hello and Subscribe frames and a tag-2 declaration.
+`pre_v5_peers_are_refused_at_hello_with_a_typed_version_mismatch` replays frozen
+v3 and v4 Hello frames, a v3 Subscribe frame and a tag-2 declaration.
 
 ## What old stores see
 
@@ -155,7 +157,7 @@ an append from the current writer.
 
 ## What users must do
 
-- **Upgrade clients and servers together.** A v3 and a v4 peer never sync.
+- **Upgrade clients and servers together.** A v3 (or v4) and a v5 peer never sync.
 - **Delete old stores.** Native data directories (RocksDB, SQLite) and browser
   IndexedDB databases written by alpha.59 or earlier must be removed, then the
   client resyncs from Core. Any write that had not reached Core is lost.

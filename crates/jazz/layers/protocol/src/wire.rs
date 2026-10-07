@@ -25,7 +25,7 @@ use crate::protocol_limits::{
 /// This is the sole supported wire version. It is independent of the v1
 /// storage, catalogue, and binding formats: those labels name their own
 /// formats and are not wire-protocol compatibility aliases.
-pub const WIRE_PROTOCOL_VERSION: u16 = 4;
+pub const WIRE_PROTOCOL_VERSION: u16 = 5;
 
 /// Frozen v1 full-frame artifact rejection corpus. NAPI and WASM execute every
 /// frame in the complete Rust message/Hello fixtures, plus these explicit
@@ -82,9 +82,9 @@ pub enum WireFrame {
     Error(WireError),
     /// One physical extent of an encoded logical sync message.
     MessageFragment(WireMessageFragment),
-    /// One ordered channel extent. Postcard-v1 enum tag 4 within wire v4.
+    /// One ordered channel extent. Postcard-v1 enum tag 4 within wire v5.
     Channel(WireChannelEnvelope),
-    /// Receiver-consumption byte grant. Postcard-v1 enum tag 5 within wire v4.
+    /// Receiver-consumption byte grant. Postcard-v1 enum tag 5 within wire v5.
     ChannelCredit(WireChannelCredit),
 }
 
@@ -2482,10 +2482,10 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_requires_an_exact_v4_advertisement_and_intersects_features() {
+    fn negotiation_requires_an_exact_v5_advertisement_and_intersects_features() {
         let remote = WireHello {
-            min_protocol_version: 4,
-            max_protocol_version: 4,
+            min_protocol_version: 5,
+            max_protocol_version: 5,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME,
             role: WirePeerRole::Relay,
             authority: None,
@@ -2549,8 +2549,8 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_rejects_version_ranges_even_when_they_include_v4() {
-        for (min_protocol_version, max_protocol_version) in [(0, 4), (3, 4), (4, 15)] {
+    fn negotiation_rejects_version_ranges_even_when_they_include_v5() {
+        for (min_protocol_version, max_protocol_version) in [(0, 5), (3, 5), (4, 5), (5, 15)] {
             let remote = WireHello {
                 min_protocol_version,
                 max_protocol_version,
@@ -2566,11 +2566,40 @@ mod tests {
         }
     }
 
-    /// Alice's v4 Core rejects Bob's v2 Core before policy snapshot decoding.
+    /// Alice's v5 Core rejects Bob's v4 Core, which predates linear row-state
+    /// history, before any row payload decoding.
+    #[test]
+    fn wire_v5_rejects_dag_history_v4_peers() {
+        let hello = WireHello {
+            min_protocol_version: 4,
+            max_protocol_version: 4,
+            features: FEATURE_SYNC_MESSAGE_PAYLOAD,
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+        let error = negotiate_wire(&hello, FEATURE_SYNC_MESSAGE_PAYLOAD).unwrap_err();
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    /// Alice's v5 Core rejects Bob's v3 Core before predecessor snapshot decoding.
+    #[test]
+    fn wire_v5_rejects_single_predecessor_v3_peers() {
+        let hello = WireHello {
+            min_protocol_version: 3,
+            max_protocol_version: 3,
+            features: FEATURE_SYNC_MESSAGE_PAYLOAD,
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+        assert!(negotiate_wire(&hello, FEATURE_SYNC_MESSAGE_PAYLOAD).is_err());
+    }
+
+    /// Alice's v5 Core rejects Bob's v2 Core before policy snapshot decoding.
     /// This internal boundary test pins negotiation, which row equality cannot observe.
     #[test]
-    fn wire_v4_rejects_v2_before_policy_snapshot_decode() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 4);
+    fn wire_v5_rejects_v2_before_policy_snapshot_decode() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
         let remote = WireHello {
             min_protocol_version: 2,
             max_protocol_version: 2,
@@ -2586,13 +2615,13 @@ mod tests {
             negotiate_wire(&current, current_wire_features())
                 .unwrap()
                 .protocol_version,
-            4
+            5
         );
     }
 
     #[test]
-    fn wire_v4_rejects_v14_without_compatibility_negotiation() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 4);
+    fn wire_v5_rejects_v14_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
         let remote = WireHello {
             min_protocol_version: 14,
             max_protocol_version: 14,
@@ -2609,7 +2638,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_v4_rejects_v15_peer_before_payload_decode() {
+    fn wire_v5_rejects_v15_peer_before_payload_decode() {
         let v15_peer = WireHello {
             min_protocol_version: 15,
             max_protocol_version: 15,
@@ -2619,9 +2648,9 @@ mod tests {
         };
 
         let error = negotiate_wire(&v15_peer, current_wire_features())
-            .expect_err("v15 encoding must fail during the v4 handshake");
+            .expect_err("v15 encoding must fail during the v5 handshake");
 
-        assert_eq!(WIRE_PROTOCOL_VERSION, 4);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
     }

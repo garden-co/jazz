@@ -303,9 +303,11 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     let mut lineage_publication = SchemaLineagePublication {
         id: jazz::ids::SchemaLineagePublicationId(uuid::Uuid::nil()),
         schema: lineage_target.clone(),
-        lens: lineage_lens,
-        new_tables: Vec::new(),
-        dropped_tables: Vec::new(),
+        predecessors: vec![jazz::protocol::SchemaPredecessor {
+            lens: lineage_lens,
+            new_tables: Vec::new(),
+            dropped_tables: Vec::new(),
+        }],
         physical_identities: lineage_target_identities,
     };
     lineage_publication.id = lineage_publication.content_id();
@@ -680,6 +682,34 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         "ViewUpdatePart",
         SyncMessage::ViewUpdatePart(part),
     ));
+    let (_, _, snapshot) = messages
+        .iter()
+        .find(|(_, _, message)| matches!(message, SyncMessage::CatalogueSnapshot(_)))
+        .unwrap();
+    let SyncMessage::CatalogueSnapshot(mut merged_snapshot) = snapshot.clone() else {
+        unreachable!()
+    };
+    let publication = &mut merged_snapshot.lineages[0].1;
+    let predecessor = &publication.predecessors[0];
+    publication
+        .predecessors
+        .push(jazz::protocol::SchemaPredecessor {
+            lens: MigrationLens::new(
+                SchemaVersionId(uuid::Uuid::from_bytes([0x34; 16])),
+                publication.schema.id,
+                predecessor.lens.table_lenses().to_vec(),
+            )
+            .unwrap(),
+            new_tables: vec![],
+            dropped_tables: vec![],
+        });
+    publication.predecessors.sort_by_key(|p| p.lens.source());
+    publication.id = publication.content_id();
+    messages.push((
+        "catalogue_snapshot_multiple_predecessors",
+        "CatalogueSnapshot",
+        SyncMessage::CatalogueSnapshot(merged_snapshot),
+    ));
     messages
 }
 
@@ -768,7 +798,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v4",
+        fixture_set: "jazz-wire-message-frames-v5",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -953,50 +983,60 @@ fn retired_wire_tag_12_rejects_decoding() {
     }
 }
 
-/// Wire protocol v4 (linear row-state history) refuses every pre-v4 peer at
+/// Wire protocol v5 (linear row-state history) refuses every pre-v5 peer at
 /// the Hello handshake with the typed `UnsupportedProtocolVersion`/`Never`
 /// error, before any payload is decoded.
 ///
-/// Actors: `alice` runs a v4 Core; `bob` still runs a v3 build (alpha.54 to
-/// alpha.57) whose frozen Hello and Subscribe frames are replayed verbatim.
+/// Actors: `alice` runs a v5 Core; `bob` still runs a v3 build (alpha.54 to
+/// alpha.57) and `carol` a v4 build (multiple schema predecessors, version
+/// DAG history). Their frozen Hello frames, and bob's Subscribe frame, are
+/// replayed verbatim.
 ///
 /// ```text
-/// bob(v3) ──Hello 3..=3──► alice(v4) ──✗ UnsupportedProtocolVersion, retry Never
-/// bob(v3) ──Message v3──► alice(v4) ──✗ envelope version mismatch (never decoded)
-/// bob(v3) ──ExactVersionSet (tag 2) in a v4 envelope──► ✗ reserved tag, not a Watermark
+/// bob(v3)   ──Hello 3..=3──► alice(v5) ──✗ UnsupportedProtocolVersion, retry Never
+/// carol(v4) ──Hello 4..=4──► alice(v5) ──✗ UnsupportedProtocolVersion, retry Never
+/// bob(v3)   ──Message v3──► alice(v5) ──✗ envelope version mismatch (never decoded)
+/// bob(v3)   ──ExactVersionSet (tag 2) in a v5 envelope──► ✗ reserved tag, not a Watermark
 /// ```
 ///
 /// Exact frames are not a public database API, so this is a codec-level
-/// receipt: the inputs are the bytes the v3 fixture set froze.
+/// receipt: the inputs are the bytes the v3 and v4 fixture sets froze.
 #[test]
-fn pre_v4_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
-    assert_eq!(WIRE_PROTOCOL_VERSION, 4);
-    let bob_v3_hellos = [
-        // `wire_hello_frames.json` (jazz-wire-hello-frames-v1) at wire v3.
-        "000303000000",
-        "000303010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
-        "000303f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
-        "00030388020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+fn pre_v5_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
+    assert_eq!(WIRE_PROTOCOL_VERSION, 5);
+    let old_hellos = [
+        // `wire_hello_frames.json` (jazz-wire-hello-frames-v1) at wire v3 (bob).
+        (3, "000303000000"),
+        (3, "000303010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
+        (3, "000303f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
+        (3, "00030388020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
+        // The same fixture set at wire v4 (carol).
+        (4, "000404000000"),
+        (4, "000404010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
+        (4, "000404f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
+        (4, "00040488020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
     ];
-    for hex_frame in bob_v3_hellos {
-        let WireFrame::Hello(hello) =
-            jazz::wire::decode_frame(&parse_hex(hex_frame)).expect("v3 Hello is a canonical frame")
+    for (version, hex_frame) in old_hellos {
+        let WireFrame::Hello(hello) = jazz::wire::decode_frame(&parse_hex(hex_frame))
+            .expect("an old Hello is a canonical frame")
         else {
             panic!("expected a Hello frame");
         };
         assert_eq!(
             (hello.min_protocol_version, hello.max_protocol_version),
-            (3, 3)
+            (version, version)
         );
         let error = jazz::wire::negotiate_wire(&hello, jazz::wire::current_wire_features())
-            .expect_err("alice's v4 Core must refuse bob's v3 Hello");
+            .expect_err("alice's v5 Core must refuse an old Hello");
         assert_eq!(
             error.code,
             jazz::wire::WireErrorCode::UnsupportedProtocolVersion
         );
         assert_eq!(error.retry, jazz::wire::WireRetry::Never);
         assert!(
-            error.message.contains("remote 3..=3, expected 4..=4"),
+            error
+                .message
+                .contains(&format!("remote {version}..={version}, expected 5..=5")),
             "{}",
             error.message
         );
@@ -1010,13 +1050,13 @@ fn pre_v4_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
         &bob_v3_subscribe,
         jazz::wire::current_wire_features(),
     )
-    .expect_err("a v3 envelope must not be admitted on a v4 link");
+    .expect_err("a v3 envelope must not be admitted on a v5 link");
     assert!(
-        rejection.contains("protocol version 3 does not match negotiated 4"),
+        rejection.contains("protocol version 3 does not match negotiated 5"),
         "{rejection}"
     );
 
-    // Even re-wrapped in a v4 envelope, bob's pre-v4 `ExactVersionSet`
+    // Even re-wrapped in a v5 envelope, bob's pre-v5 `ExactVersionSet`
     // declaration (tag 2) is a reserved tag rather than a `Watermark` prefix.
     let WireFrame::Message(envelope) = jazz::wire::decode_frame(&bob_v3_subscribe).unwrap() else {
         panic!("expected a message frame");
@@ -1154,7 +1194,7 @@ fn supporting_snapshots_reject_duplicate_rows_and_invalid_native_table() {
 #[test]
 fn v1_delegated_policy_fields_reject_old_shapes_and_pin_claim_bytes() {
     let messages = wire_fixture_messages();
-    // `FetchRowVersions` (tag 15) is retired in wire v4, so `Subscribe` is the
+    // `FetchRowVersions` (tag 15) is retired in wire v5, so `Subscribe` is the
     // only direct-policy message left to pin; its retired fixtures are gone.
     for name in ["subscribe_empty_todos_binding"] {
         let (_, _, message) = messages

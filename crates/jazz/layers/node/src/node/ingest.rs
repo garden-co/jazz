@@ -8,7 +8,7 @@
 //! sibling [`super::catalogue_ingest`] module.
 
 use super::*;
-use crate::protocol::{CatalogueAck, LensOp, RowBase, SchemaLineagePublication, VersionBundleRef};
+use crate::protocol::{CatalogueAck, RowBase, SchemaLineagePublication, VersionBundleRef};
 use crate::protocol_limits::{commit_unit_limit_violation, validate_shape_registration_size};
 use crate::schema::ColumnSchema;
 
@@ -72,14 +72,6 @@ pub(super) fn validate_received_view_bundle_global_time_durability(
             "global timestamp requires Global durability",
         ));
     }
-    Ok(())
-}
-
-fn validate_transform_column(column: Option<&ColumnSchema>, transform: &str) -> Result<(), Error> {
-    validate_registered_transform(transform)?;
-    let Some(_) = column else {
-        return Err(Error::InvalidCatalogueUpdate("transform column is unknown"));
-    };
     Ok(())
 }
 

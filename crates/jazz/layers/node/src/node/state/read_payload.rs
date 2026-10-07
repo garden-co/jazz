@@ -71,24 +71,31 @@ where
             return Some(Vec::new());
         }
 
-        let mut seen = BTreeSet::from([source]);
-        let mut queue = VecDeque::from([(source, Vec::new())]);
-        while let Some((schema, path)) = queue.pop_front() {
-            for (lens, direction) in self.ordered_lens_edges(schema) {
-                let next = match direction {
-                    LensPathDirection::Forward => lens.target,
-                    LensPathDirection::Reverse => lens.source,
-                };
-                if seen.contains(&next) {
-                    continue;
+        // Preserve ancestor-authored columns when a forward route exists.
+        // A shorter reverse detour can drop and reintroduce those columns.
+        for forward_only in [true, false] {
+            let mut seen = BTreeSet::from([source]);
+            let mut queue = VecDeque::from([(source, Vec::new())]);
+            while let Some((schema, path)) = queue.pop_front() {
+                for (lens, direction) in self.ordered_lens_edges(schema) {
+                    if forward_only && matches!(direction, LensPathDirection::Reverse) {
+                        continue;
+                    }
+                    let next = match direction {
+                        LensPathDirection::Forward => lens.target,
+                        LensPathDirection::Reverse => lens.source,
+                    };
+                    if seen.contains(&next) {
+                        continue;
+                    }
+                    let mut next_path = path.clone();
+                    next_path.push((lens.id, direction));
+                    if next == target {
+                        return Some(next_path);
+                    }
+                    seen.insert(next);
+                    queue.push_back((next, next_path));
                 }
-                let mut next_path = path.clone();
-                next_path.push((lens.id, direction));
-                if next == target {
-                    return Some(next_path);
-                }
-                seen.insert(next);
-                queue.push_back((next, next_path));
             }
         }
         None

@@ -19,7 +19,7 @@
   "rejections": [
     {
       "name": "trailing complete hello",
-      "frame_hex": "00040400000000",
+      "frame_hex": "00050500000000",
       "negotiated_features": "0"
     },
     {
@@ -34,22 +34,22 @@
     },
     {
       "name": "corrupt zstd-compressed message payload",
-      "frame_hex": "01041000106e6f742061207a737464206672616d65",
+      "frame_hex": "01051000106e6f742061207a737464206672616d65",
       "negotiated_features": "17"
     },
     {
       "name": "malformed semantic payload inside a complete message envelope",
-      "frame_hex": "0104010001ff",
+      "frame_hex": "0105010001ff",
       "negotiated_features": "1"
     },
     {
       "name": "trailing semantic payload inside a complete message envelope",
-      "frame_hex": "0104010019040c1011111111111111111111111111111111010107010300",
+      "frame_hex": "0105010019040c1011111111111111111111111111111111010107010300",
       "negotiated_features": "1"
     },
     {
       "name": "unnegotiated auxiliary semantic payload inside a complete message envelope",
-      "frame_hex": "01040100691b000197e5d51d966aed891c711f3be08331a07daed269cfaa3e2d619d10216ad63c2fd3f6430ff65c7b8002c7aabe98543246fd606b924b6f51e812430065b9c70b9020d3f6430ff65c7b8002c7aabe98543246fd606b924b6f51e812430065b9c70b908180040000",
+      "frame_hex": "01050100691b000197e5d51d966aed891c711f3be08331a07daed269cfaa3e2d619d10216ad63c2fd3f6430ff65c7b8002c7aabe98543246fd606b924b6f51e812430065b9c70b9020d3f6430ff65c7b8002c7aabe98543246fd606b924b6f51e812430065b9c70b908180040000",
       "negotiated_features": "1"
     },
     {
@@ -60,6 +60,11 @@
     {
       "name": "unsupported exact-v3 hello",
       "frame_hex": "000303000100",
+      "negotiated_features": "0"
+    },
+    {
+      "name": "unsupported exact-v4 hello",
+      "frame_hex": "000404000100",
       "negotiated_features": "0"
     }
   ]

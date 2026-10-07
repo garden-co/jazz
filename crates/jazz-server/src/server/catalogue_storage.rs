@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 
 use crate::server::catalogue_entry::CatalogueEntry;
-use jazz::groove::storage::{BoxedStorage, OrderedKvStorage, StorageCodecProfile, StorageFactory};
+use jazz::groove::storage::{
+    BoxedStorage, OrderedKvStorage, OwnedWriteOperation, StorageCodecProfile, StorageFactory,
+    WriteManyOutcome,
+};
 use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::tools::ObjectId;
 
@@ -15,12 +18,18 @@ pub(crate) type CatalogueStorageResult<T> = Result<T, CatalogueStorageError>;
 #[derive(Debug, Clone)]
 pub(crate) enum CatalogueStorageError {
     IoError(String),
+    /// The backend could not prove the batch remained uncommitted. Reopen
+    /// or recover before serving an in-memory catalogue based on the old state.
+    PossiblyCommitted(String),
 }
 
 impl std::fmt::Display for CatalogueStorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CatalogueStorageError::IoError(message) => write!(f, "IO error: {message}"),
+            CatalogueStorageError::PossiblyCommitted(message) => {
+                write!(f, "catalogue batch may have committed: {message}")
+            }
         }
     }
 }
@@ -29,7 +38,14 @@ impl std::error::Error for CatalogueStorageError {}
 
 pub(crate) trait CatalogueStorage {
     fn scan_catalogue_entries(&self) -> CatalogueStorageResult<Vec<CatalogueEntry>>;
+    #[cfg(any(test, feature = "embedded-server"))]
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> CatalogueStorageResult<()>;
+    /// Validate all encodings before atomically writing any of the entries.
+    /// Durability is established separately by `flush` / `flush_wal`.
+    fn upsert_catalogue_entries(
+        &mut self,
+        entries: &[CatalogueEntry],
+    ) -> CatalogueStorageResult<()>;
     fn flush(&self) -> CatalogueStorageResult<()>;
     fn flush_wal(&self) -> CatalogueStorageResult<()>;
     fn close(&self) -> CatalogueStorageResult<()>;
@@ -51,8 +67,20 @@ impl CatalogueStorage for CatalogueMemoryStorage {
         Ok(self.entries.values().cloned().collect())
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> CatalogueStorageResult<()> {
         self.entries.insert(entry.object_id, entry.clone());
+        Ok(())
+    }
+
+    fn upsert_catalogue_entries(
+        &mut self,
+        entries: &[CatalogueEntry],
+    ) -> CatalogueStorageResult<()> {
+        encode_batch(entries)?;
+        for entry in entries {
+            self.entries.insert(entry.object_id, entry.clone());
+        }
         Ok(())
     }
 
@@ -76,7 +104,12 @@ pub(crate) struct CatalogueKvStorage {
 
 enum CatalogueStorageCommand {
     Scan(mpsc::Sender<CatalogueStorageResult<Vec<CatalogueEntry>>>),
+    #[cfg(any(test, feature = "embedded-server"))]
     Upsert(CatalogueEntry, mpsc::Sender<CatalogueStorageResult<()>>),
+    UpsertBatch(
+        Vec<OwnedWriteOperation>,
+        mpsc::Sender<CatalogueStorageResult<()>>,
+    ),
     Flush(mpsc::Sender<CatalogueStorageResult<()>>),
     Close(mpsc::Sender<CatalogueStorageResult<()>>),
 }
@@ -164,8 +197,29 @@ impl CatalogueStorage for CatalogueKvStorage {
         self.request(CatalogueStorageCommand::Scan)
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> CatalogueStorageResult<()> {
         self.request(|reply| CatalogueStorageCommand::Upsert(entry.clone(), reply))
+    }
+
+    fn upsert_catalogue_entries(
+        &mut self,
+        entries: &[CatalogueEntry],
+    ) -> CatalogueStorageResult<()> {
+        let operations = encode_batch(entries)?;
+        let (reply, response) = mpsc::channel();
+        self.commands
+            .send(CatalogueStorageCommand::UpsertBatch(operations, reply))
+            .map_err(|_| {
+                CatalogueStorageError::IoError("catalogue storage owner is closed".to_owned())
+            })?;
+        // After enqueueing, a missing acknowledgement is an uncertain commit.
+        // Preserve the backend's explicit uncommitted result when it replies.
+        response.recv().map_err(|_| {
+            CatalogueStorageError::PossiblyCommitted(
+                "catalogue storage owner exited before acknowledging the batch".to_owned(),
+            )
+        })?
     }
 
     fn flush(&self) -> CatalogueStorageResult<()> {
@@ -202,6 +256,7 @@ fn run_catalogue_storage(storage: BoxedStorage, commands: mpsc::Receiver<Catalog
             CatalogueStorageCommand::Scan(reply) => {
                 let _ = reply.send(scan_entries(active_storage));
             }
+            #[cfg(any(test, feature = "embedded-server"))]
             CatalogueStorageCommand::Upsert(entry, reply) => {
                 let result = entry
                     .encode_storage_row()
@@ -216,6 +271,17 @@ fn run_catalogue_storage(storage: BoxedStorage, commands: mpsc::Receiver<Catalog
                         ))
                         .map_err(storage_error)
                     });
+                let _ = reply.send(result);
+            }
+            CatalogueStorageCommand::UpsertBatch(operations, reply) => {
+                let result = match jazz::db::block_on(active_storage.write_many_outcome(operations))
+                {
+                    WriteManyOutcome::Committed => Ok(()),
+                    WriteManyOutcome::Uncommitted(error) => Err(storage_error(error)),
+                    WriteManyOutcome::PossiblyCommitted(error) => {
+                        Err(CatalogueStorageError::PossiblyCommitted(error.to_string()))
+                    }
+                };
                 let _ = reply.send(result);
             }
             CatalogueStorageCommand::Flush(reply) => {
@@ -256,6 +322,22 @@ fn scan_entries(storage: &BoxedStorage) -> CatalogueStorageResult<Vec<CatalogueE
     Ok(entries)
 }
 
+fn encode_batch(entries: &[CatalogueEntry]) -> CatalogueStorageResult<Vec<OwnedWriteOperation>> {
+    entries
+        .iter()
+        .map(|entry| {
+            let value = entry.encode_storage_row().map_err(|error| {
+                CatalogueStorageError::IoError(format!("encode catalogue entry: {error}"))
+            })?;
+            Ok(OwnedWriteOperation::Set {
+                cf: CatalogueKvStorage::COLUMN_FAMILY.to_owned(),
+                key: CatalogueKvStorage::entry_key(entry.object_id),
+                value,
+            })
+        })
+        .collect()
+}
+
 fn storage_error(error: jazz::groove::storage::Error) -> CatalogueStorageError {
     CatalogueStorageError::IoError(error.to_string())
 }
@@ -276,6 +358,59 @@ pub(crate) fn catalogue_storage_codec_profile() -> CatalogueStorageResult<Storag
 mod tests {
     use super::*;
     use jazz::groove::storage::OrderedKvStorage;
+
+    // Internal adapter tests: the deploy endpoint is not connected yet, and
+    // entry-encoding failure must be checked before any native batch is submitted.
+    fn check_batch_rejection_is_atomic(storage: &mut dyn CatalogueStorage) -> Vec<CatalogueEntry> {
+        let entry = |byte, content: &[u8]| CatalogueEntry {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_bytes([byte; 16])),
+            metadata: std::collections::HashMap::new(),
+            content: content.to_vec(),
+        };
+        let original = entry(1, b"old");
+        storage.upsert_catalogue_entry(&original).unwrap();
+        let replacement = entry(1, b"new");
+        let second = entry(2, b"second");
+        let mut invalid = second.clone();
+        invalid
+            .metadata
+            .insert("oversized".into(), "x".repeat(usize::from(u16::MAX) + 1));
+        assert!(matches!(
+            storage.upsert_catalogue_entries(&[replacement.clone(), invalid]),
+            Err(CatalogueStorageError::IoError(_))
+        ));
+        assert_eq!(storage.scan_catalogue_entries().unwrap(), vec![original]);
+        let expected = vec![replacement, second];
+        storage.upsert_catalogue_entries(&expected).unwrap();
+        assert_eq!(storage.scan_catalogue_entries().unwrap(), expected);
+        storage.upsert_catalogue_entries(&[]).unwrap();
+        assert_eq!(storage.scan_catalogue_entries().unwrap(), expected);
+        expected
+    }
+
+    #[test]
+    fn memory_catalogue_batch_rejects_invalid_entries_without_a_prefix_write() {
+        check_batch_rejection_is_atomic(&mut CatalogueMemoryStorage::new());
+    }
+
+    #[test]
+    fn persistent_catalogue_batch_rejects_invalid_entries_and_reopens_complete() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalogue.rocksdb");
+        let mut storage = CatalogueKvStorage::open(
+            Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory),
+            path.clone(),
+        )
+        .unwrap();
+        let expected = check_batch_rejection_is_atomic(&mut storage);
+        storage.flush().unwrap();
+        storage.close().unwrap();
+        let reopened =
+            CatalogueKvStorage::open(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory), path)
+                .unwrap();
+        assert_eq!(reopened.scan_catalogue_entries().unwrap(), expected);
+        reopened.close().unwrap();
+    }
 
     #[test]
     fn catalogue_key_v1_is_exact_and_rejects_alternate_spellings() {

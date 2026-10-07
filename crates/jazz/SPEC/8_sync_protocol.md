@@ -147,13 +147,14 @@ the Rust receipt rejects noncanonical payloads, and TypeScript independently
 encodes the corpus and rejects malformed relation input. It is compatibility
 evidence, not a migration input.
 
-**Linear-history boundary, 2026-09-29 — the sole wire protocol is v4.** Wire v4
-replaces the version DAG with linear per-row state (SPEC 4 §4.6). It changes
+**Linear-history boundary, 2026-09-29 — the sole wire protocol is v5.** Wire v5
+replaces the version DAG with linear per-row state (SPEC 4 §4.6) and keeps
+v4's schema-predecessor vector (below) unchanged. It changes
 payload shapes in place, so every endpoint advertises exactly
-`min_protocol_version=4, max_protocol_version=4` and a v3 (or older) peer fails
+`min_protocol_version=5, max_protocol_version=5` and a v4 (or older) peer fails
 the Hello handshake with `UnsupportedProtocolVersion`/`Never` before any payload
-is decoded; a v3 envelope on a v4 link is rejected by its version field. The v4
-baseline, frozen fresh rather than appended to v3, is:
+is decoded; a v4 envelope on a v5 link is rejected by its version field. The v5
+baseline, frozen fresh rather than appended to v4, is:
 
 - the `JVRR` row blob is version `2` (no `parents`; `_deletion` cell), and
   `VersionRecord` ends with `authored_columns`, `base` (SPEC 4 §4.6 "Wire
@@ -197,15 +198,24 @@ baseline, frozen fresh rather than appended to v3, is:
 - `KnownStateDeclaration` tag 2 (`ExactVersionSet`) is retired and reserved;
   `Watermark` is tag 3, so an old exact declaration fails decoding instead of
   being read as a watermark prefix;
-- `SupportingRowsUpdate::CatchUp` is tag 2. It is a mandatory v4 variant, not an
+- `SupportingRowsUpdate::CatchUp` is tag 2. It is a mandatory v5 variant, not an
   optional extension, so it has no feature bit.
 - `SyncMessage` tag 34 (`ViewUpdatePart`) is a non-final part of a
   `ViewUpdate` whose semantic payload exceeds the routed payload limit; the
   final part is an ordinary `ViewUpdate` (SPEC 13, "Oversized view updates").
-  It is a mandatory v4 variant with no feature bit.
+  It is a mandatory v5 variant with no feature bit.
 
-Clients, relays and Core servers must upgrade together; there is no v3 decoder
+Clients, relays and Core servers must upgrade together; there is no v4 decoder
 or migration. The storage boundary moves with it (SPEC 2 §2.7.1).
+
+**Schema-predecessor boundary — wire protocol v4 (superseded by v5).** Wire v4
+replaces the single incoming migration in each schema publication with an
+explicit predecessor vector. V3 and older peers fail the Hello handshake before
+decoding these snapshots. Clients and Core servers must upgrade together. It
+retains v3's deployment-aware catalogue policy semantics: policy changes must
+advance the write revision. Existing message discriminants remain fixed,
+including retired tags 12 and 30. Persisted single-predecessor records remain
+readable; storage versions are independent of this wire boundary.
 
 **Deployment boundary, 2026-09-18 — wire protocol v3 (superseded by v4).** `ViewUpdate` carries
 settled version payloads only through `version_carriers`; the transitional
@@ -232,8 +242,8 @@ Accountless reader sessions remain distinct from non-null row authors. Large sca
 internal enum/record encoding rather than the former private tagged/postcard
 payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
 milliseconds; the packed HLC is internal ordering state and is not protocol
-data. The wire-v4 golden fixture set is the only supported message layout.
-Wire-protocol v4 is independent of other formats that are also labelled v1,
+data. The wire-v5 golden fixture set is the only supported message layout.
+Wire-protocol v5 is independent of other formats that are also labelled v1,
 including storage, catalogue, migration-lens, and NAPI/WASM binding formats.
 `MigrationLens` payloads in that fixture set are
 their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
@@ -262,7 +272,7 @@ evaluate policy. `SYSTEM` is never a relay transport identity or delegated
 subject. This is a deliberate redefinition of the sole, unreleased v1 layout:
 there is no old-shape decoder or compatibility path.
 
-### 8.1.1 Frozen wire-protocol v4 byte contract
+### 8.1.1 Frozen wire-protocol v5 byte contract
 
 `WireFrame` and its `WireEnvelope.payload` are each **one complete postcard
 value**. A conformant decoder MUST reject a valid prefix followed by any
@@ -292,7 +302,7 @@ endpoint byte as a suffix is malformed framing, not version compatibility. A
 length other than exactly `16` MUST be rejected even when the declared byte
 sequence and the remaining Hello fields are otherwise well formed.
 
-Postcard enum ordinals are wire data. The wire-protocol v4 baseline freezes these permanent
+Postcard enum ordinals are wire data. The wire-protocol v5 baseline freezes these permanent
 discriminants (decimal):
 
 | enum                    | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -311,7 +321,7 @@ retired and MUST reject decoding; they have no constructible message.
 Future variants MUST append after these values; existing variants, fields, and
 their field order MUST NOT be reordered, inserted before, reused, or decoded
 through a migration path. A new optional semantic variant additionally needs a
-new negotiated feature bit. Wire-protocol v4 intentionally provides neither
+new negotiated feature bit. Wire-protocol v5 intentionally provides neither
 old-version decoding nor migration.
 
 Tag 30 (`AuthorityPublication`) is retired. Its former edge-admission
@@ -339,7 +349,7 @@ its accepted mask is converted to a narrower runtime type. The feature mask
 and authority epoch remain `bigint` through wire decoding, so canonical values
 through `2^64-1` are representable without a JavaScript number conversion. Exactly
 one compression bit may be active on an envelope; when both codecs are
-negotiated, an outbound wire-protocol v4 sender selects LZ4 and emits only its bit. A
+negotiated, an outbound wire-protocol v5 sender selects LZ4 and emits only its bit. A
 receiver rejects an envelope declaring both codecs, a codec change within one
 connection, corrupt compressed bytes, or an encoded payload exceeding `E`
 before fragment admission, or a decompressed payload exceeding `D`.
@@ -368,7 +378,7 @@ new durable storage encoding or compatibility fallback.
 inline/indirect records. Rust checks exact bytes, decoded values, roundtrips,
 and rejection of the old descriptor before storage.
 
-The wire-protocol v4 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
+The wire-protocol v5 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
 `crates/jazz/fixtures/wire_hello_frames.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic
 value to the exact same payload and frame bytes, and TypeScript independently
@@ -809,7 +819,7 @@ supporting_revision }`, tag 3): "I have Q at seq `position` with supporting
   revision `supporting_revision` installed". A serving peer that can answer
   from its `by_seq` index replies with `SupportingRowsUpdate::CatchUp` against
   that revision; any other peer treats it as a fast declaration at `position`.
-- **Slow declaration** (retired in wire v4; its tag 2 is reserved) — an
+- **Slow declaration** (retired in wire v5; its tag 2 is reserved) — an
   explicit set of row-version identities
   `(row_uuid, tx_time, tx_node_id)`: used when no valid fast fact exists
   (fresh store, eviction, corruption). The client evaluates the query locally
@@ -1214,7 +1224,7 @@ selected scope's deletion witnesses and changes only with its source receipt.
 ### Mandatory current-row availability messages
 
 `CurrentRowsRequest`, `CurrentRowsReceipt`, and `CurrentRowsCancel` are mandatory
-wire-protocol v4 semantic messages. They require no optional feature bit and use
+wire-protocol v5 semantic messages. They require no optional feature bit and use
 the existing named postcard control codec and native `VersionCarrier` encoding;
 the byte corpus pins all three variants. Ordinary version validation and
 authenticated link admission still apply. No compatibility with peers lacking
@@ -1232,7 +1242,7 @@ current-row availability contract for authorization and receipt validation.
   the answer to a `Watermark` declaration, carrying only rows whose seq moved
   past the declared watermark (`changed`) or that left the set (`left`).
 
-The named semantic encoding is postcard in the version-4 WireEnvelope. Enum
+The named semantic encoding is postcard in the version-5 WireEnvelope. Enum
 discriminants are respectively 0, 1 and 2, followed by fields in declaration order.
 Revisions are exactly 16 raw array bytes (no length prefix). Vectors use postcard
 lengths and the existing exact SupportingRow field encoding. Populated snapshots

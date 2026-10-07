@@ -16,8 +16,6 @@ use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
 use jazz::tools::{ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
-use reqwest::StatusCode;
-use serde_json::json;
 use support::{
     TestingClient, has_added, publish_allow_all_permissions, push_catalogue_in_memory,
     wait_for_query, wait_for_subscription_update,
@@ -100,8 +98,7 @@ async fn push_catalogue(server: &JazzServer, schemas: &[Schema], lenses: &[Lens]
     .expect("push catalogue");
 }
 
-/// Publishing a permissions head for `schema` is the public operation that
-/// moves the server's current write pointer to that generation.
+/// Deploying `schema` with its permissions activates that generation.
 async fn activate_generation(server: &JazzServer, schema: &Schema) {
     publish_allow_all_permissions(
         &server.base_url(),
@@ -196,13 +193,13 @@ async fn newest_write_wins_when_row_history_spans_variable_column_generations() 
 
 async fn newest_write_wins_when_row_history_spans_variable_column_generations_impl() {
     let server = JazzServer::start().await.expect("start test server");
+    activate_generation(&server, &tasks_schema_v1()).await;
     push_catalogue(
         &server,
         &[tasks_schema_v1(), tasks_schema_v2()],
         &[v1_to_v2_lens()],
     )
     .await;
-    activate_generation(&server, &tasks_schema_v1()).await;
 
     let alice = connect_ready(&server, tasks_schema_v1(), "alice-mixed-history").await;
     let (row_id, project_id) = insert_v1_task(&alice).await;
@@ -261,13 +258,13 @@ async fn cold_client_converges_row_with_mixed_generation_history() {
 
 async fn cold_client_converges_row_with_mixed_generation_history_impl() {
     let server = JazzServer::start().await.expect("start test server");
+    activate_generation(&server, &tasks_schema_v1()).await;
     push_catalogue(
         &server,
         &[tasks_schema_v1(), tasks_schema_v2()],
         &[v1_to_v2_lens()],
     )
     .await;
-    activate_generation(&server, &tasks_schema_v1()).await;
 
     let alice = connect_ready(&server, tasks_schema_v1(), "alice-cold-history").await;
     let (row_id, project_id) = insert_v1_task(&alice).await;
@@ -322,13 +319,13 @@ async fn late_write_under_prior_generation_converges_with_current_schema_update(
 
 async fn late_write_under_prior_generation_converges_with_current_schema_update_impl() {
     let server = JazzServer::start().await.expect("start test server");
+    activate_generation(&server, &tasks_schema_v1()).await;
     push_catalogue(
         &server,
         &[tasks_schema_v1(), tasks_schema_v2()],
         &[v1_to_v2_lens()],
     )
     .await;
-    activate_generation(&server, &tasks_schema_v1()).await;
 
     let alice = connect_ready(&server, tasks_schema_v1(), "alice-late-writer").await;
     let (row_id, project_id) = insert_v1_task(&alice).await;
@@ -436,13 +433,13 @@ async fn read_paths_agree_on_newest_state_after_mixed_generation_writes() {
 
 async fn read_paths_agree_on_newest_state_after_mixed_generation_writes_impl() {
     let server = JazzServer::start().await.expect("start test server");
+    activate_generation(&server, &tasks_schema_v1()).await;
     push_catalogue(
         &server,
         &[tasks_schema_v1(), tasks_schema_v2()],
         &[v1_to_v2_lens()],
     )
     .await;
-    activate_generation(&server, &tasks_schema_v1()).await;
 
     let alice = connect_ready(&server, tasks_schema_v1(), "alice-read-paths").await;
     let (row_id, project_id) = insert_v1_task(&alice).await;
@@ -680,18 +677,16 @@ async fn draft_schema_without_lineage_does_not_affect_active_generation_reads_im
 
     // Publish only the v2 schema, never its v1 -> v2 migration: it stays a
     // draft with no active lineage.
-    let response = reqwest::Client::new()
-        .post(format!(
-            "{}/apps/{}/admin/schemas",
-            server.base_url(),
-            server.app_id()
-        ))
-        .header("X-Jazz-Admin-Secret", server.admin_secret())
-        .json(&json!({ "schema": tasks_schema_v2() }))
-        .send()
-        .await
-        .expect("publish v2 draft schema");
-    assert_eq!(response.status(), StatusCode::CREATED);
+    // Internal setup preserves coverage for persisted legacy drafts; public deploy rejects this state.
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        &[tasks_schema_v2()],
+        &[],
+    )
+    .await
+    .expect("seed legacy draft schema");
 
     let (second_row_id, second_values, transaction_id) = alice
         .insert(
@@ -764,13 +759,13 @@ async fn partial_current_schema_update_keeps_untouched_added_column_readable() {
 
 async fn partial_current_schema_update_keeps_untouched_added_column_readable_impl() {
     let server = JazzServer::start().await.expect("start test server");
+    activate_generation(&server, &tasks_schema_v1()).await;
     push_catalogue(
         &server,
         &[tasks_schema_v1(), tasks_schema_v2()],
         &[v1_to_v2_lens()],
     )
     .await;
-    activate_generation(&server, &tasks_schema_v1()).await;
 
     let alice = connect_ready(&server, tasks_schema_v1(), "alice-partial-update").await;
     let (row_id, project_id) = insert_v1_task(&alice).await;

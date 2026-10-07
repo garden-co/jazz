@@ -1874,7 +1874,7 @@ fn branch_column_evolution_rejects_non_monotone_changes() {
     let mut removed_from_table = source.clone();
     removed_from_table.runtime_mut_for_testing().tables[0].branch_by.clear();
 
-    for (target, expected) in [
+    for (mut target, expected) in [
         (
             changed_default,
             "branch column type and migration default are immutable",
@@ -1890,6 +1890,15 @@ fn branch_column_evolution_rejects_non_monotone_changes() {
     ] {
         let (_dir, mut core) =
             open_history_complete_node_with_schema(node(0x9a), source.clone());
+        // Defaults alone do not change the runtime schema ID. Include a valid
+        // rename so every case reaches branch validation instead of rejecting
+        // a migration from a schema to itself.
+        target.runtime_mut_for_testing().tables[0]
+            .columns
+            .iter_mut()
+            .find(|column| column.name == "title")
+            .unwrap()
+            .name = "summary".to_owned();
         let target = SchemaVersion::new(target);
         // These deliberately malformed targets cannot be authored by the
         // authority factory.  Keep the fixture explicit so this test reaches
@@ -1905,7 +1914,10 @@ fn branch_column_evolution_rejects_non_monotone_changes() {
                 vec![TableLens {
                     source_table: "todos".to_owned(),
                     target_table: "todos".to_owned(),
-                    ops: Vec::new(),
+                    ops: vec![LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "summary".to_owned(),
+                    }],
                 }],
             ).expect("valid migration lens"),
             Vec::<String>::new(),
@@ -1914,9 +1926,9 @@ fn branch_column_evolution_rejects_non_monotone_changes() {
         })
         .unwrap_err();
         assert!(matches!(
-            error,
-            crate::node::Error::InvalidCatalogueUpdate(message) if message == expected
-        ));
+            &error,
+            crate::node::Error::InvalidCatalogueUpdate(message) if *message == expected
+        ), "expected {expected:?}, got {error:?}");
     }
 }
 
