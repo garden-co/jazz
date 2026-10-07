@@ -9,8 +9,8 @@ use super::*;
 use crate::node::query_engine::RequestedSourceExpr;
 use groove::db::{RootIndirectValues, SubscriptionLifetime};
 
-/// A first-result consumer owns exactly its subscription and, when needed,
-/// its prepared shape. Dropping a suspended read cannot keep a binding alive
+/// An installing or first-result consumer owns its subscription and, when needed,
+/// its prepared shape. Dropping a suspended operation cannot keep a binding alive
 /// or retire graph roots owned by a different subscription.
 struct HydrationSubscription<'a> {
     database: &'a mut groove::db::Database,
@@ -1467,6 +1467,8 @@ where
 
     /// The same installation and binding path serves one-result and retained
     /// consumers. Output terminals differ, but source hydration does not.
+    /// Only a first-result private shape leaves a caller-owned retirement
+    /// obligation; retained bindings own their private or shared shapes.
     async fn install_lowered_program_subscription(
         &mut self,
         program: QueryProgram,
@@ -1543,8 +1545,8 @@ where
             .collect::<Result<Vec<_>, Error>>()?;
         // Retained client-local subscribers of identical terminals share one
         // prepared shape, which retires itself with its last retained
-        // binding. Serving installs keep a shape per subscriber for now. A
-        // first-result read owns a private shape and retires it on return.
+        // binding. Serving installs keep a private shape owned by that
+        // subscriber. First-result reads retire their private shape on return.
         let shared_shape = lifetime == SubscriptionLifetime::Retained
             && binding_source_shape.ends_with(":client-local");
         let prepared = if shared_shape {
@@ -1570,24 +1572,39 @@ where
             prepared_shape: Some(prepared.id()),
             shared_shape,
         };
-        let subscription = owner
-            .database
-            .bind_shape_with_lifetime_and_root_values(
-                prepared.id(),
-                &values,
-                lifetime,
-                root_indirect_values,
-                progress_waker,
-            )
-            .await
-            .map_err(|error| {
-                if crate::debug_env::covered_input_trace() {
-                    eprintln!("JAZZ_COVERED_INPUT_TRACE stage=bind_receiver_error error={error:?}");
-                }
-                Error::Groove(error)
-            })?;
+        let subscription = if lifetime == SubscriptionLifetime::Retained && !shared_shape {
+            owner
+                .database
+                .bind_shape_owned_with_root_values(
+                    prepared.id(),
+                    &values,
+                    root_indirect_values,
+                    progress_waker,
+                )
+                .await
+        } else {
+            owner
+                .database
+                .bind_shape_with_lifetime_and_root_values(
+                    prepared.id(),
+                    &values,
+                    lifetime,
+                    root_indirect_values,
+                    progress_waker,
+                )
+                .await
+        }
+        .map_err(|error| {
+            if crate::debug_env::covered_input_trace() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=bind_receiver_error error={error:?}");
+            }
+            Error::Groove(error)
+        })?;
         owner.prepared_shape = None;
-        Ok((subscription, Some(prepared.id())))
+        Ok((
+            subscription,
+            (lifetime == SubscriptionLifetime::FirstResult).then_some(prepared.id()),
+        ))
     }
 
     /// `root_indirect_values` decides which root fields the result rebuilds

@@ -68,6 +68,15 @@ supplies only the authorized opaque-locator chunk capability specified by
 chapter 19. Jazz MUST NOT materialize descriptors after Groove has already
 evaluated filters, policies, ordering, grouping, joins, indices, or aggregates.
 
+Lowered subscription installation selects Groove's prepared-shape lifetime.
+Private retained serving shapes transfer ownership to their bindings after a
+successful opening; their last binding releases the registration. Retained
+client-local installations keep the existing shared-shape policy. First-result
+reads keep explicit ownership of their private preparation and retire it on
+completion or cancellation. While binding is suspended, the Jazz installation
+guard still owns a caller-owned preparation. This changes resource ownership,
+not query results, authorisation routing, or storage and wire encodings.
+
 ### 14.2 Schema → groove
 
 A jazz schema lowers its fixed system tables and direct record stores through

@@ -320,6 +320,100 @@ async fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
     ));
 }
 
+/// Alice's failed owned opening releases its shape without closing Bob's view.
+///
+/// alice -> duplicate occurrence error -> release plan -> bob receives next row
+#[futures_test::test]
+async fn owned_prepared_shape_releases_after_immediate_hydration_error() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 7, "first"));
+    batch.insert("history", history_values(1, 20, 7, "ambiguous"));
+    batch.insert("rows", vec![Value::U64(9), Value::String("Bob".to_owned())]);
+    database.commit_batch(batch).await.unwrap();
+    let bob = database
+        .subscribe_one_sink(GraphBuilder::table("rows"))
+        .await
+        .unwrap();
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(9), Value::String("Bob".to_owned())], 1)]
+    );
+    let baseline = database.runtime_stats();
+    let descriptor = RecordDescriptor::new([("wanted", ColumnType::U64)]);
+    let selected = GraphBuilder::join(
+        GraphBuilder::binding_source("owned_error_params", descriptor),
+        GraphBuilder::table("history"),
+        ["wanted"],
+        ["row"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.row", "row"),
+        ProjectField::renamed("right.stamp", "stamp"),
+        ProjectField::renamed("right.node", "node"),
+        ProjectField::renamed("right.title", "title"),
+    ]);
+    let graph = GraphBuilder::collect_by_expand(
+        selected,
+        ["row"],
+        [
+            CollectByField::named("row"),
+            CollectByField::renamed("node", "source_node"),
+            CollectByField::renamed("title", "child_title"),
+        ],
+        ["row", "node"],
+        [TopByOrder::asc("stamp")],
+        ["node"],
+        0,
+        TopByLimit::Finite(3),
+    );
+    let shape = database
+        .prepare_one_sink(graph, "owned_error_params", descriptor, ["row"])
+        .await
+        .unwrap();
+    let alice = database
+        .bind_shape_owned_with_root_values(
+            shape.id(),
+            &[Value::U64(1)],
+            crate::db::RootIndirectValues::Materialize,
+            None,
+        )
+        .await
+        .unwrap();
+    let event = std::future::poll_fn(|cx| alice.poll_next_event(cx)).await;
+    assert!(matches!(
+        event,
+        SubscriptionEvent::Error(error)
+            if matches!(
+                error.source_error(),
+                Some(IvmRuntimeError::DuplicateCollectByOccurrenceId)
+            )
+    ));
+    let after = database.runtime_stats();
+    assert_eq!(after.active_subscriptions, baseline.active_subscriptions);
+    assert_eq!(
+        after.active_prepared_shapes,
+        baseline.active_prepared_shapes
+    );
+    assert_eq!(after.active_shape_params, baseline.active_shape_params);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "rows",
+        vec![Value::U64(10), Value::String("Bob again".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(
+            vec![Value::U64(10), Value::String("Bob again".to_owned())],
+            1
+        )]
+    );
+}
+
 #[futures_test::test]
 async fn collect_by_rejects_join_and_nested_collector_consumers() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"])
