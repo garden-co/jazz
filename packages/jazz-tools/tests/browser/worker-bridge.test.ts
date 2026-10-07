@@ -1066,46 +1066,25 @@ describe("SharedWorker bridge with IndexedDB", () => {
   // 2. Insert + local query through worker bridge
   // -------------------------------------------------------------------------
 
-  it("inserts a row and queries it back", async () => {
+  it("inserts and queries multiple rows through the optimistic foreground", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
         driver: { type: "persistent", dbName: uniqueDbName("insert-query") },
       }),
     );
+    const { value: first } = db.insert(todos, { title: "Task A", done: false });
+    expect(first.id).toBeTruthy();
+    expect(typeof first.id).toBe("string");
+    await expect(db.all(allTodos)).resolves.toEqual([
+      expect.objectContaining({ id: first.id, title: "Task A", done: false }),
+    ]);
 
-    // Insert (sync — runs on main-thread in-memory runtime)
-    const {
-      value: { id },
-    } = db.insert(todos, { title: "Buy milk", done: false });
-    expect(id).toBeTruthy();
-    expect(typeof id).toBe("string");
-
-    // Query (async — runs on main-thread runtime)
-    const results = await db.all(allTodos);
-    expect(results.length).toBe(1);
-    expect(results[0].id).toBe(id);
-    expect(results[0].title).toBe("Buy milk");
-    expect(results[0].done).toBe(false);
-  });
-
-  it("inserts multiple rows and queries all", async () => {
-    const db = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("multi-insert") },
-      }),
-    );
-
-    db.insert(todos, { title: "Task A", done: false });
     db.insert(todos, { title: "Task B", done: true });
     db.insert(todos, { title: "Task C", done: false });
-
-    const results = await db.all(allTodos);
-    expect(results.length).toBe(3);
-
-    const titles = results.map((r) => r.title).sort();
-    expect(titles).toEqual(["Task A", "Task B", "Task C"]);
+    const rows = await db.all(allTodos);
+    expect(rows).toHaveLength(3);
+    expect(rows.map((row) => row.title).sort()).toEqual(["Task A", "Task B", "Task C"]);
   });
 
   it("sync insert before bridge init is persisted after init completes", async () => {
@@ -1149,91 +1128,35 @@ describe("SharedWorker bridge with IndexedDB", () => {
   // 3. Update + delete through worker bridge
   // -------------------------------------------------------------------------
 
-  it("updates a row", async () => {
+  it("updates and deletes rows optimistically and durably through the worker bridge", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("update") },
+        driver: { type: "persistent", dbName: uniqueDbName("update-delete") },
       }),
     );
 
-    const { value: inserted } = db.insert(todos, {
-      title: "Original",
-      done: false,
-    });
-    const { id } = inserted;
-    const result = db.update(todos, id, { done: true });
-    expect(result).toMatchObject({
-      wait: expect.any(Function),
-    });
+    // Foreground reads must reflect writes before the caller awaits durability.
+    const { value: optimistic } = db.insert(todos, { title: "Original", done: false });
+    const optimisticUpdate = db.update(todos, optimistic.id, { done: true });
+    expect(optimisticUpdate).toMatchObject({ wait: expect.any(Function) });
+    await expect(db.all(allTodos)).resolves.toEqual([
+      expect.objectContaining({ id: optimistic.id, title: "Original", done: true }),
+    ]);
+    const optimisticDelete = db.delete(todos, optimistic.id);
+    expect(optimisticDelete).toMatchObject({ wait: expect.any(Function) });
+    await expect(db.all(allTodos)).resolves.toEqual([]);
 
-    const results = await db.all(allTodos);
-    expect(results.length).toBe(1);
-    expect(results[0].title).toBe("Original");
-    expect(results[0].done).toBe(true);
-  });
-
-  it("updates a row durably", async () => {
-    const db = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("update-durable") },
-      }),
-    );
-
-    const { id } = await db
-      .insert(todos, { title: "Original", done: false })
+    // Local-tier reads separately verify the durable worker acknowledgements.
+    const durable = await db
+      .insert(todos, { title: "Durable", done: false })
       .wait({ tier: "local" });
-
-    const updateHandle = db.update(todos, id, { done: true });
-    await updateHandle.wait({ tier: "local" });
-
-    const results = await db.all(allTodos, { tier: "local" });
-    expect(results.length).toBe(1);
-    expect(results[0].done).toBe(true);
-  });
-
-  it("deletes a row", async () => {
-    const db = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("delete") },
-      }),
-    );
-
-    const { value: inserted } = db.insert(todos, {
-      title: "Ephemeral",
-      done: false,
-    });
-    const { id } = inserted;
-    expect((await db.all(allTodos)).length).toBe(1);
-
-    const result = db.delete(todos, id);
-    expect(result).toMatchObject({
-      wait: expect.any(Function),
-    });
-    const results = await db.all(allTodos);
-    expect(results.length).toBe(0);
-  });
-
-  it("deletes a row durably", async () => {
-    const db = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("delete-durable") },
-      }),
-    );
-
-    const { id } = await db
-      .insert(todos, { title: "Ephemeral", done: false })
-      .wait({ tier: "local" });
-    expect((await db.all(allTodos, { tier: "local" })).length).toBe(1);
-
-    const deleteHandle = db.delete(todos, id);
-    await deleteHandle.wait({ tier: "local" });
-
-    const results = await db.all(allTodos, { tier: "local" });
-    expect(results.length).toBe(0);
+    await db.update(todos, durable.id, { done: true }).wait({ tier: "local" });
+    await expect(db.all(allTodos, { tier: "local" })).resolves.toEqual([
+      expect.objectContaining({ id: durable.id, title: "Durable", done: true }),
+    ]);
+    await db.delete(todos, durable.id).wait({ tier: "local" });
+    await expect(db.all(allTodos, { tier: "local" })).resolves.toEqual([]);
   });
 
   // -------------------------------------------------------------------------
