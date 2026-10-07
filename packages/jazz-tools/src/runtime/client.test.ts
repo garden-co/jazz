@@ -737,7 +737,6 @@ describe("public read tiers", () => {
         propagation: "local-only",
         localUpdates: "immediate",
         openTransactionId: "forged-open-transaction",
-        runtimeSettledTier: "global",
       } as any;
 
       await client.query('{"relation_ir":{"table":"todos"}}', injected);

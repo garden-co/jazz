@@ -998,10 +998,7 @@ local materialized state (`INV-API-32`):
 foreground to its durable worker. Such a read sees only the foreground's own
 materialized/pending data; worker-only cache requires `Full` propagation.
 Local-only query attachments retain a unique usage identity but create no
-remote registration and are immediately covered. The wire compatibility field
-`RegisterShapeOptions.propagate_upstream` MUST be true: every receiving node
-rejects false as an unsupported capability, regardless of trust, topology,
-SYSTEM identity, delegated scope, or local-receiver role. No sender emits false.
+remote registration and are immediately covered.
 
 `LocalOnly` is **not** what chooses the local
 snapshot, nor is it a request to wait until that snapshot becomes complete

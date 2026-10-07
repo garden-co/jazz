@@ -3462,9 +3462,6 @@ fn upstream_register_shape_options(
     RegisterShapeOptions {
         tier: remote_subscription_tier(tier, upstream_durability_floor),
         read_view,
-        // LocalOnly controls whether the caller attaches a remote usage.
-        // Every usage that crosses a node boundary propagates normally.
-        propagate_upstream: true,
         ..RegisterShapeOptions::default()
     }
 }
@@ -3526,12 +3523,6 @@ fn ensure_supported_register_shape_options(
     delegated_session_capability: bool,
 ) -> Result<(), Error> {
     ensure_supported_register_shape_read_view(opts)?;
-    if !opts.propagate_upstream {
-        return Err(Error::new(
-            ErrorCode::Query,
-            "remote subscriptions cannot disable upstream propagation; LocalOnly is a local read setting",
-        ));
-    }
     if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(
@@ -4903,7 +4894,6 @@ struct SubscriptionState {
     /// from each replacement connection before it can be settled again.
     requires_authority_receipt: bool,
     /// Routing intent sent with this subscription's remote registration.
-    remote_propagate_upstream: bool,
     read_view: ReadViewSpec,
     snapshot: RelationSnapshot,
     snapshot_index: RelationSnapshotIndex,
@@ -6793,7 +6783,6 @@ fn subscription_is_settled<S>(
     binding: &Binding,
     tier: DurabilityTier,
     read_view: ReadViewSpec,
-    propagate_upstream: bool,
     requires_authority_receipt: bool,
     authority_result_key: Option<&crate::protocol::AuthorityResultKey>,
 ) -> bool
@@ -6809,7 +6798,6 @@ where
         read_view: RegisterShapeOptions {
             tier,
             read_view,
-            propagate_upstream,
             ..RegisterShapeOptions::default()
         }
         .read_view_key(),

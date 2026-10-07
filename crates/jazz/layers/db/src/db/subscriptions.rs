@@ -1084,10 +1084,9 @@ where
         let mut upstream_subscription_handles = Vec::new();
         let mut authority_witness = Vec::new();
         let mut suppress_provisional_opening = false;
-        let remote_propagate_upstream = opts.propagation == Propagation::Full;
         // LocalOnly never sends a query to another node, including a durable
         // browser worker. Full Local reads may still consume its cache.
-        let propagates_upstream = remote_propagate_upstream;
+        let propagates_upstream = opts.propagation == Propagation::Full;
         if propagates_upstream {
             let upstream_opts = self
                 .node
@@ -1156,7 +1155,6 @@ where
                 read_view: RegisterShapeOptions {
                     tier: settled_tier,
                     read_view: opts.read_view.clone(),
-                    propagate_upstream: remote_propagate_upstream,
                     ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
@@ -1228,7 +1226,6 @@ where
                 &state_binding,
                 settled_tier,
                 opts.read_view.clone(),
-                remote_propagate_upstream,
                 requires_authority_receipt,
                 settled_authority_result.as_ref(),
             ) && (!subscription.has_covered_input_sources()
@@ -1290,7 +1287,7 @@ where
         let closed = Rc::new(Cell::new(false));
         let scalar_reconciliation_enabled = read_tier < DurabilityTier::Global
             && remote_read_tier.is_some()
-            && remote_propagate_upstream
+            && propagates_upstream
             && opts.read_view.is_default()
             && crate::node::simple_scalar_exit_query(state_shape.query());
         let state = Rc::new(RefCell::new(SubscriptionState {
@@ -1315,7 +1312,6 @@ where
             pending_overlay,
             remote_read_tier,
             requires_authority_receipt,
-            remote_propagate_upstream,
             read_view: opts.read_view.clone(),
             snapshot: state_snapshot,
             snapshot_index,

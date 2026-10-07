@@ -1052,9 +1052,7 @@ where
             // stale claim scope. Scope relays instead retire and replace the
             // opaque upstream usage below, because that usage *does* name an
             // authority result admitted under the old immutable claims.
-            if group.upstream_opts.propagate_upstream
-                && group.authority_result_subscription != group.upstream_subscription
-            {
+            if group.authority_result_subscription != group.upstream_subscription {
                 let mut owners = self.relay_upstream_subscription_owners.borrow_mut();
                 if let Some(owner) = owners.get_mut(&(
                     group.upstream_subscription,
@@ -1109,7 +1107,6 @@ where
                 if group.policy_binding_origin == CoveragePolicyBindingOrigin::DirectAdmitted {
                     group.policy_binding = refreshed_direct_binding.clone();
                     if group.authority_result_subscription == group.upstream_subscription
-                        && group.upstream_opts.propagate_upstream
                         && let Some(downstream_subscription) = group.subscribers.first().copied()
                     {
                         let old_upstream_subscription = group.upstream_subscription;
@@ -4744,8 +4741,7 @@ where
                             // receive a live authority result.  A serving
                             // authority, by contrast, evaluates the incoming
                             // downstream usage itself and therefore owns D.
-                            let propagates_to_selected_authority = opts.propagate_upstream
-                                && (local_subscriber || scope_relay);
+                            let propagates_to_selected_authority = local_subscriber || scope_relay;
                             let waits_for_selected_authority = propagates_to_selected_authority
                                 && opts.tier > DurabilityTier::Local;
                             let authority_result_subscription = if propagates_to_selected_authority {
@@ -4979,38 +4975,37 @@ where
                                     selected,
                                 );
                             }
-                            if group.upstream_opts.propagate_upstream {
-                                let owner = RelayUpstreamSubscriptionOwner {
-                                    request: PendingUpstreamSubscription {
-                                        subscription: group.upstream_subscription,
-                                        shape: shape.clone(), binding: binding.clone(), opts: upstream_opts.clone(),
-                                        identity: group.policy_binding.0,
-                                        policy_binding: Some(group.policy_binding.clone()),
-                                    },
-                                    scalar_authority_revision: 0,
-                                    scalar_reconciliation: ScalarReconciliation::default(),
-                                    downstream_connection_epoch: connection_epoch,
-                                    coverage: coverage.clone(),
-                                    policy_binding: group.policy_binding.clone(),
-                                    downstream_subscriptions: BTreeSet::from([subscription]),
-                                };
-                                self.relay_upstream_subscription_owners
-                                    .borrow_mut()
-                                    .entry((group.upstream_subscription, connection_epoch, coverage.opts.read_view_key()))
-                                    .and_modify(|existing| {
-                                        debug_assert_eq!(
-                                            existing.downstream_connection_epoch,
-                                            connection_epoch,
-                                            "relay upstream handle changed downstream owner"
-                                        );
-                                        debug_assert_eq!(
-                                            existing.coverage, coverage,
-                                            "relay upstream handle changed coverage group"
-                                        );
-                                        existing.downstream_subscriptions.insert(subscription);
-                                    })
-                                    .or_insert(owner);
-                            }
+                            let owner = RelayUpstreamSubscriptionOwner {
+                                request: PendingUpstreamSubscription {
+                                    subscription: group.upstream_subscription,
+                                    shape: shape.clone(), binding: binding.clone(), opts: upstream_opts.clone(),
+                                    identity: group.policy_binding.0,
+                                    policy_binding: Some(group.policy_binding.clone()),
+                                },
+                                scalar_authority_revision: 0,
+                                scalar_reconciliation: ScalarReconciliation::default(),
+                                downstream_connection_epoch: connection_epoch,
+                                coverage: coverage.clone(),
+                                policy_binding: group.policy_binding.clone(),
+                                downstream_subscriptions: BTreeSet::from([subscription]),
+                            };
+                            self.relay_upstream_subscription_owners
+                                .borrow_mut()
+                                .entry((group.upstream_subscription, connection_epoch, coverage.opts.read_view_key()))
+                                .and_modify(|existing| {
+                                    debug_assert_eq!(
+                                        existing.downstream_connection_epoch,
+                                        connection_epoch,
+                                        "relay upstream handle changed downstream owner"
+                                    );
+                                    debug_assert_eq!(
+                                        existing.coverage, coverage,
+                                        "relay upstream handle changed coverage group"
+                                    );
+                                    existing.downstream_subscriptions.insert(subscription);
+                                })
+                                .or_insert(owner);
+
                             served.insert(subscription, coverage);
                             if let Some(mut update) = opening_pending {
                                 stamp_view_update_authorization_progress_from(
@@ -5056,7 +5051,7 @@ where
                                 }
                                 sent_view_update = true;
                             }
-                            if first_subscriber && group.upstream_opts.propagate_upstream {
+                            if first_subscriber {
                                 upstream_subscriptions.borrow_mut().push(
                                     PendingUpstreamCommand::Subscribe(
                                         PendingUpstreamSubscription {
@@ -5121,21 +5116,18 @@ where
                                     if group.pending_initial_update.as_ref().is_some_and(|(pending, _)| *pending == subscription) {
                                         group.pending_initial_update = None;
                                     }
-                                    if group.upstream_opts.propagate_upstream {
-                                        if let Some(owner) = self
-                                            .relay_upstream_subscription_owners
-                                            .borrow_mut()
-                                            .get_mut(&(group.upstream_subscription, connection_epoch, coverage.opts.read_view_key()))
-                                            && owner.downstream_connection_epoch == connection_epoch
-                                            && owner.coverage == coverage
-                                        {
-                                            owner.downstream_subscriptions.remove(&subscription);
-                                        }
+                                    if let Some(owner) = self
+                                        .relay_upstream_subscription_owners
+                                        .borrow_mut()
+                                        .get_mut(&(group.upstream_subscription, connection_epoch, coverage.opts.read_view_key()))
+                                        && owner.downstream_connection_epoch == connection_epoch
+                                        && owner.coverage == coverage
+                                    {
+                                        owner.downstream_subscriptions.remove(&subscription);
                                     }
+
                                     if group.subscribers.is_empty() {
                                         let upstream_subscription = group.upstream_subscription;
-                                        let propagated_upstream =
-                                            group.upstream_opts.propagate_upstream;
                                         let group_subscription = coverage_group_subscription_key(&coverage);
                                         // A coverage group owns a maintained Groove receiver.
                                         // Forgetting only the peer-side cursor leaves that
@@ -5149,31 +5141,29 @@ where
                                             group_subscription,
                                         );
                                         coverage_groups.remove(&coverage);
-                                        if propagated_upstream {
-                                            if retire_relay_upstream_subscription(
-                                                &self.relay_upstream_subscription_owners,
-                                                upstream_subscription,
-                                                connection_epoch,
-                                                &coverage,
-                                            )
-                                            .is_some()
-                                            {
-                                                // The relay owns both the
-                                                // local exact authority
-                                                // receipt and its wire usage
-                                                // site. Retiring only the
-                                                // remote wire handle leaks a
-                                                // settled receipt until a
-                                                // later lifecycle sweep.
-                                                self.node
-                                                    .borrow_mut()
-                                                    .apply_unsubscribe(upstream_subscription);
-                                                upstream_subscriptions.borrow_mut().push(
-                                                    PendingUpstreamCommand::Unsubscribe(
-                                                        upstream_subscription,
-                                                    ),
-                                                );
-                                            }
+                                        if retire_relay_upstream_subscription(
+                                            &self.relay_upstream_subscription_owners,
+                                            upstream_subscription,
+                                            connection_epoch,
+                                            &coverage,
+                                        )
+                                        .is_some()
+                                        {
+                                            // The relay owns both the
+                                            // local exact authority
+                                            // receipt and its wire usage
+                                            // site. Retiring only the
+                                            // remote wire handle leaks a
+                                            // settled receipt until a
+                                            // later lifecycle sweep.
+                                            self.node
+                                                .borrow_mut()
+                                                .apply_unsubscribe(upstream_subscription);
+                                            upstream_subscriptions.borrow_mut().push(
+                                                PendingUpstreamCommand::Unsubscribe(
+                                                    upstream_subscription,
+                                                ),
+                                            );
                                         }
                                     }
                                 }
@@ -7064,22 +7054,18 @@ fn rollback_rejected_subscriber_admission<S>(
     {
         group.pending_initial_update = None;
     }
-    if group.upstream_opts.propagate_upstream {
-        if let Some(owner) = relay_upstream_subscription_owners.borrow_mut().get_mut(&(
-            group.upstream_subscription,
-            connection_epoch,
-            coverage.opts.read_view_key(),
-        )) && owner.downstream_connection_epoch == connection_epoch
-            && owner.coverage == coverage
-        {
-            owner.downstream_subscriptions.remove(&subscription);
-        }
-    }
-    let retire_group = group.subscribers.is_empty();
-    let upstream = retire_group.then_some((
+    if let Some(owner) = relay_upstream_subscription_owners.borrow_mut().get_mut(&(
         group.upstream_subscription,
-        group.upstream_opts.propagate_upstream,
-    ));
+        connection_epoch,
+        coverage.opts.read_view_key(),
+    )) && owner.downstream_connection_epoch == connection_epoch
+        && owner.coverage == coverage
+    {
+        owner.downstream_subscriptions.remove(&subscription);
+    }
+
+    let retire_group = group.subscribers.is_empty();
+    let upstream = retire_group.then_some(group.upstream_subscription);
 
     let mut node = node.borrow_mut();
     node.apply_unsubscribe(subscription);
@@ -7090,17 +7076,16 @@ fn rollback_rejected_subscriber_admission<S>(
 
     peer.forget_subscription_with_node(&mut node, coverage_group_subscription_key(&coverage));
     coverage_groups.remove(&coverage);
-    let Some((upstream_subscription, propagated_upstream)) = upstream else {
+    let Some(upstream_subscription) = upstream else {
         return;
     };
-    if !propagated_upstream
-        || retire_relay_upstream_subscription(
-            relay_upstream_subscription_owners,
-            upstream_subscription,
-            connection_epoch,
-            &coverage,
-        )
-        .is_none()
+    if retire_relay_upstream_subscription(
+        relay_upstream_subscription_owners,
+        upstream_subscription,
+        connection_epoch,
+        &coverage,
+    )
+    .is_none()
     {
         return;
     }

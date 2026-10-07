@@ -2398,9 +2398,7 @@ where
                                     connection.connection_epoch,
                                     coverage.opts.read_view_key(),
                                 ))?;
-                                (group.upstream_opts.propagate_upstream
-                                    && owner.downstream_connection_epoch
-                                        == connection.connection_epoch
+                                (owner.downstream_connection_epoch == connection.connection_epoch
                                     && owner.coverage == *coverage)
                                     .then(|| PendingUpstreamSubscription {
                                         subscription: group.upstream_subscription,
@@ -3591,8 +3589,7 @@ where
         state: &mut ScalarReconciliation,
         local_owner: Option<&Rc<RefCell<SubscriptionState>>>,
     ) -> Result<(), Error> {
-        if !request.opts.propagate_upstream
-            || !request.opts.read_view.is_default()
+        if !request.opts.read_view.is_default()
             || !crate::node::simple_scalar_exit_query(request.shape.query())
         {
             return Ok(());
@@ -4061,7 +4058,6 @@ where
             pending_overlay,
             remote_read_tier,
             requires_authority_receipt,
-            remote_propagate_upstream,
             read_view,
             previous_source,
             previous_settled,
@@ -4076,7 +4072,6 @@ where
                 state.pending_overlay,
                 state.remote_read_tier,
                 state.requires_authority_receipt,
-                state.remote_propagate_upstream,
                 state.read_view.clone(),
                 state.snapshot_source,
                 state.settled,
@@ -4254,7 +4249,6 @@ where
                 read_view: RegisterShapeOptions {
                     tier: settled_tier,
                     read_view: read_view.clone(),
-                    propagate_upstream: remote_propagate_upstream,
                     ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
@@ -4371,7 +4365,6 @@ where
                 &binding,
                 settled_tier,
                 read_view.clone(),
-                remote_propagate_upstream,
                 requires_authority_receipt,
                 settled_authority_result.as_ref(),
             );
@@ -4464,7 +4457,6 @@ where
                 read_view: RegisterShapeOptions {
                     tier: settled_tier,
                     read_view: read_view.clone(),
-                    propagate_upstream: remote_propagate_upstream,
                     ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
@@ -4603,7 +4595,6 @@ where
                     &binding,
                     settled_tier,
                     read_view,
-                    remote_propagate_upstream,
                     requires_authority_receipt,
                     settled_authority_result.as_ref(),
                 );
@@ -4760,7 +4751,6 @@ where
                         &binding,
                         settled_tier,
                         read_view,
-                        remote_propagate_upstream,
                         requires_authority_receipt,
                         settled_authority_result.as_ref(),
                     );
@@ -4826,7 +4816,6 @@ where
                                     &binding,
                                     settled_tier,
                                     read_view,
-                                    remote_propagate_upstream,
                                     requires_authority_receipt,
                                     settled_authority_result.as_ref(),
                                 );
@@ -4958,7 +4947,6 @@ where
                                 &binding,
                                 settled_tier,
                                 read_view,
-                                remote_propagate_upstream,
                                 requires_authority_receipt,
                                 settled_authority_result.as_ref(),
                             ) && node
@@ -5066,7 +5054,6 @@ where
                         &binding,
                         settled_tier,
                         read_view,
-                        remote_propagate_upstream,
                         requires_authority_receipt,
                         settled_authority_result.as_ref(),
                     );
@@ -5174,7 +5161,6 @@ where
                     &binding,
                     settled_tier,
                     read_view,
-                    remote_propagate_upstream,
                     requires_authority_receipt,
                     settled_authority_result.as_ref(),
                 );
@@ -5452,7 +5438,6 @@ pub(super) fn route_upstream_subscription_rejection(
         let opts = RegisterShapeOptions {
             tier: state_ref.remote_read_tier.unwrap_or(state_ref.read_tier),
             read_view: state_ref.read_view.clone(),
-            propagate_upstream: state_ref.remote_propagate_upstream,
             ..RegisterShapeOptions::default()
         };
         if !register_shape_rejection_matches(subscription, shape, &opts) {

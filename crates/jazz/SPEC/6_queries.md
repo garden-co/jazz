@@ -851,7 +851,7 @@ supply the key as independent identity. The wire vocabulary is `RegisterShape`,
 `Subscribe`, `Unsubscribe`, and `ViewUpdate` (ch. 8).
 
 The `JRVK` V2 preimage for that resolved identity is `magic "JRVK" |
-version 2 | tier:u8 | propagate_upstream:u8 | binding_source:u8 | source`. A
+version 2 | tier:u8 | binding_source:u8 | source`. A
 snapshot source encodes `owner:uuid | global_base:u64le | local_base:u64le |
 dot_count:u32le | dots`, where every dot is `tx_time:u64le | node:uuid`. Dots
 are a set: the encoder sorts `TxId` by `(time, node)` and removes duplicates

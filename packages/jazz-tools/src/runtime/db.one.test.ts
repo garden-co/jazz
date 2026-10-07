@@ -129,7 +129,6 @@ describe("Db.one", () => {
       propagation: "local-only",
       localUpdates: "visible",
       openTransactionId: "forged-open-transaction",
-      runtimeSettledTier: "global",
     } as any);
 
     expect(query.mock.calls[0]?.[1]).toEqual({

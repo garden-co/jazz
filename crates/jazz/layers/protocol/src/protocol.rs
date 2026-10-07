@@ -2729,11 +2729,6 @@ pub struct RegisterShapeOptions {
     /// Semantic read-view request for this shape registration.
     #[serde(default)]
     pub read_view: ReadViewSpec,
-    /// Whether the serving node may register matching coverage with its own upstream.
-    /// Retained for wire compatibility; remote registrations require true.
-    /// LocalOnly is a caller-local setting and never crosses a node boundary.
-    #[serde(default = "default_propagate_upstream")]
-    pub propagate_upstream: bool,
     /// Internal ownership of the binding whose ViewUpdates a local relay may
     /// consume as its authority.  Callers always use [`BindingSource::Ordinary`];
     /// relay code creates `RelayAuthoritySession` only for its own upstream
@@ -2748,7 +2743,6 @@ impl Default for RegisterShapeOptions {
         Self {
             tier: default_register_shape_tier(),
             read_view: ReadViewSpec::default(),
-            propagate_upstream: default_propagate_upstream(),
             binding_source: BindingSource::Ordinary,
         }
     }
@@ -2793,10 +2787,6 @@ impl RegisterShapeOptions {
 
 fn default_register_shape_tier() -> DurabilityTier {
     DurabilityTier::Global
-}
-
-fn default_propagate_upstream() -> bool {
-    true
 }
 
 /// Semantic read-view request carried over the wire before local resolution.
@@ -2884,7 +2874,6 @@ fn canonical_register_shape_options_v2_bytes(options: &RegisterShapeOptions) -> 
         DurabilityTier::Local => 1,
         DurabilityTier::Global => 2,
     });
-    bytes.push(u8::from(options.propagate_upstream));
     bytes.push(match options.binding_source {
         BindingSource::Ordinary => 0,
         BindingSource::RelayAuthoritySession => 1,
@@ -7337,16 +7326,28 @@ mod tests {
         let options = RegisterShapeOptions {
             tier: DurabilityTier::Global,
             read_view: ReadViewSpec::branch_view(selector(1), None),
-            propagate_upstream: false,
             binding_source: BindingSource::RelayAuthoritySession,
         };
         assert_eq!(
             hex::encode(canonical_register_shape_options_v2_bytes(&options)),
-            "4a52564b020200010101000000060000006272616e63681200000001070101010101010101010101010101010100"
+            "4a52564b0202010101000000060000006272616e63681200000001070101010101010101010101010101010100"
         );
         assert_eq!(
             options.read_view_key().id,
-            uuid::uuid!("86e2dfa3-ed52-5500-808c-d5f63c79173e")
+            uuid::uuid!("c42e5064-19cf-5246-be41-4385a11d305e")
+        );
+    }
+
+    /// Alice's v5 registration encodes tier, source, and binding ownership only.
+    /// This low-level byte fixture pins the wire layout independently of serde round trips.
+    #[test]
+    fn wire_v5_registration_options_bytes() {
+        let options = RegisterShapeOptions::default();
+        let bytes = postcard::to_allocvec(&options).unwrap();
+        assert_eq!(hex::encode(&bytes), "020000");
+        assert_eq!(
+            postcard::from_bytes::<RegisterShapeOptions>(&bytes).unwrap(),
+            options
         );
     }
 
@@ -7375,7 +7376,7 @@ mod tests {
         assert_eq!(ordered_bytes, equivalent_bytes);
         assert_eq!(
             hex::encode(ordered_bytes),
-            "4a52564b0202010002707070707070707070707070707070700500000000000000060000000000000002000000070000000000000071717171717171717171717171717171090000000000000072727272727272727272727272727272"
+            "4a52564b02020002707070707070707070707070707070700500000000000000060000000000000002000000070000000000000071717171717171717171717171717171090000000000000072727272727272727272727272727272"
         );
         assert_eq!(
             ordered.read_view_key(),
@@ -7383,7 +7384,7 @@ mod tests {
         );
         assert_eq!(
             ordered.read_view_key().id,
-            uuid::uuid!("7e5f439a-c9b3-554f-b083-791ce815e413")
+            uuid::uuid!("9496f8c9-194c-5a93-a3bd-43dbc82016f6")
         );
     }
 

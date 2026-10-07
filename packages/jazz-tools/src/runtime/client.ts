@@ -530,7 +530,6 @@ export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> 
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
   openTransactionId?: OpenTransactionId;
-  runtimeSettledTier?: DurabilityTier | null;
 };
 
 export interface ResolvedQueryExecutionOptions {
@@ -1765,9 +1764,7 @@ export class JazzClient {
     const results = await this.runtime.query(
       query,
       sessionJson,
-      options?.runtimeSettledTier === null
-        ? undefined
-        : (options?.runtimeSettledTier ?? normalizedOptions.tier),
+      normalizedOptions.tier,
       optionsJson,
     );
     return results as Row[];
