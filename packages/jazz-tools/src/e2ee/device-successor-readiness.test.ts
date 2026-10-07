@@ -6,10 +6,13 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createNativeCrypto } from "./native.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
-it("keeps accepted device membership visible when rotated key delivery fails authentication", async () => {
+it("preserves membership on bad successor delivery and propagates history signer failures", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   let corruptSuccessorDelivery = false;
+  const signerError = new Error("Successor history signer unavailable");
+  let failHistoryVerification = false;
+  let successorHistoryUnwrapped = false;
   try {
     await deploy({
       serverUrl: server.url,
@@ -20,7 +23,7 @@ it("keeps accepted device membership visible when rotated key delivery fails aut
     });
     const account = await localAccountConfig(server.appId, server.url);
     const adapters = await createNativeCrypto();
-    const open = async (faultyDelivery = false) => {
+    const open = async (faultyCrypto = false) => {
       let saved: string | null = null;
       const db = await createDb({
         ...account,
@@ -40,13 +43,33 @@ it("keeps accepted device membership visible when rotated key delivery fails aut
               async open(device, context, envelope) {
                 const secret = await adapters.keyEnvelope.open(device, context, envelope);
                 if (
-                  faultyDelivery &&
+                  faultyCrypto &&
                   corruptSuccessorDelivery &&
                   new TextDecoder().decode(context).includes("jazz.e2ee.account-successor.v1")
                 ) {
                   secret[0] = secret[0]! ^ 1;
                 }
                 return secret;
+              },
+              async unwrap(key, context, envelope) {
+                const secret = await adapters.keyEnvelope.unwrap(key, context, envelope);
+                if (faultyCrypto && failHistoryVerification) {
+                  const decoded = new TextDecoder().decode(context);
+                  if (
+                    decoded.includes("jazz.e2ee.account-successor.v1") &&
+                    decoded.includes("history")
+                  )
+                    successorHistoryUnwrapped = true;
+                }
+                return secret;
+              },
+            },
+            deviceSigner: {
+              ...adapters.deviceSigner,
+              async verify(publicKey, record, signature) {
+                if (faultyCrypto && failHistoryVerification && successorHistoryUnwrapped)
+                  throw signerError;
+                return adapters.deviceSigner.verify(publicKey, record, signature);
               },
             },
           },
@@ -78,93 +101,18 @@ it("keeps accepted device membership visible when rotated key delivery fails aut
     expect(await first.e2ee.devices.list()).toContainEqual(
       expect.objectContaining({ id: creator!.id, state: "active", keyReadiness: "verified" }),
     );
-    await first.e2ee.devices.approve(pending.id).wait();
-    expect(await third.e2ee.devices.list()).toContainEqual(
-      expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
-    );
-  } finally {
-    await Promise.all(clients.map((db) => db.shutdown()));
-    await server.stop();
-  }
-}, 60_000);
-
-it("rejects device listing with the original signer error during successor history authentication", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  const clients: Db[] = [];
-  const signerError = new Error("Successor history signer unavailable");
-  let failHistoryVerification = false;
-  let successorHistoryUnwrapped = false;
-  try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: deviceRequestApp,
-      permissions: deviceRequestPermissions,
-    });
-    const account = await localAccountConfig(server.appId, server.url);
-    const adapters = await createNativeCrypto();
-    const decoder = new TextDecoder();
-    const open = async (faultyVerifier = false) => {
-      let saved: string | null = null;
-      const db = await createDb({
-        ...account,
-        e2ee: {
-          store: {
-            async read() {
-              return saved;
-            },
-            async update(transform) {
-              saved = transform(saved);
-            },
-          },
-          crypto: {
-            ...adapters,
-            keyEnvelope: {
-              ...adapters.keyEnvelope,
-              async unwrap(key, context, envelope) {
-                const secret = await adapters.keyEnvelope.unwrap(key, context, envelope);
-                if (faultyVerifier && failHistoryVerification) {
-                  const decoded = decoder.decode(context);
-                  if (
-                    decoded.includes("jazz.e2ee.account-successor.v1") &&
-                    decoded.includes("history")
-                  ) {
-                    successorHistoryUnwrapped = true;
-                  }
-                }
-                return secret;
-              },
-            },
-            deviceSigner: {
-              ...adapters.deviceSigner,
-              async verify(publicKey, record, signature) {
-                if (faultyVerifier && failHistoryVerification && successorHistoryUnwrapped)
-                  throw signerError;
-                return adapters.deviceSigner.verify(publicKey, record, signature);
-              },
-            },
-          },
-        },
-      });
-      clients.push(db);
-      return db;
-    };
-    const first = await open(true);
-    const [creator] = await first.e2ee.devices.list();
-    const second = await open();
-    const removed = (await second.e2ee.devices.list()).find((device) => device.id !== creator!.id)!;
-    await first.e2ee.devices.approve(removed.id).wait();
-    await first.e2ee.devices.revoke(removed.id).wait();
-
+    // Both faults use this real successor, avoiding a second enrolment/rotation.
     failHistoryVerification = true;
     await expect(first.e2ee.devices.list()).rejects.toBe(signerError);
     expect(successorHistoryUnwrapped).toBe(true);
-
     failHistoryVerification = false;
     successorHistoryUnwrapped = false;
     expect(await first.e2ee.devices.list()).toContainEqual(
       expect.objectContaining({ id: creator!.id, state: "active", keyReadiness: "verified" }),
+    );
+    await first.e2ee.devices.approve(pending.id).wait();
+    expect(await third.e2ee.devices.list()).toContainEqual(
+      expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
     );
   } finally {
     await Promise.all(clients.map((db) => db.shutdown()));
@@ -292,6 +240,7 @@ it("reports signer failure when a shared device reconciles an accepted proof", a
       })
       .toContain(signerError);
     expect(responses).toBe(2);
+    expect(returnedSecrets.length).toBeGreaterThan(0);
     expect(returnedSecrets.every((secret) => secret.every((byte) => byte === 0))).toBe(true);
     rejectProofVerification = false;
     for (const client of [second, shared])

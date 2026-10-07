@@ -169,6 +169,9 @@ it.each([false, true])(
           expect.objectContaining({ id: another.id, state: "pending" }),
         ]),
       );
+      // Reopening and replay rejection are exercised below with untrusted records
+      // and shared responders; the clean path only needs its exact-device receipt.
+      if (!adversarial) return;
       await second.shutdown();
       if (shared) {
         expect(await shared.e2ee.devices.list()).toContainEqual(
