@@ -92,6 +92,10 @@ function cursorKey(cursor: HistoryCursor) {
   return `${cursor.at.getTime()}:${cursor.offset}`;
 }
 
+export function mergeHistoryPages(...pages: ShownMessage[][]) {
+  return pages.flat().reverse();
+}
+
 export function RoomView({ summary, author }: { summary: RoomSummary; author: string }) {
   const db = useDb();
   const directory = useDirectory();
@@ -108,9 +112,10 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
     setOlderPages((pages) => new Map(pages).set(cursorKey(cursor), rows));
   }, []);
   const messages = useMemo(() => {
-    const all: ShownMessage[] = [...newestFirst];
-    for (const cursor of olderCursors) all.push(...(olderPages.get(cursorKey(cursor)) ?? []));
-    return all.reverse();
+    return mergeHistoryPages(
+      newestFirst,
+      ...olderCursors.map((cursor) => olderPages.get(cursorKey(cursor)) ?? []),
+    );
   }, [newestFirst, olderCursors, olderPages]);
   const lastCursor = olderCursors.at(-1);
   const lastPage = lastCursor ? olderPages.get(cursorKey(lastCursor)) : newestFirst;

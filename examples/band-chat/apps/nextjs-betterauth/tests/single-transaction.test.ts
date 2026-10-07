@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
-import { historyQuery } from "../src/components/RoomView";
+import { historyQuery, mergeHistoryPages } from "../src/components/RoomView";
 import { app } from "../schema";
 import permissions from "../permissions";
 
@@ -118,10 +118,15 @@ it("does not lose messages when a history page boundary shares a timestamp", asy
   const offset = firstPage.filter(
     (message) => message.$createdAt.getTime() === oldest.$createdAt.getTime(),
   ).length;
+  const pinnedLiveWindow = await owner.all(historyQuery(room.id, { from: oldest.$createdAt }), {
+    tier: "global",
+  });
   const olderPage = await owner.all(
     historyQuery(room.id, { before: { at: oldest.$createdAt, offset } }),
     { tier: "global" },
   );
   expect(olderPage[0].$createdAt.getTime()).toBe(oldest.$createdAt.getTime());
-  expect(new Set([...firstPage, ...olderPage].map((message) => message.id)).size).toBe(55);
+  const visibleMessages = mergeHistoryPages(pinnedLiveWindow, olderPage);
+  expect(visibleMessages).toHaveLength(55);
+  expect(new Set(visibleMessages.map((message) => message.id)).size).toBe(55);
 });
