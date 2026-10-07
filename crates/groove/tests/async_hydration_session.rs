@@ -1427,6 +1427,17 @@ fn cancelled_cold_live_admission_releases_only_its_unpublished_binding() {
 /// alice empty route -> new binding waits -> drop alice -> retire shape -> handoff error
 #[test]
 fn retired_shared_shape_handoff_releases_its_admitted_binding() {
+    check_retired_shared_shape_handoff(false);
+}
+
+/// Alice's projected opening must release its published binding when the old
+/// receiver retires the shape, while Bob's independent view remains live.
+#[test]
+fn projected_live_handoff_releases_binding_after_shape_retirement() {
+    check_retired_shared_shape_handoff(true);
+}
+
+fn check_retired_shared_shape_handoff(projected: bool) {
     let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
     let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
     let mut seed = database.open_batch();
@@ -1442,9 +1453,10 @@ fn retired_shared_shape_handoff_releases_its_admitted_binding() {
     );
     let before = database.runtime_stats();
     let binding = RecordDescriptor::new([("start", ColumnType::U64)]);
+    let sink = if projected { "__default" } else { "reach" };
     let shape = block_on(database.prepare_shared(
         [groove::ivm::RoutedMultisinkTerminal::new(
-            "reach",
+            sink,
             bound_cold_reachability_graph("retired_live_reach", binding),
             std::iter::empty::<&str>(),
             ["src", "dst"],
@@ -1456,9 +1468,7 @@ fn retired_shared_shape_handoff_releases_its_admitted_binding() {
     let alice = block_on(database.bind_shape(shape.id(), &[Value::U64(9)])).unwrap();
     block_on(database.drive_progress()).unwrap();
     assert_eq!(
-        alice.try_recv().unwrap().sinks["reach"]
-            .to_values()
-            .unwrap(),
+        alice.try_recv().unwrap().sinks[sink].to_values().unwrap(),
         Vec::new()
     );
 
@@ -1467,7 +1477,20 @@ fn retired_shared_shape_handoff_releases_its_admitted_binding() {
     let polls_before = control.poll_count(TestStorageOperation::ScanOpen);
     control.pause_on(TestStorageOperation::ScanOpen);
     let values = [Value::U64(1)];
-    let mut admission = Box::pin(database.bind_shape(shape.id(), &values));
+    let mut admission = Box::pin(async {
+        if projected {
+            database
+                .bind_shape_one_sink_with_output(
+                    shape.id(),
+                    &values,
+                    RecordDescriptor::new([("src", ColumnType::U64), ("dst", ColumnType::U64)]),
+                )
+                .await
+                .map(|_| ())
+        } else {
+            database.bind_shape(shape.id(), &values).await.map(|_| ())
+        }
+    });
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     assert!(matches!(
@@ -1500,6 +1523,80 @@ fn retired_shared_shape_handoff_releases_its_admitted_binding() {
     assert_eq!(
         bob.recv().unwrap().to_values().unwrap(),
         vec![(vec![Value::U64(8), Value::String("Bob again".into())], 1)]
+    );
+}
+
+/// Rejecting Alice's requested projection must not strand a live-admitted key;
+/// her valid retry and Bob's next matching row must still have unit weights.
+#[test]
+fn projected_live_binding_rejection_releases_admitted_reference() {
+    let storage = TestStorage::new(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("albums", vec![Value::U64(1), Value::String("Alice".into())]);
+    seed.insert("albums", vec![Value::U64(2), Value::String("Bob".into())]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let binding = RecordDescriptor::new([("title", ColumnType::String)]);
+    let graph = GraphBuilder::join(
+        GraphBuilder::binding_source("projected_live_title", binding),
+        GraphBuilder::table("albums"),
+        ["title"],
+        ["title"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("right.title", "title"),
+    ]);
+    let shape =
+        block_on(database.prepare_one_sink(graph, "projected_live_title", binding, ["title"]))
+            .unwrap();
+    let bob =
+        block_on(database.bind_shape_one_sink(shape.id(), &[Value::String("Bob".into())])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(2), Value::String("Bob".into())], 1)]
+    );
+    let before = database.runtime_stats();
+    let values = [Value::String("Alice".into())];
+    assert!(matches!(
+        block_on(database.bind_shape_one_sink_with_output(
+            shape.id(),
+            &values,
+            RecordDescriptor::new([("missing", ColumnType::U64)]),
+        )),
+        Err(DatabaseError::IvmRuntime(groove::ivm::IvmRuntimeError::GraphFieldNotFound(field)))
+            if field == "missing"
+    ));
+    block_on(database.drive_progress()).unwrap();
+    let after = database.runtime_stats();
+    assert_eq!(after.active_shape_params, before.active_shape_params);
+    assert_eq!(after.active_subscriptions, before.active_subscriptions);
+    assert_eq!(after.active_prepared_shapes, before.active_prepared_shapes);
+
+    let alice = block_on(database.bind_shape_one_sink_with_output(
+        shape.id(),
+        &values,
+        RecordDescriptor::new([("id", ColumnType::U64)]),
+    ))
+    .unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        alice.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(1)], 1)]
+    );
+    database.unsubscribe(alice.id());
+    let mut update = database.open_batch();
+    update.insert("albums", vec![Value::U64(3), Value::String("Bob".into())]);
+    block_on(database.commit_batch(update)).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        database.runtime_stats().active_shape_params,
+        before.active_shape_params
+    );
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(3), Value::String("Bob".into())], 1)]
     );
 }
 
