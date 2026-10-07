@@ -297,6 +297,7 @@ where
                     require_coverage,
                     &coverage_expired,
                     &release_coverage,
+                    None,
                 )
                 .await;
         }
@@ -324,6 +325,7 @@ where
                     require_coverage,
                     &coverage_expired,
                     &release_coverage,
+                    None,
                 )
             },
             || {
@@ -336,6 +338,7 @@ where
                     true,
                     &coverage_expired,
                     &release_coverage,
+                    None,
                 )
             },
             |result| match result {
@@ -344,6 +347,101 @@ where
             },
         ))
         .await
+    }
+
+    /// Opt-in paired read: content witnesses and authority fates are captured
+    /// under the row evaluation's node lock, never reconstructed from rows.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn all_settled_serialized_query_for_binding<F, E>(
+        &self,
+        query: &[u8],
+        mut opts: ReadOpts,
+        open_tx: OpenTransactionId,
+        request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        author: Option<AuthorSubject>,
+        require_coverage: bool,
+        coverage_expired: E,
+        release_coverage: F,
+    ) -> Result<BindingSettledRead, Error>
+    where
+        F: Fn(QueryAttachment),
+        E: Fn() -> bool,
+    {
+        ensure_default_read_view(&opts)?;
+        let _ = std::mem::take(&mut opts.empty_opening);
+        let mut settlements = Vec::new();
+        let result = self
+            .all_serialized_query_once(
+                query,
+                opts,
+                Some(open_tx),
+                request_scope,
+                author,
+                require_coverage,
+                &coverage_expired,
+                &release_coverage,
+                Some(&mut settlements),
+            )
+            .await?;
+        let SerializedReadResult::Rows(rows) = result else {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "E2EE settlement reads require ordinary stored rows",
+            ));
+        };
+        Ok(BindingSettledRead { rows, settlements })
+    }
+
+    /// Cover the admitted opened catalogue without materializing result rows.
+    /// The serving side still performs ordinary source and policy evaluation.
+    #[doc(hidden)]
+    pub async fn cover_catalogue_for_binding<F, E>(
+        &self,
+        table: &str,
+        request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        author: Option<AuthorSubject>,
+        coverage_expired: E,
+        release_coverage: F,
+    ) -> Result<(), Error>
+    where
+        F: FnOnce(QueryAttachment),
+        E: Fn() -> bool,
+    {
+        let opts = ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::Full,
+            local_updates: LocalUpdates::Deferred,
+            ..ReadOpts::default()
+        };
+        {
+            let admission = self.await_open_schema_for_read(&opts);
+            let mut admission = std::pin::pin!(admission);
+            std::future::poll_fn(|cx| match admission.as_mut().poll(cx) {
+                Poll::Pending if coverage_expired() => Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "Timed out waiting for query coverage",
+                ))),
+                outcome => outcome,
+            })
+            .await?;
+        }
+        let prepared = self
+            .prepare_query_async_for(&Query::from(table).limit(0), true)
+            .await?;
+        let prepared = match request_scope {
+            Some((author, claims)) => prepared.with_identity_claims(author, claims),
+            None => prepared,
+        };
+        let coverage = SerializedReadCoverage {
+            attachment: Some(
+                self.attach_query_with_opts_async(&prepared, opts, None, author)
+                    .await?,
+            ),
+            release: Some(release_coverage),
+        };
+        self.wait_for_serialized_read_coverage(&coverage, &coverage_expired)
+            .await
     }
 
     /// Wait until a serialized read's coverage attachment is covered.
@@ -531,6 +629,7 @@ where
         require_coverage: bool,
         coverage_expired: &E,
         release_coverage: &F,
+        settlements: Option<&mut Vec<(TxId, GlobalTime)>>,
     ) -> Result<SerializedReadResult, Error>
     where
         F: Fn(QueryAttachment),
@@ -560,6 +659,12 @@ where
         let decoded: Query = crate::wire::decode_postcard_exact(query)
             .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
         let is_relation = decoded.relation.is_some();
+        if settlements.is_some() && (is_relation || !decoded.array_subqueries.is_empty()) {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "E2EE settlement reads require ordinary stored rows",
+            ));
+        }
         if open_tx.is_some() && is_relation {
             return Err(Error::new(
                 ErrorCode::Query,
@@ -785,10 +890,22 @@ where
         }
 
         let mut rows = match open_tx {
-            Some(open_tx) => {
-                self.all_in_open_transaction(open_tx, &prepared, opts, author)
+            Some(open_tx) => match settlements {
+                Some(settlements) => {
+                    self.transaction_all_settled_for_binding(
+                        open_tx,
+                        &prepared,
+                        opts,
+                        author,
+                        settlements,
+                    )
                     .await
-            }
+                }
+                None => {
+                    self.all_in_open_transaction(open_tx, &prepared, opts, author)
+                        .await
+                }
+            },
             None => match author {
                 Some(author) => self.all_for_identity(&prepared, opts, author).await,
                 None => self.all(&prepared, opts).await,

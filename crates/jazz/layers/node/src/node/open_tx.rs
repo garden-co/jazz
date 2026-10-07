@@ -1899,6 +1899,56 @@ where
             .ok_or(Error::MissingOpenBatch(tx_id))
     }
 
+    /// Restrict a fresh, read-only E2EE observation to locally accepted versions.
+    /// This does not establish completeness and must never be used to activate
+    /// new membership without a separate accepted, covered history.
+    #[doc(hidden)]
+    pub async fn restrict_e2ee_observation_snapshot(
+        &mut self,
+        tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        let tx = self.open_tx(tx_id)?;
+        if !matches!(&tx.kind, OpenTransactionKind::Exclusive { .. })
+            || !tx.writes.is_empty()
+            || (tx.base_snapshot.local_base != TxTime(0)
+                && (!tx.row_reads.is_empty()
+                    || !tx.absent_reads.is_empty()
+                    || !tx.predicate_reads.is_empty()
+                    || !tx.base_snapshot_rows.is_empty()))
+        {
+            return Err(Error::InvalidStoredValue(
+                "E2EE observation requires a fresh read-only transaction",
+            ));
+        }
+        let snapshot = tx.base_snapshot.clone();
+        // A zero local prefix excludes normal local writes. Refuse a non-accepted
+        // zero-time record too, rather than assuming that sentinel cannot exist.
+        if self
+            .transaction_state(TxId::new(TxTime(0), snapshot.owner))
+            .await
+            .is_some_and(|state| {
+                !matches!(state, (Fate::Accepted, Some(_), DurabilityTier::Global))
+            })
+        {
+            return Err(Error::InvalidStoredValue(
+                "E2EE observation has an unsettled zero-time record",
+            ));
+        }
+        let mut accepted = Vec::with_capacity(snapshot.dots.len());
+        for dot in snapshot.dots {
+            if matches!(
+                self.transaction_state(dot).await,
+                Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+            ) {
+                accepted.push(dot);
+            }
+        }
+        let tx = self.open_tx_mut(tx_id)?;
+        tx.base_snapshot.local_base = TxTime(0);
+        tx.base_snapshot.dots = accepted;
+        Ok(())
+    }
+
     pub(super) fn open_tx_mut(
         &mut self,
         tx_id: OpenTransactionId,
@@ -2236,6 +2286,54 @@ where
             )
             .await?;
         self.version_tx_id(&version).ok()
+    }
+
+    /// Capture content settlements while the caller still holds the node lock
+    /// used to evaluate these rows. The generic updater alias may name a
+    /// deletion, so it is only a stored-provenance check, never the witness.
+    #[doc(hidden)]
+    pub async fn tx_content_settlements_for_binding(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        rows: &[CurrentRow],
+    ) -> Result<Option<Vec<(TxId, GlobalTime)>>, Error> {
+        let open_tx = self.open_tx(tx_id)?;
+        if !matches!(open_tx.kind, OpenTransactionKind::Exclusive { .. }) {
+            return Ok(None);
+        }
+        let staged_content = open_tx
+            .writes
+            .iter()
+            .filter(|write| write.deletion.is_none())
+            .map(|write| (write.table.as_str(), write.row_uuid))
+            .collect::<BTreeSet<_>>();
+        if rows.iter().any(|row| {
+            staged_content.contains(&(row.table(), row.row_uuid()))
+                || row.projected_tx_alias().is_none()
+        }) {
+            return Ok(None);
+        }
+        let snapshot = open_tx.base_snapshot.clone();
+        let mut settlements = Vec::with_capacity(rows.len());
+        for row in rows {
+            if self.current_row_tx_id(row).await.is_none() {
+                return Ok(None);
+            }
+            let Some(witness) = self
+                .snapshot_content_witness(schema_version, row.table(), row.row_uuid(), &snapshot)
+                .await
+            else {
+                return Ok(None);
+            };
+            let Some((Fate::Accepted, Some(position), DurabilityTier::Global)) =
+                self.transaction_state(witness).await
+            else {
+                return Ok(None);
+            };
+            settlements.push((witness, position));
+        }
+        Ok(Some(settlements))
     }
 
     fn overlay_pending_writes_in_schema(

@@ -410,6 +410,92 @@ transaction as `ExclusiveConflict`; neither case may be treated as evidence
 that a row is absent. Supporting ambiguous name reuse would require additional
 read-set identity information.
 
+#### Authority-settled observations and portable identities
+
+The internal `allSettledForE2ee` read returns row bodies and authority metadata
+from the same covered exclusive read. Each row has exactly one settlement:
+its row UUID, committed transaction ID and authority position. The position
+belongs to the returned content version, not to the row's creation time.
+Only `Accepted` transactions with an explicit `Global` receipt qualify.
+Ordinary reads retain their existing row codec and do not perform settlement
+lookups. Projection/relation results that are not stored rows are refused by
+the settlement boundary.
+
+Row evaluation and content-settlement capture retain the same node lock, so
+incoming history cannot replace a content witness between the two operations.
+A returned row with staged content writes is refused rather than paired with
+an earlier version's acceptance. Deletion-register updates do not replace the
+content transaction or position; ordinary `$updatedBy` and `$updatedAt`
+provenance continues to describe the latest logical-row update.
+
+Row settlement is not query completeness. Callers may use a covered snapshot
+as authoritative history only after that exclusive transaction's explicit
+`wait({ tier: "global" })` succeeds. For example, two rows authored atomically
+share one transaction and position; a later proposal has a later position,
+irrespective of UUID ordering. A proposal arriving after the read invalidates
+the exclusive snapshot instead of silently extending it. Empty history also
+requires coverage and acceptance. An explicit global wait never falls back to
+local durability when no authority is configured; omitted wait options retain
+the existing offline behavior.
+
+Prepared exclusive scopes perform the same schema admission as ordinary
+transactions before writes or read decoding. While a commit drains, operations
+continue through the scope's bound preparation I/O rather than ordinary owner I/O.
+
+`observeE2eeHistory` is weaker: it hydrates local inputs, freezes a fresh
+read-only exclusive snapshot, excludes its pending local prefix and unsettled
+dots, and rolls the observation back. The returned accepted observations do
+not prove that the history is complete or current and cannot alone activate
+membership. This is an observation API, not an offline accepted-history cache.
+
+`catalogue_table_identity`, `table_identity` and `column_identity` expose the
+accepted catalogue's portable table lineage and column epoch UUIDs. Pending
+schema proposals and unknown names have no accepted identity. Compatible
+renames retain identity; a fixed schema view retains its own names while the
+owner follows the current write schema. These operations neither allocate an
+identity nor grant permission to read rows. High-level online identity reads
+cover the catalogue without requesting row bodies; offline/local-only identity
+reads supply candidates, not proof of current membership.
+
+Every online identity lookup obtains fresh global coverage through a zero-row
+query validated against the admitted opened schema, then resolves the identity
+in the owner or fixed view. A rename or removal from the current schema can
+therefore return absence without querying a nonexistent current table. A table
+UUID is not a reusable catalogue-freshness receipt, including after reconnect.
+Coverage preserves the effective reader and claims, bounds initial schema
+admission by the read deadline, and releases its attachment on cancellation.
+It returns no row bodies or application results, but the authority can still
+perform the existing source and policy evaluation work on each lookup.
+
+The native/WASM identity binding is exactly 16 UUID bytes in RFC UUID byte
+order, or zero bytes for absence. JavaScript renders the bytes as a lowercase
+hyphenated UUID; local table/column aliases never cross this boundary.
+The existing `runtime-descriptor.test.ts` UUID corpus fixes the byte sequence
+`00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f` as
+`00010203-0405-0607-0809-0a0b0c0d0e0f`, including a nonzero typed-array offset.
+The **settled-row binding frame v1** is an in-process frame, not a durable or
+network format: four little-endian bytes containing the UTF-8 JSON metadata
+length, those bytes, then the unchanged encoded row batches. Metadata is an
+array of `{rowId, transactionId, position}` records. `position` is a decimal
+u64 string, never a JavaScript number. JSON property order is not authoritative.
+The empty corpus is `02 00 00 00 5b 5d 00`. Metadata-only reads omit the length
+and row payload. No serializer's default UUID or integer representation defines
+this contract.
+
+Regressions cover authority ordering and snapshot conflicts
+(`settlement-snapshot.test.ts`), Node and browser parity
+(`settlement-native.test.ts`, `e2ee-settlement.server.test.ts`), staged-content
+refusal and independent deletion provenance, accepted identity across a real-server
+rename and reconnect (`scope-identity-native.test.ts`), authored-but-unaccepted
+schema-ID lookup (`catalogue.rs::catalogue_table_identity_requires_accepted_schema_publication`),
+fresh clients, denied row access and persistent browser-worker identity refresh
+(`e2ee-scope-identity.server.test.ts`), and the binding byte corpus
+(`wasm-settled-rows.test.ts`). Validation receipts remain specific to their source
+and runtime. Release-level qualification and limitations remain tracked in
+[#3125](https://github.com/garden-co/jazz/issues/3125).
+Encryption, lifecycle authoring and automatic managed schemas are unchanged
+by this substrate.
+
 ### 3.8 Rejection and cascade
 
 Rejection records the authority's decision without keeping rejected foreign

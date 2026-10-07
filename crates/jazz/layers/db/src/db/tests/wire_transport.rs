@@ -2,6 +2,121 @@
 
 use super::*;
 
+/// Binding-only paired reads refuse pending content and retain its exact
+/// transaction identity after authority acceptance without changing ordinary rows.
+/// This is internal because the public client does not expose the paired core
+/// result or let callers schedule individual authority receipt frames.
+/// Alice -> authority acceptance -> Bob's subscription -> paired settlement.
+#[test]
+fn row_settlement_is_opt_in_and_follows_authority_acceptance() {
+    let schema = schema();
+    let alice_author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob_author = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let authority = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
+    let alice = open_db(0xa1, alice_author, &schema);
+    let bob = open_db(0xb1, bob_author, &schema);
+    let (alice_up, alice_down) = byte_duplex();
+    let (bob_up, bob_down) = byte_duplex();
+    let _alice_upstream = block_on(alice.connect_upstream(alice_up));
+    let _bob_upstream = block_on(bob.connect_upstream(bob_up));
+    let alice_peer = authority.accept_subscriber(alice_down, alice_author);
+    let bob_peer = authority.accept_subscriber(bob_down, bob_author);
+    let prepared = bob.prepare_query(&Query::from("todos")).unwrap();
+    let opts = global_subscribe_opts();
+    let mut subscription = block_on(bob.subscribe(&prepared, opts.clone())).unwrap();
+    let pump = || {
+        for _ in 0..32 {
+            alice.tick().unwrap();
+            alice_peer.borrow_mut().tick().unwrap();
+            bob.tick().unwrap();
+            bob_peer.borrow_mut().tick().unwrap();
+        }
+    };
+    pump();
+    while subscription.try_next_event().is_some() {}
+    // The public builder uses tools values; the binding-facing Db uses core values.
+    let cells = crate::row_input!("title" => "settlement")
+        .into_iter()
+        .map(|(name, value)| match value {
+            PublicValue::Text(text) => (name, Value::String(text)),
+            _ => unreachable!("fixture contains only text"),
+        })
+        .collect();
+    let write = block_on(alice.insert("todos", cells, Default::default())).unwrap();
+    let local_query = alice.prepare_query(&Query::from("todos")).unwrap();
+    let local = block_on(alice.all(&local_query, ReadOpts::default())).unwrap();
+    assert_eq!(local.len(), 1);
+    let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+    let observation_opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let pending_read = OpenTransactionId::new();
+    block_on(alice.begin_exclusive(pending_read)).unwrap();
+    let pending = block_on(alice.all_settled_serialized_query_for_binding(
+        &query,
+        observation_opts.clone(),
+        pending_read,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| alice.detach_query(attachment),
+    ));
+    assert!(matches!(
+        pending,
+        Err(Error {
+            code: ErrorCode::NotObserved,
+            ..
+        })
+    ));
+    assert_eq!(
+        block_on(alice.all(&local_query, ReadOpts::default())).unwrap(),
+        local
+    );
+    alice.abandon_transaction_handle(pending_read).unwrap();
+    pump();
+    block_on(write.wait(DurabilityTier::Global)).unwrap();
+    let received = block_on(bob.all(&prepared, opts.clone())).unwrap();
+    assert_eq!(received.len(), 1);
+    let bob_read = OpenTransactionId::new();
+    block_on(bob.begin_exclusive(bob_read)).unwrap();
+    let paired = block_on(bob.all_settled_serialized_query_for_binding(
+        &query,
+        observation_opts.clone(),
+        bob_read,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| bob.detach_query(attachment),
+    ))
+    .unwrap();
+    assert_eq!(paired.rows, received);
+    assert_eq!(paired.settlements.len(), 1);
+    let (tx, position) = paired.settlements[0];
+    assert_eq!(tx, write.mergeable_tx_id());
+    assert_eq!(alice.write_state(tx).unwrap().global_time, Some(position));
+    bob.abandon_transaction_handle(bob_read).unwrap();
+    let alice_read = OpenTransactionId::new();
+    block_on(alice.begin_exclusive(alice_read)).unwrap();
+    let paired = block_on(alice.all_settled_serialized_query_for_binding(
+        &query,
+        observation_opts,
+        alice_read,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| alice.detach_query(attachment),
+    ))
+    .unwrap();
+    assert_eq!(paired.rows, local);
+    assert_eq!(paired.settlements, vec![(tx, position)]);
+    alice.abandon_transaction_handle(alice_read).unwrap();
+    assert_eq!(block_on(bob.all(&prepared, opts)).unwrap(), received);
+}
+
 // These tests exercise physical FIFO/backpressure boundaries that a Db cannot
 // expose directly. The actual adapter and persistent codecs remain in use.
 fn receive_after_pumping<T: WireTransport, U: WireTransport>(

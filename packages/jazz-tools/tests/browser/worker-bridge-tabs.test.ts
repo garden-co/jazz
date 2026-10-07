@@ -656,18 +656,26 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const remoteTitle = `remote-for-local-only-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      dbA.insert(todos, { title: remoteTitle, done: false }).wait({ tier: "local" }),
+      dbA.insert(todos, { title: remoteTitle, done: false }).wait({ tier: "global" }),
       10000,
-      "A insert(worker) did not resolve",
+      "A remote write did not settle at the server",
     );
 
-    // Give sync enough time; local-only must still not see remote data.
-    await sleep(3000);
+    // Complete a remote query on B as a control for its working server link.
+    // Use a disjoint filter: reading remoteTitle here would legitimately import
+    // that row into B's local storage and invalidate the isolation assertion.
+    await expect(
+      withTimeout(
+        dbB.all(app.todos.where({ title: `${remoteTitle}-absent` }), { tier: "global" }),
+        10000,
+        "B's disjoint control query did not settle at the server",
+      ),
+    ).resolves.toEqual([]);
     const latestAfterRemote = snapshots[snapshots.length - 1] ?? [];
     expect(latestAfterRemote.some((row) => row.title === remoteTitle)).toBe(false);
 
     const localTitle = `local-only-local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    dbB.insert(todos, { title: localTitle, done: true });
+    await dbB.insert(todos, { title: localTitle, done: true }).wait({ tier: "local" });
 
     await waitForCondition(
       async () => {
@@ -680,7 +688,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const latest = snapshots[snapshots.length - 1] ?? [];
     expect(latest.some((row) => row.title === localTitle)).toBe(true);
-    expect(latest.some((row) => row.title === remoteTitle)).toBe(false);
+    expect(snapshots.every((rows) => rows.every((row) => row.title !== remoteTitle))).toBe(true);
 
     unsub();
   }, 60000);
