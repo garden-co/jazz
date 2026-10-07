@@ -1279,7 +1279,6 @@ fn physical_history_field_names_for_case(
             crate::schema::SEQ_FIELD,
             crate::schema::BASE_SEQ_FIELD,
             crate::schema::BASE_PENDING_FIELD,
-            crate::schema::LOST_CELLS_FIELD,
         ],
         "physical history column mapping missing",
     )

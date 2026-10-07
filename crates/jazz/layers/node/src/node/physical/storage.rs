@@ -76,107 +76,10 @@ where
             .map(Some)
     }
 
-    /// The wire spelling of `version`'s lost cells: keys become slots of its
-    /// authored table (`0` is `_deletion`, `i + 1` the `i`-th user column),
-    /// values keep their bytes (SPEC 4 §4.6, "Wire layout").
-    pub(super) fn lost_cells_for_wire(&self, version: &VersionRow) -> Result<Vec<u8>, Error> {
-        let stored = version.lost_cells_raw()?;
-        if stored.is_empty() {
-            return Ok(stored);
-        }
-        let schema_version = self
-            .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue("lost cells schema version alias missing"))?;
-        let table = self.table_in_schema_ref(version.table(), schema_version)?;
-        let mapping = self.lost_cells_mapping(schema_version, version.table())?;
-        // Stored lost cells use the record's own authored spelling, which is
-        // also the wire's.
-        let descriptor = super::codec::history_record_descriptor(table);
-        super::lost_cells::rekey(&stored, |id| {
-            let slot = if PhysicalColumnId(id) == DELETION_COLUMN_ID {
-                0
-            } else {
-                let name = mapping
-                    .iter()
-                    .find_map(|(name, column)| (column.0 == id).then_some(name))
-                    .ok_or(Error::InvalidStoredValue(
-                        "lost cell column id is absent from its schema mapping",
-                    ))?;
-                table
-                    .columns
-                    .iter()
-                    .position(|column| &column.name == name)
-                    .ok_or(Error::InvalidStoredValue("lost cell column missing"))?
-                    as u64
-                    + 1
-            };
-            Ok((slot, lost_cell_type(&descriptor, slot)?))
-        })
-    }
-
-    /// The storage spelling of a wire version's lost cells: slots become
-    /// node-local physical column ids. An unknown slot is malformed.
-    pub(super) fn lost_cells_for_storage(&self, version: &VersionRecord) -> Result<Vec<u8>, Error> {
-        if version.lost_cells().is_empty() {
-            return Ok(Vec::new());
-        }
-        let schema_version = version.schema_version();
-        let table = self.table_in_schema_ref(version.table(), schema_version)?;
-        let mapping = self.lost_cells_mapping(schema_version, version.table())?;
-        let descriptor = super::codec::history_record_descriptor(table);
-        super::lost_cells::rekey(version.lost_cells(), |slot| {
-            let id = match slot {
-                0 => DELETION_COLUMN_ID,
-                slot => {
-                    let column = table
-                        .columns
-                        .get(usize::try_from(slot - 1).unwrap_or(usize::MAX))
-                        .ok_or(Error::InvalidStoredValue("lost cell slot out of range"))?;
-                    *mapping.get(&column.name).ok_or(Error::InvalidStoredValue(
-                        "lost cell column physical mapping missing",
-                    ))?
-                }
-            };
-            Ok((id.0, lost_cell_type(&descriptor, slot)?))
-        })
-    }
-
-    /// The physical spelling of user cell `column` of `table` under
-    /// `schema_version`: its authored enum tags re-tagged into the lineage's
-    /// physical registry, exactly as a history write stores them. A cell
-    /// without an enum boundary is returned unchanged. Ancestor comparisons
-    /// read stored cells in this spelling (SPEC 4 §4.6).
-    pub(in crate::node) fn authored_cell_to_physical(
-        &mut self,
-        schema_version: SchemaVersionId,
-        table: &str,
-        column: usize,
-        value: Value,
-    ) -> Result<Value, Error> {
-        let plan =
-            self.prepared_physical_write_plan(schema_version, table, PhysicalWriteTarget::History)?;
-        let Some(index) = plan.write_fields.iter().position(
-            |field| matches!(field, PhysicalWriteField::Enum { column: enum_column, .. } if *enum_column == column),
-        ) else {
-            return Ok(value);
-        };
-        match (value, &plan.physical_descriptor.fields()[index].value_type) {
-            (Value::Nullable(Some(inner)), records::ValueType::Nullable(physical)) => {
-                Ok(Value::Nullable(Some(Box::new(remap_nested_enum_value(
-                    *inner,
-                    &plan.source_table.columns[column].column_type,
-                    physical,
-                    &plan.enum_remaps[column],
-                    "root",
-                )?))))
-            }
-            (value, _) => Ok(value),
-        }
-    }
-
-    /// The authored spelling of a physical user cell: the inverse of
-    /// [`Self::authored_cell_to_physical`], for the record's own schema
-    /// version. Lost cells are stored in this spelling.
+    /// The authored spelling of a physical user cell of `table` under
+    /// `schema_version`: its physical enum tags re-tagged to that schema
+    /// version's authored tags, the spelling of an uploaded write. A cell
+    /// without an enum boundary is returned unchanged.
     pub(in crate::node) fn physical_cell_to_authored(
         &mut self,
         schema_version: SchemaVersionId,
@@ -216,21 +119,6 @@ where
             }
             (value, _) => Ok(value),
         }
-    }
-
-    fn lost_cells_mapping(
-        &self,
-        schema_version: SchemaVersionId,
-        table: &str,
-    ) -> Result<&BTreeMap<String, PhysicalColumnId>, Error> {
-        self.catalogue
-            .physical_mappings
-            .get(&schema_version)
-            .and_then(|mapping| mapping.tables.get(table))
-            .map(|mapping| &mapping.columns)
-            .ok_or(Error::InvalidStoredValue(
-                "lost cells physical table mapping missing",
-            ))
     }
 
     /// Translate a logical contribution table at the local storage boundary.
@@ -1066,22 +954,4 @@ where
             ),
         ))
     }
-
-}
-
-/// The cell type of lost-cell `slot` in a history layout: `_deletion` or a
-/// user cell, each stored nullable.
-fn lost_cell_type(
-    descriptor: &groove::records::RecordDescriptor,
-    slot: u64,
-) -> Result<groove::records::ValueType, Error> {
-    let field = match slot {
-        0 => HistoryRowRecord::FIELD__DELETION_IDX,
-        slot => HistoryRowRecord::USER_CELLS + usize::try_from(slot - 1).unwrap_or(usize::MAX),
-    };
-    descriptor
-        .fields()
-        .get(field)
-        .map(|field| field.value_type.clone())
-        .ok_or(Error::InvalidStoredValue("lost cell slot out of range"))
 }

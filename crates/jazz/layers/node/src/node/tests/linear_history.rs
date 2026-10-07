@@ -1,9 +1,9 @@
 // Linear Core-sequenced history: the user-visible guarantees that replaced the
 // version DAG's merge heads, merge versions, parked parents and rejection
-// cascades. Core sequences every accepted write, merges it into the row's
-// post-image one cell at a time (a plain cell against the writer's ancestor,
-// ops for merge-strategy columns), and every other node stores Core's
-// post-images under its own pending overlay (SPEC/4 §4.6).
+// cascades. Core sequences every accepted write and applies it to the row's
+// post-image as a patch (its authored plain cells by arrival, ops for
+// merge-strategy columns), and every other node stores Core's post-images
+// under its own pending overlay (SPEC/4 §4.6).
 
 /// Replicates the current rows of `table` from `core` to `receiver` through
 /// one whole-table view update, as a subscribed client would receive them.
@@ -46,12 +46,13 @@ fn core_fate(core: &mut NodeState, unit: SyncMessage) -> SyncMessage {
         .expect("Core decides every complete commit unit")
 }
 
-/// INV-HIST-8: two writers edit different columns of one row without seeing
-/// each other. Both columns survive at Core, and on the shared column the
-/// write Core sequenced first keeps its value: the later one was made over an
-/// image without it, so its title is recorded as lost.
+/// INV-HIST-8, INV-HIST-21: two writers edit one row without seeing each
+/// other, and both write the title. Core applies both by arrival, so the
+/// write it sequences last keeps the shared title and its own body. That
+/// write is maybe conflicting (the other was accepted after its base), and
+/// its conflict analysis names the other write; the first is not.
 #[test]
-fn concurrent_writes_to_different_columns_both_survive_at_core() {
+fn concurrent_overlapping_writes_resolve_by_arrival_at_core() {
     let schema = two_column_schema();
     let (_alice_dir, mut alice) = open_node_with_schema(node(1), schema.clone());
     let (_bob_dir, mut bob) = open_node_with_schema(node(2), schema.clone());
@@ -67,12 +68,12 @@ fn concurrent_writes_to_different_columns_both_survive_at_core() {
 
     // alice retitles at t=30; bob, whose clock is behind, rewrites the body
     // and also the title at t=20.
-    let (_alice_tx, alice_unit) = alice
+    let (alice_tx, alice_unit) = alice
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 30).cells(title_cells("alice")),
         )
         .unwrap();
-    let (_bob_tx, bob_unit) = bob
+    let (bob_tx, bob_unit) = bob
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 20).cells(todo_cells("bob", "bob")),
         )
@@ -91,15 +92,18 @@ fn concurrent_writes_to_different_columns_both_survive_at_core() {
         ));
     }
 
-    // bob's body has no competing writer and survives; bob's later-sequenced
-    // title was written over the base title, which alice had changed, and
-    // loses to alice's.
-    let expected = BTreeMap::from([(target, todo_cells("alice", "bob"))]);
+    // bob's write arrived last: his title overrides alice's, whatever the
+    // clocks say, and his body applies.
+    let expected = BTreeMap::from([(target, todo_cells("bob", "bob"))]);
     assert_eq!(
         rows_at(&mut core, "todos", DurabilityTier::Global),
         expected
     );
     assert_eq!(rows_at(&mut core, "todos", DurabilityTier::Local), expected);
+    assert!(!flagged(&mut core, target, alice_tx), "alice wrote over the latest image");
+    let bob_conflict = conflict(&mut core, target, bob_tx);
+    assert!(bob_conflict.maybe_conflicting);
+    assert_eq!(bob_conflict.overlapping, vec![alice_tx]);
 
     // Both writers converge to Core's post-image once they hear back.
     alice.apply_sync_message_settled(alice_fate).unwrap();
@@ -110,10 +114,60 @@ fn concurrent_writes_to_different_columns_both_survive_at_core() {
     }
 }
 
+/// INV-HIST-8, INV-HIST-21: two writers edit different columns of one row
+/// without seeing each other. Both columns apply whatever the arrival order.
+/// The write Core sequences second is still maybe conflicting (the other
+/// was accepted after its base), but nothing in its conflict analysis
+/// overlaps it.
+#[test]
+fn concurrent_disjoint_writes_both_apply_at_core() {
+    for alice_first in [true, false] {
+        let schema = two_column_schema();
+        let (_alice_dir, mut alice) = open_node_with_schema(node(1), schema.clone());
+        let (_bob_dir, mut bob) = open_node_with_schema(node(2), schema.clone());
+        let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+        let target = row(0x11);
+        commit_mergeable_global(
+            &mut alice,
+            &mut core,
+            MergeableCommit::new("todos", target, 10).cells(todo_cells("base", "base")),
+        );
+        sync_table_rows_to(&mut core, &mut bob, "todos");
+
+        let (alice_tx, alice_unit) = alice
+            .commit_mergeable_unit_settled(
+                MergeableCommit::new("todos", target, 30).cells(title_cells("alice")),
+            )
+            .unwrap();
+        let (bob_tx, bob_unit) = bob
+            .commit_mergeable_unit_settled(
+                MergeableCommit::new("todos", target, 20)
+                    .cells(BTreeMap::from([("body".to_owned(), v("bob"))])),
+            )
+            .unwrap();
+        let (first, second) = if alice_first {
+            ((alice_tx, alice_unit), (bob_tx, bob_unit))
+        } else {
+            ((bob_tx, bob_unit), (alice_tx, alice_unit))
+        };
+        assert_accepted(&core_fate(&mut core, first.1));
+        assert_accepted(&core_fate(&mut core, second.1));
+        assert_eq!(
+            rows_at(&mut core, "todos", DurabilityTier::Global),
+            BTreeMap::from([(target, todo_cells("alice", "bob"))]),
+            "alice first: {alice_first}"
+        );
+        assert!(!flagged(&mut core, target, first.0));
+        let second_conflict = conflict(&mut core, target, second.0);
+        assert!(second_conflict.maybe_conflicting);
+        assert!(second_conflict.overlapping.is_empty());
+    }
+}
+
 /// INV-HIST-10: two writers increment a counter from the same base without
 /// seeing each other. Core sums both deltas exactly instead of keeping one
-/// writer's absolute value; the plain column keeps the first-sequenced
-/// writer's value, which the second writer had not seen.
+/// writer's absolute value; the plain column takes the value of the write
+/// Core sequences last.
 #[test]
 fn concurrent_counter_increments_sum_exactly_at_core() {
     let schema = counter_schema();
@@ -151,7 +205,7 @@ fn concurrent_counter_increments_sum_exactly_at_core() {
     core_fate(&mut core, alice_unit);
     core_fate(&mut core, bob_unit);
 
-    let expected = BTreeMap::from([(target, counter_cells(18, "alice"))]);
+    let expected = BTreeMap::from([(target, counter_cells(18, "bob"))]);
     assert_eq!(
         rows_at(&mut core, "counters", DurabilityTier::Global),
         expected
@@ -164,12 +218,11 @@ fn concurrent_counter_increments_sum_exactly_at_core() {
 }
 
 /// INV-HIST-15: the same concurrent writes, delivered to Core in every order,
-/// produce the post-image their seq order and bases determine: counter ops
-/// commute, and the contested plain column keeps the value of the write Core
-/// sequenced first, since each later write was made over the base without it.
-/// Writer clocks play no part.
+/// produce the post-image their seq order determines: counter ops commute,
+/// and the contested plain column keeps the value of the write Core
+/// sequenced last. Writer clocks play no part.
 #[test]
-fn core_post_image_is_determined_by_seq_order_and_bases() {
+fn core_post_image_is_determined_by_seq_order() {
     let schema = counter_schema();
     let target = row(0x30);
     let (_base_dir, mut base_writer) = open_node_with_schema(node(1), schema.clone());
@@ -215,7 +268,7 @@ fn core_post_image_is_determined_by_seq_order_and_bases() {
         for index in order {
             core_fate(&mut core, units[index].clone());
         }
-        let expected = BTreeMap::from([(target, counter_cells(421, titles[order[0]]))]);
+        let expected = BTreeMap::from([(target, counter_cells(421, titles[order[2]]))]);
         assert_eq!(
             rows_at(&mut core, "counters", DurabilityTier::Global),
             expected,
@@ -346,10 +399,11 @@ fn receiver_keeps_the_newest_seq_whatever_order_core_images_arrive() {
     }
 }
 
-/// INV-TX-6: an edit carries the image it was made over as its base, so an
-/// edit made after observing a value overrides it even when the editing
-/// node's clock is far behind. A writer whose base predates the value loses
-/// on that cell whatever its clock.
+/// INV-TX-6: Core orders writes by its own seq, so an edit made after
+/// observing a value overrides it even when the editing node's clock is far
+/// behind. A writer whose base predates the value is not rejected for its
+/// slow clock either: it arrives last, so it wins, and history derives that
+/// it was made over an older image (it is maybe conflicting).
 #[test]
 fn write_after_observing_a_value_overrides_it_despite_a_slow_clock() {
     let schema = two_column_schema();
@@ -405,13 +459,18 @@ fn write_after_observing_a_value_overrides_it_despite_a_slow_clock() {
         rows_at(&mut core, "todos", DurabilityTier::Global),
         BTreeMap::from([(target, todo_cells("observed then edited", "base"))])
     );
-    // The unobserving writer is sequenced last and still loses.
-    // Its slow clock is not a reason to reject it.
+    // The unobserving writer is sequenced last and wins by arrival. Its
+    // slow clock is not a reason to reject it.
     assert!(accepted(&core_fate(&mut core, stale_unit)));
     assert_eq!(
         rows_at(&mut core, "todos", DurabilityTier::Global),
-        BTreeMap::from([(target, todo_cells("observed then edited", "base"))])
+        BTreeMap::from([(target, todo_cells("never observed", "base"))])
     );
+    assert!(!flagged(&mut core, target, observer_tx), "observer saw the latest image");
+    let stale_conflict = conflict(&mut core, target, stale_tx);
+    assert!(stale_conflict.maybe_conflicting);
+    assert_eq!(stale_conflict.overlapping.len(), 2, "the fast title and the observer's");
+    assert_eq!(stale_conflict.overlapping[1], observer_tx);
 }
 
 /// INV-TX-8: when Core rejects a transaction, its effects leave the writer's
@@ -824,7 +883,8 @@ fn unsigned_counter_decrement_sums_with_a_concurrent_increment_at_core() {
     core_fate(&mut core, alice_unit);
     core_fate(&mut core, bob_unit);
 
-    let expected = BTreeMap::from([(target, unsigned_counter_cells(9, "alice"))]);
+    // bob's write arrives last, so his title wins (SPEC 4 §4.6).
+    let expected = BTreeMap::from([(target, unsigned_counter_cells(9, "bob"))]);
     assert_eq!(
         rows_at(&mut core, "counters", DurabilityTier::Global),
         expected
@@ -1262,7 +1322,7 @@ fn signed_counter_op_past_its_maximum_is_rejected_at_core() {
 /// the exact delta over a concurrent op. From `i32::MAX - 10`, bob's +5
 /// settles first; alice's write down to `i32::MIN` (a change of
 /// `-(2^32 - 11)`, whose low bits alone read as `+11`) then lands the
-/// counter on `i32::MIN + 5`.
+/// counter on `i32::MIN + 5`, and her title, arriving last, wins.
 #[test]
 fn counter_write_wider_than_half_the_type_applies_its_exact_delta_at_core() {
     let schema = counter_schema();
@@ -1296,7 +1356,7 @@ fn counter_write_wider_than_half_the_type_applies_its_exact_delta_at_core() {
     assert_accepted(&core_fate(&mut core, alice_unit));
     assert_eq!(
         rows_at(&mut core, "counters", DurabilityTier::Global),
-        BTreeMap::from([(target, counter_cells(i32::MIN + 5, "bob"))])
+        BTreeMap::from([(target, counter_cells(i32::MIN + 5, "alice"))])
     );
 }
 

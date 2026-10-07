@@ -1,12 +1,14 @@
-// Offline write chains and the ancestor merge (SPEC 4 §4.6).
+// Offline write chains, arrival-order merge and the maybe-conflicting
+// derivation (SPEC 4 §4.6).
 //
 // A writer that edits a row several times without hearing back from Core
 // uploads a chain: each write's base names the settled image it rested on
-// and the writer's own previous pending write. Core rebuilds what the writer
-// saw from that image plus the writer's own patches, and applies a cell only
-// when nothing else changed it since. These tests drive nodes directly so
-// the seq Core assigns to every write is exact; the writers stay offline
-// simply by not receiving Core's fates.
+// and the writer's own previous pending write. Core applies every write as a
+// patch in the order it accepts them (last arrival wins per authored cell),
+// keeps one writer's chain in order, and history derives from each write's
+// base whether it was made over the row's latest accepted image. These tests
+// drive nodes directly so the seq Core assigns to every write is exact; the
+// writers stay offline simply by not receiving Core's fates.
 
 fn todo_edit(cells: &[(&str, &str)]) -> BTreeMap<String, Value> {
     cells
@@ -29,39 +31,55 @@ fn offline_edit(
         .unwrap()
 }
 
-/// The cells a write lost at Core, by column name (`_deletion` for the
-/// deletion cell), read from the write's history record there.
-fn lost_cells_at_core(core: &mut NodeState, tx: TxId) -> BTreeMap<String, Value> {
-    let mut lost = BTreeMap::new();
-    for version in core.query_versions_for_tx(tx).resolve().unwrap() {
-        let schema_version = core
-            .schema_version_for_alias(version.schema_version_alias())
-            .unwrap();
-        let table = core.table_in_schema(version.table(), schema_version).unwrap();
-        let wire = core.lost_cells_for_wire(&version).unwrap();
-        // Lost cells travel in the record's own authored spelling.
-        let descriptor = crate::node::codec::history_record_descriptor(&table);
-        for (slot, value) in crate::node::lost_cells::decode(&wire, |slot| {
-            let field = match slot {
-                0 => HistoryRowRecord::FIELD__DELETION_IDX,
-                slot => HistoryRowRecord::USER_CELLS + slot as usize - 1,
-            };
-            Ok(descriptor.fields()[field].value_type.clone())
-        })
+/// What Core's history derives for `tx`'s write to `target` in `table`
+/// (SPEC 4 §4.6, "Maybe conflicting").
+fn conflict_in(
+    core: &mut NodeState,
+    table: &str,
+    target: RowUuid,
+    tx: TxId,
+) -> crate::node::ingest::WriteConflict {
+    core.write_conflict(table, &BranchKey::default(), target, tx)
+        .resolve()
         .unwrap()
-        {
-            let name = match slot {
-                0 => DELETION_COLUMN_NAME.to_owned(),
-                slot => table.columns[slot as usize - 1].name.clone(),
-            };
-            lost.insert(name, value);
-        }
-    }
-    lost
+        .expect("Core holds the write's accepted record")
 }
 
-fn lost_text(value: &str) -> Value {
-    Value::Nullable(Some(Box::new(v(value))))
+fn conflict(core: &mut NodeState, target: RowUuid, tx: TxId) -> crate::node::ingest::WriteConflict {
+    conflict_in(core, "todos", target, tx)
+}
+
+/// Whether `tx`'s write to `target` in `todos` is maybe conflicting.
+fn flagged(core: &mut NodeState, target: RowUuid, tx: TxId) -> bool {
+    conflict(core, target, tx).maybe_conflicting
+}
+
+/// Every accepted write of `target` in `todos`, by transaction, with what
+/// history derives for it.
+fn row_conflicts(
+    core: &mut NodeState,
+    target: RowUuid,
+) -> BTreeMap<TxId, crate::node::ingest::WriteConflict> {
+    core.row_write_conflicts("todos", &BranchKey::default(), target)
+        .resolve()
+        .unwrap()
+        .into_iter()
+        .collect()
+}
+
+/// Core's post-image of `tx`'s single row: its deletion state and cells.
+fn post_image_at_core(
+    core: &mut NodeState,
+    tx: TxId,
+) -> (Option<DeletionEvent>, BTreeMap<String, Value>) {
+    let versions = core.query_versions_for_tx(tx).resolve().unwrap();
+    assert_eq!(versions.len(), 1, "one row written");
+    let version = &versions[0];
+    let schema_version = core
+        .schema_version_for_alias(version.schema_version_alias())
+        .unwrap();
+    let table = core.table_in_schema(version.table(), schema_version).unwrap();
+    (version.deletion(), version.cells(&table).unwrap())
 }
 
 fn fate_of(message: &SyncMessage) -> &Fate {
@@ -69,6 +87,19 @@ fn fate_of(message: &SyncMessage) -> &Fate {
         panic!("expected a fate update, got {message:?}");
     };
     fate
+}
+
+/// The seq Core accepted a write at, from its fate.
+fn accepted_seq(message: &SyncMessage) -> GlobalTime {
+    let SyncMessage::FateUpdate {
+        fate: Fate::Accepted,
+        global_time: Some(seq),
+        ..
+    } = message
+    else {
+        panic!("expected an accepted fate, got {message:?}");
+    };
+    *seq
 }
 
 fn assert_refused_base(message: &SyncMessage) {
@@ -115,25 +146,26 @@ fn core_with_seeded_todo(
     (nodes, core_dir, core)
 }
 
-/// INV-HIST-8, INV-HIST-21: a 1000-edit offline chain merges against what
-/// its writer saw, with other writers editing before, between and after it.
+/// INV-HIST-8, INV-HIST-21: a 1000-edit offline chain applies in order, every
+/// write of it, with other writers editing before, between and after it.
+/// Only the chain's first write and the first write after dave's
+/// interruption are maybe conflicting, and only the second has a conflict
+/// analysis: dave's title, which it overrides.
 ///
 /// carol edits offline 1000 times: every edit retitles the row, and her
 /// 500th also rewrites the body. dave changes the body before carol's chain
 /// arrives, retitles between its two halves, and changes the body again
-/// after it. carol's first 500 titles apply one after another (she saw each
-/// of them); dave's title then changes a cell under her, so every later
-/// carol title is lost, and so is her body (she never saw dave's body).
+/// after it, each time over the latest image.
 ///
 /// ```text
 /// dave  ──body="dave before"──► core
-/// carol ═offline═ title c0..c499 ──► core            title=c499
+/// carol ═offline═ title c0..c499 ──► core            title=c499   c0 flagged
 /// dave  ──title="dave between"──► core
-/// carol ═offline═ title c500..c999, body ──► core     lost: title, body
-/// dave  ──body="dave after"──► core
+/// carol ═offline═ title c500..c999, body ──► core     title=c999   c500 flagged
+/// dave  ──body="dave after"──► core                  body="dave after"
 /// ```
 #[test]
-fn thousand_edit_offline_chain_merges_against_what_its_writer_saw() {
+fn thousand_edit_offline_chain_applies_in_order_and_flags_only_interrupted_writes() {
     let target = row(0x81);
     let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
     let (_, carol) = &mut writers[0];
@@ -153,112 +185,79 @@ fn thousand_edit_offline_chain_merges_against_what_its_writer_saw() {
     );
     let (_, dave) = &mut writers[1];
 
-    let (_, before) = offline_edit(dave, target, 50, &[("body", "dave before")]);
+    let (before_tx, before) = offline_edit(dave, target, 50, &[("body", "dave before")]);
     assert_accepted(&core_fate(&mut core, before));
     let mut units = units.into_iter();
-    for (_, unit) in units.by_ref().take(500) {
+    let mut first_half = Vec::new();
+    for (tx, unit) in units.by_ref().take(500) {
         assert_accepted(&core_fate(&mut core, unit));
+        first_half.push(tx);
     }
     assert_eq!(
         rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
         todo_cells("c499", "dave before")
     );
     sync_table_rows_to(&mut core, dave, "todos");
-    let (_, between) = offline_edit(dave, target, 2_000, &[("title", "dave between")]);
+    let (between_tx, between) = offline_edit(dave, target, 2_000, &[("title", "dave between")]);
     assert_accepted(&core_fate(&mut core, between));
     let mut second_half = Vec::new();
     for (tx, unit) in units {
         assert_accepted(&core_fate(&mut core, unit));
         second_half.push(tx);
     }
+    // Every chained write applied, in order, over dave's title.
     assert_eq!(
         rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
-        todo_cells("dave between", "dave before")
-    );
-    assert_eq!(
-        lost_cells_at_core(&mut core, second_half[0]),
-        BTreeMap::from([
-            ("title".to_owned(), lost_text("c500")),
-            ("body".to_owned(), lost_text("carol")),
-        ])
-    );
-    assert_eq!(
-        lost_cells_at_core(&mut core, second_half[499]),
-        BTreeMap::from([("title".to_owned(), lost_text("c999"))])
+        todo_cells("c999", "carol")
     );
 
     sync_table_rows_to(&mut core, dave, "todos");
-    let (_, after) = offline_edit(dave, target, 3_000, &[("body", "dave after")]);
+    let (after_tx, after) = offline_edit(dave, target, 3_000, &[("body", "dave after")]);
     assert_accepted(&core_fate(&mut core, after));
     assert_eq!(
         rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
-        todo_cells("dave between", "dave after")
+        todo_cells("c999", "dave after")
     );
-}
 
-/// INV-HIST-21: when the first write of a chain loses a cell, a later
-/// chained write of the same cell is compared with the value its writer
-/// wrote (the lost one), not with Core's winner, so it stays lost; a cell
-/// nobody else touched still applies.
-///
-/// ```text
-/// dave  ──title="dave"──► core
-/// carol ═offline═ e1 title="c1" ──► core   lost: title
-/// carol ═offline═ e2 title="c2", body="c2" ──► core   lost: title; body applies
-/// ```
-#[test]
-fn chained_write_stays_lost_on_a_cell_its_predecessor_lost() {
-    let target = row(0x82);
-    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
-    let (e1, e1_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "c1")]);
-    let (e2, e2_unit) =
-        offline_edit(&mut writers[0].1, target, 101, &[("title", "c2"), ("body", "c2")]);
-    let (_, dave_unit) = offline_edit(&mut writers[1].1, target, 50, &[("title", "dave")]);
-
-    assert_accepted(&core_fate(&mut core, dave_unit));
-    let e1_fate = core_fate(&mut core, e1_unit);
-    let e2_fate = core_fate(&mut core, e2_unit);
-    assert_accepted(&e1_fate);
-    assert_accepted(&e2_fate);
+    let conflicts = row_conflicts(&mut core, target);
+    // The seed, dave's three writes and carol's 1000.
+    assert_eq!(conflicts.len(), 1004);
+    let flagged = conflicts
+        .iter()
+        .filter(|(_, conflict)| conflict.maybe_conflicting)
+        .map(|(tx, _)| *tx)
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
-        todo_cells("dave", "c2")
+        flagged,
+        BTreeSet::from([first_half[0], second_half[0]]),
+        "only the writes whose base an other writer's write had moved past"
     );
-    // carol predicts her own image when the fates arrive, then converges on
-    // Core's post-image.
-    let carol = &mut writers[0].1;
-    carol.apply_sync_message_settled(e1_fate).unwrap();
-    carol.apply_sync_message_settled(e2_fate).unwrap();
-    sync_table_rows_to(&mut core, carol, "todos");
-    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
-        assert_eq!(rows_at(carol, "todos", tier)[&target], todo_cells("dave", "c2"));
+    // carol's first edit missed dave's body, which it does not touch.
+    assert!(conflicts[&first_half[0]].overlapping.is_empty());
+    // Her first edit after the interruption overrides dave's title.
+    assert_eq!(conflicts[&second_half[0]].overlapping, vec![between_tx]);
+    for tx in [before_tx, between_tx, after_tx] {
+        assert!(!conflicts[&tx].maybe_conflicting, "dave wrote over the latest image");
     }
-    assert_eq!(
-        lost_cells_at_core(&mut core, e1),
-        BTreeMap::from([("title".to_owned(), lost_text("c1"))])
-    );
-    assert_eq!(
-        lost_cells_at_core(&mut core, e2),
-        BTreeMap::from([("title".to_owned(), lost_text("c2"))])
-    );
 }
 
-/// A chained write whose pending predecessor Core rejected: the rejected
-/// write is not in history and contributes nothing, so the chain's ancestor
-/// is the settled image the writer started from.
+/// A chained write whose pending predecessor Core rejected resolves to the
+/// predecessor's own base: the rejected write is not in history.
 ///
 /// erin's first offline edit retitles the row and pushes a counter past its
 /// type's range over dave's concurrent increment, so Core rejects it. Her
-/// second edit only rewrites the title again; nothing else changed the title
-/// since the image she started from, so it applies.
+/// second edit only rewrites the title again and applies. Its base resolves
+/// to the seed erin's chain started from, and dave's increment came after
+/// it, so it is maybe conflicting; dave touched only the counter, so its
+/// conflict analysis is empty.
 ///
 /// ```text
 /// dave ──count +1──► core                   count=i32::MAX
 /// erin ═offline═ e1 count +1, title="e1" ──► core ──✗ Rejected (out of range)
-/// erin ═offline═ e2 title="e2" ──► core     title="e2"
+/// erin ═offline═ e2 title="e2" ──► core     title="e2"   flagged, no overlap
 /// ```
 #[test]
-fn chained_write_over_a_rejected_predecessor_merges_against_the_settled_image() {
+fn chained_write_over_a_rejected_predecessor_resolves_to_the_predecessors_base() {
     let schema = counter_schema();
     let target = row(0x83);
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
@@ -278,19 +277,19 @@ fn chained_write_over_a_rejected_predecessor_merges_against_the_settled_image() 
             MergeableCommit::new("counters", target, 100).cells(counter_cells(i32::MAX, "e1")),
         )
         .unwrap();
-    let (_, e2) = erin
+    let (e2_tx, e2) = erin
         .commit_mergeable_unit_settled(
             MergeableCommit::new("counters", target, 101)
                 .cells(BTreeMap::from([("title".to_owned(), v("e2"))])),
         )
         .unwrap();
-    let (_, dave_unit) = dave
+    let (dave_tx, dave_unit) = dave
         .commit_mergeable_unit_settled(
             MergeableCommit::new("counters", target, 50)
                 .cells(BTreeMap::from([("count".to_owned(), Value::I32(i32::MAX))])),
         )
         .unwrap();
-    assert_accepted(&core_fate(&mut core, dave_unit));
+    let dave_seq = accepted_seq(&core_fate(&mut core, dave_unit));
     assert!(matches!(
         fate_of(&core_fate(&mut core, e1)),
         Fate::Rejected(RejectionReason::MalformedCommit(_))
@@ -300,21 +299,29 @@ fn chained_write_over_a_rejected_predecessor_merges_against_the_settled_image() 
         rows_at(&mut core, "counters", DurabilityTier::Global),
         BTreeMap::from([(target, counter_cells(i32::MAX, "e2"))])
     );
+
+    let seed_seq = conflict_in(&mut core, "counters", target, dave_tx).previous;
+    assert!(seed_seq.is_some_and(|seed| seed < dave_seq));
+    let e2_conflict = conflict_in(&mut core, "counters", target, e2_tx);
+    assert_eq!(e2_conflict.resolved_base, seed_seq, "the rejected e1's own base");
+    assert_eq!(e2_conflict.previous, Some(dave_seq));
+    assert!(e2_conflict.maybe_conflicting);
+    assert!(e2_conflict.overlapping.is_empty(), "dave touched only the counter");
 }
 
-/// A chain spanning several rows and transactions resolves each row's
-/// ancestor on its own: a two-row transaction, then edits of each row, with
-/// a concurrent writer touching only one cell of one row.
+/// A chain spanning several rows and transactions is ordered and flagged per
+/// row: a two-row transaction, then edits of each row, with a concurrent
+/// writer touching only one cell of one row before the chain arrives.
 ///
 /// ```text
 /// dave  ──B.title="dave"──► core
 /// carol ═offline═ tx1 {A.title="c1", B.title="c1"}
 ///                 tx2 {A.body="c2", B.body="c2"}
 ///                 tx3 {B.title="c3"} ──► core
-///       A = {c1, c2}; B = {dave, c2}, B.title lost by tx1 and tx3
+///       A = {c1, c2}; B = {c3, c2}; only tx1's write to B is flagged
 /// ```
 #[test]
-fn offline_chain_over_several_rows_and_transactions_merges_each_row() {
+fn offline_chain_over_several_rows_and_transactions_flags_each_row() {
     let first = row(0x84);
     let second = row(0x85);
     let schema = two_column_schema();
@@ -351,7 +358,7 @@ fn offline_chain_over_several_rows_and_transactions_merges_each_row() {
         txs.push(tx);
         units.push(unit);
     }
-    let (_, dave_unit) = offline_edit(&mut dave, second, 50, &[("title", "dave")]);
+    let (dave_tx, dave_unit) = offline_edit(&mut dave, second, 50, &[("title", "dave")]);
     assert_accepted(&core_fate(&mut core, dave_unit));
     for unit in units {
         assert_accepted(&core_fate(&mut core, unit));
@@ -360,16 +367,18 @@ fn offline_chain_over_several_rows_and_transactions_merges_each_row() {
         rows_at(&mut core, "todos", DurabilityTier::Global),
         BTreeMap::from([
             (first, todo_cells("c1", "c2")),
-            (second, todo_cells("dave", "c2")),
+            (second, todo_cells("c3", "c2")),
         ])
     );
-    for (tx, title) in [(txs[0], "c1"), (txs[2], "c3")] {
-        assert_eq!(
-            lost_cells_at_core(&mut core, tx),
-            BTreeMap::from([("title".to_owned(), lost_text(title))])
-        );
+    for tx in &txs[..2] {
+        assert!(!flagged(&mut core, first, *tx), "nobody else wrote row A");
     }
-    assert!(lost_cells_at_core(&mut core, txs[1]).is_empty());
+    let tx1 = conflict(&mut core, second, txs[0]);
+    assert!(tx1.maybe_conflicting);
+    assert_eq!(tx1.overlapping, vec![dave_tx]);
+    for tx in &txs[1..] {
+        assert!(!flagged(&mut core, second, *tx), "the chain continues tx1 on row B");
+    }
 }
 
 /// INV-EDGE-16 for chains: a chain resent after a reconnect is the same set
@@ -407,32 +416,33 @@ fn offline_chain_resent_after_reconnect_is_idempotent() {
     assert_eq!(rows_at(&mut core, "todos", DurabilityTier::Global), settled);
 }
 
-/// `_deletion` is merged like any cell: an offline chain that deletes and
-/// then restores the row applies both (each saw the deletion state before
-/// it), keeps a concurrent body edit, and applies its own title.
+/// `_deletion` is a cell like any other: an offline chain that deletes and
+/// then restores the row applies both, keeps a concurrent body edit, and
+/// applies its own title. The chain's first write (the delete) is maybe
+/// conflicting, since dave's body was accepted after its base.
 ///
 /// ```text
 /// dave  ──body="dave"──► core
 /// carol ═offline═ e1 delete; e2 restore; e3 title="c2" ──► core
-///       = {c2, dave}, not deleted
+///       = {c2, dave}, not deleted; e1 flagged
 /// ```
 #[test]
 fn offline_chain_deletes_and_restores_over_a_concurrent_edit() {
     let target = row(0x87);
     let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
-    let (_, delete) = writers[0]
+    let (delete_tx, delete) = writers[0]
         .1
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 100).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
-    let (_, restore) = writers[0]
+    let (restore_tx, restore) = writers[0]
         .1
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 101).deletion(DeletionEvent::Restored),
         )
         .unwrap();
-    let (_, retitle) = offline_edit(&mut writers[0].1, target, 102, &[("title", "c2")]);
+    let (retitle_tx, retitle) = offline_edit(&mut writers[0].1, target, 102, &[("title", "c2")]);
     let (_, dave_unit) = offline_edit(&mut writers[1].1, target, 50, &[("body", "dave")]);
     assert_accepted(&core_fate(&mut core, dave_unit));
     assert_accepted(&core_fate(&mut core, delete));
@@ -443,23 +453,32 @@ fn offline_chain_deletes_and_restores_over_a_concurrent_edit() {
         rows_at(&mut core, "todos", DurabilityTier::Global),
         BTreeMap::from([(target, todo_cells("c2", "dave"))])
     );
+    let delete_conflict = conflict(&mut core, target, delete_tx);
+    assert!(delete_conflict.maybe_conflicting);
+    assert!(delete_conflict.overlapping.is_empty(), "dave touched only the body");
+    for tx in [restore_tx, retitle_tx] {
+        assert!(!flagged(&mut core, target, tx));
+    }
 }
 
-/// A concurrent delete wins over a chained update that did not see it: the
-/// chain authors only titles, so the row's deletion state stays as Core
-/// accepted it, while the titles still apply underneath.
+/// INV-HIST-8, INV-HIST-21: an edit whose base predates a delete Core
+/// already accepted does not resurrect the row. An update does not author
+/// `_deletion`, so the row stays deleted; the edits are accepted, recorded
+/// in history and applied underneath the deletion, and the first of them is
+/// maybe conflicting. A later restore reveals them.
 ///
 /// ```text
 /// dave  ──delete──► core
-/// carol ═offline═ e1 title="c1"; e2 title="c2" ──► core   still deleted
+/// carol ═offline═ e1 title="c1"; e2 title="c2" ──► core   still deleted, e1 flagged
+/// erin  ──restore──► core                                 = {c2, base}
 /// ```
 #[test]
-fn concurrent_delete_survives_a_chained_update() {
+fn edit_after_an_accepted_delete_stays_deleted_and_is_flagged() {
     let target = row(0x88);
-    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
-    let (_, e1) = offline_edit(&mut writers[0].1, target, 100, &[("title", "c1")]);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 3);
+    let (e1_tx, e1) = offline_edit(&mut writers[0].1, target, 100, &[("title", "c1")]);
     let (e2_tx, e2) = offline_edit(&mut writers[0].1, target, 101, &[("title", "c2")]);
-    let (_, delete) = writers[1]
+    let (delete_tx, delete) = writers[1]
         .1
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 50).deletion(DeletionEvent::Deleted),
@@ -469,27 +488,57 @@ fn concurrent_delete_survives_a_chained_update() {
     assert_accepted(&core_fate(&mut core, e1));
     assert_accepted(&core_fate(&mut core, e2));
     assert!(rows_at(&mut core, "todos", DurabilityTier::Global).is_empty());
-    assert!(lost_cells_at_core(&mut core, e2_tx).is_empty());
+    // Core's post-image of each edit holds its title under the deletion.
+    assert_eq!(
+        post_image_at_core(&mut core, e2_tx),
+        (Some(DeletionEvent::Deleted), todo_cells("c2", "base"))
+    );
+
+    assert!(!flagged(&mut core, target, delete_tx));
+    let e1_conflict = conflict(&mut core, target, e1_tx);
+    assert!(e1_conflict.maybe_conflicting, "the delete came after e1's base");
+    assert!(
+        e1_conflict.overlapping.is_empty(),
+        "the delete authored only `_deletion`"
+    );
+    assert!(!flagged(&mut core, target, e2_tx), "e2 continues e1");
+
+    // erin restores the row over the image she holds, the seed: an
+    // explicitly authored `_deletion` applies by arrival.
+    let (restore_tx, restore) = writers[2]
+        .1
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 200).deletion(DeletionEvent::Restored),
+        )
+        .unwrap();
+    assert_accepted(&core_fate(&mut core, restore));
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global),
+        BTreeMap::from([(target, todo_cells("c2", "base"))])
+    );
+    let restore_conflict = conflict(&mut core, target, restore_tx);
+    assert!(restore_conflict.maybe_conflicting);
+    assert_eq!(restore_conflict.overlapping, vec![delete_tx]);
 }
 
-/// A blind update (the writer holds no image of the row) has no base, so it
-/// has no ancestor: arrival wins on every cell it authors, also over a
-/// concurrent edit it never saw. An insert likewise applies whole.
+/// INV-HIST-21: a write with no base is never maybe conflicting. A blind
+/// update (the writer holds no image of the row) applies over a concurrent
+/// edit it never saw, and an insert applies whole.
 ///
 /// ```text
 /// dave  ──title="dave"──► core
-/// frank (never loaded the row) ──title="frank"──► core   title="frank"
-/// frank ──insert new row──► core
+/// frank (never loaded the row) ──title="frank"──► core   title="frank", not flagged
+/// frank ──insert new row──► core                          not flagged
 /// ```
 #[test]
-fn blind_update_and_insert_have_no_ancestor_and_apply() {
+fn inserts_and_blind_updates_are_never_flagged() {
     let target = row(0x89);
     let fresh = row(0x8a);
     let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
     let (_frank_dir, mut frank) = open_node_with_schema(node(0x30), two_column_schema());
     let (frank_tx, blind) = offline_edit(&mut frank, target, 100, &[("title", "frank")]);
     let (_, dave_unit) = offline_edit(&mut writers[0].1, target, 50, &[("title", "dave")]);
-    assert_accepted(&core_fate(&mut core, dave_unit));
+    let dave_seq = accepted_seq(&core_fate(&mut core, dave_unit));
     assert!(
         core.query_versions_for_tx(frank_tx).resolve().unwrap().is_empty(),
         "the blind update has not reached Core yet"
@@ -503,8 +552,17 @@ fn blind_update_and_insert_have_no_ancestor_and_apply() {
         rows_at(&mut core, "todos", DurabilityTier::Global)[&target].get("title"),
         Some(&v("frank"))
     );
+    let blind_conflict = conflict(&mut core, target, frank_tx);
+    assert!(!blind_conflict.maybe_conflicting);
+    assert_eq!(blind_conflict.resolved_base, None);
+    assert!(blind_conflict.overlapping.is_empty());
+    assert_eq!(
+        blind_conflict.previous,
+        Some(dave_seq),
+        "a record precedes the blind update, yet it is not flagged"
+    );
 
-    let (_, insert) = frank
+    let (insert_tx, insert) = frank
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", fresh, 101)
                 .known_fresh_row()
@@ -520,10 +578,19 @@ fn blind_update_and_insert_have_no_ancestor_and_apply() {
         rows_at(&mut core, "todos", DurabilityTier::Global)[&fresh],
         todo_cells("new", "row")
     );
+    let insert_conflict = conflict(&mut core, fresh, insert_tx);
+    assert!(!insert_conflict.maybe_conflicting);
+    assert_eq!(insert_conflict.previous, None, "the row's first record");
+    // The seed is an insert too.
+    let seed = row_conflicts(&mut core, target)
+        .into_values()
+        .find(|conflict| conflict.previous.is_none())
+        .expect("the seed is the row's first record");
+    assert!(!seed.maybe_conflicting);
 }
 
 /// INV-HIST-20: Core resolves a base exactly or refuses the write with a
-/// not-supported-yet reason; it never guesses an ancestor. A base seq above
+/// not-supported-yet reason; it never guesses another base. A base seq above
 /// the row's current seq, a base seq of 0, a base seq naming a real seq that
 /// holds no write of this row, a predecessor of another node and a
 /// predecessor not older than the write are each refused, and the row is
@@ -666,7 +733,7 @@ fn chained_write_arriving_before_its_predecessor_is_asked_to_retry() {
         rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
         todo_cells("c2", "base")
     );
-    assert!(lost_cells_at_core(&mut core, e2).is_empty());
+    assert!(!flagged(&mut core, target, e2), "e2 continues e1");
 }
 
 /// INV-HIST-20: Core stores nothing for a write whose predecessor it does
@@ -689,7 +756,7 @@ fn core_stores_nothing_for_a_write_whose_predecessor_is_unknown() {
 
 /// INV-HIST-20: Core may hold the predecessor as Pending (here relayed
 /// before Core decided it). A chained write over it is asked to retry until
-/// Core decides the predecessor, then merges against it.
+/// Core decides the predecessor, then applies after it.
 ///
 /// ```text
 /// core  ◄─relay── e1 (stored Pending)
@@ -761,9 +828,11 @@ fn with_malformed_timestamps(unit: SyncMessage) -> SyncMessage {
     SyncMessage::CommitUnit { tx, versions }
 }
 
-/// INV-HIST-20: once Core refuses the predecessor (here before admission,
-/// as a malformed authored version), the retried write merges against the
-/// settled image, since a rejected predecessor contributes nothing.
+/// INV-HIST-20, INV-HIST-21: once Core refuses the predecessor (here before
+/// admission, as a malformed authored version), the retried write applies
+/// over the settled row, which the rejected predecessor never reached. Its
+/// base resolves to the predecessor's own base, the seed, which is still the
+/// record before it, so it is not maybe conflicting.
 ///
 /// ```text
 /// carol ──e2──► core              RetryLater(awaiting e1)
@@ -771,7 +840,7 @@ fn with_malformed_timestamps(unit: SyncMessage) -> SyncMessage {
 /// carol ──e2──► core              e2 accepted   body=c2
 /// ```
 #[test]
-fn chained_write_retried_after_a_rejected_predecessor_merges_against_the_settled_image() {
+fn chained_write_retried_after_a_rejected_predecessor_applies_over_the_settled_row() {
     let target = row(0x94);
     let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
     let carol = &mut writers[0].1;
@@ -792,6 +861,9 @@ fn chained_write_retried_after_a_rejected_predecessor_merges_against_the_settled
         rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
         todo_cells("base", "c2")
     );
+    let e2_conflict = conflict(&mut core, target, e2);
+    assert!(!e2_conflict.maybe_conflicting);
+    assert_eq!(e2_conflict.resolved_base, e2_conflict.previous);
 }
 
 /// INV-HIST-20: a two-level chain that reaches Core last write first: each
@@ -829,7 +901,9 @@ fn two_level_chain_arriving_backwards_is_retried_in_order() {
         rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
         todo_cells("c3", "c2")
     );
-    assert!(lost_cells_at_core(&mut core, e3).is_empty());
+    for tx in [e1, e2, e3] {
+        assert!(!flagged(&mut core, target, tx), "nobody else wrote the row");
+    }
 }
 
 /// Core keeps nothing for a write it asked to retry, so a Core restart in
@@ -944,18 +1018,18 @@ fn plain_counters_schema(with_notes: bool) -> JazzSchema {
     compile_public_test_schema(&source)
 }
 
-/// The ancestor is compared with the current image by physical column
-/// across schema versions: a v1 write's title, made over an image bob has
-/// since retitled under v2, loses; its body, which nobody else changed,
-/// applies. The post-image takes the v1 layout.
+/// Authored cells apply by physical column across schema versions: a v1
+/// write made over an image bob has since retitled under v2 overrides bob's
+/// title by arrival, and its conflict analysis names bob's write (the same
+/// physical column). The post-image takes the v1 layout.
 ///
 /// ```text
 /// carol (v1) ──{title, body}="base"──► core          image v1
 /// bob   (v2, blind) ──title="bob"──► core             image v2
-/// carol (v1) ═offline═ title="c", body="c" ──► core   = {bob, c}, lost: title
+/// carol (v1) ═offline═ title="c", body="c" ──► core   = {c, c}, flagged: bob
 /// ```
 #[test]
-fn ancestor_compares_cells_by_physical_column_across_schema_versions() {
+fn authored_cells_apply_by_physical_column_across_schema_versions() {
     let target = row(0x8c);
     let (_core_dir, mut core) = core_with_descendant_schema(
         plain_counters_schema(false),
@@ -970,7 +1044,7 @@ fn ancestor_compares_cells_by_physical_column_across_schema_versions() {
         &mut core,
         MergeableCommit::new("counters", target, 10).cells(base_cells),
     );
-    let (_, bob_unit) = bob
+    let (bob_tx, bob_unit) = bob
         .commit_mergeable_unit_settled(
             MergeableCommit::new("counters", target, 20).cells(title_cells("bob")),
         )
@@ -998,135 +1072,154 @@ fn ancestor_compares_cells_by_physical_column_across_schema_versions() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         rows[&target],
-        BTreeMap::from([("title".to_owned(), v("bob")), ("body".to_owned(), v("c"))])
+        BTreeMap::from([("title".to_owned(), v("c")), ("body".to_owned(), v("c"))])
     );
-    let lost = core
-        .query_versions_for_tx(carol_tx)
-        .resolve()
-        .unwrap()
-        .into_iter()
-        .map(|version| core.lost_cells_for_wire(&version).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(lost.len(), 1);
-    assert!(!lost[0].is_empty(), "carol's title is recorded as lost");
+    assert!(!conflict_in(&mut core, "counters", target, bob_tx).maybe_conflicting);
+    let carol_conflict = conflict_in(&mut core, "counters", target, carol_tx);
+    assert!(carol_conflict.maybe_conflicting);
+    assert_eq!(carol_conflict.overlapping, vec![bob_tx]);
 }
 
-/// The fast paths (a base at the current seq, and a chain with no
-/// concurrent write) give exactly what the full ancestor rule gives: the
-/// same post-images and the same lost cells, byte for byte.
-#[test]
-fn ancestor_fast_paths_match_the_full_rule() {
-    fn run(full_rule: bool) -> (Vec<u8>, Vec<Vec<u8>>) {
-        crate::node::ingest::FULL_ANCESTOR_RULE.with(|full| full.set(full_rule));
-        let target = row(0x8d);
-        let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
-        let mut txs = Vec::new();
-        // A chain nobody else interrupts: the second fast path.
-        for index in 0..4 {
-            let (tx, unit) = offline_edit(
-                &mut writers[0].1,
-                target,
-                100 + index,
-                &[("title", &format!("c{index}"))],
-            );
-            assert_accepted(&core_fate(&mut core, unit));
-            txs.push(tx);
-        }
-        // A write over the current image: the first fast path.
-        sync_table_rows_to(&mut core, &mut writers[1].1, "todos");
-        let (tx, unit) = offline_edit(&mut writers[1].1, target, 200, &[("body", "dave")]);
-        assert_accepted(&core_fate(&mut core, unit));
-        txs.push(tx);
-        // A chain continued after a concurrent write: the full rule.
-        let (tx, unit) =
-            offline_edit(&mut writers[0].1, target, 104, &[("title", "c4"), ("body", "c4")]);
-        assert_accepted(&core_fate(&mut core, unit));
-        txs.push(tx);
-        crate::node::ingest::FULL_ANCESTOR_RULE.with(|full| full.set(false));
-        let image = core
-            .query_global_winner("todos", target)
-            .resolve()
-            .unwrap()
-            .unwrap();
-        let mut lost = Vec::new();
-        for tx in txs {
-            for version in core.query_versions_for_tx(tx).resolve().unwrap() {
-                lost.push(version.lost_cells_raw().unwrap());
-            }
-        }
-        (image.record.borrowed().raw().to_vec(), lost)
-    }
-    let fast = run(false);
-    let full = run(true);
-    assert_eq!(fast, full);
-    assert!(fast.1.last().is_some_and(|lost| !lost.is_empty()));
-    // A chain with no concurrent write after its base, whose predecessor
-    // lost a cell: the chain fast path must not apply there.
-    assert_eq!(predecessor_lost_after_sync(false), predecessor_lost_after_sync(true));
-}
-
-/// The chain scenario where a chained predecessor lost a cell after its
-/// writer had already received the concurrent value, run with the fast paths
-/// on or off. Returns Core's image, the title it holds and each write's
-/// stored lost cells.
-fn predecessor_lost_after_sync(full_rule: bool) -> (Vec<u8>, BTreeMap<RowUuid, BTreeMap<String, Value>>, Vec<Vec<u8>>) {
-    crate::node::ingest::FULL_ANCESTOR_RULE.with(|full| full.set(full_rule));
-    let target = row(0x8e);
-    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
-    // carol edits offline over the seeded image.
-    let (p1, p1_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "a")]);
-    // dave's title is accepted first, and carol receives Core's image.
-    let (dave, dave_unit) = offline_edit(&mut writers[1].1, target, 50, &[("title", "m")]);
-    assert_accepted(&core_fate(&mut core, dave_unit));
-    sync_table_rows_to(&mut core, &mut writers[0].1, "todos");
-    // carol's next edit rests on dave's image plus her own pending title.
-    let (w, w_unit) = offline_edit(&mut writers[0].1, target, 101, &[("title", "b")]);
-    let SyncMessage::CommitUnit { versions, .. } = &w_unit else {
-        panic!("expected a commit unit");
-    };
-    assert_eq!(versions[0].base().pending, Some(p1));
-    assert!(versions[0].base().seq.is_some());
-    // Core accepts carol's first edit after dave's, so it loses the title.
-    assert_accepted(&core_fate(&mut core, p1_unit));
-    assert_accepted(&core_fate(&mut core, w_unit));
-    crate::node::ingest::FULL_ANCESTOR_RULE.with(|full| full.set(false));
-    let image = core
-        .query_global_winner("todos", target)
-        .resolve()
-        .unwrap()
-        .unwrap();
-    let mut lost = Vec::new();
-    for tx in [dave, p1, w] {
-        for version in core.query_versions_for_tx(tx).resolve().unwrap() {
-            lost.push(version.lost_cells_raw().unwrap());
-        }
-    }
-    (
-        image.record.borrowed().raw().to_vec(),
-        rows_at(&mut core, "todos", DurabilityTier::Global),
-        lost,
-    )
-}
-
-/// INV-HIST-21: a chained write whose predecessor lost a cell compares that
-/// cell against the predecessor's own value, also when every write after its
-/// base is its writer's own.
+/// A chained write over a predecessor that Core accepted after a concurrent
+/// edit: the predecessor is maybe conflicting (it overrides dave's title),
+/// while the chained write, made over dave's image plus the predecessor,
+/// resolves to the predecessor's seq, the record before it, so it is not.
 ///
 /// ```text
 /// carol ═offline═ p1 title="a" (base: seed)
 /// dave  ──title="m"──► core                        title=m
 /// core  ──image(title=m)──► carol
 /// carol ═offline═ w  title="b" (base: dave's seq, pending p1)
-/// carol ──p1──► core   lost: title (seed ≠ m)
-/// carol ──w ──► core   ancestor title=a ≠ m: lost: title
+/// carol ──p1──► core   title=a, flagged: dave
+/// carol ──w ──► core   title=b, not flagged
 /// ```
 #[test]
-fn chained_write_over_a_predecessor_that_lost_a_cell_after_a_sync_stays_lost() {
-    let (_, rows, lost) = predecessor_lost_after_sync(false);
-    assert_eq!(rows[&row(0x8e)], todo_cells("m", "base"));
-    assert!(lost[0].is_empty(), "dave's title applies");
-    assert!(!lost[1].is_empty(), "carol's first title is lost");
-    assert!(!lost[2].is_empty(), "carol's chained title is lost too");
+fn chained_write_over_a_predecessor_accepted_after_a_concurrent_edit() {
+    let target = row(0x8e);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
+    let (p1, p1_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "a")]);
+    let (dave, dave_unit) = offline_edit(&mut writers[1].1, target, 50, &[("title", "m")]);
+    assert_accepted(&core_fate(&mut core, dave_unit));
+    sync_table_rows_to(&mut core, &mut writers[0].1, "todos");
+    let (w, w_unit) = offline_edit(&mut writers[0].1, target, 101, &[("title", "b")]);
+    let SyncMessage::CommitUnit { versions, .. } = &w_unit else {
+        panic!("expected a commit unit");
+    };
+    assert_eq!(versions[0].base().pending, Some(p1));
+    assert!(versions[0].base().seq.is_some());
+    assert_accepted(&core_fate(&mut core, p1_unit));
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("a", "base")
+    );
+    assert_accepted(&core_fate(&mut core, w_unit));
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("b", "base")
+    );
+    assert!(!flagged(&mut core, target, dave));
+    let p1_conflict = conflict(&mut core, target, p1);
+    assert!(p1_conflict.maybe_conflicting);
+    assert_eq!(p1_conflict.overlapping, vec![dave]);
+    let w_conflict = conflict(&mut core, target, w);
+    assert_eq!(w_conflict.resolved_base, w_conflict.previous);
+    assert!(!w_conflict.maybe_conflicting);
+}
+
+/// INV-HIST-21: a write's resolved base is the larger of its base seq and its
+/// pending predecessor's seq. carol's first edit is accepted, but its fate
+/// has not reached her when she receives Core's newer image (which counts it
+/// and dave's later edit); her next edit names that image's seq and her
+/// still-pending first edit. She saw everything before it, so it is not
+/// maybe conflicting.
+///
+/// ```text
+/// carol ═offline═ p title="p" ──► core          accepted; fate not delivered
+/// dave  ──body="dave"──► core                   (after seeing p)
+/// core  ──image(p, dave)──► carol
+/// carol ═offline═ w body="w" (base: dave's seq, pending p) ──► core   not flagged
+/// ```
+#[test]
+fn chained_write_over_an_image_newer_than_its_predecessor_is_not_flagged() {
+    let target = row(0x8d);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
+    let (p, p_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "p")]);
+    let p_seq = accepted_seq(&core_fate(&mut core, p_unit));
+    sync_table_rows_to(&mut core, &mut writers[1].1, "todos");
+    let (dave, dave_unit) = offline_edit(&mut writers[1].1, target, 150, &[("body", "dave")]);
+    let dave_seq = accepted_seq(&core_fate(&mut core, dave_unit));
+    sync_table_rows_to(&mut core, &mut writers[0].1, "todos");
+    let (w, w_unit) = offline_edit(&mut writers[0].1, target, 200, &[("body", "w")]);
+    let SyncMessage::CommitUnit { versions, .. } = &w_unit else {
+        panic!("expected a commit unit");
+    };
+    assert_eq!(versions[0].base().pending, Some(p), "p is still pending at carol");
+    assert_eq!(versions[0].base().seq, Some(dave_seq));
+    assert_accepted(&core_fate(&mut core, w_unit));
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("p", "w")
+    );
+    assert!(!flagged(&mut core, target, dave), "dave saw p");
+    let w_conflict = conflict(&mut core, target, w);
+    assert!(p_seq < dave_seq);
+    assert_eq!(w_conflict.resolved_base, Some(dave_seq));
+    assert_eq!(w_conflict.previous, Some(dave_seq));
+    assert!(!w_conflict.maybe_conflicting);
+    assert!(w_conflict.overlapping.is_empty());
+}
+
+/// Core accepts `writer`'s edit of `target` in `todos`.
+fn accept_edit(
+    core: &mut NodeState,
+    writer: &mut NodeState,
+    target: RowUuid,
+    at_ms: u64,
+    cells: &[(&str, &str)],
+) -> TxId {
+    let (tx, unit) = offline_edit(writer, target, at_ms, cells);
+    assert_accepted(&core_fate(core, unit));
+    tx
+}
+
+/// INV-HIST-21: the conflict analysis walks the row's history from a write's
+/// resolved base to the write and names the intervening writes whose
+/// authored columns overlap the write's, in seq order.
+///
+/// ```text
+/// dave  ──title="dave"──► core          over the seed
+/// erin  ──body="erin"──► core           over the seed: flagged, overlaps nothing
+/// carol ──title="carol"──► core         over the seed: flagged, overlaps dave
+/// frank ──title, body="frank"──► core   over the seed: flagged, overlaps dave, erin, carol
+/// dave  ──body="dave"──► core           over the latest image: not flagged
+/// ```
+#[test]
+fn conflict_walk_names_the_intervening_writes_that_overlap() {
+    let target = row(0x98);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 4);
+    let dave = accept_edit(&mut core, &mut writers[1].1, target, 50, &[("title", "dave")]);
+    let erin = accept_edit(&mut core, &mut writers[2].1, target, 51, &[("body", "erin")]);
+    let carol = accept_edit(&mut core, &mut writers[0].1, target, 52, &[("title", "carol")]);
+    let frank = accept_edit(&mut core, &mut writers[3].1, target, 53, &[("title", "frank"), ("body", "frank")]);
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("frank", "frank")
+    );
+    let conflicts = row_conflicts(&mut core, target);
+    assert!(!conflicts[&dave].maybe_conflicting);
+    assert!(conflicts[&erin].maybe_conflicting);
+    assert!(conflicts[&erin].overlapping.is_empty());
+    assert!(conflicts[&carol].maybe_conflicting);
+    assert_eq!(conflicts[&carol].overlapping, vec![dave]);
+    assert!(conflicts[&frank].maybe_conflicting);
+    assert_eq!(conflicts[&frank].overlapping, vec![dave, erin, carol]);
+
+    // dave receives Core's image and edits over it.
+    sync_table_rows_to(&mut core, &mut writers[1].1, "todos");
+    let latest = accept_edit(&mut core, &mut writers[1].1, target, 1_000, &[("body", "dave")]);
+    let latest_conflict = conflict(&mut core, target, latest);
+    assert!(!latest_conflict.maybe_conflicting);
+    assert!(latest_conflict.overlapping.is_empty());
 }
 
 /// History keeps pending writes at seq 0, ahead of every accepted write of
@@ -1215,26 +1308,24 @@ fn base_names_the_writers_own_pending_write_over_a_relayed_one() {
     );
 }
 
-/// Lost cells are spelled with the write's own schema version's enum tags,
-/// and a chained write's ancestor re-tags them into the lineage's physical
-/// registry before comparing them with the stored image.
+/// Enum cells apply by arrival under a branched enum registry: an uploaded
+/// write's authored tags are stored as the lineage's physical tags, and a
+/// cell carried from the current image is re-tagged to the write's own.
 ///
 /// Core publishes `base -> A (+ a) -> A2 (+ a2)` and then `base -> B (+ b)`,
 /// so B's `b` (authored tag 1) is physical tag 3. carol and dave write under
 /// B; carol wrote the seed. carol's first edit sets `b` over the seed after
-/// dave already did, so
-/// it is lost and its lost cell reads as B's tag 1. Her chained edit then
-/// sets `base` over what she saw (`b`, her own lost value), which is also
-/// the current value, so it applies.
+/// dave already did, so it is maybe conflicting with dave's write; her
+/// chained edit then sets `base` and is not.
 ///
 /// ```text
 /// carol ──status=base──► core                  seed
 /// dave  ──status=b──► core                     status=b (physical 3)
-/// carol ═offline═ e1 status=b ──► core          lost: status=b (tag 1)
-/// carol ═offline═ e2 status=base ──► core       ancestor b == current: applies
+/// carol ═offline═ e1 status=b ──► core          flagged: dave
+/// carol ═offline═ e2 status=base ──► core       status=base
 /// ```
 #[test]
-fn lost_enum_cells_use_the_writers_tags_and_compare_by_physical_tag() {
+fn enum_cells_apply_by_arrival_under_a_branched_registry() {
     let base = enum_projection_schema(&["base"]);
     let a = SchemaVersion::new(enum_projection_schema(&["base", "a"]));
     let a2 = SchemaVersion::new(enum_projection_schema(&["base", "a", "a2"]));
@@ -1284,20 +1375,15 @@ fn lost_enum_cells_use_the_writers_tags_and_compare_by_physical_tag() {
     };
     let (e1, e1_unit) = edit(&mut carol, 100, 1);
     let (e2, e2_unit) = edit(&mut carol, 101, 0);
-    let (_, dave_unit) = edit(&mut dave, 50, 1);
+    let (dave_tx, dave_unit) = edit(&mut dave, 50, 1);
 
     assert_accepted(&core_fate(&mut core, dave_unit));
     assert_accepted(&core_fate(&mut core, e1_unit));
     assert_accepted(&core_fate(&mut core, e2_unit));
-    assert_eq!(
-        lost_cells_at_core(&mut core, e1),
-        BTreeMap::from([(
-            "status".to_owned(),
-            Value::Nullable(Some(Box::new(Value::EnumTag(1))))
-        )]),
-        "e1's lost status is B's authored tag for b"
-    );
-    assert_eq!(lost_cells_at_core(&mut core, e2), BTreeMap::new(), "e2 applies");
+    let e1_conflict = conflict_in(&mut core, "items", target, e1);
+    assert!(e1_conflict.maybe_conflicting);
+    assert_eq!(e1_conflict.overlapping, vec![dave_tx]);
+    assert!(!conflict_in(&mut core, "items", target, e2).maybe_conflicting);
     let rows = core
         .current_rows_for_schema("items", b.id, DurabilityTier::Global)
         .resolve()

@@ -1068,9 +1068,6 @@ impl TableSchema {
         // the writer's own pending predecessor to this row.
         columns.push(column(BASE_SEQ_FIELD, GrooveColumnType::U64.nullable()));
         columns.push(column(BASE_PENDING_FIELD, tx_id_column().nullable()));
-        // The write's own values for the cells it authored but lost: empty,
-        // or sparse cells keyed by physical column id.
-        columns.push(column(LOST_CELLS_FIELD, GrooveColumnType::Bytes));
 
         // Accepted writes are keyed by seq, so "the row at seq S" is a point
         // read and "the row's writes after S" a range read. A write without
@@ -1371,10 +1368,6 @@ pub const BASE_SEQ_FIELD: &str = "base_seq";
 /// History field holding the pending predecessor of a write's base.
 #[doc(hidden)]
 pub const BASE_PENDING_FIELD: &str = "base_pending";
-
-/// History field holding a write's lost cells (SPEC 4 §4.6).
-#[doc(hidden)]
-pub const LOST_CELLS_FIELD: &str = "lost_cells";
 
 /// History field carrying the sign bits of a patch's counter ops: bit `i`
 /// (least significant first) belongs to the table's `i`-th counter column in

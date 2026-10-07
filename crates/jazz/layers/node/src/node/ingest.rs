@@ -45,7 +45,7 @@ include!("ingest/commit_bundles.rs");
 include!("ingest/fates.rs");
 include!("ingest/view_updates.rs");
 include!("ingest/validation.rs");
-include!("ingest/ancestor.rs");
+include!("ingest/write_base.rs");
 
 /// A sequence is the global-authority receipt. Peer payloads which pair it
 /// with a weaker durability must be rejected before they can reach storage.

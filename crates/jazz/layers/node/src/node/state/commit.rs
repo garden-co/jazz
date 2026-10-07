@@ -490,10 +490,9 @@ where
                         cells,
                         authored_columns: authored_column_ids.clone(),
                         deletion,
-                        // A pending write has no seq and has lost nothing.
+                        // A pending write has no seq yet.
                         seq: GlobalTime(0),
                         base,
-                        lost_cells: Vec::new(),
                         counter_signs,
                     },
                     (write_schema_version != self.catalogue.local_schema_version_id)

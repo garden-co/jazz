@@ -411,7 +411,7 @@ where
         // History also ends with `counter_signs` and the merge fields (after
         // `authored_columns`), which current lacks: a settled image's signs
         // are empty, its seq is the current row's, and the image carries no
-        // base or lost cells of its own.
+        // base of its own.
         let Some(signs_idx) = history_descriptor.field_index(crate::schema::COUNTER_SIGNS_FIELD)
         else {
             return Ok(None);

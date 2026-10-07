@@ -3292,7 +3292,6 @@ fn decode_typed_version_witness(
         // merge fields.
         seq: crate::time::GlobalTime(0),
         base: crate::protocol::RowBase::default(),
-        lost_cells: Vec::new(),
         counter_signs: Vec::new(),
     };
     let values = history_values_from_parts(table, &parts)?;
@@ -4778,7 +4777,6 @@ mod tests {
                 deletion: None,
                 seq: crate::time::GlobalTime(0),
                 base: crate::protocol::RowBase::default(),
-                lost_cells: Vec::new(),
                 counter_signs: Vec::new(),
             },
             None,
@@ -4806,7 +4804,6 @@ mod tests {
                 deletion: Some(DeletionEvent::Deleted),
                 seq: crate::time::GlobalTime(0),
                 base: crate::protocol::RowBase::default(),
-                lost_cells: Vec::new(),
                 counter_signs: Vec::new(),
             },
             None,

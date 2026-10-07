@@ -2,21 +2,20 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Apply an accepted write to the row's post-image, one cell at a time.
+    /// Apply an accepted write to the row's post-image as a patch, one cell
+    /// at a time (SPEC 4 §4.6, "Patch rule").
     ///
-    /// At the authority, a plain cell the write authored, and `_deletion`
-    /// when authored, takes the write's value iff nothing changed it since
-    /// the writer's image: the write's ancestor (`resolve_write_ancestor`)
-    /// holds the current value there, or does not know the cell. Otherwise
-    /// the accepted value stays and the write's value is recorded on its
-    /// history record as a lost cell (SPEC 4 §4.6). Cells are matched by
-    /// physical column id and compared only when the ancestor and the
-    /// current image both carry the column with the incoming layout's type.
-    /// Merge columns apply their op in seq order whatever the ancestor. The
-    /// post-image keeps the write's identity and layout (it is the row as of
-    /// this seq), takes `updated_by`/`updated_at` from the write, and keeps
-    /// `created_by`/`created_at`. Returns `None` when the post-image does
-    /// not change.
+    /// Every plain cell the write authored, and `_deletion` when authored,
+    /// takes the write's value: the last write Core accepts wins. A cell the
+    /// write did not author keeps the row's value where the current image
+    /// carries its physical column with the incoming layout's type, and the
+    /// writer's snapshot otherwise; so an update, which does not author
+    /// `_deletion`, keeps the row's deletion state. Merge columns apply their
+    /// op in seq order. The post-image keeps the write's identity and layout
+    /// (it is the row as of this seq), takes `updated_by`/`updated_at` from
+    /// the write, and keeps `created_by`/`created_at`. The write's base takes
+    /// no part (the authority validated it before minting the seq). Returns
+    /// `None` when the post-image does not change.
     ///
     /// Only the node that minted `global_time` (`authority`) derives the
     /// row's post-image. Any other node merging an accepted write here is an
@@ -37,8 +36,7 @@ where
     ///   accepted the write, so this is the local image's staleness, never a
     ///   reason to fail the fate.
     ///
-    /// At the authority those, and a base it cannot resolve, are invariant
-    /// violations (seqs are minted in order, and `merge_op_rejection`
+    /// At the authority those are invariant violations (seqs are minted in order, and `merge_op_rejection`
     /// refuses such writes before a seq is minted) and remain errors.
     pub(super) async fn merged_global_post_image(
         &mut self,
@@ -54,10 +52,10 @@ where
         let authors = |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
         let incoming_descriptor = incoming.record.descriptor();
         let base = incoming.base()?;
-        let at_seq = |values: Vec<Value>, lost: Vec<u8>| -> Result<VersionRow, Error> {
+        let at_seq = |values: Vec<Value>| -> Result<VersionRow, Error> {
             incoming
                 .with_record_values(values)?
-                .with_merge_fields(global_time, base, lost)
+                .with_merge_fields(global_time, base)
         };
         let Some((previous, previous_seq)) = self
             .query_global_winner_with_seq_in_batch(
@@ -74,7 +72,7 @@ where
             // image keeps the cells.
             let mut values = incoming.record.to_values()?;
             crate::node::merge_ops::clear_counter_signs(&mut values, &incoming_descriptor);
-            return at_seq(values, Vec::new()).map(Some);
+            return at_seq(values).map(Some);
         };
         let previous_tx = self.version_tx_id(&previous)?;
         if previous_tx == incoming_tx {
@@ -104,36 +102,9 @@ where
                 values[field] = value;
             }
             crate::node::merge_ops::clear_counter_signs(&mut values, &incoming_descriptor);
-            return at_seq(values, Vec::new()).map(Some);
+            return at_seq(values).map(Some);
         }
 
-        // Which authored plain cells (and `_deletion`) apply. A prediction
-        // applies every authored cell.
-        let ancestor = if authority {
-            match self
-                .resolve_write_ancestor(
-                    batch,
-                    schema_version,
-                    &table_schema.name,
-                    incoming.branch_key(),
-                    incoming.row_uuid(),
-                    base,
-                    incoming_tx,
-                    previous_seq,
-                    incoming.authored_column_ids()?.as_ref(),
-                )
-                .await?
-            {
-                Ok(ancestor) => ancestor,
-                Err(_) => {
-                    return Err(Error::InvalidStoredValue(
-                        "accepted write has a base the authority cannot resolve",
-                    ));
-                }
-            }
-        } else {
-            WriteAncestor::AllApply
-        };
         let current = self.image_physical_cells(&previous)?;
         let mapping = self
             .catalogue
@@ -150,18 +121,6 @@ where
                 .filter(|(current_type, _)| current_type == column_type)
                 .map(|(_, value)| value.clone())
         };
-        let applies = |id: PhysicalColumnId, column_type: &ValueType| match &ancestor {
-            WriteAncestor::AllApply => true,
-            WriteAncestor::Cells(cells) => {
-                match (
-                    cells.get(&id).filter(|(ancestor_type, _)| ancestor_type == column_type),
-                    carried(id, column_type),
-                ) {
-                    (Some((_, ancestor)), Some(current)) => *ancestor == current,
-                    _ => true,
-                }
-            }
-        };
 
         // The post-image keeps the incoming write's identity and layout:
         // it is the row as of this write's seq.
@@ -169,29 +128,19 @@ where
         let previous_values = same_layout.then(|| previous.record.to_values()).transpose()?;
         // Stored images spell enum cells with the lineage's physical tags; an
         // uploaded write spells them with its schema version's authored
-        // tags. Comparisons above read stored images only. A cell carried
-        // from the current image into an uploaded write is re-tagged to the
-        // write's spelling, and lost cells are stored in the authored one.
+        // tags. A cell carried from the current image into an uploaded write
+        // is re-tagged to the write's spelling.
         let logical = super::codec::history_record_descriptor(table_schema);
         let incoming_authored = *incoming_descriptor == logical;
         let counter_signs = incoming.counter_signs()?;
-        let mut lost = Vec::new();
         let cell_value = |value: Option<Value>| Value::Nullable(value.map(Box::new));
-        let deletion_type = deletion_cell_type();
+        // An authored `_deletion` applies; otherwise the row keeps its
+        // deletion state, so an edit over an image older than an accepted
+        // delete leaves the row deleted (SPEC 4 §4.6, "Edit after delete").
+        if !authors(DELETION_COLUMN_NAME)
+            && let Some(value) = carried(DELETION_COLUMN_ID, &deletion_cell_type())
         {
-            let field = HistoryRowRecord::FIELD__DELETION_IDX;
-            if authors(DELETION_COLUMN_NAME) {
-                if !applies(DELETION_COLUMN_ID, &deletion_type) {
-                    lost.push((
-                        DELETION_COLUMN_ID.0,
-                        logical.fields()[field].value_type.clone(),
-                        merged[field].clone(),
-                    ));
-                    merged[field] = cell_value(carried(DELETION_COLUMN_ID, &deletion_type).flatten());
-                }
-            } else if let Some(value) = carried(DELETION_COLUMN_ID, &deletion_type) {
-                merged[field] = cell_value(value);
-            }
+            merged[HistoryRowRecord::FIELD__DELETION_IDX] = cell_value(value);
         }
         let cross_layout_merge_cells = if same_layout {
             Vec::new()
@@ -217,27 +166,12 @@ where
                 let id = *mapping
                     .get(&column.name)
                     .ok_or(Error::InvalidStoredValue("incoming column physical mapping missing"))?;
+                // Authored cells take the write's value. Unauthored cells
+                // keep the row's value where its image carries the column,
+                // and the writer's snapshot otherwise.
                 let keep = if authors(&column.name) {
-                    if applies(id, &column.column_type) {
-                        None
-                    } else {
-                        let own = if incoming_authored {
-                            merged[field].clone()
-                        } else {
-                            self.physical_cell_to_authored(
-                                schema_version,
-                                &table_schema.name,
-                                index,
-                                merged[field].clone(),
-                            )?
-                        };
-                        lost.push((id.0, logical.fields()[field].value_type.clone(), own));
-                        Some(carried(id, &column.column_type).flatten())
-                    }
+                    None
                 } else {
-                    // Unauthored cells keep the row's value where its image
-                    // carries the column, and the writer's snapshot
-                    // otherwise.
                     carried(id, &column.column_type)
                 };
                 if let Some(value) = keep {
@@ -311,8 +245,7 @@ where
             merged[index] = previous.record.borrowed().get_idx(index)?;
         }
         crate::node::merge_ops::clear_counter_signs(&mut merged, &incoming_descriptor);
-        lost.sort_by_key(|(id, _, _)| *id);
-        at_seq(merged, super::lost_cells::encode(&lost)?).map(Some)
+        at_seq(merged).map(Some)
     }
 
     /// The authority refuses a write it cannot merge into the row without
@@ -334,9 +267,8 @@ where
     /// - A counter op that would take the column outside its type's range
     ///   over the row's current value. The op is not wrapped.
     ///
-    /// It also refuses a write whose base it cannot resolve exactly
-    /// (`INV-HIST-20`), and an upload that carries lost cells: only the
-    /// authority records those.
+    /// It also refuses a write whose base it cannot name exactly
+    /// (`INV-HIST-20`).
     pub(super) async fn merge_op_rejection(
         &mut self,
         tx_id: TxId,
@@ -345,12 +277,6 @@ where
         let batch = self.database.open_batch();
         for version in versions {
             let schema_version = version.schema_version();
-            if !version.lost_cells().is_empty() {
-                return Ok(Some(RejectionReason::MalformedCommit(format!(
-                    "row version for table '{}' carries lost cells; only the authority records them",
-                    version.table()
-                ))));
-            }
             if !version.base().is_empty() {
                 let current_seq = self
                     .global_current_seq_in_batch(
@@ -362,7 +288,7 @@ where
                     )
                     .await?;
                 if let Err(reason) = self
-                    .resolve_write_ancestor(
+                    .validate_write_base(
                         &batch,
                         schema_version,
                         version.table(),
@@ -371,12 +297,6 @@ where
                         version.base(),
                         tx_id,
                         current_seq,
-                        self.authored_column_ids_for_names(
-                            schema_version,
-                            version.table(),
-                            version.authored_columns(),
-                        )?
-                        .as_ref(),
                     )
                     .await?
                 {

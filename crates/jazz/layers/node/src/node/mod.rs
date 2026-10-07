@@ -326,7 +326,6 @@ mod eviction;
 mod exclusive_read_evidence;
 mod global_state;
 mod ingest;
-mod lost_cells;
 mod node_aliases;
 pub use node_aliases::NodeAliases;
 #[doc(hidden)]

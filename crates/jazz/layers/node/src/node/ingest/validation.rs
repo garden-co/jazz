@@ -119,10 +119,9 @@ where
         self.table_in_schema_ref(version.table(), author_schema)?;
         let schema_alias = self.ensure_schema_version_alias(author_schema).await?;
         let authored = self.authored_column_ids_for_names(author_schema, version.table(), version.authored_columns())?;
-        let lost_cells = self.lost_cells_for_storage(version)?;
         let table = self.table_in_schema_ref(version.table(), author_schema)?;
         VersionRow::from_wire_with_schema_version(
-            table, version, authored, tx_node_alias, schema_alias, tx_time, seq, lost_cells,
+            table, version, authored, tx_node_alias, schema_alias, tx_time, seq,
             (author_schema != self.catalogue.local_schema_version_id).then_some(author_schema),
         )
     }
@@ -338,7 +337,6 @@ where
                 version.authored_columns(),
             )?;
             let table_schema = self.table_in_schema(version.table(), author_schema)?;
-            let lost_cells = self.lost_cells_for_storage(&version)?;
             // An accepted write is stored at its seq, a pending one at 0
             // (SPEC 2 §2.7.1).
             let seq = match (&fate, global_time) {
@@ -353,7 +351,6 @@ where
                 schema_version_alias,
                 tx.tx_id.time,
                 seq,
-                lost_cells,
                 (author_schema != self.catalogue.local_schema_version_id)
                     .then_some(author_schema),
             )?;

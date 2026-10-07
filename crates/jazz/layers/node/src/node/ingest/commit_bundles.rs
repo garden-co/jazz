@@ -958,7 +958,6 @@ where
                     version.table(),
                     version.authored_columns(),
                 )?;
-                let lost_cells = self.lost_cells_for_storage(version)?;
                 let source_table_schema = self.table_in_schema_ref(version.table(), author_schema)?;
                 let stored = VersionRow::from_wire_with_schema_version(
                     source_table_schema,
@@ -968,7 +967,6 @@ where
                     schema_version_alias,
                     tx.tx_id.time,
                     global_time,
-                    lost_cells,
                     (author_schema != self.catalogue.local_schema_version_id)
                         .then_some(author_schema),
                 )?;

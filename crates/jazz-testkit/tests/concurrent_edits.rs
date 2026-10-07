@@ -1,11 +1,11 @@
-//! Concurrent edits merge one cell at a time against the writer's ancestor.
+//! Concurrent edits apply one authored cell at a time, in arrival order.
 //!
-//! Core merges every accepted write into the row one cell at a time. A write
-//! sets a cell it authored when nothing changed that cell since the image the
-//! writer made the write over; otherwise the value Core accepted first stays
-//! and the write's value is recorded as lost (SPEC 4 §4.6). Clocks take no
-//! part: a client with a clock running ahead cannot make its values immune to
-//! later edits, and one running behind still overrides what it saw.
+//! Core applies every accepted write to the row as a patch: each cell the
+//! write authored takes its value, every other cell keeps the row's, and the
+//! write Core accepts last wins a cell two writes both set (SPEC 4 §4.6).
+//! Clocks take no part: a client with a clock running ahead cannot make its
+//! values immune to later edits, and one running behind still overrides
+//! what Core accepted before it.
 //!
 //! Every write below carries an explicit physical timestamp through the public
 //! `WriteContext::with_updated_at`, which is the client's clock for that write.
@@ -175,22 +175,23 @@ async fn offline_edits_to_different_columns_both_survive() {
         .await;
 }
 
-/// A late offline write loses the column a newer write already set, while
-/// its other columns still apply.
+/// A late offline write overrides, by arrival, a column a write with a newer
+/// clock already set, and its other columns apply too.
 ///
 /// Actors: alice goes offline and edits both the title and `done`; bob
-/// retitles the todo and reaches Core first. When alice reconnects her title
-/// was written over the seeded title, which bob has changed since, so it
-/// loses; her `done` has no concurrent writer and applies.
+/// retitles the todo and reaches Core first. When alice reconnects her write
+/// arrives last, so her title replaces bob's although her clock is older
+/// and she never saw his title (history derives that her write is maybe
+/// conflicting); her `done` applies as well.
 ///
 /// ```text
 /// alice ─offline─ t+1s {title="alice (stale)", done=true} ─────reconnect──┐
 /// bob   ────────── t+5s {title="bob (newer)"} ──► server                  │
 ///                                                   ◄────────────────────┘
-///                                                   = {bob (newer), done}
+///                                                   = {alice (stale), done}
 /// ```
 #[tokio::test]
-async fn late_offline_write_loses_newer_column_but_applies_the_rest() {
+async fn late_offline_write_overrides_a_newer_column_by_arrival() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = JazzServer::start_with_schema(todo_schema())
@@ -229,7 +230,7 @@ async fn late_offline_write_loses_newer_column_but_applies_the_rest() {
             settle(&alice, alice_edit, DurabilityTier::GlobalServer).await;
 
             for (client, who) in [(&alice, "alice"), (&bob, "bob")] {
-                expect_todo(client, who, todo_id, todo("bob (newer)", true)).await;
+                expect_todo(client, who, todo_id, todo("alice (stale)", true)).await;
             }
 
             alice.shutdown().await.expect("shutdown alice");

@@ -1927,7 +1927,6 @@ pub(super) trait VersionRecordFromNode: Sized {
         table: &TableSchema,
         schema_version: SchemaVersionId,
         authored_columns: Option<BTreeSet<String>>,
-        lost_cells: Vec<u8>,
     ) -> Result<Self, Error>;
 }
 
@@ -1963,7 +1962,6 @@ impl VersionRecordFromNode for VersionRecord {
         table: &TableSchema,
         schema_version: SchemaVersionId,
         authored_columns: Option<BTreeSet<String>>,
-        lost_cells: Vec<u8>,
     ) -> Result<Self, Error> {
         let descriptor = version_record_descriptors(table).1;
         let input = stored.record.borrowed();
@@ -2032,7 +2030,6 @@ impl VersionRecordFromNode for VersionRecord {
         .with_branch_key(stored.branch_key().clone())
         .with_authored_columns(authored_columns)
         .with_base(stored.base()?)
-        .with_lost_cells(lost_cells)
         .with_counter_signs(stored.counter_signs()?))
     }
 }
@@ -2193,8 +2190,6 @@ pub(super) struct VersionRowParts {
     pub(super) seq: GlobalTime,
     /// The write's base (SPEC 4 §4.6, "Base of a write").
     pub(super) base: RowBase,
-    /// The write's lost cells keyed by physical column id; empty when none.
-    pub(super) lost_cells: Vec<u8>,
     /// Sign bits of this patch's counter ops (`merge_ops::counter_signs`):
     /// empty when none is negative, and on every settled image.
     pub(super) counter_signs: Vec<u8>,
@@ -2341,7 +2336,6 @@ impl VersionRow {
         schema_version_alias: SchemaVersionAlias,
         tx_time: TxTime,
         seq: GlobalTime,
-        lost_cells: Vec<u8>,
         _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
         if !version.branch_key().is_canonical() {
@@ -2425,7 +2419,6 @@ impl VersionRow {
                         0 => Value::U64(seq.0),
                         1 => base_seq_value(version.base()),
                         2 => base_pending_value(version.base()),
-                        3 => Value::Bytes(lost_cells.clone()),
                         _ => {
                             return Err(Error::InvalidStoredValue(
                                 "history layout does not end with the merge fields",
@@ -2449,7 +2442,6 @@ impl VersionRow {
                 schema_version_alias,
                 tx_time,
                 seq,
-                &lost_cells,
             )?;
             assert_eq!(
                 raw,
@@ -2671,26 +2663,9 @@ impl VersionRow {
         Ok(RowBase { seq, pending })
     }
 
-    /// The write's lost cells, keyed by node-local physical column id
-    /// (`lost_cells`): empty when it lost nothing.
-    pub(super) fn lost_cells_raw(&self) -> Result<Vec<u8>, Error> {
-        match self.trailing_field(crate::schema::LOST_CELLS_FIELD)? {
-            None => Ok(Vec::new()),
-            Some(Value::Bytes(bytes)) => Ok(bytes),
-            Some(_) => Err(Error::InvalidStoredValue(
-                "history lost_cells must be bytes",
-            )),
-        }
-    }
-
     /// This image with its trailing merge fields replaced. A layout without
     /// the fields (none is written today) keeps its record.
-    pub(super) fn with_merge_fields(
-        &self,
-        seq: GlobalTime,
-        base: RowBase,
-        lost_cells: Vec<u8>,
-    ) -> Result<Self, Error> {
+    pub(super) fn with_merge_fields(&self, seq: GlobalTime, base: RowBase) -> Result<Self, Error> {
         let descriptor = self.record.descriptor();
         let Some(seq_idx) = descriptor.field_index(crate::schema::SEQ_FIELD) else {
             return Ok(self.clone());
@@ -2704,16 +2679,15 @@ impl VersionRow {
         };
         set(crate::schema::BASE_SEQ_FIELD, base_seq_value(base));
         set(crate::schema::BASE_PENDING_FIELD, base_pending_value(base));
-        set(crate::schema::LOST_CELLS_FIELD, Value::Bytes(lost_cells));
         self.with_record_values(values)
     }
 
-    /// This image at `seq`, keeping its base and lost cells.
+    /// This image at `seq`, keeping its base.
     pub(super) fn with_seq(&self, seq: GlobalTime) -> Result<Self, Error> {
         if self.seq()? == seq {
             return Ok(self.clone());
         }
-        self.with_merge_fields(seq, self.base()?, self.lost_cells_raw()?)
+        self.with_merge_fields(seq, self.base()?)
     }
 
     pub(super) fn to_history_entry(
@@ -3893,7 +3867,6 @@ pub(super) fn history_values_from_parts(
     values.push(Value::U64(version.seq.0));
     values.push(base_seq_value(version.base));
     values.push(base_pending_value(version.base));
-    values.push(Value::Bytes(version.lost_cells.clone()));
     Ok(values)
 }
 
@@ -3916,7 +3889,6 @@ fn history_values_from_wire(
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
     seq: GlobalTime,
-    lost_cells: &[u8],
 ) -> Result<Vec<Value>, Error> {
     let mut values = Vec::with_capacity(HistoryRowRecord::USER_CELLS + table.columns.len());
     values.push(Value::Bytes(version.branch_key().canonical_bytes()));
@@ -3951,7 +3923,6 @@ fn history_values_from_wire(
     values.push(Value::U64(seq.0));
     values.push(base_seq_value(version.base()));
     values.push(base_pending_value(version.base()));
-    values.push(Value::Bytes(lost_cells.to_vec()));
     Ok(values)
 }
 

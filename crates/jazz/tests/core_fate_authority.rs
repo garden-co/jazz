@@ -407,11 +407,15 @@ fn core_authority_rejects_write_only_update_and_upsert_and_rolls_back() {
 /// Black-box regression for authored-column carriage across the public Db and
 /// sync/wire path. Bob explicitly writes the unchanged base title over the
 /// base image, concurrently with Alice changing both cells. Core sequences
-/// Alice's write first, so Bob's authored title is a cell that changed since
-/// his image and loses (SPEC 4 §4.6); his write must not claim Alice's
-/// independent `completed` edit either.
+/// Alice's write first, so Bob's authored title applies after hers and wins
+/// by arrival (SPEC 4 §4.6), while his write must not claim Alice's
+/// independent `completed` edit.
+///
+/// Planted positive: removing `MergeableCommit::authored_columns` from the
+/// partial-update lowering makes Bob's entire materialized row look authored;
+/// Bob still wins `title`, but incorrectly reverts `completed` to false.
 #[test]
-fn explicit_unchanged_partial_write_survives_sync_without_overriding_a_concurrent_edit() {
+fn explicit_unchanged_partial_write_survives_sync_and_wins_by_arrival() {
     let schema = schema();
     let mut core = InMemoryServerShell::start(
         InMemoryServerShellConfig::new(schema.clone(), identity(0xc1, AuthorSubject::SYSTEM))
@@ -504,12 +508,9 @@ fn explicit_unchanged_partial_write_survives_sync_without_overriding_a_concurren
                 ..
             }
         ),
-        "Bob's write is accepted even though its title lost"
+        "Bob's write is accepted"
     );
-    assert_eq!(
-        visible_titles(&alice, DurabilityTier::Global),
-        ["alice-change"]
-    );
+    assert_eq!(visible_titles(&alice, DurabilityTier::Global), ["base"]);
     let prepared = alice.prepare_query(&Query::from("todos")).unwrap();
     let rows = block_on(alice.all(
         &prepared,
@@ -1126,7 +1127,8 @@ fn records_schema(gset: bool) -> JazzSchema {
 ///   editor ──Global read──► core ──► the one converged row
 ///
 /// Both updates are made over the seed, and Core sequences the writer's
-/// first, so it keeps the plain cells both changed (SPEC 4 §4.6).
+/// first, so the observer's, applied last, keeps the plain cells both
+/// changed (SPEC 4 §4.6).
 /// ```
 #[test]
 fn apps_differing_only_in_a_merge_strategy_each_converge_in_one_process() {
@@ -1239,13 +1241,13 @@ fn apps_differing_only_in_a_merge_strategy_each_converge_in_one_process() {
         let table = &schema.tables[0];
         assert_eq!(
             rows[0].row.cell(table, "title"),
-            Some(Value::String("left".to_owned())),
-            "round {round}: the first-sequenced title stays"
+            Some(Value::String("right".to_owned())),
+            "round {round}: the last-sequenced title wins"
         );
         let expected_tags = if gset {
             tags(&["left", "right", "seed"])
         } else {
-            tags(&["left"])
+            tags(&["right"])
         };
         assert_eq!(
             rows[0].row.cell(table, "tags"),

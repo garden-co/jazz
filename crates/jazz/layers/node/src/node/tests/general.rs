@@ -1419,7 +1419,6 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             deletion,
             seq: crate::time::GlobalTime(0),
             base: crate::protocol::RowBase::default(),
-            lost_cells: Vec::new(),
             counter_signs: Vec::new(),
         }
     }
@@ -1633,7 +1632,6 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
                     deletion: None,
                     seq: crate::time::GlobalTime(0),
                     base: crate::protocol::RowBase::default(),
-                    lost_cells: Vec::new(),
                     counter_signs: Vec::new(),
                 },
                 None,
@@ -1814,8 +1812,8 @@ fn history_images_store_updated_by_only_when_it_differs_from_the_transaction_aut
             Value::Nullable(None),
             "the transaction's own author is not stored in the image"
         );
-        // An image whose merge kept another writer's provenance (here: the
-        // same image written under bob's transaction) stores it.
+        // An image whose `updated_by` is not its transaction's author (here:
+        // the same image written under bob's transaction) stores it.
         let (_, explicit) = node.version_storage_write_binding(&version, bob).unwrap();
         assert_eq!(
             explicit

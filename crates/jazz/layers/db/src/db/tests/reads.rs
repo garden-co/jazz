@@ -5479,7 +5479,7 @@ fn subscription_opening_retains_selected_created_at_in_native_carrier() {
 }
 
 /// History rows carry merge fields (`seq`, `base_seq`, `base_pending`,
-/// `lost_cells`, SPEC 4 §4.6) that current rows do not. Every public read
+/// SPEC 4 §4.6) that current rows do not. Every public read
 /// path publishes the current layout, without them.
 #[test]
 fn row_reads_never_publish_history_merge_fields() {
@@ -5509,7 +5509,6 @@ fn row_reads_never_publish_history_merge_fields() {
         crate::schema::SEQ_FIELD,
         crate::schema::BASE_SEQ_FIELD,
         crate::schema::BASE_PENDING_FIELD,
-        crate::schema::LOST_CELLS_FIELD,
         crate::schema::COUNTER_SIGNS_FIELD,
     ];
     let assert_current_layout = |rows: &[CurrentRow], path: &str| {
