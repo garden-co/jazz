@@ -116,8 +116,7 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
         .attach_query_with_opts(
             &prepared,
             ReadOpts {
-                tier: DurabilityTier::Local,
-                propagation: Propagation::LocalOnly,
+                tier: crate::db::ReadTier::LocalOnly,
                 ..ReadOpts::default()
             },
         )
@@ -600,7 +599,7 @@ fn subscription_opening_publication_follows_upstream_coverage_lifecycle() {
         &client,
         &query,
         ReadOpts {
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     )

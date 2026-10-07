@@ -768,7 +768,7 @@ fn malformed_authority_closure_fails_one_shot_owner_tick_loudly() {
         .attach_query_with_opts(
             &query,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: crate::db::ReadTier::Remote,
                 ..Default::default()
             },
         )

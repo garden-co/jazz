@@ -6869,16 +6869,9 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
             key.as_str()
         };
         let normalized = match (key, item.as_str()) {
-            ("tier", Some("local" | "Local" | "local-first" | "LocalFirst")) => Some("Local"),
-            ("tier", Some("remote" | "Remote")) => Some("Global"),
-            ("tier", Some("global" | "Global")) => Some("Global"),
-            ("tier", Some("none" | "None")) => Some("None"),
-            ("local_updates", Some("immediate" | "Immediate")) => Some("Immediate"),
-            ("local_updates", Some("deferred" | "Deferred")) => Some("Deferred"),
-            ("propagation", Some("full" | "Full")) => Some("Full"),
-            ("propagation", Some("LocalOnly" | "local_only" | "localOnly" | "local-only")) => {
-                Some("LocalOnly")
-            }
+            ("tier", Some("local-first" | "LocalFirst")) => Some("LocalFirst"),
+            ("tier", Some("remote" | "Remote")) => Some("Remote"),
+            ("tier", Some("local-only" | "LocalOnly")) => Some("LocalOnly"),
             _ => None,
         };
         value[key] = normalized
@@ -6888,7 +6881,7 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
     let mut opts: ReadOpts = serde_json::from_value(value).map_err(|e| failure(e.to_string()))?;
     // A local-first read's server-wait timeout. `Remote` reads ignore it.
     if let Some(timeout_ms) = first_load_remote_wait_ms
-        && opts.tier == CoreDurabilityTier::Local
+        && opts.tier == jazz::db::ReadTier::LocalFirst
     {
         opts.first_load = jazz::db::FirstLoad::WaitForRemote { timeout_ms };
     }
@@ -8758,7 +8751,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::All {
                 query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
-                options_json: r#"{"tier":"global","local_updates":"deferred"}"#.into(),
+                options_json: r#"{"tier":"remote"}"#.into(),
                 transaction: None,
             },
         );
@@ -8800,7 +8793,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::All {
                 query: postcard::to_allocvec(&Query::from("todos").limit(1)).unwrap(),
-                options_json: r#"{"tier":"local","local_updates":"deferred"}"#.into(),
+                options_json: r#"{"tier":"local-first"}"#.into(),
                 transaction: Some(transaction),
             },
         );
@@ -8981,7 +8974,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::All {
                 query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
-                options_json: r#"{"tier":"global","local_updates":"deferred"}"#.into(),
+                options_json: r#"{"tier":"remote"}"#.into(),
                 transaction: None,
             },
         );
@@ -12044,7 +12037,7 @@ mod tests {
             .unwrap();
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
         let read = match client
-            .start_foreground_read(query, "{\"tier\":\"global\"}".into(), None)
+            .start_foreground_read(query, "{\"tier\":\"remote\"}".into(), None)
             .unwrap()
         {
             ForegroundOperationPoll::Pending { operation } => operation,
@@ -12387,7 +12380,7 @@ mod tests {
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
         for _ in 0..7 {
             let ForegroundOperationPoll::Pending { operation } = client
-                .start_foreground_read(query.clone(), "{\"tier\":\"global\"}".into(), None)
+                .start_foreground_read(query.clone(), "{\"tier\":\"remote\"}".into(), None)
                 .unwrap()
             else {
                 panic!("remote read without an authority remains pending");
@@ -13615,7 +13608,7 @@ mod tests {
             .subscribe_foreground_query_with_options(
                 postcard::to_allocvec(&Query::from("todos")).unwrap(),
                 ReadOpts {
-                    tier: CoreDurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             )
@@ -16499,7 +16492,7 @@ mod tests {
             "Core",
         ] {
             let removed = format!(
-                "foreground NativeDb command failed: invalid read options: unknown variant `{tier}`, expected one of `None`, `Local`, `Global`"
+                "foreground NativeDb command failed: invalid read options: unknown variant `{tier}`, expected one of `LocalFirst`, `Remote`, `LocalOnly`"
             );
             let options_json = format!(r#"{{"tier":"{tier}"}}"#);
             assert_eq!(
@@ -16528,7 +16521,7 @@ mod tests {
         // starts a pending read instead of failing its options.
         let local = response(ForegroundDbCommandRequest::All {
             query,
-            options_json: r#"{"tier":"local"}"#.to_owned(),
+            options_json: r#"{"tier":"local-first"}"#.to_owned(),
             transaction: None,
         });
         assert!(

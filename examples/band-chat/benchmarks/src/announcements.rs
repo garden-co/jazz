@@ -15,8 +15,8 @@ use std::time::Instant;
 
 use jazz::account_registry::AccountId;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
-    Propagation, ReadOpts, SubscriptionEvent, SubscriptionStream, WriteIdentity, block_on,
+    Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, PreparedQuery, ReadOpts, ReadTier,
+    SubscriptionEvent, SubscriptionStream, WriteIdentity, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
@@ -177,9 +177,7 @@ fn room_query(db: &Db, room: &str) -> PreparedQuery {
 
 fn subscription_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }

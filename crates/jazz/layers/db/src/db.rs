@@ -3287,15 +3287,22 @@ pub use config::{
     ClientRelayScope, DbConfig, DbIdentity, ProductionRowIdSource, RowIdSource, SeededRowIdSource,
 };
 
+/// Where a read gets its results and whether it includes pending writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum ReadTier {
+    /// Include local data and pending writes, and request results upstream.
+    LocalFirst,
+    /// Read the server-confirmed view without a pending-write overlay.
+    Remote,
+    /// Include locally known data and pending writes without requesting upstream results.
+    LocalOnly,
+}
+
 /// One-shot read options.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ReadOpts {
-    /// Durability tier that gates the first result.
-    pub tier: DurabilityTier,
-    /// Whether own local updates are visible immediately.
-    pub local_updates: LocalUpdates,
-    /// Whether evaluation may propagate upstream.
-    pub propagation: Propagation,
+    /// Read semantics; execution resolves coverage durability separately.
+    pub tier: ReadTier,
     /// Include current rows whose deletion winner is `Deleted`.
     pub include_deleted: bool,
     /// Semantic read view to evaluate against.
@@ -3309,9 +3316,7 @@ pub struct ReadOpts {
 impl Default for ReadOpts {
     fn default() -> Self {
         Self {
-            tier: DurabilityTier::Local,
-            local_updates: LocalUpdates::Immediate,
-            propagation: Propagation::Full,
+            tier: ReadTier::LocalFirst,
             include_deleted: false,
             read_view: ReadViewSpec::default(),
             first_load: FirstLoad::Deliver,
@@ -3320,29 +3325,19 @@ impl Default for ReadOpts {
 }
 
 impl ReadOpts {
+    /// Construct a read from product semantics.
+    pub fn for_read_tier(tier: ReadTier) -> Self {
+        Self {
+            tier,
+            ..Self::default()
+        }
+    }
+
     /// Evaluate the query as a live head branch composed over an optional base.
     pub fn branch_view(mut self, head: BranchSelector, base: Option<BranchViewBase>) -> Self {
         self.read_view = ReadViewSpec::branch_view(head, base);
         self
     }
-}
-
-/// Own-write overlay policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum LocalUpdates {
-    /// Include local writes immediately.
-    Immediate,
-    /// Defer local writes until the requested tier observes them.
-    Deferred,
-}
-
-/// Read propagation policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum Propagation {
-    /// Full propagation may be used by future remote paths.
-    Full,
-    /// Evaluate only against local knowledge.
-    LocalOnly,
 }
 
 pub use crate::node::api_error::{Error, ErrorCode};
@@ -3446,11 +3441,12 @@ pub mod doctest_support {
     }
 }
 
-fn effective_read_tier(opts: &ReadOpts) -> DurabilityTier {
-    if opts.local_updates == LocalUpdates::Immediate {
-        opts.tier.max(DurabilityTier::Local)
-    } else {
-        opts.tier
+/// Default coverage for a read. Initial waits and hydration pass their
+/// stronger coverage explicitly without changing the requested read tier.
+fn read_coverage_tier(opts: &ReadOpts) -> DurabilityTier {
+    match opts.tier {
+        ReadTier::LocalFirst | ReadTier::LocalOnly => DurabilityTier::Local,
+        ReadTier::Remote => DurabilityTier::Global,
     }
 }
 

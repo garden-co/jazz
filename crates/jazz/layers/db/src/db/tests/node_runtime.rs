@@ -504,8 +504,7 @@ fn large_value_pushes_through_relay_then_pulls_from_core_after_relay_chunk_evict
         &upload_relay,
         &query,
         ReadOpts {
-            tier: DurabilityTier::Local,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     )
@@ -4775,7 +4774,7 @@ fn root_authority_does_not_retain_settled_subscriber_uploads() {
     let _bob_rows = crate::local_executor::block_on(bob.subscribe(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: crate::db::ReadTier::Remote,
             ..Default::default()
         },
     ))
@@ -4811,7 +4810,7 @@ fn root_authority_does_not_retain_settled_subscriber_uploads() {
     let bob_rows = crate::local_executor::block_on(bob.all(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: crate::db::ReadTier::Remote,
             ..Default::default()
         },
     ))

@@ -37,7 +37,7 @@ describe("WASM backend read capability parity", () => {
           },
         },
       });
-      const opts = { tier: "local" };
+      const opts = { tier: "local-first" };
       const txId = createOpenTransactionId();
       db.beginTransaction(txId, "mergeable");
       const reads = [

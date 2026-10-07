@@ -7,16 +7,13 @@ use std::task::{Context, Poll};
 use futures::StreamExt;
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, ExclusiveTxOps, LocalUpdates, Propagation, ReadOpts, Transport,
-};
+use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, Transport};
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol::SyncMessage;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
 
 fn schema() -> JazzSchema {
@@ -127,9 +124,7 @@ fn concurrent_cold_reads_and_subscription_wait_for_the_async_node_owner() {
         .prepare_query(&db.table("todos"))
         .expect("prepare todos query");
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
 
@@ -206,9 +201,7 @@ fn reproduces_sync_query_preparation_reentering_a_cold_read() {
     let mut first = Box::pin(db.all(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Local,
-            local_updates: LocalUpdates::Immediate,
-            propagation: Propagation::LocalOnly,
+            tier: jazz::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     ));
@@ -236,9 +229,7 @@ fn reproduces_sync_query_preparation_reentering_a_cold_read() {
         block_on(db.all(
             &second,
             ReadOpts {
-                tier: DurabilityTier::Local,
-                local_updates: LocalUpdates::Immediate,
-                propagation: Propagation::LocalOnly,
+                tier: jazz::db::ReadTier::LocalOnly,
                 ..ReadOpts::default()
             }
         ))
@@ -279,9 +270,7 @@ fn exclusive_transaction_relation_snapshot_suspends_on_cold_storage() {
     let mut read = Box::pin(tx.relation_snapshot_prepared_with_opts(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Local,
-            local_updates: LocalUpdates::Immediate,
-            propagation: Propagation::LocalOnly,
+            tier: jazz::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     ));
@@ -316,9 +305,7 @@ fn explicit_subscription_close_drives_finalization_without_an_external_tick() {
         .prepare_query(&db.table("todos"))
         .expect("prepare todos query");
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     let mut subscription =
@@ -374,9 +361,7 @@ fn cancelled_subscription_close_rejoins_blocked_finalization_without_a_tick() {
         .prepare_query(&db.table("todos"))
         .expect("prepare todos query");
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     let mut subscription =
@@ -528,7 +513,7 @@ fn cancelled_query_admission_waiters_leave_no_subscription_or_coverage() {
     let table = db.table("todos");
     let prepared = block_on(db.prepare_query_async(&table)).unwrap();
     let opts = ReadOpts {
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     storage.evict_all();
@@ -618,7 +603,7 @@ fn prepared_request_claims_survive_owner_wait_and_same_subject_reentry() {
     let b = prepared.with_identity_claims(alice, claims("team-b"));
     db.set_identity_claims(alice, claims("team-b"));
     let opts = ReadOpts {
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     let waker = noop_waker();

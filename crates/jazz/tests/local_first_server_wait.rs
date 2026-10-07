@@ -21,8 +21,8 @@ mod common;
 use duplex_transport::duplex;
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FirstLoad, LocalUpdates, ReadOpts, RemoteLinkHint,
-    SerializedReadResult, SubscriptionEvent, SubscriptionStream,
+    Db, DbConfig, DbIdentity, FirstLoad, ReadOpts, RemoteLinkHint, SerializedReadResult,
+    SubscriptionEvent, SubscriptionStream,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -30,7 +30,6 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -119,7 +118,7 @@ fn first_load_remote_wait(timeout: Duration) -> ReadOpts {
         first_load: FirstLoad::WaitForRemote {
             timeout_ms: timeout.as_millis() as u64,
         },
-        ..ReadOpts::default()
+        ..ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst)
     }
 }
 
@@ -233,8 +232,7 @@ fn warm_client(node: u8, server: &Db) -> Db {
     connect(&client, server);
     client.set_remote_link_hint(RemoteLinkHint::Live);
     let remote = ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Immediate,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     let mut warm = subscribe(&client, &items(), remote);

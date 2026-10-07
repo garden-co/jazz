@@ -210,9 +210,9 @@ writer format explicitly. Hash-domain changes and descriptor-envelope versions
 are reviewed with the corresponding reader and rejection tests.
 
 The high-level `Db` facade follows the same boundary for every live
-subscription tier. Local subscriptions are desired and first-class: they are the
+subscription tier. Local-first subscriptions are desired and first-class: they are the
 application/UI-facing maintained view over the local read frontier, including the
-node's own pending committed writes. Global subscriptions are maintained
+node's own pending committed writes. Remote subscriptions are maintained
 views over their corresponding accepted-state frontiers, with additional
 settlement/completeness requirements. Tiers select the source/frontier
 expression and runtime consumption policy; they must not select a different
@@ -307,7 +307,7 @@ answer may be published; it does not select another evaluator:
 - `local-first` evaluates locally known current data plus pending local
   changes, online or offline. Installing a remote closure does not retire its
   cached inputs. This is determined by observation tier, not by whether the
-  local node is a trusted backend: a trusted backend may make the same Local
+  local node is a trusted backend: a trusted backend may make the same local-first
   read while merely propagating upstream. Remote scope withdrawal is not a
   stored client-side revocation;
 - `remote` waits for a fresh settled closure for its exact usage-site
@@ -320,7 +320,7 @@ answer may be published; it does not select another evaluator:
   first, while a remote can answer, and in reading an `offset > 0` window as
   the strict remote view (falling back to the local window at the deadline)
   (ch. 13);
-- a core `Global` read with immediate local updates (no longer a product tier)
+- a local-first remote-answer execution, used by initial-wait pagination,
   evaluates the exact authority inputs with pending edits/deletes applied to
   those inputs, plus eligible pending new inserts. An edit alone does not
   admit an existing out-of-scope row. Relationships use only these inputs,
@@ -385,7 +385,7 @@ Worked examples:
   cached row.
 - **Cached Local-first open.** A client can show retained same-scope A plus a
   pending insert B. A new authority closure containing only C does not evict A
-  from local-first knowledge. A `Global` read with immediate local updates
+  from local-first knowledge. A local-first remote-answer execution
   instead uses C plus B (if B matches using available query inputs); remote
   uses only C.
 - **Reconnect.** A fresh usage-site subscription cannot reuse its detached
@@ -957,7 +957,7 @@ result changes back to the correct parent output.
 
 ## Open Questions
 
-- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand the `Global` + immediate-local-updates inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
+- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand the local-first remote-answer inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
 - 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Subscription patch and first-result API.
 - 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Correlated subquery maintenance.
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Partition-aware deletion witnesses.

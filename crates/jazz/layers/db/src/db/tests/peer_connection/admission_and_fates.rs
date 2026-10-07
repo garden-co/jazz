@@ -5075,8 +5075,7 @@ fn foreground_local_only_reads_never_emit_remote_query_requests() {
     let query = Query::from("todos");
     let prepared = foreground.prepare_query(&query).unwrap();
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     let attachment = foreground

@@ -248,7 +248,7 @@ it("returns an inserted row immediately without overtaking earlier preparation",
       .query(
         translateQuery(query._build(), query._schema),
         undefined,
-        "local",
+        "local-first",
         JSON.stringify({ transaction_id: id }),
       );
     expect(earlier).toEqual([]);

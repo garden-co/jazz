@@ -48,11 +48,11 @@ pub enum FirstLoad {
     ///   answer, so there the gate instead waits for a `Global` witness
     ///   coverage of the same read, answered by the authority through the
     ///   owner, and retires the witness once it releases;
-    /// - a one-shot read returns the remote result (Global tier, immediate
-    ///   local updates) if it arrives in time, and otherwise the local-first
+    /// - a one-shot read returns the remote result (Global coverage, local-first
+    ///   visibility) if it arrives in time, and otherwise the local-first
     ///   result, dropping the pending remote read;
     /// - a query with a non-zero `offset` is read as a strict remote view
-    ///   (Global tier, immediate local updates) instead, because local
+    ///   (Global coverage, local-first visibility) instead, because local
     ///   pagination over a partially synced cache is literal and would
     ///   produce a wrong page. It falls back to the local-first window when
     ///   the remote cannot answer.
@@ -585,30 +585,29 @@ where
     }
 
     /// Resolve a [`FirstLoad::WaitForRemote`] subscription request: the
-    /// effective read options and the gate to install, if any.
+    /// execution coverage and the gate to install, keeping read semantics fixed.
     pub(super) fn resolve_first_load(
         &self,
         prepared: &PreparedQuery,
-        mut opts: ReadOpts,
+        opts: &ReadOpts,
         authorization_mode: QueryAuthorizationMode,
-    ) -> (ReadOpts, Option<OpeningGate>) {
-        let Some(timeout) = std::mem::take(&mut opts.first_load).requested_wait() else {
-            return (opts, None);
+        coverage_tier: DurabilityTier,
+    ) -> (DurabilityTier, Option<OpeningGate>) {
+        let Some(timeout) = opts.first_load.requested_wait() else {
+            return (coverage_tier, None);
         };
         if authorization_mode != QueryAuthorizationMode::ClientLocal
-            || opts.propagation != Propagation::Full
-            || effective_read_tier(&opts) != DurabilityTier::Local
+            || opts.tier == ReadTier::LocalOnly
+            || coverage_tier != DurabilityTier::Local
         {
-            return (opts, None);
+            return (coverage_tier, None);
         }
         let Some((epoch, deadline)) = self.node.remote_link.arm(timeout) else {
-            return (opts, None);
+            return (coverage_tier, None);
         };
         if prepared.shape().query().offset > 0 {
-            opts.tier = DurabilityTier::Global;
-            opts.local_updates = LocalUpdates::Immediate;
             return (
-                opts,
+                DurabilityTier::Global,
                 Some(OpeningGate::armed(
                     epoch,
                     deadline,
@@ -617,7 +616,7 @@ where
             );
         }
         (
-            opts,
+            coverage_tier,
             Some(OpeningGate::armed(
                 epoch,
                 deadline,

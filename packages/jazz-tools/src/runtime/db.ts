@@ -1,3 +1,4 @@
+import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
@@ -32,17 +33,14 @@ import {
   type InsertOptions as InternalInsertOptions,
   type RestoreOptions as InternalRestoreOptions,
   type UpdateOptions as InternalUpdateOptions,
-  type DurabilityTier,
   type ReadTierOptions,
   type InternalQueryExecutionOptions,
-  type QueryPropagation,
   type QueryVisibility,
   isPublicQueryReadTier,
   rejectRemovedReadTier,
   normalizeFirstLoadRemoteWaitMs,
   resolveEffectiveQueryExecutionOptions,
-  resolveReadTier,
-  type RuntimeReadTier,
+  type InternalReadTier,
   type BranchSelector,
   type BranchView,
   type OpenTransactionId,
@@ -214,8 +212,6 @@ export type QueryOptions = ReadTierOptions & {
 
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
   tier?: InternalQueryExecutionOptions["tier"];
-  localUpdates?: InternalQueryExecutionOptions["localUpdates"];
-  propagation?: InternalQueryExecutionOptions["propagation"];
   visibility?: InternalQueryExecutionOptions["visibility"];
 };
 /**
@@ -506,8 +502,7 @@ export interface ActiveQuerySubscriptionTrace {
   query: string;
   table: string;
   branches: string[];
-  tier: RuntimeReadTier;
-  propagation: QueryPropagation;
+  tier: InternalReadTier;
   createdAt: string;
   stack?: string;
 }
@@ -1525,7 +1520,6 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       translateQuery(builderJson, planningSchema),
       {
         ...queryOptions,
-        localUpdates: "deferred",
         openTransactionId,
       },
       this.context?.readSession,
@@ -1722,7 +1716,7 @@ export class Db {
     // Client construction starts the follower's init handshake. Do not decide
     // the read tier from config/MessagePort shape: wait for the worker receipt.
     this.getClient(query._schema);
-    await this.connection.ensureReady("local");
+    await this.connection.ensureReady("runtime");
     const selectedOptions = this.#authenticatedInspectorPhysicalDbName
       ? createInspectorLocalQueryOptions(options)
       : // Drop a source's cache-only marker when the worker did not issue an
@@ -1943,13 +1937,18 @@ export class Db {
     return this.connection.getCurrentClient();
   }
 
-  protected async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
-    await this.connection.ensureReady(tier, signal ?? this.shutdownAbort.signal);
+  protected async ensureReady(
+    requirement: ConnectionRequirement,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.connection.ensureReady(requirement, signal ?? this.shutdownAbort.signal);
     this.assertOpen();
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
-    return setWriteWaitReadiness(handle, (tier) => this.ensureReady(tier));
+    return setWriteWaitReadiness(handle, (tier) =>
+      this.ensureReady(tier === "global" ? "server" : "runtime"),
+    );
   }
 
   protected getAccessContext(): DbAccessContext | null {
@@ -2593,7 +2592,7 @@ export class Db {
       { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
       queryOptions,
     ).tier;
-    await this.ensureReady(effectiveTier);
+    await this.ensureReady(effectiveTier === "remote" ? "server" : "runtime");
     const rows =
       context || usesRelationTraversal
         ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
@@ -2960,14 +2959,13 @@ export class Db {
     // The native maintained stream owns both the opening snapshot and later
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
-    if (
-      this.connection.shouldDeferSubscriptionStart(resolveReadTier(queryOptions.tier ?? "local"))
-    ) {
+    const requirement = queryOptions.tier === "remote" ? "server" : "runtime";
+    if (this.connection.shouldDeferSubscriptionStart(requirement)) {
       // The worker can only classify the initial authority-tier snapshot as
       // settled after its own server transport is attached. Delay native
       // subscription creation until that topology is ready; the native stream
       // then owns the settled-snapshot gate and remains the sole data source.
-      void this.ensureReady(resolveReadTier(queryOptions.tier ?? "local"), readyAbort.signal)
+      void this.ensureReady(requirement, readyAbort.signal)
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
           if (unsubscribed || readyAbort.signal.aborted || this.shutdownPromise) return;
@@ -3093,7 +3091,7 @@ export class Db {
     );
     // Inspector-only reads must not recursively appear in the inspector's
     // own subscription list. Public local-first still propagates and is listed.
-    if (resolvedOptions.propagation === "local-only") return null;
+    if (resolvedOptions.tier === "local-only") return null;
     const payload = this.parseRuntimeQueryTracePayload(queryJson);
     const traceId = `sub-${this.nextActiveQuerySubscriptionTraceId++}`;
 
@@ -3103,7 +3101,6 @@ export class Db {
       table: payload.table,
       branches: payload.branches,
       tier: resolvedOptions.tier,
-      propagation: resolvedOptions.propagation,
       createdAt: new Date().toISOString(),
       stack: trimSubscriptionTraceStack(new Error().stack),
       visibility: resolvedOptions.visibility ?? "public",

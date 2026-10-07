@@ -180,8 +180,8 @@ delivered material part of that retained knowledge and MUST wake affected Local
 subscriptions. An upstream removal changes future authoritative Global
 membership, but does not retroactively redact material already delivered to the
 scope-isolated store; Local may continue to expose it (`INV-RLS-6`).
-`Propagation::LocalOnly` prevents asking upstream and does not change these
-Local semantics. A local-first read with a server wait
+`ReadTier::LocalOnly` reads local data and pending writes without asking
+upstream. `LocalFirst` also requests upstream results. A local-first read with a server wait
 (`FirstLoad::WaitForRemote { timeout_ms }`) is a Local read throughout;
 only its opening may wait for the first authority view, only while the link
 is live or within the attempt window, and never past its deadline. Under it,

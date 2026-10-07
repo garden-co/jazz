@@ -19,7 +19,7 @@ it("cancels a pending foreground read only once", () => {
       },
     } as never,
   );
-  const read = db.all(Uint8Array.of(1), { tier: "local" });
+  const read = db.all(Uint8Array.of(1), { tier: "local-first" });
   expect("cancel" in read).toBe(true);
   if (!("cancel" in read) || typeof read.cancel !== "function")
     throw new Error("Pending reads must expose cancellation");

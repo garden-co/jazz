@@ -2067,15 +2067,14 @@ export class NativeRuntimeAdapter implements Runtime {
     // boundary; lowering it to Local here would re-scan cached rows that a
     // fresh remote receipt had just removed.
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
-    const transportTier = readPropagationIsFull(optionsJson) ? tier : undefined;
     const readContext = this.nativeReadContext(session, pendingTx);
     const query = nativeQueryInput(coreQueryJson, this.schema);
     await this.ensureClientSessionClaims(session);
-    await this.waitForStrictRemoteQueryTransport(transportTier);
+    await this.waitForStrictRemoteQueryTransport(tier);
     await this.processPendingPeerActivityBeforeRead();
     if (this.closed || this.ownerRuntime.closed) return [];
     if (!pendingTx) {
-      this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
+      this.attachLocalReadCoverageInBackground(tier, query, session);
     }
     this.emitQueryCoverageTrace("attach");
     if (queryHasArraySubqueries(coreQueryJson)) {
@@ -2122,7 +2121,7 @@ export class NativeRuntimeAdapter implements Runtime {
       openingAbort: new AbortController(),
       reading: false,
       outputColumns: subscriptionOutputColumns(queryJson, this.schema),
-      tier: tier ?? "local",
+      tier: tier ?? "local-first",
       cancelled: false,
     });
     const subscription = this.subscriptions.get(handle)!;
@@ -2780,9 +2779,7 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<Uint8Array> {
     return this.awaitNativeRead(
       this.startRowsForContext(query, opts, context, openTransactionId),
-      (opts as { propagation?: string }).propagation === "local_only"
-        ? undefined
-        : (opts as { tier?: string }).tier,
+      (opts as { tier?: string }).tier,
     );
   }
 
@@ -3001,7 +2998,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * failed. Relation-IR reads share this gate with other prepared reads.
    */
   private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
-    if (tier !== "global") return;
+    if (tier !== "remote") return;
     const initialIntent = this.serverReplacementIntent;
     const endpoint = initialIntent?.url ?? this.serverEndpointUrl;
     const identityAuthJson = initialIntent?.authJson ?? this.serverAuthJson ?? "{}";
@@ -3072,23 +3069,20 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private attachLocalReadCoverageInBackground(
     tier: string | null | undefined,
-    optionsJson: string | null | undefined,
     query: NativeQueryInput,
     session: RuntimeSession | null,
   ): void {
-    if (tier != null && tier !== "local") return;
-    if (!readPropagationIsFull(optionsJson)) return;
+    if (tier != null && tier !== "local-first") return;
     if (this.nonDurableClient || !this.serverTransport) return;
 
     const refresh = async () => {
       await this.serverCarrierPromise;
       if (this.closed || this.ownerRuntime.closed) return;
-      const remoteOptionsJson = JSON.stringify({ propagation: "full" });
-      await this.waitForStrictRemoteQueryTransport("global");
+      await this.waitForStrictRemoteQueryTransport("remote");
       if (this.closed || this.ownerRuntime.closed) return;
       await this.readRowsForContextAsync(
         query,
-        readOptions("global", false, remoteOptionsJson),
+        readOptions("remote", false),
         this.nativeReadContext(session),
       );
     };
@@ -3966,7 +3960,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private failRemoteSubscriptions(error: Error): void {
     for (const subscription of this.subscriptions.values()) {
       if (subscription.cancelled) continue;
-      if (subscription.tier !== "global") continue;
+      if (subscription.tier !== "remote") continue;
       this.failSubscription(subscription, error);
     }
   }
@@ -4019,7 +4013,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private throwServerTransportErrorForTier(tier: string): void {
-    if (tier === "global" && this.serverTransportError) {
+    if ((tier === "global" || tier === "remote") && this.serverTransportError) {
       throw this.serverTransportError;
     }
   }
@@ -4027,7 +4021,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private waitForServerTransportError(
     tier: string,
   ): { promise: Promise<never>; cancel: () => void } | null {
-    if (tier !== "global") return null;
+    if (tier !== "global" && tier !== "remote") return null;
     if (this.serverTransportError) {
       return {
         promise: Promise.reject(this.serverTransportError),
@@ -4071,7 +4065,7 @@ export class NativeRuntimeAdapter implements Runtime {
     tier: string,
     observedEpoch: number,
   ): { promise: Promise<void>; cancel: () => void } | null {
-    if (tier !== "global") return null;
+    if (tier !== "global" && tier !== "remote") return null;
     if (
       this.serverTransportWorkEpoch !== observedEpoch ||
       this.pendingInboundServerFrames.length > 0
@@ -4397,15 +4391,12 @@ function readOptions(
   const readOptions: Record<string, unknown> = {};
   if (tier != null) readOptions.tier = tier;
   if (includeDeleted) readOptions.include_deleted = true;
-  if (options.local_updates != null) readOptions.local_updates = options.local_updates;
   if (
     typeof options.first_load_remote_wait_ms === "number" &&
     options.first_load_remote_wait_ms > 0
   ) {
     readOptions.first_load_remote_wait_ms = options.first_load_remote_wait_ms;
   }
-  if (options.propagation === "local-only") readOptions.propagation = "local_only";
-  if (options.propagation === "full") readOptions.propagation = "full";
   const readView = options.read_view ?? options.readView;
   if (readView != null) readOptions.read_view = readView;
   return readOptions;
@@ -4424,21 +4415,11 @@ function readFirstLoadWaitsForRemote(optionsJson?: string | null): boolean {
   }
 }
 
-function readPropagationIsFull(optionsJson?: string | null): boolean {
-  if (optionsJson == null) return true;
-  try {
-    const options = JSON.parse(optionsJson) as { propagation?: unknown };
-    return options.propagation == null || options.propagation === "full";
-  } catch {
-    return true;
-  }
-}
-
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
-  if (tier != null && !["local", "global"].includes(tier)) {
+  if (tier != null && !["local-first", "remote", "local-only"].includes(tier)) {
     throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
-  if (optionsJson != null) readSupportedReadOptions(optionsJson);
+  if (optionsJson != null) JSON.parse(optionsJson);
 }
 
 function parsedAccountId(value: unknown): string | undefined {
@@ -4527,16 +4508,6 @@ function sessionClaims(
 
 function closeSubscriptionSource(source: SubscriptionSource): void {
   source.close();
-}
-
-function readSupportedReadOptions(optionsJson: string): void {
-  const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
-  const propagation = parsed.propagation;
-  if (propagation != null && propagation !== "full" && propagation !== "local-only") {
-    throw new Error(
-      `Native runtime does not support read propagation '${String(propagation)}' yet`,
-    );
-  }
 }
 
 function queryIncludesDeleted(queryJson: string): boolean {

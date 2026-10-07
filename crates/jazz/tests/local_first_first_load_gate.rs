@@ -29,9 +29,8 @@ mod common;
 use duplex_transport::duplex;
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FirstLoad, LocalUpdates, REMOTE_LINK_ATTEMPT_WINDOW, ReadOpts,
-    RemoteLinkHint, SerializedReadResult, SubscriptionEvent, SubscriptionStream, TickScheduler,
-    TickUrgency,
+    Db, DbConfig, DbIdentity, FirstLoad, REMOTE_LINK_ATTEMPT_WINDOW, ReadOpts, RemoteLinkHint,
+    SerializedReadResult, SubscriptionEvent, SubscriptionStream, TickScheduler, TickUrgency,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -39,7 +38,6 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -133,7 +131,7 @@ fn wait_for_remote(timeout: Duration) -> ReadOpts {
         first_load: FirstLoad::WaitForRemote {
             timeout_ms: timeout.as_millis() as u64,
         },
-        ..ReadOpts::default()
+        ..ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst)
     }
 }
 
@@ -400,8 +398,7 @@ fn an_offset_window_reads_the_remote_page_after_a_partial_sync() {
     connect(&alice, &server);
     let expected = vec![row(4), row(5)];
     let remote = ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Immediate,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     let bytes = postcard::to_allocvec(&window()).expect("encode window");
@@ -460,8 +457,7 @@ fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer()
     let upstream = block_on(alice.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
     let remote = ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Immediate,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     let mut warm = subscribe(&alice, &items(), remote);
@@ -732,8 +728,7 @@ fn a_foreground_whose_owner_link_failed_opens_at_once() {
 fn warm_worker(node: u8, server: &Db) -> Db {
     let worker = worker_connected_to(node, server);
     let remote = ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Immediate,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     let mut cache = subscribe(&worker, &items(), remote);
@@ -948,4 +943,54 @@ fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
     drop(held);
     drop(answered);
     let _ = block_on(alice.tick());
+}
+
+/// Alice's local-first remote-answer execution keeps pending writes visible,
+/// while her Remote subscription waits for Bob's confirmation. This uses the
+/// host one-shot subscription entrypoint to exercise its coverage promotion.
+///
+/// ```text
+/// bob ── settled rows ──► alice: local-first remote answer + Remote
+/// alice ── pending insert ──► local-first delta
+/// bob is not ticked: Remote has no confirmation and publishes nothing
+/// ```
+#[test]
+fn remote_answer_coverage_preserves_local_first_pending_writes() {
+    let bob = seeded_server();
+    let alice = fresh_client(0x7e);
+    connect(&alice, &bob);
+    let prepared = alice.prepare_query(&items()).expect("prepare items");
+    let mut local_first = block_on(alice.subscribe_remote_answer(
+        &prepared,
+        ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst),
+    ))
+    .expect("local-first remote answer");
+    let mut remote = subscribe(
+        &alice,
+        &items(),
+        ReadOpts::for_read_tier(jazz::db::ReadTier::Remote),
+    );
+    assert_eq!(
+        opening(first_event(&mut local_first, &alice, Some(&bob))).1,
+        all_rows()
+    );
+    assert_eq!(
+        opening(first_event(&mut remote, &alice, Some(&bob))).1,
+        all_rows()
+    );
+    block_on(alice.insert(
+        "items",
+        BTreeMap::from([("label".to_owned(), Value::String("pending".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(20)),
+            ..Default::default()
+        },
+    ))
+    .expect("Alice's pending insert");
+    let (reset, added, _) = opening(first_event(&mut local_first, &alice, None));
+    assert!(!reset);
+    assert_eq!(added, vec![row(20)]);
+    assert_withheld(&mut remote, &alice, None, 8);
+    block_on(local_first.close()).expect("close local-first remote answer");
+    block_on(remote.close()).expect("close remote read");
 }

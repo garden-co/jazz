@@ -8,34 +8,7 @@ pub enum DurabilityTier {
     GlobalServer,
 }
 
-/// Product-level consistency choice for reads.
-///
-/// Read tiers deliberately do not expose the storage/protocol durability
-/// lattice. There are two: [`ReadTier::LocalFirst`] reads what is locally
-/// known, and [`ReadTier::Remote`] waits for the ordinary remote view. A
-/// local-first read may additionally wait a bounded time for the server's
-/// answer on its opening; see `JazzClient::query_local_first` and
-/// `JazzClient::subscribe_local_first`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ReadTier {
-    /// Read immediately from local knowledge.
-    LocalFirst,
-    /// Wait for the ordinary remote view.
-    Remote,
-}
-
-impl ReadTier {
-    /// Lower this product-level choice to the legacy facade durability tier.
-    ///
-    /// This is intentionally read-only. Writes and write settlement keep using
-    /// [`DurabilityTier`] directly.
-    pub const fn legacy_durability_tier(self) -> DurabilityTier {
-        match self {
-            Self::LocalFirst => DurabilityTier::Local,
-            Self::Remote => DurabilityTier::GlobalServer,
-        }
-    }
-}
+pub use crate::db::ReadTier;
 
 /// Unique identifier for a client connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -81,22 +54,21 @@ mod tests {
             assert_eq!(postcard::to_allocvec(&expected).unwrap(), encoded);
         }
         assert!(postcard::from_bytes::<DurabilityTier>(&[2]).is_err());
-        assert_eq!(
-            ReadTier::Remote.legacy_durability_tier(),
-            DurabilityTier::GlobalServer
-        );
     }
 
     /// The serialized read-tier encoding is not observable through the
-    /// client API, so it is pinned here: only the two tiers decode, and the
-    /// removed tiers' names and postcard index 2 are rejected.
+    /// client API, so it is pinned here: the three tiers decode, and removed tier names and unknown tags are rejected.
     #[test]
-    fn only_the_two_read_tiers_decode() {
-        for (tier, bytes) in [(ReadTier::LocalFirst, vec![0]), (ReadTier::Remote, vec![1])] {
+    fn only_the_three_read_tiers_decode() {
+        for (tier, bytes) in [
+            (ReadTier::LocalFirst, vec![0]),
+            (ReadTier::Remote, vec![1]),
+            (ReadTier::LocalOnly, vec![2]),
+        ] {
             assert_eq!(postcard::to_allocvec(&tier).unwrap(), bytes);
             assert_eq!(postcard::from_bytes::<ReadTier>(&bytes).unwrap(), tier);
         }
-        assert!(postcard::from_bytes::<ReadTier>(&[2]).is_err());
+        assert!(postcard::from_bytes::<ReadTier>(&[3]).is_err());
         for removed in ["\"RemoteIfPossible\"", "\"LocalFirstUnlessEmpty\""] {
             assert!(serde_json::from_str::<ReadTier>(removed).is_err());
         }

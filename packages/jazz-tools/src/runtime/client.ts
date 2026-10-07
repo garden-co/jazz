@@ -408,29 +408,11 @@ export function rejectRemovedReadTier(tier: unknown): void {
     removed ?? `Unknown read tier ${JSON.stringify(tier)}; expected "local-first" or "remote".`,
   );
 }
-export type QueryReadTier = ReadTier;
 /**
- * @internal Tiers internal callers may pass: the product tiers, the runtime
- * durability names (for runtime defaults and framework internals), and the
+ * @internal Tiers internal callers may pass: the product tiers and the
  * inspector-only tier that never subscribes upstream.
  */
-type InternalQueryReadTier = QueryReadTier | DurabilityTier | "local-only";
-/**
- * Controls when a write is visible to subscriptions.
- *
- * - With `"immediate"`, your own local writes appear in the subscription while it's still waiting for
- * the tier to confirm the initial snapshot (only once the subscription has settled at least once).
- * - With `"deferred"`, all delivery is held until the tier confirms.
- * Default is `"immediate"`.
- */
-export type LocalUpdatesMode = "immediate" | "deferred";
-/**
- * Controls where the subscription reads data from.
- *
- * - With `"full"`, the subscription is sent to upstream servers, which push matching data back.
- * - With `"local-only"`, only local storage is queried and no server communication happens.
- */
-export type QueryPropagation = "full" | "local-only";
+export type InternalReadTier = ReadTier | "local-only";
 /**
  * Whether this query should be shown in the inspector.
  * Useful for helpers and framework internals that create subscriptions
@@ -519,25 +501,21 @@ export function publicQueryExecutionOptions(
 }
 
 /** @internal `local-only` is deliberately excluded from the product surface. */
-export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
+export function isPublicQueryReadTier(value: unknown): value is ReadTier {
   return value === ReadTier.LocalFirst || value === ReadTier.Remote;
 }
 
 /** @internal Low-level read controls that are not part of the product-facing query API. */
 export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> & {
-  tier?: InternalQueryReadTier;
-  localUpdates?: LocalUpdatesMode;
-  propagation?: QueryPropagation;
+  tier?: InternalReadTier;
   visibility?: QueryVisibility;
   openTransactionId?: OpenTransactionId;
 };
 
 export interface ResolvedQueryExecutionOptions {
-  tier: RuntimeReadTier;
+  tier: InternalReadTier;
   /** Server wait of a local-first read; absent when it does not wait. */
   firstLoadRemoteWaitMs?: number;
-  localUpdates: LocalUpdatesMode;
-  propagation: QueryPropagation;
   visibility: QueryVisibility;
   branch?: BranchView;
 }
@@ -686,34 +664,20 @@ export function resolveEffectiveQueryExecutionOptions(
   context: QueryExecutionDefaultsContext,
   options?: InternalQueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
-  const selectedTier = options?.tier ?? resolveDefaultDurabilityTier(context);
-  const tier = resolveReadTier(selectedTier);
+  const tier =
+    options?.tier ??
+    (resolveDefaultDurabilityTier(context) === "global" ? ReadTier.Remote : ReadTier.LocalFirst);
+  if (tier !== "local-only") rejectRemovedReadTier(tier);
   const firstLoadRemoteWaitMs =
-    tier === "local" && selectedTier !== "local-only"
+    tier === ReadTier.LocalFirst
       ? normalizeFirstLoadRemoteWaitMs(options?.firstLoadRemoteWaitMs)
       : undefined;
   return {
     tier,
     ...(firstLoadRemoteWaitMs !== undefined ? { firstLoadRemoteWaitMs } : {}),
-    // A server-tier read is a remote read: own writes show once the server
-    // confirms them. The old "global" read that also showed pending local
-    // writes is gone; acknowledgements could briefly drop rows from it (#3902).
-    localUpdates: tier === "global" ? "deferred" : (options?.localUpdates ?? "immediate"),
-    propagation: selectedTier === "local-only" ? "local-only" : (options?.propagation ?? "full"),
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
   };
-}
-
-/** @internal Tier names the runtime bindings accept for reads. */
-export type RuntimeReadTier = DurabilityTier;
-
-/** @internal Lower product read choices to the runtime's read tiers. */
-export function resolveReadTier(tier: InternalQueryReadTier): RuntimeReadTier {
-  if (tier === "local-only" || tier === "local") return "local";
-  if (tier === "global") return "global";
-  rejectRemovedReadTier(tier);
-  return tier === ReadTier.LocalFirst ? "local" : "global";
 }
 
 function isBrowserRuntime(): boolean {
@@ -734,10 +698,10 @@ function getScheduler(): (task: () => void) => void {
   return (task: () => void) => queueMicrotask(task);
 }
 
-function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): string | undefined {
+function encodeQueryExecutionOptions(
+  options: ResolvedInternalQueryExecutionOptions,
+): string | undefined {
   const payload: {
-    propagation?: QueryPropagation;
-    local_updates?: LocalUpdatesMode;
     first_load_remote_wait_ms?: number;
     transaction_id?: string;
     read_view?: {
@@ -751,12 +715,6 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
       };
     };
   } = {};
-  if ((options.propagation ?? "full") !== "full") {
-    payload.propagation = options.propagation;
-  }
-  if ((options.localUpdates ?? "immediate") !== "immediate") {
-    payload.local_updates = options.localUpdates;
-  }
   if (options.openTransactionId) {
     payload.transaction_id = options.openTransactionId;
   }
@@ -775,13 +733,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     };
   }
 
-  if (
-    !payload.propagation &&
-    !payload.local_updates &&
-    !payload.transaction_id &&
-    !payload.first_load_remote_wait_ms &&
-    !payload.read_view
-  ) {
+  if (!payload.transaction_id && !payload.first_load_remote_wait_ms && !payload.read_view) {
     return undefined;
   }
 

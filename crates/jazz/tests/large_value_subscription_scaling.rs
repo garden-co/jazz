@@ -22,8 +22,8 @@ mod common;
 use common::{allow_all_policies, compile_schema};
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, LocalUpdates, Propagation, ReadOpts,
-    SubscriptionEvent, SubscriptionOutputRow, SubscriptionStream, UpdateOptions,
+    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, ReadOpts, SubscriptionEvent,
+    SubscriptionOutputRow, SubscriptionStream, UpdateOptions,
 };
 use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use jazz::groove::large_values::{LEAF_MAX_BYTES, full_materializations_for_test};
@@ -136,9 +136,7 @@ fn delete_file(db: &Db, id: RowUuid) {
 
 fn opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }

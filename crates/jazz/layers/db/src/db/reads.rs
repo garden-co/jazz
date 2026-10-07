@@ -262,7 +262,7 @@ where
     /// outside a transaction applies the shared one-shot rule of
     /// [`Db::read_local_first_within`]: the local-first read runs with
     /// the caller's coverage requirement, and the strict remote read (Global
-    /// tier, immediate local updates) always requires coverage. Each phase
+    /// coverage, local-first visibility) always requires coverage. Each phase
     /// releases its own attachment through `release_coverage`.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
@@ -281,11 +281,12 @@ where
         F: Fn(QueryAttachment),
         E: Fn() -> bool,
     {
+        let coverage_tier = read_coverage_tier(&opts);
         let first_load = std::mem::take(&mut opts.first_load);
         let gated = open_tx.is_none()
             && author.is_none()
-            && opts.propagation == Propagation::Full
-            && effective_read_tier(&opts) == DurabilityTier::Local;
+            && opts.tier != ReadTier::LocalOnly
+            && coverage_tier == DurabilityTier::Local;
         let wait_timeout = match first_load {
             FirstLoad::WaitForRemote { timeout_ms } if gated && timeout_ms > 0 => {
                 Some(std::time::Duration::from_millis(timeout_ms))
@@ -293,11 +294,7 @@ where
             _ => None,
         };
         if let Some(timeout) = wait_timeout {
-            let remote_opts = ReadOpts {
-                tier: DurabilityTier::Global,
-                local_updates: LocalUpdates::Immediate,
-                ..opts.clone()
-            };
+            let remote_opts = opts.clone();
             let remote_scope = request_scope.clone();
             // Boxed: the gated read nests two full one-shot reads, which would
             // otherwise multiply this future's size and every host poll frame.
@@ -307,6 +304,7 @@ where
                     self.all_serialized_query_once(
                         query,
                         opts,
+                        coverage_tier,
                         None,
                         request_scope,
                         None,
@@ -319,6 +317,7 @@ where
                     self.all_serialized_query_once(
                         query,
                         remote_opts,
+                        DurabilityTier::Global,
                         None,
                         remote_scope,
                         None,
@@ -333,6 +332,7 @@ where
         self.all_serialized_query_once(
             query,
             opts,
+            coverage_tier,
             open_tx,
             request_scope,
             author,
@@ -523,6 +523,7 @@ where
         &self,
         query: &[u8],
         opts: ReadOpts,
+        coverage_tier: DurabilityTier,
         open_tx: Option<OpenTransactionId>,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         author: Option<AuthorSubject>,
@@ -535,15 +536,11 @@ where
         E: Fn() -> bool,
     {
         let release_coverage = |attachment| release_coverage(attachment);
-        if require_coverage
-            && open_tx.is_none()
-            && opts.propagation == Propagation::Full
-            && opts.tier >= DurabilityTier::Global
-        {
+        if require_coverage && open_tx.is_none() && coverage_tier >= DurabilityTier::Global {
             self.preceding_local_writes_on_wire(query).await?;
         }
         {
-            let admission = self.await_open_schema_for_read(&opts);
+            let admission = self.await_open_schema_for_coverage(coverage_tier);
             let mut admission = std::pin::pin!(admission);
             std::future::poll_fn(|cx| match admission.as_mut().poll(cx) {
                 Poll::Pending if coverage_expired() => Poll::Ready(Err(Error::new(
@@ -575,24 +572,26 @@ where
         // needs a fresh delivery from its durable owner, while the maintained
         // subscription drives the complete multi-hop input closure.
         if require_coverage && is_relation {
-            let local_coverage = if effective_read_tier(&opts) == DurabilityTier::Local {
+            let local_coverage = if coverage_tier == DurabilityTier::Local {
                 Some(SerializedReadCoverage {
                     attachment: Some(
-                        self.attach_query_with_opts_async(&prepared, opts.clone(), None, author)
-                            .await?,
+                        self.attach_query_with_coverage_async(
+                            &prepared,
+                            opts.clone(),
+                            coverage_tier,
+                            None,
+                            author,
+                        )
+                        .await?,
                     ),
                     release: Some(release_coverage),
                 })
             } else {
                 None
             };
-            let mut stream = match author {
-                Some(author) => {
-                    self.subscribe_client_for_identity(&prepared, opts.clone(), author)
-                        .await?
-                }
-                None => self.subscribe(&prepared, opts.clone()).await?,
-            };
+            let mut stream = self
+                .subscribe_one_shot_with_coverage(&prepared, opts.clone(), author, coverage_tier)
+                .await?;
             let outcome = async {
                 let mut next = Box::pin(stream.next_event());
                 let event = std::future::poll_fn(|cx| {
@@ -669,8 +668,7 @@ where
         // commit instead of being accepted.
         let exclusive_snapshot_read = match open_tx {
             Some(open_tx) if self.node.receives_commits_as_local() => {
-                self.transaction_is_exclusive(open_tx).await?
-                    && opts.propagation == Propagation::Full
+                self.transaction_is_exclusive(open_tx).await? && opts.tier != ReadTier::LocalOnly
             }
             _ => false,
         };
@@ -687,15 +685,18 @@ where
             _ => Vec::new(),
         };
         let mut coverage = None;
-        let hydrate =
-            exclusive_snapshot_read && effective_read_tier(&opts) < DurabilityTier::Global;
+        let hydrate = exclusive_snapshot_read && coverage_tier < DurabilityTier::Global;
         if hydrate && let Some(epoch) = self.node.remote_link.arm_until_loss() {
-            let mut hydration_opts = opts.clone();
-            hydration_opts.tier = DurabilityTier::Global;
             let hydration = SerializedReadCoverage {
                 attachment: Some(
-                    self.attach_query_with_opts_async(&prepared, hydration_opts, open_tx, author)
-                        .await?,
+                    self.attach_query_with_coverage_async(
+                        &prepared,
+                        opts.clone(),
+                        DurabilityTier::Global,
+                        open_tx,
+                        author,
+                    )
+                    .await?,
                 ),
                 release: Some(release_coverage),
             };
@@ -712,7 +713,13 @@ where
         }
         if coverage.is_none() && require_coverage {
             let attachment = self
-                .attach_query_with_opts_async(&prepared, opts.clone(), open_tx, author)
+                .attach_query_with_coverage_async(
+                    &prepared,
+                    opts.clone(),
+                    coverage_tier,
+                    open_tx,
+                    author,
+                )
                 .await?;
             let required = SerializedReadCoverage {
                 attachment: Some(attachment),
@@ -732,13 +739,12 @@ where
                     break;
                 };
                 let source_query = self.prepare_query_async(&query).await?;
-                let mut hydration_opts = opts.clone();
-                hydration_opts.tier = DurabilityTier::Global;
                 let hydration = SerializedReadCoverage {
                     attachment: Some(
-                        self.attach_query_with_opts_async(
+                        self.attach_query_with_coverage_async(
                             &source_query,
-                            hydration_opts,
+                            opts.clone(),
+                            DurabilityTier::Global,
                             Some(open_tx),
                             author,
                         )
@@ -766,13 +772,20 @@ where
                     self.relation_snapshot_in_open_transaction(open_tx, &prepared, opts, author)
                         .await
                 }
-                None => match author {
-                    Some(author) => {
-                        self.all_relation_snapshot_for_identity(&prepared, opts, author)
-                            .await
-                    }
-                    None => self.all_relation_snapshot(&prepared, opts).await,
-                },
+                None => {
+                    self.relation_snapshot_with_coverage(
+                        &prepared,
+                        &opts,
+                        coverage_tier,
+                        author.unwrap_or(self.identity.author),
+                        if author.is_some() {
+                            QueryAuthorizationMode::TrustedServing
+                        } else {
+                            QueryAuthorizationMode::ClientLocal
+                        },
+                    )
+                    .await
+                }
             }?;
             if !in_transaction {
                 self.hydrate_relation_snapshot_for_binding(&mut snapshot)
@@ -786,10 +799,20 @@ where
                 self.all_in_open_transaction(open_tx, &prepared, opts, author)
                     .await
             }
-            None => match author {
-                Some(author) => self.all_for_identity(&prepared, opts, author).await,
-                None => self.all(&prepared, opts).await,
-            },
+            None => {
+                self.all_for_identity_in_authorization_mode(
+                    &prepared,
+                    opts,
+                    coverage_tier,
+                    author.unwrap_or(self.identity.author),
+                    if author.is_some() {
+                        QueryAuthorizationMode::TrustedServing
+                    } else {
+                        QueryAuthorizationMode::ClientLocal
+                    },
+                )
+                .await
+            }
         }?;
         self.hydrate_rows_for_binding(&mut rows).await?;
         Ok(SerializedReadResult::Rows(rows))
@@ -986,9 +1009,8 @@ where
     /// #     pub use jazz_model::{query, tx};
     /// #     pub use jazz_types::ids;
     /// # }
-    /// # use jazz::db::{ReadOpts, LocalUpdates, Propagation};
+    /// # use jazz::db::{ReadOpts};
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
-    /// # use jazz::tx::DurabilityTier;
     /// let db = block_on(open_todos_db())?;
     /// block_on(db.insert(
     ///     "todos",
@@ -997,9 +1019,7 @@ where
     /// ))?;
     ///
     /// let opts = ReadOpts {
-    ///     tier: DurabilityTier::Local,
-    ///     local_updates: LocalUpdates::Immediate,
-    ///     propagation: Propagation::LocalOnly,
+    ///     tier: jazz::db::ReadTier::LocalOnly,
     ///     include_deleted: false,
     ///     ..ReadOpts::default()
     /// };
@@ -1013,9 +1033,11 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let coverage_tier = read_coverage_tier(&opts);
         self.all_for_identity_in_authorization_mode(
             prepared,
             opts,
+            coverage_tier,
             self.identity.author,
             QueryAuthorizationMode::ClientLocal,
         )
@@ -1033,9 +1055,11 @@ where
         opts: ReadOpts,
         author: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let coverage_tier = read_coverage_tier(&opts);
         self.all_for_identity_in_authorization_mode(
             prepared,
             opts,
+            coverage_tier,
             author,
             QueryAuthorizationMode::TrustedServing,
         )
@@ -1046,19 +1070,19 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
+        coverage_tier: DurabilityTier,
         author: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.await_open_schema_for_read(&opts).await?;
-        let tier = effective_read_tier(&opts);
+        self.await_open_schema_for_coverage(coverage_tier).await?;
         // Follow the same host-selected authority route as subscription
         // registration. Storage durability alone cannot identify that route:
         // authority-tier reads are floored at the host's upstream durability
         // tier. Local knowledge stays local in either case.
         let tier = if authorization_mode == QueryAuthorizationMode::ClientLocal {
-            self.client_authority_read_tier(tier)
+            self.client_authority_read_tier(coverage_tier)
         } else {
-            tier
+            coverage_tier
         };
         let mut node = self.node.node.lock().await;
         let mut node = prepared.scoped_node(&mut node, author)?;
@@ -1242,26 +1266,14 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
-        self.await_open_schema_for_read(&opts).await?;
-        ensure_supported_read_view(&opts)?;
-        if opts.include_deleted {
-            return Err(Error::new(
-                ErrorCode::Query,
-                "relation snapshots do not support include_deleted yet",
-            ));
-        }
-        let tier = self.client_authority_read_tier(effective_read_tier(&opts));
-        let mut owner = self.node.node.lock().await;
-        let mut node = prepared.scoped_node(&mut owner, self.identity.author)?;
-        node.query_relation_snapshot_for_client(
-            &prepared.shape,
-            &prepared.binding,
-            tier,
+        self.relation_snapshot_with_coverage(
+            prepared,
+            &opts,
+            read_coverage_tier(&opts),
             self.identity.author,
-            &opts.read_view,
+            QueryAuthorizationMode::ClientLocal,
         )
         .await
-        .map_err(Into::into)
     }
 
     /// Tier-gated one-shot relation read evaluated as `author`.
@@ -1271,25 +1283,56 @@ where
         opts: ReadOpts,
         author: AuthorSubject,
     ) -> Result<RelationSnapshot, Error> {
-        self.await_open_schema_for_read(&opts).await?;
-        ensure_supported_read_view(&opts)?;
+        self.relation_snapshot_with_coverage(
+            prepared,
+            &opts,
+            read_coverage_tier(&opts),
+            author,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    async fn relation_snapshot_with_coverage(
+        &self,
+        prepared: &PreparedQuery,
+        opts: &ReadOpts,
+        coverage_tier: DurabilityTier,
+        author: AuthorSubject,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<RelationSnapshot, Error> {
+        self.await_open_schema_for_coverage(coverage_tier).await?;
+        ensure_supported_read_view(opts)?;
         if opts.include_deleted {
             return Err(Error::new(
                 ErrorCode::Query,
                 "relation snapshots do not support include_deleted yet",
             ));
         }
-        let tier = effective_read_tier(&opts);
         let mut owner = self.node.node.lock().await;
         let mut node = prepared.scoped_node(&mut owner, author)?;
-        node.query_relation_snapshot_for_serving_in_read_view(
-            &prepared.shape,
-            &prepared.binding,
-            tier,
-            author,
-            &opts.read_view,
-        )
-        .await
+        match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => {
+                node.query_relation_snapshot_for_client(
+                    &prepared.shape,
+                    &prepared.binding,
+                    self.client_authority_read_tier(coverage_tier),
+                    author,
+                    &opts.read_view,
+                )
+                .await
+            }
+            QueryAuthorizationMode::TrustedServing => {
+                node.query_relation_snapshot_for_serving_in_read_view(
+                    &prepared.shape,
+                    &prepared.binding,
+                    coverage_tier,
+                    author,
+                    &opts.read_view,
+                )
+                .await
+            }
+        }
         .map_err(Into::into)
     }
 
@@ -1313,7 +1356,8 @@ where
         query: &RelationQuery,
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
-        self.await_open_schema_for_read(&opts).await?;
+        self.await_open_schema_for_coverage(read_coverage_tier(&opts))
+            .await?;
         ensure_default_read_view(&opts)?;
         let prepared = self.prepare_relation_query_async(query).await?;
         // The relation terminal already emits the requested aliases and row
@@ -1334,7 +1378,8 @@ where
         opts: ReadOpts,
         author: AuthorSubject,
     ) -> Result<RelationSnapshot, Error> {
-        self.await_open_schema_for_read(&opts).await?;
+        self.await_open_schema_for_coverage(read_coverage_tier(&opts))
+            .await?;
         ensure_default_read_view(&opts)?;
         let prepared = self.prepare_relation_query_async(query).await?;
         // The relation terminal already emits the requested aliases and row

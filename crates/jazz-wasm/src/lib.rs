@@ -20,11 +20,10 @@ use futures_util::{Stream, StreamExt};
 use idb_tree::IndexedDbPageStore;
 use jazz::db::{
     block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error, ErrorCode, FirstLoad,
-    InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MutationErrorCallback, PeerConnection,
-    PermissionAdvice, Propagation, ReadOpts, RemoteLinkHint, RowCells, SeededRowIdSource,
-    SerializedReadResult, SerializedSubscriptionAuthorization, StreamingMutationKind,
-    StreamingValueUpload, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
-    WriteHandle,
+    InitialSyncFlushCadence, LargeValueUpdate, MutationErrorCallback, PeerConnection,
+    PermissionAdvice, ReadOpts, RemoteLinkHint, RowCells, SeededRowIdSource, SerializedReadResult,
+    SerializedSubscriptionAuthorization, StreamingMutationKind, StreamingValueUpload,
+    SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::Value;
 #[cfg(target_arch = "wasm32")]
@@ -1976,9 +1975,7 @@ impl WasmDb {
                     .map_err(to_js_error)?;
             }
             let requires_coverage = tier_is_explicit
-                && (non_durable_client
-                    || (opts.tier >= DurabilityTier::Global
-                        && opts.propagation == Propagation::Full));
+                && (non_durable_client || (opts.tier == jazz::db::ReadTier::Remote));
             let result = inner
                 .all_serialized_query(
                     query,
@@ -3374,20 +3371,6 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
     if let Some(tier) = optional_string_prop(&value, "tier")? {
         opts.tier = read_tier_from_str(&tier)?;
     }
-    if let Some(local_updates) = optional_string_prop(&value, "local_updates")? {
-        opts.local_updates = match local_updates.as_str() {
-            "Immediate" | "immediate" => LocalUpdates::Immediate,
-            "Deferred" | "deferred" => LocalUpdates::Deferred,
-            other => return Err(JsValue::from_str(&format!("unknown local_updates {other}"))),
-        };
-    }
-    if let Some(propagation) = optional_string_prop(&value, "propagation")? {
-        opts.propagation = match propagation.as_str() {
-            "Full" | "full" => Propagation::Full,
-            "LocalOnly" | "local_only" | "localOnly" => Propagation::LocalOnly,
-            other => return Err(JsValue::from_str(&format!("unknown propagation {other}"))),
-        };
-    }
     if let Some(include_deleted) = optional_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
     }
@@ -3399,7 +3382,7 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
 
 /// A local-first read's server-wait timeout. `Remote` reads ignore it.
 fn local_first_server_wait(opts: &ReadOpts, timeout_ms: u64) -> FirstLoad {
-    if opts.tier == DurabilityTier::Local {
+    if opts.tier == jazz::db::ReadTier::LocalFirst {
         FirstLoad::WaitForRemote { timeout_ms }
     } else {
         opts.first_load
@@ -3432,11 +3415,12 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
 
 /// Read-only binding lowering. Write waits keep `durability_tier_from_str`, so
 /// a product read choice can never change write-settlement semantics.
-fn read_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
+fn read_tier_from_str(tier: &str) -> Result<jazz::db::ReadTier, JsValue> {
     match tier {
-        "local-first" | "LocalFirst" => Ok(DurabilityTier::Local),
-        "remote" | "Remote" => Ok(DurabilityTier::Global),
-        _ => durability_tier_from_str(tier),
+        "local-first" | "LocalFirst" => Ok(jazz::db::ReadTier::LocalFirst),
+        "remote" | "Remote" => Ok(jazz::db::ReadTier::Remote),
+        "local-only" | "LocalOnly" => Ok(jazz::db::ReadTier::LocalOnly),
+        other => Err(JsValue::from_str(&format!("unknown read tier {other}"))),
     }
 }
 
@@ -4247,14 +4231,14 @@ mod dynamic_schema_view_tests {
 
     /// Binding read choices lower to the existing core tiers.
     #[test]
-    fn read_tier_names_lower_to_existing_core_tiers() {
+    fn read_tier_names_are_separate_from_durability() {
         assert_eq!(
             read_tier_from_str("local-first").expect("local-first read tier"),
-            DurabilityTier::Local
+            jazz::db::ReadTier::LocalFirst
         );
         assert_eq!(
             read_tier_from_str("remote").expect("strict remote read tier"),
-            DurabilityTier::Global
+            jazz::db::ReadTier::Remote
         );
         assert_eq!(
             durability_tier_from_str("local").expect("legacy write tier"),
@@ -4275,11 +4259,14 @@ mod dynamic_schema_view_tests {
             "LocalFirstUnlessEmpty",
             "core",
             "Core",
+            "local",
+            "global",
+            "none",
             "invalid-tier",
         ] {
             assert_eq!(
                 read_tier_from_str(name).unwrap_err().as_string().unwrap(),
-                format!("unknown durability tier {name}"),
+                format!("unknown read tier {name}"),
             );
         }
     }
@@ -4419,7 +4406,7 @@ mod dynamic_schema_view_tests {
 
         let opts = read_opts_from_js(value.into()).expect("parse read options");
 
-        assert_eq!(opts.propagation, Propagation::Full);
+        assert_eq!(opts.tier, jazz::db::ReadTier::LocalFirst);
     }
 
     /// The host-visible transport boundary must honor both parts of its

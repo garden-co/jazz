@@ -2,7 +2,7 @@ import { copyAccountConfigAdmission } from "../../accounts/config-capability.js"
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
-import type { AuthUpdate, DurabilityTier, JazzClient, MutationErrorEvent } from "../client.js";
+import type { AuthUpdate, JazzClient, MutationErrorEvent } from "../client.js";
 import type { DbConfig } from "../db.js";
 import type { Session } from "../context.js";
 import type { ForegroundNodeLease, RuntimeSource } from "../runtime-source.js";
@@ -37,6 +37,12 @@ function getPolicyStrippedSchema(schema: WasmSchema): WasmSchema {
   policyStrippedSchemaCache.set(schema, strippedSchema);
   return strippedSchema;
 }
+
+/** Readiness required by an operation, independent of read or write tiers.
+ * `runtime` admits local work, including browser worker initialization.
+ * `server` also waits for the configured server transport to be available.
+ */
+export type ConnectionRequirement = "runtime" | "server";
 
 export interface ConnectionManagerClientInput {
   schemaKey: string;
@@ -139,9 +145,9 @@ export abstract class ConnectionManager {
 
   protected onClientCreated(_input: ConnectionManagerClientInput): void {}
 
-  abstract ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void>;
+  abstract ensureReady(requirement: ConnectionRequirement, signal?: AbortSignal): Promise<void>;
 
-  abstract shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean;
+  abstract shouldDeferSubscriptionStart(requirement: ConnectionRequirement): boolean;
 
   /** True only after the application explicitly called Db.disconnect(). */
   abstract isExplicitlyOffline(): boolean;

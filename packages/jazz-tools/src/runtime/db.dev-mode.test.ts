@@ -71,8 +71,7 @@ describe("Db devMode active query tracing", () => {
 
     expect(trace?.table).toBe("todos");
     expect(trace?.branches).toEqual([]);
-    expect(trace?.tier).toBe("local");
-    expect(trace?.propagation).toBe("full");
+    expect(trace?.tier).toBe("local-first");
     expect(trace?.query).toContain('"table":"todos"');
     expect(trace?.stack).toContain("Error");
     expect(observed.at(-1)).toHaveLength(1);
@@ -105,8 +104,7 @@ describe("Db devMode active query tracing", () => {
       tier: "remote",
     });
 
-    expect(db.getActiveQuerySubscriptions()[0]?.tier).toBe("global");
-    expect(db.getActiveQuerySubscriptions()[0]?.propagation).toBe("full");
+    expect(db.getActiveQuerySubscriptions()[0]?.tier).toBe("remote");
 
     unsubscribe();
   });

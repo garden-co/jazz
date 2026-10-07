@@ -47,7 +47,7 @@ Invariant digest:
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; accepted state and the core committed frontier MUST become durable atomically before publication.
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it MUST NOT accept, assign global timestamp, or create merge versions from that payload.
 
-- `INV-SYNC-37`: LocalOnly propagation MUST remain on the calling node. Remote subscriptions have no propagation switch; every receiving node follows normal upstream routing.
+- `INV-SYNC-37`: `ReadTier::LocalOnly` MUST remain on the calling node. Remote subscriptions have no propagation switch; every receiving node follows normal upstream routing.
 - `INV-SYNC-38`: An extra local query input absent from a completed selected-authority scope MUST be revalidated; scope absence or Unknown MUST NOT assert deletion or access loss. Bounded batches MUST preserve eventual retry/progression for supported active queries.
 - `INV-SYNC-39`: Confirmed current unavailability MUST be scoped to the exact effective identity/claims and filter current application inputs before joins, counts and limits. It MUST NOT erase shared content, expose the cause, or affect SYSTEM and other contexts.
 - `INV-SYNC-40`: Readmission MUST follow complete authorized native content ingestion and fresh correlated evidence. Durable per-row denial and clear watermarks MUST survive reopen and prevent stale replies from reversing a newer decision; authoritative inclusion MUST be able to revalidate an excluded row.
@@ -1007,7 +1007,7 @@ is deferred.
 
 ### Local propagation is not a remote capability
 
-`Propagation::LocalOnly` is a setting on the calling node. It MUST NOT send a
+`ReadTier::LocalOnly` evaluates on the calling node. It MUST NOT send a
 remote query and MUST NOT be implemented by telling another node to stop there.
 Remote registrations have no propagation switch. Every receiving node follows
 normal upstream routing under its admitted identity, trust, and topology.

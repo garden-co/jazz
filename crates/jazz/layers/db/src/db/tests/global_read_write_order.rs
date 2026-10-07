@@ -84,8 +84,7 @@ fn global_read<'a>(
         db.all_serialized_query(
             &query,
             ReadOpts {
-                tier: DurabilityTier::Global,
-                local_updates: LocalUpdates::Deferred,
+                tier: crate::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
             None,

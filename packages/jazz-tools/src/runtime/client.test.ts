@@ -8,7 +8,6 @@ import {
   ReadTier,
   resolveDefaultDurabilityTier,
   resolveEffectiveQueryExecutionOptions,
-  resolveReadTier,
   publicQueryExecutionOptions,
   type Runtime,
   type TransactionalRuntime,
@@ -615,20 +614,12 @@ describe("resolveDefaultDurabilityTier", () => {
 });
 
 describe("public read tiers", () => {
-  it("lowers each new public tier to the existing native durability contract", () => {
-    expect(resolveReadTier("local-first")).toBe("local");
-    expect(resolveReadTier("remote")).toBe("global");
-    expect(resolveReadTier(ReadTier.LocalFirst)).toBe("local");
-    expect(resolveReadTier(ReadTier.Remote)).toBe("global");
-    expect(Object.values(ReadTier)).toEqual(["local-first", "remote"]);
-  });
-
   it.each(["remote-if-possible", "local-first-unless-empty", "local", "global", "core", "edge"])(
     "rejects the removed %s read tier with a migration message",
     (name) => {
       const removed = name as never;
       expect(() => publicQueryExecutionOptions({ tier: removed })).toThrow(
-        `The "${name}" ${name === "local" || name === "global" || name === "core" || name === "edge" ? "read " : ""}tier was removed`,
+        `The "${name}" ${name === "local" || name === "global" || name === "core" ? "read " : ""}tier was removed`,
       );
     },
   );
@@ -657,20 +648,16 @@ describe("public read tiers", () => {
     const reads = [
       [
         { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 500 },
-        "local",
+        "local-first",
         '{"first_load_remote_wait_ms":500}',
       ],
       [
         { tier: "local-first", firstLoadRemoteWaitMs: 250.9 },
-        "local",
+        "local-first",
         '{"first_load_remote_wait_ms":250}',
       ],
-      [{ tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 0 }, "local", undefined],
-      [
-        { tier: ReadTier.Remote, firstLoadRemoteWaitMs: 500 },
-        "global",
-        JSON.stringify({ local_updates: "deferred" }),
-      ],
+      [{ tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 0 }, "local-first", undefined],
+      [{ tier: ReadTier.Remote, firstLoadRemoteWaitMs: 500 }, "remote", undefined],
     ] as const;
     for (const [options, nativeTier, optionsJson] of reads) {
       runtime.query.mockClear();
@@ -687,44 +674,15 @@ describe("public read tiers", () => {
     );
   });
 
-  it("keeps the runtime's internal durability read names byte-for-byte compatible", () => {
-    for (const tier of ["local", "global"] as const) {
-      expect(resolveReadTier(tier)).toBe(tier);
-    }
-    expect(resolveEffectiveQueryExecutionOptions({}, { tier: "local" })).toMatchObject({
-      tier: "local",
-      localUpdates: "immediate",
-    });
-  });
-
-  it("reads every server tier as remote, without pending local writes (#3902)", () => {
-    expect(resolveEffectiveQueryExecutionOptions({}, { tier: "global" })).toMatchObject({
-      tier: "global",
-      localUpdates: "deferred",
-    });
-    expect(
-      resolveEffectiveQueryExecutionOptions({}, { tier: "global", localUpdates: "immediate" }),
-    ).toMatchObject({ tier: "global", localUpdates: "deferred" });
-    // Outside the browser, a client with a server reads remote by default.
+  it("defaults connected non-browser reads to the remote tier", () => {
     expect(
       resolveEffectiveQueryExecutionOptions({ serverUrl: "http://localhost:1" }),
-    ).toMatchObject({ tier: "global", localUpdates: "deferred" });
-  });
-
-  it("infers the own-write overlay policy from the product read tier", () => {
-    expect(resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.LocalFirst })).toMatchObject({
-      tier: "local",
-      localUpdates: "immediate",
-    });
-    expect(resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.Remote })).toMatchObject({
-      tier: "global",
-      localUpdates: "deferred",
-    });
+    ).toMatchObject({ tier: "remote" });
   });
 
   it.each([
-    [ReadTier.LocalFirst, "local", undefined],
-    [ReadTier.Remote, "global", JSON.stringify({ local_updates: "deferred" })],
+    [ReadTier.LocalFirst, "local-first", undefined],
+    [ReadTier.Remote, "remote", undefined],
   ] as const)(
     "keeps public %s reads full and derives their own-write policy",
     async (tier, nativeTier, expectedOptionsJson) => {
@@ -753,14 +711,34 @@ describe("public read tiers", () => {
       client.unsubscribe(subscription);
     },
   );
+  it.each([
+    ["local-first", "deferred", undefined],
+    ["remote", "immediate", undefined],
+  ] as const)(
+    "derives internal %s visibility despite an injected override",
+    async (tier, injected, expected) => {
+      const runtime = makeFakeRuntime();
+      runtime.query.mockResolvedValue([]);
+      runtime.createSubscription.mockReturnValue(7);
+      const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+      const options = { tier, localUpdates: injected } as any;
+      await client.queryInternal('{"relation_ir":{"table":"todos"}}', options);
+      const subscription = client.subscribeInternal(
+        '{"relation_ir":{"table":"todos"}}',
+        () => {},
+        options,
+      );
+      expect(runtime.query.mock.calls[0]?.[3]).toBe(expected);
+      expect(runtime.createSubscription.mock.calls[0]?.[3]).toBe(expected);
+      client.unsubscribe(subscription);
+    },
+  );
 });
 
 describe("internal read tiers", () => {
-  it("lowers local-only reads without exposing upstream propagation", () => {
+  it("preserves the internal local-only read tier", () => {
     expect(resolveEffectiveQueryExecutionOptions({}, { tier: "local-only" })).toMatchObject({
-      tier: "local",
-      localUpdates: "immediate",
-      propagation: "local-only",
+      tier: "local-only",
     });
   });
 });
@@ -916,7 +894,6 @@ describe("JazzClient transaction query plumbing", () => {
 
     await expect(
       client.queryInternal(JSON.stringify({ relation_ir: { table: "todos" } }), {
-        localUpdates: "deferred",
         openTransactionId: transactionId,
       }),
     ).resolves.toEqual([{ id: "todo-transaction-query", values: [] }]);
@@ -924,7 +901,6 @@ describe("JazzClient transaction query plumbing", () => {
     expect(runtime.query).toHaveBeenCalledTimes(1);
     const optionsJson = runtime.query.mock.calls[0][3];
     expect(JSON.parse(optionsJson as string)).toMatchObject({
-      local_updates: "deferred",
       transaction_id: transactionId,
     });
   });
@@ -1113,7 +1089,9 @@ describe("JazzClient mutation error handling", () => {
 
 it("rejects the removed edge read tier instead of silently choosing a local read", () => {
   const legacy = "edge" as never;
-  expect(() => resolveReadTier(legacy)).toThrow('The "edge" tier was removed');
+  expect(() => resolveEffectiveQueryExecutionOptions({}, { tier: legacy })).toThrow(
+    'The "edge" tier was removed',
+  );
   expect(() => publicQueryExecutionOptions({ tier: legacy })).toThrow(
     'The "edge" tier was removed',
   );

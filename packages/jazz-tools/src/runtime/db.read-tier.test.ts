@@ -1,3 +1,4 @@
+import type { ConnectionRequirement } from "./connection-manager/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReadTier, type JazzClient, type SubscriptionCallbacks } from "./client.js";
 import {
@@ -216,8 +217,8 @@ describe("Db read tiers and connection controls", () => {
     // Test-only access to force the deferred worker-start branch deterministically.
     const dbInternals = db as unknown as {
       connection: {
-        ensureReady: (tier?: string) => Promise<void>;
-        shouldDeferSubscriptionStart: (tier: string) => boolean;
+        ensureReady: (requirement: ConnectionRequirement) => Promise<void>;
+        shouldDeferSubscriptionStart: (requirement: ConnectionRequirement) => boolean;
       };
     };
     const connection = dbInternals.connection;
