@@ -2,6 +2,280 @@
 
 use super::*;
 
+/// Alice's combined total publishes every changed summary once, even when its
+/// first canonical value (the average) stays unchanged.
+///
+/// alice ──nullable seeds / insert / update / delete──► local aggregate stream
+#[test]
+fn local_combined_aggregate_publishes_changes_when_first_value_is_unchanged() {
+    use crate::query::Aggregate;
+
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .nullable_column("rank", PublicColumnType::Integer)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        TestStorage::new(&refs),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x6a; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .expect("open Alice's aggregate database");
+    let cells = |rank: Option<i32>| {
+        BTreeMap::from([(
+            "rank".to_owned(),
+            Value::Nullable(rank.map(|value| Box::new(Value::I32(value)))),
+        )])
+    };
+    for (id, rank) in [(1, None), (2, None), (3, Some(1)), (4, Some(1))] {
+        block_on(db.insert(
+            "items",
+            cells(rank),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        ))
+        .expect("seed nullable ranks");
+    }
+    let query = Query::from("items").aggregate(vec![
+        Aggregate::count(),
+        Aggregate::sum("rank"),
+        Aggregate::min("rank"),
+        Aggregate::max("rank"),
+        Aggregate::avg("rank"),
+    ]);
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        ..Default::default()
+    };
+    let prepared = db.prepare_query(&query).expect("prepare combined total");
+    let mut stream = block_on(db.subscribe(&prepared, opts.clone())).expect("subscribe");
+    let values = |output: &CurrentRow| {
+        ["count", "sum_rank", "min_rank", "max_rank", "avg_rank"].map(|name| {
+            match output.application_field(name).expect("aggregate field") {
+                Value::Nullable(Some(value)) => *value,
+                value => value,
+            }
+        })
+    };
+    let expected = |count, sum, min, max, avg| {
+        [
+            Value::U64(count),
+            Value::I32(sum),
+            Value::I32(min),
+            Value::I32(max),
+            Value::F64(avg),
+        ]
+    };
+    let Some(SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    }) = stream.try_next_event()
+    else {
+        panic!("expected opening combined total");
+    };
+    assert_eq!(added.len(), 1);
+    assert!(updated.is_empty() && removed.is_empty() && terminal_operations.is_empty());
+    let occurrence = added[0].occurrence_id.clone();
+    assert_eq!(values(&added[0].row), expected(4, 2, 1, 1, 1.0));
+    assert!(stream.try_next_event().is_none());
+
+    for (phase, summary) in [
+        ("insert", expected(5, 2, 0, 1, 2.0 / 3.0)),
+        ("update", expected(5, 4, 0, 2, 1.0)),
+        ("delete", expected(4, 3, 0, 2, 1.0)),
+    ] {
+        match phase {
+            "insert" => {
+                block_on(db.insert(
+                    "items",
+                    cells(Some(0)),
+                    crate::db::InsertOptions {
+                        row_id: Some(row(5)),
+                        ..Default::default()
+                    },
+                ))
+                .expect("insert zero rank");
+            }
+            "update" => {
+                block_on(db.update("items", row(2), cells(Some(2)), Default::default()))
+                    .expect("replace a null rank");
+            }
+            "delete" => {
+                block_on(db.delete("items", row(3), Default::default()))
+                    .expect("delete rank one while average stays one");
+            }
+            _ => unreachable!(),
+        }
+        let once = block_on(db.all(&prepared, opts.clone())).expect("one-shot total");
+        assert_eq!(once.len(), 1);
+        assert_eq!(values(&once[0]), summary, "{phase} one-shot");
+        let Some(SubscriptionEvent::Delta {
+            reset,
+            added,
+            updated,
+            removed,
+            terminal_operations,
+            ..
+        }) = stream.try_next_event()
+        else {
+            panic!("expected changed combined total after {phase}");
+        };
+        assert!(!reset);
+        assert!(added.is_empty() && removed.is_empty() && terminal_operations.is_empty());
+        assert_eq!(updated.len(), 1, "{phase} replaces the singleton once");
+        assert_eq!(updated[0].occurrence_id, occurrence);
+        assert_eq!(updated[0].index, 0);
+        assert_eq!(values(&updated[0].row), summary, "{phase} subscription");
+        assert!(stream.try_next_event().is_none(), "no duplicate {phase}");
+    }
+    block_on(db.update("items", row(2), cells(Some(2)), Default::default()))
+        .expect("write an equal rank");
+    assert!(stream.try_next_event().is_none(), "equal summary is silent");
+    block_on(db.tick()).expect("quiet owner tick");
+    assert!(stream.try_next_event().is_none(), "no delayed duplicate");
+}
+
+/// Alice receives all distinct string totals above one MiB, then receives a
+/// non-first total update without changing the aggregate occurrence.
+#[test]
+fn local_combined_aggregate_delivers_large_summary_and_subsequent_update() {
+    use crate::query::Aggregate;
+
+    let names = (0..18)
+        .map(|index| format!("text_{index:02}"))
+        .collect::<Vec<_>>();
+    let mut table = PublicTableSchemaBuilder::new("items");
+    for name in &names {
+        table = table.column(name, PublicColumnType::Text);
+    }
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            table.policies(
+                PublicTablePolicies::new()
+                    .with_select(PublicPolicyExpr::True)
+                    .with_insert(PublicPolicyExpr::True)
+                    .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+            ),
+        ),
+    );
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        TestStorage::new(&refs),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x6b; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .expect("open large-summary database");
+    let mut expected = names
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("{index:02}{}", "a".repeat(60 * 1024)))
+        .collect::<Vec<_>>();
+    assert!(expected.iter().map(String::len).sum::<usize>() > 1024 * 1024);
+    block_on(
+        db.insert(
+            "items",
+            names
+                .iter()
+                .cloned()
+                .zip(expected.iter().cloned().map(Value::String))
+                .collect(),
+            crate::db::InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ),
+    )
+    .expect("insert distinct string source columns");
+    let query =
+        Query::from("items").aggregate(names.iter().map(|name| Aggregate::min(name).alias(name)));
+    let prepared = db.prepare_query(&query).expect("prepare large total");
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        ..Default::default()
+    };
+    let mut stream = block_on(db.subscribe(&prepared, opts.clone())).expect("subscribe");
+    let assert_values = |output: &CurrentRow, expected: &[String]| {
+        for (name, value) in names.iter().zip(expected) {
+            assert_eq!(
+                output.application_field(name),
+                Some(Value::Nullable(Some(Box::new(Value::String(
+                    value.clone()
+                ))))),
+                "actual delivered value for {name}",
+            );
+        }
+    };
+    let Some(SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        ..
+    }) = stream.try_next_event()
+    else {
+        panic!("expected large opening summary");
+    };
+    assert_eq!(added.len(), 1);
+    assert!(updated.is_empty() && removed.is_empty());
+    assert_values(&added[0].row, &expected);
+    let occurrence = added[0].occurrence_id.clone();
+    assert!(stream.try_next_event().is_none());
+    expected[17] = "changed".repeat(9 * 1024);
+    block_on(db.update(
+        "items",
+        row(1),
+        BTreeMap::from([(names[17].clone(), Value::String(expected[17].clone()))]),
+        Default::default(),
+    ))
+    .expect("update the non-first large string");
+    let Some(SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        reset,
+        ..
+    }) = stream.try_next_event()
+    else {
+        panic!("expected changed large summary");
+    };
+    assert!(!reset && added.is_empty() && removed.is_empty());
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].occurrence_id, occurrence);
+    assert_values(&updated[0].row, &expected);
+    let once = block_on(db.all(&prepared, opts)).expect("one-shot large total");
+    assert_eq!(once.len(), 1);
+    assert_values(&once[0], &expected);
+    assert!(
+        stream.try_next_event().is_none(),
+        "no duplicate large summary"
+    );
+}
+
 #[test]
 fn maintained_physical_point_subscription_stays_live_for_only_its_row() {
     let schema = schema();

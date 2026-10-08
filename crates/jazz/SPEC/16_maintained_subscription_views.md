@@ -184,6 +184,26 @@ The concrete v1 byte contracts are:
   payload cells plus declared occurrence UUIDs and union labels; aggregate bytes
   contain only the declared groups and values.
   Member identity and query binding own omitted version/routing bookkeeping.
+- Aggregate replacement identity: zero outputs retain the scalar `String("empty")`
+  envelope; one output retains its exact canonical scalar descriptor/value
+  envelope and existing one-MiB identity limit. Two or more outputs use BLAKE3
+  over UTF-8 `jazz aggregate replacement v1`, the complete aggregate `JRPD`
+  descriptor length as little-endian `U64`, those descriptor bytes, canonical
+  row length as little-endian `U64`, then those row bytes. The 32 digest bytes
+  are wrapped in the existing runtime scalar `Bytes` descriptor/value envelope.
+  Hashing consumes the already materialised canonical publication, without an
+  allocated concatenated preimage or a second summary encoding. Producers and
+  validators use this same preimage; complete role/name/type and canonical row
+  validation MUST precede validation of the digest. Execution and nested runtime
+  bindings do not enter it, but logical names, recursive types and enum registry
+  identities do. A change to any output changes the replacement token (subject
+  to the BLAKE3 collision assumption); equal complete summaries still cancel
+  their before/after weights. The group-derived row identity and public
+  occurrence remain unchanged, including the fixed global group identity.
+  The scalar identity limit MUST NOT be applied to a complete multi-output
+  summary: previously admitted payloads above one MiB remain admitted, while
+  their replacement token has bounded size. This corrects an opaque, volatile
+  runtime discriminator; it changes no wire, durable, `JRPD` or binding format.
 - Root publication hash: BLAKE3 over ASCII `jazz terminal root publication v1`,
   the persisted role descriptor, root byte-layout position as little-endian
   `U64`, and carrier byte (`0` current-row, `1` logical). In descriptor order,
