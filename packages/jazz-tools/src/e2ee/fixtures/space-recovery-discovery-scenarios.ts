@@ -17,7 +17,7 @@ export const app = s.defineApp({
   projects: s.table({ title: s.string() }, {}),
 });
 
-export async function fixture(allowGrantDeletion = false) {
+async function ownerFixture(allowGrantDeletion = false) {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients = new Set<Db>();
   const cleanup = async () => {
@@ -110,17 +110,8 @@ export async function fixture(allowGrantDeletion = false) {
       return db;
     };
     const ownerAccount = await localAccountConfig(server.appId, server.url);
-    const recipientAccount = await localAccountConfig(server.appId, server.url);
     const owner = await open(ownerAccount);
-    const recipient = await open(recipientAccount, true);
     await owner.e2ee.devices.list();
-    await recipient.e2ee.devices.list();
-    const parent = await owner.e2ee.groups.create().wait();
-    const child = await owner.e2ee.groups.create().wait();
-    await owner.e2ee.groups
-      .add(child.id, { kind: "account", id: recipientAccount.account.id })
-      .wait();
-    await owner.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
     const project = async (title: string, recipientId = ownerAccount.account.id) => {
       const row = await owner.insert(app.projects, { title }).wait({ tier: "global" });
       await owner.e2ee.spaces.grant(app.projects, row.id, recipientId).wait();
@@ -132,10 +123,7 @@ export async function fixture(allowGrantDeletion = false) {
     };
     return {
       owner,
-      recipient,
-      recipientAccount,
-      parent,
-      child,
+      newAccount: () => localAccountConfig(server.appId, server.url),
       project,
       open,
       close,
@@ -147,6 +135,39 @@ export async function fixture(allowGrantDeletion = false) {
     };
   } catch (error) {
     await cleanup();
+    throw error;
+  }
+}
+
+// Nested recipients remain fresh for every discovery and recovery scenario.
+export async function fixture() {
+  const base = await ownerFixture();
+  try {
+    const recipientAccount = await base.newAccount();
+    const recipient = await base.open(recipientAccount, true);
+    await recipient.e2ee.devices.list();
+    const parent = await base.owner.e2ee.groups.create().wait();
+    const child = await base.owner.e2ee.groups.create().wait();
+    await base.owner.e2ee.groups
+      .add(child.id, { kind: "account", id: recipientAccount.account.id })
+      .wait();
+    await base.owner.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
+    return { ...base, recipientAccount, recipient, parent, child };
+  } catch (error) {
+    await base.cleanup();
+    throw error;
+  }
+}
+
+// Initial-grant deletion requires a genuine group recipient, but no nested
+// recipients. Keep its owner, store, deployment and group independent.
+export async function deletedGrantFixture() {
+  const base = await ownerFixture(true);
+  try {
+    const parent = await base.owner.e2ee.groups.create().wait();
+    return { ...base, parent };
+  } catch (error) {
+    await base.cleanup();
     throw error;
   }
 }

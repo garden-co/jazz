@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
-import { app, fixture } from "./fixtures/space-recovery-discovery-scenarios.js";
+import { app, deletedGrantFixture } from "./fixtures/space-recovery-discovery-scenarios.js";
 it("fails closed when the only initial group-recipient grant is deleted", async () => {
-  const f = await fixture(true);
+  const f = await deletedGrantFixture();
   try {
     const target = await f.project("Deleted initial group grant", f.parent.id);
     expect(await f.owner.e2ee.explain(target)).toEqual({ state: "ready" });
