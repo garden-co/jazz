@@ -1061,12 +1061,16 @@ export class Spaces {
       };
     }
     // Recipient eligibility belongs to the public transaction's fixed snapshot.
-    // Online reads cover cold history at that coordinate; offline reads use only
-    // accepted local rows from that same snapshot.
+    // External recipients need online coverage at that coordinate. Offline
+    // proposals use only accepted local rows from that same snapshot.
     const offline = await this.db.e2eeIsExplicitlyOffline();
+    // A creator-only proposal does not introduce another recipient. Its accepted
+    // local history must remain usable after transport loss, without requiring
+    // an explicit disconnect. Keep live coverage for external recipients.
+    const creatorOnly = initialRecipientIds(recipientIds).every((id) => id === this.accountId);
     const reader: E2eeHistoryReader = {
       allSettledForE2ee: (query) =>
-        tx.allSettledForE2ee(query, offline ? "local-only" : undefined, true),
+        tx.allSettledForE2ee(query, offline || creatorOnly ? "local-only" : undefined, true),
     };
     try {
       return await this.acceptedInitialEligibility(reader, deviceId, recipientIds);
