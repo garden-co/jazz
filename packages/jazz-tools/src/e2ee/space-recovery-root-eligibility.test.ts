@@ -44,15 +44,18 @@ function canonicalId(scopeId: string, identifier: string): string {
 }
 
 it.each([
-  "wrong-ID same-address",
-  "wrong-ID before canonical",
-  "covered-empty strict-before creator",
-  "inactive creator",
-  "wrong-epoch creator",
-  "operational verifier fault",
+  {
+    name: "noncanonical roots",
+    candidates: ["wrong-ID same-address", "wrong-ID before canonical"],
+  },
+  {
+    name: "ineligible creators",
+    candidates: ["covered-empty strict-before creator", "inactive creator", "wrong-epoch creator"],
+  },
+  { name: "operational verifier fault", candidates: [] },
 ] as const)(
-  "isolates native recovery root eligibility (%s)",
-  async (scenario) => {
+  "isolates native recovery root eligibility ($name)",
+  async ({ name, candidates }) => {
     const app = s.defineApp({
       ...deviceRequestSchema,
       ...spaceSchema,
@@ -123,7 +126,10 @@ it.each([
       const { material } = await db.e2ee.recovery.create().wait();
       let otherRecipient: string | undefined;
 
-      if (scenario !== "operational verifier fault") {
+      // Each candidate has its own signed root and grant. All must be ignored by
+      // status, creation and restoration while the honest space remains usable.
+      // Grouping candidates shares that complete recovery workflow, not authority.
+      for (const scenario of candidates) {
         let writer = db;
         let authorId = accountId;
         let author = device;
@@ -328,7 +334,7 @@ it.each([
           return native.deviceSigner.verify(publicKey, record, signature);
         };
       };
-      if (scenario === "operational verifier fault") {
+      if (name === "operational verifier fault") {
         armVerifierFault();
         await expect(db.e2ee.recovery.status(material)).rejects.toBe(verifierFailure);
         await expect(db.e2ee.recovery.create().wait()).rejects.toBe(verifierFailure);
@@ -347,7 +353,7 @@ it.each([
       expect(replacement.getSnapshot().account!.id).toBe(accountId);
       const pending = (await recovered.e2ee.devices.list()).find((row) => row.state === "pending");
       expect(pending).toBeDefined();
-      if (scenario === "operational verifier fault") {
+      if (name === "operational verifier fault") {
         armVerifierFault();
         await expect(recovered.e2ee.recovery.use(material).wait()).rejects.toBe(verifierFailure);
         adapters.deviceSigner.verify = native.deviceSigner.verify;
