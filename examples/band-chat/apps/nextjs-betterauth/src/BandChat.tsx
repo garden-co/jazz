@@ -81,8 +81,19 @@ function Rooms({
   profile,
   onSignOut,
 }: BandChatProps & { author: string; profile: Profile }) {
-  const { data: rooms = [] } = useAll(app.rooms.select("*", "$createdBy", "$createdAt"));
+  // Each room comes with its newest message: it orders the list, and a room
+  // is unread when that message is someone else's and newer than this
+  // reader's marker. Nobody writes to the room when they post.
+  const { data: rooms = [] } = useAll(
+    app.rooms.select("*", "$createdBy", "$createdAt").include({
+      messagesViaRoom: app.messages
+        .select("senderId", "text", "$createdAt")
+        .orderBy("$createdAt", "desc")
+        .limit(1),
+    }),
+  );
   const { data: memberships = [] } = useAll(app.roomMembers.where({ memberAuthor: author }));
+  // Co-members can read markers too (check marks); the list needs only ours.
   const { data: markers = [] } = useAll(app.readMarkers.where({ reader: author }));
   const [selectedRoomId, setSelectedRoomId] = useSearchParam("room");
   const [joinRoomId, setJoinRoomId] = useSearchParam("join");
@@ -99,19 +110,21 @@ function Rooms({
     }
     return rooms
       .filter((room) => memberOf.has(room.id) || room.$createdBy.account === author)
-      .map((room) => {
-        const activityAt = room.lastActivityAt ?? room.$createdAt;
+      .map(({ messagesViaRoom, ...room }) => {
+        const newest = messagesViaRoom[0];
         const readAt = lastRead.get(room.id);
         return {
           room,
-          activityAt,
+          newest,
+          activityAt: newest?.$createdAt ?? room.$createdAt,
           readAt,
           isCreator: room.$createdBy.account === author,
-          hasUnread: !!room.lastActivityAt && (!readAt || readAt < room.lastActivityAt),
+          hasUnread:
+            !!newest && newest.senderId !== profile.id && (!readAt || readAt < newest.$createdAt),
         };
       })
       .sort((a, b) => b.activityAt.getTime() - a.activityAt.getTime());
-  }, [rooms, memberships, markers, author]);
+  }, [rooms, memberships, markers, author, profile.id]);
 
   const selected =
     summaries.find((summary) => summary.room.id === selectedRoomId) ??

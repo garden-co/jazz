@@ -51,7 +51,11 @@ const workloadSpecs = {
     // Former W1 diagnostics: scaling points and memory twins.
     nightly: { benches: ["nightly"], env: {}, timeout: 40 },
   },
-  "band-chat": nativeExample("band-chat"),
+  "band-chat": {
+    ...nativeExample("band-chat"),
+    // The band after years of use: 11 cases, each seeding 303,695 messages.
+    nightly: { benches: ["nightly"], env: {}, timeout: 40 },
+  },
   "band-book": {
     ...nativeExample("band-book"),
     // The rest of the policy sweep: the other arms and the 10k table.

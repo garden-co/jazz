@@ -37,14 +37,28 @@ product slice, not another generic Todo tutorial.
   external issuer and subject remain account identity metadata, never
   membership values. Revocation rejects subsequent writes at the serving
   authority; it does not erase rows already retained locally.
-- **Unread state.** `rooms.lastActivityAt` is a denormalized carrier that any
-  member may bump (an `exists` check against the stored row keeps the name
-  creator-only). The value is not bounded by the policy: a member can write any
-  time, including a future one, which keeps the room at the top of everyone's
-  list. Opening the room still clears it, because a read marker never lags the
-  room's activity. Each reader keeps a private `readMarkers` row per room; a room
-  is unread when its activity is newer than the marker, and only unread rooms pay
-  for a bounded count query.
+- **Unread state.** The room list reads each room with its newest message
+  (`messagesViaRoom`, newest first, limit 1), which also orders the list.
+  Nobody writes to the room when they post, so no member can keep a room on
+  top or hide new messages from others. Each reader keeps one `readMarkers` row
+  per room holding the `$createdAt` of the newest message they have seen; it
+  only moves forward. A room is unread when its newest message was sent by
+  someone else after the marker, and only unread rooms pay for a count, capped
+  at 100. `$createdAt` is the sender's clock, so a message sent from a clock
+  far behind can land before the marker and not count as unread.
+- **Read receipts.** Markers are readable by the room's members: under your own
+  messages, one check mark means sent and two mean another member's marker has
+  reached it. Every marker move also appends a `readProgress` row in the same
+  transaction. "Read by" on your message lists the members whose journal
+  reaches it, dated by the first entry that did. The journal grows with marker
+  moves, not with messages times readers; a member who jumps to the end reads
+  everything they skipped at once. BandChat does not limit who may see read
+  dates by room size or message age; Telegram, for example, stops at 100
+  participants and 7 days.
+- **History.** A room opens on its newest 50 messages, each with its reactions.
+  Older messages load 50 at a time before a cursor (`$createdAt < oldest
+shown`), never by offset; once older pages are loaded, the live window keeps
+  everything from its oldest message on, so new messages cannot open a gap.
 - **Attachments** stream into the message row with `db.insertStreaming`. The
   room timeline selects message metadata only. An image or audio attachment
   reads its bytes once it scrolls near the viewport, and any other file only
