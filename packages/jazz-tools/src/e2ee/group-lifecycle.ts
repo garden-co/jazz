@@ -23,7 +23,6 @@ import type {
 } from "./groups.js";
 import {
   readPublicMembershipHistory,
-  readAccountMembership,
   prefetchPublicMembershipHistory,
   replayAccountMembership,
   historyBefore,
@@ -456,15 +455,7 @@ export class Groups {
     await Promise.all(
       [
         ...new Set([observed.accountId, memberKind === "account" ? memberId : child!.accountId]),
-      ].map((accountId) =>
-        readAccountMembership(
-          this.db,
-          accountId,
-          this.accountContext(accountId),
-          this.signer,
-          this.tables,
-        ),
-      ),
+      ].map((accountId) => prefetchPublicMembershipHistory(this.db, accountId, this.tables)),
     );
     const relatedGroupId = memberKind === "group" ? memberId : undefined;
     await this.warmMembership({
@@ -482,6 +473,14 @@ export class Groups {
           author.publicHistory,
           relatedGroupId,
         );
+        // Preserve full-current discovery validation even for creators who have
+        // left their group; historical root replay alone checks only its prefix.
+        const creatorIds = new Set([observed.accountId, ...(child ? [child.accountId] : [])]);
+        for (const accountId of creatorIds) {
+          const history = group.histories.get(accountId);
+          if (!history) throw new Error("Missing E2EE group creator account history");
+          await replayAccountMembership(history, this.accountContext(accountId), this.signer);
+        }
         const roots = group.targetRoots;
         if (roots.rows[0]?.accountId !== observed.accountId)
           throw new Error("E2EE group creator changed");
