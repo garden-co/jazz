@@ -248,7 +248,7 @@ describe("group recovery adapter classification", () => {
         owner = await f.open(adapters, ownerStore);
         observer = await f.open(adapters);
         await readyStatus(observer, root, groupId);
-        await observer.e2ee.recovery.use(root.material).wait();
+        if (surface !== "status") await observer.e2ee.recovery.use(root.material).wait();
         expect(await owner.e2ee.explain({ groupId })).toEqual({ state: "ready" });
         const activeOwner = owner;
         const activeObserver = observer;
