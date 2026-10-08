@@ -10,7 +10,7 @@ import { JoinRoom } from "./components/JoinRoom";
 import { NewRoomDialog } from "./components/NewRoomDialog";
 import { ProfileDialog, ProfileSetup } from "./components/ProfileDialog";
 import { RoomNav, type RoomSummary } from "./components/RoomNav";
-import { RoomView } from "./components/RoomView";
+import { RoomView, usePrefetchRoom } from "./components/RoomView";
 import { UnsentMessagesProvider, UnsentNotices } from "./components/UnsentNotices";
 import { ProfileDirectoryProvider } from "./lib/profiles";
 import { memoryStore, ParamStoreProvider, useSearchParam } from "./lib/url-state";
@@ -61,6 +61,12 @@ function Workspace({ author, ...props }: BandChatProps & { author: string }) {
   const { data: myProfiles } = useAll(
     app.profiles.where({ author }).orderBy("$createdAt", "asc").limit(1),
   );
+  // None of these depend on the profile: open them together with it, and the
+  // open room's messages too when the URL names the room, instead of one
+  // after the other as each component mounts.
+  const roomData = useRoomData(author);
+  const [selectedRoomId] = useSearchParam("room");
+  usePrefetchRoom(selectedRoomId);
   if (!myProfiles) return <Loading label="Loading your profile…" />;
   // Profile creation is an explicit first-run action, never a read side effect.
   // Two tabs finishing setup at once can create two profiles; the oldest wins.
@@ -70,20 +76,31 @@ function Workspace({ author, ...props }: BandChatProps & { author: string }) {
   return (
     <ProfileDirectoryProvider me={profile}>
       <UnsentMessagesProvider>
-        <Rooms author={author} profile={profile} {...props} />
+        <Rooms author={author} profile={profile} roomData={roomData} {...props} />
       </UnsentMessagesProvider>
     </ProfileDirectoryProvider>
   );
 }
 
+type RoomData = ReturnType<typeof useRoomData>;
+
+/** The rooms, memberships and read markers behind the room list; undefined while loading. */
+function useRoomData(author: string) {
+  const { data: rooms } = useAll(app.rooms.select("*", "$createdBy", "$createdAt"));
+  const { data: memberships } = useAll(app.roomMembers.where({ memberAuthor: author }));
+  const { data: markers } = useAll(app.readMarkers.where({ reader: author }));
+  return { rooms, memberships, markers };
+}
+
 function Rooms({
   author,
   profile,
+  roomData,
   onSignOut,
-}: BandChatProps & { author: string; profile: Profile }) {
-  const { data: rooms = [] } = useAll(app.rooms.select("*", "$createdBy", "$createdAt"));
-  const { data: memberships = [] } = useAll(app.roomMembers.where({ memberAuthor: author }));
-  const { data: markers = [] } = useAll(app.readMarkers.where({ reader: author }));
+}: BandChatProps & { author: string; profile: Profile; roomData: RoomData }) {
+  const { rooms = [], memberships = [], markers = [] } = roomData;
+  // "No rooms yet" and the join prompt wait for the real answer.
+  const isLoadingRooms = !roomData.rooms || !roomData.memberships || !roomData.markers;
   const [selectedRoomId, setSelectedRoomId] = useSearchParam("room");
   const [joinRoomId, setJoinRoomId] = useSearchParam("join");
   const [isNewRoomOpen, setNewRoomOpen] = useState(false);
@@ -134,7 +151,9 @@ function Rooms({
   }
 
   let main;
-  if (joinRoomId && !joinedRoom) {
+  if (isLoadingRooms && !selected) {
+    main = <Loading label="Loading rooms…" />;
+  } else if (joinRoomId && !joinedRoom) {
     main = <JoinRoom roomId={joinRoomId} profile={profile} onDismiss={() => setJoinRoomId(null)} />;
   } else if (selected) {
     main = <RoomView key={selected.room.id} summary={selected} author={author} />;

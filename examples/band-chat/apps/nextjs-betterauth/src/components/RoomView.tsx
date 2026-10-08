@@ -7,6 +7,7 @@ import {
   Badge,
   Banner,
   Button,
+  Center,
   ChatLayout,
   ChatMessage,
   ChatMessageBubble,
@@ -19,6 +20,7 @@ import {
   HStack,
   MobileNavToggle,
   MoreMenu,
+  Spinner,
   StackItem,
   Timestamp,
   VStack,
@@ -52,31 +54,48 @@ export type MessageSummary = {
   $createdAt: Date;
 };
 
+/** A room's newest messages, newest first. */
+export const roomMessagesQuery = (roomId: string) =>
+  app.messages
+    .where({ roomId })
+    .select(
+      "id",
+      "roomId",
+      "senderId",
+      "text",
+      "attachmentName",
+      "attachmentType",
+      "attachmentSize",
+      "canvasId",
+      "$createdAt",
+    )
+    .orderBy("$createdAt", "desc")
+    .limit(HISTORY_PAGE);
+export const roomReactionsQuery = (roomId: string) => app.reactions.where({ roomId });
+export const roomMembersQuery = (roomId: string) => app.roomMembers.where({ roomId });
+
+/**
+ * Opens a room's queries before its view mounts. Queries are shared by key,
+ * so when the room id is already known (from the URL) the room's messages
+ * load alongside the profile and room list instead of after them.
+ */
+export function usePrefetchRoom(roomId: string | null) {
+  useAll(roomId ? roomMessagesQuery(roomId) : undefined);
+  useAll(roomId ? roomReactionsQuery(roomId) : undefined);
+  useAll(roomId ? roomMembersQuery(roomId) : undefined);
+}
+
 export function RoomView({ summary, author }: { summary: RoomSummary; author: string }) {
   const db = useDb();
   const directory = useDirectory();
   const { room, isCreator } = summary;
   const roomId = room.id;
-  const { data: newestFirst = [] } = useAll(
-    app.messages
-      .where({ roomId })
-      .select(
-        "id",
-        "roomId",
-        "senderId",
-        "text",
-        "attachmentName",
-        "attachmentType",
-        "attachmentSize",
-        "canvasId",
-        "$createdAt",
-      )
-      .orderBy("$createdAt", "desc")
-      .limit(HISTORY_PAGE),
-  );
-  const messages = useMemo(() => [...newestFirst].reverse(), [newestFirst]);
-  const { data: reactions = [] } = useAll(app.reactions.where({ roomId }));
-  const { data: loadedMembers } = useAll(app.roomMembers.where({ roomId }));
+  const { data: newestFirst } = useAll(roomMessagesQuery(roomId));
+  // Undefined until the first result: "No messages yet" only for a room that has none.
+  const isLoadingMessages = newestFirst === undefined;
+  const messages = useMemo(() => [...(newestFirst ?? [])].reverse(), [newestFirst]);
+  const { data: reactions = [] } = useAll(roomReactionsQuery(roomId));
+  const { data: loadedMembers } = useAll(roomMembersQuery(roomId));
   const members = loadedMembers ?? [];
   const { data: requests = [] } = useAll(
     isCreator ? app.joinRequests.where({ roomId }) : undefined,
@@ -221,19 +240,25 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
             />
           }
           emptyState={
-            <EmptyState
-              title="No messages yet"
-              description={
-                isCreator
-                  ? "Say hello, or invite bandmates with the room link."
-                  : "Say hello to the band."
-              }
-              actions={
-                isCreator ? (
-                  <Button label="Invite bandmates" onClick={() => setMembersOpen(true)} />
-                ) : undefined
-              }
-            />
+            isLoadingMessages ? (
+              <Center axis="both" padding={4}>
+                <Spinner label="Loading messages…" />
+              </Center>
+            ) : (
+              <EmptyState
+                title="No messages yet"
+                description={
+                  isCreator
+                    ? "Say hello, or invite bandmates with the room link."
+                    : "Say hello to the band."
+                }
+                actions={
+                  isCreator ? (
+                    <Button label="Invite bandmates" onClick={() => setMembersOpen(true)} />
+                  ) : undefined
+                }
+              />
+            )
           }
         >
           {messages.length > 0 ? (
