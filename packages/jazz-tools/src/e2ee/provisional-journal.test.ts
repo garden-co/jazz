@@ -4,7 +4,7 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { accountRegistry } from "../accounts/enrollment.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { createBrowserCrypto } from "./browser.js";
-import { localDevice } from "./local-device.js";
+import { DeviceKeyLifetime, localDevice } from "./local-device.js";
 import { accountEpochContext, confirmAccountEpoch } from "./first-epoch.js";
 import { InitializationJournal, type FounderProposal } from "./provisional-initialization.js";
 
@@ -26,9 +26,10 @@ it("atomically reuses one device-bound sealed founder epoch across competing loc
   };
   const scope = JSON.stringify([accountRegistry(config.account), "main", config.account.id]);
   const crypto = await createBrowserCrypto();
+  const lifetime = new DeviceKeyLifetime();
   const [firstDevice, secondDevice] = await Promise.all([
-    localDevice(store, scope, crypto.keyEnvelope, crypto.deviceSigner, () => {}),
-    localDevice(store, scope, crypto.keyEnvelope, crypto.deviceSigner, () => {}),
+    localDevice(store, scope, crypto.keyEnvelope, crypto.deviceSigner, lifetime, () => {}),
+    localDevice(store, scope, crypto.keyEnvelope, crypto.deviceSigner, lifetime, () => {}),
   ]);
   try {
     expect(secondDevice.id).toBe(firstDevice.id);
@@ -114,10 +115,7 @@ it("atomically reuses one device-bound sealed founder epoch across competing loc
     value = original;
     expect(await reopened.claimFounder(first)).toEqual(first);
   } finally {
-    for (const device of [firstDevice, secondDevice]) {
-      device.privateKey.fill(0);
-      device.signing.privateKey.fill(0);
-    }
+    lifetime.close();
     await db.shutdown();
   }
 });

@@ -2,7 +2,7 @@ import type { AccountStore } from "../accounts/persistence.js";
 import type { Db, E2eeTransactionScope } from "../runtime/db.js";
 import { initializationStatus, journalE2eeInitialization } from "../runtime/db.js";
 import type { ReservedTxId } from "../runtime/provisional-initialization.js";
-import { decodeLocalDeviceStore, type StoredDevices } from "./local-device.js";
+import { DeviceKeyLifetime, withLocalDeviceStore, type StoredDevices } from "./local-device.js";
 import type { SpaceRoot, SpaceGrant } from "./spaces.js";
 
 export class E2eeInitializationNotReady extends Error {
@@ -85,32 +85,43 @@ function decode(value: string): Proposal {
     throw new Error("Invalid E2EE space proposal");
   return proposal;
 }
-function stored(value: string | null) {
-  const state = decodeLocalDeviceStore(value) as StoredDevices & {
-    initializationJournalV1?: StoredEntry[];
-  };
-  const entries = state.initializationJournalV1 ?? [];
-  if (!Array.isArray(entries)) throw new Error("Invalid E2EE initialization journal");
-  const seen = new Set<string>();
-  for (const entry of entries) {
-    if (
-      !entry ||
-      typeof entry.scope !== "string" ||
-      typeof entry.proposal !== "string" ||
-      typeof entry.local !== "boolean" ||
-      !["pending", "accepted", "rejected", "interrupted"].includes(entry.outcome) ||
-      (entry.promoted !== undefined && typeof entry.promoted !== "boolean") ||
-      (entry.promoted === true && entry.outcome !== "accepted") ||
-      (entry.reservation !== undefined && typeof entry.reservation !== "string") ||
-      (entry.local && !entry.reservation)
-    )
-      throw new Error("Invalid E2EE initialization entry");
-    const proposal = decode(entry.proposal);
-    const key = JSON.stringify([entry.scope, proposal.kind, proposal.id]);
-    if (seen.has(key)) throw new Error("Duplicate E2EE initialization proposal");
-    seen.add(key);
+function stored<T>(
+  value: string | null,
+  use: (stored: {
+    state: StoredDevices & { initializationJournalV1?: StoredEntry[] };
+    entries: StoredEntry[];
+  }) => T,
+): T {
+  const lifetime = new DeviceKeyLifetime();
+  try {
+    return withLocalDeviceStore(value, lifetime, (parsed) => {
+      const state = parsed as StoredDevices & { initializationJournalV1?: StoredEntry[] };
+      const entries = state.initializationJournalV1 ?? [];
+      if (!Array.isArray(entries)) throw new Error("Invalid E2EE initialization journal");
+      const seen = new Set<string>();
+      for (const entry of entries) {
+        if (
+          !entry ||
+          typeof entry.scope !== "string" ||
+          typeof entry.proposal !== "string" ||
+          typeof entry.local !== "boolean" ||
+          !["pending", "accepted", "rejected", "interrupted"].includes(entry.outcome) ||
+          (entry.promoted !== undefined && typeof entry.promoted !== "boolean") ||
+          (entry.promoted === true && entry.outcome !== "accepted") ||
+          (entry.reservation !== undefined && typeof entry.reservation !== "string") ||
+          (entry.local && !entry.reservation)
+        )
+          throw new Error("Invalid E2EE initialization entry");
+        const proposal = decode(entry.proposal);
+        const key = JSON.stringify([entry.scope, proposal.kind, proposal.id]);
+        if (seen.has(key)) throw new Error("Duplicate E2EE initialization proposal");
+        seen.add(key);
+      }
+      return use({ state, entries });
+    });
+  } finally {
+    lifetime.close();
   }
-  return { state, entries };
 }
 
 export class InitializationJournal {
@@ -270,7 +281,7 @@ export class InitializationJournal {
     return pending;
   }
   async entries(): Promise<Entry[]> {
-    const { entries } = stored(await this.store.read());
+    const entries = stored(await this.store.read(), ({ entries }) => entries);
     this.assertOpen();
     return entries
       .filter((entry) => entry.scope === this.scope)
@@ -281,27 +292,30 @@ export class InitializationJournal {
     let selected: FounderProposal | undefined;
     await this.store.update((value) => {
       this.assertOpen();
-      const { state, entries } = stored(value);
-      const found = entries.find(
-        (entry) => entry.scope === this.scope && decode(entry.proposal).kind === "founder",
-      );
-      if (found) {
-        selected = decode(found.proposal) as FounderProposal;
-        if (selected.id !== proposal.id) throw new Error("Founder account mismatch");
-        if (found.outcome === "rejected" || found.outcome === "interrupted")
-          throw new E2eeInitializationNotReady("The original founder proposal cannot be replayed");
-        if (selected.deviceId !== proposal.deviceId) throw new Error("Founder device mismatch");
-      } else {
-        selected = proposal;
-        entries.push({
-          scope: this.scope,
-          proposal: encode(proposal),
-          local: false,
-          outcome: "pending",
-        });
-      }
-      state.initializationJournalV1 = entries;
-      return JSON.stringify(state);
+      return stored(value, ({ state, entries }) => {
+        const found = entries.find(
+          (entry) => entry.scope === this.scope && decode(entry.proposal).kind === "founder",
+        );
+        if (found) {
+          selected = decode(found.proposal) as FounderProposal;
+          if (selected.id !== proposal.id) throw new Error("Founder account mismatch");
+          if (found.outcome === "rejected" || found.outcome === "interrupted")
+            throw new E2eeInitializationNotReady(
+              "The original founder proposal cannot be replayed",
+            );
+          if (selected.deviceId !== proposal.deviceId) throw new Error("Founder device mismatch");
+        } else {
+          selected = proposal;
+          entries.push({
+            scope: this.scope,
+            proposal: encode(proposal),
+            local: false,
+            outcome: "pending",
+          });
+        }
+        state.initializationJournalV1 = entries;
+        return JSON.stringify(state);
+      });
     });
     if (!selected) throw new Error("Initialization store did not perform its atomic update");
     return selected;
@@ -311,15 +325,16 @@ export class InitializationJournal {
     let updated = false;
     await this.store.update((value) => {
       this.assertOpen();
-      const { state, entries } = stored(value);
-      const entry = entries.find(
-        (entry) => entry.scope === this.scope && decode(entry.proposal).id === id,
-      );
-      if (!entry) throw new Error("Missing E2EE initialization journal entry");
-      change(entry);
-      state.initializationJournalV1 = entries;
-      updated = true;
-      return JSON.stringify(state);
+      return stored(value, ({ state, entries }) => {
+        const entry = entries.find(
+          (entry) => entry.scope === this.scope && decode(entry.proposal).id === id,
+        );
+        if (!entry) throw new Error("Missing E2EE initialization journal entry");
+        change(entry);
+        state.initializationJournalV1 = entries;
+        updated = true;
+        return JSON.stringify(state);
+      });
     });
     if (!updated) throw new Error("Initialization store did not perform its atomic update");
     this.assertOpen();
@@ -331,29 +346,30 @@ export class InitializationJournal {
         let updated = false;
         await this.store.update((value) => {
           this.assertOpen();
-          const { state, entries } = stored(value);
-          let entry = entries.find(
-            (entry) => entry.scope === this.scope && decode(entry.proposal).id === proposal.id,
-          );
-          if (entry?.reservation && entry.reservation !== reservation)
-            throw new E2eeInitializationNotReady(
-              "The original initialization transaction already exists",
+          return stored(value, ({ state, entries }) => {
+            let entry = entries.find(
+              (entry) => entry.scope === this.scope && decode(entry.proposal).id === proposal.id,
             );
-          if (!entry) {
-            entry = {
-              scope: this.scope,
-              proposal: encode(proposal),
-              local: false,
-              outcome: "pending",
-            };
-            entries.push(entry);
-          }
-          if (entry.outcome !== "pending")
-            throw new E2eeInitializationNotReady("Initialization is terminal");
-          entry.reservation = reservation;
-          state.initializationJournalV1 = entries;
-          updated = true;
-          return JSON.stringify(state);
+            if (entry?.reservation && entry.reservation !== reservation)
+              throw new E2eeInitializationNotReady(
+                "The original initialization transaction already exists",
+              );
+            if (!entry) {
+              entry = {
+                scope: this.scope,
+                proposal: encode(proposal),
+                local: false,
+                outcome: "pending",
+              };
+              entries.push(entry);
+            }
+            if (entry.outcome !== "pending")
+              throw new E2eeInitializationNotReady("Initialization is terminal");
+            entry.reservation = reservation;
+            state.initializationJournalV1 = entries;
+            updated = true;
+            return JSON.stringify(state);
+          });
         });
         if (!updated) throw new Error("Initialization store did not perform its atomic update");
         this.assertOpen();

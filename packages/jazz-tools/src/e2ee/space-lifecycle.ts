@@ -62,6 +62,7 @@ import {
 
 type DeviceState = {
   active: Set<string>;
+  verified: Set<string>;
   epochId: string;
   publicHistory: PublicMembershipHistory;
 };
@@ -2175,8 +2176,7 @@ export class Spaces {
         return { state: "ready" };
       } finally {
         secret?.fill(0);
-        device.privateKey.fill(0);
-        device.signing.privateKey.fill(0);
+        this.requireDevice().release(device);
       }
     }
     let used = false;
