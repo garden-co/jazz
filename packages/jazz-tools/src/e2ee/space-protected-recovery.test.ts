@@ -25,7 +25,7 @@ function isSpaceRecovery(bytes: Uint8Array) {
   return text.includes("jazz.e2ee.space.v1") && text.includes("recovery-delivery");
 }
 
-async function fixture() {
+async function fixture(rootCount = 2) {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients = new Set<Db>();
   const clearStores: (() => void)[] = [];
@@ -118,7 +118,7 @@ async function fixture() {
     await owner.e2ee.spaces.grant(app.projects, project.id, account.id).wait();
     const target = { scope: app.projects, identifier: project.id };
     expect(await owner.e2ee.explain(target)).toEqual({ state: "ready" });
-    for (let index = 0; index < 2; index++) {
+    for (let index = 0; index < rootCount; index++) {
       const before = new Set(
         (await owner.all(app.__e2ee_recovery_roots, { tier: "global" })).map((row) => row.id),
       );
@@ -226,7 +226,9 @@ it("tries another protected recovery root when the first space delivery is unusa
 }, 60_000);
 
 it("reports fixed space recovery exhaustion for explicit material", async () => {
-  const f = await fixture();
+  // Explicit recovery addresses one root. The other tests retain two protectors
+  // to prove fallback and abort-before-fallback independently.
+  const f = await fixture(1);
   try {
     const failure = new Error("private-space-envelope-diagnostic", {
       cause: { secret: "private-space-envelope-diagnostic" },
