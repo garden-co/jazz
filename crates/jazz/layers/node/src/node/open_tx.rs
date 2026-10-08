@@ -349,6 +349,7 @@ where
         let local_base = self.tx_time_high_water();
         let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
         let mut accepted_e2ee_dots = Vec::new();
+        let mut accepted_e2ee_dot_positions = BTreeMap::new();
         for global_time in self.clock.applied_global_times_after_frontier.clone() {
             let ids = self.transaction_ids_for_global_time(global_time).await?;
             for id in &ids {
@@ -357,6 +358,7 @@ where
                     if position == global_time)
                 {
                     accepted_e2ee_dots.push(*id);
+                    accepted_e2ee_dot_positions.insert(*id, global_time);
                 }
             }
             dots.extend(ids);
@@ -386,6 +388,7 @@ where
                 provisional_author,
                 base_snapshot,
                 accepted_e2ee_base_snapshot,
+                accepted_e2ee_dot_positions,
                 base_snapshot_rows: BTreeMap::new(),
                 row_reads: Vec::new(),
                 absent_reads: Vec::new(),
@@ -2204,9 +2207,13 @@ where
         child: OpenTransactionId,
         settlements: &[(TxId, GlobalTime)],
     ) -> Result<bool, Error> {
-        let snapshot = &self.open_tx(child)?.base_snapshot;
+        let observation = self.open_tx(child)?;
+        let snapshot = &observation.base_snapshot;
         Ok(settlements.iter().all(|(witness, position)| {
-            *position <= snapshot.global_base || snapshot.dots.contains(witness)
+            if let Some(captured) = observation.accepted_e2ee_dot_positions.get(witness) {
+                return position == captured;
+            }
+            *position <= snapshot.global_base
         }))
     }
 
@@ -2799,6 +2806,8 @@ pub(super) struct OpenTransaction {
     /// Accepted authority witnesses captured at begin, excluding pending/local
     /// prefixes. Internal observation children must reuse this immutable cut.
     pub(super) accepted_e2ee_base_snapshot: Snapshot,
+    /// Exact acceptance positions of above-frontier dots at public begin.
+    pub(super) accepted_e2ee_dot_positions: BTreeMap<TxId, GlobalTime>,
     /// Base snapshot row derivations observed by point reads in this transaction.
     pub(super) base_snapshot_rows: BTreeMap<(SchemaVersionId, String, RowUuid), SnapshotRow>,
     /// Point reads recorded by the transaction.
