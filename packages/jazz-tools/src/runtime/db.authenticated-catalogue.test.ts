@@ -73,7 +73,7 @@ it("qualifies owner catalogue readiness with the requested schema's local admiss
   expect(queryInternal.mock.calls).toHaveLength(2);
 });
 
-it("reuses admitted catalogue lineage without network coverage and covers cold owners", async () => {
+it("keeps authenticated local lookups separate from fresh general identities", async () => {
   const app = s.defineApp({ projects: s.table({ title: s.string() }, {}) });
   const identity = "00000000-0000-4000-8000-000000000001";
   let published = true;
@@ -101,14 +101,19 @@ it("reuses admitted catalogue lineage without network coverage and covers cold o
     },
   });
 
-  await expect(db.tableIdentity(app.projects)).resolves.toBe(identity);
+  await expect(db.authenticatedTableIdentity(app.projects)).resolves.toBe(identity);
   expect(queryInternal).toHaveBeenCalledOnce();
   expect(coverCatalogue).not.toHaveBeenCalled();
   expect(ensureReady.mock.calls.every(([tier]) => tier === "local")).toBe(true);
 
-  published = false;
   await expect(db.tableIdentity(app.projects)).resolves.toBe(identity);
-  expect(queryInternal).toHaveBeenCalledOnce();
+  expect(coverCatalogue).toHaveBeenCalledOnce();
   expect(coverCatalogue).toHaveBeenCalledWith("projects", undefined);
   expect(ensureReady).toHaveBeenCalledWith("global");
+
+  published = false;
+  await expect(db.authenticatedTableIdentity(app.projects)).resolves.toBeNull();
+  await expect(db.tableIdentity(app.projects)).resolves.toBe(identity);
+  expect(queryInternal).toHaveBeenCalledOnce();
+  expect(coverCatalogue).toHaveBeenCalledTimes(2);
 });
