@@ -1,5 +1,3 @@
-// Intended location: packages/jazz-tools/src/runtime/db.authenticated-catalogue.test.ts
-// Source-only proposal. Exercises the real Db method with controlled boundary collaborators.
 import { expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { Db } from "./db.js";
@@ -8,10 +6,11 @@ it("qualifies owner catalogue readiness with the requested schema's local admiss
   const requested = s.defineApp({ projects: s.table({ title: s.string() }, {}) });
   const unpublishedSchema = new Error("Requested schema has not been admitted");
   let admitted = false;
+  let published = false;
   const events: string[] = [];
   const ownerReady = vi.fn(async () => {
     events.push("owner-publication");
-    return true;
+    return published;
   });
   const queryInternal = vi.fn(async (_query: string, _options: unknown, _session: unknown) => {
     events.push("requested-schema");
@@ -35,6 +34,16 @@ it("qualifies owner catalogue readiness with the requested schema's local admiss
     getAccessContext: { value: () => undefined },
     tableIdentity: { value: tableIdentity },
   });
+
+  await expect(db.authenticatedTableIdentity(requested.projects)).resolves.toBeNull();
+  expect(queryInternal).not.toHaveBeenCalled();
+  expect(tableIdentity).not.toHaveBeenCalled();
+  expect(events).toEqual(["owner-publication"]);
+  expect(ensureReady).toHaveBeenCalledWith("local");
+
+  published = true;
+  events.length = 0;
+  ownerReady.mockClear();
 
   await expect(db.authenticatedTableIdentity(requested.projects)).rejects.toBe(unpublishedSchema);
   expect(ownerReady).toHaveBeenCalledOnce();
