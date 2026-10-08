@@ -736,7 +736,7 @@ it.each([
       await owner.e2ee.devices.list();
       await reader.e2ee.devices.list();
       const group = await owner.e2ee.groups.create().wait();
-      await owner.e2ee.groups.add(group.id, bob.account.id).wait();
+      await owner.e2ee.groups.add(group.id, { kind: "account", id: bob.account.id }).wait();
       const tx = owner.beginExclusiveTransaction();
       const project = tx.insert(
         groupApp.projects,
@@ -762,7 +762,8 @@ it.each([
           ? await reader.all(groupApp.__e2ee_group_membership, { tier: "global" })
           : await reader.all(groupApp.__e2ee_space_grants, { tier: "global" });
 
-      if (removal === "group") await owner.e2ee.groups.remove(group.id, bob.account.id).wait();
+      if (removal === "group")
+        await owner.e2ee.groups.remove(group.id, { kind: "account", id: bob.account.id }).wait();
       else await owner.e2ee.spaces.revoke(groupApp.projects, project.id, bob.account.id).wait();
       // Fetch through an ordinary sibling query, without refreshing the space.
       const after =
