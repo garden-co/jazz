@@ -1801,6 +1801,11 @@ struct LiftedLiteralFilter {
 }
 
 const AUTO_DIRECT_BINDING_PREFIX: &str = "\0groove.auto_direct.binding.";
+/// Prepared bindings kept arranged after their last subscription ended. A
+/// sequence of one-at-a-time reads under the same binding (for example one
+/// session's claims) then reuses the arranged binding instead of retracting it
+/// from, and later re-adding it to, every shape that shares its source.
+const MAX_IDLE_PREPARED_BINDINGS: usize = 32;
 
 fn auto_direct_binding_field(
     graph: &GraphBuilder,
@@ -4396,7 +4401,7 @@ impl IvmRuntime {
                 ..
             } = subscription.target
             {
-                if let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
+                if let Some(param_delta) = self.release_binding_ref(shape_id, &binding_key)
                     && !param_delta.deltas.is_empty()
                 {
                     self.pending_binding_retractions.push(param_delta);
@@ -4435,7 +4440,7 @@ impl IvmRuntime {
                 ..
             } = subscription.target
             {
-                if let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
+                if let Some(param_delta) = self.release_binding_ref(shape_id, &binding_key)
                     && !param_delta.deltas.is_empty()
                 {
                     self.tick_with_params(
@@ -4475,6 +4480,13 @@ impl IvmRuntime {
             .prepared_shapes
             .remove(&shape_id)
             .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
+        if !self
+            .prepared_shapes
+            .values()
+            .any(|other| other.shape == shape.shape)
+        {
+            self.forget_idle_bindings(&shape.shape);
+        }
         if let Some(key) = &shape.shared_key
             && self.shared_prepared_shapes.get(key) == Some(&shape_id)
         {
@@ -4989,15 +5001,18 @@ impl IvmRuntime {
             .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
         let binding_key = BindingKey(shape.binding_descriptor.create(binding_values)?);
         let delta = self.add_binding_ref(shape_id, binding_key.clone())?;
-        debug_assert_eq!(delta.deltas.len(), 1, "a live attach admits a new binding");
-        if let Err(error) = self
-            .tick_with_params(
-                Vec::new(),
-                vec![delta],
-                OwnedStorage::new(Rc::clone(storage)),
-                None,
-            )
-            .await
+        // An idle binding (see `release_binding_ref`) is still arranged and its
+        // shared nodes current, so reviving it needs no admission tick.
+        debug_assert!(delta.deltas.len() <= 1, "a live attach admits at most one binding");
+        if !delta.deltas.is_empty()
+            && let Err(error) = self
+                .tick_with_params(
+                    Vec::new(),
+                    vec![delta],
+                    OwnedStorage::new(Rc::clone(storage)),
+                    None,
+                )
+                .await
         {
             if let Some(delta) = self.remove_binding_ref(shape_id, &binding_key)
                 && !delta.deltas.is_empty()
@@ -5103,7 +5118,7 @@ impl IvmRuntime {
     pub fn prepared_binding_source_is_bound(&self, shape: &str) -> bool {
         self.binding_sources
             .get(&BindingSourceKey::prepared(shape.to_owned()))
-            .is_some_and(|source| !source.refcounts.is_empty())
+            .is_some_and(|source| source.refcounts.values().any(|count| *count > 0))
     }
 
     /// The shared nodes a live attach may borrow, or `None` when the shape is
@@ -5122,13 +5137,17 @@ impl IvmRuntime {
         let Some(source) = self.binding_sources.get(&source_key) else {
             return Ok(None);
         };
-        // Only a new binding for a source that is already populated. A
-        // reacquired binding or a queued retraction keeps the ordinary path.
+        // Only a binding without live references (new, or idle and still
+        // arranged) for a source that is already populated. A binding another
+        // subscription holds, or a queued retraction, keeps the ordinary path.
         // The attach tick must not change the subscription set either: a
         // dropped receiver it discovers would be unsubscribed mid-attach,
         // queueing a retraction the borrowed state has not seen.
         if source.refcounts.is_empty()
-            || source.refcounts.contains_key(&binding_key)
+            || source
+                .refcounts
+                .get(&binding_key)
+                .is_some_and(|count| *count > 0)
             || self
                 .pending_binding_retractions
                 .iter()
@@ -5194,12 +5213,14 @@ impl IvmRuntime {
             .binding_sources
             .get_mut(&BindingSourceKey::prepared(shape))
             .ok_or_else(|| IvmRuntimeError::BindingSourceNotFound(shape.to_owned()))?;
+        // An idle binding (count 0) is still arranged: reviving it needs no delta.
+        let admitted = !source.refcounts.contains_key(&binding);
         let count = source.refcounts.entry(binding.clone()).or_default();
         *count += 1;
         Ok(BindingDelta {
             key: BindingSourceKey::prepared(shape),
             descriptor: source.descriptor,
-            deltas: if *count == 1 {
+            deltas: if admitted {
                 vec![RecordDelta {
                     record: binding.0.into(),
                     weight: 1,
@@ -5207,6 +5228,102 @@ impl IvmRuntime {
             } else {
                 Vec::new()
             },
+            initializes_snapshot: false,
+        })
+    }
+
+    /// Release one ended subscription's reference to its binding.
+    ///
+    /// When the last reference goes, the binding stays arranged at count 0
+    /// instead of being retracted at once. Every shape sharing the binding
+    /// source keeps its state for it, so a later bind of the same values (the
+    /// next one-at-a-time read of a session) costs nothing, where a retraction
+    /// followed by a re-admission would stream every row those shapes join with
+    /// the binding, twice. At most `MAX_IDLE_PREPARED_BINDINGS` stay idle; the
+    /// oldest is then retracted as before. Auto-direct families keep the
+    /// immediate retraction: their source is removed with the family.
+    fn release_binding_ref(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding: &BindingKey,
+    ) -> Option<BindingDelta> {
+        let shape = self.prepared_shapes.get(&shape_id)?;
+        if shape.auto_family_key.is_some() {
+            return self.remove_binding_ref(shape_id, binding);
+        }
+        let shape = shape.shape.clone();
+        let source = self
+            .binding_sources
+            .get_mut(&BindingSourceKey::prepared(shape.clone()))?;
+        let descriptor = source.descriptor;
+        let count = source.refcounts.get_mut(binding)?;
+        debug_assert!(*count > 0, "a live subscription holds a reference");
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.idle_prepared_bindings
+                .retain(|(idle_shape, idle)| !(idle_shape == &shape && idle == binding));
+            self.idle_prepared_bindings
+                .push_back((shape.clone(), binding.clone()));
+            while self.idle_prepared_bindings.len() > MAX_IDLE_PREPARED_BINDINGS {
+                let Some((oldest_shape, oldest)) = self.idle_prepared_bindings.pop_front() else {
+                    break;
+                };
+                if let Some(retraction) = self.retract_idle_binding(&oldest_shape, &oldest) {
+                    self.pending_binding_retractions.push(retraction);
+                }
+            }
+        }
+        Some(BindingDelta {
+            key: BindingSourceKey::prepared(shape),
+            descriptor,
+            deltas: Vec::new(),
+            initializes_snapshot: false,
+        })
+    }
+
+    /// Queue the retraction of every idle prepared binding, for an owner that
+    /// wants their state released at a point of its choosing (for example when
+    /// a session ends). The next tick applies them. Returns how many were queued.
+    pub fn release_idle_bindings(&mut self) -> usize {
+        let mut released = 0;
+        while let Some((shape, binding)) = self.idle_prepared_bindings.pop_front() {
+            if let Some(retraction) = self.retract_idle_binding(&shape, &binding) {
+                self.pending_binding_retractions.push(retraction);
+                released += 1;
+            }
+        }
+        released
+    }
+
+    /// Drop the idle bindings of a binding source no prepared shape uses any
+    /// more. Their graph nodes are being collected, so nothing observes them.
+    fn forget_idle_bindings(&mut self, source_shape: &str) {
+        if let Some(source) = self
+            .binding_sources
+            .get_mut(&BindingSourceKey::prepared(source_shape))
+        {
+            source.refcounts.retain(|_, count| *count > 0);
+        }
+        self.idle_prepared_bindings
+            .retain(|(shape, _)| shape != source_shape);
+    }
+
+    /// The retraction of an idle binding, or `None` when it was bound again.
+    fn retract_idle_binding(&mut self, shape: &str, binding: &BindingKey) -> Option<BindingDelta> {
+        let source = self
+            .binding_sources
+            .get_mut(&BindingSourceKey::prepared(shape))?;
+        if source.refcounts.get(binding) != Some(&0) {
+            return None;
+        }
+        source.refcounts.remove(binding);
+        Some(BindingDelta {
+            key: BindingSourceKey::prepared(shape),
+            descriptor: source.descriptor,
+            deltas: vec![RecordDelta {
+                record: binding.0.clone().into(),
+                weight: -1,
+            }],
             initializes_snapshot: false,
         })
     }

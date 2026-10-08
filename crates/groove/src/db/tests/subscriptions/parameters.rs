@@ -1026,3 +1026,142 @@ async fn duplicate_join_subscriptions_share_state_without_double_applying_deltas
     assert!(database.unsubscribe(second.id()));
     assert!(database.ivm_runtime.retained_node_ids().is_empty());
 }
+
+/// A binding whose last subscription ends stays arranged, so the next
+/// subscription with the same values, on the same shape or on a sibling
+/// sharing its binding source, needs no retraction and re-admission. One-at-a-
+/// time reads under one session's values otherwise stream every row their
+/// shapes join with the binding out and back in on every read.
+#[futures_test::test]
+async fn ended_binding_stays_arranged_for_the_next_bind_of_the_same_values() {
+    let storage = TestStorage::new(&["albums", "artists"]);
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::U64(7),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+    let baseline = database.runtime_stats();
+    let first = database
+        .prepare_one_sink(
+            artist_album_shape_graph(),
+            "artist_params",
+            artist_binding_descriptor(),
+            ["artist_id"],
+        )
+        .await
+        .unwrap();
+    let second = database
+        .prepare_one_sink(
+            artist_album_shape_graph(),
+            "artist_params",
+            artist_binding_descriptor(),
+            ["artist_id"],
+        )
+        .await
+        .unwrap();
+    let blue_train = (
+        vec![
+            Value::U64(7),
+            Value::U64(1),
+            Value::String("Blue Train".to_owned()),
+        ],
+        1,
+    );
+
+    let earlier = database
+        .bind_shape_one_sink(first.id(), &[Value::U64(7)])
+        .await
+        .unwrap();
+    database.drive_progress().await.unwrap();
+    assert_eq!(expect_try_recv_vals(&earlier), vec![blue_train.clone()]);
+    assert!(database.unsubscribe(earlier.id()));
+    assert_eq!(
+        database.runtime_stats().active_shape_params,
+        baseline.active_shape_params + 1,
+        "the ended binding stays arranged"
+    );
+
+    let later = database
+        .bind_shape_one_sink(second.id(), &[Value::U64(7)])
+        .await
+        .unwrap();
+    database.drive_progress().await.unwrap();
+    assert_eq!(expect_try_recv_vals(&later), vec![blue_train]);
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(2),
+            Value::U64(7),
+            Value::String("Giant Steps".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+    database.drive_progress().await.unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&later),
+        vec![(
+            vec![
+                Value::U64(7),
+                Value::U64(2),
+                Value::String("Giant Steps".to_owned()),
+            ],
+            1,
+        )]
+    );
+
+    assert!(database.unsubscribe(later.id()));
+    assert_eq!(database.release_idle_bindings().unwrap(), 1);
+    database.flush().await.unwrap();
+    assert_eq!(
+        database.runtime_stats().active_shape_params,
+        baseline.active_shape_params
+    );
+}
+
+/// At most a bounded number of ended bindings stay arranged; the oldest are
+/// retracted as before.
+#[futures_test::test]
+async fn idle_bindings_are_bounded() {
+    let storage = TestStorage::new(&["albums", "artists"]);
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
+    let baseline = database.runtime_stats();
+    let shape = database
+        .prepare_one_sink(
+            artist_album_shape_graph(),
+            "artist_params",
+            artist_binding_descriptor(),
+            ["artist_id"],
+        )
+        .await
+        .unwrap();
+    for artist in 0..40 {
+        let subscription = database
+            .bind_shape_one_sink(shape.id(), &[Value::U64(artist)])
+            .await
+            .unwrap();
+        database.drive_progress().await.unwrap();
+        assert!(database.unsubscribe(subscription.id()));
+    }
+    database.flush().await.unwrap();
+    assert_eq!(
+        database.runtime_stats().active_shape_params,
+        baseline.active_shape_params + 32
+    );
+    assert_eq!(database.release_idle_bindings().unwrap(), 32);
+    database.flush().await.unwrap();
+    assert_eq!(
+        database.runtime_stats().active_shape_params,
+        baseline.active_shape_params
+    );
+}
