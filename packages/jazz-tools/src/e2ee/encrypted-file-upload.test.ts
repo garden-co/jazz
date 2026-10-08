@@ -142,7 +142,7 @@ const legacyUploadApp = s.defineApp({
   ),
 });
 
-async function uploadFixture(native = false, denied = false) {
+async function uploadFixture(native = false, denied = false, withRecipient = false) {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const permissions = definePermissions(uploadApp, ({ policy, session }) => {
     policy.projects.allowRead.always();
@@ -186,7 +186,9 @@ async function uploadFixture(native = false, denied = false) {
       permissions,
     });
     const ownerAccount = await localAccountConfig(server.appId, server.url);
-    const recipientAccount = await localAccountConfig(server.appId, server.url);
+    const recipientAccount = withRecipient
+      ? await localAccountConfig(server.appId, server.url)
+      : undefined;
     let owner: Db;
     let ownerId: string;
     if (native) {
@@ -206,16 +208,24 @@ async function uploadFixture(native = false, denied = false) {
       ownerId = ownerAccount.account.id;
       clients.push(owner);
     }
-    const recipient = await createDb({
-      ...recipientAccount,
-      e2ee: { app: uploadApp, store: store() },
-    });
-    clients.push(recipient);
-    const legacy = await createDb(ownerAccount);
-    clients.push(legacy);
+    const recipient = recipientAccount
+      ? await createDb({ ...recipientAccount, e2ee: { app: uploadApp, store: store() } })
+      : undefined;
+    if (recipient) clients.push(recipient);
+    const getRecipient = async () => {
+      if (!recipient || !recipientAccount) throw new Error("Recipient fixture was not requested");
+      return { db: recipient, id: recipientAccount.account.id };
+    };
+    let legacy: Promise<Db> | undefined;
+    const getLegacy = () =>
+      (legacy ??= (async () => {
+        const db = await createDb(ownerAccount);
+        clients.push(db);
+        return db;
+      })());
     await owner.e2ee.devices.list();
-    await recipient.e2ee.devices.list();
-    return { owner, ownerId, recipient, recipientId: recipientAccount.account.id, legacy, close };
+    if (recipient) await recipient.e2ee.devices.list();
+    return { owner, ownerId, getRecipient, getLegacy, close };
   } catch (error) {
     await close();
     throw error;
@@ -232,15 +242,16 @@ function uploadBytes(bytes: Uint8Array) {
 it.each([false, true])(
   "atomically publishes a declared scope and two files with its exact recipient seed (native=%s)",
   async (native) => {
-    const fixture = await uploadFixture(native);
+    const fixture = await uploadFixture(native, false, true);
     try {
+      const recipient = await fixture.getRecipient();
       const payload = Uint8Array.from({ length: 131_091 }, (_, index) => index % 251);
       const result = await fixture.owner.streamingTransaction((plan) => {
         const scope = plan.insert(
           uploadApp.projects,
           { title: "Only recipient can read" },
           {
-            initialRecipients: [fixture.recipientId],
+            initialRecipients: [recipient.id],
           },
         );
         const image = plan.insertStreaming(uploadApp.files, {
@@ -257,7 +268,7 @@ it.each([false, true])(
       });
       const ids = await result.wait({ tier: "global" });
       expect(
-        await fixture.recipient.one(uploadApp.files.where({ id: ids.image }), { tier: "global" }),
+        await recipient.db.one(uploadApp.files.where({ id: ids.image }), { tier: "global" }),
       ).toEqual({
         id: ids.image,
         projectId: ids.scope,
@@ -265,7 +276,7 @@ it.each([false, true])(
         payload,
       });
       expect(
-        await fixture.recipient.one(uploadApp.files.where({ id: ids.empty }), { tier: "global" }),
+        await recipient.db.one(uploadApp.files.where({ id: ids.empty }), { tier: "global" }),
       ).toEqual({
         id: ids.empty,
         projectId: ids.scope,
@@ -281,7 +292,7 @@ it.each([false, true])(
         uploadApp.__e2ee_space_grants.where({ spaceId: roots[0]!.id }),
         { tier: "global" },
       );
-      expect(grants.map((grant) => grant.recipientId)).toEqual([fixture.recipientId]);
+      expect(grants.map((grant) => grant.recipientId)).toEqual([recipient.id]);
       await expect(
         fixture.owner.one(uploadApp.files.where({ id: ids.image }), { tier: "global" }),
       ).rejects.toThrow();
@@ -297,7 +308,8 @@ it.each([false, true])(
   async (native) => {
     const fixture = await uploadFixture(native);
     try {
-      const scope = await fixture.legacy
+      const legacy = await fixture.getLegacy();
+      const scope = await legacy
         .insert(legacyUploadApp.projects, { title: "Legacy" })
         .wait({ tier: "global" });
       expect(await fixture.owner.all(uploadApp.__e2ee_spaces, { tier: "global" })).toEqual([]);
@@ -380,7 +392,7 @@ it.each([false, true])(
 it.each(["rotation", "removal"] as const)(
   "rejects %s during a blocked source without replay or an accepted file",
   async (change) => {
-    const fixture = await uploadFixture();
+    const fixture = await uploadFixture(false, false, true);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -390,17 +402,18 @@ it.each(["rotation", "removal"] as const)(
       entered = resolve;
     });
     try {
+      const recipient = await fixture.getRecipient();
       const scope = await fixture.owner
         .insert(
           uploadApp.projects,
           { title: "Shared" },
           {
-            initialRecipients: [fixture.ownerId, fixture.recipientId],
+            initialRecipients: [fixture.ownerId, recipient.id],
           },
         )
         .wait({ tier: "global" });
       let pulls = 0;
-      const writer = change === "rotation" ? fixture.owner : fixture.recipient;
+      const writer = change === "rotation" ? fixture.owner : recipient.db;
       const pending = writer
         .insertStreaming(uploadApp.files, {
           projectId: scope.id,
@@ -416,9 +429,7 @@ it.each(["rotation", "removal"] as const)(
         .then((write) => write.wait({ tier: "global" }));
       const rejected = expect(pending).rejects.toThrow();
       await started;
-      await fixture.owner.e2ee.spaces
-        .revoke(uploadApp.projects, scope.id, fixture.recipientId)
-        .wait();
+      await fixture.owner.e2ee.spaces.revoke(uploadApp.projects, scope.id, recipient.id).wait();
       release();
       await rejected;
       expect(pulls).toBe(1);
@@ -474,8 +485,9 @@ it.each(["source-failure", "denied"] as const)(
 );
 
 it("rejects keyless writers and every invalid declaration before pulling any source", async () => {
-  const fixture = await uploadFixture();
+  const fixture = await uploadFixture(false, false, true);
   try {
+    const recipient = await fixture.getRecipient();
     const scope = await fixture.owner
       .insert(uploadApp.projects, { title: "Private" })
       .wait({ tier: "global" });
@@ -486,7 +498,7 @@ it("rejects keyless writers and every invalid declaration before pulling any sou
         yield new Uint8Array([1]);
       })();
     await expect(
-      fixture.recipient.insertStreaming(uploadApp.files, {
+      recipient.db.insertStreaming(uploadApp.files, {
         projectId: scope.id,
         name: "not granted",
         payload: source(),
@@ -580,14 +592,15 @@ it.each(["resolved", "pending"] as const)(
 );
 
 it("rejects a later keyless space before pulling an earlier eligible source", async () => {
-  const fixture = await uploadFixture();
+  const fixture = await uploadFixture(false, false, true);
   try {
+    const recipient = await fixture.getRecipient();
     const shared = await fixture.owner
       .insert(
         uploadApp.projects,
         { title: "Shared" },
         {
-          initialRecipients: [fixture.ownerId, fixture.recipientId],
+          initialRecipients: [fixture.ownerId, recipient.id],
         },
       )
       .wait({ tier: "global" });
@@ -601,7 +614,7 @@ it("rejects a later keyless space before pulling an earlier eligible source", as
         yield new Uint8Array([1]);
       })();
     await expect(
-      fixture.recipient.streamingTransaction((plan) => {
+      recipient.db.streamingTransaction((plan) => {
         plan.insertStreaming(uploadApp.files, {
           projectId: shared.id,
           name: "eligible",
@@ -624,7 +637,8 @@ it("rejects a later keyless space before pulling an earlier eligible source", as
 it("keeps a legacy scope but rejects its first file and initial controls together on permission denial", async () => {
   const fixture = await uploadFixture(false, true);
   try {
-    const scope = await fixture.legacy
+    const legacy = await fixture.getLegacy();
+    const scope = await legacy
       .insert(legacyUploadApp.projects, { title: "Legacy remains" })
       .wait({ tier: "global" });
     const pending = fixture.owner
@@ -670,18 +684,17 @@ it("applies declaration order when a later stream replaces an earlier staged fil
 }, 60_000);
 
 it("keeps both existing-space keys borrowed until their staged files reach the granted recipient", async () => {
-  const fixture = await uploadFixture();
+  const fixture = await uploadFixture(false, false, true);
   try {
+    const recipient = await fixture.getRecipient();
     const first = await fixture.owner
       .insert(uploadApp.projects, { title: "First space" })
       .wait({ tier: "global" });
     const second = await fixture.owner
       .insert(uploadApp.projects, { title: "Second space" })
       .wait({ tier: "global" });
-    await fixture.owner.e2ee.spaces.grant(uploadApp.projects, first.id, fixture.recipientId).wait();
-    await fixture.owner.e2ee.spaces
-      .grant(uploadApp.projects, second.id, fixture.recipientId)
-      .wait();
+    await fixture.owner.e2ee.spaces.grant(uploadApp.projects, first.id, recipient.id).wait();
+    await fixture.owner.e2ee.spaces.grant(uploadApp.projects, second.id, recipient.id).wait();
     const firstBytes = Uint8Array.from({ length: 131_091 }, (_, index) => index % 251);
     const secondBytes = Uint8Array.from({ length: 131_093 }, (_, index) => 255 - (index % 251));
     const result = await fixture.owner.streamingTransaction((plan) => {
@@ -699,7 +712,7 @@ it("keeps both existing-space keys borrowed until their staged files reach the g
     });
     const ids = await result.wait({ tier: "global" });
     expect(
-      await fixture.recipient.one(uploadApp.files.where({ id: ids.first }), { tier: "global" }),
+      await recipient.db.one(uploadApp.files.where({ id: ids.first }), { tier: "global" }),
     ).toEqual({
       id: ids.first,
       projectId: first.id,
@@ -707,7 +720,7 @@ it("keeps both existing-space keys borrowed until their staged files reach the g
       payload: firstBytes,
     });
     expect(
-      await fixture.recipient.one(uploadApp.files.where({ id: ids.second }), { tier: "global" }),
+      await recipient.db.one(uploadApp.files.where({ id: ids.second }), { tier: "global" }),
     ).toEqual({
       id: ids.second,
       projectId: second.id,
