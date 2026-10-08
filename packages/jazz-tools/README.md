@@ -104,12 +104,11 @@ If your platform is not supported in the npm package, install with Cargo from so
 
 ## React Native alpha boundary
 
-The `jazz-tools/react-native` entry point currently exposes compile-level binding
-scaffolding only. Persistent React Native/Expo databases are not available in
-this alpha: the default persistent configuration and the proposal-only
-`sqliteStorage` option both fail before opening a driver. Explicit memory mode
-has only been exercised by Node-based wiring tests, not Metro/Hermes or a device,
-and is not a supported persistence alternative.
+The `jazz-tools/react-native` entry point requires a matching installed
+`jazz-rn` native artifact. Persistent databases use native account admission
+or a platform-issued `nativeRelay` capability. Storage is owned by the native
+runtime; there is no JavaScript SQLite driver option. Explicit memory mode is
+not supported by the React Native entrypoint.
 
 ## Relations
 
