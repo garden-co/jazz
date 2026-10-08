@@ -2419,15 +2419,23 @@ impl WasmDb {
 
     /// Internal foreground-lease handoff boundary. Values cross the JS ABI as
     /// BigInt, never lossy IEEE-754 numbers.
+    ///
+    /// The high-water is read under the node lock. Another native future can
+    /// hold that lock while it waits for a host callback (IndexedDB, timers), and
+    /// on wasm only the JS event loop can complete that callback. Blocking here
+    /// would spin forever, so this resolves as a Promise on the event loop.
     #[wasm_bindgen(js_name = foregroundTxTimeHighWater)]
-    pub fn foreground_tx_time_high_water(&self) -> Result<u64, JsValue> {
+    pub fn foreground_tx_time_high_water(&self) -> Result<js_sys::Promise, JsValue> {
         let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => Ok(block_on(db.foreground_tx_time_high_water()).0),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => Ok(block_on(db.foreground_tx_time_high_water()).0),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
+        Ok(future_to_promise(async move {
+            let high_water = match &inner {
+                WasmDbInner::Memory(db) => db.foreground_tx_time_high_water().await,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db.foreground_tx_time_high_water().await,
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            };
+            Ok(JsValue::from(high_water.0))
+        }))
     }
 
     /// Internal foreground-lease bootstrap boundary. The worker-owned lease

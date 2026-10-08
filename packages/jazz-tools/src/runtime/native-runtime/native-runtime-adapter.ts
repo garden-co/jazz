@@ -271,7 +271,8 @@ type NativeDb = {
   admitLocalFirstSession?(token: string, appId: string, claimedAuthor: string): void;
   setSessionClaims?(claims: Record<string, unknown> | undefined | null): void | Promise<void>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
-  foregroundTxTimeHighWater?(): bigint;
+  /** Native bindings answer synchronously; the browser binding resolves on the event loop. */
+  foregroundTxTimeHighWater?(): bigint | Promise<bigint>;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
   subscribe?(
     query: Uint8Array,
@@ -789,6 +790,11 @@ export class NativeRuntimeAdapter implements Runtime {
   // A concurrent ordinary close must not dispose native state between a lease
   // handoff's mutation drain and its HLC readout.
   private foregroundLeaseCapture: Promise<bigint> | null = null;
+  // While that drain runs, already-started native futures may hold the node
+  // lock until a core tick completes their host continuation (cold storage,
+  // admission deadlines). Mutation admission stays closed, but core progress
+  // must continue, or the HLC readout waits behind them forever.
+  private foregroundLeaseDraining = false;
   private physicalCloseStarted = false;
   private nextSubscriptionId = 1;
 
@@ -1026,7 +1032,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /** @internal Return the native HLC high-water for a foreground lease handoff. */
-  foregroundTxTimeHighWater(): bigint {
+  foregroundTxTimeHighWater(): bigint | Promise<bigint> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.foregroundTxTimeHighWater();
     if (!this.db.foregroundTxTimeHighWater) {
       throw new Error("Native runtime does not expose foreground transaction high-water");
@@ -1050,16 +1056,25 @@ export class NativeRuntimeAdapter implements Runtime {
     this.closed = true;
     this.clearCoreDeadline();
     this.foregroundLeaseQuiesced = true;
-    const capture = this.captureForegroundTxTimeHighWater();
+    this.foregroundLeaseDraining = true;
+    const capture = this.captureForegroundTxTimeHighWater().finally(() => {
+      this.foregroundLeaseDraining = false;
+      this.clearCoreDeadline();
+    });
     this.foregroundLeaseCapture = capture;
     return capture;
+  }
+
+  /** Core ticks run while open, and while a lease handoff drains started work. */
+  private coreProgressAllowed(): boolean {
+    return !this.closed || this.foregroundLeaseDraining;
   }
 
   private async captureForegroundTxTimeHighWater(): Promise<bigint> {
     await Promise.all(this.pendingStreamingMutations);
     await Promise.all(this.pendingLocalSettlements);
     await this.coreOperation?.completion.catch(() => undefined);
-    return this.foregroundTxTimeHighWater();
+    return await this.foregroundTxTimeHighWater();
   }
 
   /** @internal Seed a foreground lease high-water before the first local write. */
@@ -3260,7 +3275,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private scheduleCoreWake(urgency: CoreTickWake): void {
-    if (this.closed) return;
+    if (!this.coreProgressAllowed()) return;
     if (urgency === "after-current-turn") {
       // A microtask would set `coreTickAgain` while a core tick is still
       // running, recursively entering the next tick before the browser can
@@ -3299,7 +3314,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private scheduleCoreTick(): void {
-    if (this.closed) return;
+    if (!this.coreProgressAllowed()) return;
     if (this.coreOperation) {
       this.coreTickAgain = true;
       return;
@@ -3324,7 +3339,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private runCoreTick(): Promise<void> {
-    if (this.closed) return Promise.resolve();
+    if (!this.coreProgressAllowed()) return Promise.resolve();
     const operation = this.coreOperation;
     if (operation) {
       this.coreTickAgain = true;
@@ -3354,7 +3369,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.pumpSubscriptions();
         this.scheduleServerPump();
         this.notifyPeerTransportWork();
-        if (this.closed || !this.coreTickAgain) break;
+        if (!this.coreProgressAllowed() || !this.coreTickAgain) break;
         if (round + 1 >= MAX_CORE_TICKS_PER_TURN) {
           yielded = true;
           break;
@@ -3364,7 +3379,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.drainTransportRetirements();
       this.coreOperation = null;
     }
-    if (yielded && !this.closed) {
+    if (yielded && this.coreProgressAllowed()) {
       setTimeout(() => this.scheduleCoreTick(), 0);
     }
   }
