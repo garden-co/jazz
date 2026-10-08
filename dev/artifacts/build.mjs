@@ -29,7 +29,20 @@ import {
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const commands = {
   wasm: {
-    fast: ["wasm-pack", ["build", "crates/jazz-wasm", "--target", "web", "--dev"]],
+    // The correctness suite exercises substantial engine work. Light optimisation
+    // retains dev invariant checks and checked arithmetic throughout the runtime.
+    fast: [
+      "wasm-pack",
+      ["build", "crates/jazz-wasm", "--target", "web", "--dev"],
+      [
+        "--config",
+        "profile.dev.opt-level=1",
+        "--config",
+        "profile.dev.debug-assertions=true",
+        "--config",
+        "profile.dev.overflow-checks=true",
+      ],
+    ],
     // Browser releases link the whole engine with fat LTO in one codegen unit.
     // That removes duplicate generic instantiations across crates: about 28%
     // smaller raw and 22% smaller gzip, at unchanged opt-level 3 and no
