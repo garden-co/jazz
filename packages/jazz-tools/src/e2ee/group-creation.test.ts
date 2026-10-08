@@ -137,16 +137,19 @@ it.each([
         expect(request).toBeDefined();
         await first.e2ee.devices.approve(request.id).wait();
       }
-      // Most resume cases only need an independent reader after the creator closes.
+      // Most resume cases and the compatibility fixture only need an independent reader.
       // Malformed-candidate, history-race and inactive-creator checks retain a pending client.
       const pending =
-        second && scenario.startsWith("resume") && scenario !== "resume-signed-malformed"
+        second &&
+        (scenario === "staged-fixture" ||
+          (scenario.startsWith("resume") && scenario !== "resume-signed-malformed"))
           ? second
           : await createDb({ ...account, e2ee: { app, store: store() } });
       if (pending !== second) clients.push(pending);
-      const pendingDevice = (await pending.e2ee.devices.list()).find(
-        (device) => device.state === "pending",
-      )!;
+      const pendingDevice =
+        pending === second
+          ? undefined
+          : (await pending.e2ee.devices.list()).find((device) => device.state === "pending");
       if (pending !== second) expect(pendingDevice).toBeDefined();
       let injected = false;
       if (scenario.endsWith("history-race")) {
@@ -159,7 +162,7 @@ it.each([
           id: crypto.randomUUID(),
           accountId: account.account.id,
           epochId: root!.epochId,
-          deviceId: pendingDevice.id,
+          deviceId: pendingDevice!.id,
           signerId: creator.id,
         };
         const privateKey = Uint8Array.from(retainedDevice.signingPrivateKey);
@@ -362,16 +365,20 @@ it.each([
       clients.push(reopened);
       expect(await reopened.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "ready" });
 
-      await expect(pending.e2ee.groups.create().wait()).rejects.toThrow(/active|approved/i);
+      // These account/device boundaries do not depend on delivery corruption or
+      // the compatibility store. Keep one live check of each in the ordinary case.
+      if (scenario === "ordinary") {
+        await expect(pending.e2ee.groups.create().wait()).rejects.toThrow(/active|approved/i);
 
-      const outsider = await createDb({
-        ...(await localAccountConfig(server.appId, server.url)),
-        e2ee: { app, store: store() },
-      });
-      clients.push(outsider);
-      expect(await outsider.e2ee.explain({ groupId: group.id })).toMatchObject({
-        state: "refused",
-      });
+        const outsider = await createDb({
+          ...(await localAccountConfig(server.appId, server.url)),
+          e2ee: { app, store: store() },
+        });
+        clients.push(outsider);
+        expect(await outsider.e2ee.explain({ groupId: group.id })).toMatchObject({
+          state: "refused",
+        });
+      }
     } finally {
       await Promise.all(clients.map((client) => client.shutdown()));
       await server.stop();
