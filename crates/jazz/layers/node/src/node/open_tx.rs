@@ -351,17 +351,13 @@ where
         let mut accepted_e2ee_dots = Vec::new();
         let mut accepted_e2ee_dot_positions = BTreeMap::new();
         for global_time in self.clock.applied_global_times_after_frontier.clone() {
-            let ids = self.transaction_ids_for_global_time(global_time).await?;
-            for id in &ids {
-                if matches!(self.transaction_state(*id).await,
-                    Some((Fate::Accepted, Some(position), DurabilityTier::Global))
-                    if position == global_time)
-                {
-                    accepted_e2ee_dots.push(*id);
-                    accepted_e2ee_dot_positions.insert(*id, global_time);
+            for (tx_id, accepted) in self.transaction_dots_for_global_time(global_time).await? {
+                dots.push(tx_id);
+                if accepted {
+                    accepted_e2ee_dots.push(tx_id);
+                    accepted_e2ee_dot_positions.insert(tx_id, global_time);
                 }
             }
-            dots.extend(ids);
         }
         // Capture accepted witnesses before pending foreign dots are added.
         // Their fate must never be reevaluated later to authorize this cut.
@@ -2318,11 +2314,14 @@ where
         Ok(self.open_tx(tx_id)?.base_snapshot.clone())
     }
 
-    pub(super) async fn transaction_ids_for_global_time(
+    /// Indexed dots and whether each was accepted and durable at this exact
+    /// position. Capture status from the row already read by the index, before
+    /// pending foreign dots are added, without a second transaction lookup.
+    async fn transaction_dots_for_global_time(
         &mut self,
         global_time: GlobalTime,
-    ) -> Result<Vec<TxId>, Error> {
-        let mut tx_ids = Vec::new();
+    ) -> Result<Vec<(TxId, bool)>, Error> {
+        let mut dots = Vec::new();
         for raw in self
             .database
             .index_scan_raw(
@@ -2339,12 +2338,19 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "transaction node alias must exist",
                 ))?;
-            tx_ids.push(TxId::new(
+            let tx_id = TxId::new(
                 TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
                 node,
-            ));
+            );
+            // Match transaction_state's fail-closed status decoding and
+            // durability override for writes whose persistence is pending.
+            let accepted = !self.pending_persistence.contains(&tx_id)
+                && matches!(transaction_state_from_encoded_fields(record).ok(),
+                    Some((Fate::Accepted, Some(position), DurabilityTier::Global))
+                    if position == global_time);
+            dots.push((tx_id, accepted));
         }
-        Ok(tx_ids)
+        Ok(dots)
     }
 
     /// Pending transactions of other nodes that are present locally. Current reads already

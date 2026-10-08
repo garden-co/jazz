@@ -993,15 +993,7 @@ where
         // Status is a projection, not a payload audit. Full transaction readers
         // continue validating author and contribution identities independently.
         self.query_transaction_fields(tx_id, |_, _, record| {
-            Ok((
-                fate_from_encoded_fields(record)?,
-                record
-                    .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
-                    .map(GlobalTime),
-                durability_from_discriminant(
-                    record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
-                )?,
-            ))
+            transaction_state_from_encoded_fields(record)
         })
         .await
     }
