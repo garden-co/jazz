@@ -62,6 +62,14 @@ pnpm test          # everything (via turbo)
 cargo test -p jazz --no-default-features --features testing,transport-compression-zstd   # rust core only
 ```
 
+### Better Auth adapter test fixtures
+
+Reuse the generated fixture schema and permissions when testing adapter
+behaviour. Each case still owns a fresh server, client context and rows, and
+publishes its catalogue through the real deployment interface. Keep filesystem
+schema-loading coverage in the CLI and loader suites rather than repeating it
+in adapter setup.
+
 ### Focus one Rust test safely
 
 `dev/t` first asks Cargo for the test inventory using the same target and
