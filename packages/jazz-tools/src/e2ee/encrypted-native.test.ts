@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createJazzSession } from "../backend/create-jazz-session.js";
@@ -8,72 +8,107 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { spaceSchema } from "./spaces.js";
 
+function store() {
+  let value: string | null = null;
+  return {
+    async read() {
+      return value;
+    },
+    async update(transform: (value: string | null) => string) {
+      value = transform(value);
+    },
+  };
+}
+
+async function createFixture() {
+  const app = s.defineApp({
+    ...deviceRequestSchema,
+    ...spaceSchema,
+    projects: s.table({ title: s.string() }, {}),
+    notes: s
+      .table(
+        { projectId: s.uuid(), title: s.string(), bytes: s.bytes() },
+        { project: s.rel("projects", "projectId") },
+      )
+      .encrypted({ space: "projectId", columns: ["title", "bytes"] }),
+  });
+  const policies = definePermissions(app, ({ policy, session }) => {
+    policy.projects.allowRead.always();
+    policy.projects.allowInsert.always();
+    policy.notes.allowRead.always();
+    policy.notes.allowInsert.always();
+    policy.notes.allowUpdate.always();
+    policy.__e2ee_spaces.allowRead.always();
+    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_space_grants.allowRead.always();
+    policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
+    policy.__e2ee_space_deliveries.allowRead.always();
+    policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+  });
+  const permissions = { ...deviceRequestPermissions, ...policies };
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  let wasm: Awaited<ReturnType<typeof createDb>> | undefined;
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    owner = await createJazzSession({
+      appId: server.appId,
+      serverUrl: server.url,
+      app,
+      permissions,
+      driver: { type: "memory" },
+      initial: "local-first",
+      e2ee: { app, store: store() },
+    });
+    const native = owner.getSnapshot().client!.db;
+    const nativeId = owner.getSnapshot().account!.id;
+    const account = await localAccountConfig(server.appId, server.url);
+    wasm = await createDb({ ...account, e2ee: { app, store: store() } });
+    await native.e2ee.devices.list();
+    await wasm.e2ee.devices.list();
+    return {
+      app,
+      native,
+      nativeId,
+      wasm,
+      account,
+      server,
+      async close() {
+        await wasm?.shutdown();
+        await owner?.close();
+        await server.stop();
+      },
+    };
+  } catch (error) {
+    await wasm?.shutdown();
+    await owner?.close();
+    await server.stop();
+    throw error;
+  }
+}
+
+// Each mode and writer direction creates a fresh scope. Only the accepted
+// accounts are shared; the automatic startup suites exercise cold enrolment.
+let fixture: Awaited<ReturnType<typeof createFixture>>;
+beforeAll(async () => {
+  fixture = await createFixture();
+}, 60_000);
+afterAll(async () => {
+  await fixture?.close();
+});
+
 it.each(["grant", "initial", "initial-upsert", "late-initial"])(
   "reads and updates encrypted cells across native Node and WASM (%s)",
   async (sharing) => {
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...spaceSchema,
-      projects: s.table({ title: s.string() }, {}),
-      notes: s
-        .table(
-          { projectId: s.uuid(), title: s.string(), bytes: s.bytes() },
-          { project: s.rel("projects", "projectId") },
-        )
-        .encrypted({ space: "projectId", columns: ["title", "bytes"] }),
-    });
-    const policies = definePermissions(app, ({ policy, session }) => {
-      policy.projects.allowRead.always();
-      policy.projects.allowInsert.always();
-      policy.notes.allowRead.always();
-      policy.notes.allowInsert.always();
-      policy.notes.allowUpdate.always();
-      policy.__e2ee_spaces.allowRead.always();
-      policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
-      policy.__e2ee_space_grants.allowRead.always();
-      policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
-      policy.__e2ee_space_deliveries.allowRead.always();
-      policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
-    });
-    const permissions = { ...deviceRequestPermissions, ...policies };
-    const store = () => {
-      let value: string | null = null;
-      return {
-        async read() {
-          return value;
-        },
-        async update(transform: (value: string | null) => string) {
-          value = transform(value);
-        },
-      };
-    };
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
-    let wasm: Awaited<ReturnType<typeof createDb>> | undefined;
+    const { app, native, nativeId, wasm, account, server } = fixture;
     const lateRecipients: Awaited<ReturnType<typeof createDb>>[] = [];
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId: server.appId,
-        adminSecret: server.adminSecret,
-        schema: app,
-        permissions,
-      });
-      owner = await createJazzSession({
-        appId: server.appId,
-        serverUrl: server.url,
-        app,
-        permissions,
-        driver: { type: "memory" },
-        initial: "local-first",
-        e2ee: { app, store: store() },
-      });
-      const native = owner.getSnapshot().client!.db;
-      const nativeId = owner.getSnapshot().account!.id;
-      const account = await localAccountConfig(server.appId, server.url);
-      wasm = await createDb({ ...account, e2ee: { app, store: store() } });
-      await native.e2ee.devices.list();
-      await wasm.e2ee.devices.list();
       for (const [writer, reader, readerId] of [
         [native, wasm, account.account.id],
         [wasm, native, nativeId],
@@ -187,9 +222,6 @@ it.each(["grant", "initial", "initial-upsert", "late-initial"])(
       }
     } finally {
       for (const recipient of lateRecipients) await recipient.shutdown();
-      await wasm?.shutdown();
-      await owner?.close();
-      await server.stop();
     }
   },
   60_000,
