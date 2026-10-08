@@ -3642,10 +3642,6 @@ export class Db {
     if (!runtime.tableIdentity)
       throw new Error("Runtime does not expose catalogue table identities");
     if (!localOnly) {
-      // Reuse stable lineage only after durable publication and admission of
-      // this exact schema view. Membership still requires fresh history replay.
-      const authenticated = await this.authenticatedTableIdentity(table);
-      if (authenticated) return authenticated;
       const initialOfflineState = this.connection.initialExplicitOfflineState();
       if (initialOfflineState) await initialOfflineState;
       const offline = this.connection.isExplicitlyOffline();

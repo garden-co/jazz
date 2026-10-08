@@ -93,11 +93,18 @@ export async function firstAccountEpoch(
                 new Uint8Array(32),
               );
               assertOpen();
-              return tx.insert(
+              const identity = tx.insert(
                 identities,
                 { deviceId: device.id, epochId, envelope, verification, ledgerVersion: 1 },
                 { id: accountId },
               );
+              tx.insert(roots, {
+                accountId,
+                deviceId: device.id,
+                epochId,
+                ledgerVersion: 1,
+              });
+              return identity;
             } finally {
               secret.fill(0);
             }
