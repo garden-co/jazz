@@ -452,15 +452,13 @@ export class Groups {
         ? await this.db.one(this.tables.__e2ee_groups.where({ id: memberId }), { tier: "global" })
         : null;
     if (memberKind === "group" && !child) throw new Error("Missing E2EE child group");
-    await Promise.all(
-      [
-        ...new Set([observed.accountId, memberKind === "account" ? memberId : child!.accountId]),
-      ].map((accountId) => prefetchPublicMembershipHistory(this.db, accountId, this.tables)),
-    );
     const relatedGroupId = memberKind === "group" ? memberId : undefined;
-    await this.warmMembership({
-      groupIds: relatedGroupId === undefined ? [observed.id] : [observed.id, relatedGroupId],
-    });
+    await this.warmMembership(
+      {
+        groupIds: relatedGroupId === undefined ? [observed.id] : [observed.id, relatedGroupId],
+      },
+      [observed.accountId, memberKind === "account" ? memberId : child!.accountId],
+    );
     const device = await this.loadDevice();
     try {
       const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
@@ -1360,7 +1358,7 @@ export class Groups {
   }
 
   /** Key-free discovery only; empty group IDs never fall back to account discovery. */
-  async warmMembership(scope: GroupHistoryScope) {
+  async warmMembership(scope: GroupHistoryScope, additionalAccountIds: readonly string[] = []) {
     const { roots, records, successors } = await collectGroupHistory(scope, {
       roots: (selector) =>
         this.db.all(this.tables.__e2ee_groups.where(selector), { tier: "global" }),
@@ -1371,7 +1369,9 @@ export class Groups {
           tier: "global",
         }),
     });
-    const accounts = new Set([this.accountId]);
+    // Deduplicate preparation only within this discovery call. Selected accounts
+    // remain covered even if an observed group root changes during discovery.
+    const accounts = new Set([this.accountId, ...additionalAccountIds]);
     if ("accountId" in scope) accounts.add(scope.accountId);
     for (const group of roots) accounts.add(group.accountId);
     for (const row of records) {

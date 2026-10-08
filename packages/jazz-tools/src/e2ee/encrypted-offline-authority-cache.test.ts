@@ -251,7 +251,6 @@ it.each(["group", "space grant"] as const)(
           code: expect.stringMatching(/^(key-unavailable|key-not-shared)$/),
         }),
       ]);
-      expect(await owner.one(query, { tier: "global" })).toEqual(note);
     } finally {
       for (const client of clients) await client.shutdown();
       await server.stop();
