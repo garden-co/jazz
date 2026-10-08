@@ -76,8 +76,8 @@ it("invalidates encrypted equality when membership is removed from a child group
     await reader.e2ee.devices.list();
     const parent = await owner.e2ee.groups.create().wait();
     const child = await owner.e2ee.groups.create().wait();
-    await owner.e2ee.groups.add(parent.id, child.id).wait();
-    await owner.e2ee.groups.add(child.id, bob.account.id).wait();
+    await owner.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
+    await owner.e2ee.groups.add(child.id, { kind: "account", id: bob.account.id }).wait();
     const tx = owner.beginExclusiveTransaction();
     const project = tx.insert(app.projects, { title: "Group project" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Shared note" });
@@ -102,7 +102,7 @@ it("invalidates encrypted equality when membership is removed from a child group
     );
     try {
       await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([note]);
-      await owner.e2ee.groups.remove(child.id, bob.account.id).wait();
+      await owner.e2ee.groups.remove(child.id, { kind: "account", id: bob.account.id }).wait();
       await expect.poll(() => failure?.name, { timeout: 10_000 }).toBe("E2eeDataError");
       expect(snapshots.some((rows) => rows.length === 0)).toBe(false);
     } finally {
