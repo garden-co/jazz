@@ -5,7 +5,7 @@ import type { RowSettlement } from "../runtime/client.js";
 import type { SpaceRoot, SpaceGrant } from "./spaces.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { decodeLocalDeviceStore } from "./local-device.js";
+import { DeviceKeyLifetime, withLocalDeviceStore, type StoredDevices } from "./local-device.js";
 
 type Read = {
   query: QueryBuilder<{ id: string }>;
@@ -27,41 +27,52 @@ export function configureAcceptedHistory(db: Db, storage: Storage): void {
   stores.set(db, storage);
 }
 
-function storedHistories(value: string | null) {
-  const state = decodeLocalDeviceStore(value) as ReturnType<typeof decodeLocalDeviceStore> & {
-    acceptedHistoryV1?: StoredHistory[];
-  };
-  const entries = state.acceptedHistoryV1 ?? [];
-  const seen = new Set<string>();
-  if (!Array.isArray(entries)) throw new Error("Invalid stored E2EE histories");
-  for (const entry of entries) {
-    if (
-      !entry ||
-      typeof entry.scope !== "string" ||
-      typeof entry.key !== "string" ||
-      typeof entry.reads !== "string"
-    )
-      throw new Error("Invalid stored E2EE history");
-    if (
-      entry.initial &&
-      (typeof entry.initial.rootId !== "string" ||
-        typeof entry.initial.transactionId !== "string" ||
-        !entry.initial.transactionId ||
-        !Array.isArray(entry.initial.rowIds) ||
-        !Array.isArray(entry.initial.recipientIds) ||
-        entry.initial.recipientIds.some((id) => typeof id !== "string") ||
-        new Set(entry.initial.recipientIds).size !== entry.initial.recipientIds.length ||
-        entry.initial.rowIds.length === 0 ||
-        entry.initial.rowIds.some((id) => typeof id !== "string") ||
-        !entry.initial.rowIds.includes(entry.initial.rootId) ||
-        new Set(entry.initial.rowIds).size !== entry.initial.rowIds.length)
-    )
-      throw new Error("Invalid stored initial E2EE history");
-    const key = JSON.stringify([entry.scope, entry.key]);
-    if (seen.has(key)) throw new Error("Duplicate stored E2EE history");
-    seen.add(key);
+function storedHistories<T>(
+  value: string | null,
+  use: (stored: {
+    state: StoredDevices & { acceptedHistoryV1?: StoredHistory[] };
+    entries: StoredHistory[];
+  }) => T,
+): T {
+  const lifetime = new DeviceKeyLifetime();
+  try {
+    return withLocalDeviceStore(value, lifetime, (parsed) => {
+      const state = parsed as StoredDevices & { acceptedHistoryV1?: StoredHistory[] };
+      const entries = state.acceptedHistoryV1 ?? [];
+      const seen = new Set<string>();
+      if (!Array.isArray(entries)) throw new Error("Invalid stored E2EE histories");
+      for (const entry of entries) {
+        if (
+          !entry ||
+          typeof entry.scope !== "string" ||
+          typeof entry.key !== "string" ||
+          typeof entry.reads !== "string"
+        )
+          throw new Error("Invalid stored E2EE history");
+        if (
+          entry.initial &&
+          (typeof entry.initial.rootId !== "string" ||
+            typeof entry.initial.transactionId !== "string" ||
+            !entry.initial.transactionId ||
+            !Array.isArray(entry.initial.rowIds) ||
+            !Array.isArray(entry.initial.recipientIds) ||
+            entry.initial.recipientIds.some((id) => typeof id !== "string") ||
+            new Set(entry.initial.recipientIds).size !== entry.initial.recipientIds.length ||
+            entry.initial.rowIds.length === 0 ||
+            entry.initial.rowIds.some((id) => typeof id !== "string") ||
+            !entry.initial.rowIds.includes(entry.initial.rootId) ||
+            new Set(entry.initial.rowIds).size !== entry.initial.rowIds.length)
+        )
+          throw new Error("Invalid stored initial E2EE history");
+        const key = JSON.stringify([entry.scope, entry.key]);
+        if (seen.has(key)) throw new Error("Duplicate stored E2EE history");
+        seen.add(key);
+      }
+      return use({ state, entries });
+    });
+  } finally {
+    lifetime.close();
   }
-  return { state, entries };
 }
 
 // Local JSON v1: snapshots contain public metadata only. BYTEA is the single-key
@@ -128,7 +139,7 @@ async function persist(
     })),
   );
   decodeAcceptedHistoryReads(encoded);
-  const existing = storedHistories(await storage.store.read()).entries.find(
+  const existing = storedHistories(await storage.store.read(), ({ entries }) => entries).find(
     (entry) => entry.scope === storage.scope && entry.key === key,
   );
   storage.assertOpen();
@@ -136,13 +147,14 @@ async function persist(
   let updated = false;
   await storage.store.update((value) => {
     storage.assertOpen();
-    const { state, entries } = storedHistories(value);
-    state.acceptedHistoryV1 = [
-      ...entries.filter((entry) => entry.scope !== storage.scope || entry.key !== key),
-      { scope: storage.scope, key, reads: encoded, ...(initial ? { initial } : {}) },
-    ];
-    updated = true;
-    return JSON.stringify(state);
+    return storedHistories(value, ({ state, entries }) => {
+      state.acceptedHistoryV1 = [
+        ...entries.filter((entry) => entry.scope !== storage.scope || entry.key !== key),
+        { scope: storage.scope, key, reads: encoded, ...(initial ? { initial } : {}) },
+      ];
+      updated = true;
+      return JSON.stringify(state);
+    });
   });
   if (!updated) throw new Error("E2EE history store did not perform the update");
   storage.assertOpen();
@@ -155,7 +167,7 @@ async function restore<T>(
 ) {
   const storage = stores.get(db);
   if (!storage) return undefined;
-  const { entries } = storedHistories(await storage.store.read());
+  const entries = storedHistories(await storage.store.read(), ({ entries }) => entries);
   storage.assertOpen();
   const entry = entries.find((item) => item.scope === storage.scope && item.key === key);
   if (!entry) return undefined;
