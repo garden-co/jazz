@@ -17,8 +17,7 @@ use jazz::tools::{
 };
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, TxId};
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireFrame, decode_frame,
-    decode_sync_message, encode_sync_message,
+    WIRE_PROTOCOL_VERSION, WireFrame, decode_frame, decode_sync_message, encode_sync_message,
 };
 use jazz_storage_rocksdb::RocksDbStorage;
 
@@ -38,11 +37,7 @@ enum Wire {
 impl Wire {
     fn encoded(message: SyncMessage) -> Self {
         let payload = encode_sync_message(&message).unwrap();
-        let context = jazz::wire::WireInboundContext::new(
-            WIRE_PROTOCOL_VERSION,
-            FEATURE_SYNC_MESSAGE_PAYLOAD,
-            None,
-        );
+        let context = jazz::wire::WireInboundContext::new(WIRE_PROTOCOL_VERSION, 0, None);
         let mut sender = jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
         sender
             .enqueue(0, 0, jazz::wire::channels::ChannelClass::Control, payload)
@@ -59,11 +54,7 @@ impl Wire {
         match self {
             Wire::Sync(sync) => Some(sync),
             Wire::Frame(bytes) => {
-                let context = jazz::wire::WireInboundContext::new(
-                    WIRE_PROTOCOL_VERSION,
-                    FEATURE_SYNC_MESSAGE_PAYLOAD,
-                    None,
-                );
+                let context = jazz::wire::WireInboundContext::new(WIRE_PROTOCOL_VERSION, 0, None);
                 let mut receiver =
                     jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
                 let mut message = None;

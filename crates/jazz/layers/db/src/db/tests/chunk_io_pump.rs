@@ -7,10 +7,7 @@ use std::task::{Context, Poll, Waker};
 use groove::chunks::{ChunkKvStorage, ChunkProvider, ChunkStorage, MissingChunkResolver};
 
 use super::super::*;
-use super::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireFrame, duplex, encode_frame, open_db,
-    schema,
-};
+use super::{WIRE_PROTOCOL_VERSION, WireFrame, duplex, encode_frame, open_db, schema};
 
 #[derive(Default)]
 struct DeferredChunkStorage {
@@ -1186,7 +1183,7 @@ fn complete_auxiliary_response_with_wrong_protocol_version_is_rejected_without_r
             SyncMessage::ChunkRequestBatch(batch) => batch.requests[0].request_id,
             _ => unreachable!(),
         };
-        let features = FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_AUXILIARY_CHUNKS;
+        let features = crate::wire::FEATURE_AUXILIARY_CHUNKS;
         let payload = crate::wire::encode_sync_message(&SyncMessage::ChunkResponseBatch(
             ChunkResponseBatch {
                 responses: vec![ChunkResponseEntry {
@@ -1235,9 +1232,7 @@ fn paired_wire_context_governs_auxiliary_frames_in_both_directions() {
         let author = AuthorSubject::for_test_bytes([0x52; 16]);
         let database = open_db(0x52, author, &schema());
         let (client_bytes, _server_bytes) = super::byte_duplex_raw();
-        let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | crate::wire::FEATURE_AUXILIARY_CHUNKS;
+        let features = crate::wire::FEATURE_SESSION_FRAME | crate::wire::FEATURE_AUXILIARY_CHUNKS;
         let session = crate::wire::WireSession {
             session_id: "auxiliary-context-session".to_owned(),
             epoch: 7,

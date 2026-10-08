@@ -253,14 +253,11 @@ through a migration path. A new optional semantic variant additionally needs a
 new negotiated feature bit. Wire-protocol v5 intentionally provides neither
 old-version decoding nor migration.
 
-Feature bits are also permanent: `SyncMessagePayload=1<<0`,
-`SessionFrame=1<<1`, `StructuredErrors=1<<2`, `PayloadLz4=1<<3`,
-`PayloadZstd=1<<4`, `MessageFragmentation=1<<5`,
-`AuthorizationScopeReceipts=1<<6`, `AuthorizationScopeViews=1<<7`, and
-`AuxiliaryChunks=1<<8`, `ScopeIsolatedClientRelay=1<<9`, and
-retired `AuthorityPublications=1<<10` (never advertised). `Hello` negotiates
-only the intersection. A message
-envelope or fragment MUST NOT declare a bit outside that intersection. Feature
+The optional feature bits are `SessionFrame=1<<1`, `PayloadLz4=1<<3`,
+`PayloadZstd=1<<4`, `AuthorizationScopeReceipts=1<<6`,
+`AuthorizationScopeViews=1<<7`, `AuxiliaryChunks=1<<8`, and
+`ScopeIsolatedClientRelay=1<<9`. `Hello` negotiates only the intersection of optional features.
+A channel extent MUST NOT declare a bit outside that intersection. Feature
 masks are postcard `u64` values and MUST be decoded and compared across all 64
 bits; a binding language MUST NOT apply a narrowing 32-bit bitwise operation.
 Any unsupported low or high bit, including `1<<32`, rejects the Hello before

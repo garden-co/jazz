@@ -461,17 +461,10 @@ pub mod tests {
 mod dependency_tests {
     use super::*;
     use crate::ids::AuthorSubject;
-    use crate::wire::{
-        FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireFrame, decode_frame,
-    };
+    use crate::wire::{WIRE_PROTOCOL_VERSION, WireFrame, decode_frame};
     use std::collections::BTreeMap;
     fn endpoint() -> ChannelEndpoint {
-        ChannelEndpoint::new(WireInboundContext::new(
-            WIRE_PROTOCOL_VERSION,
-            FEATURE_SYNC_MESSAGE_PAYLOAD,
-            None,
-        ))
-        .unwrap()
+        ChannelEndpoint::new(WireInboundContext::new(WIRE_PROTOCOL_VERSION, 0, None)).unwrap()
     }
     fn ordinary() -> SyncMessage {
         SyncMessage::FetchRowVersions {

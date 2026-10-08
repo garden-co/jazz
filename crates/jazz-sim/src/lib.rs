@@ -14,8 +14,7 @@ use jazz::protocol::{RegisterShapeOptions, ShapeAst};
 use jazz::query::{QUERY_NAMESPACE, Query, ShapeId};
 use jazz::schema::JazzSchema;
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireFrame, decode_frame,
-    decode_sync_message, encode_sync_message,
+    WIRE_PROTOCOL_VERSION, WireFrame, decode_frame, decode_sync_message, encode_sync_message,
 };
 use serde_json::{Map, Value, json};
 use std::cmp::Ordering;
@@ -905,11 +904,7 @@ pub fn loopback_transport_message(
             let mut encode_time = encode_start.elapsed();
             let mut decode_time = std::time::Duration::ZERO;
             let payload = if codec == SimulatorTransportCodec::WireFrames {
-                let context = jazz::wire::WireInboundContext::new(
-                    WIRE_PROTOCOL_VERSION,
-                    FEATURE_SYNC_MESSAGE_PAYLOAD,
-                    None,
-                );
+                let context = jazz::wire::WireInboundContext::new(WIRE_PROTOCOL_VERSION, 0, None);
                 let mut sender =
                     jazz::wire::stream_backend::OrderedChannelBackend::new(context.clone())
                         .unwrap();

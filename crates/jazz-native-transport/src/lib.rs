@@ -10,9 +10,8 @@ use jazz::db::WireTransportAdapter;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WireAuthorityEndpoint, WireError, WireFrame,
-    WireHello, WirePeerRole, WireTransport, current_wire_features, decode_frame, encode_frame,
-    negotiate_wire,
+    TransportError, WireAuthorityEndpoint, WireError, WireFrame, WireHello, WirePeerRole,
+    WireTransport, current_wire_features, decode_frame, encode_frame, negotiate_wire,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -28,7 +27,6 @@ use jazz::tools::native_transport_connector::{
 };
 use jazz::tools::websocket_prelude_auth::AuthConfig;
 
-const WS_CLIENT_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 // The serving route caps client-to-server WebSocket messages at one MiB. Keep
 // a small postcard framing reserve so a burst of individually-valid wire
@@ -467,12 +465,6 @@ impl WebSocketTransport {
         if server_hello.authority.is_none() {
             negotiated.features &= !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
                 | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS);
-        }
-        if negotiated.features & WS_CLIENT_REQUIRED_FEATURES != WS_CLIENT_REQUIRED_FEATURES {
-            return Err(WebSocketClientError::ServerRejected(
-                "server did not negotiate sync message payload frames".to_owned(),
-            )
-            .into());
         }
         let session_context = if negotiated.features
             & (jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
@@ -1234,7 +1226,7 @@ mod tests {
         let frames = Arc::new(Mutex::new(VecDeque::new()));
         let credits = Arc::new(Mutex::new(VecDeque::new()));
         let received_frames = Arc::new(Mutex::new(VecDeque::new()));
-        let features = FEATURE_SYNC_MESSAGE_PAYLOAD | jazz::wire::FEATURE_MESSAGE_FRAGMENTATION;
+        let features = 0;
         let mut sender = WireTransportAdapter::new(
             FrameSink {
                 outbound: Arc::clone(&frames),
@@ -1511,6 +1503,38 @@ mod tests {
         }
     }
 
+    /// Alice can connect to Bob with no optional features: semantic traffic,
+    /// structured errors, and channel splitting are baseline wire behavior.
+    #[tokio::test]
+    async fn ordinary_connection_accepts_no_optional_features() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _prelude = socket.next().await.unwrap().unwrap();
+            let _hello = socket.next().await.unwrap().unwrap();
+            let hello =
+                encode_frame(&WireFrame::Hello(WireHello::current(WirePeerRole::Core, 0))).unwrap();
+            socket
+                .send(Message::Binary(
+                    postcard::to_allocvec(&vec![hello]).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let connected = WebSocketTransport::connect(
+            format!("http://{address}"),
+            AppId::random(),
+            AuthorSubject::for_test_bytes([0x42; 16]),
+            AuthConfig::default(),
+        )
+        .await
+        .expect("baseline protocol requires no feature bits");
+        assert_eq!(connected.features, 0);
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn outbound_queue_returns_backpressure_at_a_finite_byte_budget() {
         let (_inbound_sender, inbound) = mpsc::channel(1);
@@ -1523,7 +1547,7 @@ mod tests {
             terminal: None,
             terminal_publisher: Arc::new(Mutex::new(None)),
             protocol_version: WIRE_PROTOCOL_VERSION,
-            features: FEATURE_SYNC_MESSAGE_PAYLOAD,
+            features: 0,
             session_context: None,
         };
         let frame = vec![0; MAX_WIRE_FRAME_BYTES];

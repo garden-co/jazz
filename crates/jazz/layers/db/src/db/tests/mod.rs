@@ -68,7 +68,6 @@ use crate::schema::WritePolicies;
 use crate::time::{GlobalTime, TxTime};
 use crate::tx::TxId;
 use crate::wire::{
-    FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD,
     WIRE_PROTOCOL_VERSION, WireError, WireErrorCode, WireFrame, WireRetry, WireSession,
     WireTransport, current_wire_features, decode_frame, decode_sync_message, encode_frame,
     encode_sync_message,

@@ -3514,12 +3514,6 @@ impl NapiDb {
                 "server negotiated wire features {features:#x}, but this native binding was not compiled with {unsupported:#x}"
             )).into());
         }
-        if features & jazz::wire::FEATURE_SYNC_MESSAGE_PAYLOAD == 0 {
-            return Err(napi::Error::from_reason(
-                "server did not negotiate required sync message payload frames",
-            )
-            .into());
-        }
         let remote_node: [u8; 16] = remote_node.as_ref().try_into().map_err(|_| {
             napi::Error::from_reason("server hello authority node must be 16 bytes")
         })?;

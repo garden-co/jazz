@@ -272,11 +272,7 @@ mod tests {
                 .push_back(ReceivedSyncMessage::unleased(message.clone()));
         }
         let mut sender = RoutedMessages::default();
-        let context = WireInboundContext::new(
-            crate::wire::WIRE_PROTOCOL_VERSION,
-            crate::wire::FEATURE_SYNC_MESSAGE_PAYLOAD,
-            None,
-        );
+        let context = WireInboundContext::new(crate::wire::WIRE_PROTOCOL_VERSION, 0, None);
         let credits = std::sync::Arc::new(std::sync::Mutex::new(
             crate::wire::channel_credit::ChannelCredits::new(context.clone()),
         ));

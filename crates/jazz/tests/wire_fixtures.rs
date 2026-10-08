@@ -31,10 +31,8 @@ use jazz::tools::{
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::{
     FEATURE_AUTHORIZATION_SCOPE_RECEIPTS, FEATURE_AUTHORIZATION_SCOPE_VIEWS,
-    FEATURE_AUXILIARY_CHUNKS, FEATURE_MESSAGE_FRAGMENTATION, FEATURE_PAYLOAD_LZ4,
-    FEATURE_PAYLOAD_ZSTD, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD,
-    WIRE_PROTOCOL_VERSION, WireFrame, WireHello, WirePeerRole, decode_sync_message, encode_frame,
-    encode_sync_message,
+    FEATURE_AUXILIARY_CHUNKS, FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, WIRE_PROTOCOL_VERSION,
+    WireFrame, WireHello, WirePeerRole, decode_sync_message, encode_frame, encode_sync_message,
 };
 use serde::{Deserialize, Serialize};
 
@@ -808,7 +806,7 @@ fn fixture_manifest() -> Manifest {
         fixture_set: "jazz-wire-message-frames-v5",
         codec: "postcard Vec<Vec<u8>> of WireFrame::Channel carrying encode_sync_message(..)",
         protocol_version: WIRE_PROTOCOL_VERSION,
-        features: FEATURE_SYNC_MESSAGE_PAYLOAD,
+        features: 0,
         fixtures,
     }
 }
@@ -816,25 +814,12 @@ fn fixture_manifest() -> Manifest {
 fn hello_fixture_manifest() -> HelloManifest {
     let cases = [
         ("client_without_authority", WirePeerRole::Client, 0, None),
-        (
-            "client_with_authority",
-            WirePeerRole::Client,
-            FEATURE_SYNC_MESSAGE_PAYLOAD,
-            Some(300),
-        ),
-        (
-            "core_without_authority",
-            WirePeerRole::Core,
-            FEATURE_STRUCTURED_ERRORS,
-            None,
-        ),
+        ("client_with_authority", WirePeerRole::Client, 0, Some(300)),
+        ("core_without_authority", WirePeerRole::Core, 0, None),
         (
             "core_with_authority",
             WirePeerRole::Core,
-            FEATURE_SYNC_MESSAGE_PAYLOAD
-                | FEATURE_STRUCTURED_ERRORS
-                | FEATURE_PAYLOAD_ZSTD
-                | FEATURE_MESSAGE_FRAGMENTATION
+            FEATURE_PAYLOAD_ZSTD
                 | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
                 | FEATURE_AUTHORIZATION_SCOPE_VIEWS
                 | FEATURE_AUXILIARY_CHUNKS,
@@ -979,7 +964,7 @@ fn historical_catalogue_payload_rejects_version_admission() {
 }
 
 fn channel_frames(payload: Vec<u8>, version: u16) -> Vec<Vec<u8>> {
-    let context = jazz::wire::WireInboundContext::new(version, FEATURE_SYNC_MESSAGE_PAYLOAD, None);
+    let context = jazz::wire::WireInboundContext::new(version, 0, None);
     let mut sender = jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
     sender
         .enqueue(0, 0, jazz::wire::channels::ChannelClass::Control, payload)

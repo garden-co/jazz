@@ -4543,7 +4543,7 @@ fn silent_partial_canonical_receive_schedules_its_own_expiry() {
     let (wake_tx, wake_rx) = std::sync::mpsc::channel();
     client.set_tick_scheduler(Some(Rc::new(TimerHost(wake_tx))));
     let (client_bytes, mut remote) = byte_duplex_raw();
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+    let features = 0;
     let mut adapter =
         WireTransportAdapter::new(client_bytes, WIRE_PROTOCOL_VERSION, features, None);
     adapter.set_incomplete_receive_timeout_for_test(20);

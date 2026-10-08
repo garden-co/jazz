@@ -23,14 +23,13 @@ use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::serving::ServerLinkAdmission;
 use jazz::tools::Session;
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame,
-    WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
+    WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
+    current_wire_features, encode_frame, negotiate_wire,
 };
 use tokio::sync::mpsc;
 
 use crate::server::ServerState;
 
-const WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
 const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
@@ -698,20 +697,7 @@ async fn handle_ws_connection(
     };
 
     let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
-        Ok(negotiated) if negotiated.features & WS_REQUIRED_FEATURES != 0 => negotiated,
-        Ok(_) => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(
-                    WireErrorCode::UnsupportedFeature,
-                    WireRetry::Never,
-                    "websocket requires sync message payload frames",
-                ),
-            )
-            .await;
-            let _ = socket.close().await;
-            return;
-        }
+        Ok(negotiated) => negotiated,
         Err(error) => {
             send_ws_error(&mut socket, error).await;
             let _ = socket.close().await;
@@ -1123,10 +1109,7 @@ mod tests {
     use jazz::schema::{JazzSchema, TableSchema};
     use jazz::tx::{DurabilityTier, Fate, TxId};
     use jazz::wire::decode_frame;
-    use jazz::wire::{
-        FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
-        WIRE_PROTOCOL_VERSION, WireTransport,
-    };
+    use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireTransport};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
     use crate::middleware::AuthConfig;
@@ -2059,10 +2042,7 @@ mod tests {
             .expect("send Alice prelude");
         alice
             .send(WsMessage::Binary(
-                ws_client_hello_batch_with_features(
-                    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-                )
-                .into(),
+                ws_client_hello_batch_with_features(0).into(),
             ))
             .await
             .expect("send Alice hello");
@@ -2218,10 +2198,7 @@ mod tests {
         // reaches normal handshake admission and produces a server Hello.
         let _ = ws
             .send(WsMessage::Binary(
-                ws_client_hello_batch_with_features(
-                    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-                )
-                .into(),
+                ws_client_hello_batch_with_features(0).into(),
             ))
             .await;
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
@@ -2343,13 +2320,11 @@ mod tests {
                 WsMessage::Binary(json.into_bytes().into())
             };
             ws.send(message).await.expect("send writer prelude");
-            let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-                | FEATURE_STRUCTURED_ERRORS
-                | if entry["requested_link"] == "scope_isolated_client_relay" {
-                    jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
-                } else {
-                    0
-                };
+            let features = if entry["requested_link"] == "scope_isolated_client_relay" {
+                jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
+            } else {
+                0
+            };
             expect_ws_server_hello(&mut ws, features).await;
         }
     }
@@ -2378,10 +2353,7 @@ mod tests {
         .await
         .expect("send scope-isolated prelude");
         ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(
-                FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-            )
-            .into(),
+            ws_client_hello_batch_with_features(0).into(),
         ))
         .await
         .expect("send client hello without scope feature");
@@ -2420,11 +2392,7 @@ mod tests {
                 .await
                 .expect("connect websocket");
             ws.send(message).await.expect("send exact-cap prelude");
-            expect_ws_server_hello(
-                &mut ws,
-                FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-            )
-            .await;
+            expect_ws_server_hello(&mut ws, 0).await;
         }
 
         let oversized = padded_ws_prelude(identity, WS_MAX_MESSAGE_BYTES + 1);
@@ -2445,9 +2413,7 @@ mod tests {
         let state = make_ws_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorSubject::for_test_bytes([0x7a; 16]);
-        let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-            | FEATURE_STRUCTURED_ERRORS
-            | FEATURE_MESSAGE_FRAGMENTATION;
+        let features = 0;
         let mut ws = open_negotiated_ws_with_prelude_and_features(
             addr,
             &state,
@@ -2634,13 +2600,7 @@ mod tests {
         prelude: Vec<u8>,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        open_negotiated_ws_with_prelude_and_features(
-            addr,
-            state,
-            prelude,
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        )
-        .await
+        open_negotiated_ws_with_prelude_and_features(addr, state, prelude, 0).await
     }
 
     async fn open_negotiated_ws_with_prelude_and_features(
@@ -2839,7 +2799,7 @@ mod tests {
                 adapter: WireTransportAdapter::new(
                     transport.clone(),
                     WIRE_PROTOCOL_VERSION,
-                    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+                    0,
                     None,
                 ),
             }))

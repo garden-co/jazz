@@ -35,18 +35,12 @@ pub const WIRE_FRAME_ARTIFACT_CORPUS: &str =
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
-/// Frame payloads contain encoded Jazz sync messages.
-pub const FEATURE_SYNC_MESSAGE_PAYLOAD: WireFeatures = 1 << 0;
 /// Frames may carry an explicit resumable session id and epoch.
 pub const FEATURE_SESSION_FRAME: WireFeatures = 1 << 1;
-/// Peers understand structured [`WireError`] frames.
-pub const FEATURE_STRUCTURED_ERRORS: WireFeatures = 1 << 2;
 /// Message frame payloads may be LZ4-compressed at the transport frame seam.
 pub const FEATURE_PAYLOAD_LZ4: WireFeatures = 1 << 3;
 /// Message frame payloads may be Zstandard-compressed at the transport frame seam.
 pub const FEATURE_PAYLOAD_ZSTD: WireFeatures = 1 << 4;
-/// Logical sync messages may be decomposed into bounded physical frames.
-pub const FEATURE_MESSAGE_FRAGMENTATION: WireFeatures = 1 << 5;
 /// Semantic frames may carry authorization-support purposes and receipts.
 ///
 /// This feature is deliberately separate from framing: an older peer can
@@ -784,10 +778,7 @@ fn default_transport_compression_features() -> WireFeatures {
 
 /// Base sync frame features plus any runtime-enabled transport compression.
 pub fn current_wire_features() -> WireFeatures {
-    FEATURE_SYNC_MESSAGE_PAYLOAD
-        | FEATURE_STRUCTURED_ERRORS
-        | FEATURE_MESSAGE_FRAGMENTATION
-        | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+    FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
         | FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_AUXILIARY_CHUNKS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
@@ -956,10 +947,7 @@ mod tests {
 
     #[test]
     fn hello_json_shape_is_stable() {
-        let frame = WireFrame::Hello(WireHello::current(
-            WirePeerRole::Client,
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        ));
+        let frame = WireFrame::Hello(WireHello::current(WirePeerRole::Client, 0));
 
         assert_eq!(
             serde_json::to_value(frame).unwrap(),
@@ -967,7 +955,7 @@ mod tests {
                 "Hello": {
                     "min_protocol_version": WIRE_PROTOCOL_VERSION,
                     "max_protocol_version": WIRE_PROTOCOL_VERSION,
-                    "features": 5,
+                    "features": 0,
                     "role": "client",
                     "authority": null
                 }
@@ -1990,8 +1978,7 @@ mod tests {
 
         for message in messages {
             let payload = encode_sync_message(&message).unwrap();
-            let frame =
-                test_channel_frame(WIRE_PROTOCOL_VERSION, FEATURE_SYNC_MESSAGE_PAYLOAD, payload);
+            let frame = test_channel_frame(WIRE_PROTOCOL_VERSION, 0, payload);
 
             let decoded = decode_frame(&encode_frame(&frame).unwrap()).unwrap();
             let WireFrame::Channel(envelope) = decoded else {
@@ -2111,13 +2098,16 @@ mod tests {
         let remote = WireHello {
             min_protocol_version: 5,
             max_protocol_version: 5,
-            features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME,
+            features: FEATURE_SESSION_FRAME | FEATURE_AUXILIARY_CHUNKS,
             role: WirePeerRole::Relay,
             authority: None,
         };
 
-        let negotiated =
-            negotiate_wire(&remote, FEATURE_SESSION_FRAME | FEATURE_STRUCTURED_ERRORS).unwrap();
+        let negotiated = negotiate_wire(
+            &remote,
+            FEATURE_SESSION_FRAME | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+        )
+        .unwrap();
 
         assert_eq!(
             negotiated,
@@ -2198,11 +2188,11 @@ mod tests {
         let hello = WireHello {
             min_protocol_version: 3,
             max_protocol_version: 3,
-            features: FEATURE_SYNC_MESSAGE_PAYLOAD,
+            features: 0,
             role: WirePeerRole::Core,
             authority: None,
         };
-        assert!(negotiate_wire(&hello, FEATURE_SYNC_MESSAGE_PAYLOAD).is_err());
+        assert!(negotiate_wire(&hello, 0).is_err());
     }
 
     /// Alice rejects Bob's previous wire layout before interpreting its tier tags.
@@ -2246,12 +2236,12 @@ mod tests {
         let remote = WireHello {
             min_protocol_version: 14,
             max_protocol_version: 14,
-            features: FEATURE_SYNC_MESSAGE_PAYLOAD,
+            features: 0,
             role: WirePeerRole::Core,
             authority: None,
         };
 
-        let error = negotiate_wire(&remote, FEATURE_SYNC_MESSAGE_PAYLOAD)
+        let error = negotiate_wire(&remote, 0)
             .expect_err("current wire protocol must not negotiate with an old peer");
 
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
@@ -2314,7 +2304,7 @@ mod tests {
                 },
             },
         };
-        let old_features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
+        let old_features = 0;
         assert_eq!(
             encode_sync_message_for_features(&message, old_features)
                 .unwrap_err()

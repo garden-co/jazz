@@ -89,8 +89,7 @@ fn logical_message_larger_than_frame_round_trips_in_channel_fifo() {
 fn strict_bootstrap_receive_rejects_bad_physical_frame_before_later_valid_message() {
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);
-    let features =
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let features = 0;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
     let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
     sender
@@ -160,8 +159,7 @@ fn schema_lineage_publication_fragments_before_atomic_admission() {
 
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);
-    let features =
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let features = 0;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
     let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
     sender.send(message.clone()).unwrap();
@@ -215,7 +213,7 @@ fn channel_reordering_and_duplicate_extents_fail_closed() {
     for duplicate in [false, true] {
         let (left, right) = byte_duplex_raw();
         let staged = Rc::clone(&right.inbound);
-        let features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+        let features = 0;
         let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
         let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
         sender
@@ -278,7 +276,7 @@ fn receive_poll_reports_permanent_failure_while_flushing_accepted_backlog() {
             ]),
         },
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION,
+        0,
         None,
     );
 
@@ -317,7 +315,7 @@ fn pending_outbound_backpressure_retains_a_bounded_fifo_queue() {
             .collect(),
         },
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD,
+        0,
         None,
     );
     for _ in 0..MAX_CHANNEL_QUEUED_MESSAGES {
@@ -466,8 +464,7 @@ fn pending_backpressure_admits_later_receipt_in_bounded_channel_queue() {
 
 #[test]
 fn reconnect_discards_missing_fragments_and_replays_the_logical_message() {
-    let features =
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let features = 0;
     let message = SyncMessage::SessionClaims {
         identity: AuthorSubject::for_test_bytes([0x74; 16]),
         claims: BTreeMap::from([(
@@ -506,19 +503,13 @@ pub(super) fn byte_duplex_with_session(
         Box::new(WireTransportAdapter::new(
             left,
             WIRE_PROTOCOL_VERSION,
-            FEATURE_SYNC_MESSAGE_PAYLOAD
-                | crate::wire::FEATURE_SESSION_FRAME
-                | FEATURE_STRUCTURED_ERRORS
-                | FEATURE_MESSAGE_FRAGMENTATION,
+            crate::wire::FEATURE_SESSION_FRAME,
             Some(session.clone()),
         )),
         Box::new(WireTransportAdapter::new(
             right,
             WIRE_PROTOCOL_VERSION,
-            FEATURE_SYNC_MESSAGE_PAYLOAD
-                | crate::wire::FEATURE_SESSION_FRAME
-                | FEATURE_STRUCTURED_ERRORS
-                | FEATURE_MESSAGE_FRAGMENTATION,
+            crate::wire::FEATURE_SESSION_FRAME,
             Some(session),
         )),
     )
@@ -544,9 +535,7 @@ fn test_catalogue_ack() -> SyncMessage {
 fn encode_test_message_frame(session: Option<WireSession>) -> Vec<u8> {
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-        | crate::wire::FEATURE_SESSION_FRAME
-        | FEATURE_STRUCTURED_ERRORS;
+    let features = crate::wire::FEATURE_SESSION_FRAME;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, session);
     sender.send(test_catalogue_ack()).unwrap();
     staged.borrow_mut().pop_front().unwrap()
@@ -650,9 +639,7 @@ fn wire_transport_adapter_accepts_matching_session() {
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
+        crate::wire::FEATURE_SESSION_FRAME,
         Some(session),
     );
 
@@ -676,9 +663,7 @@ fn wire_transport_adapter_rejects_missing_session_without_emitting_sync_message(
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
+        crate::wire::FEATURE_SESSION_FRAME,
         Some(test_wire_session(identity, 3)),
     );
 
@@ -690,9 +675,7 @@ fn wire_transport_adapter_rejects_missing_session_without_emitting_sync_message(
 fn channel_authentication_precedes_payload_admission() {
     let (left, mut right) = byte_duplex_raw();
     let expected_identity = AuthorSubject::for_test_bytes([0xa5; 16]);
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-        | crate::wire::FEATURE_SESSION_FRAME
-        | FEATURE_STRUCTURED_ERRORS;
+    let features = crate::wire::FEATURE_SESSION_FRAME;
     let mut frame = decode_frame(&encode_test_message_frame(Some(test_wire_session(
         AuthorSubject::for_test_bytes([0xb5; 16]),
         3,
@@ -724,7 +707,7 @@ fn channel_authentication_precedes_payload_admission() {
 #[test]
 fn channel_negotiation_validation_precedes_payload_admission() {
     let (left, mut right) = byte_duplex_raw();
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+    let features = 0;
     let mut frame = decode_frame(&encode_test_message_frame(None)).unwrap();
     let WireFrame::Channel(envelope) = &mut frame else {
         panic!("channel fixture")
@@ -765,9 +748,7 @@ fn wire_transport_adapter_rejects_wrong_identity_without_emitting_sync_message()
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
+        crate::wire::FEATURE_SESSION_FRAME,
         Some(test_wire_session(expected_identity, 3)),
     );
 
@@ -788,9 +769,7 @@ fn wire_transport_adapter_rejects_stale_epoch_without_emitting_sync_message() {
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
+        crate::wire::FEATURE_SESSION_FRAME,
         Some(test_wire_session(identity, 3)),
     );
 
@@ -827,13 +806,13 @@ fn wire_transport_adapter_lz4_compresses_payload_when_negotiated() {
     let mut sender = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4,
+        crate::wire::FEATURE_PAYLOAD_LZ4,
         None,
     );
     let mut receiver = WireTransportAdapter::new(
         right,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4,
+        crate::wire::FEATURE_PAYLOAD_LZ4,
         None,
     );
     let message = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
@@ -887,7 +866,7 @@ fn lz4_fragmentation_round_trips_incompressible_payload_over_logical_limit() {
         .expect("deterministic message encodes")
         .len();
     assert!(logical_len <= MAX_LOGICAL_MESSAGE_BYTES);
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4;
+    let features = crate::wire::FEATURE_PAYLOAD_LZ4;
     let (left, right) = byte_duplex_raw();
     let attempts = Rc::new(RefCell::new(Vec::new()));
     let mut sender = WireTransportAdapter::new(
@@ -937,13 +916,13 @@ fn wire_transport_adapter_zstd_stream_preserves_message_order() {
     let mut sender = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD,
+        crate::wire::FEATURE_PAYLOAD_ZSTD,
         None,
     );
     let mut receiver = WireTransportAdapter::new(
         right,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD,
+        crate::wire::FEATURE_PAYLOAD_ZSTD,
         None,
     );
     let first = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
@@ -1183,7 +1162,7 @@ fn channel_encoded_budget_is_enforced_independently_of_decoded_bytes() {
     use crate::wire::channels::{ChannelClass, ChannelFrame, MAX_CHANNEL_FRAME_PAYLOAD};
     const EXPECTED_ENCODED_CAP: usize =
         MAX_LOGICAL_MESSAGE_BYTES + MAX_LOGICAL_MESSAGE_BYTES / 10 + 24;
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD;
+    let features = crate::wire::FEATURE_PAYLOAD_ZSTD;
     let (left, right) = byte_duplex_raw();
     let inbound = Rc::clone(&right.inbound);
     let mut bob = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
@@ -1247,7 +1226,7 @@ fn channel_decoded_budget_is_checked_before_payload_admission() {
     let WireFrame::Channel(envelope) = &mut frame else {
         panic!("channel fixture")
     };
-    envelope.features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+    envelope.features = 0;
     envelope.extent.message_len = MAX_LOGICAL_MESSAGE_BYTES as u32 + 1;
     envelope.extent.payload = vec![0xff];
     // Bypass the semantic sender's admission to model a malicious physical
@@ -1255,12 +1234,7 @@ fn channel_decoded_budget_is_checked_before_payload_admission() {
     left.inbound
         .borrow_mut()
         .push_back(encode_frame(&frame).unwrap());
-    let mut bob = WireTransportAdapter::new(
-        left,
-        WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD,
-        None,
-    );
+    let mut bob = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, 0, None);
     let error = bob.try_recv_result().unwrap_err();
     assert!(format!("{error:?}").contains("logical size limit"));
     assert!(bob.try_recv_result().is_err());

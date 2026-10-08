@@ -6,7 +6,6 @@ import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
   FEATURE_PAYLOAD_ZSTD,
-  FEATURE_SYNC_MESSAGE_PAYLOAD,
   MAX_WIRE_PROTOCOL_VERSION,
   MIN_WIRE_PROTOCOL_VERSION,
   WIRE_PROTOCOL_VERSION,
@@ -934,7 +933,7 @@ describe("websocket frame carrier", () => {
         const reader = new PostcardReader(frame);
         expect(reader.u64()).toBe(2); // WireFrame::Channel
         expect(reader.u64()).toBe(WIRE_PROTOCOL_VERSION);
-        expect(reader.u64()).toBe(FEATURE_SYNC_MESSAGE_PAYLOAD);
+        expect(reader.u64()).toBe(0);
         expect(reader.option(() => "session")).toBeUndefined();
       }
     }
