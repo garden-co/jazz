@@ -3662,7 +3662,6 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
             | SyncMessage::RowVersionPayloads { .. }
             | SyncMessage::CatalogueSnapshot(_)
-            | SyncMessage::AuthorizationScopeReceipt { .. }
             | SyncMessage::AuthorizationScopeView { .. }
             | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
             | SyncMessage::AuthorizationScopeUnavailable { .. }

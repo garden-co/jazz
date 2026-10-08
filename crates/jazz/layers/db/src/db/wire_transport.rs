@@ -565,9 +565,7 @@ fn delivery_route_key(message: &SyncMessage) -> Vec<u8> {
     use SyncMessage::*;
     let (tag, bytes) = match message {
         ViewUpdate(view) => (0, postcard::to_allocvec(&view.subscription).unwrap()),
-        SubscribeRejected { subscription, .. } | AuthorizationScopeReceipt { subscription, .. } => {
-            (0, postcard::to_allocvec(subscription).unwrap())
-        }
+        SubscribeRejected { subscription, .. } => (0, postcard::to_allocvec(subscription).unwrap()),
         AuthorizationScopeView { request_id, .. }
         | AuthorizationScopeAggregateReceipt { request_id, .. }
         | AuthorizationScopeUnavailable { request_id }

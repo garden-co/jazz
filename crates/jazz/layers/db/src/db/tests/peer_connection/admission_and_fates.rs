@@ -1301,10 +1301,10 @@ fn authorization_scope_replies_retry_fifo_after_backpressure() {
     assert!(subscriber.borrow().pending_control_responses.is_empty());
 }
 
-// The exact bounded-adapter refusal and retained control queue are internal
-// transport state; the public API only observes the eventual receipt.
+/// Alice receives Bob's aggregate receipt exactly once after backpressure.
+/// The transport seam exposes queue retention, which public row APIs hide.
 #[test]
-fn queued_sibling_authorization_receipt_survives_backpressure_exactly_once() {
+fn queued_aggregate_authorization_receipt_survives_backpressure_exactly_once() {
     let identity = AuthorSubject::for_test_bytes([0xc8; 16]);
     let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema());
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
@@ -1315,13 +1315,8 @@ fn queued_sibling_authorization_receipt_survives_backpressure_exactly_once() {
         }),
         identity,
     );
-    let subscription = SubscriptionKey {
-        shape_id: ShapeId(uuid::Uuid::from_bytes([0x31; 16])),
-        binding_id: BindingId(uuid::Uuid::from_bytes([0x32; 16])),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    };
-    let response = SyncMessage::AuthorizationScopeReceipt {
-        subscription,
+    let response = SyncMessage::AuthorizationScopeAggregateReceipt {
+        request_id: PermissionAdviceRequestId([0x31; 16]),
         receipt: AuthorizationScopeReceipt {
             key: AuthorizationSupportScopeKey {
                 support_shape_digest: [0x41; 32],
@@ -1346,7 +1341,7 @@ fn queued_sibling_authorization_receipt_survives_backpressure_exactly_once() {
     subscriber
         .borrow_mut()
         .tick()
-        .expect("the refused sibling receipt remains queued");
+        .expect("the refused aggregate receipt remains queued");
     assert_eq!(
         subscriber
             .borrow()
@@ -1358,7 +1353,7 @@ fn queued_sibling_authorization_receipt_survives_backpressure_exactly_once() {
     subscriber
         .borrow_mut()
         .tick()
-        .expect("capacity retry accepts the sibling receipt");
+        .expect("capacity retry accepts the aggregate receipt");
     subscriber
         .borrow_mut()
         .tick()
@@ -4530,7 +4525,7 @@ fn permission_advice_response_wire_cannot_carry_policy_rows_or_reasons() {
         request_id: PermissionAdviceRequestId([7; 16]),
         advice: PermissionAdvice::Denied,
     };
-    let mut expected = vec![22]; // AuthorizationScopeDecision in wire v5.
+    let mut expected = vec![21]; // AuthorizationScopeDecision in wire v5.
     expected.extend_from_slice(&[7; 16]);
     expected.push(1); // Denied.
     assert_eq!(

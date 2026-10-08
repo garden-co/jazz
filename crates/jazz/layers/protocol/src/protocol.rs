@@ -126,13 +126,6 @@ pub enum SyncMessage {
     /// Trusted upstream catalogue metadata required to decode immutable
     /// authored-version payloads before their view update arrives.
     CatalogueSnapshot(Box<CatalogueSnapshot>),
-    /// Authority proof emitted after the matching support `ViewUpdate`.
-    AuthorizationScopeReceipt {
-        /// Support view that the receiver must apply before accepting proof.
-        subscription: SubscriptionKey,
-        /// Bound authority receipt.
-        receipt: AuthorizationScopeReceipt,
-    },
     /// Minimal request for an authority-owned authorization support scope.
     ///
     /// The caller supplies only an opaque correlation id and the hypothetical
@@ -668,9 +661,6 @@ impl SyncMessage {
     /// to an older peer.
     pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
         match self {
-            Self::AuthorizationScopeReceipt { .. } => {
-                crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-            }
             Self::AuthorizationScopeIntent { .. }
             | Self::AuthorizationScopeView { .. }
             | Self::AuthorizationScopeAggregateReceipt { .. }

@@ -3465,8 +3465,7 @@ impl NapiDb {
                 },
                 jazz::wire::WIRE_PROTOCOL_VERSION,
                 jazz::wire::current_wire_features()
-                    & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                        | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+                    & !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
                 None,
                 None,
                 self.trusted_backend,

@@ -2984,15 +2984,6 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
         )),
         "the injected target reset failure must not fabricate a clone update"
     );
-    assert!(
-        messages.iter().all(|message| !matches!(
-            message,
-            SyncMessage::AuthorizationScopeReceipt { subscription, .. }
-                if [first_subscription, second_subscription, failed_subscription]
-                    .contains(subscription)
-        )),
-        "ordinary query usages must not acquire unpaired authorization-scope receipts"
-    );
     drop(messages);
 
     // This test stays at the connection seam because the injected clone reset

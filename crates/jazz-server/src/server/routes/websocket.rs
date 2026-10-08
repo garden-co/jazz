@@ -747,23 +747,20 @@ async fn handle_ws_connection(
     // client need not (and must not) self-assert one merely to learn which
     // authority issued its downstream fates.
     let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
-    let session_context = if negotiated.features
-        & (jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-            | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
-        != 0
-    {
-        // An authenticated client can request current rows without itself
-        // being an authority. Retain our receipt epoch and its admitted identity
-        // independently of whether it advertises a remote authority endpoint.
-        Some(ConnectionSessionContext {
-            local: server_endpoint,
-            remote: remote_hello.authority,
-            link_identity: admission.identity,
-            negotiated_features: negotiated.features,
-        })
-    } else {
-        None
-    };
+    let session_context =
+        if negotiated.features & jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0 {
+            // An authenticated client can request current rows without itself
+            // being an authority. Retain our receipt epoch and its admitted identity
+            // independently of whether it advertises a remote authority endpoint.
+            Some(ConnectionSessionContext {
+                local: server_endpoint,
+                remote: remote_hello.authority,
+                link_identity: admission.identity,
+                negotiated_features: negotiated.features,
+            })
+        } else {
+            None
+        };
     let link_admission =
         match ws_link_admission(&admission, negotiated.features, server_endpoint.epoch) {
             Ok(link_admission) => link_admission,

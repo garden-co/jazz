@@ -39,12 +39,12 @@
       "name": "core_with_authority",
       "min_protocol_version": 5,
       "max_protocol_version": 5,
-      "features": 464,
+      "features": 400,
       "role": 1,
       "authority_node_hex": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
       "authority_epoch": 300,
-      "frame_hex": "000505d0030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
-      "frame_base64": "AAUF0AMBARBeXl5eXl5eXl5eXl5eXl5erAI="
+      "frame_hex": "00050590030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+      "frame_base64": "AAUFkAMBARBeXl5eXl5eXl5eXl5eXl5erAI="
     },
     {
       "name": "core_with_max_u64_authority_epoch",

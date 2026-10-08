@@ -573,7 +573,7 @@ fn wire_transport_adapter_carries_only_admitted_session_context() {
             epoch: 19,
         }),
         link_identity: AuthorSubject::for_test_bytes([0x83; 16]),
-        negotiated_features: crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+        negotiated_features: crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
     };
     let adapter = WireTransportAdapter::new_with_session_context(
         left,

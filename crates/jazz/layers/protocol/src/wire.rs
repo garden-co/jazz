@@ -39,12 +39,6 @@ pub const FEATURE_NONE: WireFeatures = 0;
 pub const FEATURE_PAYLOAD_LZ4: WireFeatures = 1 << 3;
 /// Message frame payloads may be Zstandard-compressed at the transport frame seam.
 pub const FEATURE_PAYLOAD_ZSTD: WireFeatures = 1 << 4;
-/// Semantic frames may carry authorization-support purposes and receipts.
-///
-/// This feature is deliberately separate from framing: an older peer can
-/// still exchange every pre-existing sync message, but must never be asked to
-/// deserialize the new semantic enum variants or extension fields.
-pub const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS: WireFeatures = 1 << 6;
 /// Authority-owned authorization scope hydration.  Unlike the first receipt
 /// experiment this never accepts caller supplied support query identities.
 pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
@@ -141,7 +135,7 @@ pub struct WireHello {
     /// Runtime/link role for topology and admission decisions.
     pub role: WirePeerRole,
     /// Authority endpoint bound by the authenticated handshake when the
-    /// authorization-scope receipt feature is offered.  Semantic sync frames
+    /// authorization-scope view feature is offered.  Semantic sync frames
     /// never self-assert this identity.
     #[serde(default)]
     pub authority: Option<WireAuthorityEndpoint>,
@@ -776,8 +770,7 @@ fn default_transport_compression_features() -> WireFeatures {
 
 /// Base sync frame features plus any runtime-enabled transport compression.
 pub fn current_wire_features() -> WireFeatures {
-    FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-        | FEATURE_AUTHORIZATION_SCOPE_VIEWS
+    FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_AUXILIARY_CHUNKS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
         | runtime_transport_compression_features()
@@ -2103,7 +2096,7 @@ mod tests {
 
         let negotiated = negotiate_wire(
             &remote,
-            FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+            FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY,
         )
         .unwrap();
 
@@ -2266,7 +2259,7 @@ mod tests {
 
     #[test]
     fn negotiation_keeps_directional_scope_capability_without_remote_authority() {
-        let feature = FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
+        let feature = FEATURE_AUTHORIZATION_SCOPE_VIEWS;
         let unbound = WireHello::current(WirePeerRole::Core, feature);
         assert_eq!(
             negotiate_wire(&unbound, feature).unwrap().features & feature,
@@ -2284,12 +2277,8 @@ mod tests {
     /// This codec-level test pins rejection before semantic dispatch.
     #[test]
     fn authorization_scope_semantics_fail_closed_without_negotiated_feature() {
-        let message = SyncMessage::AuthorizationScopeReceipt {
-            subscription: SubscriptionKey {
-                shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
-                binding_id: BindingId(uuid::Uuid::from_bytes([2; 16])),
-                read_view: Default::default(),
-            },
+        let message = SyncMessage::AuthorizationScopeAggregateReceipt {
+            request_id: PermissionAdviceRequestId([1; 16]),
             receipt: crate::protocol::AuthorizationScopeReceipt {
                 key: AuthorizationSupportScopeKey {
                     support_shape_digest: [4; 32],
@@ -2316,7 +2305,7 @@ mod tests {
 
         let encoded = encode_sync_message_for_features(
             &message,
-            old_features | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+            old_features | FEATURE_AUTHORIZATION_SCOPE_VIEWS,
         )
         .unwrap();
         assert_eq!(

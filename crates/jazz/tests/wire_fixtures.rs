@@ -30,9 +30,9 @@ use jazz::tools::{
 };
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::{
-    FEATURE_AUTHORIZATION_SCOPE_RECEIPTS, FEATURE_AUTHORIZATION_SCOPE_VIEWS,
-    FEATURE_AUXILIARY_CHUNKS, FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, WIRE_PROTOCOL_VERSION,
-    WireFrame, WireHello, WirePeerRole, decode_sync_message, encode_frame, encode_sync_message,
+    FEATURE_AUTHORIZATION_SCOPE_VIEWS, FEATURE_AUXILIARY_CHUNKS, FEATURE_PAYLOAD_LZ4,
+    FEATURE_PAYLOAD_ZSTD, WIRE_PROTOCOL_VERSION, WireFrame, WireHello, WirePeerRole,
+    decode_sync_message, encode_frame, encode_sync_message,
 };
 use serde::{Deserialize, Serialize};
 
@@ -819,10 +819,7 @@ fn hello_fixture_manifest() -> HelloManifest {
         (
             "core_with_authority",
             WirePeerRole::Core,
-            FEATURE_PAYLOAD_ZSTD
-                | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                | FEATURE_AUTHORIZATION_SCOPE_VIEWS
-                | FEATURE_AUXILIARY_CHUNKS,
+            FEATURE_PAYLOAD_ZSTD | FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUXILIARY_CHUNKS,
             Some(300),
         ),
         (
@@ -985,7 +982,7 @@ fn current_rows_cancel_uses_compact_v5_tag() {
     let message = SyncMessage::CurrentRowsCancel {
         request_id: jazz::protocol::PermissionAdviceRequestId([0x42; 16]),
     };
-    let mut expected = vec![28];
+    let mut expected = vec![27];
     expected.extend_from_slice(&[0x42; 16]);
     assert_eq!(encode_sync_message(&message).unwrap(), expected);
     assert_eq!(decode_sync_message(&expected).unwrap(), message);

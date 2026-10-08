@@ -2462,9 +2462,7 @@ impl WasmDb {
                 queues: queues.clone(),
             },
             jazz::wire::WIRE_PROTOCOL_VERSION,
-            jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+            jazz::wire::current_wire_features() & !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
             None,
         ));
         let db_inner = self.open_inner()?;
@@ -2634,9 +2632,7 @@ impl WasmDb {
         let features = if context.is_some() {
             jazz::wire::current_wire_features()
         } else {
-            jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
+            jazz::wire::current_wire_features() & !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
         };
         let transport = Box::new(WireTransportAdapter::new_with_session_context(
             WasmWireTransport {
@@ -4462,8 +4458,7 @@ mod dynamic_schema_view_tests {
         // The pump strips compression bits because each auxiliary payload is an
         // independently encoded complete envelope.
         let features = jazz::wire::current_wire_features()
-            & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+            & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
                 | jazz::wire::FEATURE_PAYLOAD_LZ4
                 | jazz::wire::FEATURE_PAYLOAD_ZSTD);
         let request = |request_id| jazz::protocol::ChunkRequestEntry {

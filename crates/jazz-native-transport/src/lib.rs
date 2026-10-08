@@ -463,25 +463,21 @@ impl WebSocketTransport {
         // Receipt semantics require an admitted authority endpoint, not merely
         // a feature bit from a legacy hello.
         if server_hello.authority.is_none() {
-            negotiated.features &= !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS);
+            negotiated.features &= !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS;
         }
-        let session_context = if negotiated.features
-            & (jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
-            != 0
-        {
-            server_hello
-                .authority
-                .map(|remote| ConnectionSessionContext {
-                    local: client_endpoint,
-                    remote: Some(remote),
-                    link_identity: peer_identity,
-                    negotiated_features: negotiated.features,
-                })
-        } else {
-            None
-        };
+        let session_context =
+            if negotiated.features & jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0 {
+                server_hello
+                    .authority
+                    .map(|remote| ConnectionSessionContext {
+                        local: client_endpoint,
+                        remote: Some(remote),
+                        link_identity: peer_identity,
+                        negotiated_features: negotiated.features,
+                    })
+            } else {
+                None
+            };
 
         let (inbound_tx, inbound_rx) = mpsc::channel(WS_CLIENT_INBOUND_FRAME_SLOTS);
         let inbound = Arc::new(Mutex::new(inbound_rx));

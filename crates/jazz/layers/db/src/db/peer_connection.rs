@@ -658,8 +658,6 @@ pub(super) struct UpstreamConnectionState {
     pub(super) pending_row_version_fetches: VecDeque<PendingRowVersionFetch>,
     pub(super) pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
     pub(super) deferred_repair_fates: VecDeque<StagedInboundMessage>,
-    pub(super) scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalTime>,
-    pub(super) scope_receipts: BTreeMap<SubscriptionKey, AuthorizationScopeReceipt>,
     pub(super) expected_scope_authority: Option<AuthorityContext>,
     pub(super) scope_lease_manager: AuthorizationScopeLeaseManager,
 }
@@ -1479,20 +1477,6 @@ where
         peer.scope_relay_binding_for_test()
     }
 
-    /// Return a receipt only after this connection applied its matching
-    /// authorization-support view. A reconnect creates a new connection and
-    /// therefore has no receipt to reuse.
-    pub fn authorization_scope_receipt(
-        &self,
-        subscription: SubscriptionKey,
-    ) -> Option<&AuthorizationScopeReceipt> {
-        let ConnectionLink::Upstream(UpstreamConnectionState { scope_receipts, .. }) = &self.link
-        else {
-            return None;
-        };
-        scope_receipts.get(&subscription)
-    }
-
     /// Extract this subscriber connection's resume cursor for a reconnect.
     pub fn take_resume_cursor(&mut self) -> Option<ResumeCursor> {
         let ConnectionLink::Subscriber(SubscriberConnectionState {
@@ -1837,8 +1821,6 @@ where
                 pending_row_version_fetches,
                 pending_row_version_repairs,
                 deferred_repair_fates,
-                scope_view_cuts,
-                scope_receipts,
                 expected_scope_authority,
                 scope_lease_manager,
             }) => {
@@ -2779,16 +2761,6 @@ where
                                 let repair = pending_row_version_repairs.pop_front().expect("active repair");
                                 if let Some(lease) = repair.lease { received_leases.push(lease); }
                                 if !repair.superseded {
-                                let (subscription, settled_through) = match &repair.update {
-                                    SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                                        subscription,
-                                        settled_through,
-                                        ..
-                                    }) => (*subscription, *settled_through),
-                                    _ => {
-                                        unreachable!("row-version repair must retain a view update")
-                                    }
-                                };
                                 stage_initial_coverage_clear_for_update(
                                     &repair.update,
                                     &self.latest_coverage_subscriptions,
@@ -2799,7 +2771,6 @@ where
                                     repair.update,
                                     repair.authority_receipt_eligible,
                                 )?;
-                                scope_view_cuts.insert(subscription, settled_through);
                                 }
                                 while pending_row_version_fetches.front().is_some_and(|fetch|
                                     fetch.requests.is_empty() && fetch.sent_count == 0)
@@ -2810,9 +2781,6 @@ where
                                     if successor.superseded { continue; }
                                     stage_initial_coverage_clear_for_update(&successor.update,
                                         &self.latest_coverage_subscriptions, &mut pending_initial_coverage_clears);
-                                    if let SyncMessage::ViewUpdate(view) = &successor.update {
-                                        scope_view_cuts.insert(view.subscription, view.settled_through);
-                                    }
                                     push_view_update_message_for_receiver(&mut pending_view_updates,
                                         successor.update, successor.authority_receipt_eligible)?;
                                 }
@@ -2872,7 +2840,6 @@ where
                                         }
                                     }
                                 }
-                                scope_receipts.remove(&subscription);
                                 #[cfg(not(feature = "sync-autopsy"))]
                                 let _ = subscription;
                                 let missing = {
@@ -2936,7 +2903,6 @@ where
                                         message,
                                         authority_receipt_eligible,
                                     )?;
-                                    scope_view_cuts.insert(subscription, settled_through);
                                     #[cfg(feature = "sync-autopsy")]
                                     sync_autopsy::record(format!(
                                         "upstream applied view update {}",
@@ -3173,7 +3139,6 @@ where
                                     view.into_view_update(),
                                     authority_receipt_eligible,
                                 )?;
-                                scope_view_cuts.insert(subscription, settled_through);
                                 request.applied_clauses.insert(
                                     clause_index,
                                     (subscription, settled_through, authorization_progress),
@@ -3486,25 +3451,6 @@ where
                                         }
                                     }
                                 }
-                            }
-                            SyncMessage::AuthorizationScopeReceipt {
-                                subscription,
-                                receipt,
-                            } => {
-                                let Some(expected) = expected_scope_authority else {
-                                    drop_peer_request(&self.node);
-                                    continue;
-                                };
-                                if !authorization_scope_receipt_matches_transport_context(
-                                    &receipt,
-                                    *expected,
-                                    expected.link,
-                                    scope_view_cuts.get(&subscription).copied(),
-                                ) {
-                                    drop_peer_request(&self.node);
-                                    continue;
-                                }
-                                scope_receipts.insert(subscription, receipt);
                             }
                             message => {
                                 let admitted = *self.admitted_upstream_authority.borrow();
@@ -4044,8 +3990,7 @@ where
                             continue;
                         }
                         // Authority-only messages from subscribers are rejected.
-                        SyncMessage::AuthorizationScopeReceipt { .. }
-                        | SyncMessage::AuthorizationScopeView { .. }
+                        SyncMessage::AuthorizationScopeView { .. }
                         | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
                         | SyncMessage::AuthorizationScopeUnavailable { .. }
                         | SyncMessage::AuthorizationScopeDecision { .. } => {
