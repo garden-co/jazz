@@ -346,9 +346,7 @@ async fn ws_admission(
         state.jwt_verifier.as_deref(),
     )
     .await
-    .map_err(|error| {
-        serde_json::to_string(&error).unwrap_or_else(|_| "authentication failed".to_owned())
-    })?;
+    .map_err(super::accounts::AdmissionError::from)?;
 
     let Some(mut session) = session else {
         return Err("Session required. Provide JWT, backend secret, or admin secret.".into());

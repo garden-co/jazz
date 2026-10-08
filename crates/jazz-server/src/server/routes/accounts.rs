@@ -9,6 +9,7 @@ use jazz::account_registry::storage::RegistryError;
 use jazz::account_registry::{
     AccountCommand, AccountCommandResult, AccountId, Assignment, Principal,
 };
+use jazz::tools::transport_error::{UnauthenticatedCode, UnauthenticatedResponse};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -46,7 +47,13 @@ async fn authenticate(state: &ServerState, headers: &HeaderMap) -> Result<Princi
         state.jwt_verifier.as_deref(),
     )
     .await
-    .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid account credential"))?
+    .map_err(|error| match error.code {
+        UnauthenticatedCode::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "JWKS authentication service unavailable",
+        ),
+        _ => (StatusCode::UNAUTHORIZED, "invalid account credential"),
+    })?
     .ok_or((StatusCode::UNAUTHORIZED, "missing account credential"))?;
     if session.issuer == jazz::tools::identity::ANONYMOUS_ISSUER {
         return Err((
@@ -119,12 +126,14 @@ pub(super) async fn resolve_for_admin(
 pub(super) enum AdmissionError {
     Denied(String),
     Unavailable,
+    AuthenticationUnavailable(String),
 }
 impl std::fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Denied(message) => f.write_str(message),
             Self::Unavailable => f.write_str("account registry unavailable"),
+            Self::AuthenticationUnavailable(message) => f.write_str(message),
         }
     }
 }
@@ -136,6 +145,17 @@ impl From<String> for AdmissionError {
 impl From<&str> for AdmissionError {
     fn from(message: &str) -> Self {
         Self::Denied(message.into())
+    }
+}
+impl From<UnauthenticatedResponse> for AdmissionError {
+    fn from(error: UnauthenticatedResponse) -> Self {
+        match error.code {
+            UnauthenticatedCode::Unavailable => Self::AuthenticationUnavailable(error.message),
+            _ => Self::Denied(
+                serde_json::to_string(&error)
+                    .unwrap_or_else(|_| "authentication failed".to_owned()),
+            ),
+        }
     }
 }
 impl From<RegistryError> for AdmissionError {
@@ -155,6 +175,9 @@ impl AdmissionError {
             }
             Self::Denied(message) => {
                 WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, message)
+            }
+            Self::AuthenticationUnavailable(message) => {
+                WireError::new(WireErrorCode::NotReady, WireRetry::Later, message)
             }
         }
     }
