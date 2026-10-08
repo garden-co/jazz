@@ -3308,3 +3308,73 @@ fn online_publishing_settlement_refuses_foreign_pending_dot_accepted_after_begin
         db.tick().unwrap();
     }
 }
+
+/// Node fate reconciliation explicitly permits monotone position advancement.
+/// This exercises that supported Core API, not a Root retransmission contract.
+#[test]
+fn publishing_settlement_refuses_accepted_dot_position_advanced_after_begin() {
+    let author = AuthorSubject::for_test_bytes([0xef; 16]);
+    let db = open_db(0xef, author, &schema());
+    let accepted = db
+        .insert(
+            "todos",
+            cells("accepted ledger", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = accepted.mergeable_tx_id();
+    let before = GlobalTime(tx_id.time.0 + 100);
+    {
+        let owner = db.node.node();
+        let mut node = owner.borrow_mut();
+        block_on(node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(before),
+            Some(DurabilityTier::Global),
+        ))
+        .unwrap();
+    }
+    let parent = OpenTransactionId::new();
+    block_on(db.begin_exclusive(parent)).unwrap();
+    let original = db
+        .node
+        .node()
+        .borrow()
+        .open_transaction_snapshot(parent)
+        .unwrap();
+    assert!(original.global_base < before);
+    assert!(original.dots.contains(&tx_id));
+    block_on(db.exclusive_tx_ref(parent).insert(
+        "todos",
+        cells("unrelated app write", true, author),
+        Default::default(),
+    ))
+    .unwrap();
+    {
+        let owner = db.node.node();
+        let mut node = owner.borrow_mut();
+        block_on(node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(GlobalTime(before.0 + 1)),
+            Some(DurabilityTier::Global),
+        ))
+        .unwrap();
+    }
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let error = local_publishing_settlement_read(&db, parent, &query)
+        .err()
+        .expect("changed accepted-dot position must not qualify");
+    assert_eq!(error.code, ErrorCode::NotObserved);
+    assert_eq!(
+        db.node
+            .node()
+            .borrow()
+            .open_transaction_snapshot(parent)
+            .unwrap(),
+        original
+    );
+    db.abandon_transaction_handle(parent).unwrap();
+    db.tick().unwrap();
+}
