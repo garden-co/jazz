@@ -50,6 +50,9 @@ pub enum VariantProjectionTarget {
 pub struct IndexSourceOp {
     pub table: String,
     pub index: String,
+    /// Durable numeric ids of the indexes this source reads (boxed to keep
+    /// `OpType` variants balanced).
+    pub durable_ids: Box<IndexSourceDurableIds>,
     pub intersections: Vec<(String, StaticScanSpec)>,
     pub candidate_filter: Option<IndexCandidateFilter>,
     /// Fixed descriptor consumed by `IndexBy` after optional variant
@@ -66,6 +69,18 @@ pub struct IndexSourceOp {
     pub append_value_to_key: bool,
     pub store_value: bool,
     pub scan: Option<StaticScanSpec>,
+}
+
+/// Durable numeric ids (storage-key prefixes) of the indexes one
+/// [`IndexSourceOp`] reads.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexSourceDurableIds {
+    /// Id of the source's own index.
+    pub index: u32,
+    /// Ids of `intersections`, in the same order.
+    pub intersections: Vec<u32>,
+    /// Id of the candidate filter's index.
+    pub candidate: Option<u32>,
 }
 
 /// Static ordered-key scan supplied at graph construction.
@@ -635,6 +650,7 @@ pub enum LiteralValue {
     U16(u16),
     U32(u32),
     U64(u64),
+    U48(u64),
     I64(i64),
     I32(i32),
     /// Stored as raw bits so predicates remain `Eq + Hash + Ord`.
@@ -663,6 +679,7 @@ impl From<Value> for LiteralValue {
             Value::U16(value) => Self::U16(value),
             Value::U32(value) => Self::U32(value),
             Value::U64(value) => Self::U64(value),
+            Value::U48(value) => Self::U48(value),
             Value::I64(value) => Self::I64(value),
             Value::I32(value) => Self::I32(value),
             Value::F64(value) => Self::F64(value.to_bits()),
@@ -695,6 +712,7 @@ impl LiteralValue {
             Self::U16(_) => Some(ValueType::U16),
             Self::U32(_) => Some(ValueType::U32),
             Self::U64(_) => Some(ValueType::U64),
+            Self::U48(_) => Some(ValueType::U48),
             Self::I64(_) => Some(ValueType::I64),
             Self::I32(_) => Some(ValueType::I32),
             Self::F64(_) => Some(ValueType::F64),
@@ -729,6 +747,7 @@ impl LiteralValue {
             Self::U16(value) => Value::U16(*value),
             Self::U32(value) => Value::U32(*value),
             Self::U64(value) => Value::U64(*value),
+            Self::U48(value) => Value::U48(*value),
             Self::I64(value) => Value::I64(*value),
             Self::I32(value) => Value::I32(*value),
             Self::F64(value) => Value::F64(f64::from_bits(*value)),

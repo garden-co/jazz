@@ -25,7 +25,7 @@ use crate::protocol_limits::{
 /// This is the sole supported wire version. It is independent of the v1
 /// storage, catalogue, and binding formats: those labels name their own
 /// formats and are not wire-protocol compatibility aliases.
-pub const WIRE_PROTOCOL_VERSION: u16 = 5;
+pub const WIRE_PROTOCOL_VERSION: u16 = 6;
 
 /// Frozen v1 full-frame artifact rejection corpus. NAPI and WASM execute every
 /// frame in the complete Rust message/Hello fixtures, plus these explicit
@@ -80,9 +80,9 @@ pub enum WireFrame {
     Error(WireError),
     /// One physical extent of an encoded logical sync message.
     MessageFragment(WireMessageFragment),
-    /// One ordered channel extent. Postcard-v1 enum tag 4 within wire v5.
+    /// One ordered channel extent. Postcard-v1 enum tag 4 within wire v6.
     Channel(WireChannelEnvelope),
-    /// Receiver-consumption byte grant. Postcard-v1 enum tag 5 within wire v5.
+    /// Receiver-consumption byte grant. Postcard-v1 enum tag 5 within wire v6.
     ChannelCredit(WireChannelCredit),
 }
 
@@ -1979,9 +1979,12 @@ mod tests {
     // a redundant receipt pass or prove the locally selected trust boundary.
     #[test]
     fn trusted_encoder_skips_receipt_validation_but_session_admission_keeps_it() {
-        let message = SyncMessage::RowVersionPayloads {
-            version_bundles: version_bundles(2),
-        };
+        let message = view_update_with_carriers(
+            version_bundles(2)
+                .into_iter()
+                .map(VersionCarrier::Bundle)
+                .collect(),
+        );
         crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.set(0));
         let payload = encode_sync_message(&message).unwrap();
         assert_eq!(
@@ -2035,7 +2038,6 @@ mod tests {
                             &table,
                             schema_version,
                             RowUuid::from_bytes([index as u8; 16]),
-                            Vec::new(),
                             author,
                             1_000 + index as u64,
                             author,
@@ -2305,17 +2307,6 @@ mod tests {
                 global_time: Some(GlobalTime(7)),
                 durability: Some(DurabilityTier::Global),
             },
-            SyncMessage::FetchRowVersions {
-                requests: vec![crate::protocol::RowVersionRef::new(
-                    "todos",
-                    RowUuid::from_bytes([0x77; 16]),
-                    tx_id,
-                )],
-                delegated_session: None,
-            },
-            SyncMessage::RowVersionPayloads {
-                version_bundles: Vec::new(),
-            },
         ]
     }
 
@@ -2442,10 +2433,10 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_requires_an_exact_v5_advertisement_and_intersects_features() {
+    fn negotiation_requires_an_exact_v6_advertisement_and_intersects_features() {
         let remote = WireHello {
-            min_protocol_version: 5,
-            max_protocol_version: 5,
+            min_protocol_version: 6,
+            max_protocol_version: 6,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME,
             role: WirePeerRole::Relay,
             authority: None,
@@ -2509,8 +2500,10 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_rejects_version_ranges_even_when_they_include_v5() {
-        for (min_protocol_version, max_protocol_version) in [(0, 5), (4, 5), (5, 15)] {
+    fn negotiation_rejects_version_ranges_even_when_they_include_v6() {
+        for (min_protocol_version, max_protocol_version) in
+            [(0, 6), (3, 6), (4, 6), (5, 6), (6, 15)]
+        {
             let remote = WireHello {
                 min_protocol_version,
                 max_protocol_version,
@@ -2526,10 +2519,36 @@ mod tests {
         }
     }
 
-    /// Alice's v5 Core rejects Bob's v3 Core before predecessor snapshot decoding.
-    /// This internal boundary test pins negotiation, which row equality cannot observe.
+    /// Alice's v6 Core rejects Bob's v5 Core, which carries read-tier durability
+    /// tags but predates linear row-state history, before any payload decoding.
+    /// Internal boundary coverage is required because old bytes cannot be authored by v6 APIs.
     #[test]
-    fn wire_v5_rejects_single_predecessor_v3_peers() {
+    fn wire_v6_rejects_v5_read_tier_peers_before_linear_history_decode() {
+        let old = decode_frame(&[0, 5, 5, 0, 1, 0]).unwrap();
+        let WireFrame::Hello(hello) = old else {
+            panic!("historical Hello")
+        };
+        let error = negotiate_wire(&hello, FEATURE_NONE).unwrap_err();
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    /// Alice's v6 Core rejects Bob's v4 Core, which predates linear row-state
+    /// history and the compact durability tags, before any row payload decoding.
+    #[test]
+    fn wire_v6_rejects_dag_history_v4_peers() {
+        let old = decode_frame(&[0, 4, 4, 0, 1, 0]).unwrap();
+        let WireFrame::Hello(hello) = old else {
+            panic!("historical Hello")
+        };
+        let error = negotiate_wire(&hello, FEATURE_SYNC_MESSAGE_PAYLOAD).unwrap_err();
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    /// Alice's v6 Core rejects Bob's v3 Core before predecessor snapshot decoding.
+    #[test]
+    fn wire_v6_rejects_single_predecessor_v3_peers() {
         let hello = WireHello {
             min_protocol_version: 3,
             max_protocol_version: 3,
@@ -2540,22 +2559,11 @@ mod tests {
         assert!(negotiate_wire(&hello, FEATURE_SYNC_MESSAGE_PAYLOAD).is_err());
     }
 
-    /// Alice rejects Bob's previous wire layout before interpreting its tier tags.
-    /// Internal boundary coverage is required because old bytes cannot be authored by v5 APIs.
+    /// Alice's v6 Core rejects Bob's v2 Core before policy snapshot decoding.
+    /// This internal boundary test pins negotiation, which row equality cannot observe.
     #[test]
-    fn wire_v5_rejects_v4_before_compact_durability_decode() {
-        let old = decode_frame(&[0, 4, 4, 0, 1, 0]).unwrap();
-        let WireFrame::Hello(hello) = old else {
-            panic!("historical Hello")
-        };
-        let error = negotiate_wire(&hello, FEATURE_NONE).unwrap_err();
-        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
-        assert_eq!(error.retry, WireRetry::Never);
-    }
-
-    #[test]
-    fn wire_v5_rejects_v2_before_policy_snapshot_decode() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
+    fn wire_v6_rejects_v2_before_policy_snapshot_decode() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 6);
         let remote = WireHello {
             min_protocol_version: 2,
             max_protocol_version: 2,
@@ -2571,13 +2579,13 @@ mod tests {
             negotiate_wire(&current, current_wire_features())
                 .unwrap()
                 .protocol_version,
-            5
+            6
         );
     }
 
     #[test]
-    fn wire_v5_rejects_v14_without_compatibility_negotiation() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
+    fn wire_v6_rejects_v14_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 6);
         let remote = WireHello {
             min_protocol_version: 14,
             max_protocol_version: 14,
@@ -2594,7 +2602,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_v5_rejects_v15_peer_before_payload_decode() {
+    fn wire_v6_rejects_v15_peer_before_payload_decode() {
         let v15_peer = WireHello {
             min_protocol_version: 15,
             max_protocol_version: 15,
@@ -2604,9 +2612,9 @@ mod tests {
         };
 
         let error = negotiate_wire(&v15_peer, current_wire_features())
-            .expect_err("v15 encoding must fail during the v5 handshake");
+            .expect_err("v15 encoding must fail during the v6 handshake");
 
-        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 6);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
     }

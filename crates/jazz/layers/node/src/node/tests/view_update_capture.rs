@@ -20,7 +20,6 @@ struct CanonicalVersionRecord {
     table: String,
     schema_version: SchemaVersionId,
     row_uuid: RowUuid,
-    parents: Vec<TxId>,
     created_by: AuthorSubject,
     created_at: u64,
     updated_by: AuthorSubject,
@@ -46,8 +45,6 @@ fn canonical_version_bundle(bundle: VersionBundle) -> CanonicalVersionBundle {
 }
 
 fn canonical_version_record(record: VersionRecord) -> CanonicalVersionRecord {
-    let mut parents = record.parents();
-    parents.sort();
     let cells = (0..record.record().descriptor().fields().len())
         .filter_map(|idx| record.optional_cell_at(idx))
         .map(|value| format!("{value:?}"))
@@ -56,7 +53,6 @@ fn canonical_version_record(record: VersionRecord) -> CanonicalVersionRecord {
         table: record.table().to_owned(),
         schema_version: record.schema_version(),
         row_uuid: record.row_uuid(),
-        parents,
         created_by: record.created_by(),
         created_at: record.created_at_ms(),
         updated_by: record.updated_by(),
@@ -239,9 +235,6 @@ fn accept_owner_capture_row(
 ) -> TxId {
     let mut commit =
         MergeableCommit::new("todos", row_uuid, made_at).cells(owner_cells(owner, title));
-    if let Some(parent) = parents.get(&row_uuid).and_then(|(content, _)| *content) {
-        commit = commit.parents(vec![parent]);
-    }
     let tx_id = accept_global(core, commit);
     parents.entry(row_uuid).or_default().0 = Some(tx_id);
     tx_id
@@ -255,9 +248,6 @@ fn accept_capture_delete(
 ) {
     let mut commit =
         MergeableCommit::new("todos", row_uuid, made_at).deletion(DeletionEvent::Deleted);
-    if let Some(parent) = parents.get(&row_uuid).and_then(|(_, deletion)| *deletion) {
-        commit = commit.parents(vec![parent]);
-    }
     let tx_id = accept_global(core, commit);
     parents.entry(row_uuid).or_default().1 = Some(tx_id);
 }
@@ -583,6 +573,7 @@ impl MaintainedSubscriptionViewSubscription {
                 settled_through: core.committed_global_time(),
                 peer_complete_tx_payloads: self.peer_complete_tx_payloads.clone(),
                 known_state: None,
+                leave_scan_after: None,
                 complete_exclusive_payloads: false,
                 previous_result_set,
                 result_member_adds: result_member_adds
@@ -1065,12 +1056,6 @@ fn accept_recursive_row(
     made_at: u64,
 ) -> TxId {
     let mut commit = MergeableCommit::new(table, row_uuid, made_at).cells(cells);
-    if let Some(parent) = parents
-        .get(&(table, row_uuid))
-        .and_then(|(content, _)| *content)
-    {
-        commit = commit.parents(vec![parent]);
-    }
     let tx_id = accept_global(core, commit);
     parents.entry((table, row_uuid)).or_default().0 = Some(tx_id);
     tx_id
@@ -1085,12 +1070,6 @@ fn delete_recursive_row(
 ) -> TxId {
     let mut commit =
         MergeableCommit::new(table, row_uuid, made_at).deletion(DeletionEvent::Deleted);
-    if let Some(parent) = parents
-        .get(&(table, row_uuid))
-        .and_then(|(_, deletion)| *deletion)
-    {
-        commit = commit.parents(vec![parent]);
-    }
     let tx_id = accept_global(core, commit);
     parents.entry((table, row_uuid)).or_default().1 = Some(tx_id);
     tx_id
@@ -1347,12 +1326,6 @@ fn seeded_maintained_subscription_view_multitable_capture(
                   made_at: u64,
                   cells: BTreeMap<String, Value>| {
         let mut commit = MergeableCommit::new(table, row_uuid, made_at).cells(cells);
-        if let Some(parent) = parents
-            .get(&(table, row_uuid))
-            .and_then(|(content, _)| *content)
-        {
-            commit = commit.parents(vec![parent]);
-        }
         let tx_id = accept_global(core, commit);
         parents.entry((table, row_uuid)).or_default().0 = Some(tx_id);
         txs.insert((table, row_uuid), tx_id);

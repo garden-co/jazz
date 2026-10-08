@@ -316,19 +316,18 @@ where
                     self.register_shape_with_options(shape_id, ast, opts)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }
-                SyncMessage::FetchRowVersions { .. } => Err(Error::UnsupportedSyncMessage(
-                    "row-version repair fetch must be served by peer state",
-                )),
-                SyncMessage::RowVersionPayloads { .. } => Err(Error::UnsupportedSyncMessage(
-                    "row-version repair payload requires outstanding request context",
-                )),
+                SyncMessage::Reserved15(retired) | SyncMessage::Reserved16(retired) => {
+                    match retired {}
+                }
                 SyncMessage::CatalogueSnapshot(_) => Err(Error::UnsupportedSyncMessage(
                     "catalogue snapshot requires a trusted upstream link",
                 )),
+                // Only the uploading link acts on a retry-later answer; it
+                // changes nothing in a node's state.
+                SyncMessage::RetryLater { .. } => Err(Error::UnsupportedSyncMessage(
+                    "retry-later answers are handled by the uploading link",
+                )),
                 SyncMessage::Subscribe(subscribe) => {
-                    validate_known_state_declaration(&subscribe.known_state).map_err(|_| {
-                        Error::UnsupportedSyncMessage("known-state declaration exceeds limit")
-                    })?;
                     self.apply_subscribe(subscribe)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }
@@ -364,6 +363,11 @@ where
                 SyncMessage::ChunkRequestBatch(_) | SyncMessage::ChunkResponseBatch(_) => Err(
                     Error::UnsupportedSyncMessage("chunk traffic requires peer link context"),
                 ),
+                // The wire transport reassembles parts into one `ViewUpdate`;
+                // a bare part never reaches node ingest.
+                SyncMessage::ViewUpdatePart(_) => Err(Error::UnsupportedSyncMessage(
+                    "view-update parts are reassembled by the wire transport",
+                )),
                 SyncMessage::CurrentRowsRequest(_)
                 | SyncMessage::CurrentRowsReceipt(_)
                 | SyncMessage::CurrentRowsCancel { .. }
@@ -738,6 +742,8 @@ where
             }
             let mut batch = self.database.open_batch();
             Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
+            // A catalogue-only batch writes no history rows, so it applies directly
+            // rather than through `apply_node_batch`.
             let persistence = async {
                 let applied = self.database.apply_batch(batch).await?;
                 let persisted = self.database.persist_with_progress(&applied).await;

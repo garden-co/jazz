@@ -190,7 +190,6 @@ where
             // in-memory fast known-state cursor may survive. Scope and cursor
             // invalidation is infallible and precedes any body deletion.
             self.invalidate_subscription_scopes();
-            self.clear_content_version_reachability_cache();
         }
 
         if low_water_bytes.is_none() {
@@ -204,6 +203,12 @@ where
                 self.invalidate_tx_version_tables_cache(candidate.tx_id);
                 last_invalidated_tx_id = Some(candidate.tx_id);
             }
+        }
+
+        if !evictable.is_empty() {
+            // A stored watermark's held set is rebuilt from local rows, which
+            // are about to lose bodies: no restart may resume from it.
+            self.purge_subscription_watermarks().await?;
         }
 
         let mut batch = self.database.open_batch();
@@ -221,11 +226,11 @@ where
             let history_table = self.version_storage_table_for_row(&candidate.version)?;
             batch.delete(
                 history_table.as_ref(),
-                history_primary_key(&candidate.version),
+                history_primary_key(&candidate.version)?,
             );
             batch_deletes += 1;
             if low_water_bytes.is_some() {
-                let applied = self.database.apply_batch(batch).await?;
+                let applied = self.apply_node_batch(batch).await?;
                 let persisted = self.database.persist_with_progress(&applied).await;
                 self.database.finish_persistence(persisted)?;
                 remaining_bytes = self
@@ -236,7 +241,7 @@ where
             }
         }
         if batch_deletes > 0 && low_water_bytes.is_none() {
-            let applied = self.database.apply_batch(batch).await?;
+            let applied = self.apply_node_batch(batch).await?;
             let persisted = self.database.persist_with_progress(&applied).await;
             self.database.finish_persistence(persisted)?;
         }

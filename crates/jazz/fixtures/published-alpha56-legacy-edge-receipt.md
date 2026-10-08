@@ -15,16 +15,22 @@ It pins the byte state that alpha.56-and-earlier clients hold after a retired
 Edge server acknowledged a write that Core never saw:
 
 - `edgeAccepted`: fate tag 1 (Accepted), durability tag 2 (the retired Edge
-  tier), `global_time` null. Before durability v2, this decoded as Pending/Local and replayed to Core
-  through the author-scoped resend scan (#3265).
+  tier), `global_time` null.
 - `coreConfirmed`: a control write from the same client that reached Core:
-  fate tag 1, durability tag 3 (Global), `global_time` present. This historically retained its Accepted/Global outcome.
+  fate tag 1, durability tag 3 (Global), `global_time` present.
 
-The test `published_alpha56_legacy_edge_receipt_is_rejected_without_mutation`
-checks both records byte-for-byte in the physical store before current code
-attempts to open it and again afterwards. Durability v2 rejects the old
-storage profile before decoding or rewriting either record. The old replay
-compatibility path has been removed.
+This root uses the DAG history layout and the earlier durability tags. The
+linear row-history format (`jazz.history-version-current.v4`,
+`groove.durable-index.v2`) with durability encoding v2
+(`jazz.transaction-durability.v2`, which no longer has an Edge tag) does not
+read it: the test
+`published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_records`
+checks both records byte-for-byte in the physical store, asserts that opening
+with the node profile fails with `UnsupportedStorageCodecs` naming the three
+missing families, and checks that both records and every column family are
+unchanged afterwards. An unsynced Edge write in such a root is therefore not
+replayed by current code; the client must sync it with the release that wrote
+it before upgrading.
 
 There is no published fixture for a tag-2 record that already carries a
 global time. Alpha.56 stores a global time only together with Global

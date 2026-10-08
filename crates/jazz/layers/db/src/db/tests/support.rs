@@ -117,6 +117,23 @@ impl WireTransport for ByteDuplexTransport {
     }
 }
 
+/// Restores the protocol routed-payload limit when a test that lowered it ends,
+/// including by panic, so later tests on a reused thread see the real limit.
+pub(super) struct RoutedPayloadLimitGuard;
+
+impl RoutedPayloadLimitGuard {
+    pub(super) fn lower_to(limit: usize) -> Self {
+        crate::db::routed_messages::set_routed_payload_limit_for_test(Some(limit));
+        Self
+    }
+}
+
+impl Drop for RoutedPayloadLimitGuard {
+    fn drop(&mut self) {
+        crate::db::routed_messages::set_routed_payload_limit_for_test(None);
+    }
+}
+
 pub(super) fn byte_duplex_raw() -> (ByteDuplexTransport, ByteDuplexTransport) {
     use std::collections::VecDeque;
     let left = Rc::new(RefCell::new(VecDeque::new()));
@@ -143,22 +160,21 @@ pub(super) fn byte_duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
 
 pub(super) fn byte_duplex_uncompressed() -> (Box<dyn Transport>, Box<dyn Transport>) {
     let (left, right) = byte_duplex_raw();
+    (uncompressed_adapter(left), uncompressed_adapter(right))
+}
+
+/// A current-version adapter that never negotiates transport compression, so
+/// frame sizes on the link match encoded message sizes whichever compression
+/// features the build enables.
+pub(super) fn uncompressed_adapter(raw: ByteDuplexTransport) -> Box<dyn Transport> {
     let features =
         FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
-    (
-        Box::new(WireTransportAdapter::new(
-            left,
-            WIRE_PROTOCOL_VERSION,
-            features,
-            None,
-        )),
-        Box::new(WireTransportAdapter::new(
-            right,
-            WIRE_PROTOCOL_VERSION,
-            features,
-            None,
-        )),
-    )
+    Box::new(WireTransportAdapter::new(
+        raw,
+        WIRE_PROTOCOL_VERSION,
+        features,
+        None,
+    ))
 }
 
 pub(super) fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {
@@ -2195,9 +2211,6 @@ impl CoreDb {
             .made_by(made_by)
             .permission_subject(self.author)
             .cells(cells);
-        if let Some(parent) = parent {
-            commit = commit.parents(vec![parent]);
-        }
         let published = block_on(node.borrow_mut().commit_mergeable(commit))?;
         let tx_id = block_on(node.borrow_mut().persist_and_settle_transaction(published))?;
         let outcome = block_on(node.borrow_mut().finalize_local_mergeable_commit(tx_id))?;

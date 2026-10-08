@@ -990,7 +990,7 @@ impl SyncCapture {
                     .collect::<BTreeMap<_, _>>();
                 json!({"table": version.table(), "row": version.row_uuid().0.to_string(),
                     "schema": version.schema_version(), "branch": version.branch_key(),
-                    "parents": version.parents(), "cells": cells,
+                    "cells": cells,
                     "wire_hex": capture_hex(&postcard::to_allocvec(version).unwrap())})
             }).collect::<Vec<_>>();
             json!({"tx": bundle.tx, "tx_hex": capture_hex(&postcard::to_allocvec(bundle.tx).unwrap()),
@@ -1957,9 +1957,15 @@ fn run_warm(
         None,
     );
     first = run_connect_and_subscribe("warm", seeded, relay, client, expected, config);
+    // A reopened relay resumes a row-local view from its durable "Q at W"
+    // watermark: the settled seq is stored, and the held set is exactly the
+    // persisted rows that match Q, so Core's catch-up from W is exact. Every
+    // policy-dependent view (recursive resource access, inherited children)
+    // must still reacquire its scope from Core with no declaration.
     assert_eq!(
-        first.relay_known_state_declared, 0,
-        "reopened relay must not recover known-state from persisted rows"
+        first.relay_known_state_declared,
+        row_local_subscription_tables().len() as u64,
+        "reopened relay must declare known state for exactly its row-local views"
     );
     first
 }
@@ -2253,8 +2259,9 @@ fn run_connect_and_subscribe(
     }
     if label == "warm" {
         // Drain a post-readiness relay/core cycle before inspecting reconnect
-        // diagnostics. Persisted rows survive reopening, but known-state
-        // receipts never do: the restarted relay must reacquire scope from Core.
+        // diagnostics. Persisted rows and row-local "Q at W" watermarks
+        // survive reopening; every other known-state receipt does not, so the
+        // restarted relay must reacquire policy-dependent scope from Core.
         #[cfg(feature = "cold-settle-attribution")]
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
@@ -2586,6 +2593,29 @@ fn subscription_tables() -> Vec<String> {
         child_slot += 1;
     }
     assert_eq!(tables.len(), 39);
+    tables
+}
+
+/// Subscribed tables whose select policy is `PolicyExpr::True`, so their
+/// views are row-local: membership depends only on each row's own image.
+/// Mirrors `schema()`; the resource tables and their inheriting children are
+/// policy-dependent and excluded.
+fn row_local_subscription_tables() -> Vec<String> {
+    let mut tables = vec![
+        ORG.to_owned(),
+        GROUP.to_owned(),
+        GROUP_ACCESS.to_owned(),
+        GROUP_ENTRY.to_owned(),
+        PROFILE.to_owned(),
+    ];
+    tables.extend(RESOURCE_SPECS.iter().map(|spec| spec.access_table()));
+    let child_tables = RESOURCE_SPECS
+        .iter()
+        .filter(|spec| spec.child_rows.is_some())
+        .count();
+    tables.extend((child_tables..CHILD_TABLES).map(|slot| format!("empty_child_{slot}")));
+    let subscribed = subscription_tables();
+    assert!(tables.iter().all(|table| subscribed.contains(table)));
     tables
 }
 

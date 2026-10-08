@@ -249,9 +249,7 @@ where
             row,
             cells,
             None,
-            Vec::new(),
             now_ms,
-            false,
             known_fresh_row,
         )
         .await?;
@@ -310,9 +308,7 @@ where
             row,
             cells,
             None,
-            Vec::new(),
             now_ms,
-            false,
             branch,
             known_fresh_row,
             verified_inherited_cells,
@@ -595,9 +591,7 @@ where
                 row,
                 BTreeMap::new(),
                 Some(DeletionEvent::Deleted),
-                Vec::new(),
                 now_ms,
-                false,
                 false,
             )
             .await
@@ -636,9 +630,7 @@ where
                 row,
                 BTreeMap::new(),
                 Some(DeletionEvent::Deleted),
-                Vec::new(),
                 now_ms,
-                true,
                 head,
                 false,
             )?;
@@ -657,16 +649,6 @@ where
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
-        let content_parents = node
-            .local_content_winner_tx_id(table, row)
-            .await?
-            .into_iter()
-            .collect();
-        let deletion_parents = node
-            .local_deletion_winner_tx_id(table, row)
-            .await?
-            .into_iter()
-            .collect();
         node.tx_write_mergeable_in_schema(
             tx_id,
             self.schema_version_id,
@@ -674,9 +656,7 @@ where
             row,
             cells,
             None,
-            content_parents,
             now_ms,
-            true,
             false,
         )
         .await?;
@@ -687,9 +667,7 @@ where
             row,
             BTreeMap::new(),
             Some(DeletionEvent::Restored),
-            deletion_parents,
             now_ms,
-            true,
             false,
         )
         .await?;
@@ -708,16 +686,6 @@ where
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
-        let content_parents = node
-            .local_content_winner_tx_id_in_branch(table, &branch, row)
-            .await?
-            .into_iter()
-            .collect();
-        let deletion_parents = node
-            .local_deletion_winner_tx_id_in_branch(table, &branch, row)
-            .await?
-            .into_iter()
-            .collect();
         node.tx_write_mergeable_in_schema_and_branch(
             tx_id,
             self.schema_version_id,
@@ -725,9 +693,7 @@ where
             row,
             cells,
             None,
-            content_parents,
             now_ms,
-            true,
             branch.clone(),
             false,
         )?;
@@ -738,9 +704,7 @@ where
             row,
             BTreeMap::new(),
             Some(DeletionEvent::Restored),
-            deletion_parents,
             now_ms,
-            true,
             branch,
             false,
         )?;

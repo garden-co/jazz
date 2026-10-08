@@ -1678,7 +1678,7 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
         .expect("terminal update encodes for the native binding");
     let (descriptor, _) = binding_rows[0].encoded_record();
     assert_eq!(
-        descriptor.bind(batches[0].rows[0].raw).get("$createdAt"),
+        descriptor.bind(&batches[0].rows[0].raw).get("$createdAt"),
         Ok(Value::U64(4_321))
     );
     assert!(batches[0].descriptor.iter().any(|field| matches!(

@@ -572,10 +572,10 @@ describe("websocket frame carrier", () => {
     }
   });
 
-  it("accepts the exact v5 Core advertisement for compact durability tags", async () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(5);
+  it("accepts the exact v6 Core advertisement for linear row-state history", async () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(6);
     const { carrier, socket } = carrierForTest();
-    socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 5)]));
+    socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 6)]));
     await expect(carrier.ready()).resolves.toBeDefined();
     carrier.close();
   });
@@ -588,10 +588,14 @@ describe("websocket frame carrier", () => {
       [2, 3],
       [3, 3],
       [3, 4],
+      [3, 15],
       [4, 4],
       [4, 5],
-      [5, 15],
+      [5, 5],
+      [5, 6],
       [4, 15],
+      [5, 15],
+      [6, 15],
       [1, 15],
       [12, 12],
     ]) {
@@ -991,7 +995,7 @@ type RustWireHelloFixtureManifest = {
 function rustWireFixtureManifest(): RustWireFixtureManifest {
   return JSON.parse(
     readFileSync(
-      new URL("../../../../../crates/jazz/fixtures/wire_message_frames_v5.json", import.meta.url),
+      new URL("../../../../../crates/jazz/fixtures/wire_message_frames_v6.json", import.meta.url),
       "utf8",
     ),
   ) as RustWireFixtureManifest;
@@ -1000,7 +1004,7 @@ function rustWireFixtureManifest(): RustWireFixtureManifest {
 function rustWireHelloFixtureManifest(): RustWireHelloFixtureManifest {
   return JSON.parse(
     readFileSync(
-      new URL("../../../../../crates/jazz/fixtures/wire_hello_frames_v5.json", import.meta.url),
+      new URL("../../../../../crates/jazz/fixtures/wire_hello_frames_v6.json", import.meta.url),
       "utf8",
     ),
   ) as RustWireHelloFixtureManifest;

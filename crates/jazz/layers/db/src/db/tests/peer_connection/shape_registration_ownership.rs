@@ -210,26 +210,6 @@ fn relay_cannot_seed_or_consume_delegated_claims() {
         state.served.is_empty(),
         "a non-SYSTEM backend must not consume a caller-supplied delegated policy binding"
     );
-    drop(connection);
-    while relay_transport.try_recv().is_some() {
-        // The rejected Subscribe may have raced an unrelated control flush;
-        // the repair assertion below concerns only the hostile fetch.
-    }
-
-    relay_transport
-        .send(SyncMessage::FetchRowVersions {
-            requests: Vec::new(),
-            delegated_session: Some(delegated_session),
-        })
-        .unwrap();
-    subscriber.borrow_mut().tick().unwrap();
-    assert!(
-        !matches!(
-            relay_transport.try_recv(),
-            Some(SyncMessage::RowVersionPayloads { .. })
-        ),
-        "a non-relay backend must not consume a caller-supplied delegated repair binding"
-    );
 }
 
 // This stays internal because installed query-program retention and peer ownership

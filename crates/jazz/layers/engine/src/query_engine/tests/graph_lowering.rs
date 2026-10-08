@@ -87,17 +87,13 @@ fn simple_current_table_root_query_lowers_for_local_and_global_sync_outputs() {
         let mut resolver = FakeSourceResolver::default();
         let program =
             lower_query_program(request, &mut resolver).expect("simple current root lowers");
-        assert_eq!(resolver.requests.len(), 2);
+        // Deletions are row deltas: no IncludeDeleted sibling source.
+        assert_eq!(resolver.requests.len(), 1);
         let source_request = resolver
             .requests
             .iter()
             .find(|request| request.visibility == RowVisibility::Visible)
             .expect("visible source request");
-        let deletion_preimage_request = resolver
-            .requests
-            .iter()
-            .find(|request| request.visibility == RowVisibility::IncludeDeleted)
-            .expect("authorized deletion preimage request");
         assert_eq!(source_request.source, source("todos", SourceRole::Root));
         assert_eq!(source_request.visibility, RowVisibility::Visible);
         assert_eq!(
@@ -117,22 +113,10 @@ fn simple_current_table_root_query_lowers_for_local_and_global_sync_outputs() {
                 .contains(&SourceMetadataRequirement::Coverage)
         );
         assert!(
-            source_request
+            !source_request
                 .requirements
                 .metadata
                 .contains(&SourceMetadataRequirement::DeletionMarkers)
-        );
-        assert_eq!(
-            deletion_preimage_request.source,
-            source("todos", SourceRole::Root)
-        );
-        assert_eq!(
-            deletion_preimage_request.requirements.app_fields,
-            FieldRequirement::None
-        );
-        assert!(
-            deletion_preimage_request.requirements.metadata.is_empty(),
-            "the IncludeDeleted sibling authorizes the deletion preimage only"
         );
         assert!(
             program
@@ -165,7 +149,8 @@ fn simple_current_table_root_query_lowers_for_local_and_global_sync_outputs() {
                 })
             )
         }));
-        assert!(terminals.iter().any(|terminal| {
+        // No deletion witness terminal: deletions are row deltas.
+        assert!(!terminals.iter().any(|terminal| {
             matches!(
                 terminal,
                 OutputTerminalSchema::Fact(ProgramFactOutput {

@@ -9,7 +9,13 @@ use jazz::tx::Transaction;
 pub fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::Reserved12(retired) => match *retired {},
+        SyncMessage::Reserved15(retired) | SyncMessage::Reserved16(retired) => match *retired {},
         SyncMessage::ViewUpdate(ViewUpdatePayload {
+            version_carriers,
+            peer_payload_inventory,
+            ..
+        })
+        | SyncMessage::ViewUpdatePart(ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
             ..
@@ -26,6 +32,7 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         }
         SyncMessage::CurrentRowsRequest(_) | SyncMessage::CurrentRowsCancel { .. } => 0,
         SyncMessage::FateUpdate { .. } => tx_id_wire_bytes() + 16,
+        SyncMessage::RetryLater { .. } => 2 * tx_id_wire_bytes(),
         // An authority scope view carries an ordinary settlement-bearing view
         // update. Its row payload is part of the simulated delivery cost.
         SyncMessage::AuthorizationScopeView { view, .. } => scope_view_update_bytes(view),
@@ -43,8 +50,6 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         | SyncMessage::SessionClaims { .. }
         | SyncMessage::SubscribeRejected { .. }
         | SyncMessage::Unsubscribe { .. }
-        | SyncMessage::FetchRowVersions { .. }
-        | SyncMessage::RowVersionPayloads { .. }
         | SyncMessage::CatalogueSnapshot(_)
         | SyncMessage::PermissionAdviceRequest { .. }
         | SyncMessage::PermissionAdviceResponse { .. }
@@ -61,6 +66,7 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
 pub fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::Reserved12(retired) => match *retired {},
+        SyncMessage::Reserved15(retired) | SyncMessage::Reserved16(retired) => match *retired {},
         SyncMessage::ViewUpdate(ViewUpdatePayload {
             version_carriers, ..
         }) => version_carriers_bytes_floor(version_carriers),
@@ -160,7 +166,6 @@ mod tests {
             &schema.tables()[0],
             schema.version_id(),
             RowUuid(uuid::Uuid::nil()),
-            Vec::new(),
             AuthorSubject::for_test_bytes([0; 16]),
             tx_id.time.physical_ms(),
             AuthorSubject::for_test_bytes([0; 16]),

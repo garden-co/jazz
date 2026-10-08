@@ -6,6 +6,8 @@
 
 mod publication_type;
 
+use std::borrow::Cow;
+
 use serde::Serialize;
 
 use crate::db::{RemovedRow, SubscriptionOutputRow};
@@ -128,8 +130,9 @@ pub struct Row<'a> {
     pub row_id: RowUuid,
     /// Whether the row is an opt-in deleted historical row.
     pub deleted: bool,
-    /// Packed record bytes described by the enclosing batch.
-    pub raw: &'a [u8],
+    /// Packed record bytes described by the enclosing batch. Borrowed from
+    /// the row unless the host boundary had to strip storage-internal fields.
+    pub raw: Cow<'a, [u8]>,
 }
 
 /// Relation snapshot envelope used by both native hosts.
@@ -231,15 +234,40 @@ pub fn encode_subscription_delta(
     })
 }
 
+/// One row as it may leave the engine toward a host or client.
+#[doc(hidden)]
+pub struct PublishedRecord<'a> {
+    /// Descriptor of `raw`, without storage-internal fields.
+    pub descriptor: groove::records::RecordDescriptor,
+    /// Record bytes; borrowed from the row when nothing was stripped.
+    pub raw: Cow<'a, [u8]>,
+    /// Publication bindings aligned with `descriptor`.
+    pub fields: Vec<&'a CurrentRowPublicationField>,
+}
+
+/// The publication view of one row at the host boundary: its stored current
+/// layout, borrowed.
+#[doc(hidden)]
+pub fn published_record(row: &CurrentRow) -> Result<PublishedRecord<'_>, postcard::Error> {
+    let (descriptor, raw) = row.encoded_record();
+    Ok(PublishedRecord {
+        descriptor: *descriptor,
+        raw: Cow::Borrowed(raw),
+        fields: row.publication_fields().iter().collect(),
+    })
+}
+
 /// Group only adjacent rows with equal table and tagged descriptor.
 pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::Error> {
     let mut batches: Vec<RowBatch<'_>> = Vec::new();
     for row in rows {
-        let (descriptor, raw) = row.encoded_record();
-        let binding_descriptor = descriptor
+        let published = published_record(row)?;
+        let raw = published.raw;
+        let binding_descriptor = published
+            .descriptor
             .fields()
             .iter()
-            .zip(row.publication_fields())
+            .zip(published.fields)
             .map(|(field, binding)| {
                 let name = match binding {
                     CurrentRowPublicationField::StoredColumn { id, output_name } => {

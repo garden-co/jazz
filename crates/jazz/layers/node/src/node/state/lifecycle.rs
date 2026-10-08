@@ -66,7 +66,7 @@ impl NodeState {
         let meta_database = Database::new_with_storage_layout(
             JazzSchema::empty().lower_catalogue_meta_to_groove(),
             storage,
-            StorageLayout::jazz_class_v1(),
+            StorageLayout::jazz_class_v2(),
         )
         .await?;
         let requested_key = [
@@ -238,7 +238,7 @@ impl NodeState {
         // repurpose as an uninitialized runtime.
         let meta_schema = bootstrap_schema.lower_to_groove();
         let meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
                 .await?;
         let mut genesis = None;
         let mut schemas = BTreeMap::new();
@@ -361,14 +361,7 @@ impl NodeState {
             }
         } else { legacy_pointer };
         let mut has_non_catalogue_residue = false;
-        for table in [
-            "jazz_transactions",
-            "jazz_rejected_transactions",
-            "jazz_pending_edges",
-            "jazz_merge_heads",
-            "jazz_global_changes",
-            "jazz_deletion_history",
-        ] {
+        for table in ["jazz_transactions", "jazz_rejected_transactions"] {
             if !meta_database
                 .primary_key_scan_raw(table, &[])
                 .await?
@@ -489,7 +482,7 @@ impl NodeState {
     {
         let meta_schema = JazzSchema::empty().lower_catalogue_meta_to_groove();
         let meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
                 .await?;
         let mut genesis = None;
         let mut active = None;
@@ -843,9 +836,13 @@ impl NodeState {
                 locally_minted_global_times: BTreeSet::new(),
                 committed_global_time: GlobalTime(0),
                 applied_global_times_after_frontier: BTreeSet::new(),
+                frontier_dots: BTreeMap::new(),
             },
             parking: Parking::default(),
             query: QueryServing {
+                watermark_restore_seen: BTreeSet::new(),
+                persisted_watermarks: BTreeMap::new(),
+                watermarks_invalidated: false,
                 local_availability_records: BTreeMap::new(),
                 local_availability_authorities: BTreeMap::new(),
                 local_unavailable_inputs: BTreeMap::new(),
@@ -857,7 +854,6 @@ impl NodeState {
                 policy_authorization_graph_cache: BTreeMap::new(),
                 policy_authorization_graph_replacements: BTreeMap::new(),
                 policy_proof_stack: Vec::new(),
-                tx_version_tables_cache: BTreeMap::new(),
                 tx_versions_cache: BTreeMap::new(),
                 tx_version_tables_cache_order: VecDeque::new(),
                 tx_version_tables_cache_order_set: BTreeSet::new(),
@@ -900,16 +896,14 @@ impl NodeState {
             pending_persistence: BTreeSet::new(),
             node_aliases: NodeAliases::default(),
             absent_node_alias: None,
-            ahead_current_keys: FxHashSet::default(),
-            content_version_reachability_cache: BTreeMap::new(),
-            content_version_reachability_cache_order: VecDeque::new(),
-            content_version_reachability_cache_tx_ids: 0,
+            ahead_current_keys: FxHashMap::default(),
+            ahead_shadow_dirty: Vec::new(),
+            tx_touched_dirty: BTreeMap::new(),
+            history_tx_authors: BTreeMap::new(),
+            history_tx_seqs: RefCell::new(FxHashMap::default()),
+            minting_global_time: false,
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
-            #[cfg(any(test, feature = "testing"))]
-            merge_head_reachability_walks: 0,
-            #[cfg(any(test, feature = "testing"))]
-            merge_head_reachability_nodes: 0,
             #[cfg(any(test, feature = "testing"))]
             query_program_compilations: 0,
             session_claims: BTreeMap::new(),
@@ -1012,7 +1006,7 @@ impl NodeState {
             physical_mappings,
         )?;
         lowered.tables.extend(current_tables);
-        let layout = StorageLayout::jazz_class_v1();
+        let layout = StorageLayout::jazz_class_v2();
         let mut database = Database::new_with_storage_layout(lowered, storage, layout).await?;
         // Jazz publishes plain ordered results from membership and version
         // deltas and never reads their generic root positions; only root
@@ -1940,11 +1934,9 @@ where
         self.query.compiled_query_program_cache.clear();
         self.query.query_program_templates.clear();
         self.query.supported_query_program_requests.clear();
-        self.clear_content_version_reachability_cache();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
-        self.query.tx_version_tables_cache.clear();
         self.query.tx_versions_cache.clear();
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
@@ -2004,7 +1996,7 @@ where
         let local_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
         let mut meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
                 .await?;
         let mut recovered_active_schema = None;
         let mut catalogue_schemas = BTreeMap::new();

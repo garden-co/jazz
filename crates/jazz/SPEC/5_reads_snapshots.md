@@ -18,7 +18,7 @@ Invariant digest:
 - `INV-READ-4`: Reads inside an open exclusive transaction MUST overlay that transaction's own pending writes on top of the snapshot-covered base view.
 - `INV-READ-5`: `tx_read` MUST record a `RowRead` for a present snapshot-visible row and an `AbsentRead` for an absent snapshot-visible row.
 - `INV-READ-6`: `tx_current_rows` and `tx_query` MUST record predicate reads as `PredicateRead` values carrying `table`, `shape_id`, `shape`, `binding_id`, and `binding_values`; whole-table transaction reads are degenerate query shapes.
-- `INV-READ-7`: Local current-row reads MUST use argmax `TxId` currency per `(row_uuid, VersionLayer)` over held non-rejected versions, independent of sender arrival order.
+- `INV-READ-7`: A node's current row MUST be the Core post-image with the highest seq it holds for that row, with the node's pending overlay on top for `Local`/`None` reads. Receiving Core's images of a row out of seq order MUST leave the same current row as receiving them in order.
 - `INV-READ-8`: Global current-row reads MUST use the per-lineage combined global-current source and MUST exclude rows whose stored visibility is false.
 - `INV-READ-9`: Global as-of reads at `GlobalTime` MUST choose independent content and deletion winners from `jazz_global_changes` at or before the requested `global_base`, then derive visibility before returning content.
 - `INV-READ-10`: Current-row visibility MUST be derived from independent content and deletion-register winners; content writes alone MUST NOT restore a deleted row, while `DeletionEvent::Restored` reveals current content.
@@ -38,8 +38,10 @@ non-rejected versions held by that node (node-local derived state, ch. 2).
 tables described below.
 
 A settled read names a `DurabilityTier` (ch. 3). A `none`/`local` read resolves
-against local currency: the argmax-by-`TxId` winner per `(row_uuid, layer)` over
-held non-rejected versions, independent of arrival order (`INV-READ-7`). This
+against local currency: the Core post-image with the highest seq the node holds
+for the row, with the node's pending overlay on top. Core's images of a row
+may arrive out of seq order; an older seq never replaces a newer one, so the
+result is independent of arrival order (`INV-READ-7`). This
 means it **includes the reading node's own pending committed writes**. A
 `global` read resolves against the per-layer global-current tables, which contain
 accepted state only, and therefore **excludes a write that has not yet been

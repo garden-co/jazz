@@ -136,14 +136,12 @@ fn policy_graph_version(
             .unwrap(),
         schema.version_id(),
         row_uuid,
-        Vec::new(),
         AuthorSubject::system_at(node(1)),
         tx_id.time.physical_ms(),
         AuthorSubject::system_at(node(1)),
         tx_id.time.physical_ms(),
         cells,
-        None,
-    )
+        None,)
     .unwrap_or_else(|error| {
         panic!(
             "policy-graph performance fixture has invalid cells for table={table} row={row_uuid:?}: {error:?}; cells={cells:?}"

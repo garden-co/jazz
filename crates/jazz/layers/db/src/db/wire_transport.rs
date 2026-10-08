@@ -3,12 +3,12 @@
 //! This stays below the database facade: it converts authenticated byte frames
 //! into logical sync messages without changing peer dispatch semantics.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 #[cfg(test)]
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 
 use super::{ConnectionSessionContext, Transport};
-use crate::protocol::SyncMessage;
+use crate::protocol::{SubscriptionKey, SyncMessage, ViewUpdatePayload};
 use crate::protocol_limits::validate_wire_frame_len;
 #[cfg(test)]
 use crate::protocol_limits::{
@@ -275,6 +275,14 @@ pub struct WireTransportAdapter<T> {
     terminal_error: Option<TransportError>,
     last_wire_error: Option<WireError>,
     received_wire_error: bool,
+    /// Remaining bounded parts of one accepted oversized `ViewUpdate`. While
+    /// any remain, every other canonical offer is refused, so this holds at
+    /// most the one logical update the adapter has already accepted.
+    outbound_view_parts: VecDeque<SyncMessage>,
+    /// Received `ViewUpdatePart`s awaiting their final `ViewUpdate`, by
+    /// subscription. Dropped with the adapter, so a reconnect never resumes
+    /// a partial sequence.
+    inbound_view_parts: BTreeMap<SubscriptionKey, InboundViewParts>,
     // Retained only for historical fragment corpus tests, not live admission.
     #[cfg(test)]
     pub(super) reassembler: LogicalMessageReassembler,
@@ -338,6 +346,8 @@ impl<T: WireTransport> WireTransportAdapter<T> {
             terminal_error: None,
             last_wire_error: None,
             received_wire_error: false,
+            outbound_view_parts: VecDeque::new(),
+            inbound_view_parts: BTreeMap::new(),
             #[cfg(test)]
             reassembler: LogicalMessageReassembler::default(),
         }
@@ -345,6 +355,19 @@ impl<T: WireTransport> WireTransportAdapter<T> {
     /// Return the underlying byte transport.
     pub fn into_inner(self) -> T {
         self.inner
+    }
+
+    /// `ViewUpdatePart`s buffered while their final part is outstanding, and
+    /// parts of an accepted oversized update not yet admitted to a channel.
+    #[cfg(test)]
+    pub(super) fn view_update_parts_in_flight_for_test(&self) -> (usize, usize) {
+        (
+            self.inbound_view_parts
+                .values()
+                .map(|buffered| buffered.parts.len())
+                .sum(),
+            self.outbound_view_parts.len(),
+        )
     }
 
     #[cfg(test)]
@@ -394,6 +417,140 @@ impl<T: WireTransport> WireTransportAdapter<T> {
         if let Some(error) = &self.terminal_error {
             return Err(error.clone());
         }
+        self.enqueue_outbound_view_parts()?;
+        let status = self.flush_endpoints(turns)?;
+        if self.outbound_view_parts.is_empty() {
+            return Ok(status);
+        }
+        // Sending frames does not return credit, but a part may have become
+        // admissible since the first attempt; either way the sequence stays
+        // pending until the peer grants more credit.
+        self.enqueue_outbound_view_parts()?;
+        Ok(match status {
+            WireFlushStatus::Idle if self.endpoint.has_pending() => WireFlushStatus::MoreReady,
+            WireFlushStatus::Idle if !self.outbound_view_parts.is_empty() => {
+                WireFlushStatus::Backpressured
+            }
+            status => status,
+        })
+    }
+
+    /// Route and enqueue one canonical message. `Ok(false)` is backpressure:
+    /// nothing was admitted and the caller still owns the message.
+    fn enqueue_canonical(&mut self, message: &SyncMessage) -> Result<bool, TransportError> {
+        let (slot, generation, class, barrier) = match self.route(message) {
+            Ok(route) => route,
+            Err(TransportError::Backpressure) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        match self
+            .endpoint
+            .enqueue(slot, generation, class, message, barrier)
+        {
+            Ok(()) => {}
+            Err(TransportError::Backpressure) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        if (3..crate::wire::channels::PROGRESS_CHANNEL).contains(&slot) {
+            self.routes.retain(|_, (existing, _)| *existing != slot);
+            self.routes
+                .insert(delivery_route_key(message), (slot, generation));
+        }
+        Ok(true)
+    }
+
+    /// Admit as many remaining parts of the accepted oversized update as
+    /// channel credit allows, in order. The adapter already owns them, so a
+    /// hard failure is terminal for the link.
+    fn enqueue_outbound_view_parts(&mut self) -> Result<(), TransportError> {
+        while let Some(part) = self.outbound_view_parts.pop_front() {
+            match self.enqueue_canonical(&part) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.outbound_view_parts.push_front(part);
+                    break;
+                }
+                Err(error) => {
+                    self.outbound_view_parts.clear();
+                    self.terminal_error = Some(error.clone());
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Hold a received `ViewUpdatePart` until its final `ViewUpdate`, and
+    /// yield that update whole. Every other message passes through.
+    fn assemble_view_update(
+        &mut self,
+        received: super::ReceivedSyncMessage,
+    ) -> Result<Option<super::ReceivedSyncMessage>, TransportError> {
+        let super::ReceivedSyncMessage {
+            message,
+            lease,
+            receipts_validated,
+        } = received;
+        match message {
+            SyncMessage::ViewUpdatePart(part) => {
+                // Each open sequence occupies one delivery stream, so a peer
+                // cannot hold more open sequences than it has streams. The
+                // part's lease is released here: it is buffered semantically,
+                // and holding its credit could stall the rest of the sequence.
+                drop(lease);
+                let open = self.inbound_view_parts.len();
+                let entry = self
+                    .inbound_view_parts
+                    .entry(part.subscription)
+                    .or_insert_with(|| InboundViewParts {
+                        parts: Vec::new(),
+                        receipts_validated: true,
+                    });
+                if entry.parts.is_empty() && open >= crate::wire::channels::MAX_CHANNELS {
+                    return Err(self.fail_view_update_assembly(
+                        "more open view-update part sequences than delivery streams",
+                    ));
+                }
+                entry.parts.push(part);
+                entry.receipts_validated &= receipts_validated;
+                Ok(None)
+            }
+            SyncMessage::ViewUpdate(last) => {
+                let Some(buffered) = self.inbound_view_parts.remove(&last.subscription) else {
+                    return Ok(Some(super::ReceivedSyncMessage {
+                        message: SyncMessage::ViewUpdate(last),
+                        lease,
+                        receipts_validated,
+                    }));
+                };
+                let merged =
+                    super::view_update_parts::merge_view_update_parts(buffered.parts, last)
+                        .map_err(|reason| self.fail_view_update_assembly(&reason))?;
+                Ok(Some(super::ReceivedSyncMessage {
+                    message: SyncMessage::ViewUpdate(merged),
+                    lease,
+                    receipts_validated: receipts_validated && buffered.receipts_validated,
+                }))
+            }
+            message => Ok(Some(super::ReceivedSyncMessage {
+                message,
+                lease,
+                receipts_validated,
+            })),
+        }
+    }
+
+    fn fail_view_update_assembly(&mut self, reason: &str) -> TransportError {
+        self.inbound_view_parts.clear();
+        self.last_wire_error = Some(WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            reason.to_owned(),
+        ));
+        TransportError::Failed(reason.to_owned())
+    }
+
+    fn flush_endpoints(&mut self, turns: usize) -> Result<WireFlushStatus, TransportError> {
         self.endpoint.expire().map_err(TransportError::Failed)?;
         self.auxiliary
             .lock()
@@ -539,6 +696,17 @@ impl<T: WireTransport> WireTransportAdapter<T> {
     }
 
     fn receive(&mut self) -> Result<Option<super::ReceivedSyncMessage>, TransportError> {
+        // A buffered part yields nothing on its own; keep draining until a
+        // complete message or an empty inbound queue.
+        while let Some(received) = self.receive_routed()? {
+            if let Some(message) = self.assemble_view_update(received)? {
+                return Ok(Some(message));
+            }
+        }
+        Ok(None)
+    }
+
+    fn receive_routed(&mut self) -> Result<Option<super::ReceivedSyncMessage>, TransportError> {
         if let Some(error) = &self.terminal_error {
             return Err(error.clone());
         }
@@ -656,27 +824,25 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                 };
             }
         } else {
-            let (slot, generation, class, barrier) = match self.route(&message) {
-                Ok(route) => route,
-                Err(TransportError::Backpressure) => {
-                    return Ok(WireSendOutcome::Rejected(message));
-                }
-                Err(error) => return Err(error),
-            };
-            match self
-                .endpoint
-                .enqueue(slot, generation, class, &message, barrier)
-            {
-                Ok(()) => {}
-                Err(TransportError::Backpressure) => {
-                    return Ok(WireSendOutcome::Rejected(message));
-                }
-                Err(error) => return Err(error),
+            // The parts of an accepted oversized update go out contiguously,
+            // before any later canonical message.
+            self.enqueue_outbound_view_parts()?;
+            if !self.outbound_view_parts.is_empty() {
+                return Ok(WireSendOutcome::Rejected(message));
             }
-            if (3..crate::wire::channels::PROGRESS_CHANNEL).contains(&slot) {
-                self.routes.retain(|_, (existing, _)| *existing != slot);
-                self.routes
-                    .insert(delivery_route_key(&message), (slot, generation));
+            match message {
+                SyncMessage::ViewUpdate(view) if exceeds_routed_payload_limit(&view) => {
+                    let limit = super::routed_messages::max_routed_payload_bytes();
+                    let parts = super::view_update_parts::split_view_update(view, limit)
+                        .map_err(|error| TransportError::Failed(error.to_string()))?;
+                    self.outbound_view_parts = parts.into();
+                    self.enqueue_outbound_view_parts()?;
+                }
+                message => {
+                    if !self.enqueue_canonical(&message)? {
+                        return Ok(WireSendOutcome::Rejected(message));
+                    }
+                }
             }
         }
         // Semantic ownership is now accepted. A rejected physical extent is
@@ -796,10 +962,28 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
     }
 }
 
+/// Parts of one oversized `ViewUpdate` still waiting for their final part.
+struct InboundViewParts {
+    parts: Vec<ViewUpdatePayload>,
+    receipts_validated: bool,
+}
+
+/// Whether `view` must be sent as bounded parts. A size walk without
+/// allocation; ordinary updates stop here.
+fn exceeds_routed_payload_limit(view: &ViewUpdatePayload) -> bool {
+    // Measure the payload as a message: the variant tag is one byte.
+    postcard::experimental::serialized_size(view).map_or(true, |bytes| {
+        bytes.saturating_add(1) > super::routed_messages::max_routed_payload_bytes()
+    })
+}
+
 fn delivery_route_key(message: &SyncMessage) -> Vec<u8> {
     use SyncMessage::*;
     let (tag, bytes) = match message {
-        ViewUpdate(view) => (0, postcard::to_allocvec(&view.subscription).unwrap()),
+        // Every part of one update shares its subscription's stream.
+        ViewUpdate(view) | ViewUpdatePart(view) => {
+            (0, postcard::to_allocvec(&view.subscription).unwrap())
+        }
         SubscribeRejected { subscription, .. } | AuthorizationScopeReceipt { subscription, .. } => {
             (0, postcard::to_allocvec(subscription).unwrap())
         }

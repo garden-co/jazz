@@ -225,6 +225,46 @@ fn composite_index_declarations_are_canonical_and_validated() {
     );
 }
 
+/// Keys of every composite-index entry in the durable `indices` family, with
+/// the `(table, index)` its numeric index id is registered to, in key order.
+///
+/// Groove keys each entry by a LEB128 index id and records the id in its
+/// `\0groove-index-id\0` registry (table and index names, then a `u32` BE id).
+fn composite_index_entries(storage: &LayoutStorage) -> Vec<(String, String, Vec<u8>)> {
+    const REGISTRY: &[u8] = b"\0groove-index-id\0";
+    let entries = block_on(storage.prefix("indices".into(), Vec::new())).unwrap();
+    let mut names = BTreeMap::new();
+    for (key, value) in &entries {
+        let Some(rest) = key.strip_prefix(REGISTRY) else {
+            continue;
+        };
+        let table_len = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+        let table = String::from_utf8(rest[2..2 + table_len].to_vec()).unwrap();
+        let index = String::from_utf8(rest[2 + table_len..].to_vec()).unwrap();
+        let id = u32::from_be_bytes(value[..4].try_into().unwrap());
+        names.insert(id, (table, index));
+    }
+    entries
+        .into_iter()
+        .filter(|(key, _)| key.first() != Some(&0))
+        .filter_map(|(key, _)| {
+            let (mut id, mut shift, mut len) = (0_u32, 0, 0);
+            for byte in &key {
+                id |= u32::from(byte & 0x7f) << shift;
+                shift += 7;
+                len += 1;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+            }
+            let (table, index) = names.get(&id).expect("entry id is registered").clone();
+            index
+                .starts_with("by_physical_composite_")
+                .then(|| (table, index, key[len..].to_vec()))
+        })
+        .collect()
+}
+
 /// Durable-encoding receipt for the physical composite index. This is
 /// deliberately below the public API: the index namespace
 /// (`by_physical_composite_v1_<column ids>`) and its entry key layout
@@ -247,26 +287,25 @@ fn physical_composite_index_entry_keys_are_pinned() {
         &families.iter().map(String::as_str).collect::<Vec<_>>(),
     )
     .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v1())).unwrap();
-    let keys = block_on(storage.prefix("indices".into(), Vec::new()))
-        .unwrap()
+    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v2())).unwrap();
+    let keys = composite_index_entries(&storage)
         .into_iter()
-        .map(|(key, _)| key)
-        .filter(|key| {
-            key.windows(b"\0by_physical_composite_".len())
-                .any(|window| window == b"\0by_physical_composite_")
-        })
-        .map(hex::encode)
+        .map(|(table, index, key)| (table, index, hex::encode(key)))
         .collect::<Vec<_>>();
-    // `jazz_physical_1_ahead_current\0by_physical_composite_v1_1_2\0`, the
-    // persisted-index tag 7, then the escaped logical key: branch key bytes,
-    // text "alice", order-preserving i32 7, and the ahead row's primary key
-    // (branch key, row uuid 0x0a.., transaction coordinate).
+    // After the index id: the index columns written once, single-escaped:
+    // branch key bytes `01 00000000`, nullable text "alice", nullable
+    // order-preserving i32 7; then `ff` and the primary-key columns the index
+    // lacks, here only row uuid 0x0a.. (the branch key is already indexed).
+    // The ahead overlay holds one row per row, so its primary key has no
+    // transaction coordinate. The value is empty.
     assert_eq!(
         keys,
-        [
-            "6a617a7a5f706879736963616c5f315f61686561645f63757272656e740062795f706879736963616c5f636f6d706f736974655f76315f315f320007070100ffff00ffff00ffff00ffff00ff00ff0906616c69636500ff00ff090e8000ff00ff07ff070100ffff00ffff00ffff00ffff00ff00ff0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0300ff00ff00ff00ff00ff0400ff00ff0300ff00ff00ff00ff00ff00ff00ff010000"
-        ]
+        [(
+            "jazz_physical_1_ahead_current".to_owned(),
+            "by_physical_composite_v1_1_2".to_owned(),
+            "070100ff00ff00ff00ff0000090661".to_owned()
+                + "6c6963650000090e80000007ff0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        )]
     );
 }
 
@@ -284,16 +323,10 @@ fn composite_index_row_order(path: &std::path::Path, schema: &JazzSchema) -> Vec
         &families.iter().map(String::as_str).collect::<Vec<_>>(),
     )
     .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v1())).unwrap();
-    block_on(storage.prefix("indices".into(), Vec::new()))
-        .unwrap()
+    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v2())).unwrap();
+    composite_index_entries(&storage)
         .into_iter()
-        .map(|(key, _)| key)
-        .filter(|key| {
-            key.windows(b"\0by_physical_composite_".len())
-                .any(|window| window == b"\0by_physical_composite_")
-        })
-        .map(|key| {
+        .map(|(_, _, key)| {
             (1..=u8::MAX)
                 .find(|byte| key.windows(16).any(|window| window == [*byte; 16]))
                 .expect("composite index key names a test row uuid")
@@ -501,7 +534,7 @@ fn composite_index_logical_names_cannot_collide_with_single_column_indexes() {
             .build(),
     )
     .expect("schema compiles");
-    let global_current = &schema.tables()[0].global_current_storage_tables()[0];
+    let global_current = &schema.tables()[0].global_current_storage_table();
     let names = global_current
         .indices
         .iter()
@@ -569,23 +602,23 @@ fn physical_global_current_composite_index_entry_keys_are_pinned() {
         &families.iter().map(String::as_str).collect::<Vec<_>>(),
     )
     .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v1())).unwrap();
-    let keys = block_on(storage.prefix("indices".into(), Vec::new()))
-        .unwrap()
+    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v2())).unwrap();
+    let keys = composite_index_entries(&storage)
         .into_iter()
-        .map(|(key, _)| key)
-        .filter(|key| key.starts_with(b"jazz_physical_1_global_current\0by_physical_composite_"))
-        .map(hex::encode)
+        .filter(|(table, _, _)| table == "jazz_physical_1_global_current")
+        .map(|(table, index, key)| (table, index, hex::encode(key)))
         .collect::<Vec<_>>();
-    // `jazz_physical_1_global_current\0by_physical_composite_v1_1_2\0`, the
-    // persisted-index tag 7, then the escaped logical key: branch key bytes,
-    // text "alice", order-preserving i32 7, and the global row's primary key
-    // (branch key, row uuid 0x0a..; unlike ahead-current, no transaction
-    // coordinate).
+    // After the index id: branch key bytes, nullable text "alice", nullable
+    // order-preserving i32 7, written once and single-escaped; then `ff` and
+    // row uuid 0x0a.., the only primary-key column the index lacks (unlike
+    // ahead-current, no transaction coordinate either way).
     assert_eq!(
         keys,
-        [
-            "6a617a7a5f706879736963616c5f315f676c6f62616c5f63757272656e740062795f706879736963616c5f636f6d706f736974655f76315f315f320007070100ffff00ffff00ffff00ffff00ff00ff0906616c69636500ff00ff090e8000ff00ff07ff070100ffff00ffff00ffff00ffff00ff00ff0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0000"
-        ]
+        [(
+            "jazz_physical_1_global_current".to_owned(),
+            "by_physical_composite_v1_1_2".to_owned(),
+            "070100ff00ff00ff00ff0000090661".to_owned()
+                + "6c6963650000090e80000007ff0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        )]
     );
 }

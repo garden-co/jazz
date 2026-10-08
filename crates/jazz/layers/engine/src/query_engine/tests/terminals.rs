@@ -1501,7 +1501,6 @@ fn immutable_witness_encoding_follows_exact_version_selection() {
         assert!(program.lowered.terminals.iter().any(|terminal| graph_any(&terminal.graph, &|graph| {
             let GraphBuilder::Project { input, fields } = graph else { return false };
             fields.iter().any(|field| field.output_name == "event_kind")
-                && fields.iter().any(|field| field.output_name == "parents")
                 && matches!(input.as_ref(), GraphBuilder::SemiJoin { left, left_on, right_on, .. }
                     if matches!(left.as_ref(), GraphBuilder::Table { table, .. } if table.ends_with("_content_versions"))
                     && left_on.len() == 3 && right_on.len() == 3)

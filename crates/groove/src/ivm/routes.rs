@@ -150,6 +150,7 @@ pub(crate) fn is_routable_type(value_type: &ValueType) -> bool {
         | ValueType::U16
         | ValueType::U32
         | ValueType::U64
+        | ValueType::U48
         | ValueType::I32
         | ValueType::I64
         | ValueType::Bool
