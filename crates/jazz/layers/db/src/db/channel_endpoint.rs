@@ -428,7 +428,7 @@ pub mod tests {
             })
             .collect::<Vec<_>>();
         let mut raw = 0_u64;
-        let mut per_message_zstd = 0_u64;
+        let mut fresh_channel_zstd = 0_u64;
         let streaming_zstd = compression_receipt(
             &messages,
             (crate::wire::current_wire_features() & !crate::wire::FEATURE_PAYLOAD_LZ4)
@@ -444,19 +444,16 @@ pub mod tests {
         for message in &messages {
             let payload = crate::wire::encode_sync_message(message).unwrap();
             raw += payload.len() as u64;
-            let (compressed, active) = crate::wire::compress_sync_payload(
-                payload.clone(),
-                crate::wire::FEATURE_PAYLOAD_ZSTD,
-            )
-            .unwrap();
-            let decompressed = crate::wire::decompress_sync_payload(&compressed, active).unwrap();
-            assert_eq!(decompressed, payload);
-            per_message_zstd += compressed.len() as u64;
+            fresh_channel_zstd += compression_receipt(
+                std::slice::from_ref(message),
+                (crate::wire::current_wire_features() & !crate::wire::FEATURE_PAYLOAD_LZ4)
+                    | crate::wire::FEATURE_PAYLOAD_ZSTD,
+            );
         }
         eprintln!(
-            "SYNTHETIC_SMALL_DELTA_COMPRESSION raw={raw} per_message_zstd={per_message_zstd} streaming_zstd={streaming_zstd} streaming_lz4={streaming_lz4}"
+            "SYNTHETIC_SMALL_DELTA_COMPRESSION raw={raw} fresh_channel_zstd={fresh_channel_zstd} streaming_zstd={streaming_zstd} streaming_lz4={streaming_lz4}"
         );
-        assert!(streaming_zstd < per_message_zstd);
+        assert!(streaming_zstd < fresh_channel_zstd);
     }
 }
 

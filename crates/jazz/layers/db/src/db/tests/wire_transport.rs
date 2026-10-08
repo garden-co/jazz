@@ -930,21 +930,6 @@ fn lz4_fragmentation_round_trips_incompressible_payload_over_logical_limit() {
     assert!(receiver.try_recv_result().unwrap().is_none());
 }
 
-#[cfg(feature = "transport-compression-lz4")]
-#[test]
-fn lz4_decoder_rejects_decompressed_payload_over_logical_limit() {
-    let mut decoder =
-        WireStreamDecoder::new(crate::wire::FEATURE_PAYLOAD_LZ4).expect("lz4 decoder");
-    let mut decompression_bomb = (MAX_LOGICAL_MESSAGE_BYTES as u32 + 1)
-        .to_le_bytes()
-        .to_vec();
-    decompression_bomb.push(0);
-    let error = decoder
-        .decode_message(&decompression_bomb, crate::wire::FEATURE_PAYLOAD_LZ4)
-        .expect_err("receiver must retain the decompressed-output bound");
-    assert!(error.contains("exceeds max"));
-}
-
 #[cfg(feature = "transport-compression-zstd")]
 #[test]
 fn wire_transport_adapter_zstd_stream_preserves_message_order() {

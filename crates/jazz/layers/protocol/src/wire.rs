@@ -12,7 +12,6 @@ pub mod stream_backend;
 
 use postcard::{take_from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 
 use crate::ids::{AuthorSubject, NodeUuid};
 use crate::protocol::SyncMessage;
@@ -63,8 +62,6 @@ pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
 /// link.  This is a transport-admission capability only: a peer's advertised
 /// role and semantic frames never create the capability.
 pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
-
-const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -816,151 +813,6 @@ fn cfg_zstd_feature() -> WireFeatures {
     #[cfg(not(feature = "transport-compression-zstd"))]
     {
         FEATURE_NONE
-    }
-}
-
-/// Compress a sync payload for one message envelope.
-///
-/// Production peer links use the same per-message encoding through
-/// [`WireStreamEncoder`], allowing decompression to enforce an output cap.
-pub fn compress_sync_payload(
-    payload: Vec<u8>,
-    negotiated_features: WireFeatures,
-) -> Result<(Vec<u8>, WireFeatures), String> {
-    let codec = WireCompression::from_features(negotiated_features);
-    let active_feature = codec.feature();
-    let payload = match codec {
-        WireCompression::None => payload,
-        WireCompression::Lz4 => compress_lz4(&payload)?,
-        WireCompression::Zstd => compress_zstd(&payload)?,
-    };
-    Ok((payload, active_feature))
-}
-
-/// Decompress a sync payload according to the envelope's active feature bit.
-pub fn decompress_sync_payload(
-    payload: &[u8],
-    envelope_features: WireFeatures,
-) -> Result<Vec<u8>, String> {
-    let active = envelope_features & FEATURE_PAYLOAD_COMPRESSION_MASK;
-    if active.count_ones() > 1 {
-        return Err("wire frame declares more than one payload compression codec".to_owned());
-    }
-    match WireCompression::from_features(active) {
-        WireCompression::None => Ok(payload.to_vec()),
-        WireCompression::Lz4 => decompress_lz4(payload),
-        WireCompression::Zstd => decompress_zstd(payload),
-    }
-}
-
-fn compress_lz4(payload: &[u8]) -> Result<Vec<u8>, String> {
-    jazz_compression::compress_lz4(payload)
-}
-
-fn decompress_lz4(payload: &[u8]) -> Result<Vec<u8>, String> {
-    jazz_compression::decompress_lz4(payload, crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES)
-}
-
-fn compress_zstd(payload: &[u8]) -> Result<Vec<u8>, String> {
-    jazz_compression::compress_zstd(payload)
-}
-
-fn decompress_zstd(payload: &[u8]) -> Result<Vec<u8>, String> {
-    jazz_compression::decompress_zstd(payload, crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES)
-}
-
-/// Negotiated per-message compression for sync payloads.
-pub struct WireStreamEncoder {
-    codec: WireCompression,
-}
-
-impl WireStreamEncoder {
-    /// Create encoder state for one outbound connection direction.
-    pub fn new(features: WireFeatures) -> Result<Self, String> {
-        let codec = outbound_wire_compression_from_features(features);
-        match codec {
-            WireCompression::None => {}
-            WireCompression::Lz4 if cfg_lz4_feature() == FEATURE_NONE => {
-                return Err("lz4 transport compression feature is not compiled in".to_owned());
-            }
-            WireCompression::Zstd if !cfg_can_encode_zstd() => {
-                return Err("zstd transport compression feature is not compiled in".to_owned());
-            }
-            _ => {}
-        }
-        Ok(Self { codec })
-    }
-
-    /// Active feature bit carried by message envelopes for this stream.
-    pub fn active_feature(&self) -> WireFeatures {
-        self.codec.feature()
-    }
-
-    /// Encode one sync payload into the connection stream and return the bytes
-    /// newly emitted by this message.
-    pub fn encode_message(&mut self, payload: &[u8]) -> Result<Vec<u8>, String> {
-        match self.codec {
-            WireCompression::None => Ok(payload.to_vec()),
-            WireCompression::Lz4 => compress_lz4(payload),
-            WireCompression::Zstd => compress_zstd(payload),
-        }
-    }
-}
-
-fn outbound_wire_compression_from_features(features: WireFeatures) -> WireCompression {
-    match WireCompression::from_features(features) {
-        WireCompression::Zstd if !cfg_can_encode_zstd() => WireCompression::None,
-        codec => codec,
-    }
-}
-
-fn cfg_can_encode_zstd() -> bool {
-    cfg!(feature = "transport-compression-zstd")
-}
-
-/// Negotiated per-message decompression for sync payloads.
-pub struct WireStreamDecoder {
-    codec: WireCompression,
-}
-
-impl WireStreamDecoder {
-    /// Create decoder state for one inbound connection direction.
-    pub fn new(features: WireFeatures) -> Result<Self, String> {
-        let codec = WireCompression::from_features(features);
-        Ok(Self { codec })
-    }
-
-    /// Decode one message's stream chunk into one owned semantic sync payload.
-    pub fn decode_message(
-        &mut self,
-        payload: &[u8],
-        envelope_features: WireFeatures,
-    ) -> Result<Vec<u8>, String> {
-        self.decode_message_borrowed(payload, envelope_features)
-            .map(Cow::into_owned)
-    }
-
-    #[doc(hidden)]
-    pub fn decode_message_borrowed<'a>(
-        &mut self,
-        payload: &'a [u8],
-        envelope_features: WireFeatures,
-    ) -> Result<Cow<'a, [u8]>, String> {
-        let active = envelope_features & FEATURE_PAYLOAD_COMPRESSION_MASK;
-        if active.count_ones() > 1 {
-            return Err("wire frame declares more than one payload compression codec".to_owned());
-        }
-        if active == FEATURE_NONE {
-            return Ok(Cow::Borrowed(payload));
-        }
-        if WireCompression::from_features(active) != self.codec {
-            return Err("wire frame compression codec changed within one connection".to_owned());
-        }
-        let decoded = decompress_sync_payload(payload, active)?;
-        if decoded.len() > crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES {
-            return Err("decompressed logical message exceeds receiver budget".to_owned());
-        }
-        Ok(Cow::Owned(decoded))
     }
 }
 
@@ -1867,54 +1719,77 @@ mod tests {
         );
     }
 
-    #[test]
-    fn uncompressed_stream_round_trips_message_boundaries() {
-        let mut encoder = WireStreamEncoder::new(FEATURE_NONE).unwrap();
-        let mut decoder = WireStreamDecoder::new(FEATURE_NONE).unwrap();
-        let first = vec![1, 2, 3];
-        let second = vec![4, 5];
-
-        let encoded_first = encoder.encode_message(&first).unwrap();
-        let encoded_second = encoder.encode_message(&second).unwrap();
-
-        assert_eq!(
-            decoder
-                .decode_message(&encoded_first, FEATURE_NONE)
-                .unwrap(),
-            first
-        );
-        assert_eq!(
-            decoder
-                .decode_message(&encoded_second, FEATURE_NONE)
-                .unwrap(),
-            second
-        );
+    fn channel_backend(features: WireFeatures) -> stream_backend::OrderedChannelBackend {
+        stream_backend::OrderedChannelBackend::new(WireInboundContext::new(
+            WIRE_PROTOCOL_VERSION,
+            features,
+            None,
+        ))
+        .unwrap()
     }
 
-    #[test]
-    fn uncompressed_stream_decoder_borrows_payload() {
-        let mut decoder = WireStreamDecoder::new(FEATURE_NONE).unwrap();
-        let message = b"uncompressed logical message".to_vec();
-
-        let decoded = decoder
-            .decode_message_borrowed(&message, FEATURE_NONE)
+    fn next_channel_message(
+        sender: &mut stream_backend::OrderedChannelBackend,
+        payload: &[u8],
+    ) -> (WireChannelEnvelope, usize) {
+        sender
+            .enqueue(0, 0, channels::ChannelClass::Control, payload.to_vec())
             .unwrap();
-
-        assert_eq!(decoded.as_ptr(), message.as_ptr());
+        let bytes = sender
+            .peek_outbound()
+            .unwrap()
+            .expect("small message fits one extent");
+        sender.accept_outbound().unwrap();
+        let WireFrame::Channel(frame) = decode_frame(&bytes).unwrap() else {
+            unreachable!()
+        };
+        (frame, bytes.len())
     }
 
+    fn channel_round_trips_messages(features: WireFeatures) {
+        let mut sender = channel_backend(features);
+        let mut receiver = channel_backend(features);
+        for (sequence, payload) in [
+            b"alpha alpha alpha".as_slice(),
+            b"alpha alpha beta",
+            b"alpha alpha gamma",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (frame, len) = next_channel_message(&mut sender, payload);
+            assert_eq!(frame.extent.sequence, sequence as u64);
+            assert_eq!(frame.features, features);
+            assert_eq!(
+                receiver.receive(frame, len).unwrap().unwrap().payload,
+                payload
+            );
+        }
+    }
+
+    /// Alice's uncompressed messages reach Bob in order on one channel.
+    /// The byte backend is tested directly to observe message boundaries.
+    #[test]
+    fn uncompressed_channel_round_trips_message_boundaries() {
+        channel_round_trips_messages(FEATURE_NONE);
+    }
+
+    /// Bob can receive Alice's raw channel even when their link offers zstd.
+    /// This byte-level test covers peers without an outbound compression encoder.
     #[cfg(feature = "transport-compression-zstd")]
     #[test]
-    fn compressed_stream_decoder_accepts_raw_envelopes() {
-        let mut decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
-        let message = b"client hello without outbound zstd encoder".to_vec();
-
+    fn compressed_channel_receiver_accepts_raw_extents() {
+        let payload = b"client without outbound zstd encoder";
+        let (frame, len) = next_channel_message(&mut channel_backend(FEATURE_NONE), payload);
+        let mut receiver = channel_backend(FEATURE_PAYLOAD_ZSTD);
         assert_eq!(
-            decoder.decode_message(&message, FEATURE_NONE).unwrap(),
-            message
+            receiver.receive(frame, len).unwrap().unwrap().payload,
+            payload
         );
     }
 
+    /// Alice selects LZ4 when Bob negotiates both codecs, and zstd when Bob
+    /// offers only zstd. A byte-level test checks the actual emitted feature bit.
     #[cfg(all(
         feature = "transport-compression-lz4",
         feature = "transport-compression-zstd"
@@ -1922,106 +1797,94 @@ mod tests {
     #[test]
     fn dual_compression_negotiation_gives_outbound_lz4_precedence() {
         let both = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
-        let remote = WireHello::current(WirePeerRole::Core, both);
-        let negotiated = negotiate_wire(&remote, both)
-            .expect("peers offering both codecs negotiate both capability bits");
-        assert_eq!(negotiated.features, both);
-
-        let mut encoder = WireStreamEncoder::new(negotiated.features)
-            .expect("both negotiated codecs are compiled in");
-        assert_eq!(encoder.active_feature(), FEATURE_PAYLOAD_LZ4);
-        let semantic = b"dual-codec negotiated payload";
-        let payload = encoder.encode_message(semantic).expect("LZ4 encodes");
-        let emitted_features =
-            (negotiated.features & !FEATURE_PAYLOAD_COMPRESSION_MASK) | encoder.active_feature();
-        let frame = decode_frame(
-            &encode_frame(&test_channel_frame(
-                negotiated.protocol_version,
-                emitted_features,
-                payload.clone(),
-            ))
-            .expect("selected-codec envelope encodes"),
-        )
-        .expect("selected-codec envelope decodes");
-        let WireFrame::Channel(envelope) = frame else {
-            panic!("expected message envelope")
-        };
-        assert_eq!(
-            envelope.features & FEATURE_PAYLOAD_COMPRESSION_MASK,
-            FEATURE_PAYLOAD_LZ4,
-            "the emitted envelope carries LZ4 and clears negotiated-but-inactive Zstd"
-        );
-        assert_eq!(envelope.features & FEATURE_PAYLOAD_ZSTD, 0);
-        let mut decoder = WireStreamDecoder::new(both).expect("both codecs decode");
-        assert_eq!(
-            decoder
-                .decode_message(&payload, envelope.features)
-                .expect("emitted LZ4 payload decodes"),
-            semantic
-        );
-
-        // Planted sensitivity controls: union negotiation or swapped codec-bit
-        // mapping would turn this Zstd-only peer into LZ4 and fail these checks.
-        let zstd_only = WireHello::current(WirePeerRole::Core, FEATURE_PAYLOAD_ZSTD);
-        let zstd_negotiated =
-            negotiate_wire(&zstd_only, both).expect("Zstd-only remote still has one common codec");
-        assert_eq!(zstd_negotiated.features, FEATURE_PAYLOAD_ZSTD);
-        assert_eq!(
-            WireStreamEncoder::new(zstd_negotiated.features)
-                .expect("Zstd encoder is compiled in")
-                .active_feature(),
-            FEATURE_PAYLOAD_ZSTD
-        );
-    }
-
-    #[cfg(feature = "transport-compression-zstd")]
-    #[test]
-    fn zstd_stream_decoder_rejects_corrupt_compressed_payload() {
-        let mut decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
-
-        assert!(
-            decoder
-                .decode_message(b"not a zstd frame", FEATURE_PAYLOAD_ZSTD)
-                .is_err(),
-            "a negotiated compression bit must not turn corrupt bytes into a semantic payload"
-        );
-    }
-
-    #[cfg(feature = "transport-compression-zstd")]
-    #[test]
-    fn zstd_stream_round_trips_multiple_message_boundaries() {
-        let mut encoder = WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
-        let mut decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
-        let messages = [
-            b"alpha alpha alpha".to_vec(),
-            b"alpha alpha beta".to_vec(),
-            b"alpha alpha gamma".to_vec(),
-        ];
-
-        for message in messages {
-            let chunk = encoder.encode_message(&message).unwrap();
-            let decoded = decoder
-                .decode_message(&chunk, FEATURE_PAYLOAD_ZSTD)
-                .unwrap();
-            assert_eq!(decoded, message);
+        for (offered, expected) in [
+            (both, FEATURE_PAYLOAD_LZ4),
+            (FEATURE_PAYLOAD_ZSTD, FEATURE_PAYLOAD_ZSTD),
+        ] {
+            let remote = WireHello::current(WirePeerRole::Core, offered);
+            let negotiated = negotiate_wire(&remote, both).unwrap();
+            assert_eq!(negotiated.features, offered);
+            let payload = b"negotiated channel payload";
+            let (frame, len) =
+                next_channel_message(&mut channel_backend(negotiated.features), payload);
+            assert_eq!(
+                frame.features & (FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD),
+                expected
+            );
+            assert_eq!(
+                channel_backend(negotiated.features)
+                    .receive(frame, len)
+                    .unwrap()
+                    .unwrap()
+                    .payload,
+                payload
+            );
         }
     }
 
+    /// Bob rejects Mallory's corrupt compressed channel before semantic decode.
+    /// Direct frame injection is required to exercise the codec failure boundary.
+    #[cfg(feature = "transport-compression-zstd")]
+    #[test]
+    fn zstd_channel_receiver_rejects_corrupt_compressed_payload() {
+        let WireFrame::Channel(frame) = test_channel_frame(
+            WIRE_PROTOCOL_VERSION,
+            FEATURE_PAYLOAD_ZSTD,
+            b"not a zstd frame".to_vec(),
+        ) else {
+            unreachable!()
+        };
+        assert!(
+            channel_backend(FEATURE_PAYLOAD_ZSTD)
+                .receive(frame, 64)
+                .is_err()
+        );
+    }
+
+    /// Alice's successive zstd messages reach Bob using one persistent channel.
+    /// Direct backend coverage pins the streaming codec's message boundaries.
+    #[cfg(feature = "transport-compression-zstd")]
+    #[test]
+    fn zstd_channel_round_trips_multiple_message_boundaries() {
+        channel_round_trips_messages(FEATURE_PAYLOAD_ZSTD);
+    }
+
+    /// Alice's successive LZ4 messages reach Bob using one persistent channel.
+    /// Direct backend coverage pins the streaming codec's message boundaries.
     #[cfg(feature = "transport-compression-lz4")]
     #[test]
-    fn lz4_stream_round_trips_multiple_message_boundaries() {
-        let mut encoder = WireStreamEncoder::new(FEATURE_PAYLOAD_LZ4).unwrap();
-        let mut decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_LZ4).unwrap();
-        let messages = [
-            b"alpha alpha alpha".to_vec(),
-            b"alpha alpha beta".to_vec(),
-            b"alpha alpha gamma".to_vec(),
-        ];
+    fn lz4_channel_round_trips_multiple_message_boundaries() {
+        channel_round_trips_messages(FEATURE_PAYLOAD_LZ4);
+    }
 
-        for message in messages {
-            let chunk = encoder.encode_message(&message).unwrap();
-            let decoded = decoder.decode_message(&chunk, FEATURE_PAYLOAD_LZ4).unwrap();
-            assert_eq!(decoded, message);
+    /// Bob rejects Mallory's compressed extent when it expands beyond its
+    /// declared output size. Frame injection tests the pre-semantic output cap
+    /// with a small payload instead of allocating a near-limit decompression bomb.
+    #[cfg(any(
+        feature = "transport-compression-lz4",
+        feature = "transport-compression-zstd"
+    ))]
+    #[test]
+    fn compressed_channel_rejects_output_beyond_declared_extent() {
+        let codecs: &[WireFeatures] = &[
+            #[cfg(feature = "transport-compression-lz4")]
+            FEATURE_PAYLOAD_LZ4,
+            #[cfg(feature = "transport-compression-zstd")]
+            FEATURE_PAYLOAD_ZSTD,
+        ];
+        for &features in codecs {
+            let (mut frame, len) =
+                next_channel_message(&mut channel_backend(features), &[42; 1024]);
+            frame.extent.decoded_len = 1;
+            frame.extent.message_len = 1;
+            let error = channel_backend(features)
+                .receive(frame, len)
+                .err()
+                .expect("decompression must respect declared extent size");
+            assert!(
+                error.contains("exceeded declared decoded extent"),
+                "{error}"
+            );
         }
     }
 
