@@ -513,6 +513,8 @@ export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
 /** @internal Low-level read controls that are not part of the product-facing query API. */
 export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> & {
   settlementMetadata?: boolean | "with-rows";
+  /** @internal Preserve the public transaction's immutable accepted begin cut. */
+  e2eeSnapshotAtBegin?: boolean;
   tier?: InternalQueryReadTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
@@ -531,6 +533,8 @@ export interface ResolvedQueryExecutionOptions {
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
   settlementMetadata?: boolean | "with-rows";
+  /** @internal Preserve the public transaction's immutable accepted begin cut. */
+  e2eeSnapshotAtBegin?: boolean;
   openTransactionId?: OpenTransactionId;
 };
 
@@ -728,6 +732,7 @@ function getScheduler(): (task: () => void) => void {
 function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): string | undefined {
   const payload: {
     settlement_metadata?: boolean | "with-rows";
+    e2ee_snapshot_at_begin?: boolean;
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
     transaction_id?: string;
@@ -752,6 +757,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     payload.transaction_id = options.openTransactionId;
   }
   if (options.settlementMetadata) payload.settlement_metadata = options.settlementMetadata;
+  if (options.e2eeSnapshotAtBegin) payload.e2ee_snapshot_at_begin = true;
   if (options.branch) {
     const base = options.branch.base;
     payload.read_view = {
@@ -1596,6 +1602,7 @@ export class JazzClient {
       openTransactionId: options.openTransactionId,
     };
     if (options.settlementMetadata) result.settlementMetadata = options.settlementMetadata;
+    if (options.e2eeSnapshotAtBegin) result.e2eeSnapshotAtBegin = true;
     return result;
   }
 

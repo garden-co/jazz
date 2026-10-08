@@ -1252,6 +1252,7 @@ impl WasmDbInner {
         query: Vec<u8>,
         opts: ReadOpts,
         open_tx: OpenTransactionId,
+        e2ee_snapshot_at_begin: bool,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         author: Option<AuthorSubject>,
         require_coverage: bool,
@@ -1262,17 +1263,13 @@ impl WasmDbInner {
                 let owner = Rc::clone($db);
                 let release_db = Rc::clone($db);
                 let pending = $db.enqueue_transaction_read(open_tx, async move {
-                    if opts.propagation == Propagation::LocalOnly {
-                        owner
-                            .restrict_e2ee_observation_snapshot_for_binding(open_tx)
-                            .await?;
-                    }
                     let coverage_deadline_ms = js_sys::Date::now() + coverage_budget_ms;
                     owner
-                        .all_settled_serialized_query_for_binding(
+                        .all_e2ee_settled_serialized_query_for_binding(
                             &query,
                             opts,
                             open_tx,
+                            e2ee_snapshot_at_begin,
                             request_scope,
                             author,
                             require_coverage,
@@ -2330,6 +2327,8 @@ impl WasmDb {
         include_rows: Option<bool>,
     ) -> Result<JsValue, JsValue> {
         let inner = self.open_inner()?;
+        let e2ee_snapshot_at_begin =
+            optional_bool_prop(&opts, "e2ee_snapshot_at_begin")?.unwrap_or(false);
         let opts = read_opts_from_js(opts)?;
         let has_explicit_author = author.is_some();
         let author = self.read_author(author)?;
@@ -2352,6 +2351,7 @@ impl WasmDb {
                     query,
                     opts,
                     tx_id,
+                    e2ee_snapshot_at_begin,
                     admission,
                     author,
                     requires_coverage,
