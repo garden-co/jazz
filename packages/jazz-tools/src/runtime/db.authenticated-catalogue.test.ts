@@ -72,3 +72,43 @@ it("qualifies owner catalogue readiness with the requested schema's local admiss
   expect(ensureReady.mock.calls.every(([tier]) => tier === "local")).toBe(true);
   expect(queryInternal.mock.calls).toHaveLength(2);
 });
+
+it("reuses admitted catalogue lineage without network coverage and covers cold owners", async () => {
+  const app = s.defineApp({ projects: s.table({ title: s.string() }, {}) });
+  const identity = "00000000-0000-4000-8000-000000000001";
+  let published = true;
+  const coverCatalogue = vi.fn(async () => undefined);
+  const queryInternal = vi.fn(async () => []);
+  const runtime = { tableIdentity: vi.fn(async () => identity) };
+  const client = {
+    getRuntime: () => runtime,
+    hasAuthenticatedCatalogue: async () => published,
+    queryInternal,
+    coverCatalogue,
+  };
+  const ensureReady = vi.fn(async (_tier: string) => undefined);
+  const db = Object.create(Db.prototype) as Db;
+  Object.defineProperties(db, {
+    getClient: { value: () => client },
+    ensureReady: { value: ensureReady },
+    getAccessContext: { value: () => undefined },
+    assertOpen: { value: () => undefined },
+    connection: {
+      value: {
+        initialExplicitOfflineState: () => undefined,
+        isExplicitlyOffline: () => false,
+      },
+    },
+  });
+
+  await expect(db.tableIdentity(app.projects)).resolves.toBe(identity);
+  expect(queryInternal).toHaveBeenCalledOnce();
+  expect(coverCatalogue).not.toHaveBeenCalled();
+  expect(ensureReady.mock.calls.every(([tier]) => tier === "local")).toBe(true);
+
+  published = false;
+  await expect(db.tableIdentity(app.projects)).resolves.toBe(identity);
+  expect(queryInternal).toHaveBeenCalledOnce();
+  expect(coverCatalogue).toHaveBeenCalledWith("projects", undefined);
+  expect(ensureReady).toHaveBeenCalledWith("global");
+});
