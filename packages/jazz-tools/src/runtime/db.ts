@@ -3664,7 +3664,7 @@ export class Db {
     // Owner publication does not admit a schema view. A zero-row local read
     // checks this requested schema without fetching metadata or refreshing authority.
     await client.queryInternal(
-      table.where({}).limit(0)._build(),
+      translateQuery(JSON.stringify({ table: table._table, limit: 0 }), table._schema),
       { tier: "local", propagation: "local-only" },
       this.getAccessContext()?.readSession,
     );

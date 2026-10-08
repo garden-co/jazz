@@ -41,10 +41,16 @@ it("qualifies owner catalogue readiness with the requested schema's local admiss
   expect(tableIdentity).not.toHaveBeenCalled();
   expect(events).toEqual(["owner-publication", "requested-schema"]);
   expect(queryInternal).toHaveBeenCalledWith(
-    requested.projects.where({}).limit(0)._build(),
+    expect.any(String),
     { tier: "local", propagation: "local-only" },
     undefined,
   );
+  expect(JSON.parse(queryInternal.mock.calls[0]![0])).toEqual({
+    table: "projects",
+    conditions: [],
+    array_subqueries: [],
+    limit: 0,
+  });
   expect(ensureReady).toHaveBeenCalledWith("local");
 
   admitted = true;
