@@ -299,21 +299,34 @@ impl RemoteLinkTracker {
     /// tick it scheduled.
     pub(super) fn on_tick(&self) {
         let now = Instant::now();
-        let mut elapsed = {
+        let (mut elapsed, mut next_deadline) = {
             let mut deadlines = self.deadlines.borrow_mut();
             let before = deadlines.len();
             deadlines.retain(|deadline| now < *deadline);
-            deadlines.len() != before
+            (deadlines.len() != before, deadlines.iter().copied().min())
         };
         if let RemoteReach::Attempting { since } = self.reach()
             && !self.attempt_expiry_observed.get()
-            && now >= since + REMOTE_LINK_ATTEMPT_WINDOW
         {
-            self.attempt_expiry_observed.set(true);
-            elapsed = true;
+            let expiry = since + REMOTE_LINK_ATTEMPT_WINDOW;
+            if now >= expiry {
+                self.attempt_expiry_observed.set(true);
+                elapsed = true;
+            } else {
+                next_deadline = Some(next_deadline.map_or(expiry, |next| next.min(expiry)));
+            }
         }
         if elapsed {
             self.notify();
+        }
+        // Hosts retain only their earliest timer. Any earlier read or protocol
+        // wake can consume it, so every tick must re-arm our next obligation,
+        // even when none of this tracker's deadlines elapsed.
+        if let Some(deadline) = next_deadline
+            && let Some(scheduler) = self.scheduler.borrow().as_ref()
+        {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            scheduler.schedule_tick_after(remaining.as_millis() as u64 + 1);
         }
     }
 

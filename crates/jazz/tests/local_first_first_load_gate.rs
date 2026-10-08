@@ -4,9 +4,9 @@
 //! windows with their local fallback, and the non-durable foreground's
 //! authority witness through its storage owner.
 //!
-//! Every read here asks for a server wait far longer than any test runs, so
-//! each release is caused by the link or by the server's answer, never by the
-//! timeout. The timeout itself is covered by `local_first_server_wait.rs`.
+//! Most reads here use a long server wait to isolate link and answer behavior.
+//! Scheduler regressions also exercise timeout delivery with a host that keeps
+//! only the earliest timer.
 //!
 //! Every client here is a core `Db` connected to a history-complete server
 //! `Db` over an in-memory duplex transport, with ticks driven explicitly, so
@@ -22,7 +22,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod common;
 
@@ -851,6 +851,118 @@ impl TickScheduler for RecordingScheduler {
     fn schedule_tick_after(&self, delay_ms: u64) {
         self.timers_ms.borrow_mut().push(delay_ms);
     }
+}
+
+/// Models the host contract: only the earliest timer survives, and firing it
+/// consumes it. The core must re-arm any remaining obligation during the tick.
+#[derive(Default)]
+struct EarliestTimerScheduler {
+    deadline: RefCell<Option<Instant>>,
+}
+
+impl TickScheduler for EarliestTimerScheduler {
+    fn schedule_tick(&self, _urgency: TickUrgency) {}
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        let next = Instant::now() + Duration::from_millis(delay_ms);
+        let mut deadline = self.deadline.borrow_mut();
+        if deadline.is_none_or(|current| next < current) {
+            *deadline = Some(next);
+        }
+    }
+}
+
+impl EarliestTimerScheduler {
+    fn fire(&self, db: &Db) {
+        let deadline = self
+            .deadline
+            .borrow_mut()
+            .take()
+            .expect("a held read must retain a scheduled wake");
+        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        block_on(db.tick()).expect("service the host timer");
+    }
+}
+
+/// Alice's two held subscriptions must both time out while Bob stays silent,
+/// even when an unrelated earlier timer consumes the host's only wake.
+///
+/// ```text
+/// unrelated timer -> short read timeout -> long read timeout
+///                    each tick re-arms the next deadline
+/// ```
+#[test]
+fn first_load_deadlines_rearm_after_an_earlier_host_timer() {
+    let bob = seeded_server();
+    let alice = fresh_client(0x81);
+    connect(&alice, &bob);
+    let scheduler = Rc::new(EarliestTimerScheduler::default());
+    alice.set_tick_scheduler(Some(scheduler.clone()));
+    let mut short = subscribe(&alice, &items(), wait_for_remote(SHORT));
+    let mut long = subscribe(
+        &alice,
+        &items(),
+        wait_for_remote(Duration::from_millis(600)),
+    );
+    assert_withheld(&mut short, &alice, None, 3);
+    assert!(long.try_next_event().is_none());
+
+    scheduler.schedule_tick_after(0);
+    scheduler.fire(&alice);
+    assert!(scheduler.deadline.borrow().is_some());
+
+    // Only scheduled timers drive progress; no unrelated polling ticks can
+    // accidentally rescue a read whose wake was lost.
+    let mut short_opened = false;
+    let mut long_opened = false;
+    for _ in 0..10 {
+        scheduler.fire(&alice);
+        if let Some(event) = short.try_next_event() {
+            let (reset, rows, _) = opening(event);
+            assert!(reset && rows.is_empty());
+            short_opened = true;
+        }
+        if let Some(event) = long.try_next_event() {
+            let (reset, rows, _) = opening(event);
+            assert!(reset && rows.is_empty());
+            long_opened = true;
+        }
+        if short_opened && long_opened {
+            break;
+        }
+    }
+    assert!(short_opened && long_opened, "both openings must time out");
+}
+
+/// Alice's long first-load wait must release when her connection attempt
+/// expires, even if an unrelated timer fired before the attempt deadline.
+#[test]
+fn first_load_attempt_expiry_rearms_after_an_earlier_host_timer() {
+    let alice = fresh_client(0x82);
+    let scheduler = Rc::new(EarliestTimerScheduler::default());
+    alice.set_tick_scheduler(Some(scheduler.clone()));
+    let started = Instant::now();
+    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    let mut stream = subscribe(&alice, &items(), gated());
+    assert_withheld(&mut stream, &alice, None, 3);
+
+    scheduler.schedule_tick_after(0);
+    scheduler.fire(&alice);
+    let next = scheduler
+        .deadline
+        .borrow()
+        .expect("the connection attempt must retain its expiry wake");
+    assert!(
+        next <= started + REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(100),
+        "the attempt expiry must wake before the read's longer timeout",
+    );
+    scheduler.fire(&alice);
+    let (reset, rows, _) = opening(
+        stream
+            .try_next_event()
+            .expect("attempt expiry must release the local opening"),
+    );
+    assert!(reset && rows.is_empty());
 }
 
 /// The link reports a browser host sends over a client's life, ending in
