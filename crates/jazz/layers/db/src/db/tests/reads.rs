@@ -5509,6 +5509,43 @@ fn db_at_reads_historical_cut_and_partial_requires_server() {
     assert_eq!(err.message, "historical read requires server evaluation");
 }
 
+/// Alice can use a UUID needle for array membership; a text needle is rejected
+/// before execution with both types. This public DB test checks user-visible
+/// query preparation.
+#[test]
+fn typed_uuid_array_contains_reports_expected_and_actual_types() {
+    let schema = build_public_db_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("items").column(
+            "tags",
+            PublicColumnType::Array {
+                element: Box::new(PublicColumnType::Uuid),
+            },
+        ),
+    ));
+    let db = open_db(0xd8, AuthorSubject::SYSTEM, &schema);
+    let tag = uuid::Uuid::from_bytes([0x31; 16]);
+    db.insert(
+        "items",
+        BTreeMap::from([("tags".to_owned(), Value::Array(vec![Value::Uuid(tag)]))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = Query::from("items").filter(contains(col("tags"), lit(Value::Uuid(tag))));
+    assert_eq!(row_ids(&prepared_read(&db, &query)), vec![row(1)]);
+
+    let mismatched = Query::from("items").filter(contains(col("tags"), lit("not-a-uuid")));
+    let error = db.prepare_query(&mismatched).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains("Uuid") && error.message.contains("String"),
+        "diagnostic must identify expected UUID member and actual String needle: {}",
+        error.message
+    );
+}
 #[test]
 fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
     let schema = issue_schema();
