@@ -1316,6 +1316,577 @@ fn cancelled_prepared_bind_discards_binding_tick_and_subscription_state() {
     );
 }
 
+fn bound_cold_reachability_graph(shape: &str, binding: RecordDescriptor) -> GraphBuilder {
+    let seed = GraphBuilder::join(
+        GraphBuilder::binding_source(shape, binding),
+        edge_pairs(),
+        ["start"],
+        ["src"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.start", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    let frontier = GraphBuilder::frontier_source(
+        "cancelled_frontier",
+        RecordDescriptor::new([("src", ColumnType::U64), ("dst", ColumnType::U64)]),
+    );
+    let step = GraphBuilder::join(frontier, edge_pairs(), ["dst"], ["src"]).project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    GraphBuilder::recursive(seed, step, "cancelled_frontier", 16)
+}
+
+/// Cancelling Alice's cold live admission leaves Bob's binding and future rows intact.
+///
+/// bob live -> alice admission waits on storage -> cancel alice -> bind alice again
+#[test]
+fn cancelled_cold_live_admission_releases_only_its_unpublished_binding() {
+    check_cold_live_admission_failure(false);
+}
+
+/// Alice's cold admission storage error preserves its cause and leaves Bob live.
+///
+/// bob live -> alice admission waits -> storage fails -> alice retries -> bob updates
+#[test]
+fn failed_cold_live_admission_releases_only_its_unpublished_binding() {
+    check_cold_live_admission_failure(true);
+}
+
+fn check_cold_live_admission_failure(inject_storage_error: bool) {
+    let (storage, control) = TestStorage::controlled(&["edges"]);
+    let mut database = block_on(Database::new(edges_schema(), storage.clone())).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let empty = database.runtime_stats();
+    let binding = RecordDescriptor::new([("start", ColumnType::U64)]);
+    let graph = bound_cold_reachability_graph("cancelled_live_reach", binding);
+    let shape =
+        block_on(database.prepare_one_sink(graph, "cancelled_live_reach", binding, ["src"]))
+            .unwrap();
+    let bob = block_on(database.bind_shape_one_sink(shape.id(), &[Value::U64(9)])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(bob.recv().unwrap().to_values().unwrap(), Vec::new());
+    let before = database.runtime_stats();
+
+    storage.evict_scans("edges");
+    control.take_observed();
+    let polls_before = control.poll_count(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let values = [Value::U64(1)];
+    let mut admission = Box::pin(database.bind_shape_one_sink(shape.id(), &values));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(
+        matches!(admission.as_mut().poll(&mut context), Poll::Pending),
+        "the live admission must reach real cold storage: {:?}",
+        control.observed()
+    );
+    assert!(control.poll_count(TestStorageOperation::ScanOpen) > polls_before);
+    if inject_storage_error {
+        control.fail_next(TestStorageOperation::ScanOpen);
+        control.resume();
+        let error = block_on(admission).err().expect("the cold read must fail");
+        assert!(
+            matches!(
+                &error,
+                DatabaseError::IvmRuntime(groove::ivm::IvmRuntimeError::Storage(
+                    groove::storage::Error::Backend {
+                        backend: "test",
+                        ..
+                    }
+                ))
+            ),
+            "preserve the original storage error: {error:?}"
+        );
+    } else {
+        drop(admission);
+    }
+
+    // Rows alone cannot expose an orphan metadata reference before it is published.
+    let cancelled = database.runtime_stats();
+    assert_eq!(cancelled.active_shape_params, before.active_shape_params);
+    assert_eq!(cancelled.active_subscriptions, before.active_subscriptions);
+    assert_eq!(
+        cancelled.active_prepared_shapes,
+        before.active_prepared_shapes
+    );
+    control.resume();
+    block_on(database.drive_progress()).unwrap();
+    assert!(bob.try_recv().is_err());
+
+    let alice = block_on(database.bind_shape_one_sink(shape.id(), &values)).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    let mut rows = alice.recv().unwrap().to_values().unwrap();
+    rows.sort_by_key(|(values, _)| match &values[1] {
+        Value::U64(destination) => *destination,
+        _ => panic!("destinations are u64"),
+    });
+    assert_eq!(
+        rows,
+        vec![
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(1), Value::U64(3)], 1),
+        ]
+    );
+    let mut update = database.open_batch();
+    update.insert("edges", vec![Value::U64(3), Value::U64(9), Value::U64(10)]);
+    block_on(database.commit_batch(update)).unwrap();
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(9), Value::U64(10)], 1)]
+    );
+    assert!(alice.try_recv().is_err());
+    database.unsubscribe(alice.id());
+    database.unsubscribe(bob.id());
+    database.retire_prepared_shape(shape.id()).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    let after = database.runtime_stats();
+    assert_eq!(after.active_shape_params, empty.active_shape_params);
+    assert_eq!(after.active_subscriptions, empty.active_subscriptions);
+    assert_eq!(after.active_prepared_shapes, empty.active_prepared_shapes);
+    assert_eq!(after.graph_nodes, empty.graph_nodes);
+}
+
+/// Alice's last receiver can retire a shared shape while a new binding is admitted.
+/// Failed handoff must still release that binding without disturbing Bob's view.
+///
+/// alice empty route -> new binding waits -> drop alice -> retire shape -> handoff error
+#[test]
+fn retired_shared_shape_handoff_releases_its_admitted_binding() {
+    check_retired_shared_shape_handoff(false);
+}
+
+/// Alice's projected opening must release its published binding when the old
+/// receiver retires the shape, while Bob's independent view remains live.
+#[test]
+fn projected_live_handoff_releases_binding_after_shape_retirement() {
+    check_retired_shared_shape_handoff(true);
+}
+
+fn check_retired_shared_shape_handoff(projected: bool) {
+    let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("albums", vec![Value::U64(7), Value::String("Bob".into())]);
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let bob = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(7), Value::String("Bob".into())], 1)]
+    );
+    let before = database.runtime_stats();
+    let binding = RecordDescriptor::new([("start", ColumnType::U64)]);
+    let sink = if projected { "__default" } else { "reach" };
+    let shape = block_on(database.prepare_shared(
+        [groove::ivm::RoutedMultisinkTerminal::new(
+            sink,
+            bound_cold_reachability_graph("retired_live_reach", binding),
+            std::iter::empty::<&str>(),
+            ["src", "dst"],
+        )],
+        "retired_live_reach",
+        binding,
+    ))
+    .unwrap();
+    let alice = block_on(database.bind_shape(shape.id(), &[Value::U64(9)])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        alice.try_recv().unwrap().sinks[sink].to_values().unwrap(),
+        Vec::new()
+    );
+
+    storage.evict_scans("edges");
+    control.take_observed();
+    let polls_before = control.poll_count(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let values = [Value::U64(1)];
+    let mut admission = Box::pin(async {
+        if projected {
+            database
+                .bind_shape_one_sink_with_output(
+                    shape.id(),
+                    &values,
+                    RecordDescriptor::new([("src", ColumnType::U64), ("dst", ColumnType::U64)]),
+                )
+                .await
+                .map(|_| ())
+        } else {
+            database.bind_shape(shape.id(), &values).await.map(|_| ())
+        }
+    });
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        admission.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(control.poll_count(TestStorageOperation::ScanOpen) > polls_before);
+    drop(alice);
+    control.resume();
+    assert!(matches!(
+        block_on(admission),
+        Err(DatabaseError::IvmRuntime(groove::ivm::IvmRuntimeError::PreparedShapeNotFound(id)))
+            if id == shape.id()
+    ));
+    block_on(database.drive_progress()).unwrap();
+    // The shape ID is already gone: only the captured source identity can clean up.
+    let after = database.runtime_stats();
+    assert_eq!(after.active_shape_params, before.active_shape_params);
+    assert_eq!(after.active_prepared_shapes, before.active_prepared_shapes);
+    assert_eq!(after.active_subscriptions, before.active_subscriptions);
+    assert_eq!(after.graph_nodes, before.graph_nodes);
+    assert!(bob.try_recv().is_err());
+
+    let mut update = database.open_batch();
+    update.insert(
+        "albums",
+        vec![Value::U64(8), Value::String("Bob again".into())],
+    );
+    block_on(database.commit_batch(update)).unwrap();
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(8), Value::String("Bob again".into())], 1)]
+    );
+}
+
+/// Rejecting Alice's requested projection must not strand a live-admitted key;
+/// her valid retry and Bob's next matching row must still have unit weights.
+#[test]
+fn projected_live_binding_rejection_releases_admitted_reference() {
+    let storage = TestStorage::new(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("albums", vec![Value::U64(1), Value::String("Alice".into())]);
+    seed.insert("albums", vec![Value::U64(2), Value::String("Bob".into())]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let binding = RecordDescriptor::new([("title", ColumnType::String)]);
+    let graph = GraphBuilder::join(
+        GraphBuilder::binding_source("projected_live_title", binding),
+        GraphBuilder::table("albums"),
+        ["title"],
+        ["title"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("right.title", "title"),
+    ]);
+    let shape =
+        block_on(database.prepare_one_sink(graph, "projected_live_title", binding, ["title"]))
+            .unwrap();
+    let bob =
+        block_on(database.bind_shape_one_sink(shape.id(), &[Value::String("Bob".into())])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(2), Value::String("Bob".into())], 1)]
+    );
+    let before = database.runtime_stats();
+    let values = [Value::String("Alice".into())];
+    assert!(matches!(
+        block_on(database.bind_shape_one_sink_with_output(
+            shape.id(),
+            &values,
+            RecordDescriptor::new([("missing", ColumnType::U64)]),
+        )),
+        Err(DatabaseError::IvmRuntime(groove::ivm::IvmRuntimeError::GraphFieldNotFound(field)))
+            if field == "missing"
+    ));
+    block_on(database.drive_progress()).unwrap();
+    let after = database.runtime_stats();
+    assert_eq!(after.active_shape_params, before.active_shape_params);
+    assert_eq!(after.active_subscriptions, before.active_subscriptions);
+    assert_eq!(after.active_prepared_shapes, before.active_prepared_shapes);
+
+    let alice = block_on(database.bind_shape_one_sink_with_output(
+        shape.id(),
+        &values,
+        RecordDescriptor::new([("id", ColumnType::U64)]),
+    ))
+    .unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        alice.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(1)], 1)]
+    );
+    database.unsubscribe(alice.id());
+    let mut update = database.open_batch();
+    update.insert("albums", vec![Value::U64(3), Value::String("Bob".into())]);
+    block_on(database.commit_batch(update)).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        database.runtime_stats().active_shape_params,
+        before.active_shape_params
+    );
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(3), Value::String("Bob".into())], 1)]
+    );
+}
+
+/// Cancelling Alice's cold receiver pruning cannot orphan her owned shape or
+/// lose its retraction while Bob retains the same recursive graph prefix.
+///
+/// drop alice -> detach + cold retraction waits -> cancel prune -> bob receives next row
+#[test]
+fn cancelled_cold_receiver_pruning_retires_owned_shape_before_waiting() {
+    let (storage, control) = TestStorage::controlled(&["edges"]);
+    let mut database = block_on(Database::new(edges_schema(), storage.clone())).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let empty = database.runtime_stats();
+    let binding = RecordDescriptor::new([("start", ColumnType::U64)]);
+    let terminal = |sink: &str| {
+        groove::ivm::RoutedMultisinkTerminal::new(
+            sink,
+            bound_cold_reachability_graph("cold_prune_reach", binding),
+            ["src"],
+            ["src", "dst"],
+        )
+    };
+    let bob_shape =
+        block_on(database.prepare_shared([terminal("bob")], "cold_prune_reach", binding)).unwrap();
+    let bob = block_on(database.bind_shape(bob_shape.id(), &[Value::U64(9)])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        bob.try_recv().unwrap().sinks["bob"].to_values().unwrap(),
+        Vec::new()
+    );
+    let before = database.runtime_stats();
+    let alice_shape =
+        block_on(database.prepare_shared([terminal("alice")], "cold_prune_reach", binding))
+            .unwrap();
+    assert_ne!(alice_shape.id(), bob_shape.id());
+    let alice = block_on(database.bind_shape(alice_shape.id(), &[Value::U64(1)])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    let mut rows = alice.try_recv().unwrap().sinks["alice"]
+        .to_values()
+        .unwrap();
+    rows.sort_by_key(|(values, _)| match &values[1] {
+        Value::U64(destination) => *destination,
+        _ => panic!("destinations are u64"),
+    });
+    assert_eq!(
+        rows,
+        vec![
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(1), Value::U64(3)], 1),
+        ]
+    );
+    assert!(bob.try_recv().is_err());
+
+    storage.evict_scans("edges");
+    control.take_observed();
+    let polls_before = control.poll_count(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    drop(alice);
+    let mut pruning = Box::pin(database.prune_dropped_subscriptions());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(pruning.as_mut().poll(&mut context), Poll::Pending));
+    assert!(control.poll_count(TestStorageOperation::ScanOpen) > polls_before);
+    drop(pruning);
+    // Rows alone cannot detect the now-ownerless shape retained across cancellation.
+    let cancelled = database.runtime_stats();
+    assert_eq!(
+        cancelled.active_prepared_shapes,
+        before.active_prepared_shapes
+    );
+    assert_eq!(cancelled.active_subscriptions, before.active_subscriptions);
+    assert_eq!(cancelled.active_shape_params, before.active_shape_params);
+    assert_eq!(cancelled.graph_nodes, before.graph_nodes);
+
+    control.resume();
+    let mut update = database.open_batch();
+    update.insert("edges", vec![Value::U64(3), Value::U64(9), Value::U64(10)]);
+    block_on(database.commit_batch(update)).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        bob.try_recv().unwrap().sinks["bob"].to_values().unwrap(),
+        vec![(vec![Value::U64(9), Value::U64(10)], 1)]
+    );
+    database.unsubscribe(bob.id());
+    block_on(database.drive_progress()).unwrap();
+    let after = database.runtime_stats();
+    assert_eq!(after.active_prepared_shapes, empty.active_prepared_shapes);
+    assert_eq!(after.active_subscriptions, empty.active_subscriptions);
+    assert_eq!(after.active_shape_params, empty.active_shape_params);
+    assert_eq!(after.graph_nodes, empty.graph_nodes);
+}
+
+/// Alice's published admission is compensated if cancellation interrupts the
+/// later retraction of Carol's dropped receiver; Bob's live binding stays exact.
+///
+/// carol drops -> alice publishes -> cold retraction waits -> cancel alice -> bob updates
+#[test]
+fn cancelled_live_admission_after_publication_retracts_its_binding() {
+    let (storage, control) = TestStorage::controlled(&["edges", "other_edges"]);
+    let schema = DatabaseSchema::new(["edges", "other_edges"].map(|name| {
+        TableSchema::new(
+            name,
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    }));
+    let mut database = block_on(Database::new(schema, storage.clone())).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let empty = database.runtime_stats();
+    let binding = RecordDescriptor::new([("start", ColumnType::U64)]);
+    let shape = block_on(database.prepare_one_sink(
+        bound_cold_reachability_graph("late_live_reach", binding),
+        "late_live_reach",
+        binding,
+        ["src"],
+    ))
+    .unwrap();
+    let bob = block_on(database.bind_shape_one_sink(shape.id(), &[Value::U64(9)])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(bob.recv().unwrap().to_values().unwrap(), Vec::new());
+
+    let seed = GraphBuilder::binding_source("late_live_reach", binding).project_fields([
+        ProjectField::renamed("start", "src"),
+        ProjectField::renamed("start", "dst"),
+    ]);
+    let frontier = GraphBuilder::frontier_source(
+        "late_frontier",
+        RecordDescriptor::new([("src", ColumnType::U64), ("dst", ColumnType::U64)]),
+    );
+    let step = GraphBuilder::join(
+        frontier,
+        GraphBuilder::table("other_edges").project(["src", "dst"]),
+        ["dst"],
+        ["src"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    let monitor_shape = block_on(database.prepare_shared(
+        [
+            groove::ivm::RoutedMultisinkTerminal::new(
+                "cold",
+                GraphBuilder::recursive(seed, step, "late_frontier", 16),
+                std::iter::empty::<&str>(),
+                ["src", "dst"],
+            ),
+            groove::ivm::RoutedMultisinkTerminal::new(
+                "bindings",
+                GraphBuilder::binding_source("late_live_reach", binding),
+                std::iter::empty::<&str>(),
+                ["start"],
+            ),
+        ],
+        "late_live_reach",
+        binding,
+    ))
+    .unwrap();
+    let monitor = block_on(database.bind_shape(monitor_shape.id(), &[Value::U64(7)])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    let receive_bindings = |subscription: &groove::ivm::MultisinkSubscription| {
+        let mut rows = subscription.try_recv().unwrap().sinks["bindings"]
+            .to_values()
+            .unwrap();
+        rows.sort_by_key(|(values, _)| match &values[0] {
+            Value::U64(start) => *start,
+            _ => panic!("binding starts are u64"),
+        });
+        rows
+    };
+    assert_eq!(
+        receive_bindings(&monitor),
+        vec![(vec![Value::U64(7)], 1), (vec![Value::U64(9)], 1)]
+    );
+    let before = database.runtime_stats();
+    let carol = block_on(database.bind_shape(monitor_shape.id(), &[Value::U64(8)])).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(receive_bindings(&monitor), vec![(vec![Value::U64(8)], 1)]);
+
+    storage.evict_scans("edges");
+    storage.evict_scans("other_edges");
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let values = [Value::U64(1)];
+    let mut admission = Box::pin(database.bind_shape_one_sink(shape.id(), &values));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        admission.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1
+    );
+    drop(carol);
+    control.release_one();
+    block_on(std::future::poll_fn(|cx| {
+        assert!(matches!(admission.as_mut().poll(cx), Poll::Pending));
+        if control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count()
+            == 2
+        {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }));
+    // This delivered positive proves that the second cold gate is after publication.
+    assert_eq!(receive_bindings(&monitor), vec![(vec![Value::U64(1)], 1)]);
+    drop(admission);
+    let cancelled = database.runtime_stats();
+    assert_eq!(cancelled.active_shape_params, before.active_shape_params);
+    assert_eq!(cancelled.active_subscriptions, before.active_subscriptions);
+    assert_eq!(
+        cancelled.active_prepared_shapes,
+        before.active_prepared_shapes
+    );
+
+    control.resume();
+    let mut update = database.open_batch();
+    update.insert("edges", vec![Value::U64(3), Value::U64(9), Value::U64(10)]);
+    block_on(database.commit_batch(update)).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        receive_bindings(&monitor),
+        vec![(vec![Value::U64(1)], -1), (vec![Value::U64(8)], -1)]
+    );
+    assert_eq!(
+        bob.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(9), Value::U64(10)], 1)]
+    );
+    database.unsubscribe(bob.id());
+    database.unsubscribe(monitor.id());
+    database.retire_prepared_shape(shape.id()).unwrap();
+    block_on(database.drive_progress()).unwrap();
+    let after = database.runtime_stats();
+    assert_eq!(after.active_shape_params, empty.active_shape_params);
+    assert_eq!(after.active_subscriptions, empty.active_subscriptions);
+    assert_eq!(after.active_prepared_shapes, empty.active_prepared_shapes);
+    assert_eq!(after.graph_nodes, empty.graph_nodes);
+}
+
 #[test]
 fn cancelled_one_shot_query_discards_ephemeral_graph_and_hydration_state() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
