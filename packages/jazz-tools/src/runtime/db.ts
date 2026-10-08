@@ -2566,7 +2566,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       options,
       settlementMetadata,
       this.requireBinding("query"),
-      transactionHistoryQueries(client, propagation),
+      transactionHistoryQueries(client, propagation, settlementMetadata === "with-rows"),
       this.e2ee
         ? (table, rows) =>
             decryptCellRows(this.e2ee!.db, query._schema, table, rows, this.initialSpaceKeys)
@@ -2738,11 +2738,20 @@ async function decryptEqualityMatches(
 function transactionHistoryQueries(
   client: Pick<JazzClient, "queryInternal">,
   propagation?: "local-only",
+  e2eeSnapshotAtBegin = false,
 ): Pick<JazzClient, "queryInternal"> {
-  if (!propagation) return client;
+  if (!propagation && !e2eeSnapshotAtBegin) return client;
   return {
     queryInternal: (query, options, session) =>
-      client.queryInternal(query, { ...options, propagation }, session),
+      client.queryInternal(
+        query,
+        {
+          ...options,
+          ...(propagation ? { propagation } : {}),
+          ...(e2eeSnapshotAtBegin ? { e2eeSnapshotAtBegin: true } : {}),
+        },
+        session,
+      ),
   };
 }
 
@@ -2982,7 +2991,7 @@ function preparedTransactionScope(
         { tier: "global" },
         "with-rows",
         binding,
-        transactionHistoryQueries(io, propagation),
+        transactionHistoryQueries(io, propagation, true),
       );
       checkTransactionSettlements(rows, settlements);
       return { rows, settlements };

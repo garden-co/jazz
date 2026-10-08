@@ -2656,3 +2656,655 @@ fn pending_query_carrier_routes_real_foreign_fate() {
         }
     ));
 }
+
+fn local_publishing_settlement_read(
+    db: &Db,
+    open: OpenTransactionId,
+    query: &Query,
+) -> Result<BindingSettledRead, Error> {
+    let bytes = postcard::to_allocvec(query).unwrap();
+    block_on(db.all_e2ee_settled_serialized_query_for_binding(
+        &bytes,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        open,
+        true,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| db.detach_query(attachment),
+    ))
+}
+
+/// Uses an ordinary contextless mock authority deliberately: an accepted dot
+/// above the stable authority frontier must survive the accepted-at-begin cut.
+#[test]
+fn publishing_local_settlement_preserves_accepted_dot_and_parent_snapshot() {
+    let author = AuthorSubject::for_test_bytes([0xe5; 16]);
+    let db = open_db(0xe5, author, &schema());
+    let (up, mut authority) = duplex();
+    let _upstream = block_on(db.connect_upstream(up));
+    let accepted = db
+        .insert(
+            "todos",
+            cells("accepted history", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let accepted_tx = accepted.mergeable_tx_id();
+    let position = GlobalTime(accepted_tx.time.0 + 100);
+    authority
+        .send(SyncMessage::FateUpdate {
+            tx_id: accepted_tx,
+            fate: Fate::Accepted,
+            global_time: Some(position),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    db.tick().unwrap();
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    let original = db
+        .node
+        .node()
+        .borrow()
+        .open_transaction_snapshot(open)
+        .unwrap();
+    assert!(original.global_base < position);
+    assert!(original.dots.contains(&accepted_tx));
+    // App writes can coexist with a read of unrelated accepted metadata.
+    block_on(db.exclusive_tx_ref(open).insert(
+        "todos",
+        cells("unrelated app row", true, author),
+        Default::default(),
+    ))
+    .unwrap();
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let result = local_publishing_settlement_read(&db, open, &query).unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0].row_uuid(), accepted.row_uuid());
+    assert_eq!(result.settlements, vec![(accepted_tx, position)]);
+    assert_eq!(
+        db.node
+            .node()
+            .borrow()
+            .open_transaction_snapshot(open)
+            .unwrap(),
+        original,
+        "accepted observer must never replace the publishing base snapshot"
+    );
+    let committed = block_on(db.commit_exclusive_handle(open)).unwrap();
+    db.tick().unwrap();
+    let unit = std::iter::from_fn(|| authority.try_recv())
+        .find_map(|message| match message {
+            SyncMessage::CommitUnit { tx, .. } if tx.tx_id == committed => Some(tx),
+            _ => None,
+        })
+        .expect("publishing commit retains read evidence");
+    assert!(!unit.row_read_set.as_ref().unwrap().is_empty());
+    assert!(!unit.predicate_read_set.as_ref().unwrap().is_empty());
+}
+
+#[test]
+fn publishing_local_settlement_refuses_staged_and_persisted_hidden_history() {
+    for persisted in [false, true] {
+        let author = AuthorSubject::for_test_bytes([0xe6; 16]);
+        let db = open_db(0xe6, author, &schema());
+        let (up, mut authority) = duplex();
+        let _upstream = block_on(db.connect_upstream(up));
+        let accepted = db
+            .insert(
+                "todos",
+                cells("accepted revocation ledger", false, author),
+                Default::default(),
+            )
+            .unwrap();
+        let accepted_tx = accepted.mergeable_tx_id();
+        authority
+            .send(SyncMessage::FateUpdate {
+                tx_id: accepted_tx,
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(accepted_tx.time.0 + 100)),
+                durability: Some(DurabilityTier::Global),
+            })
+            .unwrap();
+        db.tick().unwrap();
+        if persisted {
+            db.delete("todos", accepted.row_uuid(), Default::default())
+                .unwrap();
+        }
+        let open = OpenTransactionId::new();
+        block_on(db.begin_exclusive(open)).unwrap();
+        block_on(db.exclusive_tx_ref(open).insert(
+            "todos",
+            cells("unrelated app row", true, author),
+            Default::default(),
+        ))
+        .unwrap();
+        if !persisted {
+            block_on(db.exclusive_tx_ref(open).delete(
+                "todos",
+                accepted.row_uuid(),
+                Default::default(),
+            ))
+            .unwrap();
+        }
+        let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+        let error = local_publishing_settlement_read(&db, open, &query)
+            .err()
+            .expect("a pending delete cannot hide an accepted negative ledger row");
+        assert_eq!(error.code, ErrorCode::NotObserved);
+        db.abandon_transaction_handle(open).unwrap();
+        db.tick().unwrap(); // service queued child cleanup after failure
+    }
+}
+
+#[test]
+fn publishing_local_settlement_refuses_pending_at_begin_then_accepted_history() {
+    let author = AuthorSubject::for_test_bytes([0xe7; 16]);
+    let db = open_db(0xe7, author, &schema());
+    let (up, mut authority) = duplex();
+    let _upstream = block_on(db.connect_upstream(up));
+    let pending = db
+        .insert(
+            "todos",
+            cells("not accepted at begin", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = pending.mergeable_tx_id();
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.exclusive_tx_ref(open).insert(
+        "todos",
+        cells("unrelated app row", true, author),
+        Default::default(),
+    ))
+    .unwrap();
+    authority
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(tx_id.time.0 + 100)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    db.tick().unwrap();
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let error = local_publishing_settlement_read(&db, open, &query)
+        .err()
+        .expect("late acceptance cannot qualify the original publishing cut");
+    assert_eq!(error.code, ErrorCode::NotObserved);
+    db.abandon_transaction_handle(open).unwrap();
+    db.tick().unwrap();
+}
+
+#[test]
+fn publishing_local_settlement_refuses_foreign_pending_dot_accepted_after_begin() {
+    for stage_app_write in [false, true] {
+        let author = AuthorSubject::for_test_bytes([0xe8; 16]);
+        let foreign_author = AuthorSubject::for_test_bytes([0xe9; 16]);
+        let db = open_db(0xe8, author, &schema());
+        let foreign = open_db(0xe9, foreign_author, &schema());
+        let (up, mut authority) = duplex();
+        let _upstream = block_on(db.connect_upstream(up));
+        let (foreign_up, mut foreign_wire) = duplex();
+        let _foreign_upstream = block_on(foreign.connect_upstream(foreign_up));
+        let pending = foreign
+            .insert(
+                "todos",
+                cells("foreign root pending at begin", false, foreign_author),
+                Default::default(),
+            )
+            .unwrap();
+        let tx_id = pending.mergeable_tx_id();
+        foreign.tick().unwrap();
+        let unit = std::iter::from_fn(|| foreign_wire.try_recv()).find(|message|
+        matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
+    ).expect("foreign pending commit unit is on the actual upload transport");
+        authority.send(unit).unwrap();
+        db.tick().unwrap();
+        let open = OpenTransactionId::new();
+        block_on(db.begin_exclusive(open)).unwrap();
+        assert!(
+            db.node
+                .node()
+                .borrow()
+                .open_transaction_snapshot(open)
+                .unwrap()
+                .dots
+                .contains(&tx_id),
+            "test must exercise a known foreign Pending dot, not unknown history"
+        );
+        if stage_app_write {
+            block_on(db.exclusive_tx_ref(open).insert(
+                "todos",
+                cells("unrelated app row", true, author),
+                Default::default(),
+            ))
+            .unwrap();
+        }
+        authority
+            .send(SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(tx_id.time.0 + 100)),
+                durability: Some(DurabilityTier::Global),
+            })
+            .unwrap();
+        db.tick().unwrap();
+        let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+        let error = local_publishing_settlement_read(&db, open, &query)
+            .err()
+            .expect("current acceptance cannot upgrade a foreign Pending-at-begin witness");
+        assert_eq!(error.code, ErrorCode::NotObserved);
+        db.abandon_transaction_handle(open).unwrap();
+        db.tick().unwrap();
+    }
+}
+
+/// The observer is private and inherits the parent's already bound permissions;
+/// database default identity must not replace an attributed/session transaction.
+#[test]
+fn accepted_observation_child_preserves_original_bound_permission_subject() {
+    let database_author = AuthorSubject::for_test_bytes([0xea; 16]);
+    let bound_author = AuthorSubject::for_test_bytes([0xeb; 16]);
+    let db = open_db(0xea, database_author, &schema());
+    let parent = OpenTransactionId::new();
+    block_on(db.begin_exclusive_for_identity(parent, bound_author)).unwrap();
+    let child = OpenTransactionId::new();
+    let node = db.node.node();
+    let mut node = node.borrow_mut();
+    node.open_e2ee_observation_child(parent, child).unwrap();
+    assert_eq!(
+        node.exclusive_transaction_permission_subject(parent)
+            .unwrap(),
+        bound_author
+    );
+    assert_eq!(
+        node.exclusive_transaction_permission_subject(child)
+            .unwrap(),
+        bound_author
+    );
+    assert_ne!(bound_author, database_author);
+    node.abandon_tx(child).unwrap();
+    node.abandon_tx(parent).unwrap();
+}
+
+/// The publishing transaction must retain authority-validated read evidence,
+/// not merely trust the independent observer's earlier result.
+#[test]
+fn publishing_local_settlement_read_evidence_conflicts_with_concurrent_change() {
+    let author = AuthorSubject::for_test_bytes([0xec; 16]);
+    let schema = schema();
+    let authority = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
+    let db = open_db(0xec, author, &schema);
+    let (up, down) = duplex();
+    let _upstream = block_on(db.connect_upstream(up));
+    let subscriber = authority.accept_subscriber(down, author);
+    let pump = || {
+        for _ in 0..32 {
+            db.tick().unwrap();
+            subscriber.borrow_mut().tick().unwrap();
+        }
+    };
+    let history = db
+        .insert(
+            "todos",
+            cells("accepted ledger", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    pump();
+    block_on(history.wait(DurabilityTier::Global)).unwrap();
+    let parent = OpenTransactionId::new();
+    block_on(db.begin_exclusive(parent)).unwrap();
+    block_on(db.exclusive_tx_ref(parent).insert(
+        "todos",
+        cells("unrelated app row", true, author),
+        Default::default(),
+    ))
+    .unwrap();
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let read = local_publishing_settlement_read(&db, parent, &query).unwrap();
+    assert_eq!(read.rows.len(), 1);
+    authority
+        .update(
+            "todos",
+            history.row_uuid(),
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("concurrent revocation".to_owned()),
+            )]),
+        )
+        .unwrap();
+    let tx_id = block_on(db.commit_exclusive_handle(parent)).unwrap();
+    pump();
+    let error = block_on(db.wait_for_transaction(tx_id, DurabilityTier::Global)).unwrap_err();
+    assert_eq!(
+        error.code,
+        ErrorCode::WriteRejected,
+        "authority must validate genuine original-parent row/predicate evidence"
+    );
+}
+
+#[test]
+fn cancelled_publishing_local_settlement_read_queues_child_cleanup() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xed; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xed; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xed))),
+    }))
+    .unwrap();
+    let (up, mut authority) = duplex();
+    let _upstream = block_on(db.connect_upstream(up));
+    let accepted = db
+        .insert(
+            "todos",
+            cells("accepted ledger", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = accepted.mergeable_tx_id();
+    authority
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(tx_id.time.0 + 100)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    db.tick().unwrap();
+    let parent = OpenTransactionId::new();
+    block_on(db.begin_exclusive(parent)).unwrap();
+    block_on(db.exclusive_tx_ref(parent).insert(
+        "todos",
+        cells("unrelated app row", true, author),
+        Default::default(),
+    ))
+    .unwrap();
+    let bytes =
+        postcard::to_allocvec(&Query::from("todos").filter(eq(col("done"), lit(false)))).unwrap();
+    eviction.evict_all();
+    control.take_observed();
+    control.pause_on(TestStorageOperation::Get);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let mut reading = Box::pin(db.all_e2ee_settled_serialized_query_for_binding(
+        &bytes,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        parent,
+        true,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| db.detach_query(attachment),
+    ));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(
+        reading.as_mut().poll(&mut context).is_pending(),
+        "the actual child query must suspend on cold storage"
+    );
+    assert!(control.observed().iter().any(|op| matches!(
+        op,
+        TestStorageOperation::Get | TestStorageOperation::ScanOpen
+    )));
+    drop(reading);
+    assert!(
+        db.queued_mutation_count() > 0,
+        "cancellation must enqueue owned child cleanup, not synchronously borrow storage owner"
+    );
+    control.resume();
+    block_on(db.drain_queued_mutations_for_binding());
+    assert_eq!(db.queued_mutation_count(), 0);
+    assert!(
+        db.node
+            .node()
+            .borrow()
+            .open_transaction_snapshot(parent)
+            .is_ok(),
+        "cancelling an observation must not abandon the publishing transaction"
+    );
+    db.abandon_transaction_handle(parent).unwrap();
+}
+
+#[test]
+fn fresh_public_local_settlement_preserves_original_snapshot_before_any_staging() {
+    let author = AuthorSubject::for_test_bytes([0xee; 16]);
+    let db = open_db(0xee, author, &schema());
+    let (up, mut authority) = duplex();
+    let _upstream = block_on(db.connect_upstream(up));
+    let accepted = db
+        .insert(
+            "todos",
+            cells("accepted history", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = accepted.mergeable_tx_id();
+    authority
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(tx_id.time.0 + 100)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    db.tick().unwrap();
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    let original = db
+        .node
+        .node()
+        .borrow()
+        .open_transaction_snapshot(open)
+        .unwrap();
+    assert!(original.local_base > TxTime(0));
+    let result = local_publishing_settlement_read(
+        &db,
+        open,
+        &Query::from("todos").filter(eq(col("done"), lit(false))),
+    )
+    .unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        db.node
+            .node()
+            .borrow()
+            .open_transaction_snapshot(open)
+            .unwrap(),
+        original,
+        "fresh publishing read cannot mutate the public original base to an observer cut"
+    );
+    db.abandon_transaction_handle(open).unwrap();
+}
+
+#[test]
+fn accepted_observation_mode_still_rejects_a_mutating_transaction() {
+    let author = AuthorSubject::for_test_bytes([0xef; 16]);
+    let db = open_db(0xef, author, &schema());
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.exclusive_tx_ref(open).insert(
+        "todos",
+        cells("staged app write", true, author),
+        Default::default(),
+    ))
+    .unwrap();
+    let bytes = postcard::to_allocvec(&Query::from("todos")).unwrap();
+    let error = block_on(db.all_e2ee_settled_serialized_query_for_binding(
+        &bytes,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        open,
+        false,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| db.detach_query(attachment),
+    ))
+    .err()
+    .expect("private fresh observation mode cannot be used for a mutating scope");
+    assert!(
+        error
+            .message
+            .contains("E2EE observation requires a fresh read-only transaction")
+    );
+    db.abandon_transaction_handle(open).unwrap();
+}
+
+/// Full online coverage must independently cover the accepted-at-begin child,
+/// not authorize a known Pending dot through its later Global fate.
+#[test]
+fn online_publishing_settlement_refuses_foreign_pending_dot_accepted_after_begin() {
+    for stage_app_write in [false, true] {
+        let author = AuthorSubject::for_test_bytes([0xf1; 16]);
+        let foreign_author = AuthorSubject::for_test_bytes([0xf2; 16]);
+        let schema = schema();
+        let core = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
+        let db = open_db(0xf1, author, &schema);
+        let foreign = open_db(0xf2, foreign_author, &schema);
+        let (up, mut authority_wire) = duplex();
+        let _upstream = block_on(db.connect_upstream(up));
+        let (foreign_up, mut foreign_wire) = duplex();
+        let _foreign_upstream = block_on(foreign.connect_upstream(foreign_up));
+        let pending = foreign
+            .insert(
+                "todos",
+                cells(
+                    "foreign root pending at public begin",
+                    false,
+                    foreign_author,
+                ),
+                Default::default(),
+            )
+            .unwrap();
+        let tx_id = pending.mergeable_tx_id();
+        foreign.tick().unwrap();
+        let unit = std::iter::from_fn(|| foreign_wire.try_recv()).find(|message|
+            matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
+        ).expect("foreign pending commit unit");
+        // Client knows the Pending transaction BEFORE Core accepts it.
+        authority_wire.send(unit.clone()).unwrap();
+        db.tick().unwrap();
+        let parent = OpenTransactionId::new();
+        block_on(db.begin_exclusive(parent)).unwrap();
+        let original = db
+            .node
+            .node()
+            .borrow()
+            .open_transaction_snapshot(parent)
+            .unwrap();
+        assert!(original.dots.contains(&tx_id));
+        if stage_app_write {
+            block_on(db.exclusive_tx_ref(parent).insert(
+                "todos",
+                cells("unrelated app row", true, author),
+                Default::default(),
+            ))
+            .unwrap();
+        }
+        // Now the actual Core accepts that exact authenticated foreign upload.
+        let (mut submit, foreign_core_wire) = duplex();
+        let foreign_peer = core.accept_subscriber(foreign_core_wire, foreign_author);
+        submit.send(unit).unwrap();
+        let mut accepted_fate = None;
+        for _ in 0..32 {
+            foreign_peer.borrow_mut().tick().unwrap();
+            while let Some(message) = submit.try_recv() {
+                if matches!(&message, SyncMessage::FateUpdate {
+                    tx_id: actual, fate: Fate::Accepted, global_time: Some(_),
+                    durability: Some(DurabilityTier::Global),
+                } if *actual == tx_id)
+                {
+                    accepted_fate = Some(message);
+                }
+            }
+            if accepted_fate.is_some() {
+                break;
+            }
+        }
+        let accepted_fate = accepted_fate.expect("actual Core acceptance after public begin");
+        let recipient_peer = core.accept_subscriber(authority_wire, author);
+        recipient_peer
+            .borrow()
+            .downstream_fates
+            .borrow_mut()
+            .push(accepted_fate);
+        recipient_peer.borrow_mut().tick().unwrap();
+        db.tick().unwrap();
+        let bytes =
+            postcard::to_allocvec(&Query::from("todos").filter(eq(col("done"), lit(false))))
+                .unwrap();
+        let mut reading = Box::pin(db.all_e2ee_settled_serialized_query_for_binding(
+            &bytes,
+            ReadOpts {
+                tier: DurabilityTier::Global,
+                propagation: Propagation::Full,
+                ..ReadOpts::default()
+            },
+            parent,
+            true,
+            None,
+            None,
+            true,
+            || false,
+            |attachment| db.detach_query(attachment),
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        let mut outcome = None;
+        for _ in 0..256 {
+            if let Poll::Ready(result) = reading.as_mut().poll(&mut context) {
+                outcome = Some(result);
+                break;
+            }
+            // A local storage read may retain the owner across an async yield.
+            // Re-poll it before attempting another owner turn; coverage waits
+            // release the owner and need ordinary peer/client ticks.
+            recipient_peer.borrow_mut().tick().unwrap();
+            let owner_is_free = db.node.node().try_lock().is_some();
+            if owner_is_free {
+                db.tick().unwrap();
+            }
+        }
+        drop(reading);
+        let error = outcome
+            .expect("covered child and parent reads complete")
+            .err()
+            .expect("Full coverage cannot upgrade Pending-at-begin into accepted eligibility");
+        assert_eq!(error.code, ErrorCode::NotObserved);
+        assert_eq!(
+            db.node
+                .node()
+                .borrow()
+                .open_transaction_snapshot(parent)
+                .unwrap(),
+            original
+        );
+        db.abandon_transaction_handle(parent).unwrap();
+        db.tick().unwrap();
+    }
+}

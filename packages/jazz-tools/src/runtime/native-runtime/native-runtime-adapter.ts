@@ -4963,6 +4963,7 @@ function readOptions(
   if (options.local_updates != null) readOptions.local_updates = options.local_updates;
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
   if (options.propagation === "full") readOptions.propagation = "full";
+  if (options.e2ee_snapshot_at_begin === true) readOptions.e2ee_snapshot_at_begin = true;
   const readView = options.read_view ?? options.readView;
   if (readView != null) readOptions.read_view = readView;
   return readOptions;
@@ -5079,6 +5080,14 @@ function closeSubscriptionSource(source: SubscriptionSource): void {
 function readSupportedReadOptions(optionsJson: string): boolean | "with-rows" {
   const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
   const propagation = parsed.propagation;
+  if (parsed.e2ee_snapshot_at_begin != null && typeof parsed.e2ee_snapshot_at_begin !== "boolean")
+    throw new Error("E2EE snapshot-at-begin marker must be a boolean");
+  if (
+    parsed.e2ee_snapshot_at_begin === true &&
+    parsed.settlement_metadata !== true &&
+    parsed.settlement_metadata !== "with-rows"
+  )
+    throw new Error("E2EE snapshot-at-begin requires a settlement read");
   if (propagation != null && propagation !== "full" && propagation !== "local-only") {
     throw new Error(
       `Native runtime does not support read propagation '${String(propagation)}' yet`,

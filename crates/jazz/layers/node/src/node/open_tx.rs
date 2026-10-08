@@ -348,9 +348,28 @@ where
             .as_author_subject();
         let local_base = self.tx_time_high_water();
         let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
+        let mut accepted_e2ee_dots = Vec::new();
         for global_time in self.clock.applied_global_times_after_frontier.clone() {
-            dots.extend(self.transaction_ids_for_global_time(global_time).await?);
+            let ids = self.transaction_ids_for_global_time(global_time).await?;
+            for id in &ids {
+                if matches!(self.transaction_state(*id).await,
+                    Some((Fate::Accepted, Some(position), DurabilityTier::Global))
+                    if position == global_time)
+                {
+                    accepted_e2ee_dots.push(*id);
+                }
+            }
+            dots.extend(ids);
         }
+        // Capture accepted witnesses before pending foreign dots are added.
+        // Their fate must never be reevaluated later to authorize this cut.
+        let accepted_e2ee_base_snapshot = Snapshot::exclusive_base(
+            self.node_uuid,
+            self.clock.committed_global_time,
+            TxTime(0),
+            accepted_e2ee_dots,
+        )
+        .map_err(Error::InvalidStoredValue)?;
         dots.extend(self.pending_foreign_transaction_ids().await?);
         let base_snapshot = Snapshot::exclusive_base(
             self.node_uuid,
@@ -366,6 +385,7 @@ where
                 kind,
                 provisional_author,
                 base_snapshot,
+                accepted_e2ee_base_snapshot,
                 base_snapshot_rows: BTreeMap::new(),
                 row_reads: Vec::new(),
                 absent_reads: Vec::new(),
@@ -2126,6 +2146,70 @@ where
             .ok_or(Error::MissingOpenBatch(tx_id))
     }
 
+    /// Create an internal observation child from the parent's immutable
+    /// accepted-at-begin cut. The bound attribution/permission subject is
+    /// preserved; staged writes and read evidence are never inherited.
+    /// The caller must abandon this child, including on cancellation, and must
+    /// reread/compare results in the publishing parent to retain its read proof.
+    #[doc(hidden)]
+    pub fn open_e2ee_observation_child(
+        &mut self,
+        parent: OpenTransactionId,
+        child: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if self.open_tx.open_transactions.contains_key(&child)
+            || self.open_tx.closed_batches.contains(&child)
+        {
+            return Err(Error::DuplicateOpenBatch(child));
+        }
+        let source = self.open_tx(parent)?;
+        if !matches!(source.kind, OpenTransactionKind::Exclusive { .. }) {
+            return Err(Error::InvalidStoredValue(
+                "E2EE observation parent must be exclusive",
+            ));
+        }
+        let mut observation = source.clone();
+        observation.base_snapshot = source.accepted_e2ee_base_snapshot.clone();
+        observation.base_snapshot_rows.clear();
+        observation.row_reads.clear();
+        observation.absent_reads.clear();
+        observation.predicate_reads.clear();
+        observation.source_narrowing = SourceNarrowing::default();
+        observation.narrowed_predicate_reads.clear();
+        observation.writes.clear();
+        observation.superseded_large_values.clear();
+        observation.user_metadata_json = None;
+        self.open_tx.open_transactions.insert(child, observation);
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn is_fresh_e2ee_observation(&self, tx_id: OpenTransactionId) -> Result<bool, Error> {
+        let tx = self.open_tx(tx_id)?;
+        Ok(matches!(&tx.kind, OpenTransactionKind::Exclusive { .. })
+            && tx.writes.is_empty()
+            && (tx.base_snapshot.local_base == TxTime(0)
+                || (tx.row_reads.is_empty()
+                    && tx.absent_reads.is_empty()
+                    && tx.predicate_reads.is_empty()
+                    && tx.base_snapshot_rows.is_empty())))
+    }
+
+    /// Verify observation witnesses against the captured authority cut/dots,
+    /// rather than allowing a zero-prefix sentinel or a newly accepted dot to
+    /// qualify solely through its current fate.
+    #[doc(hidden)]
+    pub fn e2ee_observation_covers_settlements(
+        &self,
+        child: OpenTransactionId,
+        settlements: &[(TxId, GlobalTime)],
+    ) -> Result<bool, Error> {
+        let snapshot = &self.open_tx(child)?.base_snapshot;
+        Ok(settlements.iter().all(|(witness, position)| {
+            *position <= snapshot.global_base || snapshot.dots.contains(witness)
+        }))
+    }
+
     /// Restrict a fresh, read-only E2EE observation to locally accepted versions.
     /// This does not establish completeness and must never be used to activate
     /// new membership without a separate accepted, covered history.
@@ -2134,20 +2218,12 @@ where
         &mut self,
         tx_id: OpenTransactionId,
     ) -> Result<(), Error> {
-        let tx = self.open_tx(tx_id)?;
-        if !matches!(&tx.kind, OpenTransactionKind::Exclusive { .. })
-            || !tx.writes.is_empty()
-            || (tx.base_snapshot.local_base != TxTime(0)
-                && (!tx.row_reads.is_empty()
-                    || !tx.absent_reads.is_empty()
-                    || !tx.predicate_reads.is_empty()
-                    || !tx.base_snapshot_rows.is_empty()))
-        {
+        if !self.is_fresh_e2ee_observation(tx_id)? {
             return Err(Error::InvalidStoredValue(
                 "E2EE observation requires a fresh read-only transaction",
             ));
         }
-        let snapshot = tx.base_snapshot.clone();
+        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         // A zero local prefix excludes normal local writes. Refuse a non-accepted
         // zero-time record too, rather than assuming that sentinel cannot exist.
         if self
@@ -2720,6 +2796,9 @@ pub(super) struct OpenTransaction {
     pub(super) provisional_author: AuthorSubject,
     /// Snapshot captured when the transaction opened.
     pub(super) base_snapshot: Snapshot,
+    /// Accepted authority witnesses captured at begin, excluding pending/local
+    /// prefixes. Internal observation children must reuse this immutable cut.
+    pub(super) accepted_e2ee_base_snapshot: Snapshot,
     /// Base snapshot row derivations observed by point reads in this transaction.
     pub(super) base_snapshot_rows: BTreeMap<(SchemaVersionId, String, RowUuid), SnapshotRow>,
     /// Point reads recorded by the transaction.

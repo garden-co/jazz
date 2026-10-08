@@ -353,6 +353,156 @@ where
     /// under the row evaluation's node lock, never reconstructed from rows.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
+    pub async fn all_e2ee_settled_serialized_query_for_binding<F, E>(
+        &self,
+        query: &[u8],
+        mut opts: ReadOpts,
+        open_tx: OpenTransactionId,
+        e2ee_snapshot_at_begin: bool,
+        request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        author: Option<AuthorSubject>,
+        require_coverage: bool,
+        coverage_expired: E,
+        release_coverage: F,
+    ) -> Result<BindingSettledRead, Error>
+    where
+        F: Fn(QueryAttachment),
+        E: Fn() -> bool,
+    {
+        ensure_default_read_view(&opts)?;
+        let _ = std::mem::take(&mut opts.empty_opening);
+        // A local publishing read retains the original transaction's evidence.
+        // A fresh observation keeps the existing strict snapshot restriction.
+        let child = if e2ee_snapshot_at_begin {
+            let mut node = self.lock_for_transaction_operation(open_tx).await?;
+            let child = OpenTransactionId::new();
+            node.open_e2ee_observation_child(open_tx, child)?;
+            Some(child)
+        } else if opts.propagation == Propagation::LocalOnly {
+            self.lock_for_transaction_operation(open_tx)
+                .await?
+                .restrict_e2ee_observation_snapshot(open_tx)
+                .await?;
+            None
+        } else {
+            None
+        };
+        // Cancellation may drop this future while storage holds the owner.
+        // Queue cleanup instead of borrowing/locking the node in Drop.
+        struct ObservationCleanup<C: FnOnce()> {
+            cleanup: Option<C>,
+        }
+        impl<C: FnOnce()> Drop for ObservationCleanup<C> {
+            fn drop(&mut self) {
+                if let Some(cleanup) = self.cleanup.take() {
+                    cleanup();
+                }
+            }
+        }
+        let cleanup_db = self.clone_for_owner_operation();
+        let mut cleanup = ObservationCleanup {
+            cleanup: child.map(|child| {
+                move || {
+                    cleanup_db.enqueue_abandon_transaction_handle(child);
+                }
+            }),
+        };
+        let observed = if let Some(child) = child {
+            let mut observed_settlements = Vec::new();
+            let result = self
+                .all_serialized_query_once(
+                    query,
+                    opts.clone(),
+                    Some(child),
+                    request_scope.clone(),
+                    author,
+                    require_coverage,
+                    &coverage_expired,
+                    &release_coverage,
+                    Some(&mut observed_settlements),
+                )
+                .await?;
+            let SerializedReadResult::Rows(rows) = result else {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "E2EE settlement reads require ordinary stored rows",
+                ));
+            };
+            if rows.len() != observed_settlements.len()
+                || !self
+                    .lock_for_transaction_operation(open_tx)
+                    .await?
+                    .e2ee_observation_covers_settlements(child, &observed_settlements)?
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "Authority settlement unavailable at the original snapshot",
+                ));
+            }
+            Some((rows, observed_settlements))
+        } else {
+            None
+        };
+        let mut settlements = Vec::new();
+        let result = self
+            .all_serialized_query_once(
+                query,
+                opts,
+                Some(open_tx),
+                request_scope,
+                author,
+                require_coverage,
+                &coverage_expired,
+                &release_coverage,
+                Some(&mut settlements),
+            )
+            .await?;
+        let SerializedReadResult::Rows(rows) = result else {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "E2EE settlement reads require ordinary stored rows",
+            ));
+        };
+        if let Some((observed_rows, observed_settlements)) = observed {
+            if rows.len() != settlements.len() {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "Authority settlement unavailable",
+                ));
+            }
+            let mut observed = observed_rows
+                .iter()
+                .zip(&observed_settlements)
+                .collect::<Vec<_>>();
+            let mut actual = rows.iter().zip(&settlements).collect::<Vec<_>>();
+            observed.sort_by_key(|(row, _)| row.row_uuid());
+            actual.sort_by_key(|(row, _)| row.row_uuid());
+            if observed != actual
+                || observed
+                    .windows(2)
+                    .any(|pair| pair[0].0.row_uuid() == pair[1].0.row_uuid())
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "Local history differs from accepted history at the original snapshot",
+                ));
+            }
+        }
+        if let Some(child) = child {
+            // Parent tombstone/admission is checked again after any suspended
+            // query work. Its genuine read evidence stays in the parent.
+            self.lock_for_transaction_operation(open_tx)
+                .await?
+                .abandon_tx(child)?;
+            cleanup.cleanup = None;
+        }
+        Ok(BindingSettledRead { rows, settlements })
+    }
+
+    /// Opt-in paired read: content witnesses and authority fates are captured
+    /// under the row evaluation's node lock, never reconstructed from rows.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn all_settled_serialized_query_for_binding<F, E>(
         &self,
         query: &[u8],

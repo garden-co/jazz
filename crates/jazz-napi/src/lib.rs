@@ -3484,6 +3484,12 @@ impl NapiDb {
         claims: Option<JsonValue>,
         include_rows: Option<bool>,
     ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+        let e2ee_snapshot_at_begin = match opts.as_ref() {
+            Some(value) => {
+                optional_json_bool_prop(value, "e2ee_snapshot_at_begin")?.unwrap_or(false)
+            }
+            None => false,
+        };
         let opts = core_read_opts_from_json(opts)?;
         let open_tx = open_transaction_id
             .parse::<CoreOpenTransactionId>()
@@ -3511,14 +3517,11 @@ impl NapiDb {
                 let release_db = Rc::clone(&db);
                 let owner = Rc::clone(&db);
                 let read = db.enqueue_transaction_read(open_tx, async move {
-                    if opts.propagation == CorePropagation::LocalOnly {
-                        owner.restrict_e2ee_observation_snapshot_for_binding(open_tx).await?;
-                    }
                     let requires_coverage = non_durable_client
                         || (opts.tier >= jazz::tx::DurabilityTier::Global
                             && opts.propagation == CorePropagation::Full);
                     let deadline = Instant::now() + Duration::from_secs(15);
-                    owner.all_settled_serialized_query_for_binding(&query, opts, open_tx, admission, author, requires_coverage,
+                    owner.all_e2ee_settled_serialized_query_for_binding(&query, opts, open_tx, e2ee_snapshot_at_begin, admission, author, requires_coverage,
                         || Instant::now() >= deadline, move |attachment| release_db.detach_query(attachment)).await
                 });
                 if drive_read { db.drive_queued_mutation_once(); }
