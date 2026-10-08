@@ -119,7 +119,9 @@ export async function prepareEqualityQuery(
   const epochs = new Set<string>();
   await transaction?.ready();
   const initial = transaction?.initialSpaceKeys.size
-    ? transaction.initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${scopeIdentifier}`)
+    ? transaction.initialSpaceKeys.get(
+        `${(await db.authenticatedTableIdentity(scope)) ?? (await db.tableIdentity(scope))}:${scopeIdentifier}`,
+      )
     : undefined;
   const collect = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
     epochs.add(root.epochId);
