@@ -61,6 +61,7 @@ async function prepare(runtime: "wasm" | "native") {
   });
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
+  const recipients: { db: Awaited<ReturnType<typeof createDb>>; accountId: string }[] = [];
   let nativeSession: Awaited<ReturnType<typeof createJazzSession>> | undefined;
   try {
     await deploy({
@@ -108,8 +109,33 @@ async function prepare(runtime: "wasm" | "native") {
       db,
       crypto,
       accountId,
-      server,
+      // Warm scenarios share enrolled identities, but each prepares a new space
+      // and grant set. Cold scenarios own an independent fixture and recipients.
+      async recipient(index: number) {
+        while (recipients.length <= index) {
+          const account = await localAccountConfig(server.appId, server.url);
+          let recipientSaved: string | null = null;
+          const recipient = await createDb({
+            ...account,
+            e2ee: {
+              app,
+              store: {
+                async read() {
+                  return recipientSaved;
+                },
+                async update(transform) {
+                  recipientSaved = transform(recipientSaved);
+                },
+              },
+            },
+          });
+          recipients.push({ db: recipient, accountId: account.account.id });
+          await recipient.e2ee.devices.list();
+        }
+        return recipients[index]!;
+      },
       cleanup: async () => {
+        await Promise.all(recipients.map((recipient) => recipient.db.shutdown()));
         await db?.shutdown();
         await nativeSession?.close();
         await server.stop();
@@ -167,7 +193,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
       const mixed = outcome.includes("-mixed-");
       const cold = outcome === "accepted" || outcome === "explicit";
       const current = cold ? await prepare(runtime) : fixture;
-      const { app, db, crypto, accountId, server } = current;
+      const { app, db, crypto, accountId } = current;
       const before = cold
         ? {
             __e2ee_space_deliveries: [],
@@ -182,25 +208,9 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
       try {
         const recipientIds: string[] = [];
         for (let i = 0; i < (explicit ? (outcome.includes("-set") ? 2 : 1) : 0); i++) {
-          const account = await localAccountConfig(server.appId, server.url);
-          recipientIds.push(account.account.id);
-          let recipientSaved: string | null = null;
-          const recipient = await createDb({
-            ...account,
-            e2ee: {
-              app,
-              store: {
-                async read() {
-                  return recipientSaved;
-                },
-                async update(transform) {
-                  recipientSaved = transform(recipientSaved);
-                },
-              },
-            },
-          });
-          recipients.push(recipient);
-          await recipient.e2ee.devices.list();
+          const recipient = await current.recipient(i);
+          recipientIds.push(recipient.accountId);
+          recipients.push(recipient.db);
         }
         const initialRecipients = explicit ? recipientIds : undefined;
         const recipientAccounts = recipientIds.slice();
@@ -507,7 +517,6 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
             expect(added_projects).toEqual([]);
           history.projects = final_projects;
         }
-        await Promise.all(recipients.map((recipient) => recipient.shutdown()));
         if (cold) await current.cleanup();
       }
     },
