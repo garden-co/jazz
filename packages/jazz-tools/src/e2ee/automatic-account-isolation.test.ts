@@ -82,13 +82,13 @@ it("automatically isolates private device records and preserves application grou
     expect(
       await recipient.all(app.__e2ee_groups.where({ id: group.id }), { tier: "global" }),
     ).toHaveLength(1);
-    await owner.e2ee.groups.add(group.id, bob.account.id).wait();
+    await owner.e2ee.groups.add(group.id, { kind: "account", id: bob.account.id }).wait();
     expect(await owner.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
     expect(await recipient.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
     // Bob has the key, but Alice alone has membership administration permission.
-    await expect(recipient.e2ee.groups.remove(group.id, alice.account.id).wait()).rejects.toThrow(
-      /permission/i,
-    );
+    await expect(
+      recipient.e2ee.groups.remove(group.id, { kind: "account", id: alice.account.id }).wait(),
+    ).rejects.toThrow(/permission/i);
     expect(await owner.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
   } finally {
     for (const client of clients) await client.shutdown();

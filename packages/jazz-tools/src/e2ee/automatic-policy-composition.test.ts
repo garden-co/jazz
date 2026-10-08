@@ -89,7 +89,9 @@ it("preserves explicit E2EE administration rules when composing application poli
     expect(await db.all(app.notes, { tier: "global" })).toEqual([note]);
 
     const group = await db.e2ee.groups.create().wait();
-    await expect(db.e2ee.groups.remove(group.id, account.account.id).wait()).rejects.toMatchObject({
+    await expect(
+      db.e2ee.groups.remove(group.id, { kind: "account", id: account.account.id }).wait(),
+    ).rejects.toMatchObject({
       code: "permission_denied",
     });
   } finally {

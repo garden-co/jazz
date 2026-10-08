@@ -112,7 +112,9 @@ it.each(["update", "upsert", "delete"] as const)(
       } else {
         const tx = db.beginExclusiveTransaction();
         try {
-          tx[operation](app.proposals, original.value.id, { value: "provisional content" });
+          if (operation === "update")
+            tx.update(app.proposals, original.value.id, { value: "provisional content" });
+          else tx.upsert(app.proposals, original.value.id, { value: "provisional content" });
           expect(await tx.all(app.proposals, { tier: "local" })).toEqual([
             { id: original.value.id, value: "provisional content" },
           ]);
