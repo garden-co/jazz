@@ -703,9 +703,9 @@ export class Spaces {
         const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
           return this.stageInitial(tx, scope, identifier, [recipientId], address, device, secret);
         });
-        const accepted = await proposal.wait({ tier: "global" });
+        // Global acceptance includes the journal's initial recipient handoff.
+        await proposal.wait({ tier: "global" });
         this.assertOpen();
-        await this.deliver(address, accepted, secret, device);
         await this.explain(scope, identifier);
       } finally {
         secret.fill(0);
@@ -841,39 +841,14 @@ export class Spaces {
     this.assertOpen();
     await this.warm(expected);
     const device = await this.loadDevice();
-    let secret: Uint8Array | undefined;
     try {
-      const snapshot = await this.readAcceptedSnapshot(expected, expected.id);
-      const state = await this.validate(snapshot, expected);
-      if (
-        state.root.id !== expected.id ||
-        state.root.epochId !== expected.epochId ||
-        !snapshot.state.active.has(device.id) ||
-        state.sealed ||
-        state.rotationRequired ||
-        !state.groupsReady ||
-        !isInitialAuthor(
-          state.root,
-          state.keyRoot.epochId,
-          this.accountId,
-          device.id,
-          snapshot.state.epochId,
-        )
-      )
-        throw new E2eeDataError("key-unavailable");
-      secret = await this.keys.open(
-        device,
-        spaceContext(this.accountContext(state.root.accountId), state.root, "author", device.id),
-        state.root.authorEnvelope,
-      );
-      // deliver revalidates the exact epoch and eligibility in its own authority transaction.
-      await this.deliver(expected, state.root, secret, device);
+      // Open the author key under the same authority snapshot as its delivery.
+      await this.deliver(expected, expected, undefined, device);
       this.assertOpen();
       // Delivery adds accepted metadata after the preparation snapshot.
       // Retain that coherent state before callers can immediately go offline.
       await this.readAcceptedSnapshot(expected, expected.id);
     } finally {
-      secret?.fill(0);
       this.requireDevice().release(device);
     }
   }
@@ -2771,7 +2746,7 @@ export class Spaces {
   private async deliver(
     address: Address,
     expected: SpaceRoot,
-    secret: Uint8Array,
+    secret: Uint8Array | undefined,
     device: LocalDevice,
   ) {
     const delivery = await exclusiveE2eeTransaction(this.db, async (tx) =>
@@ -2794,14 +2769,26 @@ export class Spaces {
     snapshot: Snapshot & { state: DeviceState },
     address: Address,
     expected: SpaceRoot,
-    secret: Uint8Array,
+    secret: Uint8Array | undefined,
     device: LocalDevice,
   ) {
     let wrote = false;
-    const { root, keyRoot, members, rotationRequired, position } = await this.validate(
-      snapshot,
-      address,
-    );
+    const { root, keyRoot, members, rotationRequired, position, sealed, groupsReady } =
+      await this.validate(snapshot, address);
+    // Initial completion may use only the original author's accepted epoch.
+    // Keep these reads in the delivery transaction so concurrent changes reject
+    // the write, including changes while the asynchronous key open is pending.
+    if (
+      secret === undefined &&
+      (root.id !== expected.id ||
+        root.epochId !== expected.epochId ||
+        !snapshot.state.active.has(device.id) ||
+        sealed ||
+        rotationRequired ||
+        !groupsReady ||
+        !isInitialAuthor(root, keyRoot.epochId, this.accountId, device.id, snapshot.state.epochId))
+    )
+      throw new E2eeDataError("key-unavailable");
     if (
       root.id !== expected.id ||
       keyRoot.epochId !== expected.epochId ||
@@ -2811,61 +2798,111 @@ export class Spaces {
         !isInitialAuthor(root, keyRoot.epochId, this.accountId, device.id, snapshot.state.epochId))
     )
       throw new Error("E2EE space membership requires reconciliation");
-    await this.confirmHistory(snapshot, root, secret);
-    const delivered = new Set<string>();
-    for (const row of snapshot.deliveries.rows) {
-      if (
-        row.epochId === keyRoot.epochId &&
-        (await this.acceptedDelivery(
-          snapshot,
-          root,
-          position,
-          row,
-          positionOf(snapshot.deliveries, row.id),
-        ))
-      )
-        delivered.add(JSON.stringify([row.recipientAccountId, row.recipientDeviceId]));
-    }
-    for (const [recipientAccountId, recipientEpochId] of members) {
-      const history = snapshot.histories.get(recipientAccountId)!;
-      const recipients = await replayAccountMembership(
-        history,
-        this.accountContext(recipientAccountId),
-        this.signer,
-      );
-      if (recipients.epochId !== recipientEpochId)
-        throw new Error("E2EE space recipient epoch changed");
-      if (recipients.recoveryRoots.length) {
-        const recovery = await tx.allSettledForE2ee(
-          this.tables.__e2ee_space_recovery_deliveries.where({
-            spaceId: root.id,
-            recipientAccountId,
-          }),
+    const deliverySecret =
+      secret ??
+      (await this.keys.open(
+        device,
+        spaceContext(this.accountContext(root.accountId), root, "author", device.id),
+        root.authorEnvelope,
+      ));
+    try {
+      await this.confirmHistory(snapshot, root, deliverySecret);
+      const delivered = new Set<string>();
+      for (const row of snapshot.deliveries.rows) {
+        if (
+          row.epochId === keyRoot.epochId &&
+          (await this.acceptedDelivery(
+            snapshot,
+            root,
+            position,
+            row,
+            positionOf(snapshot.deliveries, row.id),
+          ))
+        )
+          delivered.add(JSON.stringify([row.recipientAccountId, row.recipientDeviceId]));
+      }
+      for (const [recipientAccountId, recipientEpochId] of members) {
+        const history = snapshot.histories.get(recipientAccountId)!;
+        const recipients = await replayAccountMembership(
+          history,
+          this.accountContext(recipientAccountId),
+          this.signer,
         );
-        for (const recoveryRoot of recipients.recoveryRoots) {
-          if (
-            recoveryRoot.mechanism !== this.keys.mechanism.id ||
-            recoveryRoot.version !== this.keys.mechanism.version
-          )
-            throw new Error("Unsupported E2EE space recovery recipient");
-          let present = false;
-          for (const row of recovery.rows) {
+        if (recipients.epochId !== recipientEpochId)
+          throw new Error("E2EE space recipient epoch changed");
+        if (recipients.recoveryRoots.length) {
+          const recovery = await tx.allSettledForE2ee(
+            this.tables.__e2ee_space_recovery_deliveries.where({
+              spaceId: root.id,
+              recipientAccountId,
+            }),
+          );
+          for (const recoveryRoot of recipients.recoveryRoots) {
             if (
-              row.epochId === keyRoot.epochId &&
-              row.recoveryRootId === recoveryRoot.id &&
-              (await this.acceptedDelivery(
-                snapshot,
-                root,
-                position,
-                row,
-                positionOf(recovery, row.id),
-              ))
-            ) {
-              present = true;
-              break;
+              recoveryRoot.mechanism !== this.keys.mechanism.id ||
+              recoveryRoot.version !== this.keys.mechanism.version
+            )
+              throw new Error("Unsupported E2EE space recovery recipient");
+            let present = false;
+            for (const row of recovery.rows) {
+              if (
+                row.epochId === keyRoot.epochId &&
+                row.recoveryRootId === recoveryRoot.id &&
+                (await this.acceptedDelivery(
+                  snapshot,
+                  root,
+                  position,
+                  row,
+                  positionOf(recovery, row.id),
+                ))
+              ) {
+                present = true;
+                break;
+              }
             }
+            if (present) continue;
+            const row = {
+              id: crypto.randomUUID(),
+              spaceId: root.id,
+              epochId: keyRoot.epochId,
+              senderAccountId: this.accountId,
+              senderDeviceId: device.id,
+              senderEpochId: snapshot.state.epochId,
+              recipientAccountId,
+              recipientEpochId,
+              recoveryRootId: recoveryRoot.id,
+            };
+            const envelope = await this.keys.seal(
+              recoveryRoot.publicKey,
+              spaceRecoveryContext(this.accountContext(root.accountId), keyRoot, row),
+              deliverySecret,
+            );
+            const signature = await this.sign(
+              device,
+              spaceRecoveryBytes(this.accountContext(root.accountId), keyRoot, {
+                ...row,
+                envelope,
+              }),
+            );
+            this.assertOpen();
+            const { id, ...values } = row;
+            wrote = true;
+            tx.insert(
+              this.tables.__e2ee_space_recovery_deliveries,
+              { ...values, envelope, signature },
+              { id },
+            );
           }
-          if (present) continue;
+        }
+        for (const recipientDeviceId of recipients.active) {
+          if (delivered.has(JSON.stringify([recipientAccountId, recipientDeviceId]))) continue;
+          const key = history.keys.rows.find((row) => row.deviceId === recipientDeviceId);
+          if (
+            !key ||
+            key.mechanism !== this.keys.mechanism.id ||
+            key.version !== this.keys.mechanism.version
+          )
+            throw new Error("Unsupported E2EE space recipient key");
           const row = {
             id: crypto.randomUUID(),
             spaceId: root.id,
@@ -2874,17 +2911,17 @@ export class Spaces {
             senderDeviceId: device.id,
             senderEpochId: snapshot.state.epochId,
             recipientAccountId,
-            recipientEpochId,
-            recoveryRootId: recoveryRoot.id,
+            recipientDeviceId,
+            recipientEpochId: recipients.epochId,
           };
           const envelope = await this.keys.seal(
-            recoveryRoot.publicKey,
-            spaceRecoveryContext(this.accountContext(root.accountId), keyRoot, row),
-            secret,
+            key.publicKey,
+            spaceDeliveryContext(this.accountContext(root.accountId), keyRoot, row),
+            deliverySecret,
           );
           const signature = await this.sign(
             device,
-            spaceRecoveryBytes(this.accountContext(root.accountId), keyRoot, {
+            spaceDeliveryBytes(this.accountContext(root.accountId), keyRoot, {
               ...row,
               envelope,
             }),
@@ -2893,48 +2930,17 @@ export class Spaces {
           const { id, ...values } = row;
           wrote = true;
           tx.insert(
-            this.tables.__e2ee_space_recovery_deliveries,
+            this.tables.__e2ee_space_deliveries,
             { ...values, envelope, signature },
             { id },
           );
         }
       }
-      for (const recipientDeviceId of recipients.active) {
-        if (delivered.has(JSON.stringify([recipientAccountId, recipientDeviceId]))) continue;
-        const key = history.keys.rows.find((row) => row.deviceId === recipientDeviceId);
-        if (
-          !key ||
-          key.mechanism !== this.keys.mechanism.id ||
-          key.version !== this.keys.mechanism.version
-        )
-          throw new Error("Unsupported E2EE space recipient key");
-        const row = {
-          id: crypto.randomUUID(),
-          spaceId: root.id,
-          epochId: keyRoot.epochId,
-          senderAccountId: this.accountId,
-          senderDeviceId: device.id,
-          senderEpochId: snapshot.state.epochId,
-          recipientAccountId,
-          recipientDeviceId,
-          recipientEpochId: recipients.epochId,
-        };
-        const envelope = await this.keys.seal(
-          key.publicKey,
-          spaceDeliveryContext(this.accountContext(root.accountId), keyRoot, row),
-          secret,
-        );
-        const signature = await this.sign(
-          device,
-          spaceDeliveryBytes(this.accountContext(root.accountId), keyRoot, { ...row, envelope }),
-        );
-        this.assertOpen();
-        const { id, ...values } = row;
-        wrote = true;
-        tx.insert(this.tables.__e2ee_space_deliveries, { ...values, envelope, signature }, { id });
-      }
+      return wrote ? undefined : snapshot;
+    } finally {
+      // Caller-owned keys retain their caller's lifetime.
+      if (secret === undefined) deliverySecret.fill(0);
     }
-    return wrote ? undefined : snapshot;
   }
 
   private async confirm(
