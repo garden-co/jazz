@@ -1232,7 +1232,7 @@ fn paired_wire_context_governs_auxiliary_frames_in_both_directions() {
         let author = AuthorSubject::for_test_bytes([0x52; 16]);
         let database = open_db(0x52, author, &schema());
         let (client_bytes, _server_bytes) = super::byte_duplex_raw();
-        let features = crate::wire::FEATURE_SESSION_FRAME | crate::wire::FEATURE_AUXILIARY_CHUNKS;
+        let features = crate::wire::FEATURE_AUXILIARY_CHUNKS;
         let session = crate::wire::WireSession {
             session_id: "auxiliary-context-session".to_owned(),
             epoch: 7,

@@ -503,13 +503,13 @@ pub(super) fn byte_duplex_with_session(
         Box::new(WireTransportAdapter::new(
             left,
             WIRE_PROTOCOL_VERSION,
-            crate::wire::FEATURE_SESSION_FRAME,
+            0,
             Some(session.clone()),
         )),
         Box::new(WireTransportAdapter::new(
             right,
             WIRE_PROTOCOL_VERSION,
-            crate::wire::FEATURE_SESSION_FRAME,
+            0,
             Some(session),
         )),
     )
@@ -535,7 +535,7 @@ fn test_catalogue_ack() -> SyncMessage {
 fn encode_test_message_frame(session: Option<WireSession>) -> Vec<u8> {
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);
-    let features = crate::wire::FEATURE_SESSION_FRAME;
+    let features = 0;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, session);
     sender.send(test_catalogue_ack()).unwrap();
     staged.borrow_mut().pop_front().unwrap()
@@ -636,12 +636,7 @@ fn wire_transport_adapter_accepts_matching_session() {
         .borrow_mut()
         .push_back(encode_test_message_frame(Some(session.clone())));
 
-    let mut adapter = WireTransportAdapter::new(
-        left,
-        WIRE_PROTOCOL_VERSION,
-        crate::wire::FEATURE_SESSION_FRAME,
-        Some(session),
-    );
+    let mut adapter = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, 0, Some(session));
 
     assert_eq!(adapter.try_recv(), Some(test_catalogue_ack()));
     while let Some(bytes) = right.try_recv_frame() {
@@ -663,7 +658,7 @@ fn wire_transport_adapter_rejects_missing_session_without_emitting_sync_message(
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        crate::wire::FEATURE_SESSION_FRAME,
+        0,
         Some(test_wire_session(identity, 3)),
     );
 
@@ -675,7 +670,7 @@ fn wire_transport_adapter_rejects_missing_session_without_emitting_sync_message(
 fn channel_authentication_precedes_payload_admission() {
     let (left, mut right) = byte_duplex_raw();
     let expected_identity = AuthorSubject::for_test_bytes([0xa5; 16]);
-    let features = crate::wire::FEATURE_SESSION_FRAME;
+    let features = 0;
     let mut frame = decode_frame(&encode_test_message_frame(Some(test_wire_session(
         AuthorSubject::for_test_bytes([0xb5; 16]),
         3,
@@ -748,7 +743,7 @@ fn wire_transport_adapter_rejects_wrong_identity_without_emitting_sync_message()
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        crate::wire::FEATURE_SESSION_FRAME,
+        0,
         Some(test_wire_session(expected_identity, 3)),
     );
 
@@ -769,7 +764,7 @@ fn wire_transport_adapter_rejects_stale_epoch_without_emitting_sync_message() {
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        crate::wire::FEATURE_SESSION_FRAME,
+        0,
         Some(test_wire_session(identity, 3)),
     );
 

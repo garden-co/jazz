@@ -26,9 +26,7 @@ use jazz::tools::{
     Value as PublicValue,
 };
 use jazz::tx::DurabilityTier;
-use jazz::wire::{
-    FEATURE_SESSION_FRAME, TransportError, WIRE_PROTOCOL_VERSION, WireSession, WireTransport,
-};
+use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireSession, WireTransport};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use tempfile::TempDir;
 
@@ -935,7 +933,7 @@ fn byte_duplex(epoch: u64) -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::T
         epoch,
         identity: Some(AuthorSubject::SYSTEM),
     };
-    let features = FEATURE_SESSION_FRAME;
+    let features = 0;
     (
         Box::new(WireTransportAdapter::new(
             left_transport,

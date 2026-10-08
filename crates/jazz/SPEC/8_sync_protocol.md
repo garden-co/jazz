@@ -253,7 +253,7 @@ through a migration path. A new optional semantic variant additionally needs a
 new negotiated feature bit. Wire-protocol v5 intentionally provides neither
 old-version decoding nor migration.
 
-The optional feature bits are `SessionFrame=1<<1`, `PayloadLz4=1<<3`,
+The optional feature bits are `PayloadLz4=1<<3`,
 `PayloadZstd=1<<4`, `AuthorizationScopeReceipts=1<<6`,
 `AuthorizationScopeViews=1<<7`, `AuxiliaryChunks=1<<8`, and
 `ScopeIsolatedClientRelay=1<<9`. `Hello` negotiates only the intersection of optional features.

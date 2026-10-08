@@ -35,8 +35,6 @@ pub const WIRE_FRAME_ARTIFACT_CORPUS: &str =
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
-/// Frames may carry an explicit resumable session id and epoch.
-pub const FEATURE_SESSION_FRAME: WireFeatures = 1 << 1;
 /// Message frame payloads may be LZ4-compressed at the transport frame seam.
 pub const FEATURE_PAYLOAD_LZ4: WireFeatures = 1 << 3;
 /// Message frame payloads may be Zstandard-compressed at the transport frame seam.
@@ -2098,14 +2096,14 @@ mod tests {
         let remote = WireHello {
             min_protocol_version: 5,
             max_protocol_version: 5,
-            features: FEATURE_SESSION_FRAME | FEATURE_AUXILIARY_CHUNKS,
+            features: FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUXILIARY_CHUNKS,
             role: WirePeerRole::Relay,
             authority: None,
         };
 
         let negotiated = negotiate_wire(
             &remote,
-            FEATURE_SESSION_FRAME | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+            FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
         )
         .unwrap();
 
@@ -2113,7 +2111,7 @@ mod tests {
             negotiated,
             WireNegotiated {
                 protocol_version: WIRE_PROTOCOL_VERSION,
-                features: FEATURE_SESSION_FRAME
+                features: FEATURE_AUTHORIZATION_SCOPE_VIEWS
             }
         );
     }
