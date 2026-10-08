@@ -111,17 +111,11 @@ export interface AppContext {
   /** Application identifier (used for isolation) */
   appId: string;
 
-  /** Optional client ID (generated if not provided) */
-  clientId?: string;
-
   /** Schema definition */
   schema: WasmSchema;
 
   /** Optional server URL for sync */
   serverUrl?: string;
-
-  /** Optional runtime source overrides for WASM loading. */
-  runtimeSources?: RuntimeSourcesConfig;
 
   /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;

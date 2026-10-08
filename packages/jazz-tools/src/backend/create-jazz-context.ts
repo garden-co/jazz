@@ -58,7 +58,7 @@ type BackendContextSchemaConfig =
       permissions?: undefined;
     };
 
-export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clientId"> & {
+export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
   /**
