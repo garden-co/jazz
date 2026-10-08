@@ -23,9 +23,7 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
     let mut subscription = doctest_support::block_on(db.subscribe(
         &prepared_query,
         ReadOpts {
-            tier: DurabilityTier::Local,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         },
@@ -63,9 +61,7 @@ fn db_facade_subscription_refresh_preserves_read_tier() {
     let mut subscription = doctest_support::block_on(db.subscribe(
         &prepared_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::Full,
+            tier: crate::db::ReadTier::Remote,
             include_deleted: false,
             ..ReadOpts::default()
         },
@@ -178,9 +174,7 @@ fn db_facade_schedules_immediate_tick_for_attached_query_coverage() {
     db.attach_query_with_opts(
         &prepared_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::Full,
+            tier: crate::db::ReadTier::Remote,
             include_deleted: false,
             ..ReadOpts::default()
         },
@@ -190,6 +184,8 @@ fn db_facade_schedules_immediate_tick_for_attached_query_coverage() {
     assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
 }
 
+/// Alice opens a LocalOnly subscription. Inspecting registration state here
+/// proves that no upstream request is created; delivery is tested separately.
 #[test]
 fn db_facade_local_only_subscription_does_not_register_upstream_coverage() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
@@ -198,20 +194,16 @@ fn db_facade_local_only_subscription_does_not_register_upstream_coverage() {
     let query = db.table("todos");
     let prepared_query = prepared(&db, &query);
 
-    let mut subscription = doctest_support::block_on(db.subscribe(
+    let _subscription = doctest_support::block_on(db.subscribe(
         &prepared_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         },
     ))
     .unwrap();
 
-    assert!(subscription.try_next_event().is_none());
-    assert_eq!(scheduler.take(), Vec::<TickUrgency>::new());
     assert!(db.node.upstream_subscriptions.borrow().is_empty());
 }
 
@@ -222,9 +214,7 @@ fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
     let query = db.table("todos");
     let prepared_query = prepared(&db, &query);
     let opts = ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::Remote,
         include_deleted: false,
         ..ReadOpts::default()
     };
@@ -264,24 +254,23 @@ fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
     assert_eq!(pending_upstream_unsubscribe_count(&db), 1);
 }
 
+/// Alice opens LocalOnly before connecting to Bob. The private transport queue
+/// is checked because local results alone cannot prove that no request was sent.
 #[test]
 fn local_only_subscription_is_not_forwarded_on_late_upstream_connect() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let query = db.table("todos");
     let prepared_query = prepared(&db, &query);
 
-    let mut inspector = doctest_support::block_on(db.subscribe(
+    let _inspector = doctest_support::block_on(db.subscribe(
         &prepared_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         },
     ))
     .unwrap();
-    assert!(inspector.try_next_event().is_none());
 
     let (client_transport, _server_transport) = duplex();
     let upstream = crate::local_executor::block_on(db.connect_upstream(client_transport));

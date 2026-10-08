@@ -234,7 +234,7 @@ replicated-immutable fields (§2.1): `row_uuid`, the provenance cells, a nullabl
 `_deletion`, and nullable `user_{col}` cells, carried in the `JVRR` version-2
 row blob (SPEC 16) and followed by the record's `authored_columns`, its
 `base` (SPEC 4 §4.6) and its `counter_signs` (SPEC 4 §4.3).
-Wire protocol v5 removed `parents`; a version-1 blob is rejected. Receiver-local currency and
+Wire protocol v6 removed `parents`; a version-1 blob is rejected. Receiver-local currency and
 authority-state columns are excluded (`INV-DATA-16`). Mixed-version _sync_ is
 owned by ch. 8 / ch. 10.
 
@@ -422,7 +422,7 @@ user_metadata_json, contribution_merge, permission_subject,
 view_scoped_cardinality_marker, fate, global_time, rejection_reason,
 cascade_root, reason_detail, durability)`. `TxKind` is `Mergeable=0`,
 `Exclusive=1`; fate is `Pending=0`, `Accepted=1`, `Rejected=2`; durability is
-`None=0`, `Local=1`, legacy `Edge=2`, `Global=3` (legacy tag 2 reads as Local; new writes never emit it); rejection reasons are
+`None=0`, `Local=1`, `Global=2` in `jazz.transaction-durability.v2` (ch. 9); rejection reasons are
 `ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
 `CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`. The
 `view-scoped-cardinality` marker is exactly the internal string
@@ -579,7 +579,7 @@ comparison in canonical wire-byte order. `GlobalTime` establishes authoritative
 acceptance/progress, not the row-conflict tie-break. A deletion winner does not
 erase content history, and a later restore/delete-register event changes only
 deletion visibility. Pending,
-rejected, local-only, legacy-edge-only, view-scoped-incomplete, or malformed facts may
+rejected, local-only, view-scoped-incomplete, or malformed facts may
 be retained for their stated purpose but cannot be promoted into a global
 winner by replay or reopen. Replaying an identical receipt is idempotent;
 conflicting bytes for an already named transaction/version fail closed.

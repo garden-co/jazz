@@ -65,7 +65,7 @@ describe("solid/useAll", () => {
   it("SD-ALL-01: builds cache key from query and options", async () => {
     const query = makeQuery();
     const options = {
-      tier: "local" as const,
+      tier: "local-first" as const,
       branch: "draft",
     };
 
@@ -203,19 +203,19 @@ describe("solid/useAll", () => {
     try {
       createRoot((rootDispose) => {
         dispose = rootDispose;
-        const [options, _setOptions] = createSignal<any>({ tier: "local" });
+        const [options, _setOptions] = createSignal<any>({ tier: "local-first" });
         setOptions = _setOptions;
         useAll(() => ({ query, options: options() }));
         return undefined;
       });
       await flushMicrotasks();
 
-      expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "local" });
+      expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "local-first" });
 
-      setOptions({ tier: "global" });
+      setOptions({ tier: "remote" });
       await flushMicrotasks();
 
-      expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "global" });
+      expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "remote" });
       expect(unsubscribeA).toHaveBeenCalledTimes(1);
       dispose();
       expect(unsubscribeB).toHaveBeenCalledTimes(1);

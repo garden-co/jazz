@@ -33,6 +33,10 @@ History records are keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`
 and end with the merge fields `seq`, `base_seq` and `base_pending` (SPEC 4
 §4.6); no record carries column stamps any more. The
 corpus was regenerated again for that layout.
+Durability encoding v2 (`jazz.transaction-durability.v2`, Global stored as
+tag 2) joined the root's codec profile, so the manifest and every
+transaction's durability byte changed; the corpus was regenerated again with
+the same inputs.
 
 | Store                               | Entries |
 | ----------------------------------- | ------: |
@@ -74,7 +78,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `efd20b07e7236434434f6a0425f01bed8c9743cbb3a0a3ae1b891ff2c060b8f2` |
-| SQLite payload      | `7c11847f9b8dd5876567457298ee3ed5328897134d59450165ebaa121522a8f6` |
-| gzip SQLite archive | `3a9c896de9cc6d86fcf9f37cfd1deafd17ae31d9e0e30e79060b7ec900363527` |
-| RocksDB archive     | `d314625728e5941adf05e191f71c1c912f5b1be676d08ed83f31a9cb6307df01` |
+| logical pack        | `fb64e19c3811a1fddfd419d6d1e573616af7f5bbab070614fff76ed7b3947367` |
+| SQLite payload      | `f234db40bd5f4397126a9061b74730b9e69ae3040387b1cc211dd925d0248379` |
+| gzip SQLite archive | `1037325abb4b9c2013f6d028710e8f4d0c68cf7f818e449e0be2a366c6ee8e70` |
+| RocksDB archive     | `2fe9b8e60728a1f1804821ab26349794ef8f1b2a5b85dc57c462bf155c677491` |

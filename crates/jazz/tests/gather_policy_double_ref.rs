@@ -18,9 +18,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::block_on;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, Propagation, ReadOpts, SubscriptionEvent,
-};
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -243,9 +241,7 @@ fn insert(db: &Db, table: &str, id: RowUuid, cells: Vec<(&str, Value)>) {
 
 fn local_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }

@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, PreparedQuery, Propagation, ReadOpts,
-    SeededRowIdSource, SubscriptionEvent, block_on,
+    Db, DbConfig, DbIdentity, MergeableTxOps, PreparedQuery, ReadOpts, ReadTier, SeededRowIdSource,
+    SubscriptionEvent, block_on,
 };
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
@@ -22,7 +22,6 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit, param};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::RocksDbStorage;
 use sha2::{Digest, Sha256};
 
@@ -236,9 +235,7 @@ fn seed_rows(db: &Db, table_rows: usize) {
 
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::LocalOnly,
+        tier: ReadTier::Remote,
         include_deleted: false,
         ..ReadOpts::default()
     }
@@ -246,9 +243,7 @@ fn global_read_opts() -> ReadOpts {
 
 fn local_read_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }

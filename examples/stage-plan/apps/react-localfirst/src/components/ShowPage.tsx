@@ -27,7 +27,8 @@ export function ShowPage({ showId, tab, taskId }: ShowPageProps) {
   // An empty local result waits for the server, so a fresh device doesn't
   // flash "not on this crew" before the show arrives.
   const { data: show, isLoading } = useOne(app.shows.where({ id: showId }), {
-    tier: "local-first-unless-empty",
+    tier: "local-first",
+    firstLoadRemoteWaitMs: 5_000,
   });
   const { data: crew = [] } = useAll(
     app.showCrew.where({ showId }).include({ crew: true }).orderBy("role", "asc"),

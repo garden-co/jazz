@@ -731,9 +731,7 @@ pub(super) fn event_settled(event: &SubscriptionEvent) -> bool {
 
 pub(super) fn global_subscribe_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::Remote,
         include_deleted: false,
         ..ReadOpts::default()
     }

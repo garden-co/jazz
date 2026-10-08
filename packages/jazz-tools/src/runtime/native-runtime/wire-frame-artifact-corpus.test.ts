@@ -116,11 +116,11 @@ function artifactCorpus(): ArtifactCorpus {
 }
 
 function rustHelloFixtures(): FrameFixture[] {
-  return (readJson("wire_hello_frames.json") as { fixtures: FrameFixture[] }).fixtures;
+  return (readJson("wire_hello_frames_v6.json") as { fixtures: FrameFixture[] }).fixtures;
 }
 
 function rustMessageFixtures(): FrameFixture[] {
-  return (readJson("wire_message_frames.json") as { fixtures: FrameFixture[] }).fixtures;
+  return (readJson("wire_message_frames_v6.json") as { fixtures: FrameFixture[] }).fixtures;
 }
 
 function readJson(name: string): unknown {

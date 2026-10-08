@@ -3220,13 +3220,14 @@ where
             .unwrap_or_else(|| Err(pending_open_schema_error()))
     }
 
-    pub(super) async fn await_open_schema_for_read(&self, opts: &ReadOpts) -> Result<(), Error> {
+    pub(super) async fn await_open_schema_for_coverage(
+        &self,
+        coverage_tier: DurabilityTier,
+    ) -> Result<(), Error> {
         if !self.requires_open_schema_admission {
             return Ok(());
         }
-        if effective_read_tier(opts) < DurabilityTier::Global
-            || opts.propagation == Propagation::LocalOnly
-        {
+        if coverage_tier < DurabilityTier::Global {
             return self.ensure_open_schema_admitted();
         }
         let wait = {
@@ -3663,7 +3664,7 @@ where
         let table_schema = self.table_schema(table)?.clone();
         let query = self.prepare_query(&Query::from(table))?;
         let opts = ReadOpts {
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         }
         .branch_view(head.clone(), base.cloned());

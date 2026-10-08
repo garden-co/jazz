@@ -446,7 +446,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               },
               tick: () => undefined,
               all: (_query: object, opts: { tier?: string }) => {
-                if (opts.tier !== "global") return emptyRows();
+                if (opts.tier !== "remote") return emptyRows();
                 refreshes += 1;
                 return {
                   poll: () => {
@@ -471,7 +471,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
       await runtime.waitForUpstreamServerConnection();
       await expect(
-        runtime.query(JSON.stringify({ table: "todos" }), null, "local"),
+        runtime.query(JSON.stringify({ table: "todos" }), null, "local-first"),
       ).resolves.toEqual([]);
       for (let turn = 0; turn < 5 && refreshes === 0; turn += 1) await waitForServerPumpTimer();
       await waitForServerPumpTimer();
@@ -576,7 +576,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       await runtime.waitForUpstreamServerConnection();
 
       await expect(
-        runtime.query(JSON.stringify({ table: "todos" }), null, "global"),
+        runtime.query(JSON.stringify({ table: "todos" }), null, "remote"),
       ).rejects.toThrow("core tick failed");
       await waitForServerPumpTimer();
 
@@ -746,7 +746,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
       serverDown = true;
       sockets[0]!.emitServerClose();
-      const readDuringOutage = runtime.query(JSON.stringify({ table: "todos" }), null, "global");
+      const readDuringOutage = runtime.query(JSON.stringify({ table: "todos" }), null, "remote");
       const readRejected = expect(readDuringOutage).rejects.toThrow("websocket closed");
       await vi.advanceTimersByTimeAsync(60_000);
 
@@ -768,7 +768,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       await runtime.waitForUpstreamServerConnection();
       expect(runtime.remoteLinkState()).toBe("connected");
       await expect(
-        runtime.query(JSON.stringify({ table: "todos" }), null, "global"),
+        runtime.query(JSON.stringify({ table: "todos" }), null, "remote"),
       ).resolves.toEqual([]);
 
       // A Global wait armed after recovery settles normally.
@@ -1701,7 +1701,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       entered.resolve();
       return hasUpstream();
     };
-    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "global");
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "remote");
     const result =
       action === "disconnect"
         ? expect(read).rejects.toThrow("server transport disconnected")
@@ -2106,17 +2106,17 @@ describe("NativeRuntimeAdapter server transport", () => {
     const localHandle = runtime.createSubscription(
       JSON.stringify({ table: "todos" }),
       null,
-      "local",
+      "local-first",
     );
     const otherRemoteHandle = runtime.createSubscription(
       JSON.stringify({ table: "todos" }),
       null,
-      "global",
+      "remote",
     );
     const globalHandle = runtime.createSubscription(
       JSON.stringify({ table: "todos" }),
       null,
-      "global",
+      "remote",
     );
     const localUpdates = vi.fn();
     const otherRemoteUpdates = vi.fn();

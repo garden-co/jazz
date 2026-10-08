@@ -4618,15 +4618,6 @@ pub(super) fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, Error> {
 pub(super) fn fate_from_encoded_fields(record: BorrowedRecord<'_>) -> Result<Fate, Error> {
     match record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)? {
         0 => Ok(Fate::Pending),
-        1 if record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)? == 2
-            && record
-                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
-                .is_none() =>
-        {
-            // Legacy edge acceptance is not Core confirmation. Preserve the
-            // authored unit and let normal local-author replay recover its fate.
-            Ok(Fate::Pending)
-        }
         1 => Ok(Fate::Accepted),
         2 => Ok(Fate::Rejected(rejection_reason_from_encoded_fields(
             record,

@@ -19,12 +19,11 @@ use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
 use jazz::db::{
-    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, EmptyOpening, Error, ErrorCode,
-    InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MutationErrorCallback, PeerConnection,
-    PermissionAdvice, Propagation, ReadOpts, RemoteLinkHint, RowCells, SeededRowIdSource,
-    SerializedReadResult, SerializedSubscriptionAuthorization, StreamingMutationKind,
-    StreamingValueUpload, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
-    WriteHandle,
+    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error, ErrorCode, FirstLoad,
+    InitialSyncFlushCadence, LargeValueUpdate, MutationErrorCallback, PeerConnection,
+    PermissionAdvice, ReadOpts, RemoteLinkHint, RowCells, SeededRowIdSource, SerializedReadResult,
+    SerializedSubscriptionAuthorization, StreamingMutationKind, StreamingValueUpload,
+    SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::Value;
 #[cfg(target_arch = "wasm32")]
@@ -1976,9 +1975,7 @@ impl WasmDb {
                     .map_err(to_js_error)?;
             }
             let requires_coverage = tier_is_explicit
-                && (non_durable_client
-                    || (opts.tier >= DurabilityTier::Global
-                        && opts.propagation == Propagation::Full));
+                && (non_durable_client || (opts.tier == jazz::db::ReadTier::Remote));
             let result = inner
                 .all_serialized_query(
                     query,
@@ -2404,7 +2401,7 @@ impl WasmDb {
     /// Report what the host knows about the path to the authoritative server
     /// (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
     /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
-    /// Drives only `local-first-unless-empty` reads. The core timestamps each
+    /// Drives only local-first reads that wait for the server on first load. The core timestamps each
     /// `"attempting"` report as the start of a new attempt; until this is
     /// first called, reachability is derived from this runtime's own upstream.
     #[wasm_bindgen(js_name = setRemoteLinkHint)]
@@ -3372,26 +3369,37 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
         }
     }
     if let Some(tier) = optional_string_prop(&value, "tier")? {
-        (opts.tier, opts.empty_opening) = read_tier_from_str(&tier)?;
-    }
-    if let Some(local_updates) = optional_string_prop(&value, "local_updates")? {
-        opts.local_updates = match local_updates.as_str() {
-            "Immediate" | "immediate" => LocalUpdates::Immediate,
-            "Deferred" | "deferred" => LocalUpdates::Deferred,
-            other => return Err(JsValue::from_str(&format!("unknown local_updates {other}"))),
-        };
-    }
-    if let Some(propagation) = optional_string_prop(&value, "propagation")? {
-        opts.propagation = match propagation.as_str() {
-            "Full" | "full" => Propagation::Full,
-            "LocalOnly" | "local_only" | "localOnly" => Propagation::LocalOnly,
-            other => return Err(JsValue::from_str(&format!("unknown propagation {other}"))),
-        };
+        opts.tier = read_tier_from_str(&tier)?;
     }
     if let Some(include_deleted) = optional_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
     }
+    if let Some(timeout_ms) = optional_wait_ms_prop(&value, "first_load_remote_wait_ms")? {
+        opts.first_load = local_first_server_wait(&opts, timeout_ms);
+    }
     Ok(opts)
+}
+
+/// A local-first read's server-wait timeout. `Remote` reads ignore it.
+fn local_first_server_wait(opts: &ReadOpts, timeout_ms: u64) -> FirstLoad {
+    if opts.tier == jazz::db::ReadTier::LocalFirst {
+        FirstLoad::WaitForRemote { timeout_ms }
+    } else {
+        opts.first_load
+    }
+}
+
+fn optional_wait_ms_prop(value: &JsValue, name: &str) -> Result<Option<u64>, JsValue> {
+    let prop = js_sys::Reflect::get(value, &JsValue::from_str(name))?;
+    if prop.is_undefined() || prop.is_null() {
+        return Ok(None);
+    }
+    match prop.as_f64() {
+        Some(ms) if ms.is_finite() && ms >= 0.0 => Ok(Some(ms.floor() as u64)),
+        _ => Err(JsValue::from_str(&format!(
+            "{name} must be a non-negative number of milliseconds"
+        ))),
+    }
 }
 
 fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
@@ -3407,26 +3415,13 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
 
 /// Read-only binding lowering. Write waits keep `durability_tier_from_str`, so
 /// a product read choice can never change write-settlement semantics.
-fn read_tier_from_str(tier: &str) -> Result<(DurabilityTier, EmptyOpening), JsValue> {
-    if let Some(message) = removed_read_tier(tier) {
-        return Err(JsValue::from_str(message));
-    }
+fn read_tier_from_str(tier: &str) -> Result<jazz::db::ReadTier, JsValue> {
     match tier {
-        "local-first" | "LocalFirst" => Ok((DurabilityTier::Local, EmptyOpening::Deliver)),
-        // The core owns the local-first-unless-empty gate.
-        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
-            Ok((DurabilityTier::Local, EmptyOpening::AwaitRemote))
-        }
-        "remote" | "Remote" => Ok((DurabilityTier::Global, EmptyOpening::Deliver)),
-        _ => durability_tier_from_str(tier).map(|tier| (tier, EmptyOpening::Deliver)),
+        "local-first" | "LocalFirst" => Ok(jazz::db::ReadTier::LocalFirst),
+        "remote" | "Remote" => Ok(jazz::db::ReadTier::Remote),
+        "local-only" | "LocalOnly" => Ok(jazz::db::ReadTier::LocalOnly),
+        other => Err(JsValue::from_str(&format!("unknown read tier {other}"))),
     }
-}
-
-/// Error message for a read tier name that was removed, if `tier` is one.
-fn removed_read_tier(tier: &str) -> Option<&'static str> {
-    matches!(tier, "remote-if-possible" | "RemoteIfPossible").then_some(
-        "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
-    )
 }
 
 fn write_state_to_js(state: jazz::db::WriteState) -> Result<JsValue, JsValue> {
@@ -4236,30 +4231,44 @@ mod dynamic_schema_view_tests {
 
     /// Binding read choices lower to the existing core tiers.
     #[test]
-    fn read_tier_names_lower_to_existing_core_tiers() {
+    fn read_tier_names_are_separate_from_durability() {
         assert_eq!(
             read_tier_from_str("local-first").expect("local-first read tier"),
-            (DurabilityTier::Local, EmptyOpening::Deliver)
+            jazz::db::ReadTier::LocalFirst
         );
         assert_eq!(
             read_tier_from_str("remote").expect("strict remote read tier"),
-            (DurabilityTier::Global, EmptyOpening::Deliver)
+            jazz::db::ReadTier::Remote
         );
-        for name in ["remote-if-possible", "RemoteIfPossible"] {
-            assert!(removed_read_tier(name).is_some(), "{name} was removed");
-        }
-        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
-            assert_eq!(
-                read_tier_from_str(name).expect("local-first-unless-empty read tier"),
-                (DurabilityTier::Local, EmptyOpening::AwaitRemote),
-                "{name} reads local-first with the core empty-opening gate"
-            );
-        }
         assert_eq!(
             durability_tier_from_str("local").expect("legacy write tier"),
             DurabilityTier::Local,
             "the write parser remains the separate legacy durability boundary"
         );
+    }
+
+    /// The JS binding must reject unsupported names through its normal parser.
+    /// This runs in WASM because constructing JsValue errors needs a JS host.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn read_tiers_reject_unknown_names() {
+        for name in [
+            "remote-if-possible",
+            "RemoteIfPossible",
+            "local-first-unless-empty",
+            "LocalFirstUnlessEmpty",
+            "core",
+            "Core",
+            "local",
+            "global",
+            "none",
+            "invalid-tier",
+        ] {
+            assert_eq!(
+                read_tier_from_str(name).unwrap_err().as_string().unwrap(),
+                format!("unknown read tier {name}"),
+            );
+        }
     }
 
     #[test]
@@ -4397,7 +4406,7 @@ mod dynamic_schema_view_tests {
 
         let opts = read_opts_from_js(value.into()).expect("parse read options");
 
-        assert_eq!(opts.propagation, Propagation::Full);
+        assert_eq!(opts.tier, jazz::db::ReadTier::LocalFirst);
     }
 
     /// The host-visible transport boundary must honor both parts of its

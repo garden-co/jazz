@@ -229,7 +229,7 @@ describe("Node shared backend session", () => {
       expect(
         await owner
           .getSnapshot()
-          .client!.db.one(app.posts.where({ id: row.id }), { tier: "global" }),
+          .client!.db.one(app.posts.where({ id: row.id }), { tier: "remote" }),
       ).toMatchObject({ text: "pending scope" });
     } finally {
       await owner.close();
@@ -284,7 +284,7 @@ describe("Node shared backend session", () => {
       );
       await expect(user.client!.forRequest({ headers: {} })).rejects.toThrow("backend account");
       expect(
-        await user.client!.db.one(app.notes.where({ id: initial.id }), { tier: "global" }),
+        await user.client!.db.one(app.notes.where({ id: initial.id }), { tier: "remote" }),
       ).toMatchObject({ text: "service" });
       await user
         .client!.db.insert(app.posts, { text: "ordinary positive" })
@@ -450,7 +450,7 @@ describe("Node shared backend session", () => {
       await server.stop();
       const during = db.insert(app.posts, { text: "during outage" });
       await during.wait({ tier: "local" });
-      const globalRead = db.all(app.posts, { tier: "global" }).then(
+      const globalRead = db.all(app.posts, { tier: "remote" }).then(
         () => "resolved",
         (error: unknown) => error,
       );
@@ -464,7 +464,7 @@ describe("Node shared backend session", () => {
       server = await startLocalJazzServer({ appId, port, backendSecret, dataDir });
       // The client reconnects by itself within one capped backoff interval;
       // until then Global reads keep reporting the outage.
-      await vi.waitFor(() => db.all(app.posts, { tier: "global" }), {
+      await vi.waitFor(() => db.all(app.posts, { tier: "remote" }), {
         timeout: 15_000,
         interval: 250,
       });
@@ -473,7 +473,7 @@ describe("Node shared backend session", () => {
       await vi.waitFor(
         async () => {
           const texts = (
-            await observer!.getSnapshot().client!.db.all(app.posts, { tier: "global" })
+            await observer!.getSnapshot().client!.db.all(app.posts, { tier: "remote" })
           )
             .map((row) => row.text)
             .sort();

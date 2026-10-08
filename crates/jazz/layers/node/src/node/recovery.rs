@@ -260,8 +260,7 @@ where
     }
 }
 
-// The current API cannot author a legacy edge receipt. Only this test fixture
-// writes the retired tag; the replay tests use normal Db reopen and transport.
+// Historical exclusive-read evidence fixture support.
 #[cfg(any(test, feature = "testing"))]
 impl<S: OrderedKvStorage> NodeState<S> {
     /// Rewrite a pending transaction's audit row as a build from before
@@ -290,52 +289,6 @@ impl<S: OrderedKvStorage> NodeState<S> {
         batch.update("jazz_transactions", values);
         let applied = self.database.apply_batch(batch).await.unwrap();
         let persisted = applied.persist().await;
-        self.database.finish_persistence(persisted).unwrap();
-    }
-
-    #[doc(hidden)]
-    pub async fn persist_legacy_edge_receipt_for_test(&mut self, tx_id: TxId) {
-        let stored = self.query_transaction(tx_id).await.unwrap().unwrap();
-        let mut values = transaction_values(
-            stored.node_alias,
-            &stored.tx,
-            Fate::Accepted,
-            None,
-            DurabilityTier::Local,
-            Value::Nullable(None),
-        )
-        .unwrap();
-        values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(2);
-        // A legacy receipt has no Core seq, so its history records sit at
-        // seq 0, where a write without an accepted seq is stored.
-        let versions = self.query_versions_for_tx(tx_id).await.unwrap();
-        let mut batch = self.database.open_batch();
-        for version in versions {
-            if version.seq().unwrap() == GlobalTime(0) {
-                continue;
-            }
-            let (history_table, _) = self
-                .version_storage_write_binding(&version, stored.tx.made_by)
-                .unwrap();
-            batch.delete(
-                history_table.as_ref(),
-                self.version_storage_primary_key(&version).unwrap(),
-            );
-            let pending = version.with_seq(GlobalTime(0)).unwrap();
-            let (history_table, record) = self
-                .version_storage_write_binding(&pending, stored.tx.made_by)
-                .unwrap();
-            batch.update_raw(
-                history_table.as_ref(),
-                self.version_storage_primary_key(&pending).unwrap(),
-                record,
-            );
-        }
-        self.invalidate_tx_version_tables_cache(tx_id);
-        self.history_tx_seqs.borrow_mut().clear();
-        batch.update("jazz_transactions", values);
-        let applied = self.apply_node_batch(batch).await.unwrap();
-        let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted).unwrap();
     }
 }

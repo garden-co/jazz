@@ -47,7 +47,7 @@ Invariant digest:
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; accepted state and the core committed frontier MUST become durable atomically before publication.
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. A node that receives a downstream commit unit as a local receiver (relay) MUST store it through the relay path as `Fate::Pending` at `DurabilityTier::Local`; it MUST NOT emit a fate, assign a seq, or make the write visible at the `Global` tier until Core's fate arrives.
 
-- `INV-SYNC-37`: LocalOnly propagation MUST remain on the calling node. Every remote subscription with propagate_upstream=false MUST be rejected regardless of identity, trust, role or worker transport.
+- `INV-SYNC-37`: `ReadTier::LocalOnly` MUST remain on the calling node. Remote subscriptions have no propagation switch; every receiving node follows normal upstream routing.
 - `INV-SYNC-38`: An extra local query input absent from a completed selected-authority scope MUST be revalidated; scope absence or Unknown MUST NOT assert deletion or access loss. Bounded batches MUST preserve eventual retry/progression for supported active queries.
 - `INV-SYNC-48`: A fresh strict (Global) read of a current/default single-table scalar query MUST NOT report settled while a row the client holds live, whose local winner is accepted at Global and which matches the query locally, is absent from the settled authority answer: exactly those rows are probed through `CurrentRowsRequest` and the receipt's carriers (deleted images included) are ingested first; access loss does not redact the local copy. Agreeing views settle without a probe. Reconciliation is reliable, not best-effort: settlement may stop waiting after a bounded interval and release on the authority answer alone, but the outstanding reconciliation is never dropped. The runtime keeps discovering and probing, deduplicated per row, independent of the stream that found the row and of whether the query runtime ever idles, retrying Unknown, dropped, timed-out, or disconnected probes with backoff (immediately on a new upstream link, never while none is admitted), until the authority answers each held row as deleted, readable, or unavailable, or the row's local version changes. A deletion answered after settlement is still applied locally and emits the ordinary local change.
 - `INV-SYNC-39`: Confirmed current unavailability MUST be scoped to the exact effective identity/claims and filter current application inputs before joins, counts and limits. It MUST NOT erase shared content, expose the cause, or affect SYSTEM and other contexts.
@@ -147,14 +147,15 @@ the Rust receipt rejects noncanonical payloads, and TypeScript independently
 encodes the corpus and rejects malformed relation input. It is compatibility
 evidence, not a migration input.
 
-**Linear-history boundary, 2026-09-29 — the sole wire protocol is v5.** Wire v5
+**Linear-history boundary, 2026-10-08 — the sole wire protocol is v6.** Wire v6
 replaces the version DAG with linear per-row state (SPEC 4 §4.6) and keeps
-v4's schema-predecessor vector (below) unchanged. It changes
+v5's compact durability tags, Edge-free peer roles and flagless shape
+registration, and v4's schema-predecessor vector (below), unchanged. It changes
 payload shapes in place, so every endpoint advertises exactly
-`min_protocol_version=5, max_protocol_version=5` and a v4 (or older) peer fails
+`min_protocol_version=6, max_protocol_version=6` and a v5 (or older) peer fails
 the Hello handshake with `UnsupportedProtocolVersion`/`Never` before any payload
-is decoded; a v4 envelope on a v5 link is rejected by its version field. The v5
-baseline, frozen fresh rather than appended to v4, is:
+is decoded; a v5 envelope on a v6 link is rejected by its version field. The v6
+baseline, frozen fresh rather than appended to v5, is:
 
 - the `JVRR` row blob is version `2` (no `parents`; `_deletion` cell), and
   `VersionRecord` ends with `authored_columns`, `base` (SPEC 4 §4.6 "Wire
@@ -198,15 +199,24 @@ baseline, frozen fresh rather than appended to v4, is:
 - `KnownStateDeclaration` tag 2 (`ExactVersionSet`) is retired and reserved;
   `Watermark` is tag 3, so an old exact declaration fails decoding instead of
   being read as a watermark prefix;
-- `SupportingRowsUpdate::CatchUp` is tag 2. It is a mandatory v5 variant, not an
+- `SupportingRowsUpdate::CatchUp` is tag 2. It is a mandatory v6 variant, not an
   optional extension, so it has no feature bit.
 - `SyncMessage` tag 34 (`ViewUpdatePart`) is a non-final part of a
   `ViewUpdate` whose semantic payload exceeds the routed payload limit; the
   final part is an ordinary `ViewUpdate` (SPEC 13, "Oversized view updates").
-  It is a mandatory v5 variant with no feature bit.
+  It is a mandatory v6 variant with no feature bit.
 
-Clients, relays and Core servers must upgrade together; there is no v4 decoder
+Clients, relays and Core servers must upgrade together; there is no v5 decoder
 or migration. The storage boundary moves with it (SPEC 2 §2.7.1).
+
+**Read-tiers boundary — wire protocol v5 (superseded by v6).** Wire v5
+removes the remote registration propagation flag and the retired Edge role,
+and compacts durability tags (ch. 9). It retains v4's schema-predecessor
+vector. V4 and older peers fail the Hello handshake before decoding these
+payloads. Clients and Core servers must upgrade together. Its frozen corpora
+are `crates/jazz/fixtures/wire_message_frames_v5.json` and
+`crates/jazz/fixtures/wire_hello_frames_v5.json`; v6 replays its Hello frames
+only to prove they are refused.
 
 **Schema-predecessor boundary — wire protocol v4 (superseded by v5).** Wire v4
 replaces the single incoming migration in each schema publication with an
@@ -242,8 +252,8 @@ Accountless reader sessions remain distinct from non-null row authors. Large sca
 internal enum/record encoding rather than the former private tagged/postcard
 payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
 milliseconds; the packed HLC is internal ordering state and is not protocol
-data. The wire-v5 golden fixture set is the only supported message layout.
-Wire-protocol v5 is independent of other formats that are also labelled v1,
+data. The wire-v6 golden fixture set is the only supported message layout.
+Wire-protocol v6 is independent of other formats that are also labelled v1,
 including storage, catalogue, migration-lens, and NAPI/WASM binding formats.
 `MigrationLens` payloads in that fixture set are
 their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
@@ -272,7 +282,7 @@ evaluate policy. `SYSTEM` is never a relay transport identity or delegated
 subject. This is a deliberate redefinition of the sole, unreleased v1 layout:
 there is no old-shape decoder or compatibility path.
 
-### 8.1.1 Frozen wire-protocol v5 byte contract
+### 8.1.1 Frozen wire-protocol v6 byte contract
 
 `WireFrame` and its `WireEnvelope.payload` are each **one complete postcard
 value**. A conformant decoder MUST reject a valid prefix followed by any
@@ -302,13 +312,13 @@ endpoint byte as a suffix is malformed framing, not version compatibility. A
 length other than exactly `16` MUST be rejected even when the declared byte
 sequence and the remaining Hello fields are otherwise well formed.
 
-Postcard enum ordinals are wire data. The wire-protocol v5 baseline freezes these permanent
+Postcard enum ordinals are wire data. The wire-protocol v6 baseline freezes these permanent
 discriminants (decimal):
 
 | enum                    | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `WireFrame`             | `Hello=0`, `Message=1`, `Error=2`, `MessageFragment=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `WirePeerRole`          | `Client=0`, `Core=1`, retired/rejected `2`, `Relay=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `WirePeerRole`          | `Client=0`, `Core=1`, `Relay=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `WireErrorCode`         | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `WireRetry`             | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `SyncMessage`           | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `reserved=12`, `CatalogueAck=13`, `ViewUpdate=14`, `reserved=15`, `reserved=16`, `CatalogueSnapshot=17`, `PermissionAdviceRequest=18`, `PermissionAdviceResponse=19`, `AuthorizationScopeSubscribe=20`, `AuthorizationScopeReceipt=21`, `AuthorizationScopeIntent=22`, `AuthorizationScopeView=23`, `AuthorizationScopeAggregateReceipt=24`, `AuthorizationScopeUnavailable=25`, `AuthorizationScopeDecision=26`, `ChunkUploadStart=27`, `ChunkUploadNodes=28`, `ChunkUploadResult=29`, `reserved=30`, `CurrentRowsRequest=31`, `CurrentRowsReceipt=32`, `CurrentRowsCancel=33`, `ViewUpdatePart=34`, `RetryLater=35` |
@@ -321,7 +331,7 @@ retired and MUST reject decoding; they have no constructible message.
 Future variants MUST append after these values; existing variants, fields, and
 their field order MUST NOT be reordered, inserted before, reused, or decoded
 through a migration path. A new optional semantic variant additionally needs a
-new negotiated feature bit. Wire-protocol v5 intentionally provides neither
+new negotiated feature bit. Wire-protocol v6 intentionally provides neither
 old-version decoding nor migration.
 
 Tag 30 (`AuthorityPublication`) is retired. Its former edge-admission
@@ -349,7 +359,7 @@ its accepted mask is converted to a narrower runtime type. The feature mask
 and authority epoch remain `bigint` through wire decoding, so canonical values
 through `2^64-1` are representable without a JavaScript number conversion. Exactly
 one compression bit may be active on an envelope; when both codecs are
-negotiated, an outbound wire-protocol v5 sender selects LZ4 and emits only its bit. A
+negotiated, an outbound wire-protocol v6 sender selects LZ4 and emits only its bit. A
 receiver rejects an envelope declaring both codecs, a codec change within one
 connection, corrupt compressed bytes, or an encoded payload exceeding `E`
 before fragment admission, or a decompressed payload exceeding `D`.
@@ -378,8 +388,8 @@ new durable storage encoding or compatibility fallback.
 inline/indirect records. Rust checks exact bytes, decoded values, roundtrips,
 and rejection of the old descriptor before storage.
 
-The wire-protocol v5 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
-`crates/jazz/fixtures/wire_hello_frames.json`:
+The wire-protocol v6 frozen corpora are `crates/jazz/fixtures/wire_message_frames_v6.json` and
+`crates/jazz/fixtures/wire_hello_frames_v6.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic
 value to the exact same payload and frame bytes, and TypeScript independently
 reads every transport envelope through its production postcard reader, rejects
@@ -819,7 +829,7 @@ supporting_revision }`, tag 3): "I have Q at seq `position` with supporting
   revision `supporting_revision` installed". A serving peer that can answer
   from its `by_seq` index replies with `SupportingRowsUpdate::CatchUp` against
   that revision; any other peer treats it as a fast declaration at `position`.
-- **Slow declaration** (retired in wire v5; its tag 2 is reserved) — an
+- **Slow declaration** (retired in wire v6; its tag 2 is reserved) — an
   explicit set of row-version identities
   `(row_uuid, tx_time, tx_node_id)`: used when no valid fast fact exists
   (fresh store, eviction, corruption). The client evaluates the query locally
@@ -1172,12 +1182,11 @@ is deferred.
 
 ### Local propagation is not a remote capability
 
-`Propagation::LocalOnly` is a setting on the calling node. It MUST NOT send a
+`ReadTier::LocalOnly` evaluates on the calling node. It MUST NOT send a
 remote query and MUST NOT be implemented by telling another node to stop there.
-Every peer subscription with `propagate_upstream=false` MUST be rejected through
-the ordinary subscription rejection path, regardless of trust, SYSTEM identity,
-Core role or worker transport. This rule covers both RegisterShape and
-Subscribe admission. Local-only API execution remains available on every node.
+Remote registrations have no propagation switch. Every receiving node follows
+normal upstream routing under its admitted identity, trust, and topology.
+Local-only API execution remains available on every node.
 
 A browser foreground's strictly local query therefore reads its own cached and
 pending state. It does not fetch worker-only rows. A normal propagated query can
@@ -1224,7 +1233,7 @@ selected scope's deletion witnesses and changes only with its source receipt.
 ### Mandatory current-row availability messages
 
 `CurrentRowsRequest`, `CurrentRowsReceipt`, and `CurrentRowsCancel` are mandatory
-wire-protocol v5 semantic messages. They require no optional feature bit and use
+wire-protocol v6 semantic messages. They require no optional feature bit and use
 the existing named postcard control codec and native `VersionCarrier` encoding;
 the byte corpus pins all three variants. Ordinary version validation and
 authenticated link admission still apply. No compatibility with peers lacking
@@ -1242,11 +1251,11 @@ current-row availability contract for authorization and receipt validation.
   the answer to a `Watermark` declaration, carrying only rows whose seq moved
   past the declared watermark (`changed`) or that left the set (`left`).
 
-The named semantic encoding is postcard in the version-5 WireEnvelope. Enum
+The named semantic encoding is postcard in the version-6 WireEnvelope. Enum
 discriminants are respectively 0, 1 and 2, followed by fields in declaration order.
 Revisions are exactly 16 raw array bytes (no length prefix). Vectors use postcard
 lengths and the existing exact SupportingRow field encoding. Populated snapshots
-and deltas are pinned in wire_message_frames.json; the empty forms, truncation
+and deltas are pinned in wire_message_frames_v6.json; the empty forms, truncation
 and v1 negotiation rejection have explicit Rust byte-level tests. There is no
 v1 compatibility decoder. Storage/catalogue/binding encodings are unchanged.
 

@@ -1371,7 +1371,7 @@ fn rejection_reason_column() -> GrooveColumnType {
 }
 
 fn durability_column() -> GrooveColumnType {
-    storage_enum("jazz_durability", &["none", "local", "edge", "global"])
+    storage_enum("jazz_durability", &["none", "local", "global"])
 }
 
 fn tx_id_column() -> GrooveColumnType {

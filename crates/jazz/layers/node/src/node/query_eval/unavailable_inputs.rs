@@ -296,7 +296,10 @@ impl<S: OrderedKvStorage> NodeState<S> {
                     .filter(
                         PredicateExpr::And(vec![
                             PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-                            PredicateExpr::eq("durability", Value::EnumTag(3)),
+                            PredicateExpr::eq(
+                                "durability",
+                                Value::EnumTag(DurabilityTier::Global.discriminant()),
+                            ),
                         ])
                         .canonicalize(),
                     )

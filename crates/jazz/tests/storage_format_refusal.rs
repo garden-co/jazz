@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 
 const DURABLE_INDEX_V2: &str = "groove.durable-index.v2";
 const ROW_HISTORY: &str = "jazz.history-version-current.v4";
+const DURABILITY_V2: &str = "jazz.transaction-durability.v2";
 
 fn notes_schema() -> JazzSchema {
     let source = SchemaBuilder::new()
@@ -89,7 +90,11 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
             assert_eq!(epoch, 1, "{store}");
             assert_eq!(
                 missing,
-                vec![DURABLE_INDEX_V2.to_owned(), ROW_HISTORY.to_owned()],
+                vec![
+                    DURABLE_INDEX_V2.to_owned(),
+                    ROW_HISTORY.to_owned(),
+                    DURABILITY_V2.to_owned(),
+                ],
                 "{store}"
             );
             assert_eq!(unknown, expected_unknown, "{store}");
@@ -100,8 +105,8 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 }
 
 /// A published alpha.54 client root (DAG layout) is refused at open with the
-/// typed `UnsupportedStorageCodecs` error naming the durable-index and
-/// row-history families it lacks, instead of opening and failing later with a record decode error.
+/// typed `UnsupportedStorageCodecs` error naming the durable-index,
+/// row-history and compact-durability families it lacks, instead of opening and failing later with a record decode error.
 ///
 /// Actors: `alice` upgrades her native app from alpha.54 over the same
 /// data directory.
@@ -109,7 +114,8 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 /// ```text
 /// alice's alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                               missing [groove.durable-index.v2,
-///                                                        jazz.history-version-current.v4]
+///                                                        jazz.history-version-current.v4,
+///                                                        jazz.transaction-durability.v2]
 /// ```
 #[test]
 fn published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error() {
@@ -246,6 +252,58 @@ fn linear_history_root_without_the_durable_index_family_is_refused() {
         }
         Err(other) => panic!("expected a typed format refusal, got {other}"),
         Ok(()) => panic!("a root without the durable-index family must not open"),
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
+}
+
+/// A linear-history root written before the compact durability encoding (no
+/// `jazz.transaction-durability.v2`) is refused at manifest admission, naming
+/// only the durability family, before any transaction's durability tag is
+/// read, and the SQLite file is left byte-for-byte unchanged.
+///
+/// Actors: `erin` upgrades a client whose store holds linear history with the
+/// earlier durability tags (Global = 3).
+///
+/// ```text
+/// erin's pre-durability-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
+///                                                  missing [jazz.transaction-durability.v2]
+/// ```
+#[test]
+fn linear_history_root_without_the_durability_v2_family_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("root.sqlite");
+    let families = notes_schema().column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let pre_durability_v2_profile = groove::storage::StorageCodecProfile::groove_epoch_1()
+        .with_additional_codecs(
+            jazz::storage_codec_profile::JAZZ_EPOCH_1_STORAGE_CODECS
+                .iter()
+                .copied()
+                .filter(|codec| *codec != DURABILITY_V2),
+        )
+        .and_then(|profile| profile.with_additional_codecs([DURABLE_INDEX_V2, ROW_HISTORY]))
+        .expect("pre-durability-v2 node profile");
+    drop(
+        jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
+            &path,
+            &refs,
+            jazz_storage_sqlite::Durability::FullSync,
+            &pre_durability_v2_profile,
+        )
+        .expect("pre-durability-v2 profile root"),
+    );
+    let before = std::fs::read(&path).unwrap();
+    match open_sqlite(&path) {
+        Err(StorageError::UnsupportedStorageCodecs {
+            epoch: 1,
+            missing,
+            unknown,
+        }) => {
+            assert_eq!(missing, vec![DURABILITY_V2.to_owned()]);
+            assert!(unknown.is_empty());
+        }
+        Err(other) => panic!("expected a typed format refusal, got {other}"),
+        Ok(()) => panic!("a root without the durability-v2 family must not open"),
     }
     assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
 }

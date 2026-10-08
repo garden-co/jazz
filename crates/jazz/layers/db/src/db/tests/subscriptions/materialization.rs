@@ -718,25 +718,11 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members() {
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>()
     };
-    let none_opts = ReadOpts {
-        tier: DurabilityTier::None,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::LocalOnly,
-        include_deleted: false,
-        ..ReadOpts::default()
-    };
     let local_opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     };
-    assert_eq!(
-        ids(block_on(db.all(&prepared, none_opts)).unwrap()),
-        BTreeSet::from([published, server_overemitted]),
-        "None reads scan the complete process-local overlay"
-    );
     assert_eq!(
         ids(block_on(db.all(&prepared, local_opts)).unwrap()),
         BTreeSet::from([published, server_overemitted]),

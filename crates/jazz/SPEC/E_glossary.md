@@ -125,7 +125,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   a synced client over a `NodeState`. **`NodeState`** (local engine) / **`Node`**
   (sync participant) are the node-level types beneath it.
 - **`read` / `one` / `all` / `subscribe`** · **`ReadOpts` / internal
-  `LocalUpdates` / `Propagation`** · **`WriteHandle` / Rust `WatchHandle` / binding
+  `ReadTier`** · **`WriteHandle` / Rust `WatchHandle` / binding
   subscription stream** · **`RowIdSource`**
   (`Production` / `Seeded`).
 - **branch column** · **branch key** · **branch-local row** ·

@@ -59,6 +59,10 @@ async function assertWriteHandleContract() {
   void inserted.transactionId;
 
   inserted.wait({ tier: "local" });
+  // @ts-expect-error "edge" is no longer a write durability tier.
+  inserted.wait({ tier: "edge" });
+  // @ts-expect-error WriteHandle also rejects the removed "edge" tier.
+  updated.wait({ tier: "edge" });
   // @ts-expect-error Mergeable mutations require a durability tier when waiting.
   inserted.wait();
 
@@ -68,6 +72,8 @@ async function assertWriteHandleContract() {
     return row.id;
   });
   callbackResult.wait({ tier: "global" });
+  // @ts-expect-error Transaction results use the same two write durability tiers.
+  callbackResult.wait({ tier: "edge" });
 
   const exclusiveResult: ExclusiveWriteResult<string> = await db.exclusiveTransaction(
     () => "committed",

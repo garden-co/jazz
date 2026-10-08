@@ -41,7 +41,7 @@ it("creates a room with its creator's membership, then a sketch with its message
   });
   const room = await creating.wait({ tier: "global" });
   expect(
-    (await owner.all(app.roomMembers.where({ roomId: room.id }), { tier: "global" })).map(
+    (await owner.all(app.roomMembers.where({ roomId: room.id }), { tier: "remote" })).map(
       (member) => member.memberAuthor,
     ),
   ).toEqual([ownerAuthor]);
@@ -60,7 +60,7 @@ it("creates a room with its creator's membership, then a sketch with its message
   });
   const canvas = await sketching.wait({ tier: "global" });
   expect(
-    (await owner.all(app.messages.where({ roomId: room.id }), { tier: "global" })).map(
+    (await owner.all(app.messages.where({ roomId: room.id }), { tier: "remote" })).map(
       (message) => message.canvasId,
     ),
   ).toEqual([canvas.id]);

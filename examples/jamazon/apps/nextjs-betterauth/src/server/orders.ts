@@ -149,9 +149,9 @@ export async function startPayment(
   orderId: string,
 ): Promise<Payment> {
   const paymentId = ids.payment(orderId);
-  const existing = await db.one(app.payments.where({ id: paymentId }), { tier: "global" });
+  const existing = await db.one(app.payments.where({ id: paymentId }), { tier: "remote" });
   if (existing) return existing;
-  const order = await db.one(app.orders.where({ id: orderId }), { tier: "global" });
+  const order = await db.one(app.orders.where({ id: orderId }), { tier: "remote" });
   if (!order) throw new CheckoutError("Order not found", 404);
 
   // The provider sees the same key on every attempt: Stripe returns the same
@@ -191,7 +191,7 @@ export async function settlePayment(
   input: { orderId: string; sandboxOutcome?: SandboxOutcome; now?: Date },
 ): Promise<OrderStatus> {
   const payment = await db.one(app.payments.where({ id: ids.payment(input.orderId) }), {
-    tier: "global",
+    tier: "remote",
   });
   if (!payment) throw new CheckoutError("Payment not started", 404);
   if (payment.status === "succeeded") return currentStatus(db, input.orderId);
@@ -260,7 +260,7 @@ async function addEvent(tx: Tx, order: Order, status: OrderStatus, note: string,
 }
 
 async function currentStatus(db: Db, orderId: string): Promise<OrderStatus> {
-  const order = await db.one(app.orders.where({ id: orderId }), { tier: "global" });
+  const order = await db.one(app.orders.where({ id: orderId }), { tier: "remote" });
   if (!order) throw new CheckoutError("Order not found", 404);
   return order.status;
 }

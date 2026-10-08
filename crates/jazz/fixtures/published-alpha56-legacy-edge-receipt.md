@@ -19,12 +19,14 @@ Edge server acknowledged a write that Core never saw:
 - `coreConfirmed`: a control write from the same client that reached Core:
   fate tag 1, durability tag 3 (Global), `global_time` present.
 
-This root uses the DAG history layout. The linear row-history format
-(`jazz.history-version-current.v4`, `groove.durable-index.v2`) does not read
-it: the test
+This root uses the DAG history layout and the earlier durability tags. The
+linear row-history format (`jazz.history-version-current.v4`,
+`groove.durable-index.v2`) with durability encoding v2
+(`jazz.transaction-durability.v2`, which no longer has an Edge tag) does not
+read it: the test
 `published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_records`
 checks both records byte-for-byte in the physical store, asserts that opening
-with the node profile fails with `UnsupportedStorageCodecs` naming the two
+with the node profile fails with `UnsupportedStorageCodecs` naming the three
 missing families, and checks that both records and every column family are
 unchanged afterwards. An unsynced Edge write in such a root is therefore not
 replayed by current code; the client must sync it with the release that wrote
@@ -33,8 +35,7 @@ it before upgrading.
 There is no published fixture for a tag-2 record that already carries a
 global time. Alpha.56 stores a global time only together with Global
 durability (`ingest_known_transaction` asserts this), so the producer has no
-public path to that byte state. The codec rule alone keeps such a record
-Accepted.
+public path to that byte state. The entire historical root is now rejected regardless of that field.
 
 ## Explicit reproduction
 

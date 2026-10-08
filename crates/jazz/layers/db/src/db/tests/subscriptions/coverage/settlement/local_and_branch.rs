@@ -181,8 +181,7 @@ fn subscription_executes_its_selected_authorization_mode() {
         .unwrap();
     }
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     let mut client = block_on(db.subscribe(&prepared, opts.clone())).unwrap();

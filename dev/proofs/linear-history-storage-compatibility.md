@@ -1,12 +1,15 @@
 # Linear history storage and wire compatibility (#3281)
 
 > **Upgrading requires wiping every Core root: a full server data reset.**
-> The new build refuses an alpha.59 (or earlier) Core, relay or client store
+> The new build refuses an alpha.59 (or earlier) Core, relay or client store,
+> and a store written by main after #3659 (read tiers, durability encoding v2),
 > and there is no converter, so Core and relays must start from an empty
 > root and every client resyncs from it. Data that exists only in the old
 > stores is not carried over. See [What users must do](#what-users-must-do).
 
-Comparison: main `eb772f48d` (alpha.59 formats) against the #3281 branch.
+Comparison: main `eb772f48d` (alpha.59 formats) against the #3281 branch,
+which has since merged main at `63adeca0c` (#3659: read tiers, wire v5 and
+durability encoding v2).
 This document names no verified branch revision: the refusal proofs below
 are its receipts, and they check whichever revision they run on. The two
 lines are **not storage compatible and not wire compatible**. There is **no migration, dual read or downgrade path**.
@@ -23,7 +26,7 @@ Run the refusal proofs with:
 ```sh
 dev/gates/storage-compat.sh
 RUST_MIN_STACK=4194304 cargo test -p jazz --test integration storage_format_refusal
-RUST_MIN_STACK=4194304 cargo test -p jazz --test integration wire_fixtures::pre_v5_peers_are_refused_at_hello_with_a_typed_version_mismatch
+RUST_MIN_STACK=4194304 cargo test -p jazz --test integration wire_fixtures::pre_v6_peers_are_refused_at_hello_with_a_typed_version_mismatch
 ```
 
 The browser receipts run in the TypeScript partition's "browser storage
@@ -34,21 +37,28 @@ merge.
 
 ## What changed
 
-- **Wire:** protocol v3 becomes v5 (`crates/jazz/layers/protocol/src/wire.rs`,
+- **Wire:** protocol v3 becomes v6 (`crates/jazz/layers/protocol/src/wire.rs`,
   `WIRE_PROTOCOL_VERSION`; TypeScript
   `packages/jazz-tools/src/runtime/native-runtime/websocket.ts`,
   `WIRE_PROTOCOL_VERSION`). Row payloads use `JVRR\x02` with no `parents`, a
   `_deletion` cell and trailing `base` and `counter_signs`. `SyncMessage` tags 15/16 and
   `KnownStateDeclaration` tag 2 are reserved and uninhabited. SPEC 8 records
   the boundary ("Linear-history boundary"). Wire v4 (multiple schema
-  predecessors, #3651) never shipped in a release; v5 carries its predecessor
-  vector unchanged and refuses v4 peers the same way it refuses v3 ones.
+  predecessors, #3651) and v5 (#3659: compact durability tags, no Edge role,
+  `Relay=2`, no registration propagation flag) never shipped in a release;
+  v6 carries both unchanged and refuses v5 and v4 peers the same way it
+  refuses v3 ones. This branch used v5 for linear history before #3659 took
+  that number; it was renumbered to v6 when main was merged, and its
+  `SyncMessage` tags (34 `ViewUpdatePart`, 35 `RetryLater`) did not collide
+  with #3659, which added no `SyncMessage` variant.
 - **Storage:** every root that stores rows opens with
   `node_storage_codec_profile()`
   (`crates/jazz/layers/protocol/src/storage_codec_profile.rs`), which is the
   epoch-1 base plus `JAZZ_NODE_STORAGE_CODECS`:
   `groove.durable-index.v2` and `jazz.history-version-current.v4` (#3673 adds
-  `jazz.author-alias.v1`). The storage epoch stays 1. Roots with no row
+  `jazz.author-alias.v1`). Since #3659 the base itself includes
+  `jazz.transaction-durability.v2` (`None=0`, `Local=1`, `Global=2`), so a
+  node root declares 15 families. The storage epoch stays 1. Roots with no row
   history (server account registry, catalogue-entry store) keep
   `epoch_1_storage_codec_profile()` and are unaffected.
 - **Merge fields (SPEC 4 §4.6):** within the same unreleased
@@ -65,17 +75,21 @@ merge.
 
 | Pair                                                 | Where it fails                                                                                                                                                                               | Exact error                                                                                                                                                                                                                                                                           |
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| alpha.59 (v3) client → new (v5) server               | Server, on the client's Hello (`crates/jazz-server/src/server/routes/websocket.rs`, `negotiate_wire` call in the websocket accept path). The server sends one `WireFrame::Error` and closes. | `WireErrorCode::UnsupportedProtocolVersion`, `WireRetry::Never`, message `unsupported wire protocol advertisement: remote 3..=3, expected 5..=5` (`wire.rs`, `negotiate_wire`). An old TS client names the code `unsupported_protocol_version` (`websocket.ts`, `wireErrorCodeName`). |
-| new (v5) client → alpha.59 (v3) server               | Old server, same path on main.                                                                                                                                                               | Same code and retry, message `unsupported wire protocol advertisement: remote 5..=5, expected 3..=3` (main `wire.rs`, `negotiate_wire`).                                                                                                                                              |
-| new TS client reading a server Hello that is not v5  | Client (`websocket.ts`, `decodeServerHello`).                                                                                                                                                | `server must advertise exactly wire protocol 5, got 3..=3`                                                                                                                                                                                                                            |
-| new NAPI binding told a different negotiated version | `crates/jazz-napi/src/lib.rs`, transport constructor.                                                                                                                                        | `server negotiated wire protocol 3, but this native binding supports only 5`                                                                                                                                                                                                          |
-| v3 message envelope on a v5 link                     | `wire.rs`, `validate_metadata`.                                                                                                                                                              | `UnsupportedProtocolVersion`, `wire message protocol version 3 does not match negotiated 5`                                                                                                                                                                                           |
+| alpha.59 (v3) client → new (v6) server               | Server, on the client's Hello (`crates/jazz-server/src/server/routes/websocket.rs`, `negotiate_wire` call in the websocket accept path). The server sends one `WireFrame::Error` and closes. | `WireErrorCode::UnsupportedProtocolVersion`, `WireRetry::Never`, message `unsupported wire protocol advertisement: remote 3..=3, expected 6..=6` (`wire.rs`, `negotiate_wire`). An old TS client names the code `unsupported_protocol_version` (`websocket.ts`, `wireErrorCodeName`). |
+| new (v6) client → alpha.59 (v3) server               | Old server, same path on main.                                                                                                                                                               | Same code and retry, message `unsupported wire protocol advertisement: remote 6..=6, expected 3..=3` (main `wire.rs`, `negotiate_wire`).                                                                                                                                              |
+| new TS client reading a server Hello that is not v6  | Client (`websocket.ts`, `decodeServerHello`).                                                                                                                                                | `server must advertise exactly wire protocol 6, got 3..=3`                                                                                                                                                                                                                            |
+| new NAPI binding told a different negotiated version | `crates/jazz-napi/src/lib.rs`, transport constructor.                                                                                                                                        | `server negotiated wire protocol 3, but this native binding supports only 6`                                                                                                                                                                                                          |
+| v3 message envelope on a v6 link                     | `wire.rs`, `validate_metadata`.                                                                                                                                                              | `UnsupportedProtocolVersion`, `wire message protocol version 3 does not match negotiated 6`                                                                                                                                                                                           |
 | v3 `KnownStateDeclaration::ExactVersionSet` (tag 2)  | Payload decode (`protocol.rs`, `KnownStateDeclaration::Reserved2`).                                                                                                                          | Decode failure; tag 2 is uninhabited.                                                                                                                                                                                                                                                 |
 
 Nothing reaches payload decoding across versions, so no old frame can be
 reinterpreted. Receipt: `crates/jazz/tests/wire_fixtures.rs`,
-`pre_v5_peers_are_refused_at_hello_with_a_typed_version_mismatch` replays frozen
-v3 and v4 Hello frames, a v3 Subscribe frame and a tag-2 declaration.
+`pre_v6_peers_are_refused_at_hello_with_a_typed_version_mismatch` replays frozen
+v3 and v4 Hello frames, every frame of the frozen v5 Hello corpus
+(`crates/jazz/fixtures/wire_hello_frames_v5.json`), a v3 Subscribe frame and a
+tag-2 declaration. A v3 or v4 relay Hello carries the retired role tag 3 and
+already fails frame decoding. A main (v5) peer pairs with a v6 peer the same
+way as the alpha.59 rows above, with `remote 5..=5, expected 6..=6`.
 
 ## What old stores see
 
@@ -97,14 +111,16 @@ Adapter-level receipts are in `crates/jazz/tests/storage_format_refusal.rs`
 in `crates/jazz/layers/node/src/node/tests/native_storage_corpus.rs` (the
 `node::tests::harness::` tests below).
 
-| Root written by                                                                                    | `missing`                                                    | `unknown`                                                | Receipt                                                                                                                                                                                                   |
-| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| alpha.54 RocksDB (published)                                                                       | `groove.durable-index.v2`, `jazz.history-version-current.v4` | none                                                     | `published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error` (refusal is stable on retry); `published_alpha54_native_corpus_is_refused_with_the_typed_codec_error` (no record or family changes) |
-| alpha.56 RocksDB with an unsynced edge-accepted write (previously opened and failed on first read) | same                                                         | none                                                     | `published_alpha56_rocksdb_root_is_refused_with_a_typed_format_error`; `published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_records`                                                   |
-| pre-linear current SQLite and RocksDB corpora (`crates/jazz/fixtures/pre-linear-native-jazz*`)     | same                                                         | none                                                     | `pre_linear_native_corpora_are_refused_before_any_mutation` (SQLite file byte-identical afterwards)                                                                                                       |
-| older epoch-1 settlement SQLite corpus                                                             | same                                                         | `jazz.result-member-key.v1`, `jazz.result-row-source.v1` | same test; `retired_result_codec_profiles_reject_historical_native_roots`                                                                                                                                 |
-| linear history before the compact index (alpha.59 index layout)                                    | `groove.durable-index.v2`                                    | none                                                     | `linear_history_root_without_the_durable_index_family_is_refused`                                                                                                                                         |
-| unreleased history v2 / v3 roots                                                                   | the current families                                         | `jazz.history-version-current.v2` or `.v3`               | `storage_codec_profile.rs`, `node_profile_refuses_history_v2_and_v3_roots`                                                                                                                                |
+| Root written by                                                                                    | `missing`                                                                                      | `unknown`                                                | Receipt                                                                                                                                                                                                   |
+| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| alpha.54 RocksDB (published)                                                                       | `groove.durable-index.v2`, `jazz.history-version-current.v4`, `jazz.transaction-durability.v2` | none                                                     | `published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error` (refusal is stable on retry); `published_alpha54_native_corpus_is_refused_with_the_typed_codec_error` (no record or family changes) |
+| alpha.56 RocksDB with an unsynced edge-accepted write (previously opened and failed on first read) | same                                                                                           | none                                                     | `published_alpha56_rocksdb_root_is_refused_with_a_typed_format_error`; `published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_records`                                                   |
+| pre-linear current SQLite and RocksDB corpora (`crates/jazz/fixtures/pre-linear-native-jazz*`)     | same                                                                                           | none                                                     | `pre_linear_native_corpora_are_refused_before_any_mutation` (SQLite file byte-identical afterwards)                                                                                                       |
+| older epoch-1 settlement SQLite corpus                                                             | same                                                                                           | `jazz.result-member-key.v1`, `jazz.result-row-source.v1` | same test; `retired_result_codec_profiles_reject_historical_native_roots`                                                                                                                                 |
+| linear history before the compact index (alpha.59 index layout)                                    | `groove.durable-index.v2`                                                                      | none                                                     | `linear_history_root_without_the_durable_index_family_is_refused`                                                                                                                                         |
+| main after #3659 (read tiers, DAG history, durability v2)                                          | `groove.durable-index.v2`, `jazz.history-version-current.v4`                                   | none                                                     | `storage_codec_profile.rs`, `node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots`                                                                                                      |
+| unreleased linear history before durability v2                                                     | `jazz.transaction-durability.v2`                                                               | none                                                     | `linear_history_root_without_the_durability_v2_family_is_refused`; `node_profile_refuses_linear_roots_without_durability_v2`                                                                              |
+| unreleased history v2 / v3 roots                                                                   | the current families                                                                           | `jazz.history-version-current.v2` or `.v3`               | `storage_codec_profile.rs`, `node_profile_refuses_history_v2_and_v3_roots`                                                                                                                                |
 
 With #3673, `jazz.author-alias.v1` joins every `missing` list above, and a
 linear-history root written before author aliases is refused with only that
@@ -114,7 +130,7 @@ The manifest bytes of the node profile are pinned in
 (`node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots`).
 
 The current native corpus (`crates/jazz/fixtures/current-native-jazz-*`) is
-re-pinned in the v4 layout and still has to reopen and accept writes
+re-pinned in the v4 layout with durability v2 and still has to reopen and accept writes
 (`committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`).
 The DAG-layout images it replaced moved to `pre-linear-native-jazz-*` and
 stay as refusal evidence.
@@ -134,7 +150,7 @@ it still hold:
 
 ```text
 Missing or invalid IndexedDB storage epoch manifest: unsupported storage format:
-this epoch-1 root lacks codec families ["groove.durable-index.v2","jazz.history-version-current.v4"]
+this epoch-1 root lacks codec families ["groove.durable-index.v2","jazz.history-version-current.v4","jazz.transaction-durability.v2"]
 required by this build and declares [] that this build does not read
 ```
 
@@ -158,9 +174,10 @@ an append from the current writer.
 
 ## What users must do
 
-- **Upgrade clients and servers together.** A v3 (or v4) and a v5 peer never sync.
+- **Upgrade clients and servers together.** A v3, v4 or v5 peer and a v6 peer never sync.
 - **Delete old stores.** Native data directories (RocksDB, SQLite) and browser
-  IndexedDB databases written by alpha.59 or earlier must be removed, then the
+  IndexedDB databases written by alpha.59 or earlier (or by main after #3659)
+  must be removed, then the
   client resyncs from Core. Any write that had not reached Core is lost.
 - **Core and relays** start from an empty root. There is no converter from DAG
   history to row-state history.
@@ -172,4 +189,4 @@ The refusals above are the expected result, and CI asserts them:
 receipts and the `storage_format_refusal` receipts), and the TypeScript
 partition runs the browser corpus receipts. The published alpha.54 and
 alpha.56 archives are append-only evidence and stay as refusal receipts. New
-current corpora must be written in the v4 layout.
+current corpora must be written in the v4 layout with durability v2.

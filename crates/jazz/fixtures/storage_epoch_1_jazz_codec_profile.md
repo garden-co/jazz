@@ -13,15 +13,16 @@ that root at the epoch-one settlement baseline.
   `jazz.catalogue.activation.v1`, `jazz.catalogue.bootstrap-ready.v1`,
   `jazz.catalogue.lens.v1`, `jazz.catalogue.lineage.v1`, `jazz.catalogue.physical-mapping.v1`,
   `jazz.catalogue.schema.v1`, `jazz.catalogue.write-pointer.v1`,
-  `jazz.subscription-program-fact-key.v1`
+  `jazz.subscription-program-fact-key.v1`,
+  `jazz.transaction-durability.v2`
 - adapter parameter: `key-order=unsigned-lexicographic`
 - SHA-256 of the committed canonical `JSM1` bytes:
-  `a3e89ed15b6b2b243fb15c3eef650d843398cf081ecf3be73f650e741349fe96`
+  `72683cdf9083aa6fd76f3b523d5c541c93b57b4d502411ade0d8baff4a2aad36`
 - receipt: `storage_codec_profile::tests::epoch_one_jazz_profile_has_a_pinned_manifest_receipt`
 
 An omitted, added, duplicate, or substituted ID fails profile admission before
 the adapter decodes or mutates ordinary data. After epoch-one freeze, any incompatible inventory change
-requires a new storage epoch, migration decision, and updated fixture; this is
+requires an explicitly versioned codec profile, migration decision, and updated fixture; this is
 not a per-adapter `Bytes` compatibility exception.
 
 The browser IndexedDB adapter additionally stores `storage-manifest`/
@@ -50,18 +51,19 @@ account registry and catalogue-entry store) keep the base profile unchanged.
 - codec registry, in canonical order: the base list with
   `groove.durable-index.v2` inserted first and
   `jazz.history-version-current.v4` inserted after
-  `jazz.catalogue.write-pointer.v1` (14 families)
+  `jazz.catalogue.write-pointer.v1` (15 families)
 - SHA-256 of the committed canonical `JSM1` bytes (adapter sample `memory`,
   `key-order=unsigned-lexicographic`):
-  `06e335498e562c06e78207cddd8027752c673d981640c78ef584aa95406775db`
-  (13 families without `groove.durable-index.v2`:
-  `73ece466df8d410135a648b0697126d9e3a77b977ecd6aaae0718e48bac3f319`)
+  `5c976ed2a3e64d20c72d230145673be62b1d4b320aef36ccc57acf3d0bdfedf1`
+  (14 families without `groove.durable-index.v2`:
+  `b0d8e4455d94b9a7e62dc625e5d65ca89403d35481e42681da27709ed87e9c73`)
 - receipt: `storage_codec_profile::tests::node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots`
 
 A node root written by the DAG layout (alpha.54 to alpha.57) declares only the
 base profile. Manifest admission refuses it with the typed
 `groove::storage::Error::UnsupportedStorageCodecs { epoch: 1, missing:
-["groove.durable-index.v2", "jazz.history-version-current.v4"], unknown: [...] }`
+["groove.durable-index.v2", "jazz.history-version-current.v4",
+"jazz.transaction-durability.v2"], unknown: [...] }`
 before any ordinary key is decoded or written (`tests/storage_format_refusal.rs`).
 No migration exists.
 
@@ -74,7 +76,9 @@ transaction's `made_by`, and the touched-row list moved out of
 `jazz_transactions` into the node-local `jazz_tx_touched_rows`. Neither v2 nor v3 was in a published release. A v2
 or v3 root is refused with `missing: ["groove.durable-index.v2",
 "jazz.history-version-current.v4"], unknown: [<its family>]`
-(`storage_codec_profile::tests::node_profile_refuses_history_v2_and_v3_roots`).
+(`storage_codec_profile::tests::node_profile_refuses_history_v2_and_v3_roots`;
+such a root also predates durability v2 below, so `missing` names
+`jazz.transaction-durability.v2` as well).
 The v2 manifest SHA-256 was
 `1153be8475ab6fd239d109e376663220d349fa9ac1f034b77cbdc8bc38f0631a`; v3 was
 `323199b2f7206bebea3eb2bf48859a253ff648d88a95c0232a66e6025516377d`.
@@ -94,3 +98,21 @@ not the base. A node root with the current history family but without it is refu
 with `missing: ["groove.durable-index.v2"]`
 (`linear_history_root_without_the_durable_index_family_is_refused`). No
 migration exists.
+
+## Durability encoding v2 (read tiers, 2026-10-08)
+
+Durability v2 adds `jazz.transaction-durability.v2` to the epoch-one base
+(13 families): transaction durability is stored with the compact tags
+`None=0`, `Local=1`, `Global=2`. Earlier profiles are rejected without
+migration; the physical Groove epoch stays 1. Because the base grows, the
+node profile above grows with it, so every earlier node root is refused
+naming the families it lacks: a DAG-layout root (alpha.54 to alpha.59) lacks
+all three of `groove.durable-index.v2`, `jazz.history-version-current.v4` and
+`jazz.transaction-durability.v2`, a read-tiers DAG root lacks the first two,
+and an unreleased linear-history root written before durability v2 lacks only
+`jazz.transaction-durability.v2`
+(`linear_history_root_without_the_durability_v2_family_is_refused`). The
+pre-durability-v2 node manifest SHA-256 was
+`06e335498e562c06e78207cddd8027752c673d981640c78ef584aa95406775db`
+(without `groove.durable-index.v2`:
+`73ece466df8d410135a648b0697126d9e3a77b977ecd6aaae0718e48bac3f319`).

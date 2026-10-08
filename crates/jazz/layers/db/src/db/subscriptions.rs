@@ -16,7 +16,8 @@ where
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         authorization: SerializedSubscriptionAuthorization,
     ) -> Result<SubscriptionStream, Error> {
-        self.await_open_schema_for_read(&opts).await?;
+        self.await_open_schema_for_coverage(read_coverage_tier(&opts))
+            .await?;
         let prepared = self
             .prepare_serialized_query_async(query, request_scope)
             .await?;
@@ -50,17 +51,14 @@ where
     /// #     pub use jazz_model::{query, tx};
     /// #     pub use jazz_types::ids;
     /// # }
-    /// # use jazz::db::{LocalUpdates, Propagation, ReadOpts, SubscriptionEvent};
+    /// # use jazz::db::{ReadOpts, SubscriptionEvent};
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
-    /// # use jazz::tx::DurabilityTier;
     /// let db = block_on(open_todos_db())?;
     /// let query = db.prepare_query(&db.table("todos"))?;
     /// let mut subscription = block_on(db.subscribe(
     ///     &query,
     ///     ReadOpts {
-    ///         tier: DurabilityTier::Local,
-    ///         local_updates: LocalUpdates::Immediate,
-    ///         propagation: Propagation::LocalOnly,
+    ///         tier: jazz::db::ReadTier::LocalOnly,
     ///         include_deleted: false,
     ///         ..ReadOpts::default()
     ///     },
@@ -128,7 +126,7 @@ where
         opts: ReadOpts,
         author: AuthorSubject,
     ) -> Result<SubscriptionStream, Error> {
-        let mode = if effective_read_tier(&opts) >= DurabilityTier::Global {
+        let mode = if read_coverage_tier(&opts) >= DurabilityTier::Global {
             QueryAuthorizationMode::ClientLocal
         } else {
             QueryAuthorizationMode::TrustedServing
@@ -175,19 +173,19 @@ where
     ) -> Result<QueryAttachment, Error> {
         self.ensure_open_schema_admitted()?;
         ensure_supported_read_view(&opts)?;
-        if opts.propagation == Propagation::LocalOnly {
+        if opts.tier == ReadTier::LocalOnly {
             return Ok(self.local_query_attachment(prepared, &opts));
         }
         let upstream_opts = self
             .node
-            .upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
+            .upstream_register_shape_options(read_coverage_tier(&opts), opts.read_view.clone());
         self.attach_or_refresh_query_coverage(
             &prepared.shape,
             &prepared.binding,
             upstream_opts,
             self.identity.author,
             prepared.request_policy_binding(self.identity.author)?,
-            effective_read_tier(&opts) >= DurabilityTier::Global,
+            read_coverage_tier(&opts) >= DurabilityTier::Global,
         )
     }
 
@@ -222,12 +220,12 @@ where
     ) -> Result<QueryAttachment, Error> {
         self.ensure_open_schema_admitted()?;
         ensure_supported_read_view(&opts)?;
-        if opts.propagation == Propagation::LocalOnly {
+        if opts.tier == ReadTier::LocalOnly {
             return Ok(self.local_query_attachment(prepared, &opts));
         }
         let upstream_opts = self
             .node
-            .upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
+            .upstream_register_shape_options(read_coverage_tier(&opts), opts.read_view.clone());
         let mut owner = self.node.node.borrow_mut();
         let mut node = prepared.scoped_node(&mut owner, author)?;
         let (shape, binding, _) = super::block_on(node.prepare_query_binding_for_link(
@@ -244,7 +242,7 @@ where
             upstream_opts,
             author,
             prepared.request_policy_binding(author)?,
-            effective_read_tier(&opts) >= DurabilityTier::Global,
+            read_coverage_tier(&opts) >= DurabilityTier::Global,
         )
     }
 
@@ -316,11 +314,24 @@ where
     pub async fn attach_query_with_opts_async(
         &self,
         prepared: &PreparedQuery,
-        mut opts: ReadOpts,
+        opts: ReadOpts,
         open_tx_id: Option<OpenTransactionId>,
         author: Option<AuthorSubject>,
     ) -> Result<QueryAttachment, Error> {
-        self.await_open_schema_for_read(&opts).await?;
+        let coverage_tier = read_coverage_tier(&opts);
+        self.attach_query_with_coverage_async(prepared, opts, coverage_tier, open_tx_id, author)
+            .await
+    }
+
+    pub(super) async fn attach_query_with_coverage_async(
+        &self,
+        prepared: &PreparedQuery,
+        mut opts: ReadOpts,
+        coverage_tier: DurabilityTier,
+        open_tx_id: Option<OpenTransactionId>,
+        author: Option<AuthorSubject>,
+    ) -> Result<QueryAttachment, Error> {
+        self.await_open_schema_for_coverage(coverage_tier).await?;
         ensure_supported_read_view(&opts)?;
         let mut node = match open_tx_id {
             Some(open_tx_id) => {
@@ -338,12 +349,12 @@ where
                 },
             };
         }
-        if opts.propagation == Propagation::LocalOnly {
+        if opts.tier == ReadTier::LocalOnly {
             return Ok(self.local_query_attachment(prepared, &opts));
         }
         let upstream_opts = self
             .node
-            .upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
+            .upstream_register_shape_options(coverage_tier, opts.read_view.clone());
         let (shape, binding) = if let Some(author) = author {
             let (shape, binding, _) = node
                 .prepare_query_binding_for_link(
@@ -364,7 +375,7 @@ where
             upstream_opts,
             author.unwrap_or(self.identity.author),
             prepared.request_policy_binding(author.unwrap_or(self.identity.author))?,
-            effective_read_tier(&opts) >= DurabilityTier::Global,
+            coverage_tier >= DurabilityTier::Global,
         )
     }
 
@@ -954,7 +965,7 @@ where
         allow_pending_overlay: bool,
     ) -> Result<SubscriptionStream, Error> {
         let local_first_opts = ReadOpts {
-            empty_opening: super::EmptyOpening::Deliver,
+            first_load: super::FirstLoad::Deliver,
             ..opts.clone()
         };
         // Boxed so this wrapper adds no inline opener frame to its callers.
@@ -964,6 +975,7 @@ where
             author,
             authorization_mode,
             allow_pending_overlay,
+            None,
         ))
         .await?;
         // A remote window that stops being able to answer before it opens
@@ -978,11 +990,54 @@ where
                 author,
                 authorization_mode,
                 allow_pending_overlay,
+                None,
             ))
             .await?;
             stream.window_fallback = Some(Box::new(fallback));
         }
         Ok(stream)
+    }
+
+    /// Internal one-shot remote-answer path. Coverage is remote while the
+    /// requested read semantics still control visibility of pending writes.
+    #[doc(hidden)]
+    pub async fn subscribe_remote_answer(
+        &self,
+        prepared: &PreparedQuery,
+        mut opts: ReadOpts,
+    ) -> Result<SubscriptionStream, Error> {
+        opts.first_load = FirstLoad::Deliver;
+        let coverage_tier = match opts.tier {
+            ReadTier::LocalOnly => DurabilityTier::Local,
+            ReadTier::LocalFirst | ReadTier::Remote => DurabilityTier::Global,
+        };
+        self.subscribe_one_shot_with_coverage(prepared, opts, None, coverage_tier)
+            .await
+    }
+
+    /// A one-shot server answer may have local-first semantics. Preserve that
+    /// coverage requirement without exposing a coverage override in host options.
+    pub(super) async fn subscribe_one_shot_with_coverage(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: Option<AuthorSubject>,
+        coverage_tier: DurabilityTier,
+    ) -> Result<SubscriptionStream, Error> {
+        let authorization_mode = if author.is_some() && coverage_tier < DurabilityTier::Global {
+            QueryAuthorizationMode::TrustedServing
+        } else {
+            QueryAuthorizationMode::ClientLocal
+        };
+        self.open_gated_subscription(
+            prepared,
+            opts,
+            author.unwrap_or(self.identity.author),
+            authorization_mode,
+            author.is_none(),
+            Some(coverage_tier),
+        )
+        .await
     }
 
     async fn open_gated_subscription(
@@ -992,25 +1047,28 @@ where
         author: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
         allow_pending_overlay: bool,
+        coverage_tier: Option<DurabilityTier>,
     ) -> Result<SubscriptionStream, Error> {
-        self.await_open_schema_for_read(&opts).await?;
+        let coverage_tier = coverage_tier.unwrap_or_else(|| read_coverage_tier(&opts));
+        self.await_open_schema_for_coverage(coverage_tier).await?;
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)
             .await?;
-        let (opts, opening_gate) = self.resolve_empty_opening(prepared, opts, authorization_mode);
-        let requested_read_tier = effective_read_tier(&opts);
+        let (coverage_tier, opening_gate) =
+            self.resolve_first_load(prepared, &opts, authorization_mode, coverage_tier);
+        let requested_read_tier = coverage_tier;
         // A non-durable foreground (a browser tab over its worker, an RN
         // foreground over the relay) registers Local coverage, which settles
         // at the storage owner's local answer, so its `settled` bit cannot
         // tell a gated opening that the authority answered. While the gate is
         // armed it also holds `Global` witness coverage for the same read; the
         // witness's settled authority answer, relayed by the owner, is what
-        // may release an empty opening. The owner-local coverage still
-        // delivers a warm owner cache at once. The host link hint (the owner's
-        // server link) bounds the wait, and the witness is retired when the
-        // gate releases, leaving an ordinary local-first stream.
+        // may release the withheld opening. The host link hint (the owner's
+        // server link) and the read's timeout bound the wait, and the witness
+        // is retired when the gate releases, leaving an ordinary local-first
+        // stream.
         let mut opening_gate = opening_gate;
-        let authority_witnessed = opts.propagation == Propagation::Full
+        let authority_witnessed = opts.tier != ReadTier::LocalOnly
             && self.node.upstream_durability_floor.get() == DurabilityTier::Local
             && opening_gate.is_some_and(|gate| gate.route == super::OpeningRoute::LocalFirst);
         if authority_witnessed && let Some(gate) = opening_gate.as_mut() {
@@ -1019,8 +1077,8 @@ where
         let read_tier = requested_read_tier;
         let pending_overlay = allow_pending_overlay
             && authorization_mode == QueryAuthorizationMode::ClientLocal
-            && requested_read_tier >= DurabilityTier::Global
-            && opts.local_updates == LocalUpdates::Immediate;
+            && opts.tier == ReadTier::LocalFirst
+            && coverage_tier >= DurabilityTier::Global;
         let mut owner = self.node.node.lock().await;
         let mut node = prepared.scoped_node(&mut owner, author)?;
         // The actual maintained opener below compiles and validates this exact
@@ -1084,10 +1142,9 @@ where
         let mut upstream_subscription_handles = Vec::new();
         let mut authority_witness = Vec::new();
         let mut suppress_provisional_opening = false;
-        let remote_propagate_upstream = opts.propagation == Propagation::Full;
         // LocalOnly never sends a query to another node, including a durable
         // browser worker. Full Local reads may still consume its cache.
-        let propagates_upstream = remote_propagate_upstream;
+        let propagates_upstream = opts.tier != ReadTier::LocalOnly;
         if propagates_upstream {
             let upstream_opts = self
                 .node
@@ -1156,7 +1213,6 @@ where
                 read_view: RegisterShapeOptions {
                     tier: settled_tier,
                     read_view: opts.read_view.clone(),
-                    propagate_upstream: remote_propagate_upstream,
                     ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
@@ -1228,7 +1284,6 @@ where
                 &state_binding,
                 settled_tier,
                 opts.read_view.clone(),
-                remote_propagate_upstream,
                 requires_authority_receipt,
                 settled_authority_result.as_ref(),
             ) && (!subscription.has_covered_input_sources()
@@ -1290,7 +1345,7 @@ where
         let closed = Rc::new(Cell::new(false));
         let scalar_reconciliation_enabled = read_tier < DurabilityTier::Global
             && remote_read_tier.is_some()
-            && remote_propagate_upstream
+            && propagates_upstream
             && opts.read_view.is_default()
             && crate::node::simple_scalar_exit_query(state_shape.query());
         // A stream that already opens settled rides a coverage that was live
@@ -1299,7 +1354,7 @@ where
             && !settled
             && authorization_mode == QueryAuthorizationMode::ClientLocal
             && remote_read_tier.is_some()
-            && remote_propagate_upstream
+            && propagates_upstream
             && opts.read_view.is_default()
             && crate::node::single_table_scalar_query(state_shape.query())
         {
@@ -1330,7 +1385,6 @@ where
             pending_overlay,
             remote_read_tier,
             requires_authority_receipt,
-            remote_propagate_upstream,
             read_view: opts.read_view.clone(),
             snapshot: state_snapshot,
             snapshot_index,
@@ -1429,7 +1483,8 @@ where
         author: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
-        self.await_open_schema_for_read(&opts).await?;
+        self.await_open_schema_for_coverage(read_coverage_tier(&opts))
+            .await?;
         ensure_supported_subscription_read_opts(&opts)?;
         let query = relation_query_to_query(query)?;
         let prepared = self.prepare_query(&query)?;

@@ -26,7 +26,7 @@ it("rejects caller credentials and requires an enrolled account handle", async (
       account: fixture.config.account.id,
       identity: fixture.config.account.identity,
     });
-    expect(await db.all(app.notes, { tier: "local" })).toEqual([]);
+    expect(await db.all(app.notes, { tier: "local-first" })).toEqual([]);
   });
 });
 
@@ -44,20 +44,20 @@ it("logout retires old contexts before opening an independently registered ident
     await expect(
       Promise.resolve().then(() => transaction.commit().wait({ tier: "local" })),
     ).rejects.toThrow();
-    await expect(old.all(app.notes, { tier: "local" })).rejects.toThrow();
+    await expect(old.all(app.notes, { tier: "local-first" })).rejects.toThrow();
     await expect(first.createDb()).rejects.toThrow();
     const secondConfig = await first.registerIdentity("second");
     const current = await first.createDb(secondConfig);
-    await expect(old.all(app.notes, { tier: "local" })).rejects.toThrow();
+    await expect(old.all(app.notes, { tier: "local-first" })).rejects.toThrow();
     expect(current.getAuthState().session?.user).toEqual({
       account: secondConfig.account.id,
       identity: secondConfig.account.identity,
     });
-    expect(await current.all(app.notes, { tier: "local" })).toEqual([]);
+    expect(await current.all(app.notes, { tier: "local-first" })).toEqual([]);
     await current.insert(app.notes, { title: "second identity row" }).wait({ tier: "local" });
-    expect((await current.all(app.notes, { tier: "local" })).map((row) => row.title)).toEqual([
-      "second identity row",
-    ]);
+    expect((await current.all(app.notes, { tier: "local-first" })).map((row) => row.title)).toEqual(
+      ["second identity row"],
+    );
   });
 });
 
@@ -67,7 +67,9 @@ it("logout and repeated shutdown retire the public foreground", async () => {
     await db.insert(app.notes, { title: "retained on logout" }).wait({ tier: "local" });
     await fixture.manager.logout();
     await Promise.all([db.shutdown(), db.shutdown()]);
-    await expect(db.all(app.notes, { tier: "local" })).rejects.toThrow("shutting down or closed");
+    await expect(db.all(app.notes, { tier: "local-first" })).rejects.toThrow(
+      "shutting down or closed",
+    );
     expect(() => db.insert(app.notes, { title: "must not reopen" })).toThrow(
       "shutting down or closed",
     );
@@ -75,7 +77,9 @@ it("logout and repeated shutdown retire the public foreground", async () => {
     expect(() => db.beginTransaction()).toThrow("shutting down or closed");
     const reopened = await fixture.createDb(await fixture.loginOriginal());
     await expect
-      .poll(async () => (await reopened.all(app.notes, { tier: "local" })).map((row) => row.title))
+      .poll(async () =>
+        (await reopened.all(app.notes, { tier: "local-first" })).map((row) => row.title),
+      )
       .toEqual(["retained on logout"]);
   });
 });
@@ -85,7 +89,7 @@ it("rejects auth replacement before and after first query without changing publi
     const db = await fixture.createDb();
     const admitted = db.getAuthState();
     for (const materialized of [false, true]) {
-      if (materialized) await db.all(app.notes, { tier: "local" });
+      if (materialized) await db.all(app.notes, { tier: "local-first" });
       expect(() => db.updateAuthToken(null)).toThrow("native-admission bound");
       expect(() =>
         db.updateCookieSession({
@@ -104,7 +108,9 @@ it("rejects operations once shutdown starts even before a runtime was materializ
   await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     const closing = db.shutdown();
-    await expect(db.all(app.notes, { tier: "local" })).rejects.toThrow("shutting down or closed");
+    await expect(db.all(app.notes, { tier: "local-first" })).rejects.toThrow(
+      "shutting down or closed",
+    );
     expect(() => db.insert(app.notes, { title: "must not initialize" })).toThrow(
       "shutting down or closed",
     );
@@ -142,9 +148,11 @@ it("caller config mutation cannot replace the handle behind an existing context"
     const other = await fixture.createDb(secondConfig);
     const original = await fixture.createDb();
     await expect
-      .poll(async () => (await original.all(app.notes, { tier: "local" })).map((row) => row.title))
+      .poll(async () =>
+        (await original.all(app.notes, { tier: "local-first" })).map((row) => row.title),
+      )
       .toEqual(["belongs to first admission"]);
-    expect(await other.all(app.notes, { tier: "local" })).toEqual([]);
+    expect(await other.all(app.notes, { tier: "local-first" })).toEqual([]);
   });
 });
 

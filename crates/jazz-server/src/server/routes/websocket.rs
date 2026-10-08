@@ -1121,7 +1121,7 @@ mod tests {
     use jazz::protocol::SyncMessage;
     use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
     use jazz::schema::{JazzSchema, TableSchema};
-    use jazz::tx::{DurabilityTier, Fate, TxId};
+    use jazz::tx::{Fate, TxId};
     use jazz::wire::decode_frame;
     use jazz::wire::{
         FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
@@ -1988,7 +1988,7 @@ mod tests {
             .attach_query_with_opts(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..Default::default()
                 },
             )
@@ -2899,7 +2899,7 @@ mod tests {
                 .attach_query_with_opts(
                     &query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2917,7 +2917,7 @@ mod tests {
                 .attach_query_with_opts(
                     &query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2938,7 +2938,7 @@ mod tests {
                 .all(
                     query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2957,7 +2957,7 @@ mod tests {
                 .all(
                     query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )

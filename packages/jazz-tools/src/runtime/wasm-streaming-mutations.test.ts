@@ -196,7 +196,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
   it("keeps real WASM reads pending while storage owns the node", async () => {
     const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
     const query = queryFromTable("todos");
-    const opts = { tier: "local", propagation: "local_only" };
+    const opts = { tier: "local-only" };
     const commitGate = pageStore.armCommitGate();
     const upload = db.beginStreamingMutation(
       "todos",
@@ -241,8 +241,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
       cancelSubscription = runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
         undefined,
-        "local",
-        JSON.stringify({ propagation: "local-only" }),
+        "local-only",
       );
       const opening = deferredVoid();
       let openingError: unknown;
@@ -398,7 +397,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
           app.wasmSchema,
         ),
         null,
-        "local",
+        "local-first",
       ),
     ).resolves.toEqual([
       {

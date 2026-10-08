@@ -25,7 +25,7 @@ describe("vue/create-jazz-client integration", () => {
         title: "buy milk",
         done: false,
       });
-      const rows = await client.db.all(allTodosQuery, { tier: "local" });
+      const rows = await client.db.all(allTodosQuery, { tier: "local-first" });
 
       expect(
         rows.some(
@@ -45,7 +45,7 @@ describe("vue/create-jazz-client integration", () => {
     try {
       client = await createJazzClient(await localAccountConfig(makeAppId("shutdown")));
       await client.db.insert(todosTable, { title: "shutdown-check", done: false });
-      await client.db.all(allTodosQuery, { tier: "local" });
+      await client.db.all(allTodosQuery, { tier: "local-first" });
 
       await expect(client.shutdown()).resolves.toBeUndefined();
       client = null;

@@ -40,11 +40,11 @@ use serde::{Deserialize, Serialize};
 
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/fixtures/wire_message_frames.json"
+    "/fixtures/wire_message_frames_v6.json"
 );
 const HELLO_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/fixtures/wire_hello_frames.json"
+    "/fixtures/wire_hello_frames_v6.json"
 );
 const NATIVE_ROW_CODEC_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -798,7 +798,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v5",
+        fixture_set: "jazz-wire-message-frames-v6",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -870,7 +870,7 @@ fn hello_fixture_manifest() -> HelloManifest {
                 role: match role {
                     WirePeerRole::Client => 0,
                     WirePeerRole::Core => 1,
-                    WirePeerRole::Relay => 3,
+                    WirePeerRole::Relay => 2,
                 },
                 authority_node_hex: authority_epoch.map(|_| hex(authority_node.as_bytes())),
                 authority_epoch: authority_epoch.map(|epoch| {
@@ -887,7 +887,7 @@ fn hello_fixture_manifest() -> HelloManifest {
         .collect();
 
     HelloManifest {
-        fixture_set: "jazz-wire-hello-frames-v1",
+        fixture_set: "jazz-wire-hello-frames-v6",
         codec: "postcard WireFrame::Hello(WireHello)",
         fixtures,
     }
@@ -904,14 +904,14 @@ fn wire_hello_frame_fixtures_are_current() {
         return;
     }
 
-    let expected = include_str!("../fixtures/wire_hello_frames.json");
+    let expected = include_str!("../fixtures/wire_hello_frames_v6.json");
     assert_eq!(actual, expected, "wire Hello fixtures changed");
 }
 
 #[test]
 fn wire_hello_frame_fixtures_decode_exactly() {
     let fixture_manifest: HelloManifest =
-        serde_json::from_str(include_str!("../fixtures/wire_hello_frames.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_hello_frames_v6.json"))
             .expect("wire Hello fixture manifest deserializes");
     for fixture in fixture_manifest.fixtures {
         let frame_bytes = parse_hex(&fixture.frame_hex);
@@ -983,41 +983,77 @@ fn retired_wire_tag_12_rejects_decoding() {
     }
 }
 
-/// Wire protocol v5 (linear row-state history) refuses every pre-v5 peer at
-/// the Hello handshake with the typed `UnsupportedProtocolVersion`/`Never`
-/// error, before any payload is decoded.
+/// Wire protocol v6 (linear row-state history over v5's compact durability
+/// tags) refuses every pre-v6 peer at the Hello handshake with the typed
+/// `UnsupportedProtocolVersion`/`Never` error, before any payload is decoded.
 ///
-/// Actors: `alice` runs a v5 Core; `bob` still runs a v3 build (alpha.54 to
-/// alpha.57) and `carol` a v4 build (multiple schema predecessors, version
-/// DAG history). Their frozen Hello frames, and bob's Subscribe frame, are
-/// replayed verbatim.
+/// Actors: `alice` runs a v6 Core; `bob` still runs a v3 build (alpha.54 to
+/// alpha.57), `carol` a v4 build (multiple schema predecessors, version DAG
+/// history) and `dave` a v5 build (read tiers: compact durability tags, no
+/// Edge role, version DAG history). Their frozen Hello frames, and bob's
+/// Subscribe frame, are replayed verbatim; dave's are every frame of the
+/// frozen `wire_hello_frames_v5.json` corpus.
 ///
 /// ```text
-/// bob(v3)   ──Hello 3..=3──► alice(v5) ──✗ UnsupportedProtocolVersion, retry Never
-/// carol(v4) ──Hello 4..=4──► alice(v5) ──✗ UnsupportedProtocolVersion, retry Never
-/// bob(v3)   ──Message v3──► alice(v5) ──✗ envelope version mismatch (never decoded)
-/// bob(v3)   ──ExactVersionSet (tag 2) in a v5 envelope──► ✗ reserved tag, not a Watermark
+/// bob(v3)   ──Hello 3..=3──► alice(v6) ──✗ UnsupportedProtocolVersion, retry Never
+/// carol(v4) ──Hello 4..=4──► alice(v6) ──✗ UnsupportedProtocolVersion, retry Never
+/// dave(v5)  ──Hello 5..=5──► alice(v6) ──✗ UnsupportedProtocolVersion, retry Never
+/// bob(v3)   ──Message v3──► alice(v6) ──✗ envelope version mismatch (never decoded)
+/// bob(v3)   ──ExactVersionSet (tag 2) in a v6 envelope──► ✗ reserved tag, not a Watermark
 /// ```
 ///
 /// Exact frames are not a public database API, so this is a codec-level
-/// receipt: the inputs are the bytes the v3 and v4 fixture sets froze.
+/// receipt: the inputs are the bytes the v3, v4 and v5 fixture sets froze.
 #[test]
-fn pre_v5_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
-    assert_eq!(WIRE_PROTOCOL_VERSION, 5);
-    let old_hellos = [
+fn pre_v6_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
+    assert_eq!(WIRE_PROTOCOL_VERSION, 6);
+    let frozen_v5: HelloManifest =
+        serde_json::from_str(include_str!("../fixtures/wire_hello_frames_v5.json"))
+            .expect("frozen v5 Hello corpus parses");
+    assert_eq!(frozen_v5.fixture_set, "jazz-wire-hello-frames-v5");
+    assert!(!frozen_v5.fixtures.is_empty());
+    let mut old_hellos = vec![
         // `wire_hello_frames.json` (jazz-wire-hello-frames-v1) at wire v3 (bob).
-        (3, "000303000000"),
-        (3, "000303010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
-        (3, "000303f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
-        (3, "00030388020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
+        (3, "000303000000".to_owned()),
+        (
+            3,
+            "000303010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02".to_owned(),
+        ),
+        (
+            3,
+            "000303f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02".to_owned(),
+        ),
         // The same fixture set at wire v4 (carol).
-        (4, "000404000000"),
-        (4, "000404010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
-        (4, "000404f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
-        (4, "00040488020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02"),
+        (4, "000404000000".to_owned()),
+        (
+            4,
+            "000404010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02".to_owned(),
+        ),
+        (
+            4,
+            "000404f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02".to_owned(),
+        ),
     ];
+    // A v3/v4 relay advertised the retired role tag 3 (v5 renumbered Relay to
+    // 2), so its Hello fails frame decoding before negotiation is reached.
+    for hex_frame in [
+        "00030388020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+        "00040488020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+    ] {
+        assert!(
+            jazz::wire::decode_frame(&parse_hex(hex_frame)).is_err(),
+            "an old relay Hello must not decode: {hex_frame}"
+        );
+    }
+    // Every frame of the frozen read-tiers v5 corpus (dave).
+    old_hellos.extend(
+        frozen_v5
+            .fixtures
+            .into_iter()
+            .map(|fixture| (5, fixture.frame_hex)),
+    );
     for (version, hex_frame) in old_hellos {
-        let WireFrame::Hello(hello) = jazz::wire::decode_frame(&parse_hex(hex_frame))
+        let WireFrame::Hello(hello) = jazz::wire::decode_frame(&parse_hex(&hex_frame))
             .expect("an old Hello is a canonical frame")
         else {
             panic!("expected a Hello frame");
@@ -1027,7 +1063,7 @@ fn pre_v5_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
             (version, version)
         );
         let error = jazz::wire::negotiate_wire(&hello, jazz::wire::current_wire_features())
-            .expect_err("alice's v5 Core must refuse an old Hello");
+            .expect_err("alice's v6 Core must refuse an old Hello");
         assert_eq!(
             error.code,
             jazz::wire::WireErrorCode::UnsupportedProtocolVersion
@@ -1036,7 +1072,7 @@ fn pre_v5_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
         assert!(
             error
                 .message
-                .contains(&format!("remote {version}..={version}, expected 5..=5")),
+                .contains(&format!("remote {version}..={version}, expected 6..=6")),
             "{}",
             error.message
         );
@@ -1050,13 +1086,13 @@ fn pre_v5_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
         &bob_v3_subscribe,
         jazz::wire::current_wire_features(),
     )
-    .expect_err("a v3 envelope must not be admitted on a v5 link");
+    .expect_err("a v3 envelope must not be admitted on a v6 link");
     assert!(
-        rejection.contains("protocol version 3 does not match negotiated 5"),
+        rejection.contains("protocol version 3 does not match negotiated 6"),
         "{rejection}"
     );
 
-    // Even re-wrapped in a v5 envelope, bob's pre-v5 `ExactVersionSet`
+    // Even re-wrapped in a v6 envelope, bob's pre-v6 `ExactVersionSet`
     // declaration (tag 2) is a reserved tag rather than a `Watermark` prefix.
     let WireFrame::Message(envelope) = jazz::wire::decode_frame(&bob_v3_subscribe).unwrap() else {
         panic!("expected a message frame");
@@ -1105,7 +1141,7 @@ fn wire_message_frame_fixtures_are_current() {
         return;
     }
 
-    let expected = include_str!("../fixtures/wire_message_frames.json");
+    let expected = include_str!("../fixtures/wire_message_frames_v6.json");
     assert_eq!(
         actual, expected,
         "wire fixtures changed; review compatibility and run \
@@ -1118,7 +1154,7 @@ fn wire_message_frame_fixtures_are_current() {
 #[test]
 fn wire_message_frame_fixtures_decode_to_expected_messages() {
     let fixture_manifest: Manifest =
-        serde_json::from_str(include_str!("../fixtures/wire_message_frames.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames_v6.json"))
             .expect("wire fixture manifest deserializes");
 
     for (fixture, (name, message_family, expected)) in fixture_manifest
@@ -1194,7 +1230,7 @@ fn supporting_snapshots_reject_duplicate_rows_and_invalid_native_table() {
 #[test]
 fn v1_delegated_policy_fields_reject_old_shapes_and_pin_claim_bytes() {
     let messages = wire_fixture_messages();
-    // `FetchRowVersions` (tag 15) is retired in wire v5, so `Subscribe` is the
+    // `FetchRowVersions` (tag 15) is retired in wire v6, so `Subscribe` is the
     // only direct-policy message left to pin; its retired fixtures are gone.
     for name in ["subscribe_empty_todos_binding"] {
         let (_, _, message) = messages
@@ -1245,10 +1281,10 @@ fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
     assert_eq!(corpus.format, "jazz-wire-frame-artifact-corpus-v1");
 
     let hello: HelloManifest =
-        serde_json::from_str(include_str!("../fixtures/wire_hello_frames.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_hello_frames_v6.json"))
             .expect("Hello fixture manifest parses");
     let messages: Manifest =
-        serde_json::from_str(include_str!("../fixtures/wire_message_frames.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames_v6.json"))
             .expect("message fixture manifest parses");
     let negotiated_features = jazz::wire::current_wire_features();
     let executed = execute_complete_artifact_frames(&hello, &messages, negotiated_features)

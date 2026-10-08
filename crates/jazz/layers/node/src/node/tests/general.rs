@@ -1358,7 +1358,9 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                     .fields()
                     .iter()
                     .enumerate()
-                    .map(|(idx, field)| sample_value(&field.value_type, seed.wrapping_add(idx as u8 + 1)))
+                    .map(|(idx, field)| {
+                        sample_value(&field.value_type, seed.wrapping_add(idx as u8 + 1))
+                    })
                     .collect::<Vec<_>>();
                 Value::Record(groove::records::OwnedRecord::new(
                     descriptor.create(&values).unwrap(),
@@ -2138,19 +2140,18 @@ fn active_session_claim_scope_is_deterministic_and_cancellation_safe() {
     );
 }
 
-// Pin both supported encoding boundaries. Public durability has no Edge tier,
-// but old bytes must decode as Local without renumbering Global.
+// Internal byte-level receipt for jazz.transaction-durability.v2, shared by
+// wire v5 and the manifest-gated persistent record encoding.
 #[test]
-fn durability_encoding_preserves_global_tag_and_decodes_legacy_edge_as_local() {
+fn durability_v2_pins_compact_wire_and_storage_tags() {
     use groove::records::{RecordField, ScalarEnumSchema, ValueType};
-    let ty = ValueType::EnumTag(ScalarEnumSchema::new(
-        "durability", ["none", "local", "edge", "global"],
-    ).unwrap());
+    let ty = ValueType::EnumTag(
+        ScalarEnumSchema::new("durability", ["none", "local", "global"]).unwrap(),
+    );
     for (tag, tier, encoded) in [
         (0, DurabilityTier::None, 0),
         (1, DurabilityTier::Local, 1),
-        (2, DurabilityTier::Local, 1),
-        (3, DurabilityTier::Global, 3),
+        (2, DurabilityTier::Global, 2),
     ] {
         assert_eq!(postcard::from_bytes::<DurabilityTier>(&[tag]).unwrap(), tier);
         assert_eq!(postcard::to_allocvec(&tier).unwrap(), vec![encoded]);
@@ -2159,6 +2160,6 @@ fn durability_encoding_preserves_global_tag_and_decodes_legacy_edge_as_local() {
         assert_eq!(DurabilityTier::read_tuple_raw(&[tag], &ty).unwrap(), tier);
         assert_eq!(tier.to_value(), Value::EnumTag(encoded));
     }
-    assert!(DurabilityTier::from_discriminant(4).is_err());
-    assert!(postcard::from_bytes::<DurabilityTier>(&[4]).is_err());
+    assert!(DurabilityTier::from_discriminant(3).is_err());
+    assert!(postcard::from_bytes::<DurabilityTier>(&[3]).is_err());
 }

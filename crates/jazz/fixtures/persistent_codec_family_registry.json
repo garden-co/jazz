@@ -530,8 +530,8 @@
       },
       "evidence": [
         {
-          "path": "crates/jazz/layers/node/src/node/tests/native_storage_corpus.rs",
-          "anchor": "committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes"
+          "path": "crates/jazz/tests/storage_format_refusal.rs",
+          "anchor": "fn linear_history_root_without_the_durability_v2_family_is_refused"
         },
         {
           "path": "crates/jazz/fixtures/native_storage_corpus.md",
@@ -547,7 +547,7 @@
         "anchor": "### 8.1 One protocol, roles not code"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/fixtures/wire_message_frames.json",
+        "path": "crates/jazz/fixtures/wire_message_frames_v5.json",
         "anchor": "fixture_set"
       },
       "rejection_receipt": {
@@ -688,6 +688,29 @@
         {
           "path": "crates/jazz/layers/db/src/db/tests/node_runtime.rs",
           "anchor": "fn reopened_client_catches_up_from_its_stored_watermark"
+        }
+      ]
+    },
+    {
+      "id": "jazz.transaction-durability.v2",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/9_topology.md",
+        "anchor": "### 9.2 Durability encoding v2 compatibility"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/node/src/node/tests/general.rs",
+        "anchor": "durability_v2_pins_compact_wire_and_storage_tags"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/layers/node/src/node/tests/native_storage_corpus.rs",
+        "anchor": "published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_records"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/tests/storage_format_refusal.rs",
+          "anchor": "fn linear_history_root_without_the_durability_v2_family_is_refused"
         }
       ]
     }

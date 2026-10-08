@@ -10,7 +10,7 @@ use jazz_testkit as support;
 
 use std::time::Duration;
 
-use jazz::db::{LocalUpdates, Propagation, ReadOpts};
+use jazz::db::ReadOpts;
 use jazz::query::{Query, col, eq, lit};
 use jazz::row_input;
 use jazz::tools::policy_expr::rel;
@@ -127,9 +127,7 @@ async fn local_rows(client: &JazzClient, query: Query) -> Vec<(ObjectId, Vec<Val
         .query_with_opts(
             query,
             ReadOpts {
-                tier: jazz::tx::DurabilityTier::Local,
-                local_updates: LocalUpdates::Immediate,
-                propagation: Propagation::LocalOnly,
+                tier: ReadTier::LocalOnly,
                 ..Default::default()
             },
         )
@@ -593,11 +591,13 @@ async fn deleted_invitation_reaches_local_store_while_remote_reads_keep_the_runt
                 }
                 stop.set(true);
             };
+            // Boxed: four concurrent read futures inline would otherwise sit
+            // on the test thread's stack.
             tokio::join!(
-                churn(|| Query::from("entries")),
-                churn(|| Query::from("playlists")),
-                churn(|| Query::from("invitations")),
-                scenario,
+                Box::pin(churn(|| Query::from("entries"))),
+                Box::pin(churn(|| Query::from("playlists"))),
+                Box::pin(churn(|| Query::from("invitations"))),
+                Box::pin(scenario),
             );
 
             let default_ids = |query: Query| {

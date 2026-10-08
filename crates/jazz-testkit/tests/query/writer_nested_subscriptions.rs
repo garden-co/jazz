@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use jazz::db::{LocalUpdates, ReadOpts};
 use jazz::query::{ArraySubquery, Query};
 use jazz::row_input;
 use jazz::tools::test_support::AllowAll;
@@ -9,7 +8,6 @@ use jazz::tools::{
     ColumnType, JazzClient, ObjectId, OrderedRowDelta, ReadTier, Row, SchemaBuilder, TableSchema,
     Value,
 };
-use jazz::tx::DurabilityTier;
 use jazz_server::JazzServer;
 use jazz_testkit::{
     TestingClient, collect_stream_deltas, wait_for_global_txs, wait_for_subscription_update,
@@ -142,18 +140,9 @@ async fn writer_keeps_nested_asset_after_batched_settlement() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let f = Fixture::start().await;
-            // Match the original writer scenario: server-confirmed subscription
-            // with immediate delivery of Alice's own pending writes.
             let mut stream = f
                 .alice
-                .subscribe_with_opts(
-                    query(),
-                    ReadOpts {
-                        tier: DurabilityTier::Global,
-                        local_updates: LocalUpdates::Immediate,
-                        ..Default::default()
-                    },
-                )
+                .subscribe_with_read_tier(query(), ReadTier::Remote)
                 .await
                 .unwrap();
             let mut log = vec![];
@@ -222,23 +211,13 @@ async fn writer_keeps_nested_asset_after_batched_settlement() {
 /// Alice's optimistic nested asset must survive acknowledgement of all three writes.
 /// alice subscribes -> inserts asset, message, attachment -> server settles -> asset remains
 #[tokio::test]
-#[ignore = "#3902: nested asset briefly disappears while writes are acknowledged"]
 async fn writer_keeps_nested_asset_through_settlement() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let f = Fixture::start().await;
-            // Match the original writer scenario: server-confirmed subscription
-            // with immediate delivery of Alice's own pending writes.
             let mut stream = f
                 .alice
-                .subscribe_with_opts(
-                    query(),
-                    ReadOpts {
-                        tier: DurabilityTier::Global,
-                        local_updates: LocalUpdates::Immediate,
-                        ..Default::default()
-                    },
-                )
+                .subscribe_with_read_tier(query(), ReadTier::Remote)
                 .await
                 .unwrap();
             let mut log = vec![];
@@ -293,14 +272,7 @@ async fn writer_keeps_nested_asset_when_each_insert_settles() {
             let f = Fixture::start().await;
             let mut stream = f
                 .alice
-                .subscribe_with_opts(
-                    query(),
-                    ReadOpts {
-                        tier: DurabilityTier::Global,
-                        local_updates: LocalUpdates::Immediate,
-                        ..Default::default()
-                    },
-                )
+                .subscribe_with_read_tier(query(), ReadTier::Remote)
                 .await
                 .unwrap();
             let mut log = vec![];
@@ -391,6 +363,34 @@ async fn writer_keeps_nested_asset_in_local_first_subscription() {
             collect_stream_deltas(&mut stream, &mut log, Duration::from_millis(500)).await;
             assert_fresh_read_has_asset(&f.alice, asset).await;
             assert_asset_stays_visible(&log, asset);
+            f.shutdown().await;
+        })
+        .await;
+}
+
+/// A remote read is answered by the server after Alice's earlier writes reach
+/// it, so it sees them without waiting for their acknowledgements.
+#[tokio::test]
+async fn writer_reads_own_nested_writes_remotely_right_after_inserting() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let f = Fixture::start().await;
+            let (asset, _, _) = f
+                .alice
+                .insert("assets", row_input!("status" => "pending"))
+                .unwrap();
+            let (message, _, _) = f
+                .alice
+                .insert("messages", row_input!("text" => "photo"))
+                .unwrap();
+            f.alice
+                .insert(
+                    "attachments",
+                    row_input!("message_id" => message, "asset_id" => asset),
+                )
+                .unwrap();
+
+            assert_fresh_read_has_asset(&f.alice, asset).await;
             f.shutdown().await;
         })
         .await;

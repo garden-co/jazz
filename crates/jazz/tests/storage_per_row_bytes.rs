@@ -31,7 +31,6 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::RocksDbStorage;
 
 mod common;
@@ -257,7 +256,7 @@ fn storage_per_row_bytes() {
         let _subscriber =
             core.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x61; 16]));
         let global = ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         };
         let projects = writer.prepare_query(&Query::from("projects")).unwrap();

@@ -63,7 +63,7 @@ it.each([
       return alice.insert(app.docs, value);
     });
     await Promise.all(writes.map((write) => write.wait({ tier: "global" })));
-    const rows = await alice.all(app.docs, { tier: "global" });
+    const rows = await alice.all(app.docs, { tier: "remote" });
     expect(rows).toHaveLength(3);
     for (const value of values) {
       expect(rows.find((row) => row.label === value.label)?.body).toBe(value.body);

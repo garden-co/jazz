@@ -50,7 +50,9 @@ try {
       .insert(app.entries, { text: `${type} receipt` })
       .wait({ tier: "local" });
     const check = async () => {
-      const stored = await context.db().one(app.entries.where({ id: row.id }), { tier: "local" });
+      const stored = await context
+        .db()
+        .one(app.entries.where({ id: row.id }), { tier: "local-first" });
       assert.equal(stored?.text, `${type} receipt`);
     };
     await check();
