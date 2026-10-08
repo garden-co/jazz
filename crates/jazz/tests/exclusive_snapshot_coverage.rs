@@ -20,18 +20,23 @@ use std::task::{Context, Poll, Waker};
 mod common;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, RemoteLinkHint, SerializedReadResult,
-    WireTransportAdapter, block_on,
+    CommitUnitTrust, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts,
+    RemoteLinkHint, SerializedReadResult, WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, ArraySubqueryRequirement, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession};
+use jazz::serving::{
+    InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerLinkAdmission, ServerSession,
+};
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, TxId};
-use jazz::wire::{TransportError, WireTransport};
+use jazz::wire::{
+    FEATURE_AUTHORIZATION_SCOPE_VIEWS, TransportError, WIRE_PROTOCOL_VERSION,
+    WireAuthorityEndpoint, WireTransport, current_wire_features,
+};
 
 use common::compile_schema;
 
@@ -96,6 +101,14 @@ impl Net {
     }
 
     fn with_schema(schema: JazzSchema, clients: &[u8]) -> Self {
+        Self::with_schema_and_scoped_admission(schema, clients, false)
+    }
+
+    fn with_scoped_admission(clients: &[u8]) -> Self {
+        Self::with_schema_and_scoped_admission(schema(), clients, true)
+    }
+
+    fn with_schema_and_scoped_admission(schema: JazzSchema, clients: &[u8], scoped: bool) -> Self {
         let mut core = InMemoryServerShell::start(
             InMemoryServerShellConfig::new(schema.clone(), identity(0xc0, AuthorSubject::SYSTEM))
                 .with_role(NodeRole::Core),
@@ -114,10 +127,49 @@ impl Net {
                 )))
                 .unwrap();
                 let wire = QueuedWireTransport::default();
-                block_on(
-                    db.connect_upstream(Box::new(WireTransportAdapter::current(wire.clone()))),
-                );
-                let session = core.accept_subscriber_session(author).unwrap();
+                let session = if scoped {
+                    // The fixture is the admission authority for these in-memory
+                    // endpoints. Bind both directions to the same fresh epochs;
+                    // never infer endpoint identity from a semantic fate frame.
+                    let features = current_wire_features() | FEATURE_AUTHORIZATION_SCOPE_VIEWS;
+                    let client_context = ConnectionSessionContext {
+                        local: WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([byte; 16])),
+                        remote: Some(WireAuthorityEndpoint::fresh(NodeUuid::from_bytes(
+                            [0xc0; 16],
+                        ))),
+                        link_identity: author,
+                        negotiated_features: features,
+                    };
+                    let server_context = ConnectionSessionContext {
+                        local: client_context.remote.unwrap(),
+                        remote: Some(client_context.local),
+                        link_identity: author,
+                        negotiated_features: features,
+                    };
+                    block_on(db.connect_upstream(Box::new(
+                        WireTransportAdapter::new_with_session_context(
+                            wire.clone(),
+                            WIRE_PROTOCOL_VERSION,
+                            features,
+                            None,
+                            Some(client_context),
+                        ),
+                    )));
+                    core.accept_subscriber_session_with_claims_and_trust_and_context(
+                        author,
+                        BTreeMap::new(),
+                        CommitUnitTrust::Session,
+                        features,
+                        Some(server_context),
+                        ServerLinkAdmission::OrdinarySession,
+                    )
+                    .unwrap()
+                } else {
+                    block_on(
+                        db.connect_upstream(Box::new(WireTransportAdapter::current(wire.clone()))),
+                    );
+                    core.accept_subscriber_session(author).unwrap()
+                };
                 Client { db, wire, session }
             })
             .collect();
@@ -1367,4 +1419,134 @@ fn include_under_creator_read_policies_commits() {
 #[test]
 fn include_under_an_inherited_read_policy_commits() {
     assert_include_resolves_and_commits(SharePolicy::InheritedFromList);
+}
+
+fn insert_settled_member(net: &Net, client: usize, code: &str) -> RowUuid {
+    let write = block_on(
+        net.db(client)
+            .insert("members", cells(code), Default::default()),
+    )
+    .unwrap();
+    net.settle(client, write.mergeable_tx_id())
+        .expect("member settles");
+    write.row_uuid()
+}
+
+fn insert_settled_audit_marker(net: &Net, client: usize) {
+    let write = block_on(net.db(client).insert(
+        "audit",
+        BTreeMap::from([(
+            "note".to_owned(),
+            Value::String("snapshot marker".to_owned()),
+        )]),
+        Default::default(),
+    ))
+    .unwrap();
+    net.settle(client, write.mergeable_tx_id())
+        .expect("marker settles globally");
+}
+
+/// A Global WRITE receipt must establish the frozen cut even though this
+/// client has never received the other client's earlier member transaction.
+/// No Global query may intervene: that would mask the missing write seam.
+#[test]
+fn admitted_global_write_receipt_advances_cold_exclusive_snapshot() {
+    let net = Net::with_scoped_admission(&[0x0a, 0x0b]);
+    let before = insert_settled_member(&net, OWNER, "before");
+    assert!(
+        net.read(
+            BACKEND,
+            &Query::from("members"),
+            DurabilityTier::Local,
+            None
+        )
+        .is_empty(),
+        "recipient history must start cold"
+    );
+    insert_settled_audit_marker(&net, BACKEND);
+    let open = OpenTransactionId::new();
+    block_on(net.db(BACKEND).begin_exclusive(open)).unwrap();
+    let after = insert_settled_member(&net, OWNER, "after");
+    let rows = net.read(
+        BACKEND,
+        &Query::from("members"),
+        DurabilityTier::Global,
+        Some(open),
+    );
+    assert_eq!(rows, vec![before]);
+    assert!(!rows.contains(&after));
+    assert!(
+        net.read(
+            BACKEND,
+            &Query::from("members").filter(eq(col("code"), lit("after"))),
+            DurabilityTier::Global,
+            Some(open),
+        )
+        .is_empty(),
+        "a second cold shape must still use the original frozen cut"
+    );
+    assert_eq!(
+        net.read(
+            BACKEND,
+            &Query::from("members"),
+            DurabilityTier::Local,
+            Some(open),
+        ),
+        vec![before]
+    );
+    net.db(BACKEND).abandon_transaction_handle(open).unwrap();
+}
+
+/// Delivery after begin advances future cuts, never an already-open snapshot.
+#[test]
+fn admitted_global_write_receipt_does_not_advance_an_existing_snapshot() {
+    let net = Net::with_scoped_admission(&[0x0a, 0x0b]);
+    let before = insert_settled_member(&net, OWNER, "before");
+    let old = OpenTransactionId::new();
+    block_on(net.db(BACKEND).begin_exclusive(old)).unwrap();
+    insert_settled_audit_marker(&net, BACKEND);
+    let new = OpenTransactionId::new();
+    block_on(net.db(BACKEND).begin_exclusive(new)).unwrap();
+    assert!(
+        net.read(
+            BACKEND,
+            &Query::from("members"),
+            DurabilityTier::Global,
+            Some(old),
+        )
+        .is_empty(),
+        "a receipt delivered after begin must not rewrite the base snapshot"
+    );
+    net.db(BACKEND).abandon_transaction_handle(old).unwrap();
+    assert_eq!(
+        net.read(
+            BACKEND,
+            &Query::from("members"),
+            DurabilityTier::Global,
+            Some(new),
+        ),
+        vec![before]
+    );
+    net.db(BACKEND).abandon_transaction_handle(new).unwrap();
+}
+
+/// Legacy contextless transport may retain its existing fate/outbox semantics,
+/// but an unadmitted Global fate must not publish an authority-wide snapshot cut.
+#[test]
+fn contextless_global_write_fate_does_not_advance_authority_snapshot_cut() {
+    let net = Net::new(&[0x0a, 0x0b]);
+    insert_settled_member(&net, OWNER, "unseen");
+    insert_settled_audit_marker(&net, BACKEND);
+    let open = OpenTransactionId::new();
+    block_on(net.db(BACKEND).begin_exclusive(open)).unwrap();
+    assert!(
+        net.read(
+            BACKEND,
+            &Query::from("members"),
+            DurabilityTier::Global,
+            Some(open),
+        )
+        .is_empty()
+    );
+    net.db(BACKEND).abandon_transaction_handle(open).unwrap();
 }
