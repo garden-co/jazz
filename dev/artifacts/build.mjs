@@ -29,14 +29,14 @@ import {
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const commands = {
   wasm: {
-    // The correctness suite exercises substantial engine work. Light optimisation
+    // The correctness suite exercises substantial engine work. Optimisation
     // retains dev invariant checks and checked arithmetic throughout the runtime.
     fast: [
       "wasm-pack",
       ["build", "crates/jazz-wasm", "--target", "web", "--dev"],
       [
         "--config",
-        "profile.dev.opt-level=1",
+        "profile.dev.opt-level=2",
         "--config",
         "profile.dev.debug-assertions=true",
         "--config",
