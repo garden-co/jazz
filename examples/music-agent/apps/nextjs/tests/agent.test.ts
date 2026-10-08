@@ -38,7 +38,6 @@ async function secondBackend(): Promise<Db> {
     serverUrl: server.url,
     initial: { backendSecret: server.backendSecret },
     env: jazzEnv,
-    tier: "global",
   });
   secondSession = session;
   const client = session.getSnapshot().client;

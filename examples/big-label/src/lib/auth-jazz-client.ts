@@ -36,7 +36,6 @@ export async function authJazzClient(): Promise<JazzClient> {
     jwtAudience: appOrigin(),
     initial: { backendSecret: serverSecret("BACKEND_SECRET", "big-label-dev-backend") },
     env: process.env.NODE_ENV === "production" ? "prod" : "dev",
-    tier: "global",
   }));
   try {
     const session = await pending;

@@ -115,22 +115,14 @@ describe("JazzClient runtime helpers", () => {
     };
 
     const JazzClientCtor = JazzClient as unknown as {
-      new (
-        runtime: Runtime,
-        context: AppContext,
-        defaultDurabilityTier: "local" | "global",
-      ): JazzClient;
+      new (runtime: Runtime, context: AppContext): JazzClient;
     };
-    const client = new JazzClientCtor(
-      runtime,
-      {
-        appId: "test-app",
-        schema: {},
-        serverUrl: "http://localhost:1625",
-        backendSecret: "test-backend-secret",
-      },
-      "global",
-    );
+    const client = new JazzClientCtor(runtime, {
+      appId: "test-app",
+      schema: {},
+      serverUrl: "http://localhost:1625",
+      backendSecret: "test-backend-secret",
+    });
 
     const transactionId = client.beginTransaction("exclusive");
     client.insertInternal(

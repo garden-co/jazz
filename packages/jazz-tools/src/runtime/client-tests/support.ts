@@ -135,14 +135,10 @@ export function makeClient() {
   };
 
   const JazzClientCtor = JazzClient as unknown as {
-    new (
-      runtime: Runtime,
-      context: AppContext,
-      defaultDurabilityTier: "local" | "global",
-    ): JazzClient;
+    new (runtime: Runtime, context: AppContext): JazzClient;
   };
   return {
-    client: new JazzClientCtor(runtime, context, "global"),
+    client: new JazzClientCtor(runtime, context),
     queryCalls,
     createSubscriptionCalls,
     executeSubscriptionCalls,
@@ -173,11 +169,7 @@ export function makeClientWithContext(context: AppContext): JazzClient {
   };
 
   const JazzClientCtor = JazzClient as unknown as {
-    new (
-      runtime: Runtime,
-      context: AppContext,
-      defaultDurabilityTier: "local" | "global",
-    ): JazzClient;
+    new (runtime: Runtime, context: AppContext): JazzClient;
   };
-  return new JazzClientCtor(runtime, context, "global");
+  return new JazzClientCtor(runtime, context);
 }

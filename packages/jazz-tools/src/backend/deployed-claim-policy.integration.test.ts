@@ -57,7 +57,6 @@ describe("deployed permissions with claims in referenced read policies", () => {
         app,
         permissions,
         serverUrl: server.url,
-        tier: "local",
         driver: { type: "memory" },
       });
       sessions.push(session);

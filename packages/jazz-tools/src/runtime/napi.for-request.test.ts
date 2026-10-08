@@ -175,7 +175,6 @@ async function createTestContext(
     backendSecret,
     jwtPublicKey: externalJwtPublicKey,
     env: "test",
-    tier: "local",
   });
 
   onTestFinished(async () => {
@@ -910,7 +909,6 @@ it.each(["table", "relation"] as const)(
       serverUrl: server.url,
       backendSecret,
       env: "test",
-      tier: "local",
       driver: { type: "memory" },
     });
     const reader = createJazzContext({
@@ -920,7 +918,6 @@ it.each(["table", "relation"] as const)(
       serverUrl: server.url,
       backendSecret,
       env: "test",
-      tier: "local",
       driver: { type: "memory" },
     });
     onTestFinished(async () => {
@@ -1088,7 +1085,6 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    tier: "local",
     driver: { type: "memory" },
   });
   const reader = createJazzContext({
@@ -1098,7 +1094,6 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    tier: "local",
     driver: { type: "memory" },
   });
   onTestFinished(async () => {
@@ -1146,7 +1141,6 @@ it("rejects a scoped remote wait when its context shuts down offline", async () 
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    tier: "local",
     driver: { type: "memory" },
   });
   onTestFinished(() => context.shutdown());

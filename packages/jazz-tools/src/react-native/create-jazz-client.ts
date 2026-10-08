@@ -19,7 +19,7 @@ export interface JazzClient {
  * application's trusted native admission code; no JSI factory, byte codec,
  * storage path, or native owner helper is part of this public API.
  */
-export type JazzClientConfig = AccountDbConfig & Pick<DbConfig, "nativeRelay" | "sqliteStorage">;
+export type JazzClientConfig = AccountDbConfig & Pick<DbConfig, "nativeRelay">;
 
 async function createJazzClientInternal(config: JazzClientConfig): Promise<JazzClient> {
   const db = await createDb(config);

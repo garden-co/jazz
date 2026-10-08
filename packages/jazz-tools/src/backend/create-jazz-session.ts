@@ -134,7 +134,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
         readAuthorizationHost: "client-local",
       },
     );
-    const context: AppContext = { ...config, schema: runtimeSchema, tier: "local" };
+    const context: AppContext = { ...config, schema: runtimeSchema };
     setTrustedReservedSession(context, trustedReservedSession);
     return RuntimeClient.connectWithRuntime(runtime, context, { onAuthFailure });
   }

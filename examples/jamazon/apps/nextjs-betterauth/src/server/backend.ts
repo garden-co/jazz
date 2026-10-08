@@ -36,7 +36,6 @@ export async function backend(): Promise<JazzClient> {
     },
     env: jazzEnv,
     jwtAudience: serverConfig.origin,
-    tier: "global",
   }));
   try {
     const session = await pending;

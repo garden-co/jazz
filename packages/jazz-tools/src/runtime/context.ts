@@ -111,17 +111,11 @@ export interface AppContext {
   /** Application identifier (used for isolation) */
   appId: string;
 
-  /** Optional client ID (generated if not provided) */
-  clientId?: string;
-
   /** Schema definition */
   schema: WasmSchema;
 
   /** Optional server URL for sync */
   serverUrl?: string;
-
-  /** Optional runtime source overrides for WASM loading. */
-  runtimeSources?: RuntimeSourcesConfig;
 
   /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
@@ -154,16 +148,4 @@ export interface AppContext {
    * On `/ws`, a valid admin secret authenticates this client as the backend.
    */
   adminSecret?: string;
-
-  /**
-   * Durability tier identity for this node (or identities for multi-role nodes).
-   * Set for server nodes to enable durability notifications.
-   * Clients typically leave this undefined.
-   */
-  tier?: "local" | "global" | Array<"local" | "global">;
-
-  /**
-   * Default durability tier for reads and writes when no explicit tier is provided.
-   */
-  defaultDurabilityTier?: "local" | "global";
 }
