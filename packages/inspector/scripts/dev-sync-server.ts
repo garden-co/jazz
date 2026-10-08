@@ -39,7 +39,6 @@ export default async function runServer({
       driver: { type: "memory" },
       serverUrl: serverHandle.url,
       initial: { backendSecret: serverHandle.backendSecret },
-      defaultDurabilityTier: "global",
     });
 
     const snapshot = session.getSnapshot();

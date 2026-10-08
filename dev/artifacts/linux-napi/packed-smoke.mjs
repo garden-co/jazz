@@ -40,9 +40,7 @@ try {
         driver,
         // The memory backend requires a configured URL. db() does not enable
         // authenticated transport; all operations explicitly use the local tier.
-        ...(type === "memory"
-          ? { serverUrl: "http://127.0.0.1:9", defaultDurabilityTier: "local" }
-          : {}),
+        ...(type === "memory" ? { serverUrl: "http://127.0.0.1:9" } : {}),
       });
     context = open();
     const row = await context

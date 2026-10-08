@@ -161,9 +161,4 @@ export interface AppContext {
    * Clients typically leave this undefined.
    */
   tier?: "local" | "global" | Array<"local" | "global">;
-
-  /**
-   * Default durability tier for reads and writes when no explicit tier is provided.
-   */
-  defaultDurabilityTier?: "local" | "global";
 }

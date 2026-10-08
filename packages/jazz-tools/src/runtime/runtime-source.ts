@@ -112,11 +112,6 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
  * concrete schemas.
  */
 export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
-  /** Client hosts can select local-first reads independently of DOM globals. */
-  get defaultDurabilityTier(): "local" | "global" | undefined {
-    return undefined;
-  }
-
   /** Set to true when this source can host browser persistence in a dedicated worker. */
   readonly supportsBrowserWorker: boolean = false;
   /** Set to false when the runtime must receive schemas exactly as declared. */

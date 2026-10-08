@@ -46,7 +46,6 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
         cookieSession: config.cookieSession,
         adminSecret: config.adminSecret,
         tier: "local",
-        defaultDurabilityTier: config.serverUrl ? "global" : undefined,
       },
       {
         onAuthFailure,

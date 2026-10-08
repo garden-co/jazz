@@ -6,7 +6,6 @@ import {
   WriteHandle,
   setWriteWaitReadiness,
   ReadTier,
-  resolveDefaultDurabilityTier,
   resolveEffectiveQueryExecutionOptions,
   publicQueryExecutionOptions,
   type Runtime,
@@ -603,13 +602,31 @@ describe("JazzClient.updateCookieSession", () => {
   });
 });
 
-describe("resolveDefaultDurabilityTier", () => {
-  it("uses local as the default offline durability tier", () => {
-    expect(resolveDefaultDurabilityTier({})).toBe("local");
+describe("default read tier", () => {
+  it("uses local-first without a server", () => {
+    expect(resolveEffectiveQueryExecutionOptions({}).tier).toBe(ReadTier.LocalFirst);
   });
 
-  it("still prefers global when a server is configured outside the browser runtime", () => {
-    expect(resolveDefaultDurabilityTier({ serverUrl: "https://example.test" })).toBe("global");
+  it("uses remote with a server outside client platforms", () => {
+    expect(resolveEffectiveQueryExecutionOptions({ serverUrl: "https://example.test" }).tier).toBe(
+      ReadTier.Remote,
+    );
+  });
+
+  it.each([
+    { window: {}, document: {}, navigator: undefined },
+    { window: undefined, document: undefined, navigator: { product: "ReactNative" } },
+  ])("uses local-first on client platforms", (globals) => {
+    try {
+      for (const [name, value] of Object.entries(globals)) vi.stubGlobal(name, value);
+      const context = { serverUrl: "https://example.test" };
+      expect(resolveEffectiveQueryExecutionOptions(context).tier).toBe(ReadTier.LocalFirst);
+      expect(resolveEffectiveQueryExecutionOptions(context, { tier: ReadTier.Remote }).tier).toBe(
+        ReadTier.Remote,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
