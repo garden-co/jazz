@@ -983,10 +983,14 @@ export class E2ee {
         // Existing journals are account-scoped and survive schema changes.
         // Only a new encrypted application founder may bypass online enrollment.
         if (known || ownsFounder) {
-          if (!(await this.db.authenticatedTableIdentity(this.app.__e2ee_account_identities)))
+          if (!(await this.db.authenticatedTableIdentity(this.app.__e2ee_account_identities))) {
+            // A fresh online root can authenticate its catalogue through normal
+            // enrollment. A retained proposal must keep its exact local authority.
+            if (!known) return false;
             throw new E2eeInitializationNotReady(
               "An authenticated application catalogue is required",
             );
+          }
           const identity = await this.db.one(
             this.app.__e2ee_account_identities.includeDeleted().where({ id: this.account.id }),
             { tier: "local" },
