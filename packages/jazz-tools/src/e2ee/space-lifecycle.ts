@@ -886,7 +886,8 @@ export class Spaces {
     prepareData: Parameters<Spaces["prepareInitial"]>[3],
     seed?: InitialSpaceSeed,
   ): Promise<boolean> {
-    const address = await this.address(scope, identifier);
+    const retainedScopeId = await this.db.authenticatedTableIdentity(scope);
+    const address = await this.address(scope, identifier, retainedScopeId !== null);
     const roots = this.tables.__e2ee_spaces.where(address);
     if (tx) {
       if (await tx.one(roots.includeDeleted(), { tier: "local" })) return false;
@@ -919,7 +920,8 @@ export class Spaces {
   ): Promise<void> {
     if (tx.kind !== "exclusive")
       throw new Error("E2EE initialisation requires an exclusive transaction");
-    const address = await this.address(scope, identifier);
+    const retainedScopeId = await this.db.authenticatedTableIdentity(scope);
+    const address = await this.address(scope, identifier, retainedScopeId !== null);
     const pending = seed && initialSeeds.get(seed);
     if (
       seed &&
@@ -1205,7 +1207,8 @@ export class Spaces {
     options: StreamingSpaceOptions,
     stage: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<R>,
   ): Promise<{ value: R; plan: StreamingSpacePlan }> {
-    const address = await this.address(scope, identifier);
+    const retainedScopeId = await this.db.authenticatedTableIdentity(scope);
+    const address = await this.address(scope, identifier, retainedScopeId !== null);
     const newScope = options.newScope === true;
     const rootId = spaceRootId(address);
     const recipients = initialRecipientIds(options.initialRecipients ?? [this.accountId]);

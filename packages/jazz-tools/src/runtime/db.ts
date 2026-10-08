@@ -1806,7 +1806,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       const initial =
         borrowed ??
         (this.initialSpaceKeys.size
-          ? this.initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${identifier.value}`)
+          ? this.initialSpaceKeys.get(
+              `${(await db.authenticatedTableIdentity(scope)) ?? (await db.tableIdentity(scope))}:${identifier.value}`,
+            )
           : undefined);
       const stage = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
         for (const name of declaration.columns) {
@@ -1886,7 +1888,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           if (this.encryptedInsertBatch === batch) this.encryptedInsertBatch = undefined;
           if (batch.writes.length === 1) return batch.writes[0]!(io);
           const initial = this.initialSpaceKeys.size
-            ? this.initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${identifier.value}`)
+            ? this.initialSpaceKeys.get(
+                `${(await db.authenticatedTableIdentity(scope)) ?? (await db.tableIdentity(scope))}:${identifier.value}`,
+              )
             : undefined;
           let epoch: string | undefined;
           let initialisedHere = false;
@@ -2392,7 +2396,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       const db = this.e2ee.db;
       const scope = new TypedTableQueryBuilder(declaration.scope, table._schema);
       const initial = this.initialSpaceKeys.size
-        ? this.initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${identifier}`)
+        ? this.initialSpaceKeys.get(
+            `${(await db.authenticatedTableIdentity(scope)) ?? (await db.tableIdentity(scope))}:${identifier}`,
+          )
         : undefined;
       const stage = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
         for (const name of changed) {
@@ -3892,11 +3898,14 @@ export class Db {
     try {
       for (const entry of streams) {
         const { table, stream } = entry;
-        entry.tableId = (await this.tableIdentity(table)) ?? undefined;
-        entry.columnId = (await this.columnIdentity(table, stream!.column)) ?? undefined;
+        const encryption = encryptedSchemas.get(table._schema)?.tables.get(table._table);
+        const retainedIdentity = encryption ? await this.authenticatedTableIdentity(table) : null;
+        entry.tableId = retainedIdentity ?? (await this.tableIdentity(table)) ?? undefined;
+        entry.columnId =
+          (await this.columnIdentity(table, stream!.column, retainedIdentity !== null)) ??
+          undefined;
         if (!entry.tableId || !entry.columnId)
           throw new Error("Streaming writes require accepted table and column identities");
-        const encryption = encryptedSchemas.get(table._schema)?.tables.get(table._table);
         const prior = priorDeclarations.get(entry);
         if (entry.operation !== "insert") {
           const row = (await this.one(
@@ -4079,14 +4088,21 @@ export class Db {
           await prepareDbTransaction(transaction, async (tx) => {
             for (const group of groups) await group.plan!.validate(tx);
             for (const entry of streams) {
-              if (
-                (await this.tableIdentity(entry.table)) !== entry.tableId ||
-                (await this.columnIdentity(entry.table, entry.stream!.column)) !== entry.columnId
-              )
-                throw new Error("Streaming upload schema identity changed");
               const encryption = encryptedSchemas
                 .get(entry.table._schema)
                 ?.tables.get(entry.table._table);
+              const retainedIdentity = encryption
+                ? await this.authenticatedTableIdentity(entry.table)
+                : null;
+              if (
+                (retainedIdentity ?? (await this.tableIdentity(entry.table))) !== entry.tableId ||
+                (await this.columnIdentity(
+                  entry.table,
+                  entry.stream!.column,
+                  retainedIdentity !== null,
+                )) !== entry.columnId
+              )
+                throw new Error("Streaming upload schema identity changed");
               if (!encryption || entry.operation === "insert") continue;
               const row = (await tx.one(
                 new TypedTableQueryBuilder<

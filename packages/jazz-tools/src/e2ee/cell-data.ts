@@ -259,7 +259,9 @@ export async function decryptCellRows(
       }
     };
     const initial = initialSpaceKeys?.size
-      ? initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${identifier}`)
+      ? initialSpaceKeys.get(
+          `${(await db.authenticatedTableIdentity(scope)) ?? (await db.tableIdentity(scope))}:${identifier}`,
+        )
       : undefined;
     if (initial) {
       await decrypt(initial.secret, initial.root);
