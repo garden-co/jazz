@@ -39,10 +39,27 @@ import { Groups } from "./group-lifecycle.js";
 import type { GroupRecoveryPath } from "./group-lifecycle.js";
 import { groupSchema, type GroupMember, type GroupTables } from "./groups.js";
 import { Spaces, SpaceInitialisationRequired } from "./space-lifecycle.js";
-import type { SpaceDataPreparation, SpaceRecoveryPath, InitialSpaceSeed, StreamingSpacePlan, StreamingSpaceOptions } from "./space-lifecycle.js";
-export type { InitialSpaceSeed, StreamingSpacePlan, StreamingSpaceOptions } from "./space-lifecycle.js";
+import type {
+  SpaceDataPreparation,
+  SpaceRecoveryPath,
+  InitialSpaceSeed,
+  StreamingSpacePlan,
+  StreamingSpaceOptions,
+} from "./space-lifecycle.js";
+export type {
+  InitialSpaceSeed,
+  StreamingSpacePlan,
+  StreamingSpaceOptions,
+} from "./space-lifecycle.js";
 import { spaceSchema, type SpaceTables, type SpaceRoot } from "./spaces.js";
-import type { CellCipher, DeviceSigner, EqualityIndex, JazzCrypto, KeyEnvelope, LargeValueCipher } from "./types.js";
+import type {
+  CellCipher,
+  DeviceSigner,
+  EqualityIndex,
+  JazzCrypto,
+  KeyEnvelope,
+  LargeValueCipher,
+} from "./types.js";
 
 const equalityCrypto = new WeakMap<Db, () => Promise<EqualityIndex>>();
 
@@ -966,10 +983,14 @@ export class E2ee {
         // Existing journals are account-scoped and survive schema changes.
         // Only a new encrypted application founder may bypass online enrollment.
         if (known || ownsFounder) {
-          if (!(await this.db.authenticatedTableIdentity(this.app.__e2ee_account_identities)))
+          if (!(await this.db.authenticatedTableIdentity(this.app.__e2ee_account_identities))) {
+            // A fresh online root can authenticate its catalogue through normal
+            // enrollment. A retained proposal must keep its exact local authority.
+            if (!known) return false;
             throw new E2eeInitializationNotReady(
               "An authenticated application catalogue is required",
             );
+          }
           const identity = await this.db.one(
             this.app.__e2ee_account_identities.includeDeleted().where({ id: this.account.id }),
             { tier: "local" },
