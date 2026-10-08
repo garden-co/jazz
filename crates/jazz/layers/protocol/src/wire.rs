@@ -2,9 +2,9 @@
 //!
 //! The wire layer is intentionally thinner than [`crate::protocol`]: it owns
 //! link/session negotiation, feature discovery, binary framing, and structured
-//! protocol errors. The frame payload is opaque bytes for now so bindings and
-//! server shells can adopt the envelope before the full [`crate::protocol::SyncMessage`]
-//! encoder is frozen.
+//! protocol errors. Channel payloads carry the canonical encoding of
+//! [`crate::protocol::SyncMessage`]; current v5 byte fixtures pin both the
+//! transport frames and semantic messages.
 
 pub mod channel_credit;
 pub mod channels;
@@ -493,7 +493,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
     decode_postcard_exact(bytes)
 }
 
-/// Exercise the owning v1 frame and payload decoders for the generated-host
+/// Exercise the owning v5 frame and payload decoders for the generated-host
 /// compatibility matrix.
 ///
 /// This deliberately has no transport, queue, or session side effects.  The

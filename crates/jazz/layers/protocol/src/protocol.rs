@@ -3122,7 +3122,6 @@ pub enum ResultMemberEntry {
         revision: Vec<u8>,
     },
     /// Real row whose occurrence needs typed derivation discriminators.
-    /// Appended after every legacy variant so their postcard tags stay exact.
     TypedRow {
         /// Compatibility row payload and legacy ordered source-row identity.
         row: RealRowMemberEntry,
