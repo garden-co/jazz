@@ -368,7 +368,6 @@ where
                 | SyncMessage::CurrentRowsCancel { .. }
                 | SyncMessage::PermissionAdviceRequest { .. }
                 | SyncMessage::PermissionAdviceResponse { .. }
-                | SyncMessage::AuthorizationScopeSubscribe { .. }
                 | SyncMessage::AuthorizationScopeReceipt { .. }
                 | SyncMessage::AuthorizationScopeIntent { .. }
                 | SyncMessage::AuthorizationScopeView { .. }

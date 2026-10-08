@@ -46,7 +46,6 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         | SyncMessage::CatalogueSnapshot(_)
         | SyncMessage::PermissionAdviceRequest { .. }
         | SyncMessage::PermissionAdviceResponse { .. }
-        | SyncMessage::AuthorizationScopeSubscribe { .. }
         | SyncMessage::AuthorizationScopeReceipt { .. }
         | SyncMessage::AuthorizationScopeIntent { .. }
         | SyncMessage::AuthorizationScopeAggregateReceipt { .. }

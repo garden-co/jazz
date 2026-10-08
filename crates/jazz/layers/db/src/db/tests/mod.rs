@@ -49,11 +49,11 @@ use crate::node::legacy_test_future::{
 };
 use crate::object::ObjectId as PublicObjectId;
 use crate::protocol::{
-    AuthorizationScopePurpose, AuthorizationScopeReceipt, AuthorizationSupportScopeKey,
-    KnownStateCompleteness, KnownStateDeclaration, LensOp, PeerPayloadInventory,
-    PermissionAdviceAction, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, RowVersionRef,
-    ShapeAst, SnapshotRef, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
-    VersionBundle, VersionBundleScope, VersionCarrier,
+    AuthorizationScopeReceipt, AuthorizationSupportScopeKey, KnownStateCompleteness,
+    KnownStateDeclaration, LensOp, PeerPayloadInventory, PermissionAdviceAction,
+    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, RowVersionRef, ShapeAst, SnapshotRef,
+    Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, TableLens, VersionBundle,
+    VersionBundleScope, VersionCarrier,
 };
 use crate::protocol_limits::{
     MAX_FETCH_ROW_VERSIONS, MAX_FRAGMENT_REASSEMBLY_IDLE_MS, MAX_KNOWN_STATE_EXACT_REFS,
@@ -76,8 +76,7 @@ use crate::wire::{
 use super::peer_connection::{
     PendingRowVersionRepair, SubscriberConnectionState, UpstreamConnectionState,
     aggregate_authorization_scope_bounds, authorization_progress_for_view_receipt,
-    authorization_scope_receipt_matches_transport_context,
-    authorization_scope_support_options_match, remove_scope_aggregate_member,
+    authorization_scope_receipt_matches_transport_context, remove_scope_aggregate_member,
     send_subscriber_with_sync_context,
 };
 

@@ -154,7 +154,6 @@ pub(super) fn message_class(message: &SyncMessage) -> (ChannelClass, bool) {
         | Unsubscribe { .. }
         | FetchRowVersions { .. }
         | PermissionAdviceRequest { .. }
-        | AuthorizationScopeSubscribe { .. }
         | AuthorizationScopeIntent { .. }
         | CurrentRowsRequest(_)
         | CurrentRowsCancel { .. } => (ChannelClass::Requests, false),

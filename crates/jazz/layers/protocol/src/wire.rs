@@ -912,10 +912,10 @@ mod tests {
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        AuthorizationScopePurpose, AuthorizationSupportScopeKey, ChunkRequestBatch,
-        ChunkRequestEntry, PermissionAdviceAction, PermissionAdviceRequestId, RegisterShapeOptions,
-        ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
-        VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
+        AuthorizationSupportScopeKey, ChunkRequestBatch, ChunkRequestEntry,
+        PermissionAdviceRequestId, RegisterShapeOptions, ShapeAst, Subscribe,
+        SubscribeRejectReason, SubscriptionKey, VersionBundle, VersionBundleRun,
+        VersionBundleRunError, VersionCarrier, VersionRecord,
         build_version_bundle_runs_from_singletons, expand_version_carriers,
     };
     use crate::protocol_limits::{
@@ -2280,26 +2280,30 @@ mod tests {
         );
     }
 
+    /// Alice cannot send Bob a scope receipt without its negotiated capability.
+    /// This codec-level test pins rejection before semantic dispatch.
     #[test]
     fn authorization_scope_semantics_fail_closed_without_negotiated_feature() {
-        let subscription = SubscriptionKey {
-            shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
-            binding_id: BindingId(uuid::Uuid::from_bytes([2; 16])),
-            read_view: Default::default(),
-        };
-        let message = SyncMessage::AuthorizationScopeSubscribe {
-            subscribe: Subscribe {
-                shape_id: subscription.shape_id,
-                subscription,
-                values: Vec::new(),
-                known_state: None,
-                delegated_session: None,
+        let message = SyncMessage::AuthorizationScopeReceipt {
+            subscription: SubscriptionKey {
+                shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([2; 16])),
+                read_view: Default::default(),
             },
-            purpose: AuthorizationScopePurpose {
-                action: PermissionAdviceAction::Read {
-                    table: "todos".to_owned(),
-                    row: RowUuid::from_bytes([7; 16]),
+            receipt: crate::protocol::AuthorizationScopeReceipt {
+                key: AuthorizationSupportScopeKey {
+                    support_shape_digest: [4; 32],
+                    subject: AuthorSubject::SYSTEM,
+                    claims_digest: [5; 32],
+                    policy_digest: [6; 32],
                 },
+                authority: [3; 16],
+                link: AuthorSubject::SYSTEM,
+                authority_epoch: 1,
+                claims_revision: 0,
+                policy_epoch: 0,
+                settled_through: GlobalTime(0),
+                authorization_progress: 0,
             },
         };
         let old_features = 0;

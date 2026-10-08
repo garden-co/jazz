@@ -142,17 +142,6 @@ pub enum SyncMessage {
         /// Final serving-authority result, or `Unknown` when unavailable.
         advice: PermissionAdvice,
     },
-    /// Register and hydrate a support view for one authorization scope.
-    ///
-    /// Appended to preserve every pre-existing postcard enum discriminant.
-    /// This wraps the existing subscription pipeline rather than creating a
-    /// second query transport, and is feature-gated for old peers.
-    AuthorizationScopeSubscribe {
-        /// Ordinary shape/binding subscription carrying the support view.
-        subscribe: Subscribe,
-        /// Scope and non-secret operation purpose of that support view.
-        purpose: AuthorizationScopePurpose,
-    },
     /// Authority proof emitted after the matching support `ViewUpdate`.
     AuthorizationScopeReceipt {
         /// Support view that the receiver must apply before accepting proof.
@@ -630,15 +619,6 @@ pub struct AuthorizationOperationKey {
     pub candidate_digest: [u8; 32],
 }
 
-/// Minimal caller intent for a regular subscription opened as authorization
-/// support. The authority derives the scope key and operation itself from this
-/// intent, its authenticated link identity, and the registered shape/binding.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct AuthorizationScopePurpose {
-    /// Candidate operation whose policy support is being hydrated.
-    pub action: PermissionAdviceAction,
-}
-
 /// Authority-issued receipt proving one scope was hydrated through its stated cut.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct AuthorizationScopeReceipt {
@@ -704,7 +684,7 @@ impl SyncMessage {
     /// to an older peer.
     pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
         match self {
-            Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
+            Self::AuthorizationScopeReceipt { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
             }
             Self::AuthorizationScopeIntent { .. }

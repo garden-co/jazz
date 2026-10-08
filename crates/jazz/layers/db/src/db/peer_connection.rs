@@ -4005,10 +4005,6 @@ where
                             }
                         };
                     if let Some(lease)=&lease { received_leases.push(lease.clone()); }
-                    // Authorization support is authority-owned in Phase 3.
-                    // A subscriber must never be able to smuggle a support
-                    // purpose alongside its own shape/binding subscription.
-                    let scope_purpose: Option<crate::protocol::AuthorizationScopePurpose> = None;
                     if subscriber_inbound_message_is_authority_only(
                         &message,
                         *ingest_context,
@@ -4168,11 +4164,10 @@ where
                             }
                             continue;
                         }
-                        // Legacy direct answers and caller-authored support
-                        // subscriptions are deliberately fail-closed.
+                        // Legacy direct answers and authority-only messages
+                        // are deliberately fail-closed.
                         SyncMessage::PermissionAdviceRequest { .. }
                         | SyncMessage::PermissionAdviceResponse { .. }
-                        | SyncMessage::AuthorizationScopeSubscribe { .. }
                         | SyncMessage::AuthorizationScopeReceipt { .. }
                         | SyncMessage::AuthorizationScopeView { .. }
                         | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
@@ -4593,71 +4588,6 @@ where
                                     SubscriberShapeRegistration::Registered(opts.clone()),
                                 );
                             }
-                            let scope_purpose = if let Some(purpose) = scope_purpose {
-                                let expected_result = self
-                                    .node
-                                    .borrow()
-                                    .authorization_support_scope_for_session(
-                                        ingest_context.identity,
-                                        Some(&session_claim_binding
-                                            .as_ref()
-                                            .expect("subscriber claims")
-                                            .1),
-                                        &purpose.action,
-                                    );
-                                let expected = match expected_result {
-                                    Ok(expected) => expected,
-                                    Err(_) => {
-                                        #[cfg(any(test, feature = "testing"))]
-                                        crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                        drop_peer_request(&self.node);
-                                        return Ok::<bool, Error>(true);
-                                    }
-                                };
-                                let exact_support = subscription.shape_id == shape.shape_id()
-                                    && subscription.binding_id == binding.binding_id()
-                                    && authorization_scope_support_options_match(
-                                        &expected.options,
-                                        &opts,
-                                        subscription,
-                                    )
-                                    && expected.subscriptions.iter().any(
-                                        |(expected_shape, expected_binding)| {
-                                            expected_shape.shape_id() == shape.shape_id()
-                                                && expected_binding.binding_id()
-                                                    == binding.binding_id()
-                                        },
-                                    );
-                                if !exact_support {
-                                    #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                    drop_peer_request(&self.node);
-                                    return Ok::<bool, Error>(true);
-                                }
-                                Some(AuthorizedScopePurpose {
-                                    key: expected.key,
-                                    operation: expected.operation,
-                                    action: purpose.action,
-                                    expected_support: expected
-                                        .subscriptions
-                                        .iter()
-                                        .map(|(shape, binding)| {
-                                            (shape.shape_id(), binding.binding_id())
-                                        })
-                                        .collect(),
-                                })
-                            } else {
-                                None
-                            };
-                            if let Some(purpose) = &scope_purpose
-                                && let Some(existing) = scope_purposes.get(&subscription)
-                                && existing != purpose
-                            {
-                                #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                drop_peer_request(&self.node);
-                                return Ok::<bool, Error>(true);
-                            }
                             let supported = {
                                 let mut node = self.node.lock().await;
                                 let mut node = node.scoped_active_session_claims(
@@ -4916,27 +4846,6 @@ where
                                             node.has_settled_authority_result(&key)
                                         })
                                     };
-                            if let Some(purpose) = scope_purpose {
-                                let aggregate = scope_aggregates
-                                    .entry(purpose.key.clone())
-                                    .or_insert_with(|| {
-                                        AuthorityScopeAggregate::new(
-                                            purpose.expected_support.clone(),
-                                        )
-                                    });
-                                if aggregate.expected_support() != &purpose.expected_support
-                                    || !aggregate.register(
-                                        subscription,
-                                        (shape.shape_id(), binding.binding_id()),
-                                    )
-                                {
-                                    #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                    drop_peer_request(&self.node);
-                                    return Ok::<bool, Error>(true);
-                                }
-                                scope_purposes.insert(subscription, purpose);
-                            }
                             let group =
                                 coverage_groups.entry(coverage.clone()).or_insert_with(|| {
                                     CoverageGroup {
@@ -6940,17 +6849,6 @@ pub(super) fn authorization_scope_receipt_matches_transport_context(
         && receipt.authorization_progress >= expected.authorization_progress
         && receipt.settled_through.0 >= expected.settled_through
         && applied_cut.is_some_and(|cut| cut >= receipt.settled_through)
-}
-
-/// Scope support is authority-current.  Keep this separate from generic shape
-/// admission so a matching query identity cannot silently substitute a branch,
-/// snapshot, or local-tier view for the support proof it is meant to hydrate.
-pub(super) fn authorization_scope_support_options_match(
-    expected: &RegisterShapeOptions,
-    actual: &RegisterShapeOptions,
-    subscription: SubscriptionKey,
-) -> bool {
-    actual == expected && subscription.read_view == expected.read_view_key()
 }
 
 fn move_scope_aggregate_member(
