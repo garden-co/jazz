@@ -94,18 +94,13 @@ it("keeps independent offline readers revoked after ordinary-query and device-li
   }
 }, 60_000);
 
-it.each([
-  { removal: "group", access: "read" },
-  { removal: "group", access: "write" },
-  { removal: "space grant", access: "read" },
-  { removal: "space grant", access: "write" },
-])(
-  "does not reuse offline space keys for $access after a sibling query observes $removal removal",
-  async ({ removal, access }) => {
+it.each(["group", "space grant"] as const)(
+  "does not reuse either independent offline cache after a sibling query observes %s removal",
+  async (removal) => {
     const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
-    const store = () => {
-      let value: string | null = null;
+    const store = (initial: string | null = null) => {
+      let value = initial;
       return {
         async read() {
           return value;
@@ -127,10 +122,62 @@ it.each([
       const bob = await localAccountConfig(server.appId, server.url);
       const owner = await createDb({ ...alice, e2ee: { app: groupApp, store: store() } });
       clients.push(owner);
-      const reader = await createDb({ ...bob, e2ee: { app: groupApp, store: store() } });
-      clients.push(reader);
+      const preparationStore = store();
+      const preparation = await createDb({
+        ...bob,
+        e2ee: { app: groupApp, store: preparationStore },
+      });
+      clients.push(preparation);
       await owner.e2ee.devices.list();
-      await reader.e2ee.devices.list();
+      const preparedDevices = await preparation.e2ee.devices.list();
+      expect(preparedDevices).toHaveLength(1);
+      expect(preparedDevices[0]).toMatchObject({ state: "active", keyReadiness: "verified" });
+      const acceptedSnapshot = await preparationStore.read();
+      expect(acceptedSnapshot).not.toBeNull();
+      if (acceptedSnapshot === null) throw new Error("Missing accepted device fixture");
+      const snapshot = JSON.parse(acceptedSnapshot, (key, value: unknown) => {
+        // This guard needs identity/journal metadata, never decoded secrets.
+        if ((key === "privateKey" || key === "signingPrivateKey") && Array.isArray(value)) {
+          value.fill(0);
+          return undefined;
+        }
+        return value;
+      }) as {
+        format: string;
+        devices: { id: string }[];
+        initializationJournalV1?: { outcome: string; promoted?: boolean }[];
+      };
+      expect(snapshot.format).toBe("jazz-e2ee-local-devices-v2");
+      expect(snapshot.devices.map((device) => device.id)).toEqual([preparedDevices[0]!.id]);
+      // Clone accepted identity only. Pending/unpromoted journal ownership is
+      // deliberately excluded from this repeated-space-cache fixture.
+      expect(
+        (snapshot.initializationJournalV1 ?? []).every(
+          (entry) => entry.outcome === "accepted" && entry.promoted === true,
+        ),
+      ).toBe(true);
+      await preparation.shutdown();
+      clients.pop();
+
+      // Equal immutable bytes seed separate store closures, decoded key buffers,
+      // Db runtimes and per-Db authority caches. No live preparation responder.
+      const readStore = store(acceptedSnapshot);
+      const writeStore = store(acceptedSnapshot);
+      expect(readStore).not.toBe(writeStore);
+      const readClient = await createDb({ ...bob, e2ee: { app: groupApp, store: readStore } });
+      clients.push(readClient);
+      const writeClient = await createDb({ ...bob, e2ee: { app: groupApp, store: writeStore } });
+      clients.push(writeClient);
+      expect(readClient).not.toBe(writeClient);
+      for (const client of [readClient, writeClient]) {
+        const devices = await client.e2ee.devices.list();
+        expect(devices).toHaveLength(1);
+        expect(devices[0]).toMatchObject({
+          id: preparedDevices[0]!.id,
+          state: "active",
+          keyReadiness: "verified",
+        });
+      }
       let groupId: string | undefined;
       if (removal === "group") {
         groupId = (await owner.e2ee.groups.create().wait()).id;
@@ -155,44 +202,56 @@ it.each([
       });
       expect(space).not.toBeNull();
       const query = groupApp.notes.where({ id: note.id });
-      expect(await reader.one(query, { tier: "global" })).toEqual(note);
-      const before =
-        removal === "group"
-          ? await reader.all(groupApp.__e2ee_group_membership, { tier: "global" })
-          : await reader.all(groupApp.__e2ee_space_grants, { tier: "global" });
+      const caches = [];
+      for (const client of [readClient, writeClient]) {
+        // Each branch warms its own cache before the same accepted removal.
+        expect(await client.one(query, { tier: "global" })).toEqual(note);
+        const before =
+          removal === "group"
+            ? await client.all(groupApp.__e2ee_group_membership, { tier: "global" })
+            : await client.all(groupApp.__e2ee_space_grants, { tier: "global" });
+        caches.push({ client, before });
+      }
 
       if (removal === "group")
         await owner.e2ee.groups.remove(groupId!, { kind: "account", id: bob.account.id }).wait();
       else await owner.e2ee.spaces.revoke(groupApp.projects, project.id, bob.account.id).wait();
-      // Fetch through an ordinary sibling query, without refreshing the space.
-      const after =
-        removal === "group"
-          ? await reader.all(groupApp.__e2ee_group_membership, { tier: "global" })
-          : await reader.all(groupApp.__e2ee_space_grants, { tier: "global" });
-      expect(after.length).toBeGreaterThan(before.length);
-      expect(after).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining(
-            removal === "group"
-              ? { operation: "remove", groupId: groupId!, memberId: bob.account.id }
-              : { operation: "remove", spaceId: space!.id, recipientId: bob.account.id },
-          ),
-        ]),
-      );
-      await reader.disconnect();
-      const operation =
-        access === "read"
-          ? reader.one(query, { tier: "local" })
-          : reader
-              .update(groupApp.notes, note.id, { title: "Must not be encrypted" })
-              .wait({ tier: "local" });
-      // Partial history makes the key unavailable; completed background
-      // reconciliation can instead prove that the key is no longer shared.
-      // Neither outcome may reuse the removed recipient's cached key.
-      await expect(operation).rejects.toMatchObject({
-        name: "E2eeDataError",
-        code: expect.stringMatching(/^(key-unavailable|key-not-shared)$/),
-      });
+      for (const { client, before } of caches) {
+        // Both caches observe the accepted removal independently through an
+        // ordinary sibling query, without explicitly refreshing the space.
+        const after =
+          removal === "group"
+            ? await client.all(groupApp.__e2ee_group_membership, { tier: "global" })
+            : await client.all(groupApp.__e2ee_space_grants, { tier: "global" });
+        expect(after.length).toBeGreaterThan(before.length);
+        expect(after).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining(
+              removal === "group"
+                ? { operation: "remove", groupId: groupId!, memberId: bob.account.id }
+                : { operation: "remove", spaceId: space!.id, recipientId: bob.account.id },
+            ),
+          ]),
+        );
+      }
+      await Promise.all([readClient.disconnect(), writeClient.disconnect()]);
+      // Launch both operations only after both runtimes are disconnected. The
+      // writer never observes a read failure through its own cache or store.
+      await Promise.all([
+        expect(readClient.one(query, { tier: "local" })).rejects.toMatchObject({
+          name: "E2eeDataError",
+          code: expect.stringMatching(/^(key-unavailable|key-not-shared)$/),
+        }),
+        expect(
+          writeClient
+            .update(groupApp.notes, note.id, { title: "Must not be encrypted" })
+            .wait({ tier: "local" }),
+        ).rejects.toMatchObject({
+          name: "E2eeDataError",
+          code: expect.stringMatching(/^(key-unavailable|key-not-shared)$/),
+        }),
+      ]);
+      expect(await owner.one(query, { tier: "global" })).toEqual(note);
     } finally {
       for (const client of clients) await client.shutdown();
       await server.stop();
