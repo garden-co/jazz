@@ -1195,6 +1195,11 @@ export class E2ee {
       }
       if (this.provisional) return true;
       if (retainedOnly) {
+        // Established accounts can reopen against a newer application schema.
+        // Local history must wait for that requested view's authenticated catalogue;
+        // online preparation can obtain it without replacing the retained device.
+        if (!(await this.db.authenticatedTableIdentity(this.app.__e2ee_account_identities)))
+          return false;
         try {
           const state = await observeE2eeHistory(this.db, (reader) =>
             this.approval!.deviceStates(reader),
