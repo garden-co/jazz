@@ -12061,9 +12061,11 @@ mod tests {
         relay
             .pump()
             .expect("cleanup cannot wait synchronously for the held owner");
-        // A strict one-shot reads through its own stream (INV-SYNC-48), so it
-        // holds an upstream coverage refcount but no separate query coverage
-        // registration; the refcount must survive until the owner resumes.
+        // A strict one-shot reads through its own stream (INV-SYNC-48) and,
+        // once that stream is open, also attaches query coverage at its tier
+        // so it waits for an authority receipt newer than its open. Both count
+        // against the same upstream coverage key, and both must survive the
+        // cancellation until the owner resumes to release them.
         assert_eq!(
             relay
                 .run(move |worker| Ok(worker
@@ -12071,7 +12073,7 @@ mod tests {
                     .db
                     .query_coverage_attachment_counts_for_test()))
                 .unwrap(),
-            (1, 0)
+            (1, 1)
         );
         assert!(client.cancel_foreground_operation(holder).unwrap());
         relay.pump().unwrap();
