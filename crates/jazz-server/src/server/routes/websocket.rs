@@ -1988,7 +1988,7 @@ mod tests {
             .attach_query_with_opts(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..Default::default()
                 },
             )
@@ -2899,7 +2899,7 @@ mod tests {
                 .attach_query_with_opts(
                     &query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2917,7 +2917,7 @@ mod tests {
                 .attach_query_with_opts(
                     &query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2938,7 +2938,7 @@ mod tests {
                 .all(
                     query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2957,7 +2957,7 @@ mod tests {
                 .all(
                     query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )

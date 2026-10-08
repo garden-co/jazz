@@ -73,7 +73,7 @@ describe("JazzBackend Effect layer", () => {
         Effect.gen(function* () {
           // A client subscribed before the backend writes sees the write arrive.
           const client = yield* Jazz;
-          const seenByClient = yield* client.stream(app.posts, { tier: "global" }).pipe(
+          const seenByClient = yield* client.stream(app.posts, { tier: "remote" }).pipe(
             Stream.filter((rows) => rows.some((row) => row.text === "from request")),
             Stream.runHead,
             Effect.forkChild,
@@ -154,7 +154,7 @@ describe("JazzBackend Effect layer", () => {
         Effect.gen(function* () {
           const jazz = yield* Jazz;
           yield* jazz.insert(app.diaries, { text }, { wait: "global" });
-          const rows = yield* jazz.all(app.diaries, { tier: "global" });
+          const rows = yield* jazz.all(app.diaries, { tier: "remote" });
           return rows.map((row) => row.text).sort();
         });
 

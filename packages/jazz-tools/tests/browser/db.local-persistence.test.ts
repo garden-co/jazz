@@ -17,19 +17,19 @@ it("settles an empty local read and retains acknowledged writes across repeated 
   try {
     // Safari used to overflow the WASM stack while a projection fetched its
     // already evaluated input. This first read hung before any write was made.
-    expect(await db.all(app.tasks, { tier: "local" })).toEqual([]);
+    expect(await db.all(app.tasks, { tier: "local-first" })).toEqual([]);
     for (let cycle = 0; cycle < 3; cycle++) {
       const title = `synthetic task ${cycle}`;
       await db.insert(app.tasks, { title, done: false }).wait({ tier: "local" });
       titles.push(title);
-      expect((await db.all(app.tasks, { tier: "local" })).map((row) => row.title).sort()).toEqual(
-        titles,
-      );
+      expect(
+        (await db.all(app.tasks, { tier: "local-first" })).map((row) => row.title).sort(),
+      ).toEqual(titles);
       await db.shutdown();
       db = await createDb(config);
-      expect((await db.all(app.tasks, { tier: "local" })).map((row) => row.title).sort()).toEqual(
-        titles,
-      );
+      expect(
+        (await db.all(app.tasks, { tier: "local-first" })).map((row) => row.title).sort(),
+      ).toEqual(titles);
     }
   } finally {
     await db.shutdown();

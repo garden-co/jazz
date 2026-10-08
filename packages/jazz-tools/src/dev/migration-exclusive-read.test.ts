@@ -36,9 +36,9 @@ it("accepts an exclusive read of an unchanged table after migration", async () =
     await deploy({ ...target, schema: newApp, permissions: permissions(newApp), migration });
     db = await createDb(account);
     const query = newApp.projects.where({ id: project.id });
-    expect(await db.one(query, { tier: "global" })).toEqual(project);
+    expect(await db.one(query, { tier: "remote" })).toEqual(project);
     const tx = db.beginExclusiveTransaction();
-    expect(await tx.one(query, { tier: "local" })).toEqual(project);
+    expect(await tx.one(query, { tier: "local-first" })).toEqual(project);
     await tx.commit().wait();
   } finally {
     await db?.shutdown();
@@ -78,12 +78,12 @@ it("preserves exclusive conflict detection after renaming the queried table", as
     await deploy({ ...target, schema: newApp, permissions: newPermissions, migration });
     db = await createDb(account);
     writer = await createDb(await localAccountConfig(server.appId, server.url));
-    expect(await db.all(newApp.initiatives, { tier: "global" })).toEqual([project]);
+    expect(await db.all(newApp.initiatives, { tier: "remote" })).toEqual([project]);
     const stable = db.beginExclusiveTransaction();
-    expect(await stable.all(newApp.initiatives, { tier: "local" })).toEqual([project]);
+    expect(await stable.all(newApp.initiatives, { tier: "local-first" })).toEqual([project]);
     await stable.commit().wait();
     const changed = db.beginExclusiveTransaction();
-    expect(await changed.all(newApp.initiatives, { tier: "local" })).toEqual([project]);
+    expect(await changed.all(newApp.initiatives, { tier: "local-first" })).toEqual([project]);
     await writer
       .insert(newApp.initiatives, { title: "Concurrent project" })
       .wait({ tier: "global" });

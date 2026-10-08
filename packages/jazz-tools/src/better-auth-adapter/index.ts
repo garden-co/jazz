@@ -120,7 +120,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         readAll: (
           query: QueryBuilder<Record<string, unknown>>,
         ) => Promise<Record<string, unknown>[]> = async (query) =>
-          (await config.db()).all(query, { tier: "global" }),
+          (await config.db()).all(query, { tier: "remote" }),
       ): Promise<JazzRowRecord[]> => {
         const table = getPrefixedModelName(model);
         const storedSortBy = options.sortBy
@@ -176,7 +176,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             conditions: [{ column: "id", op: "eq", value: jazzRowId }],
             limit: 1,
           }),
-          { tier: "global" },
+          { tier: "remote" },
         );
       };
 
@@ -201,7 +201,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         readAll: (
           query: QueryBuilder<Record<string, unknown>>,
         ) => Promise<Record<string, unknown>[]> = async (query) =>
-          (await config.db()).all(query, { tier: "global" }),
+          (await config.db()).all(query, { tier: "remote" }),
       ): Promise<void> => {
         const table = getPrefixedModelName(model);
         const uniqueConstraints = getUniqueConstraints(model);
@@ -250,7 +250,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         readAll: (
           query: QueryBuilder<Record<string, unknown>>,
         ) => Promise<Record<string, unknown>[]> = async (query) =>
-          (await config.db()).all(query, { tier: "global" }),
+          (await config.db()).all(query, { tier: "remote" }),
       ): Promise<void> => {
         const table = getPrefixedModelName(model);
         const existing = await readAll(
@@ -286,7 +286,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           // initializes the Jazz client, which is required before starting an exclusive
           // transaction.
           const [globalMatch] = await findAllRows(model, { where, limit: 1 }, (query) =>
-            db.all(query, { tier: "global" }),
+            db.all(query, { tier: "remote" }),
           );
           if (!globalMatch) return null;
           await preflight(globalMatch);
@@ -294,7 +294,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           try {
             const result = await db.exclusiveTransaction(async (tx) => {
               const [match] = await findAllRows(model, { where, limit: 1 }, (query) =>
-                tx.all(query, { tier: "local" }),
+                tx.all(query, { tier: "local-first" }),
               );
               if (!match) {
                 return null;
@@ -353,11 +353,11 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
                     model,
                     [{ id: "<new>", ...fields }],
                     undefined,
-                    (query) => tx.all(query, { tier: "local" }),
+                    (query) => tx.all(query, { tier: "local-first" }),
                   );
                   if (id) {
                     await assertRowIdAvailable(model, id, (query) =>
-                      tx.all(query, { tier: "local" }),
+                      tx.all(query, { tier: "local-first" }),
                     );
                   }
                   return tx.insert(qb, fields, id ? { id } : undefined);
@@ -434,7 +434,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
               const result = await db.exclusiveTransaction(
                 async (tx: TransactionScope<"exclusive">) => {
                   const [match] = await findAllRows(model, { where, limit: 1 }, (query) =>
-                    tx.all(query, { tier: "local" }),
+                    tx.all(query, { tier: "local-first" }),
                   );
                   if (!match) return null;
 
@@ -442,7 +442,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
                     model,
                     [{ ...match, ...fields }],
                     new Set([match.id]),
-                    (query) => tx.all(query, { tier: "local" }),
+                    (query) => tx.all(query, { tier: "local-first" }),
                   );
                   tx.update(qb, match.id, fields);
                   return match.id;
@@ -476,7 +476,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
               const result = await db.exclusiveTransaction(
                 async (tx: TransactionScope<"exclusive">) => {
                   const matches = await findAllRows(model, { where }, (query) =>
-                    tx.all(query, { tier: "local" }),
+                    tx.all(query, { tier: "local-first" }),
                   );
                   if (matches.length === 0) return 0;
 
@@ -484,7 +484,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
                     model,
                     matches.map((match) => ({ ...match, ...fields })),
                     new Set(matches.map((match) => match.id)),
-                    (query) => tx.all(query, { tier: "local" }),
+                    (query) => tx.all(query, { tier: "local-first" }),
                   );
                   for (const match of matches) {
                     tx.update(qb, match.id, fields);
@@ -607,7 +607,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
                   model,
                   [{ ...match, ...fields }],
                   new Set([match.id]),
-                  (query) => tx.all(query, { tier: "local" }),
+                  (query) => tx.all(query, { tier: "local-first" }),
                 );
                 tx.update(qb, match.id, fields);
 
@@ -616,7 +616,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
                     conditions: [{ column: "id", op: "eq", value: match.id }],
                     limit: 1,
                   }),
-                  { tier: "local" },
+                  { tier: "local-first" },
                 );
                 if (!persisted) {
                   throw new Error(

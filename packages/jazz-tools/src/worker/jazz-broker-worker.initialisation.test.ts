@@ -1136,18 +1136,13 @@ describe("broker worker context initialization", () => {
       id: -3,
       binding,
       query: "{}",
-      options: '{"propagation":"full"}',
+      options: "{}",
     });
     await expect(cached).resolves.toMatchObject({
       type: "inspector-query-result",
       value: [{ id: "cached-row" }],
     });
-    expect(cacheRuntime.query).toHaveBeenCalledWith(
-      "{}",
-      undefined,
-      "local",
-      '{"propagation":"local-only"}',
-    );
+    expect(cacheRuntime.query).toHaveBeenCalledWith("{}", undefined, "local-only", "{}");
     inspectorPeer.emitMessage({ type: "inspect-subscribe", id: -4, binding, query: "{}" });
     await nextTask();
     expect(cacheRuntime.executeSubscription).toHaveBeenCalledWith(71, expect.any(Function));

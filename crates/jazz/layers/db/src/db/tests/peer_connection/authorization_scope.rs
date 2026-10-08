@@ -81,7 +81,7 @@ fn assert_foreground_initial_owner_snapshot(seed_owner: bool) {
     let mut local = block_on(foreground.subscribe(
         &query,
         ReadOpts {
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     ))
@@ -486,8 +486,7 @@ fn cold_owner_local_delivery_progresses_only_on_host_wakes() {
         );
         let query = prepared(&foreground, &Query::from("todos"));
         let opts = ReadOpts {
-            tier: DurabilityTier::Local,
-            propagation: Propagation::Full,
+            tier: crate::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         };
         eviction.evict_all();
@@ -690,8 +689,7 @@ fn assert_initial_opening_backpressure(
     );
     let query = prepared(&foreground, &Query::from("todos"));
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let attachment = foreground
@@ -844,8 +842,7 @@ fn incremental_local_update_retries_after_transport_backpressure() {
     );
     let query = prepared(&foreground, &Query::from("todos"));
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let attachment = foreground
@@ -1112,8 +1109,7 @@ fn foreground_local_attachment_waits_for_owner_delivery_not_authority() {
         let _subscriber = relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
         let query = prepared(&foreground, &Query::from("todos"));
         let local = ReadOpts {
-            tier: DurabilityTier::Local,
-            propagation: Propagation::Full,
+            tier: crate::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         };
         let attachment = foreground
@@ -1183,8 +1179,7 @@ fn scope_relays_forward_new_rows_after_empty_subscription_settlement() {
         relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
     }
     let local = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let query = Query::from("todos");
@@ -1377,8 +1372,7 @@ fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
     }
     let query = Query::from("rooms").order_by("name", OrderDirection::Asc);
     let local = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let mut bob_rooms = prepared_subscribe(&bob_fg, &query, local.clone()).unwrap();
@@ -1476,8 +1470,7 @@ fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader(
                 &foreground,
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Local,
-                    propagation: Propagation::Full,
+                    tier: crate::db::ReadTier::LocalFirst,
                     ..ReadOpts::default()
                 },
             )
@@ -1489,8 +1482,7 @@ fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader(
             &foreground,
             &query.clone().filter(eq(col("title"), lit("healthy"))),
             ReadOpts {
-                tier: DurabilityTier::Local,
-                propagation: Propagation::Full,
+                tier: crate::db::ReadTier::LocalFirst,
                 ..ReadOpts::default()
             },
         )
@@ -3085,8 +3077,7 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_include
         Query::from("todos")
     };
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let mut stream = prepared_subscribe(&foreground, &query, opts.clone()).unwrap();
@@ -3739,8 +3730,7 @@ fn invalidated_owner_delivery_cannot_cover_a_waiting_local_read() {
     let _subscriber = relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
     let query = prepared(&foreground, &Query::from("todos"));
     let local = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let waiting = foreground

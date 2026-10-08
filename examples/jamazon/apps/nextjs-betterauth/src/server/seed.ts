@@ -11,7 +11,7 @@ import { ids } from "@/src/lib/ids";
  */
 export async function seedCatalogue(db: Db): Promise<void> {
   const existingStock = new Set(
-    (await db.all(app.stock, { tier: "global" })).map((row) => row.productId),
+    (await db.all(app.stock, { tier: "remote" })).map((row) => row.productId),
   );
   const write = await db.transaction((tx) => {
     CATEGORIES.forEach((category, position) =>

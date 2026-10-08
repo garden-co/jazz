@@ -64,7 +64,7 @@ describe("browser JSON Schema validation through WASM", () => {
       meta: { code: "build-7", count: 2 },
     });
 
-    expect(await db.one(jobs.jobs.where({ id: job.id }), { tier: "local" })).toMatchObject({
+    expect(await db.one(jobs.jobs.where({ id: job.id }), { tier: "local-first" })).toMatchObject({
       meta: { code: "build-7", count: 2 },
     });
   });

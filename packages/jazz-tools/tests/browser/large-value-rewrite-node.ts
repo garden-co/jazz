@@ -72,7 +72,7 @@ export async function largeValueRewriteBackendAppend(
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   const turn = await db.one(app.turns.where({ id: turnId }), {
-    tier: "global",
+    tier: "remote",
   });
   return turn?.body ?? "";
 }

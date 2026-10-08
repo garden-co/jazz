@@ -72,11 +72,11 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
   const wakes: string[] = [];
   db.setTickScheduler((urgency) => wakes.push(String(urgency)));
   const query = Uint8Array.of(1);
-  const pendingRows = db.all(query, { tier: "local" });
+  const pendingRows = db.all(query, { tier: "local-first" });
   expect(typeof pendingRows).toBe("object");
   expect("poll" in pendingRows && pendingRows.poll()).toEqual(Uint8Array.of(9));
 
-  const subscription = db.subscribe(query, { tier: "local" });
+  const subscription = db.subscribe(query, { tier: "local-first" });
   const ticksBeforeSubscriptionRead = ticks.mock.calls.length;
   const pendingSubscription = subscription.readAll();
   expect(Array.isArray(pendingSubscription)).toBe(false);
@@ -98,7 +98,7 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
   expect(db.close()).toBe(true);
   nativeWake?.("immediate");
   expect(wakes).toEqual(["deferred"]);
-  expect(() => db.all(query, { tier: "local" })).toThrow("runtime is closed");
+  expect(() => db.all(query, { tier: "local-first" })).toThrow("runtime is closed");
 });
 
 it("keeps an empty native drain ready for the next native wake", () => {
@@ -136,7 +136,7 @@ it("keeps an empty native drain ready for the next native wake", () => {
 
   // #3273: opening a subscription no longer ticks (pumps) the native relay;
   // the native owner fences and drives it off the JS thread.
-  const subscription = db.subscribe(Uint8Array.of(1), { tier: "local" });
+  const subscription = db.subscribe(Uint8Array.of(1), { tier: "local-first" });
   expect(ticks).not.toHaveBeenCalled();
   expect(subscription.readAll()).toEqual([]);
   expect(ticks).not.toHaveBeenCalled();
@@ -147,7 +147,7 @@ it("rejects unknown transaction reads before invoking native commands", () => {
   const execute = vi.fn();
   const tick = vi.fn();
   const db = new NativeForegroundDb({ execute, tick, close: () => true }, {} as never);
-  expect(() => db.all(Uint8Array.of(2), { tier: "local" }, "missing")).toThrow(
+  expect(() => db.all(Uint8Array.of(2), { tier: "local-first" }, "missing")).toThrow(
     "cannot read unknown transaction missing",
   );
   expect(execute).not.toHaveBeenCalled();

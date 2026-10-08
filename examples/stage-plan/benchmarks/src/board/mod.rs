@@ -12,10 +12,9 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    CommitUnitTrust, Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, LocalUpdates,
-    MergeableTxOps, PeerIoPump, PreparedQuery, Propagation, ReadOpts, RestoreOptions, ResumeCursor,
-    SubscriptionEvent, SubscriptionStream, UpdateOptions, WireTransportAdapter, WriteIdentity,
-    block_on,
+    CommitUnitTrust, Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, MergeableTxOps,
+    PeerIoPump, PreparedQuery, ReadOpts, ReadTier, RestoreOptions, ResumeCursor, SubscriptionEvent,
+    SubscriptionStream, UpdateOptions, WireTransportAdapter, WriteIdentity, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
@@ -234,9 +233,7 @@ impl ResumeFixture {
         let mut subscription = block_on(client.subscribe(
             &prepared,
             ReadOpts {
-                tier: DurabilityTier::Global,
-                local_updates: LocalUpdates::Deferred,
-                propagation: Propagation::Full,
+                tier: ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -477,9 +474,7 @@ fn fresh_task_snapshot_bytes(tasks: usize, comments: usize, activity_events: usi
     let mut subscription = block_on(client.subscribe(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::Full,
+            tier: ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -741,9 +736,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         let subscription = block_on(self.db.subscribe(
             &self.maintained_activity,
             ReadOpts {
-                tier: DurabilityTier::Local,
-                local_updates: LocalUpdates::Deferred,
-                propagation: Propagation::LocalOnly,
+                tier: ReadTier::LocalOnly,
                 ..ReadOpts::default()
             },
         ))
@@ -760,9 +753,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         let mut subscription = block_on(self.db.subscribe(
             &self.point_activity,
             ReadOpts {
-                tier: DurabilityTier::Local,
-                local_updates: LocalUpdates::Deferred,
-                propagation: Propagation::LocalOnly,
+                tier: ReadTier::LocalOnly,
                 ..ReadOpts::default()
             },
         ))

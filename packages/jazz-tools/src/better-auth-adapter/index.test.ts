@@ -115,7 +115,7 @@ describe("jazzAdapter", () => {
         headers: { authorization: `Bearer ${token}` },
       });
 
-      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "global" })).resolves.toEqual(
+      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "remote" })).resolves.toEqual(
         [],
       );
       await expect(
@@ -230,19 +230,19 @@ describe("jazzAdapter", () => {
       const sessionDb = await context.forRequest({
         headers: { authorization: `Bearer ${token}` },
       });
-      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "global" })).resolves.toEqual(
+      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "remote" })).resolves.toEqual(
         [],
       );
       await expect(
-        sessionDb.all(fixtureApp.better_auth_session, { tier: "global" }),
+        sessionDb.all(fixtureApp.better_auth_session, { tier: "remote" }),
       ).resolves.toEqual([]);
       await expect(
-        sessionDb.all(fixtureApp.better_auth_account, { tier: "global" }),
+        sessionDb.all(fixtureApp.better_auth_account, { tier: "remote" }),
       ).resolves.toEqual([]);
       await expect(
-        sessionDb.all(fixtureApp.better_auth_verification, { tier: "global" }),
+        sessionDb.all(fixtureApp.better_auth_verification, { tier: "remote" }),
       ).resolves.toEqual([]);
-      await expect(sessionDb.all(fixtureApp.better_auth_jwks, { tier: "global" })).resolves.toEqual(
+      await expect(sessionDb.all(fixtureApp.better_auth_jwks, { tier: "remote" })).resolves.toEqual(
         [],
       );
 

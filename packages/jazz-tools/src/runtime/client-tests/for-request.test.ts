@@ -71,10 +71,11 @@ describe("JazzClient runtime helpers", () => {
     expect(callback).toHaveBeenCalledWith(delta);
   });
 
-  it("passes query propagation options to runtime query", async () => {
+  it("passes the local-only tier to runtime query", async () => {
     const { client, queryCalls } = makeClient();
-    await client.queryInternal('{"table":"todos"}', { propagation: "local-only" });
-    expect(queryCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
+    await client.queryInternal('{"table":"todos"}', { tier: "local-only" });
+    expect(queryCalls[0]![2]).toBe("local-only");
+    expect(queryCalls[0]![3]).toBeUndefined();
   });
 
   it("passes transaction overlay options to runtime query for transaction reads", async () => {
@@ -143,7 +144,6 @@ describe("JazzClient runtime helpers", () => {
     await client.queryInternal(
       '{"table":"todos"}',
       {
-        localUpdates: "deferred",
         openTransactionId: transactionId,
       },
       undefined,
@@ -152,18 +152,18 @@ describe("JazzClient runtime helpers", () => {
     const writeContext = JSON.parse(writeContextJson ?? "{}");
     expect(queryCalls[0]![3]).toBe(
       JSON.stringify({
-        local_updates: "deferred",
         transaction_id: writeContext.transaction_id,
       }),
     );
   });
 
-  it("lowers the internal local-only tier to local-only propagation", () => {
+  it("passes the internal local-only tier to subscriptions", () => {
     const { client, createSubscriptionCalls } = makeClient();
     client.subscribeInternal('{"table":"todos"}', () => {}, {
       tier: "local-only",
     });
-    expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
+    expect(createSubscriptionCalls[0]![2]).toBe("local-only");
+    expect(createSubscriptionCalls[0]![3]).toBeUndefined();
   });
 
   // =========================================================================

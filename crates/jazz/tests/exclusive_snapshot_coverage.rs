@@ -216,7 +216,11 @@ impl Net {
         let read = db.all_serialized_query(
             &bytes,
             ReadOpts {
-                tier,
+                tier: if tier == DurabilityTier::Global {
+                    jazz::db::ReadTier::Remote
+                } else {
+                    jazz::db::ReadTier::LocalFirst
+                },
                 ..ReadOpts::default()
             },
             open_tx,

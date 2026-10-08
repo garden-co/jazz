@@ -69,7 +69,8 @@ your platform auth integration. Storage retention/deletion is a separate choice.
 For an upstream admitted by native code, `await db.disconnect()` stops the
 native socket before publishing explicit offline state. `await db.reconnect()`
 restarts it with native-owned credentials. These calls work before the first
-query and require no JavaScript server URL. `ReadTier.LocalFirstUnlessEmpty`
-reads never wait on the native socket while it is explicitly offline, down, or
-reconnecting; an empty result waits for the server only while it is connected
-or making its first connection.
+query and require no JavaScript server URL. Local-first reads with a
+`firstLoadRemoteWaitMs` timeout never wait on the native socket while it is explicitly
+offline, down, or reconnecting; the first result waits for the server, at most
+for the timeout, only while it is connected or making its first connection, and
+falls back to the local result if the connection drops.

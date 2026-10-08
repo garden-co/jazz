@@ -40,11 +40,11 @@ use serde::{Deserialize, Serialize};
 
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/fixtures/wire_message_frames.json"
+    "/fixtures/wire_message_frames_v5.json"
 );
 const HELLO_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/fixtures/wire_hello_frames.json"
+    "/fixtures/wire_hello_frames_v5.json"
 );
 const NATIVE_ROW_CODEC_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -809,7 +809,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v3",
+        fixture_set: "jazz-wire-message-frames-v5",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -881,7 +881,7 @@ fn hello_fixture_manifest() -> HelloManifest {
                 role: match role {
                     WirePeerRole::Client => 0,
                     WirePeerRole::Core => 1,
-                    WirePeerRole::Relay => 3,
+                    WirePeerRole::Relay => 2,
                 },
                 authority_node_hex: authority_epoch.map(|_| hex(authority_node.as_bytes())),
                 authority_epoch: authority_epoch.map(|epoch| {
@@ -898,7 +898,7 @@ fn hello_fixture_manifest() -> HelloManifest {
         .collect();
 
     HelloManifest {
-        fixture_set: "jazz-wire-hello-frames-v1",
+        fixture_set: "jazz-wire-hello-frames-v5",
         codec: "postcard WireFrame::Hello(WireHello)",
         fixtures,
     }
@@ -915,14 +915,14 @@ fn wire_hello_frame_fixtures_are_current() {
         return;
     }
 
-    let expected = include_str!("../fixtures/wire_hello_frames.json");
+    let expected = include_str!("../fixtures/wire_hello_frames_v5.json");
     assert_eq!(actual, expected, "wire Hello fixtures changed");
 }
 
 #[test]
 fn wire_hello_frame_fixtures_decode_exactly() {
     let fixture_manifest: HelloManifest =
-        serde_json::from_str(include_str!("../fixtures/wire_hello_frames.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_hello_frames_v5.json"))
             .expect("wire Hello fixture manifest deserializes");
     for fixture in fixture_manifest.fixtures {
         let frame_bytes = parse_hex(&fixture.frame_hex);
@@ -1005,7 +1005,7 @@ fn wire_message_frame_fixtures_are_current() {
         return;
     }
 
-    let expected = include_str!("../fixtures/wire_message_frames.json");
+    let expected = include_str!("../fixtures/wire_message_frames_v5.json");
     assert_eq!(
         actual, expected,
         "wire fixtures changed; review compatibility and run \
@@ -1018,7 +1018,7 @@ fn wire_message_frame_fixtures_are_current() {
 #[test]
 fn wire_message_frame_fixtures_decode_to_expected_messages() {
     let fixture_manifest: Manifest =
-        serde_json::from_str(include_str!("../fixtures/wire_message_frames.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames_v5.json"))
             .expect("wire fixture manifest deserializes");
 
     for (fixture, (name, message_family, expected)) in fixture_manifest
@@ -1143,10 +1143,10 @@ fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
     assert_eq!(corpus.format, "jazz-wire-frame-artifact-corpus-v1");
 
     let hello: HelloManifest =
-        serde_json::from_str(include_str!("../fixtures/wire_hello_frames.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_hello_frames_v5.json"))
             .expect("Hello fixture manifest parses");
     let messages: Manifest =
-        serde_json::from_str(include_str!("../fixtures/wire_message_frames.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames_v5.json"))
             .expect("message fixture manifest parses");
     let negotiated_features = jazz::wire::current_wire_features();
     let executed = execute_complete_artifact_frames(&hello, &messages, negotiated_features)

@@ -4,9 +4,9 @@ mod common;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, LocalUpdates, MergeableTxOps, Propagation,
-    ReadOpts, SeededRowIdSource, SubscriptionEvent, SubscriptionStream, UpdateOptions,
-    UpsertOptions, WriteIdentity,
+    Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, MergeableTxOps, ReadOpts,
+    SeededRowIdSource, SubscriptionEvent, SubscriptionStream, UpdateOptions, UpsertOptions,
+    WriteIdentity,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -14,7 +14,6 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType as PublicColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 use common::{
     allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq,
@@ -101,9 +100,7 @@ fn open_db() -> Db {
 
 fn opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }

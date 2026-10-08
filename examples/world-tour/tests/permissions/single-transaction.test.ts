@@ -34,15 +34,15 @@ it("writes a band and its demo tour in one transaction", async () => {
   const bandId = await startDemoTour(db, { userId: owner, ownerName: "Tour manager" });
 
   const fixture = buildTourFixture({ seed: DEFAULT_SEED, start: new Date() });
-  const global = { tier: "global" } as const;
-  await expect(db.all(app.members.where({ bandId }), global)).resolves.toEqual([
+  const remote = { tier: "remote" } as const;
+  await expect(db.all(app.members.where({ bandId }), remote)).resolves.toEqual([
     expect.objectContaining({ userId: owner, name: "Tour manager" }),
   ]);
-  await expect(db.all(app.bandInvites.where({ bandId }), global)).resolves.toHaveLength(1);
-  await expect(db.all(app.stops.where({ bandId }), global)).resolves.toHaveLength(
+  await expect(db.all(app.bandInvites.where({ bandId }), remote)).resolves.toHaveLength(1);
+  await expect(db.all(app.stops.where({ bandId }), remote)).resolves.toHaveLength(
     fixture.stops.length,
   );
-  await expect(db.all(app.stopNotes.where({ bandId }), global)).resolves.toHaveLength(
+  await expect(db.all(app.stopNotes.where({ bandId }), remote)).resolves.toHaveLength(
     fixture.stops.filter((stop) => stop.privateNote).length,
   );
 });

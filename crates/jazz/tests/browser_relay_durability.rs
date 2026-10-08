@@ -11,8 +11,8 @@ mod common;
 
 use duplex_transport::duplex;
 use jazz::db::{
-    ClientRelayScope, Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts,
-    SubscriptionEvent, TickScheduler, TickUrgency, Transport, block_on,
+    ClientRelayScope, Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, SubscriptionEvent,
+    TickScheduler, TickUrgency, Transport, block_on,
 };
 use jazz::groove::records::{BorrowedRecord, Value};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
@@ -490,7 +490,7 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
     let _subscription = block_on(foreground.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -983,7 +983,7 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     let mut global_subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -1197,7 +1197,7 @@ fn browser_client_hydrates_local_structured_subscription_without_authority() {
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Local,
+            tier: jazz::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         },
     ))
@@ -1300,7 +1300,7 @@ fn one_shot_global_read_does_not_retire_live_browser_subscription_coverage() {
         .attach_query_with_opts(
             &todos,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         )
@@ -1970,7 +1970,7 @@ fn browser_client_local_full_waits_for_worker_then_reconciles_upstream() {
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Local,
+            tier: jazz::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         },
     ))
@@ -2053,8 +2053,7 @@ fn browser_client_local_only_subscription_stays_in_foreground() {
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Local,
-            propagation: Propagation::LocalOnly,
+            tier: jazz::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     ))
@@ -2138,7 +2137,7 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -2268,7 +2267,7 @@ fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
         .prepare_query(&Query::from("documents"))
         .expect("prepare documents");
     let opts = ReadOpts {
-        tier: DurabilityTier::Global,
+        tier: jazz::db::ReadTier::Remote,
         ..Default::default()
     }
     .branch_view(main.clone(), None);
@@ -2534,7 +2533,7 @@ fn exclusive_sibling_global_reads_extend_relay_projection(
     }
 
     let opts = ReadOpts {
-        tier: DurabilityTier::Global,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     for (table, expected_row) in [("todos", todo), ("checks", check), ("notes", note)] {
@@ -2709,7 +2708,7 @@ fn browser_relay_hydrates_fresh_included_global_subscription_from_authority() {
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -2806,7 +2805,7 @@ fn remote_nested_query_is_derived_locally_from_terminal_free_authority_inputs() 
     let mut subscription = block_on(receiver.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -2912,7 +2911,7 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
     let mut local = block_on(receiver.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Local,
+            tier: jazz::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         },
     ))
@@ -2920,10 +2919,9 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
     let mut strict = block_on(receiver.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             // Public `remote` lowers to Deferred. Immediate deliberately
             // includes local pending writes (the pending overlay).
-            local_updates: jazz::db::LocalUpdates::Deferred,
             ..ReadOpts::default()
         },
     ))
@@ -3102,7 +3100,7 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
     let mut owner_subscription = block_on(owner_foreground.subscribe(
         &messages,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3236,7 +3234,7 @@ fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3384,7 +3382,7 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
     let mut first_subscription = block_on(first_tab.subscribe(
         &first_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3437,7 +3435,7 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
     let mut reopened_subscription = block_on(reopened_tab.subscribe(
         &reopened_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3521,7 +3519,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_global_one_
         .attach_query_with_opts(
             &first_query,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         )
@@ -3543,7 +3541,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_global_one_
         block_on(first_tab.all(
             &first_query,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -3616,7 +3614,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_global_one_
         .attach_query_with_opts(
             &reopened_query,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         )
@@ -3655,7 +3653,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_global_one_
         block_on(reopened_tab.all(
             &reopened_query,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -3695,7 +3693,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_global_one_
     let regranted_rows = block_on(reopened_tab.all(
         &reopened_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3713,13 +3711,18 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_global_one_
     assert!(core.detach_connection(&core_seed_subscriber));
 }
 
-/// A write policy changes admission only; it cannot revoke read membership.
-/// A browser-authored exact-row transaction therefore uses the worker's one
-/// ordinary Global projection. Treating the write-only table as read-scoped
-/// would select a second relay-authority projection and deliver the same
-/// transaction through incompatible bundles (`ConflictingCommitUnit`).
+/// Alice's browser-authored row remains visible to her local-first subscription
+/// while the worker relays it to Core without conflicting commit units.
+/// INSERT permission allows the write to reach Global durability, but the
+/// missing SELECT policy keeps the same row out of her remote subscription.
+///
+/// ```text
+/// Alice's tab ──insert──► worker ──relay──► Core
+///     local-first: row                   INSERT: accepted
+///     remote: empty ◄────────────────── SELECT: denied
+/// ```
 #[test]
-fn browser_worker_write_only_exact_global_write_uses_one_ordinary_relay_projection() {
+fn browser_worker_write_only_exact_write_is_visible_locally_but_not_remotely() {
     let schema = write_only_policy_schema();
     let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
     let worker = open_db(0xc3, alice, &schema);
@@ -3738,19 +3741,27 @@ fn browser_worker_write_only_exact_global_write_uses_one_ordinary_relay_projecti
     let exact_query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row_id.0))));
     let todos = main_thread
         .prepare_query(&exact_query)
-        .expect("prepare exact Global query");
+        .expect("prepare exact query");
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         },
     ))
-    .expect("subscribe exact Global query");
+    .expect("subscribe exact local-first query");
+    let mut remote_subscription = block_on(main_thread.subscribe(
+        &todos,
+        ReadOpts {
+            tier: jazz::db::ReadTier::Remote,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe exact remote query");
 
     for _ in 0..4 {
-        main_thread.tick().expect("register exact Global coverage");
-        worker.tick().expect("relay exact Global coverage");
+        main_thread.tick().expect("register exact coverage");
+        worker.tick().expect("relay exact coverage");
         core.tick().expect("serve initial exact coverage");
         worker.tick().expect("apply initial exact coverage");
         main_thread.tick().expect("settle initial exact coverage");
@@ -3762,7 +3773,7 @@ fn browser_worker_write_only_exact_global_write_uses_one_ordinary_relay_projecti
             "todos",
             BTreeMap::from([(
                 "title".to_owned(),
-                Value::String("one ordinary projection".to_owned()),
+                Value::String("write-only row".to_owned()),
             )]),
             jazz::db::InsertOptions {
                 row_id: Some(row_id),
@@ -3789,13 +3800,34 @@ fn browser_worker_write_only_exact_global_write_uses_one_ordinary_relay_projecti
             SubscriptionEvent::Delta { added, .. }
                 if added.iter().any(|row| row.row.row_uuid() == authored.row_uuid())
         )),
-        "the public Global read must receive the authored row once: {events:?}",
+        "the local-first read must receive the authored row: {events:?}",
     );
     assert!(
         events
             .iter()
             .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. })),
-        "the authored row must settle through the ordinary projection: {events:?}",
+        "the local-first read must settle: {events:?}",
+    );
+
+    let state = block_on(authored.write_state()).expect("read authored write state");
+    assert_eq!(state.fate, Fate::Accepted);
+    assert_eq!(state.durability, DurabilityTier::Global);
+
+    let remote_events =
+        std::iter::from_fn(|| remote_subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        remote_events
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. })),
+        "the remote read must receive a settled answer: {remote_events:?}",
+    );
+    assert!(
+        remote_events.iter().all(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, updated, .. }
+                if added.is_empty() && updated.is_empty()
+        )),
+        "missing SELECT permission must hide the authored row remotely: {remote_events:?}",
     );
 }
 
@@ -3875,7 +3907,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3893,7 +3925,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let global_rows = block_on(main_thread.all(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3926,7 +3958,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &contained_local,
                 ReadOpts {
-                    tier: DurabilityTier::Local,
+                    tier: jazz::db::ReadTier::LocalFirst,
                     ..ReadOpts::default()
                 },
             ))
@@ -3947,7 +3979,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let mut narrower_subscription = block_on(main_thread.subscribe(
         &narrower,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3967,7 +3999,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &narrower,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             ))
@@ -3996,7 +4028,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             ))
@@ -4010,7 +4042,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &narrower,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             ))
@@ -4024,7 +4056,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &contained_local,
                 ReadOpts {
-                    tier: DurabilityTier::Local,
+                    tier: jazz::db::ReadTier::LocalFirst,
                     ..ReadOpts::default()
                 },
             ))
@@ -4061,7 +4093,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &same_offset_one_shot,
                 ReadOpts {
-                    tier: DurabilityTier::Local,
+                    tier: jazz::db::ReadTier::LocalFirst,
                     ..ReadOpts::default()
                 },
             ))
@@ -4079,7 +4111,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
         .attach_query_with_opts(
             &same_offset_one_shot,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         )
@@ -4113,7 +4145,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &same_offset_one_shot,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             ))
@@ -4191,7 +4223,7 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
             .attach_query_with_opts(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             )
@@ -4214,7 +4246,7 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
             block_on(main_thread.all(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             ))
@@ -4279,7 +4311,7 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -4361,7 +4393,7 @@ fn browser_relay_hands_off_each_policy_scoped_empty_result_independently() {
         .prepare_query(&bob_main.table("todos"))
         .expect("prepare Bob empty Global query");
     let global_opts = ReadOpts {
-        tier: DurabilityTier::Global,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     let mut alice_subscription = block_on(alice_main.subscribe(&alice_todos, global_opts.clone()))
@@ -5021,7 +5053,7 @@ fn settled_subscription_does_not_reschedule_idle_authority_ticks() {
     let mut subscription = block_on(client.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))

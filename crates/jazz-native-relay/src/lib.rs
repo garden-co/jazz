@@ -1534,7 +1534,7 @@ impl NativeRelayHost {
     }
 
     /// Report the relay-owned native socket's reachability to the foreground
-    /// `Db`, which drives its `local-first-unless-empty` reads. The foreground's
+    /// `Db`, which drives its local-first reads that wait for the server. The foreground's
     /// own upstream is the local relay core, which is always attached, so it
     /// cannot tell whether the authoritative server could answer. Only a
     /// change is reported, so an `Attempting` report timestamps the start of
@@ -6844,8 +6844,23 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
     let object = supplied
         .as_object()
         .ok_or_else(|| failure("expected object".to_owned()))?;
+    let mut first_load_remote_wait_ms = None;
     for (key, item) in object {
         if item.is_null() {
+            continue;
+        }
+        if key == "first_load_remote_wait_ms" {
+            first_load_remote_wait_ms = Some(
+                item.as_f64()
+                    .filter(|ms| ms.is_finite() && *ms >= 0.0)
+                    .map(|ms| ms.floor() as u64)
+                    .ok_or_else(|| {
+                        failure(
+                            "first_load_remote_wait_ms must be a non-negative number of milliseconds"
+                                .to_owned(),
+                        )
+                    })?,
+            );
             continue;
         }
         let key = if key == "readView" {
@@ -6853,48 +6868,24 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
         } else {
             key.as_str()
         };
-        if key == "tier"
-            && matches!(
-                item.as_str(),
-                Some("remote-if-possible" | "RemoteIfPossible")
-            )
-        {
-            return Err(failure("the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads".to_owned()));
-        }
-        if key == "tier" && matches!(item.as_str(), Some("edge" | "Edge")) {
-            return Err(failure(
-                "the edge tier was removed; use remote or global for Core confirmation".to_owned(),
-            ));
-        }
-        if key == "tier"
-            && matches!(
-                item.as_str(),
-                Some("local-first-unless-empty" | "LocalFirstUnlessEmpty")
-            )
-        {
-            // The core owns the local-first-unless-empty gate.
-            value["tier"] = serde_json::Value::String("Local".to_owned());
-            value["empty_opening"] = serde_json::Value::String("AwaitRemote".to_owned());
-            continue;
-        }
         let normalized = match (key, item.as_str()) {
-            ("tier", Some("local" | "Local" | "local-first" | "LocalFirst")) => Some("Local"),
-            ("tier", Some("remote" | "Remote")) => Some("Global"),
-            ("tier", Some("global" | "Global" | "core" | "Core")) => Some("Global"),
-            ("tier", Some("none" | "None")) => Some("None"),
-            ("local_updates", Some("immediate" | "Immediate")) => Some("Immediate"),
-            ("local_updates", Some("deferred" | "Deferred")) => Some("Deferred"),
-            ("propagation", Some("full" | "Full")) => Some("Full"),
-            ("propagation", Some("LocalOnly" | "local_only" | "localOnly" | "local-only")) => {
-                Some("LocalOnly")
-            }
+            ("tier", Some("local-first" | "LocalFirst")) => Some("LocalFirst"),
+            ("tier", Some("remote" | "Remote")) => Some("Remote"),
+            ("tier", Some("local-only" | "LocalOnly")) => Some("LocalOnly"),
             _ => None,
         };
         value[key] = normalized
             .map(|s| serde_json::Value::String(s.to_owned()))
             .unwrap_or_else(|| item.clone());
     }
-    serde_json::from_value(value).map_err(|e| failure(e.to_string()))
+    let mut opts: ReadOpts = serde_json::from_value(value).map_err(|e| failure(e.to_string()))?;
+    // A local-first read's server-wait timeout. `Remote` reads ignore it.
+    if let Some(timeout_ms) = first_load_remote_wait_ms
+        && opts.tier == jazz::db::ReadTier::LocalFirst
+    {
+        opts.first_load = jazz::db::FirstLoad::WaitForRemote { timeout_ms };
+    }
+    Ok(opts)
 }
 
 #[derive(serde::Deserialize)]
@@ -8760,7 +8751,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::All {
                 query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
-                options_json: r#"{"tier":"global","local_updates":"deferred"}"#.into(),
+                options_json: r#"{"tier":"remote"}"#.into(),
                 transaction: None,
             },
         );
@@ -8802,7 +8793,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::All {
                 query: postcard::to_allocvec(&Query::from("todos").limit(1)).unwrap(),
-                options_json: r#"{"tier":"local","local_updates":"deferred"}"#.into(),
+                options_json: r#"{"tier":"local-first"}"#.into(),
                 transaction: Some(transaction),
             },
         );
@@ -8983,7 +8974,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::All {
                 query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
-                options_json: r#"{"tier":"global","local_updates":"deferred"}"#.into(),
+                options_json: r#"{"tier":"remote"}"#.into(),
                 transaction: None,
             },
         );
@@ -12046,7 +12037,7 @@ mod tests {
             .unwrap();
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
         let read = match client
-            .start_foreground_read(query, "{\"tier\":\"global\"}".into(), None)
+            .start_foreground_read(query, "{\"tier\":\"remote\"}".into(), None)
             .unwrap()
         {
             ForegroundOperationPoll::Pending { operation } => operation,
@@ -12389,7 +12380,7 @@ mod tests {
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
         for _ in 0..7 {
             let ForegroundOperationPoll::Pending { operation } = client
-                .start_foreground_read(query.clone(), "{\"tier\":\"global\"}".into(), None)
+                .start_foreground_read(query.clone(), "{\"tier\":\"remote\"}".into(), None)
                 .unwrap()
             else {
                 panic!("remote read without an authority remains pending");
@@ -13617,7 +13608,7 @@ mod tests {
             .subscribe_foreground_query_with_options(
                 postcard::to_allocvec(&Query::from("todos")).unwrap(),
                 ReadOpts {
-                    tier: CoreDurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             )
@@ -16425,12 +16416,12 @@ mod tests {
     }
 
     #[test]
-    fn foreground_reads_reject_the_removed_edge_tier() {
+    fn foreground_reads_reject_unknown_tiers() {
         // Internal C-ABI receipt, like the transaction-command test above:
         // React Native reaches read options only through this byte command
-        // family, so the retired `edge` tier must fail here with the same
-        // Core-only guidance the TypeScript client gives, rather than being
-        // silently treated as some other tier.
+        // family, so unknown tiers must fail at deserialization rather than
+        // being silently treated as another tier. Migration guidance belongs
+        // to the TypeScript public boundary.
         let directory = tempfile::tempdir().unwrap();
         let host = jazz_native_relay_host_new();
         let capability = unsafe {
@@ -16440,7 +16431,7 @@ mod tests {
                 .unwrap()
                 .admit_scope(RelayScopeAdmissionRequest {
                     scope: RelayScopeRequest {
-                        app_namespace: "foreground-removed-edge-tier".to_owned(),
+                        app_namespace: "foreground-unknown-tier".to_owned(),
                         storage_namespace: "default".to_owned(),
                         auth_scope: Some("opaque-validated-subject".to_owned()),
                     },
@@ -16489,9 +16480,20 @@ mod tests {
             postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap()
         };
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
-        let removed = "foreground NativeDb command failed: invalid read options: the edge tier was removed; use remote or global for Core confirmation";
 
-        for tier in ["edge", "Edge"] {
+        for tier in [
+            "invalid-tier",
+            "InvalidTier",
+            "remote-if-possible",
+            "RemoteIfPossible",
+            "local-first-unless-empty",
+            "LocalFirstUnlessEmpty",
+            "core",
+            "Core",
+        ] {
+            let removed = format!(
+                "foreground NativeDb command failed: invalid read options: unknown variant `{tier}`, expected one of `LocalFirst`, `Remote`, `LocalOnly`"
+            );
             let options_json = format!(r#"{{"tier":"{tier}"}}"#);
             assert_eq!(
                 response(ForegroundDbCommandRequest::All {
@@ -16519,7 +16521,7 @@ mod tests {
         // starts a pending read instead of failing its options.
         let local = response(ForegroundDbCommandRequest::All {
             query,
-            options_json: r#"{"tier":"local"}"#.to_owned(),
+            options_json: r#"{"tier":"local-first"}"#.to_owned(),
             transaction: None,
         });
         assert!(

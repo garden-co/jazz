@@ -9,7 +9,6 @@ use jazz::groove::{records::Value, storage::TestStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 mod common;
 
@@ -82,7 +81,7 @@ fn page(db: &Db, identity: AuthorSubject, limit: usize) -> Vec<RowUuid> {
     block_on(db.all_for_identity(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         identity,

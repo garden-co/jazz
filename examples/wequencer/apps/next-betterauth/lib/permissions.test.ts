@@ -148,7 +148,7 @@ describe("Wequencer permissions", () => {
 
     const rows = await creator.db.all(
       app.steps.where({ track_id: track.id, pattern_id: pattern.id }),
-      { tier: "global" },
+      { tier: "remote" },
     );
     expect(rows.map((row) => [row.position, row.enabled])).toEqual([[3, true]]);
   }, 30_000);
@@ -172,9 +172,9 @@ describe("Wequencer permissions", () => {
 
     await expect
       .poll(async () =>
-        (await creator.db.all(app.profiles, { tier: "global" })).map((p) => p.displayName),
+        (await creator.db.all(app.profiles, { tier: "remote" })).map((p) => p.displayName),
       )
       .toEqual(["Edie"]);
-    await expect(stranger.db.all(app.profiles, { tier: "global" })).resolves.toEqual([]);
+    await expect(stranger.db.all(app.profiles, { tier: "remote" })).resolves.toEqual([]);
   }, 30_000);
 });

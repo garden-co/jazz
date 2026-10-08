@@ -66,12 +66,11 @@ use jazz::db::LargeValueUpdate as CoreLargeValueUpdate;
 use jazz::db::StreamingMutationKind as CoreStreamingMutationKind;
 use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
-    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, EmptyOpening as CoreEmptyOpening,
-    InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
+    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, FirstLoad as CoreFirstLoad,
+    InitialSyncFlushCadence as CoreInitialSyncFlushCadence,
     MutationErrorCallback as CoreMutationErrorCallback, PeerConnection as CorePeerConnection,
-    Propagation as CorePropagation, ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint,
-    RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
-    SerializedReadResult as CoreSerializedReadResult,
+    ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint, RowCells as CoreRowCells,
+    SeededRowIdSource as CoreSeededRowIdSource, SerializedReadResult as CoreSerializedReadResult,
     SerializedSubscriptionAuthorization as CoreSerializedSubscriptionAuthorization,
     StreamingValueUpload as CoreStreamingValueUpload,
     StreamingValueUploadCleanupTicket as CoreStreamingValueUploadCleanupTicket,
@@ -3084,7 +3083,7 @@ impl NapiDb {
         &self,
         query: Uint8Array,
         #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null"
+            ts_arg_type = "{ tier?: string; include_deleted?: boolean; sync?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
         open_transaction_id: Option<String>,
@@ -3137,9 +3136,8 @@ impl NapiDb {
                             })?
                             .map_err(napi_error)?;
                     }
-                    let requires_coverage = non_durable_client
-                        || (opts.tier >= jazz::tx::DurabilityTier::Global
-                            && opts.propagation == CorePropagation::Full);
+                    let requires_coverage =
+                        non_durable_client || (opts.tier == jazz::db::ReadTier::Remote);
                     // The coverage budget runs from the first wait on the
                     // server. A Global read that first waits for its own
                     // preceding writes to go out has not asked yet (#3839).
@@ -3275,9 +3273,7 @@ impl NapiDb {
     pub fn subscribe(
         &self,
         query: Uint8Array,
-        #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
-        )]
+        #[napi(ts_arg_type = "{ tier?: string; include_deleted?: boolean } | undefined | null")]
         opts: Option<JsonValue>,
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
@@ -3426,7 +3422,7 @@ impl NapiDb {
     /// Report what the host knows about the path to the authoritative server
     /// (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
     /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
-    /// Drives only `local-first-unless-empty` reads. The core timestamps each
+    /// Drives only local-first reads that wait for the server on first load. The core timestamps each
     /// `"attempting"` report as the start of a new attempt; until this is
     /// first called, reachability is derived from this runtime's own upstream.
     #[napi(js_name = "setRemoteLinkHint")]
@@ -4232,32 +4228,16 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
         return Ok(opts);
     }
     if let Some(tier) = optional_json_string_prop(&value, "tier")? {
-        (opts.tier, opts.empty_opening) = core_read_tier_from_str(&tier)?;
-    }
-    if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
-        opts.local_updates = match local_updates.as_str() {
-            "Immediate" | "immediate" => CoreLocalUpdates::Immediate,
-            "Deferred" | "deferred" => CoreLocalUpdates::Deferred,
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "unknown local_updates {other}"
-                )));
-            }
-        };
-    }
-    if let Some(propagation) = optional_json_string_prop(&value, "propagation")? {
-        opts.propagation = match propagation.as_str() {
-            "Full" | "full" => CorePropagation::Full,
-            "LocalOnly" | "local_only" | "localOnly" | "local-only" => CorePropagation::LocalOnly,
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "unknown propagation {other}"
-                )));
-            }
-        };
+        opts.tier = core_read_tier_from_str(&tier)?;
     }
     if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
+    }
+    // A local-first read's server-wait timeout. `Remote` reads ignore it.
+    if let Some(timeout_ms) = optional_json_wait_ms_prop(&value, "first_load_remote_wait_ms")?
+        && opts.tier == jazz::db::ReadTier::LocalFirst
+    {
+        opts.first_load = CoreFirstLoad::WaitForRemote { timeout_ms };
     }
     if let Some(read_view) = value
         .get("read_view")
@@ -4524,18 +4504,14 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
 
 /// Read-only binding lowering. Write waits keep the durability-tier parser so
 /// `remote` names cannot accidentally become a write settlement tier.
-fn core_read_tier_from_str(tier: &str) -> napi::Result<(CoreDurabilityTier, CoreEmptyOpening)> {
+fn core_read_tier_from_str(tier: &str) -> napi::Result<jazz::db::ReadTier> {
     match tier {
-        "local-first" | "LocalFirst" => Ok((CoreDurabilityTier::Local, CoreEmptyOpening::Deliver)),
-        // The core owns the local-first-unless-empty gate.
-        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
-            Ok((CoreDurabilityTier::Local, CoreEmptyOpening::AwaitRemote))
-        }
-        "remote-if-possible" | "RemoteIfPossible" => Err(napi::Error::from_reason(
-            "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
-        )),
-        "remote" | "Remote" => Ok((CoreDurabilityTier::Global, CoreEmptyOpening::Deliver)),
-        _ => core_durability_tier_from_str(tier).map(|tier| (tier, CoreEmptyOpening::Deliver)),
+        "local-first" | "LocalFirst" => Ok(jazz::db::ReadTier::LocalFirst),
+        "remote" | "Remote" => Ok(jazz::db::ReadTier::Remote),
+        "local-only" | "LocalOnly" => Ok(jazz::db::ReadTier::LocalOnly),
+        other => Err(napi::Error::from_reason(format!(
+            "unknown read tier {other}"
+        ))),
     }
 }
 
@@ -4544,6 +4520,21 @@ fn optional_json_string_prop(value: &JsonValue, name: &str) -> napi::Result<Opti
         Some(JsonValue::String(value)) => Ok(Some(value.clone())),
         Some(JsonValue::Null) | None => Ok(None),
         Some(_) => Err(napi::Error::from_reason(format!("{name} must be a string"))),
+    }
+}
+
+fn optional_json_wait_ms_prop(value: &JsonValue, name: &str) -> napi::Result<Option<u64>> {
+    match value.get(name) {
+        Some(JsonValue::Null) | None => Ok(None),
+        Some(JsonValue::Number(ms)) => match ms.as_f64() {
+            Some(ms) if ms.is_finite() && ms >= 0.0 => Ok(Some(ms.floor() as u64)),
+            _ => Err(napi::Error::from_reason(format!(
+                "{name} must be a non-negative number of milliseconds"
+            ))),
+        },
+        Some(_) => Err(napi::Error::from_reason(format!(
+            "{name} must be a non-negative number of milliseconds"
+        ))),
     }
 }
 
@@ -5477,32 +5468,30 @@ mod tests {
 
     /// Binding read choices lower without widening the write durability parser.
     #[test]
-    fn read_tier_names_lower_to_existing_core_tiers() {
+    fn read_tier_names_are_separate_from_durability() {
         assert_eq!(
             core_read_tier_from_str("local-first").expect("local-first read tier"),
-            (
-                jazz::tx::DurabilityTier::Local,
-                jazz::db::EmptyOpening::Deliver
-            )
+            jazz::db::ReadTier::LocalFirst
         );
         assert_eq!(
             core_read_tier_from_str("remote").expect("strict remote read tier"),
-            (
-                jazz::tx::DurabilityTier::Global,
-                jazz::db::EmptyOpening::Deliver
-            )
+            jazz::db::ReadTier::Remote
         );
-        for name in ["remote-if-possible", "RemoteIfPossible"] {
-            assert!(core_read_tier_from_str(name).is_err(), "{name} was removed");
-        }
-        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
+        for name in [
+            "remote-if-possible",
+            "RemoteIfPossible",
+            "local-first-unless-empty",
+            "LocalFirstUnlessEmpty",
+            "core",
+            "Core",
+            "local",
+            "global",
+            "none",
+            "invalid-tier",
+        ] {
             assert_eq!(
-                core_read_tier_from_str(name).expect("local-first-unless-empty read tier"),
-                (
-                    jazz::tx::DurabilityTier::Local,
-                    jazz::db::EmptyOpening::AwaitRemote
-                ),
-                "{name} reads local-first with the core empty-opening gate"
+                core_read_tier_from_str(name).unwrap_err().reason,
+                format!("unknown read tier {name}"),
             );
         }
         assert!(
@@ -5636,7 +5625,7 @@ mod tests {
     use jazz::account_registry::AccountId;
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
-        MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
+        MergeableTxOps, SubscriptionEvent as CoreSubscriptionEvent,
     };
     use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
@@ -7400,10 +7389,10 @@ mod tests {
 
     #[test]
     fn core_read_opts_accept_public_local_only_spelling() {
-        let opts = core_read_opts_from_json(Some(json!({ "propagation": "local-only" })))
+        let opts = core_read_opts_from_json(Some(json!({ "tier": "local-only" })))
             .expect("parse read opts");
 
-        assert_eq!(opts.propagation, CorePropagation::LocalOnly);
+        assert_eq!(opts.tier, jazz::db::ReadTier::LocalOnly);
     }
 
     #[test]
@@ -7411,7 +7400,7 @@ mod tests {
         let opts =
             core_read_opts_from_json(Some(json!({ "propagate": false }))).expect("parse read opts");
 
-        assert_eq!(opts.propagation, CorePropagation::Full);
+        assert_eq!(opts.tier, jazz::db::ReadTier::LocalFirst);
     }
 
     #[test]

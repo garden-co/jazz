@@ -30,9 +30,10 @@ durability. Sharding and distributed query execution are outside this change.
   bytes is never authorization or permission to assign a fate (`INV-TX-23`).
 
 Local-first reads use retained data and local edits. Remote reads require a
-fresh Core-confirmed supporting set; local-first-unless-empty is local-first
-but may hold an empty opening for the first remote view while a remote can
-answer (ch. 13). No intermediate
+fresh Core-confirmed supporting set. A local-first read with a server wait
+(`FirstLoad::WaitForRemote`) is local-first but may hold its opening, for
+at most the timeout, for the first remote view while a remote can answer
+(ch. 13). No intermediate
 server can substitute a locally computed result for Core confirmation.
 
 Core supplies query supporting rows and handles extra-local-row reconciliation:
@@ -41,28 +42,29 @@ revealing hidden policy evidence. Clients still evaluate queries locally over
 these inputs. Reconnect, complete-set replacement, negative evidence and
 connection-scoped receipt rules from chapter 8 remain in force.
 
-### 9.2 Existing persisted durability
+### 9.2 Durability encoding v2 compatibility
 
-The record encoding keeps its established discriminants: None is 0, Local is 1,
-legacy Edge is 2, and Global is 3. New records never emit 2. Readers interpret
-legacy 2 as Local; Global must not be renumbered to 2.
+`jazz.transaction-durability.v2` encodes `None=0`, `Local=1`, `Global=2`.
+It is a required member of the persistent Jazz codec profile. Adapters reject
+roots without that exact profile before interpreting or rewriting records.
+There is no compatibility decoder or automatic migration for the preceding
+profile: its tag 2 had a different meaning, and its Global tag was 3.
+Historical physical fixtures remain immutable rejection receipts, including
+published alpha.54/alpha.56 and the previous current-producer corpora.
 
-A legacy accepted transaction with durability 2 and no Core global position is
-pending under the new authority model. Preserve its authored commit unit,
-transaction ID, author and row versions. The normal locally-authored pending
-replay path resubmits it to Core, including after restart without an active
-query. Core may acknowledge an already-known identical unit, authorize and
-accept a new unit, or reject it through ordinary transaction reconciliation.
-The old edge acceptance is not evidence of present Core authorization
-(`INV-SYNC-47`).
-Retired edge-authority publications are rejected even on privileged links;
-authenticating the sender cannot reinstate the removed admission shortcut.
+Wire protocol v5 carries the same compact core durability tags. Its handshake
+roles are `Client=0`, `Core=1`, `Relay=2`; it admits only exact v5 peers.
+The Rust tools facade encodes `Local=0`, `GlobalServer=1`. These byte-level
+contracts are pinned independently; serializers' default ordering is not the
+compatibility contract. Read-view keys use `JRVK` version 2 because their tier
+byte changed with this release.
 
-Already globally confirmed transactions retain their fate and global position.
-Rejected transactions remain rejected. Reopening must not upload another
-account's cached history as the current account's authored edits. This migration
-cannot recover bytes absent from the local store; it does not invent credentials
-or convert cached remote transactions into local authorship.
+Upgrade clients, native bindings, and servers together. Earlier persistent
+roots cannot be opened by this release; retaining the files does not make them
+compatible. Use the matching older release to recover/export data before
+moving to a newly initialized root. New-format pending-write replay, write
+permissions, local relays, and globally confirmed durability retain their
+normal semantics.
 
 ### 9.3 Encoder and authorization trust
 
@@ -178,10 +180,13 @@ delivered material part of that retained knowledge and MUST wake affected Local
 subscriptions. An upstream removal changes future authoritative Global
 membership, but does not retroactively redact material already delivered to the
 scope-isolated store; Local may continue to expose it (`INV-RLS-6`).
-`Propagation::LocalOnly` prevents asking upstream and does not change these
-Local semantics. `LocalFirstUnlessEmpty` is a Local read throughout; only an empty opening may wait
-for the first authority view, only while the link is live or within the
-attempt window, and an `offset > 0` window reads the strict remote view
+`ReadTier::LocalOnly` reads local data and pending writes without asking
+upstream. `LocalFirst` also requests upstream results. A local-first read with a server wait
+(`FirstLoad::WaitForRemote { timeout_ms }`) is a Local read throughout;
+only its opening may wait for the first authority view, only while the link
+is live or within the attempt window, and never past its deadline. Under it,
+an `offset > 0` window reads the strict remote view, and a non-durable
+foreground holds an authority witness coverage while gated
 (ch. 13). The gate lives in the core `Db`; it never runs a second concurrent
 probe query.
 

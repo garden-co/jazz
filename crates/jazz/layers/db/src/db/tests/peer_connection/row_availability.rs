@@ -678,7 +678,7 @@ fn backend_own_system_scalar_query_reconciles_after_reconnect() {
         &backend,
         &Query::from("todos"),
         ReadOpts {
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     );
@@ -821,7 +821,7 @@ fn scalar_unavailability_receipt_preserves_inflight_local_edit() {
         &client,
         &Query::from("todos"),
         ReadOpts {
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     );

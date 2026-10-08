@@ -9,10 +9,7 @@ use std::task::{Context, Poll, Waker};
 mod common;
 
 use duplex_transport::duplex;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent,
-};
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -127,9 +124,7 @@ fn open_server(seed: u8, schema: JazzSchema) -> Db {
 
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::Full,
+        tier: jazz::db::ReadTier::Remote,
         include_deleted: false,
         ..ReadOpts::default()
     }

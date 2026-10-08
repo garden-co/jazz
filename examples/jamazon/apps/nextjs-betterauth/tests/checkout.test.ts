@@ -59,7 +59,7 @@ async function reviewedCart(db: TestDb, account: string): Promise<string> {
 
 async function onHand(sku: string) {
   const [row] = await backend.all(app.stock.where({ productId: ids.product(sku) }), {
-    tier: "global",
+    tier: "remote",
   });
   return row!.onHand;
 }
@@ -97,7 +97,7 @@ describe("checkout", () => {
       created: false,
     });
 
-    const orders = await ada.db.all(app.orders, { tier: "global" });
+    const orders = await ada.db.all(app.orders, { tier: "remote" });
     expect(orders).toHaveLength(1);
     expect(orders[0]).toMatchObject({
       status: "placed",
@@ -109,7 +109,7 @@ describe("checkout", () => {
     expect(await onHand("JAM-002")).toBe(CABLE.onHand - 1);
     // The cart is emptied and its key retired.
     const lines = await ada.db.all(app.cartLines.where({ cartId: ids.cart(ada.account) }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(lines.every((line) => line.quantity === 0)).toBe(true);
 
@@ -121,7 +121,7 @@ describe("checkout", () => {
     ]);
     await startPayment(backend, provider, orderId);
     expect(new Set(provider.creates)).toEqual(new Set([`jamazon-payment-${orderId}`]));
-    expect(await ada.db.all(app.payments, { tier: "global" })).toHaveLength(1);
+    expect(await ada.db.all(app.payments, { tier: "remote" })).toHaveLength(1);
 
     // A decline, then an approval, then duplicate and late reports.
     expect(await settlePayment(backend, provider, { orderId, sandboxOutcome: "decline" })).toBe(
@@ -142,12 +142,12 @@ describe("checkout", () => {
     expect(shipped.filter(Boolean)).toHaveLength(1);
 
     const events = await ada.db.all(app.orderEvents.where({ orderId }).orderBy("at", "asc"), {
-      tier: "global",
+      tier: "remote",
     });
     expect(events.map((e) => e.status).sort()).toEqual(
       ["paid", "payment_failed", "placed", "shipped"].sort(),
     );
-    const [order] = await ada.db.all(app.orders.where({ id: orderId }), { tier: "global" });
+    const [order] = await ada.db.all(app.orders.where({ id: orderId }), { tier: "remote" });
     expect(order!.status).toBe("shipped");
   });
 
@@ -183,7 +183,7 @@ describe("checkout", () => {
       placeOrder(backend, { account: ada.account, idempotencyKey: key }),
     ).rejects.toThrow(/left in stock/);
     expect(await onHand("JAM-003")).toBe(picks.onHand);
-    expect(await ada.db.all(app.orders, { tier: "global" })).toEqual([]);
+    expect(await ada.db.all(app.orders, { tier: "remote" })).toEqual([]);
   });
 });
 

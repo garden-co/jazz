@@ -106,7 +106,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
             }
           }
         },
-        { tier: "local" },
+        { tier: "local-first" },
       );
     });
 
@@ -125,7 +125,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
     );
 
     const convergedRows = await waitFor(async () => {
-      const rows = await clientB.query(JSON.stringify({ table: "todos" }), { tier: "local" });
+      const rows = await clientB.query(JSON.stringify({ table: "todos" }), { tier: "local-first" });
       return rows.find((row) => row.id === inserted.value.id);
     });
 
@@ -256,7 +256,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
               }
             }
           },
-          { tier: "local" },
+          { tier: "local-first" },
         );
       });
       await waitForPromise(
@@ -265,7 +265,9 @@ describe("NativeRuntimeAdapter server convergence", () => {
       );
 
       const persistedRow = await waitFor(async () => {
-        const rows = await reader.query(JSON.stringify({ table: "todos" }), { tier: "local" });
+        const rows = await reader.query(JSON.stringify({ table: "todos" }), {
+          tier: "local-first",
+        });
         return rows.find((row) => row.id === inserted.value.id);
       });
 
@@ -330,7 +332,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
             }
           }
         },
-        { tier: "local" },
+        { tier: "local-first" },
       );
     });
 
@@ -415,7 +417,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
               }
             }
           },
-          { tier: "local" },
+          { tier: "local-first" },
         );
       });
 
@@ -427,7 +429,9 @@ describe("NativeRuntimeAdapter server convergence", () => {
       ).resolves.toBe("websocket restored row");
 
       const restoredRow = await waitFor(async () => {
-        const rows = await reader.query(JSON.stringify({ table: "todos" }), { tier: "local" });
+        const rows = await reader.query(JSON.stringify({ table: "todos" }), {
+          tier: "local-first",
+        });
         return rows.find((row) => row.id === inserted.value.id);
       });
 

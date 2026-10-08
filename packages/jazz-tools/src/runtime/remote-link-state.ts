@@ -8,8 +8,8 @@
  * - `unavailable`: the application disconnected explicitly, the connection
  *   dropped and is retrying, or the attempt failed.
  *
- * Hosts report it to the core Db, which uses it only to decide whether an
- * empty local-first-unless-empty opening may wait for the server. It never
+ * Hosts report it to the core Db, which uses it only to decide whether a
+ * local-first read's first load may wait for the server. It never
  * changes write durability or strict `ReadTier.Remote` reads.
  */
 export type RemoteLinkState = "none" | "connecting" | "connected" | "unavailable";

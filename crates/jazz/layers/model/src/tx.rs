@@ -501,7 +501,6 @@ pub enum RejectionReason {
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
-#[serde(from = "DurabilityEncoding", into = "DurabilityEncoding")]
 pub enum DurabilityTier {
     /// Not durable outside the local process.
     None,
@@ -509,40 +508,6 @@ pub enum DurabilityTier {
     Local,
     /// Accepted and stored at the global authority.
     Global,
-}
-
-// Pin the established Postcard tags. Legacy Edge is accepted only while
-// decoding; new messages always encode Local as 1 and Global as 3.
-#[derive(serde::Deserialize, serde::Serialize)]
-#[allow(deprecated)]
-enum DurabilityEncoding {
-    None,
-    Local,
-    #[deprecated(
-        note = "the edge tier was removed in alpha.57; decode-only so old peers' edge acks still decode, as Local. Never encode it"
-    )]
-    Edge,
-    Global,
-}
-
-#[allow(deprecated)]
-impl From<DurabilityEncoding> for DurabilityTier {
-    fn from(value: DurabilityEncoding) -> Self {
-        match value {
-            DurabilityEncoding::None => Self::None,
-            DurabilityEncoding::Local | DurabilityEncoding::Edge => Self::Local,
-            DurabilityEncoding::Global => Self::Global,
-        }
-    }
-}
-impl From<DurabilityTier> for DurabilityEncoding {
-    fn from(value: DurabilityTier) -> Self {
-        match value {
-            DurabilityTier::None => Self::None,
-            DurabilityTier::Local => Self::Local,
-            DurabilityTier::Global => Self::Global,
-        }
-    }
 }
 
 /// Stored history layer for a row version.
@@ -1396,68 +1361,13 @@ groove::impl_record_field_enum!(TxKind {
     TxKind::Mergeable = 0,
     TxKind::Exclusive = 1,
 });
-// Storage tags are independent of the public enum: 2 is a decode-only legacy
-// alias for Local, while Global remains 3.
-impl DurabilityTier {
-    #[doc(hidden)]
-    pub fn from_discriminant(tag: u8) -> Result<Self, groove::records::Error> {
-        match tag {
-            0 => Ok(Self::None),
-            1 | 2 => Ok(Self::Local),
-            3 => Ok(Self::Global),
-            tag => Err(groove::records::Error::InvalidEnumDiscriminant {
-                enum_name: "DurabilityTier".to_owned(),
-                discriminant: tag,
-            }),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn discriminant(self) -> u8 {
-        match self {
-            Self::None => 0,
-            Self::Local => 1,
-            Self::Global => 3,
-        }
-    }
-}
-
-impl groove::records::RecordField for DurabilityTier {
-    fn read(
-        record: &groove::records::BorrowedRecord<'_>,
-        idx: usize,
-    ) -> Result<Self, groove::records::Error> {
-        Self::from_discriminant(record.get_enum(idx)?)
-    }
-    fn to_value(&self) -> groove::records::Value {
-        groove::records::Value::EnumTag(self.discriminant())
-    }
-    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Enum;
-    fn read_raw(
-        bytes: &[u8],
-        value_type: &groove::records::ValueType,
-    ) -> Result<Self, groove::records::Error> {
-        match value_type {
-            groove::records::ValueType::EnumTag(schema) => {
-                let tag = <u8 as groove::records::RecordField>::read_raw(
-                    bytes,
-                    &groove::records::ValueType::U8,
-                )?;
-                schema.variant(tag)?;
-                Self::from_discriminant(tag)
-            }
-            _ => Err(groove::records::Error::TypeMismatch {
-                expected: groove::records::ValueType::U8,
-            }),
-        }
-    }
-    fn read_tuple_raw(
-        bytes: &[u8],
-        value_type: &groove::records::ValueType,
-    ) -> Result<Self, groove::records::Error> {
-        Self::read_raw(bytes, value_type)
-    }
-}
+// jazz.transaction-durability.v2: None=0, Local=1, Global=2.
+// The storage codec profile rejects earlier roots before these tags are read.
+groove::impl_record_field_enum!(DurabilityTier {
+    DurabilityTier::None = 0,
+    DurabilityTier::Local = 1,
+    DurabilityTier::Global = 2,
+});
 
 groove::impl_record_field_enum!(DeletionEvent {
     DeletionEvent::Deleted = 0,
