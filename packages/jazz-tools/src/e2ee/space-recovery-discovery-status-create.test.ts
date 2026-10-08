@@ -31,11 +31,9 @@ it.each(["status+create"] as const)(
         await f.close(f.owner);
         await f.close(f.recipient);
       }
-      const recover = async () => {
-        if (operation === "status+create") return observer.e2ee.recovery.status(material);
-        return observer.e2ee.recovery.use(material).wait();
-      };
-      await recover();
+      // Compare the first cold reader's status directly. Recovery use still
+      // needs its own post-operation status observation.
+      if (operation === "use") await observer.e2ee.recovery.use(material).wait();
       const after = await observer.e2ee.recovery.status(material);
       expect(after.spaces).toEqual(before.spaces);
       if (operation === "use") {
