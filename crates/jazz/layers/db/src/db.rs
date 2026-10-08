@@ -86,8 +86,6 @@ mod routed_messages;
 pub use channel_endpoint::{AuxiliaryChannelEndpoint, SharedAuxiliaryEndpoint};
 pub use routed_messages::ReceivedSyncMessage;
 mod wire_transport;
-#[cfg(test)]
-use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
 pub use wire_transport::{WireFlushStatus, WireSendOutcome, WireTransportAdapter};
 
 /// Pragmatic single-threaded serialization boundary for canonical Jazz state.
@@ -2817,21 +2815,6 @@ struct RelaySubscriptionRejection {
     reason: SubscribeRejectReason,
 }
 
-/// Authority-derived scope identity retained for a support subscription.
-/// Never constructed from the caller's wire payload.
-#[derive(Clone, Debug, PartialEq)]
-struct AuthorizedScopePurpose {
-    key: crate::protocol::AuthorizationSupportScopeKey,
-    operation: crate::protocol::AuthorizationOperationKey,
-    action: PermissionAdviceAction,
-    expected_support: BTreeSet<(ShapeId, BindingId)>,
-}
-
-// Compatibility spelling retained for module-local tests while the actual
-// implementation is the shared authority proof primitive.
-#[cfg(test)]
-type ScopeAggregate = AuthorityScopeAggregate;
-
 /// One receipt-bound authorization operation owned by one admitted upstream.
 ///
 /// This state deliberately lives on `ConnectionLink::Upstream`: a receipt is
@@ -3679,8 +3662,6 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
             | SyncMessage::RowVersionPayloads { .. }
             | SyncMessage::CatalogueSnapshot(_)
-            | SyncMessage::PermissionAdviceResponse { .. }
-            | SyncMessage::AuthorizationScopeReceipt { .. }
             | SyncMessage::AuthorizationScopeView { .. }
             | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
             | SyncMessage::AuthorizationScopeUnavailable { .. }

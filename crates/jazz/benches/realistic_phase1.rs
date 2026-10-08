@@ -34,10 +34,7 @@ use jazz::tools::{
     ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, Value as PublicValue,
 };
 use jazz::tx::DurabilityTier;
-use jazz::wire::{
-    FEATURE_SESSION_FRAME, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError,
-    WIRE_PROTOCOL_VERSION, WireSession, WireTransport,
-};
+use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireSession, WireTransport};
 use jazz_storage_rocksdb::RocksDbStorage;
 use tempfile::TempDir;
 
@@ -331,7 +328,7 @@ fn byte_duplex_with_session(
         epoch,
         identity: Some(identity),
     };
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME | FEATURE_STRUCTURED_ERRORS;
+    let features = 0;
     (
         Box::new(WireTransportAdapter::new(
             left_transport,

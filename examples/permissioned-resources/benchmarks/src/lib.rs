@@ -34,8 +34,8 @@ use jazz::tools::{
     TableSchemaBuilder, Value as PublicValue,
 };
 use jazz::wire::{
-    FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, TransportError, WireCompression, WireStreamDecoder,
-    WireStreamEncoder, compress_sync_payload, current_wire_features,
+    FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, TransportError, WireCompression,
+    current_wire_features,
 };
 use jazz_sim::public_schema_fixture::{compile_public_schema, seeded_recursive_access_policy};
 use jazz_sim::view_accounting::version_bundle_refs;
@@ -1088,6 +1088,77 @@ impl ProbeAttribution {
     }
 }
 
+// Exercise the same persistent channel codec and bounded credit flow as live
+// traffic. Byte counts exclude outer frame metadata, matching the probe fields.
+struct ChannelCodec {
+    sender: jazz::wire::stream_backend::OrderedChannelBackend,
+    receiver: jazz::wire::stream_backend::OrderedChannelBackend,
+}
+
+impl ChannelCodec {
+    fn new(features: u64) -> Result<Self, String> {
+        let context =
+            jazz::wire::WireInboundContext::new(jazz::wire::WIRE_PROTOCOL_VERSION, features, None);
+        Ok(Self {
+            sender: jazz::wire::stream_backend::OrderedChannelBackend::new(context.clone())?,
+            receiver: jazz::wire::stream_backend::OrderedChannelBackend::new(context)?,
+        })
+    }
+
+    fn round_trip(&mut self, payload: &[u8]) -> Result<(Vec<u8>, u64, u64, u64), String> {
+        self.sender
+            .enqueue(
+                1,
+                0,
+                jazz::wire::channels::ChannelClass::Writes,
+                payload.to_vec(),
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        let mut decoded = None;
+        let (mut bytes, mut encode_ns, mut decode_ns) = (0, 0, 0);
+        while self.sender.has_pending() {
+            let start = Instant::now();
+            let frame = self
+                .sender
+                .peek_outbound()?
+                .ok_or("loopback stalled despite returning credits")?;
+            self.sender.accept_outbound()?;
+            encode_ns += start.elapsed().as_nanos() as u64;
+            let start = Instant::now();
+            let jazz::wire::WireFrame::Channel(envelope) =
+                jazz::wire::decode_frame(&frame).map_err(|error| error.to_string())?
+            else {
+                return Err("expected channel extent".into());
+            };
+            bytes += envelope.extent.payload.len() as u64;
+            if let Some(message) = self.receiver.receive(envelope, frame.len())? {
+                decoded = Some(message.payload);
+            }
+            decode_ns += start.elapsed().as_nanos() as u64;
+            let credits = self.receiver.channel_credits();
+            let mut credits = credits.lock().unwrap();
+            while let Some(grant) = credits.peek_grant()? {
+                let jazz::wire::WireFrame::ChannelCredit(grant) =
+                    jazz::wire::decode_frame(&grant).map_err(|error| error.to_string())?
+                else {
+                    return Err("expected channel credit".into());
+                };
+                self.sender
+                    .channel_credits()
+                    .lock()
+                    .unwrap()
+                    .receive_credit(grant)?;
+                credits.accept_grant()?;
+            }
+        }
+        let decoded = decoded.ok_or("channel did not complete message")?;
+        if decoded != payload {
+            return Err("channel round trip changed payload".into());
+        }
+        Ok((decoded, bytes, encode_ns, decode_ns))
+    }
+}
+
 #[derive(Default)]
 struct CodecProbe {
     raw_bytes: u64,
@@ -1098,62 +1169,52 @@ struct CodecProbe {
     streaming_lz4_bytes: Option<u64>,
     streaming_lz4_encode_ns: u64,
     streaming_lz4_decode_ns: u64,
-    zstd_stream: Option<(WireStreamEncoder, WireStreamDecoder)>,
-    lz4_stream: Option<(WireStreamEncoder, WireStreamDecoder)>,
+    zstd_stream: Option<ChannelCodec>,
+    lz4_stream: Option<ChannelCodec>,
 }
 
 impl CodecProbe {
     fn record(&mut self, payload: &[u8]) {
         self.raw_bytes += payload.len() as u64;
-        if let Ok((compressed, active)) =
-            compress_sync_payload(payload.to_vec(), FEATURE_PAYLOAD_ZSTD)
-        {
+        // Independent block compression remains a diagnostic comparison only;
+        // it is not an alternative Jazz wire path.
+        if let Ok(compressed) = zstd::bulk::compress(payload, 0) {
             *self.per_message_zstd_bytes.get_or_insert(0) += compressed.len() as u64;
-            let _ = jazz::wire::decompress_sync_payload(&compressed, active);
         }
-        if self.zstd_stream.is_none()
-            && let (Ok(encoder), Ok(decoder)) = (
-                WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD),
-                WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD),
-            )
-        {
-            self.zstd_stream = Some((encoder, decoder));
-            self.streaming_zstd_bytes = Some(0);
-        }
-        if let Some((encoder, decoder)) = &mut self.zstd_stream {
-            let encode_start = Instant::now();
-            if let Ok(chunk) = encoder.encode_message(payload) {
-                self.streaming_zstd_encode_ns += encode_start.elapsed().as_nanos() as u64;
-                *self.streaming_zstd_bytes.get_or_insert(0) += chunk.len() as u64;
-                let decode_start = Instant::now();
-                let _ = decoder.decode_message(&chunk, FEATURE_PAYLOAD_ZSTD);
-                self.streaming_zstd_decode_ns += decode_start.elapsed().as_nanos() as u64;
+        for (features, stream, bytes, encode_ns, decode_ns) in [
+            (
+                FEATURE_PAYLOAD_ZSTD,
+                &mut self.zstd_stream,
+                &mut self.streaming_zstd_bytes,
+                &mut self.streaming_zstd_encode_ns,
+                &mut self.streaming_zstd_decode_ns,
+            ),
+            (
+                FEATURE_PAYLOAD_LZ4,
+                &mut self.lz4_stream,
+                &mut self.streaming_lz4_bytes,
+                &mut self.streaming_lz4_encode_ns,
+                &mut self.streaming_lz4_decode_ns,
+            ),
+        ] {
+            if stream.is_none() {
+                *stream = ChannelCodec::new(features).ok();
             }
-        }
-        if self.lz4_stream.is_none()
-            && let (Ok(encoder), Ok(decoder)) = (
-                WireStreamEncoder::new(FEATURE_PAYLOAD_LZ4),
-                WireStreamDecoder::new(FEATURE_PAYLOAD_LZ4),
-            )
-        {
-            self.lz4_stream = Some((encoder, decoder));
-            self.streaming_lz4_bytes = Some(0);
-        }
-        if let Some((encoder, decoder)) = &mut self.lz4_stream {
-            let encode_start = Instant::now();
-            if let Ok(chunk) = encoder.encode_message(payload) {
-                self.streaming_lz4_encode_ns += encode_start.elapsed().as_nanos() as u64;
-                *self.streaming_lz4_bytes.get_or_insert(0) += chunk.len() as u64;
-                let decode_start = Instant::now();
-                let _ = decoder.decode_message(&chunk, FEATURE_PAYLOAD_LZ4);
-                self.streaming_lz4_decode_ns += decode_start.elapsed().as_nanos() as u64;
+            if let Some(codec) = stream {
+                if let Ok((_, size, encoding, decoding)) = codec.round_trip(payload) {
+                    *bytes.get_or_insert(0) += size;
+                    *encode_ns += encoding;
+                    *decode_ns += decoding;
+                } else {
+                    *stream = None;
+                }
             }
         }
     }
 }
 
 struct DuplexTransport {
-    clean_wire: Option<(WireStreamEncoder, WireStreamDecoder)>,
+    clean_wire: Option<ChannelCodec>,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     metrics: Rc<TransportMetrics>,
@@ -1208,18 +1269,11 @@ impl Transport for DuplexTransport {
                 .known_state_subscribes
                 .set(self.metrics.known_state_subscribes.get() + 1);
         }
-        let message = if let Some((encoder, decoder)) = &mut self.clean_wire {
+        let message = if let Some(codec) = &mut self.clean_wire {
             let bytes = jazz::wire::encode_sync_message(&message).expect("encode clean transport");
-            let bytes = encoder
-                .encode_message(&bytes)
-                .expect("compress clean transport");
-            self.metrics
-                .bytes
-                .set(self.metrics.bytes.get() + bytes.len() as u64);
-            let bytes = decoder
-                .decode_message(&bytes, FEATURE_PAYLOAD_ZSTD)
-                .expect("decompress clean transport");
-            jazz::wire::decode_sync_message(&bytes).expect("decode clean transport")
+            let (decoded, size, _, _) = codec.round_trip(&bytes).expect("channel clean transport");
+            self.metrics.bytes.set(self.metrics.bytes.get() + size);
+            jazz::wire::decode_sync_message(&decoded).expect("decode clean transport")
         } else {
             #[cfg(feature = "cold-settle-attribution")]
             let probe_start = Instant::now();
@@ -1253,14 +1307,7 @@ impl Transport for DuplexTransport {
 }
 
 fn duplex_counted(diagnostics: bool) -> CountedDuplex {
-    let wire = || {
-        (!diagnostics).then(|| {
-            (
-                WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD).unwrap(),
-                WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap(),
-            )
-        })
-    };
+    let wire = || (!diagnostics).then(|| ChannelCodec::new(FEATURE_PAYLOAD_ZSTD).unwrap());
     let left = Rc::new(RefCell::new(VecDeque::new()));
     let right = Rc::new(RefCell::new(VecDeque::new()));
     let left_to_right = Rc::new(TransportMetrics::default());
@@ -3340,32 +3387,19 @@ fn encoded_message_measurement(message: &SyncMessage) -> EncodedMessageMeasureme
         };
     };
     let raw_payload = Some(bytes.clone());
-    let features = current_wire_features();
-    let encode_start = Instant::now();
-    let compressed = compress_sync_payload(bytes, features);
-    let encode_ns = encode_start.elapsed().as_nanos() as u64;
-    match compressed {
-        Ok((compressed, active)) => {
-            let decode_start = Instant::now();
-            let _ = jazz::wire::decompress_sync_payload(&compressed, active);
-            let decode_ns = decode_start.elapsed().as_nanos() as u64;
-            EncodedMessageMeasurement {
-                bytes: compressed.len() as u64,
-                #[cfg(feature = "cold-settle-attribution")]
-                serialize_ns,
-                compress_encode_ns: encode_ns,
-                compress_decode_ns: decode_ns,
-                raw_payload,
-            }
-        }
-        Err(_) => EncodedMessageMeasurement {
-            bytes: 0,
-            #[cfg(feature = "cold-settle-attribution")]
-            serialize_ns,
-            compress_encode_ns: encode_ns,
-            compress_decode_ns: 0,
-            raw_payload,
-        },
+    let result =
+        ChannelCodec::new(current_wire_features()).and_then(|mut codec| codec.round_trip(&bytes));
+    let (size, encode_ns, decode_ns) = match result {
+        Ok((_, size, encode_ns, decode_ns)) => (size, encode_ns, decode_ns),
+        Err(_) => (0, 0, 0),
+    };
+    EncodedMessageMeasurement {
+        bytes: size,
+        #[cfg(feature = "cold-settle-attribution")]
+        serialize_ns,
+        compress_encode_ns: encode_ns,
+        compress_decode_ns: decode_ns,
+        raw_payload,
     }
 }
 
@@ -3568,5 +3602,31 @@ mod tests {
         let result = fixture.first_sync();
         result.verify();
         assert!(result.rows() < member_rows);
+    }
+}
+
+/// Alice's benchmark transport delivers several messages to Bob through one
+/// persistent channel, including an incompressible message larger than its
+/// physical credit window. This checks the benchmark adapter's byte plumbing;
+/// application-level query tests cannot observe its credit exchange.
+#[cfg(test)]
+#[test]
+fn channel_codec_preserves_messages_across_credit_windows() {
+    let mut codec = ChannelCodec::new(FEATURE_PAYLOAD_ZSTD).unwrap();
+    let mut state = 0x1234_5678_9abc_def0_u64;
+    let large = (0..5 * 1024 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect::<Vec<_>>();
+    for payload in [b"first".as_slice(), large.as_slice(), b"last"] {
+        let (decoded, encoded, _, _) = codec.round_trip(payload).unwrap();
+        assert_eq!(decoded, payload);
+        if payload.len() == large.len() {
+            assert!(encoded > 4 * 1024 * 1024);
+        }
     }
 }
