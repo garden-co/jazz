@@ -41,6 +41,15 @@ truth and will drift as the API evolves.
 
 ## Testing
 
+### Browser fixture tests
+
+Keep browser cases as independent complete scenarios. Close clients before
+cleaning up owned authorities, and use ownership-aware stop helpers; keep
+shared resources at the suite's `beforeAll` lifetime. Seed in the same ordered
+writes and persistence tiers as the behavior under test. For multi-tab
+lifecycles, establish the leader first, then followers, and keep restart
+boundaries explicit.
+
 ### Pre-commit hooks in restricted shells
 
 The staged Rust hook receives its file list directly from Lefthook and invokes

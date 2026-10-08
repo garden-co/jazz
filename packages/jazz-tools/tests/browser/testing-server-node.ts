@@ -107,16 +107,21 @@ export async function stopJazzServer(): Promise<void> {
     return;
   }
 
-  for (const runningServer of runningServers) {
-    try {
-      const { server, jwtIssuer } = await runningServer;
-      await server.stop();
-      await jwtIssuer.stop();
-    } catch {
-      // Swallow all errors: either startup never produced a server (nothing to stop),
-      // or stop() itself failed (nothing recoverable during teardown).
-    }
-  }
+  let nextServer = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(4, runningServers.length) }, async () => {
+      while (nextServer < runningServers.length) {
+        const runningServer = runningServers[nextServer++];
+        try {
+          const { server, jwtIssuer } = await runningServer;
+          await server.stop();
+          await jwtIssuer.stop();
+        } catch {
+          // Startup or shutdown failed; retain the global best-effort sweep.
+        }
+      }
+    }),
+  );
 }
 
 function jazzServerUrlPattern(serverUrl: string): string {

@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           pnpm --dir packages/jazz-tools test:browser:focused -- \
-            tests/browser/worker-bridge.test.ts \
+            tests/browser/worker-bridge-lifecycle-local-db.test.ts \
             -t "survives (repeated durable writes across fresh SharedWorker lifecycles|randomized concurrent writes and SharedWorker restarts)" \
             | tee "${RUNNER_TEMP}/browser-soak.log"
           # A filter that silently matches nothing, or a soak flag that stops

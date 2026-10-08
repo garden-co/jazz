@@ -8,8 +8,7 @@
  *
  * Server sync tests use a real jazz-tools server spawned by global-setup.
  *
- * Part 2 of the bridge suite: local and server sync, subscriptions,
- * transaction identities and write rejection. See worker-bridge.test.ts.
+ * Local/server subscriptions, transaction identities and write rejection.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -225,11 +224,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
     await seeder.all(app.projects.where({ id: projectId }), { tier: "global" });
 
     const expectedTitles: string[] = [];
-    for (let i = 0; i < 12; i += 1) {
+    const writes = Array.from({ length: 12 }, (_, i) => {
       const title = `server-seeded-${i}`;
       expectedTitles.push(title);
-      await seeder.insert(todos, { title, done: i % 2 === 0, projectId }).wait({ tier: "global" });
-    }
+      return seeder.insert(todos, { title, done: i % 2 === 0, projectId });
+    });
+    await Promise.all(writes.map((write) => write.wait({ tier: "global" })));
     await seeder.shutdown();
     ctx.untrack(seeder);
 
@@ -459,13 +459,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
       syncServer,
     );
 
-    const insertedIds: string[] = [];
-    for (let i = 0; i < 120; i += 1) {
-      const { id } = await db
-        .insert(todos, { title: `seeded-${i}`, done: i % 2 === 0 })
-        .wait({ tier: "local" });
-      insertedIds.push(id);
-    }
+    const writes = Array.from({ length: 120 }, (_, i) =>
+      db.insert(todos, { title: `seeded-${i}`, done: i % 2 === 0 }),
+    );
+    const insertedIds = (
+      await Promise.all(writes.map((write) => write.wait({ tier: "local" })))
+    ).map(({ id }) => id);
 
     const targetId = insertedIds[0];
     const received: Todo[][] = [];
@@ -506,13 +505,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
       }),
     );
 
-    const insertedIds: string[] = [];
-    for (let i = 0; i < 120; i += 1) {
-      const { id } = await db
-        .insert(todos, { title: `seeded-jwt-${i}`, done: i % 2 === 0 })
-        .wait({ tier: "local" });
-      insertedIds.push(id);
-    }
+    const writes = Array.from({ length: 120 }, (_, i) =>
+      db.insert(todos, { title: `seeded-jwt-${i}`, done: i % 2 === 0 }),
+    );
+    const insertedIds = (
+      await Promise.all(writes.map((write) => write.wait({ tier: "local" })))
+    ).map(({ id }) => id);
 
     const targetId = insertedIds[0];
     const received: Todo[][] = [];

@@ -255,60 +255,70 @@ export async function createRemoteBrowserDb(
   currentContext: BrowserContext,
   currentPage: Page,
   input: RemoteBrowserDbCreateInput,
-): Promise<string> {
+): Promise<void> {
   await closeRemoteBrowserDb(input.id);
 
-  // Every page in a Playwright BrowserContext has its own ES-module realm.
-  // The browser fixture's implicit-account cache is consequently page-local;
-  // relying on it here would make tabs pointed at one physical root present
-  // different account owners to the SharedWorker. Give this remote fixture one
-  // opaque local-first credential for its whole lifetime instead.
+  // Each page has its own account-cache realm. All tabs for one physical root
+  // must retain the same explicit credential throughout the fixture lifetime.
   const resolvedInput =
     input.jwtToken || input.localFirstSecret
       ? input
       : { ...input, localFirstSecret: generateAuthSecret() };
-
   const browser = getBrowserFromContext(currentContext);
+  const harnessUrl = harnessUrlFromPage(currentPage);
   const remoteContext = await browser.newContext();
-  const lifecycle: string[] = [];
-  await remoteContext.addInitScript((key) => {
-    const count = Number(sessionStorage.getItem(key) ?? 0);
-    sessionStorage.setItem(key, String(count + 1));
-  }, HARNESS_LOAD_COUNT_KEY);
-  // WebKit tears down a page-less remote context while restart tests close
-  // every Jazz-owning page. Keep an inert, opaque-origin page there; it never
-  // joins the harness origin's agent cluster or connects to the SharedWorker.
-  //
-  // Do not retain this page in Firefox. Closed pages there otherwise keep
-  // their large page-local WASM realms alive long enough for a restart soak to
-  // exhaust the browser process before GC catches up.
-  const anchorPage =
-    browser.browserType().name() === "webkit" ? await remoteContext.newPage() : null;
-  if (anchorPage) {
-    await anchorPage.goto("data:text/html,<title>remote-browser-db-anchor</title>", {
-      waitUntil: "domcontentloaded",
-    });
-  }
-  const pages: Page[] = [];
-  for (let index = 0; index < (resolvedInput.tabCount ?? 1); index += 1) {
+  const handle: RemoteBrowserDbHandle = {
+    context: remoteContext,
+    anchorPage: null,
+    pages: [],
+    input: resolvedInput,
+    harnessUrl,
+    lifecycle: [],
+  };
+  // Enlist the context before asynchronous startup so timed-out or failed
+  // initialization remains visible to fixture cleanup.
+  remoteBrowserDbs.set(input.id, handle);
+  const initializations: Promise<void>[] = [];
+
+  async function openTab(index: number): Promise<void> {
     const page = await remoteContext.newPage();
-    await observeRemoteBrowserDbPage(page, lifecycle, index);
-    await page.goto(harnessUrlFromPage(currentPage), { waitUntil: "domcontentloaded" });
+    handle.pages[index] = page;
+    await observeRemoteBrowserDbPage(page, handle.lifecycle, index);
+    await page.goto(handle.harnessUrl, { waitUntil: "domcontentloaded" });
     await evaluateHarness(page, "createRemoteBrowserDb", {
       ...resolvedInput,
       initialRow: index === 0 ? resolvedInput.initialRow : undefined,
     });
-    pages.push(page);
   }
 
-  remoteBrowserDbs.set(input.id, {
-    context: remoteContext,
-    anchorPage,
-    pages,
-    input: resolvedInput,
-    harnessUrl: harnessUrlFromPage(currentPage),
-    lifecycle,
-  });
+  try {
+    await remoteContext.addInitScript((key) => {
+      const count = Number(sessionStorage.getItem(key) ?? 0);
+      sessionStorage.setItem(key, String(count + 1));
+    }, HARNESS_LOAD_COUNT_KEY);
+    // WebKit needs an inert page while every owner page closes on restart.
+    // Firefox must not retain an anchor: it delays reclaiming page-local WASM.
+    if (browser.browserType().name() === "webkit") {
+      handle.anchorPage = await remoteContext.newPage();
+      await handle.anchorPage.goto("data:text/html,<title>remote-browser-db-anchor</title>", {
+        waitUntil: "domcontentloaded",
+      });
+    }
+    if ((resolvedInput.tabCount ?? 1) > 0) {
+      const leader = openTab(0);
+      initializations.push(leader);
+      await leader;
+      for (let index = 1; index < (resolvedInput.tabCount ?? 1); index += 1) {
+        initializations.push(openTab(index));
+      }
+      await Promise.all(initializations);
+    }
+  } catch (error) {
+    remoteBrowserDbs.delete(input.id);
+    await remoteContext.close().catch(() => undefined);
+    await Promise.allSettled(initializations);
+    throw error;
+  }
 }
 
 export async function restartRemoteBrowserDb(id: string): Promise<void> {
@@ -321,24 +331,43 @@ export async function restartRemoteBrowserDb(id: string): Promise<void> {
   );
   await Promise.all(handle.pages.map((page) => page.close()));
   handle.pages.length = 0;
-  // With every owner page gone, the browser terminates the SharedWorker. The
-  // context remains alive so its origin-scoped IndexedDB survives the restart.
+  // All owner pages must be gone long enough to terminate the SharedWorker;
+  // the context retains the same origin-scoped IndexedDB across the restart.
   await new Promise((resolve) => setTimeout(resolve, 100));
-  for (let index = 0; index < (handle.input.tabCount ?? 1); index += 1) {
+  const pages: Page[] = [];
+  const initializations: Promise<void>[] = [];
+
+  async function openTab(index: number): Promise<void> {
     const page = await handle.context.newPage();
-    await page.goto(handle.harnessUrl, { waitUntil: "domcontentloaded" });
+    pages[index] = page;
     try {
+      await page.goto(handle.harnessUrl, { waitUntil: "domcontentloaded" });
       await evaluateHarness(page, "createRemoteBrowserDb", {
         ...handle.input,
         initialRow: undefined,
       });
     } catch (error) {
-      await page.close().catch(() => undefined);
       throw new Error(`Remote browser db "${id}" restart tab ${index} failed`, {
         cause: error,
       });
     }
-    handle.pages.push(page);
+  }
+
+  try {
+    if ((handle.input.tabCount ?? 1) > 0) {
+      const leader = openTab(0);
+      initializations.push(leader);
+      await leader;
+      for (let index = 1; index < (handle.input.tabCount ?? 1); index += 1) {
+        initializations.push(openTab(index));
+      }
+      await Promise.all(initializations);
+    }
+    handle.pages.push(...pages);
+  } catch (error) {
+    await Promise.allSettled(initializations);
+    await Promise.all(pages.map((page) => page.close().catch(() => undefined)));
+    throw error;
   }
 }
 

@@ -1,12 +1,11 @@
 /// <reference types="vite/client" />
 
 /**
- * Shared schemas, fixtures and helpers for the worker-bridge*.test.ts files.
- * The bridge suite is split across files so the browser runner can schedule
- * its three parts on separate workers; test bodies are unchanged.
+ * Shared schemas, case-owned authorities and cleanup for the worker-bridge
+ * browser scenarios. Each test file retains independent client bookkeeping.
  */
 
-import { expect, afterEach } from "vitest";
+import { expect, beforeEach, afterEach } from "vitest";
 import { commands } from "vitest/browser";
 import { Db, type QueryBuilder } from "../../src/runtime/db.js";
 import { type Schema } from "../../src/drivers/types.js";
@@ -18,7 +17,7 @@ import {
 } from "../../src/runtime/indexeddb-page-store.js";
 import { setBrowserFollowerProbeTimingForTest } from "../../src/runtime/native-runtime/browser-follower-connection.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
-import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, stopJazzServer, type JazzServerInfo } from "./testing-server.js";
 import { closeRemoteBrowserDb, waitForRemoteBrowserDbTitle } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s, migration as m } from "../../src/";
 import { computeSchemaHash, deploy } from "../../src/dev/catalogue.js";
@@ -102,10 +101,10 @@ export async function terminateWorker(port: MessagePort): Promise<void> {
 // ---------------------------------------------------------------------------
 
 // Liveness tests exercise the real worker, real probes and real pongs, but
-// with the page's probe policy scaled from 30s + 30s down to 2s + 2s. The
+// with the page's probe policy scaled from 30s + 30s down to 1s + 1s. The
 // timer arithmetic itself is covered with fake timers in
 // src/runtime/native-runtime/browser-follower-connection.test.ts.
-export const LIVENESS_TEST_PROBE_TIMING = { intervalMs: 2_000, replyMs: 2_000 } as const;
+export const LIVENESS_TEST_PROBE_TIMING = { intervalMs: 1_000, replyMs: 1_000 } as const;
 // Comfortably above one interval plus one reply grace under CI load.
 export const LIVENESS_TEST_SIGNAL_MS = 15_000;
 
@@ -426,8 +425,17 @@ export async function waitForCatalogueTodos(
   return waitForQuery(db, allCatalogueTodos, predicate, label, timeoutMs, tier);
 }
 
+// beforeAll/default authorities are not enlisted in a test's cleanup.
+let testOwnedServerUrls: Set<string> | undefined;
+
+export async function stopOwnedJazzServer(serverUrl: string): Promise<void> {
+  await stopJazzServer(serverUrl);
+  testOwnedServerUrls?.delete(serverUrl);
+}
+
 export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzServerInfo> {
   const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
+  testOwnedServerUrls?.add(testingServer.serverUrl);
   const { appId, serverUrl, adminSecret } = testingServer;
 
   const v1 = await deploy({
@@ -468,6 +476,7 @@ export async function publishSyncServerSchemaAndPermissions(
   schema?: Schema,
 ): Promise<JazzServerInfo> {
   const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
+  testOwnedServerUrls?.add(testingServer.serverUrl);
   const permissionsToPublish = permissions ?? {
     todos: {
       select: { using: { type: "True" } },
@@ -564,6 +573,10 @@ export function useSharedWorkerBridgeHarness() {
   const remoteBrowserDbIds = new Set<string>();
   const errorListeners = new Set<(event: ErrorEvent) => void>();
 
+  beforeEach(() => {
+    testOwnedServerUrls = new Set<string>();
+  });
+
   function trackRemoteBrowserDb(id: string): string {
     remoteBrowserDbIds.add(id);
     return id;
@@ -615,6 +628,8 @@ export function useSharedWorkerBridgeHarness() {
   }
 
   afterEach(async () => {
+    const ownedServers = testOwnedServerUrls;
+    testOwnedServerUrls = undefined;
     // A liveness test that throws before its own finally must not leave
     // later tests on the scaled probe policy.
     setBrowserFollowerProbeTimingForTest();
@@ -631,6 +646,9 @@ export function useSharedWorkerBridgeHarness() {
     }
     remoteBrowserDbIds.clear();
     await ctx.cleanup();
+    if (ownedServers) {
+      await Promise.all([...ownedServers].map((serverUrl) => stopJazzServer(serverUrl)));
+    }
   });
 
   return {
