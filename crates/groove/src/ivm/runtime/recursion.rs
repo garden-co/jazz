@@ -976,17 +976,14 @@ fn affected_recursive_frontier(
                         }
                         Err(error) => return Err(error),
                     }
-                    for delta in accumulated {
-                        for key in super::join::join_keys(
-                            &frontier_desc,
-                            delta.raw(),
-                            &frontier_fields,
-                            join.comparison,
-                        )? {
-                            if touched.contains(key.as_slice()) {
-                                selected.insert(delta.record.clone());
-                                break;
-                            }
+                    for keyed in super::join::keyed_join_deltas(
+                        &frontier_desc,
+                        &frontier_fields,
+                        accumulated,
+                        join.comparison,
+                    )? {
+                        if touched.contains(keyed.key.as_slice()) {
+                            selected.insert(keyed.delta.record.clone());
                         }
                     }
                 }
@@ -1774,40 +1771,37 @@ impl HydrationEvaluator<'_> {
                     let mut right_by_key =
                         std::collections::BTreeMap::<super::join::JoinKey, Vec<&RecordDelta>>::new(
                         );
-                    for right_delta in &right.deltas {
-                        for key in super::join::join_keys(
-                            &join.right_descriptor,
-                            right_delta.raw(),
-                            &right_on,
-                            join.comparison,
-                        )? {
-                            right_by_key.entry(key).or_default().push(right_delta);
-                        }
+                    for keyed in super::join::keyed_join_deltas(
+                        &join.right_descriptor,
+                        &right_on,
+                        &right.deltas,
+                        join.comparison,
+                    )? {
+                        right_by_key.entry(keyed.key).or_default().push(keyed.delta);
                     }
                     let mut deltas = Vec::new();
-                    for left_delta in &left.deltas {
-                        for key in super::join::join_keys(
-                            &join.left_descriptor,
-                            left_delta.raw(),
-                            &left_on,
-                            join.comparison,
-                        )? {
-                            let Some(matches) = right_by_key.get(&key) else {
-                                continue;
-                            };
-                            for right_delta in matches {
-                                deltas.push(RecordDelta {
-                                    record: super::join::create_join_record(
-                                        &join.left_descriptor,
-                                        left_delta.raw(),
-                                        &join.right_descriptor,
-                                        right_delta.raw(),
-                                        &output_desc,
-                                    )?
-                                    .into(),
-                                    weight: left_delta.weight * right_delta.weight,
-                                });
-                            }
+                    for keyed in super::join::keyed_join_deltas(
+                        &join.left_descriptor,
+                        &left_on,
+                        &left.deltas,
+                        join.comparison,
+                    )? {
+                        let left_delta = keyed.delta;
+                        let Some(matches) = right_by_key.get(&keyed.key) else {
+                            continue;
+                        };
+                        for right_delta in matches {
+                            deltas.push(RecordDelta {
+                                record: super::join::create_join_record(
+                                    &join.left_descriptor,
+                                    left_delta.raw(),
+                                    &join.right_descriptor,
+                                    right_delta.raw(),
+                                    &output_desc,
+                                )?
+                                .into(),
+                                weight: left_delta.weight * right_delta.weight,
+                            });
                         }
                     }
                     #[cfg(feature = "cold-settle-attribution")]

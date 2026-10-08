@@ -20,6 +20,32 @@ pub(super) struct NodeRuntimeMeta {
     pub(super) join_right_fields: Option<Arc<[String]>>,
     pub(super) join_output: Option<Arc<crate::records::PreparedRecordCopy>>,
     pub(super) aggregate_group_fields: Option<Arc<[String]>>,
+    sql_selector: Option<(
+        RecordDescriptor,
+        Option<Arc<super::key_encoding::PreparedSqlSelector>>,
+    )>,
+}
+
+impl NodeRuntimeMeta {
+    pub(super) fn sql_selector(
+        &mut self,
+        filter: &FilterOp,
+        descriptor: RecordDescriptor,
+    ) -> Option<Arc<super::key_encoding::PreparedSqlSelector>> {
+        if let Some((cached_descriptor, selector)) = &self.sql_selector
+            && *cached_descriptor == descriptor
+        {
+            return selector.as_ref().map(Arc::clone);
+        }
+        let selector = super::key_encoding::PreparedSqlSelector::prepare(
+            &filter.predicate,
+            filter.comparison,
+            &descriptor,
+        )
+        .map(Arc::new);
+        self.sql_selector = Some((descriptor, selector.clone()));
+        selector
+    }
 }
 
 /// Namespace for stateless operator helper methods.
@@ -612,9 +638,19 @@ impl NodeState {
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let predicate = &filter.predicate;
+        let prepared = super::key_encoding::PreparedSqlSelector::prepare(
+            predicate,
+            filter.comparison,
+            &input.descriptor,
+        );
         let mut deltas = Vec::new();
         for delta in &input.deltas {
-            if predicate.matches(delta.borrowed(&input.descriptor), filter.comparison)? {
+            let record = delta.borrowed(&input.descriptor);
+            let matches = match &prepared {
+                Some(selector) => selector.matches(record)?,
+                None => predicate.matches(record, filter.comparison)?,
+            };
+            if matches {
                 deltas.push(delta.clone());
             }
         }

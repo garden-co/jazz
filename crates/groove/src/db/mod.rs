@@ -23,7 +23,7 @@ use web_time::{Duration, Instant};
 use crate::ivm::runtime::{durable_index_key_prefix, encode_key_part};
 use crate::ivm::{
     IvmRuntime, PlannerError, PublicationId, QueryParameter, RecordDelta, RecordDeltas,
-    RuntimeStats, TableDelta, TickMetrics, plan_prepared_shape, plan_query,
+    RuntimeStats, TableDelta, TickMetrics, plan_query,
 };
 use crate::queries::Query;
 use crate::records::{

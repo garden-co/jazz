@@ -1237,12 +1237,19 @@ impl TickEvaluator<'_> {
                 false,
             ),
             OpType::Filter(filter) => {
+                let selector = self
+                    .node_meta
+                    .entry(node)
+                    .or_default()
+                    .sql_selector(filter, batch.input.descriptor);
                 let mut deltas = Vec::new();
                 let result = input.iter().try_for_each(|delta| {
-                    if filter
-                        .predicate
-                        .matches(delta.borrowed(&batch.input.descriptor), filter.comparison)?
-                    {
+                    let record = delta.borrowed(&batch.input.descriptor);
+                    let matches = match &selector {
+                        Some(selector) => selector.matches(record)?,
+                        None => filter.predicate.matches(record, filter.comparison)?,
+                    };
+                    if matches {
                         deltas.push(delta.clone());
                     }
                     Ok::<_, IvmRuntimeError>(())
@@ -2064,19 +2071,23 @@ impl TickEvaluator<'_> {
             let mut referenced = BTreeSet::new();
             filter.predicate.referenced_fields(&mut referenced);
             let materialized = self.materialize_indirect_fields(input, &referenced)?;
-            if Arc::ptr_eq(&materialized, input) {
-                return NodeState::update_filter(filter, output_desc, input);
-            }
             // Materialization only serves the predicate. Emit the rows as they
             // arrived, so downstream keys (TopBy root identity, #3309) see the
             // same physical form as upstream state; publication loads indirect
             // values for every output anyway.
             let mut deltas = Vec::new();
+            let selector = self
+                .node_meta
+                .entry(node)
+                .or_default()
+                .sql_selector(filter, materialized.descriptor);
             for (delta, loaded) in input.deltas.iter().zip(&materialized.deltas) {
-                if filter
-                    .predicate
-                    .matches(loaded.borrowed(&materialized.descriptor), filter.comparison)?
-                {
+                let record = loaded.borrowed(&materialized.descriptor);
+                let matches = match &selector {
+                    Some(selector) => selector.matches(record)?,
+                    None => filter.predicate.matches(record, filter.comparison)?,
+                };
+                if matches {
                     deltas.push(delta.clone());
                 }
             }

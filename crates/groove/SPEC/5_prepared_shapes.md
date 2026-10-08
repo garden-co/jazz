@@ -90,6 +90,20 @@ missing, duplicate, or unknown names, and passes values in prepared-parameter
 order (`INV-SHAPE-14`). The supplied values must conform to the shape's
 `binding_descriptor`; otherwise binding fails before hydration (`INV-SHAPE-15`).
 
+SQL lowering keeps every actual binding-origin occurrence under a deterministic,
+collision-free private carrier, independent of public projection names and
+payload bits. The public `PlannedPreparedShape::output_key_fields` contains one
+actual representative carrier per parameter in parameter order, retaining the
+positional arity expected by generic graph preparation. SQL execution consumes
+a private companion produced by the same lowering: its complete ordered
+`(carrier, binding value index)` map can contain repeated indexes. That map and
+exact routing choice are retained in the SQL shape and inherited by every bind
+path; re-preparing its graph through generic APIs keeps generic Eq routing and
+arity, not the private SQL execution contract.
+All user identifiers in the complete query namespace are reserved before
+allocating those carriers, including parameters in later CTEs. A legal user
+spelling is never interpreted as generated provenance metadata.
+
 _Further invariants._ `INV-SHAPE-2` — `prepare_query` rejects parameter-free
 queries and lowers only equality `column = parameter` predicates into binding
 joins. `INV-SHAPE-3` — a prepared-query's internal graph output includes every
@@ -155,6 +169,29 @@ notifying subscribers. The routing graph output must therefore contain every
 subscriber-visible output field with the same field name, plus the hidden
 routing key fields. Hidden routing fields are internal provenance only; they are
 not part of subscription snapshots, notifications, or `subscription_output`.
+
+For SQL-created shapes, every selector in the retained actual-origin map is
+ANDed against its owning raw binding value. Two independent CTE/join
+occurrences of one parameter therefore each select that same raw identity;
+matching just one carrier must not admit mixed derivations from another
+binding. Whole-value SQL equality can equate signed zeros without changing the
+public data payload or either binding's original bytes. At SQL bind compilation,
+accepted EnumTag string labels are canonicalised once to ordinals in one owned
+literal tree per parameter, built directly from the borrowed binding value and
+declared type, and shared across carriers/terminals. Recursive arrays, tuples
+and top-level nullable wrappers are preserved. Label/ordinal equivalents share raw binding
+keys and refcounts; F64 bits are never canonicalised for routing. The complete
+map, routing choice and exact predicate literals participate in shape/cache and
+operator descriptor identity. Generic graph routing semantics are unchanged.
+
+`UNION ALL` aligns private lanes separately from public positional columns.
+Lanes are grouped by stored parameter ownership, with the maximum actual
+occurrence count per parameter across arms. An arm missing a lane copies its
+own same-parameter representative, adding only a redundant identity selector,
+not a derivation. Wholly absent parameter arms remain unsupported. Common lanes
+have distinct stable logical source identities even when physical padding
+copies one representative; outer CTE/SELECT/join retention must preserve every
+lane that varies independently in another arm.
 
 _Further invariants._ `INV-SHAPE-9` — the per-key materialized snapshot is a
 weighted multiset; a delta bringing a record to weight zero removes it.

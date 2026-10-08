@@ -2509,7 +2509,7 @@ fn decode_tuple(bytes: &[u8], members: &[ValueType]) -> Result<Value, Error> {
     Ok(Value::Tuple(values))
 }
 
-fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Error> {
+pub(super) fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Error> {
     match value_type {
         ValueType::U8 => Ok(Value::U8(read_exact::<1>(bytes)?[0])),
         ValueType::U16 => Ok(Value::U16(u16::from_be_bytes(read_exact::<2>(bytes)?))),

@@ -87,6 +87,8 @@
 
 pub mod macros;
 mod values;
+mod whole_value;
+pub(crate) use whole_value::{EncodedValue, supports_whole_value};
 
 use std::ops::Deref;
 use std::str;
