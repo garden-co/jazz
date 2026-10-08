@@ -31,7 +31,7 @@ it("supports account-claim checks in group membership administration policies", 
   }
 });
 
-it.each(["ordinary", "forged-candidate", "forged-malformed-id"])(
+it.each(["ordinary", "forged-candidates"])(
   "separates policy-authorised group administration from possession of its key (%s)",
   async (scenario) => {
     const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
@@ -115,23 +115,39 @@ it.each(["ordinary", "forged-candidate", "forged-malformed-id"])(
         );
         // Malformed UUIDs fail at insertion. Well-formed proposals still need
         // an active device signature before they can establish membership.
-        const proposal = () =>
+        const proposal = (memberId: string) =>
           pending
-            .insert(app.__e2ee_group_membership, {
-              groupId: id,
-              epochId: root!.epochId,
-              authorAccountId: admin.account.id,
-              authorDeviceId: request.id,
-              authorEpochId: accountRoot!.epochId,
-              operation: "add",
-              memberKind: "account",
-              memberId:
-                scenario === "forged-malformed-id" ? "not-an-account-id" : crypto.randomUUID(),
-              signature: new Uint8Array(64),
-            })
+            .insert(
+              app.__e2ee_group_membership,
+              {
+                groupId: id,
+                epochId: root!.epochId,
+                authorAccountId: admin.account.id,
+                authorDeviceId: request.id,
+                authorEpochId: accountRoot!.epochId,
+                operation: "add",
+                memberKind: "account",
+                memberId,
+                signature: new Uint8Array(64),
+              },
+              // A UUIDv4 row ID ensures this candidate reaches device authentication.
+              { id: crypto.randomUUID() },
+            )
             .wait({ tier: "global" });
-        if (scenario === "forged-malformed-id") expect(proposal).toThrow("invalid UUID value");
-        else await proposal();
+        // Insertion rejects the malformed proposal without changing accepted history.
+        // Use the same pending author for the well-formed forgery afterwards.
+        await expect(async () => proposal("not-an-account-id")).rejects.toBeInstanceOf(Error);
+        const proposed = app.__e2ee_group_membership.where({
+          groupId: id,
+          authorDeviceId: request.id,
+        });
+        expect(await administrator.all(proposed, { tier: "global" })).toEqual([]);
+        await proposal(admin.account.id);
+        expect(await administrator.all(proposed, { tier: "global" })).toMatchObject([
+          { memberId: admin.account.id },
+        ]);
+        // Target the administrator itself: accepting the unsigned pending-device
+        // proposal would make the refused assertions below fail.
       }
       expect(await administrator.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
       await administrator.e2ee.groups.add(id, { kind: "account", id: bob.account.id }).wait();
