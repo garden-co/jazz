@@ -189,8 +189,7 @@ describe("group recovery adapter classification", () => {
     "classifies synchronous and rejected group envelope faults identically through $surface/$method",
     async ({ surface, method }) => {
       const { f, groupId, root, ownerRecord } = prepared;
-      let owner: Db | undefined;
-      let observer: Db | undefined;
+      let client: Db | undefined;
       try {
         const envelopeFault = new Error("Synthetic group envelope fault");
         const signerFault = new Error("Synthetic group recovery signer fault");
@@ -243,19 +242,21 @@ describe("group recovery adapter classification", () => {
             },
           },
         };
-        const ownerStore = f.memoryStore();
-        await ownerStore.update(() => ownerRecord);
-        owner = await f.open(adapters, ownerStore);
-        observer = await f.open(adapters);
-        await readyStatus(observer, root, groupId);
-        if (surface !== "status") await observer.e2ee.recovery.use(root.material).wait();
-        expect(await owner.e2ee.explain({ groupId })).toEqual({ state: "ready" });
-        const activeOwner = owner;
-        const activeObserver = observer;
+        // Only explain needs the retained owner. Status and use exercise a fresh
+        // observer; an extra owner would only repeat already-proven readiness.
+        const store = f.memoryStore();
+        if (surface === "explain") await store.update(() => ownerRecord);
+        const active = (client = await f.open(adapters, store));
+        if (surface === "explain") {
+          expect(await active.e2ee.explain({ groupId })).toEqual({ state: "ready" });
+        } else {
+          await readyStatus(active, root, groupId);
+          if (surface === "use") await active.e2ee.recovery.use(root.material).wait();
+        }
         const invoke = async () => {
-          if (surface === "status") return recoveryPath(activeObserver, root, groupId);
-          if (surface === "use") return activeObserver.e2ee.recovery.use(root.material).wait();
-          return activeOwner.e2ee.explain({ groupId });
+          if (surface === "status") return recoveryPath(active, root, groupId);
+          if (surface === "use") return active.e2ee.recovery.use(root.material).wait();
+          return active.e2ee.explain({ groupId });
         };
         const attempt = async (fault: "sync" | "async") => {
           kind = fault;
@@ -270,15 +271,20 @@ describe("group recovery adapter classification", () => {
         };
         const rejected = await attempt("async");
         const thrown = await attempt("sync");
-        // Signer failures are operational, never unusable-envelope candidate failures.
-        signerArmed = true;
-        try {
-          await expect(observer.e2ee.recovery.status(root.material)).rejects.toBe(signerFault);
-          expect(signerHits).toBeGreaterThan(0);
-        } finally {
-          signerArmed = false;
+        // This is the same status/signer check for every envelope case. Exercise
+        // it once; envelope fault classification still covers every surface above.
+        if (surface === "status" && method === "open") {
+          signerArmed = true;
+          try {
+            await expect(active.e2ee.recovery.status(root.material)).rejects.toBe(signerFault);
+            expect(signerHits).toBeGreaterThan(0);
+          } finally {
+            signerArmed = false;
+          }
         }
-        await readyStatus(observer, root, groupId);
+        if (surface === "explain")
+          expect(await active.e2ee.explain({ groupId })).toEqual({ state: "ready" });
+        else await readyStatus(active, root, groupId);
         if (surface === "status") {
           expect(rejected).toMatchObject({
             ok: true,
@@ -302,9 +308,7 @@ describe("group recovery adapter classification", () => {
           expect(thrown.error).toEqual(rejected.error);
         }
       } finally {
-        await Promise.all(
-          [owner, observer].filter((db): db is Db => db !== undefined).map((db) => f.close(db)),
-        );
+        if (client) await f.close(client);
       }
     },
     180000,

@@ -19,10 +19,9 @@ function contextColumn(context: Uint8Array): string {
   );
 }
 
+// The forged-successor case proves ordinary addition and removal before the forgery.
 it.each([
-  "ordinary",
   "repair",
-  "removal",
   "removal-forged-successor",
   "removal-invalid-verification",
   "removal-invalid-history",
@@ -131,18 +130,17 @@ it.each([
         return db;
       };
       const owner = await open(alice);
-      const recipient = await open(bob);
       if (scenario === "creation-invalid-verification") {
         corruptWrapColumn = "verification";
         await expect(owner.e2ee.groups.create().wait()).rejects.toThrow();
         expect(corruptWrapColumn).toBeUndefined();
         expect(await owner.all(app.__e2ee_groups, { tier: "remote" })).toEqual([]);
-      }
-      const { id } = await owner.e2ee.groups.create().wait();
-      if (scenario === "creation-invalid-verification") {
+        const { id } = await owner.e2ee.groups.create().wait();
         expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
         return;
       }
+      const recipient = await open(bob);
+      const { id } = await owner.e2ee.groups.create().wait();
       expect(await recipient.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
       expect(
         await recipient.all(
