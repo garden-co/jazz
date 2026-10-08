@@ -62,7 +62,11 @@ export class BrowserConnectionManager extends ConnectionManager {
     abandon: (error: Error) => void;
   } | null = null;
 
-  constructor(host: DbForConnection) {
+  constructor(
+    host: DbForConnection,
+    /** A lease whose acquisition already started the worker, in parallel with runtime loading. */
+    private readonly earlyLease?: Promise<BrowserForegroundNodeLease>,
+  ) {
     super(host);
   }
 
@@ -70,9 +74,8 @@ export class BrowserConnectionManager extends ConnectionManager {
     // This resolves before public Db construction returns, preserving the
     // synchronous application mutation API while leasing the TxId node before
     // the foreground runtime can exist or mint a transaction.
-    this.foregroundNodeLease = await this.host.runtimeSource.acquireBrowserForegroundNodeLease(
-      this.host.config,
-    );
+    this.foregroundNodeLease = await (this.earlyLease ??
+      this.host.runtimeSource.acquireBrowserForegroundNodeLease(this.host.config));
   }
 
   override getClient(schema: WasmSchema): JazzClient {

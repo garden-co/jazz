@@ -100,6 +100,26 @@ async function initializeWasmFromUrl(wasmModule: any, wasmUrl: string): Promise<
       `WASM asset request failed (${response.status} ${response.statusText}) for ${wasmUrl}`,
     );
   }
+  const contentType = response.headers.get("content-type");
+  if (canCompileStreaming(contentType)) {
+    // Compile while the body downloads. compileStreaming requires the exact
+    // application/wasm content type; any other response takes the buffered
+    // path below, which also validates the magic bytes.
+    let compiled: WebAssembly.Module;
+    try {
+      compiled = await WebAssembly.compileStreaming(response);
+    } catch (error) {
+      if (error instanceof WebAssembly.CompileError) {
+        throw new Error(
+          `WASM asset response is not a WebAssembly binary for ${wasmUrl} (${contentType}): ${error.message}`,
+        );
+      }
+      throw error;
+    }
+    await wasmModule.default({ module_or_path: compiled });
+    initializedWasmUrl = wasmUrl;
+    return;
+  }
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (
     bytes.length < 4 ||
@@ -108,11 +128,18 @@ async function initializeWasmFromUrl(wasmModule: any, wasmUrl: string): Promise<
     bytes[2] !== 0x73 ||
     bytes[3] !== 0x6d
   ) {
-    const contentType = response.headers.get("content-type") ?? "unknown content type";
     throw new Error(
-      `WASM asset response is not a WebAssembly binary for ${wasmUrl} (${contentType})`,
+      `WASM asset response is not a WebAssembly binary for ${wasmUrl} (${contentType ?? "unknown content type"})`,
     );
   }
   await wasmModule.default({ module_or_path: bytes });
   initializedWasmUrl = wasmUrl;
+}
+
+function canCompileStreaming(contentType: string | null): boolean {
+  if (typeof WebAssembly.compileStreaming !== "function") return false;
+  // compileStreaming rejects anything but exactly application/wasm (engines
+  // differ on case, and parameters are never accepted), so only that exact
+  // type streams; everything else is buffered and validated.
+  return contentType?.trim() === "application/wasm";
 }

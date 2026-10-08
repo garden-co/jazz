@@ -9,6 +9,7 @@ import {
   type BrowserSharedWorkerConnectRequest,
   type BrowserSharedWorkerConnectResponse,
   type BrowserSharedWorkerBootstrapCancelRequest,
+  type BrowserForegroundNodeLeaseProbeRequest,
   type BrowserForegroundNodeLeaseAcquireResponse,
   type BrowserForegroundNodeLeasePortEvent,
   type BrowserForegroundNodeLeasePortRequest,
@@ -82,6 +83,18 @@ type ForegroundNodeLeaseAttemptOutcome =
  * root so callers retrying a wedged open do not retain unbounded ports.
  */
 const pendingForegroundLeaseCleanups = new Map<string, symbol>();
+
+/**
+ * Ask a newly started worker to fetch, compile and instantiate its WASM while the lease,
+ * IndexedDB admission and the page's own setup run. Only URL-addressed assets
+ * are prefetched: in-memory modules are never cloned twice.
+ */
+function workerWasmPrefetch(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): BrowserForegroundNodeLeaseProbeRequest["wasmPrefetch"] {
+  if (runtimeSources?.wasmModule || runtimeSources?.wasmSource) return undefined;
+  return { runtimeSources };
+}
 
 /**
  * The one physical SharedWorker realm that may own a browser persistence root.
@@ -164,6 +177,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
           cleanupKey,
           crypto.randomUUID(),
           remainingAdmissionMs,
+          workerWasmPrefetch(runtimeSources),
         );
         if (outcome.type === "ready") return outcome.lease;
         if (outcome.type === "worker-closing") {
@@ -214,6 +228,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     cleanupKey: string,
     attemptId: string,
     timeoutMs: number,
+    wasmPrefetch?: BrowserForegroundNodeLeaseProbeRequest["wasmPrefetch"],
   ): Promise<ForegroundNodeLeaseAttemptOutcome> {
     const port = worker.port;
     return new Promise<ForegroundNodeLeaseAttemptOutcome>((resolve, reject) => {
@@ -333,7 +348,8 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
       port.postMessage({
         type: "probe-foreground-node-lease-worker",
         attemptId,
-      });
+        ...(wasmPrefetch ? { wasmPrefetch } : {}),
+      } satisfies BrowserForegroundNodeLeaseProbeRequest);
     });
   }
 
