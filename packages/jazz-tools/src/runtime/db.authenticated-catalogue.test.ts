@@ -1,0 +1,59 @@
+// Intended location: packages/jazz-tools/src/runtime/db.authenticated-catalogue.test.ts
+// Source-only proposal. Exercises the real Db method with controlled boundary collaborators.
+import { expect, it, vi } from "vitest";
+import { schema as s } from "../schema-namespace.js";
+import { Db } from "./db.js";
+
+it("qualifies owner catalogue readiness with the requested schema's local admission", async () => {
+  const requested = s.defineApp({ projects: s.table({ title: s.string() }, {}) });
+  const unpublishedSchema = new Error("Requested schema has not been admitted");
+  let admitted = false;
+  const events: string[] = [];
+  const ownerReady = vi.fn(async () => {
+    events.push("owner-publication");
+    return true;
+  });
+  const queryInternal = vi.fn(async (_query: string, _options: unknown, _session: unknown) => {
+    events.push("requested-schema");
+    if (!admitted) throw unpublishedSchema;
+    return [];
+  });
+  const requestedClient = { hasAuthenticatedCatalogue: ownerReady, queryInternal };
+  const ensureReady = vi.fn(async (_tier: string) => undefined);
+  const tableIdentity = vi.fn(async (_table: unknown, _localOnly: boolean) => {
+    events.push("local-identity");
+    return "00000000-0000-4000-8000-000000000001";
+  });
+  const getClient = vi.fn((schema: unknown) => {
+    expect(schema).toBe(requested.projects._schema);
+    return requestedClient;
+  });
+  const db = Object.create(Db.prototype) as Db;
+  Object.defineProperties(db, {
+    getClient: { value: getClient },
+    ensureReady: { value: ensureReady },
+    getAccessContext: { value: () => undefined },
+    tableIdentity: { value: tableIdentity },
+  });
+
+  await expect(db.authenticatedTableIdentity(requested.projects)).rejects.toBe(unpublishedSchema);
+  expect(ownerReady).toHaveBeenCalledOnce();
+  expect(tableIdentity).not.toHaveBeenCalled();
+  expect(events).toEqual(["owner-publication", "requested-schema"]);
+  expect(queryInternal).toHaveBeenCalledWith(
+    requested.projects.where({}).limit(0)._build(),
+    { tier: "local", propagation: "local-only" },
+    undefined,
+  );
+  expect(ensureReady).toHaveBeenCalledWith("local");
+
+  admitted = true;
+  events.length = 0;
+  await expect(db.authenticatedTableIdentity(requested.projects)).resolves.toBe(
+    "00000000-0000-4000-8000-000000000001",
+  );
+  expect(events).toEqual(["owner-publication", "requested-schema", "local-identity"]);
+  expect(tableIdentity).toHaveBeenCalledWith(requested.projects, true);
+  expect(ensureReady.mock.calls.every(([tier]) => tier === "local")).toBe(true);
+  expect(queryInternal.mock.calls).toHaveLength(2);
+});

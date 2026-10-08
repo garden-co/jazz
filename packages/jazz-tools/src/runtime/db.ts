@@ -3661,6 +3661,13 @@ export class Db {
     const client = this.getClient(table._schema);
     await this.ensureReady("local");
     if (!(await client.hasAuthenticatedCatalogue())) return null;
+    // Owner publication does not admit a schema view. A zero-row local read
+    // checks this requested schema without fetching metadata or refreshing authority.
+    await client.queryInternal(
+      table.where({}).limit(0)._build(),
+      { tier: "local", propagation: "local-only" },
+      this.getAccessContext()?.readSession,
+    );
     return this.tableIdentity(table, true);
   }
 
