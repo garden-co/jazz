@@ -352,6 +352,20 @@ fn initialization_catalogue_readiness_requires_requested_schema_admission() {
     .err()
     .expect("unpublished requested schema must reject a Local read");
     assert_eq!(local_error.code, ErrorCode::Schema);
+    let empty_query = postcard::to_allocvec(&Query::from("todos").limit(0)).unwrap();
+    let empty_error = block_on(Box::pin(pending.all_serialized_query(
+        &empty_query,
+        ReadOpts::default(),
+        None,
+        None,
+        None,
+        false,
+        || false,
+        |_| {},
+    )))
+    .err()
+    .expect("a zero-row Local read must still reject an unpublished requested schema");
+    assert_eq!(empty_error.code, ErrorCode::Schema);
     let state = block_on(pending.take_authenticated_catalogue_state()).unwrap();
     assert!(
         !state.ready,
