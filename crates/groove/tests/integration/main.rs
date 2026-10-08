@@ -11,6 +11,8 @@ mod aggregate_sql_semantics;
 mod anti_join_regressions;
 #[path = "../arrangement_regressions.rs"]
 mod arrangement_regressions;
+#[path = "../array_join_sql_semantics.rs"]
+mod array_join_sql_semantics;
 #[path = "../async_hydration_session.rs"]
 mod async_hydration_session;
 #[path = "../chunk_provider.rs"]
