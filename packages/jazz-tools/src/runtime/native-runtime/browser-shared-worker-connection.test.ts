@@ -173,6 +173,7 @@ function runtimeBootstrapFixture(aliveDelayMs = 0) {
     {
       connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
       onPeerTransportWork: () => () => undefined,
+      onLocalSettlementChange: () => () => undefined,
       progressPeerTransport: async () => undefined,
       retirePeerTransport: async () => undefined,
       reportRemoteServerTransportError: vi.fn(),
@@ -351,6 +352,17 @@ describe("browser foreground lease terminal abandonment", () => {
     await expect(lease.retire()).rejects.toBe(error);
     expect(sent.filter((type) => type === "retire-foreground-node-lease")).toHaveLength(1);
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("releases a quiesced predecessor lease without returning its node through a dead port", async () => {
+    const { lease, sent, close } = await acquireLease();
+    const reason = new Error("worker owner was replaced");
+    lease.releaseAfterWorkerReplacement(reason);
+    expect(close).toHaveBeenCalledOnce();
+    expect(sent).not.toContain("return-foreground-node-lease");
+    expect(sent).not.toContain("retire-foreground-node-lease");
+    await expect(lease.returnWithHighWater(42n)).rejects.toBe(reason);
+    await expect(lease.retire()).rejects.toBe(reason);
   });
 });
 
@@ -596,6 +608,7 @@ describe("browser SharedWorker realm identity", () => {
     const runtime = {
       connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
       onPeerTransportWork: () => () => undefined,
+      onLocalSettlementChange: () => () => undefined,
       progressPeerTransport: async () => undefined,
       retirePeerTransport: async () => undefined,
       reportRemoteServerTransportError: vi.fn(),
@@ -807,6 +820,7 @@ describe("browser SharedWorker realm identity", () => {
     const runtime = {
       connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
       onPeerTransportWork: () => () => undefined,
+      onLocalSettlementChange: () => () => undefined,
       progressPeerTransport: async () => undefined,
       retirePeerTransport: async () => undefined,
       reportRemoteServerTransportError: vi.fn(),

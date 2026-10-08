@@ -23,6 +23,7 @@ interface BrowserConnectionScope {
   readonly lease: BrowserForegroundNodeLease | undefined;
   readonly inspectorAttachment: boolean;
   resetReason: Error | null;
+  leaseWorkerReplaced: boolean;
 }
 
 /**
@@ -49,6 +50,8 @@ export class BrowserConnectionManager extends ConnectionManager {
   private browserConnectionInput: ConnectionManagerClientInput | null = null;
   /** A failed follower owns no recoverable port; reconnect must mint a new one. */
   private recoverableConnectionFailure = false;
+  private workerRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private workerRecoveryDelayMs = 250;
   private observedConfigurationAdmissionFailure: BrowserWorkerConnection | null = null;
   private configurationAdmissionRetry: Promise<BrowserWorkerConnection | null> | null = null;
   private readonly readinessByConnection = new WeakMap<BrowserWorkerConnection, Promise<void>>();
@@ -115,6 +118,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       lease: this.foregroundNodeLease,
       inspectorAttachment: workerConfig.runtimeSources?.inspectorBinding !== undefined,
       resetReason: null,
+      leaseWorkerReplaced: false,
     };
     this.connectionScope = scope;
     this.connection = connection;
@@ -130,6 +134,13 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.readinessByConnection.set(connection, readiness);
     this.connectionReady = readiness.then(
       () => {
+        // Shutdown may already own this scope while follower init finishes.
+        // Keep its lease-owner evidence even after the manager detaches it.
+        const realm = connection.getWorkerRealmId?.();
+        scope.leaseWorkerReplaced =
+          realm !== undefined &&
+          scope.lease?.workerRealmId !== undefined &&
+          realm !== scope.lease.workerRealmId;
         if (this.connection !== connection) return;
         const inspectorPhysicalDbName =
           connection.getAuthenticatedInspectorAttachmentPhysicalDbName?.();
@@ -142,6 +153,8 @@ export class BrowserConnectionManager extends ConnectionManager {
         this.initialExplicitOfflineStateKnown = true;
         this.connectionError = null;
         this.recoverableConnectionFailure = false;
+        this.clearWorkerRecoveryTimer();
+        this.workerRecoveryDelayMs = 250;
       },
       (error: unknown) => {
         this.observeConnectionFailure(connection, asError(error));
@@ -172,6 +185,47 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.recoverableConnectionFailure = true;
     this.rejectReconnectWaiters(error);
     this.notifyWorkerRemoteLink();
+    if (error instanceof BrowserWorkerUnresponsiveError) this.scheduleWorkerRecovery(connection);
+  }
+
+  private scheduleWorkerRecovery(failed: BrowserWorkerConnection): void {
+    if (
+      this.workerRecoveryTimer !== null ||
+      this.shutdownStarted ||
+      this.host.isShuttingDown ||
+      this.storageReset ||
+      this.connectionScope?.inspectorAttachment
+    )
+      return;
+    const delay = this.workerRecoveryDelayMs;
+    this.workerRecoveryDelayMs = Math.min(delay * 2, 30_000);
+    this.workerRecoveryTimer = setTimeout(() => {
+      this.workerRecoveryTimer = null;
+      void this.enqueueTransportTransition(async () => {
+        if (
+          this.connection !== failed ||
+          !(this.connectionError instanceof BrowserWorkerUnresponsiveError) ||
+          this.shutdownStarted ||
+          this.host.isShuttingDown ||
+          this.storageReset
+        )
+          return;
+        // Preserve the in-memory runtime, its transaction identities, and its
+        // pending durability waiters. Native transport replacement replays the
+        // retained outbox through the normal sync and permission path.
+        // Worker readiness is sufficient here: recovery also works offline.
+        this.reopenFailedFollower();
+        await this.connectionReady;
+      }).catch((error: unknown) => {
+        this.connectionError ??= asError(error);
+        this.notifyWorkerRemoteLink();
+      });
+    }, delay);
+  }
+
+  private clearWorkerRecoveryTimer(): void {
+    if (this.workerRecoveryTimer !== null) clearTimeout(this.workerRecoveryTimer);
+    this.workerRecoveryTimer = null;
   }
 
   async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
@@ -350,6 +404,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     scope.resetReason = new Error(
       `Browser foreground lease released after storage reset ${resetId}`,
     );
+    this.clearWorkerRecoveryTimer();
     this.host.clearAuthenticatedInspectorLocalReads();
     this.connection = null;
     this.connectionReady = null;
@@ -397,6 +452,7 @@ export class BrowserConnectionManager extends ConnectionManager {
    */
   private reopenFailedFollower(): void {
     if (!this.recoverableConnectionFailure) return;
+    this.clearWorkerRecoveryTimer();
     this.host.clearAuthenticatedInspectorLocalReads();
     this.connection = null;
     this.connectionReady = null;
@@ -419,6 +475,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   override async shutdown(): Promise<void> {
     if (this.shutdownStarted) return;
     this.shutdownStarted = true;
+    this.clearWorkerRecoveryTimer();
     const connection = this.connection;
     const scope = this.connectionScope;
     const admissionError = this.connectionError;
@@ -503,7 +560,11 @@ export class BrowserConnectionManager extends ConnectionManager {
                 // failed flush cannot establish a clean durable handoff.
                 const highWater = await runtime.quiesceForegroundTxTimeHighWater();
                 if (scope?.resetReason) return;
-                if (flushFailed) await lease.retire();
+                if (scope?.leaseWorkerReplaced && lease.releaseAfterWorkerReplacement) {
+                  lease.releaseAfterWorkerReplacement(
+                    new Error("Foreground lease owner was replaced"),
+                  );
+                } else if (flushFailed) await lease.retire();
                 else await lease.returnWithHighWater(highWater);
               }
             } catch (error) {

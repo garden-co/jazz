@@ -708,6 +708,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly completedTxs: Map<string, CompletedTx>;
   private readonly writes: Map<string, Write>;
   private readonly pendingLocalSettlements = new Set<Promise<void>>();
+  private readonly localSettlementListeners = new Set<(pending: boolean) => void>();
   // A streaming mutation can wait on its source while owning a native upload
   // handle. A foreground lease cannot return until every admitted handle has
   // published its write (and advanced the HLC) or has been aborted. Local
@@ -1367,6 +1368,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.clearServerTransportErrorWaiters();
     this.resolveServerTransportWorkWaiters();
     this.peerTransportWorkListeners.clear();
+    this.localSettlementListeners.clear();
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     const serverTransport = this.serverTransport;
@@ -2662,6 +2664,14 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  /** Observe worker durability work, including fire-and-forget mutations. */
+  onLocalSettlementChange(listener: (pending: boolean) => void): () => void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onLocalSettlementChange(listener);
+    this.localSettlementListeners.add(listener);
+    listener(this.pendingLocalSettlements.size > 0);
+    return () => this.localSettlementListeners.delete(listener);
+  }
+
   private deliverMutationError(event: MutationErrorEvent): void {
     const transactionId = event.transaction.transactionId;
     if (this.deliveredMutationErrors.has(transactionId)) return;
@@ -2679,8 +2689,17 @@ export class NativeRuntimeAdapter implements Runtime {
     // failures available for a real waiter or the mutation-error callback.
     settlement = this.waitForTransaction(txId, "local", { observeOnly: true })
       .catch(() => undefined)
-      .finally(() => this.pendingLocalSettlements.delete(settlement));
+      .finally(() => {
+        this.pendingLocalSettlements.delete(settlement);
+        if (this.pendingLocalSettlements.size === 0) {
+          for (const listener of this.localSettlementListeners) listener(false);
+        }
+      });
+    const wasEmpty = this.pendingLocalSettlements.size === 0;
     this.pendingLocalSettlements.add(settlement);
+    if (wasEmpty) {
+      for (const listener of this.localSettlementListeners) listener(true);
+    }
   }
 
   private finishInsert(

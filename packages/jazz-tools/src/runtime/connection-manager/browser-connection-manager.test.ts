@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { JazzClient } from "../client.js";
 import { SharedBrowserForegroundNodeLease } from "../native-runtime/browser-shared-worker-connection.js";
+import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { BrowserWorkerUnresponsiveError } from "../native-runtime/browser-worker-protocol.js";
 import type { BrowserWorkerConnection, BrowserWorkerConnectionContext } from "../runtime-source.js";
 import { BrowserConnectionManager } from "./browser-connection-manager.js";
@@ -145,6 +146,145 @@ async function leasedManagerFixture(admissionError?: Error, inspectorAttachment 
     fail: (error: Error) => onFailure(error),
   };
 }
+
+describe("BrowserConnectionManager automatic worker recovery", () => {
+  it("releases the predecessor lease when shutdown starts before replacement readiness", async () => {
+    vi.useFakeTimers();
+    const fixture = await leasedManagerFixture();
+    const admission = deferred();
+    const quiesce = vi.fn(async () => 42n);
+    const runtime = Object.assign(Object.create(NativeRuntimeAdapter.prototype), {
+      quiesceForegroundTxTimeHighWater: quiesce,
+    }) as NativeRuntimeAdapter;
+    Object.defineProperty(fixture.lease, "workerRealmId", { value: "predecessor" });
+    fixture.connection.getWorkerRealmId = () => "successor";
+    vi.spyOn(fixture.client, "getRuntime").mockReturnValue(runtime);
+    vi.mocked(fixture.connection.ready).mockImplementation(() => admission.promise);
+    vi.mocked(fixture.connection.flushLocal).mockImplementation(() => admission.promise);
+    const release = vi.spyOn(fixture.lease, "releaseAfterWorkerReplacement");
+    const returnLease = vi.spyOn(fixture.lease, "returnWithHighWater").mockResolvedValue();
+    try {
+      fixture.fail(new BrowserWorkerUnresponsiveError("predecessor stopped responding"));
+      await vi.advanceTimersByTimeAsync(250);
+      expect(fixture.createConnection).toHaveBeenCalledTimes(2);
+      fixture.host.isShuttingDown = true;
+      const shutdown = fixture.manager.shutdown();
+      admission.resolve();
+      await shutdown;
+      expect(quiesce).toHaveBeenCalledOnce();
+      expect(release).toHaveBeenCalledExactlyOnceWith(expect.any(Error));
+      expect(quiesce.mock.invocationCallOrder[0]).toBeLessThan(
+        release.mock.invocationCallOrder[0]!,
+      );
+      expect(returnLease).not.toHaveBeenCalled();
+      expect(fixture.port.close).toHaveBeenCalledOnce();
+    } finally {
+      admission.resolve();
+      fixture.allowFinish();
+      fixture.host.isShuttingDown = true;
+      await fixture.manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["online", "explicitly offline", "without a server"])(
+    "replaces a dead follower and preserves the foreground runtime %s",
+    async (mode) => {
+      vi.useFakeTimers();
+      const fixture = await leasedManagerFixture();
+      try {
+        if (mode === "explicitly offline") await fixture.manager.disconnect();
+        if (mode === "without a server")
+          Object.assign(fixture.host.config, { serverUrl: undefined });
+        const error = new BrowserWorkerUnresponsiveError("worker stopped responding");
+        const originalFailure = fixture.contexts[0]!.onFailure;
+        originalFailure(error);
+        originalFailure(error);
+        await expect(fixture.manager.ensureReady("local")).rejects.toBe(error);
+        await vi.advanceTimersByTimeAsync(250);
+        await expect(fixture.manager.ensureReady("local")).resolves.toBeUndefined();
+        expect(fixture.createConnection).toHaveBeenCalledTimes(2);
+        expect(fixture.createClient).toHaveBeenCalledOnce();
+        expect(fixture.manager.getClient({})).toBe(fixture.client);
+        expect(fixture.client.discard).not.toHaveBeenCalled();
+        expect(fixture.host.runtimeSource.acquireBrowserForegroundNodeLease).toHaveBeenCalledOnce();
+        expect(fixture.connection.reconnect).not.toHaveBeenCalled();
+        expect(fixture.connection.waitForServerConnection).not.toHaveBeenCalled();
+        expect(fixture.manager.isExplicitlyOffline()).toBe(mode === "explicitly offline");
+        originalFailure(error);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(fixture.createConnection).toHaveBeenCalledTimes(2);
+        await expect(fixture.manager.ensureReady("local")).resolves.toBeUndefined();
+      } finally {
+        fixture.allowFinish();
+        fixture.host.isShuttingDown = true;
+        await fixture.manager.shutdown().catch(() => undefined);
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("backs off when a replacement worker is also unresponsive", async () => {
+    vi.useFakeTimers();
+    const fixture = await leasedManagerFixture();
+    try {
+      vi.mocked(fixture.connection.ready).mockRejectedValueOnce(
+        new BrowserWorkerUnresponsiveError("replacement unavailable"),
+      );
+      fixture.fail(new BrowserWorkerUnresponsiveError("initial worker gone"));
+      await vi.advanceTimersByTimeAsync(250);
+      expect(fixture.createConnection).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(499);
+      expect(fixture.createConnection).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fixture.createConnection).toHaveBeenCalledTimes(3);
+      await expect(fixture.manager.ensureReady("local")).resolves.toBeUndefined();
+    } finally {
+      fixture.allowFinish();
+      fixture.host.isShuttingDown = true;
+      await fixture.manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])(
+    "does not automatically retry a configuration failure or replace an Inspector attachment (%s)",
+    async (inspector) => {
+      vi.useFakeTimers();
+      const fixture = await leasedManagerFixture(undefined, inspector);
+      try {
+        const error = inspector
+          ? new BrowserWorkerUnresponsiveError("attachment gone")
+          : new Error("incompatible persistent browser configuration");
+        fixture.fail(error);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(fixture.createConnection).toHaveBeenCalledOnce();
+        await expect(fixture.manager.ensureReady("local")).rejects.toBe(error);
+      } finally {
+        fixture.allowFinish();
+        fixture.host.isShuttingDown = true;
+        await fixture.manager.shutdown().catch(() => undefined);
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("cancels a scheduled replacement when shutdown begins", async () => {
+    vi.useFakeTimers();
+    const fixture = await leasedManagerFixture();
+    fixture.fail(new BrowserWorkerUnresponsiveError("worker gone"));
+    fixture.allowFinish();
+    fixture.host.isShuttingDown = true;
+    try {
+      await fixture.manager.shutdown().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fixture.createConnection).toHaveBeenCalledOnce();
+    } finally {
+      fixture.acknowledge();
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("BrowserConnectionManager acknowledged storage reset", () => {
   it.each([false, true])(
