@@ -50,6 +50,9 @@ if (faultChannelName) {
   const control = new BroadcastChannel(faultChannelName);
   let holdClose = false;
   let holdPendingWrites = false;
+  let holdFrames = false;
+  const heldOutboundPorts = new Set<MessagePort>();
+  const connectedPorts = new Set<MessagePort>();
   // This module is a SharedWorker entry, not a Window.
   const worker = globalThis as unknown as {
     close(): void;
@@ -64,18 +67,30 @@ if (faultChannelName) {
       control.postMessage({ type: "holding-pending-writes" });
     } else if (event.data.type === "die") {
       // Deliberately bypass every production cleanup/error notification.
+      control.postMessage({ type: "dying" });
       worker.close();
+    } else if (event.data.type === "hold-frames") {
+      holdFrames = true;
+      control.postMessage({ type: "holding-frames" });
+    } else if (event.data.type === "drop-outbound-frames") {
+      for (const port of connectedPorts) heldOutboundPorts.add(port);
+      control.postMessage({ type: "dropping-outbound-frames" });
     }
   };
   const connect = worker.onconnect;
   worker.onconnect = (event) => {
     const port = event.ports[0]!;
+    connectedPorts.add(port);
     const postMessage = port.postMessage.bind(port);
     port.postMessage = ((message: { type?: string }, transfer: Transferable[] = []) => {
+      if (message.type === "frames" && heldOutboundPorts.has(port)) return;
       postMessage(message, transfer);
       if (message.type === "runtime-pong") control.postMessage({ type: "pong-sent" });
     }) as typeof port.postMessage;
     port.addEventListener("message", (message: MessageEvent<{ type: string }>) => {
+      if (holdFrames && message.data.type === "frames") {
+        message.stopImmediatePropagation();
+      }
       if (holdClose && message.data.type === "close") {
         message.stopImmediatePropagation();
         control.postMessage({ type: "close-held" });

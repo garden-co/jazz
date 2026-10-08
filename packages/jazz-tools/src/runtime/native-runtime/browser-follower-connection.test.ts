@@ -37,6 +37,7 @@ class TestPort {
 }
 
 async function createWatchdogFollower(port = new TestPort()) {
+  const settlementListeners = new Set<(pending: boolean) => void>();
   const transport = {
     recvWireFrames: () => [],
     sendWireFrame: () => undefined,
@@ -45,6 +46,11 @@ async function createWatchdogFollower(port = new TestPort()) {
   const runtime = {
     connectUpstreamPeer: vi.fn(() => transport),
     onPeerTransportWork: vi.fn(() => () => undefined),
+    onLocalSettlementChange: vi.fn((listener: (pending: boolean) => void) => {
+      settlementListeners.add(listener);
+      listener(false);
+      return () => settlementListeners.delete(listener);
+    }),
     progressPeerTransport: vi.fn(async () => undefined),
     retirePeerTransport: vi.fn(async () => undefined),
     reportRemoteServerTransportError: vi.fn(),
@@ -62,10 +68,90 @@ async function createWatchdogFollower(port = new TestPort()) {
   if (!init || init.type !== "init") throw new Error("follower did not initialize");
   port.emit({ type: "result", id: init.id });
   await connection.ready();
-  return { connection, port, runtime, onFailure };
+  return {
+    connection,
+    port,
+    runtime,
+    onFailure,
+    setLocalSettlementsPending(pending: boolean) {
+      for (const listener of settlementListeners) listener(pending);
+    },
+  };
 }
 
 describe("MessagePortBrowserFollowerConnection", () => {
+  it("detects silent worker death with a mutation awaiting local durability and no control RPC", async () => {
+    vi.useFakeTimers();
+    const fixture = await createWatchdogFollower();
+    try {
+      fixture.setLocalSettlementsPending(true);
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(fixture.onFailure).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fixture.onFailure).toHaveBeenCalledExactlyOnceWith(
+        expect.any(BrowserWorkerUnresponsiveError),
+      );
+      expect(fixture.port.sent.filter((message) => "id" in message)).toHaveLength(1);
+      expect(fixture.runtime.retirePeerTransport).toHaveBeenCalledOnce();
+    } finally {
+      fixture.connection.detachForReconnect();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps pending mutations alive with pongs and stops probing after local durability", async () => {
+    vi.useFakeTimers();
+    const fixture = await createWatchdogFollower();
+    try {
+      fixture.port.onPostMessage = (message) => {
+        if (message.type === "runtime-probe")
+          fixture.port.emit({ ...message, type: "runtime-pong" });
+      };
+      fixture.setLocalSettlementsPending(true);
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(fixture.onFailure).not.toHaveBeenCalled();
+      const probes = fixture.port.sent.filter((message) => message.type === "runtime-probe").length;
+      expect(probes).toBe(6);
+      fixture.setLocalSettlementsPending(false);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(fixture.port.sent.filter((message) => message.type === "runtime-probe")).toHaveLength(
+        probes,
+      );
+    } finally {
+      fixture.connection.detachForReconnect();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])(
+    "probes an idle follower once on resume (worker alive=%s)",
+    async (alive) => {
+      vi.useFakeTimers();
+      const page = Object.assign(new EventTarget(), { visibilityState: "visible" });
+      vi.stubGlobal("document", page);
+      const fixture = await createWatchdogFollower();
+      try {
+        fixture.port.onPostMessage = (message) => {
+          if (alive && message.type === "runtime-probe")
+            fixture.port.emit({ ...message, type: "runtime-pong" });
+        };
+        page.dispatchEvent(new Event("resume"));
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(
+          fixture.port.sent.filter((message) => message.type === "runtime-probe"),
+        ).toHaveLength(1);
+        if (alive) expect(fixture.onFailure).not.toHaveBeenCalled();
+        else
+          expect(fixture.onFailure).toHaveBeenCalledExactlyOnceWith(
+            expect.any(BrowserWorkerUnresponsiveError),
+          );
+      } finally {
+        fixture.connection.detachForReconnect();
+        vi.unstubAllGlobals();
+        vi.useRealTimers();
+      }
+    },
+  );
   it.each([false, true])(
     "preserves an asynchronous peer installation across early frames (closed=%s)",
     async (closeBeforeConnected) => {
@@ -82,6 +168,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
       const runtime = {
         connectUpstreamPeer: vi.fn(() => pendingTransport),
         onPeerTransportWork: vi.fn(() => () => undefined),
+        onLocalSettlementChange: vi.fn(() => () => undefined),
         progressPeerTransport: vi.fn(async () => undefined),
         retirePeerTransport: vi.fn(async () => undefined),
         reportRemoteServerTransportError: vi.fn(),
@@ -132,6 +219,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
       const runtime = {
         connectUpstreamPeer: vi.fn(() => transport),
         onPeerTransportWork: vi.fn(() => () => undefined),
+        onLocalSettlementChange: vi.fn(() => () => undefined),
         progressPeerTransport: vi.fn(async () => undefined),
         retirePeerTransport: vi.fn(async () => undefined),
         reportRemoteServerTransportError: vi.fn(),
@@ -338,6 +426,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
     const runtime = {
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
+      onLocalSettlementChange: vi.fn(() => () => undefined),
       progressPeerTransport: vi.fn(async () => undefined),
       retirePeerTransport: vi.fn(async () => undefined),
       clearRemoteServerTransportError: vi.fn(),
@@ -382,6 +471,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
     const runtime = {
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
+      onLocalSettlementChange: vi.fn(() => () => undefined),
       progressPeerTransport: vi.fn(async () => undefined),
       retirePeerTransport: vi.fn(async () => undefined),
       clearRemoteServerTransportError: vi.fn(),
@@ -440,6 +530,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
     const runtime = {
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
+      onLocalSettlementChange: vi.fn(() => () => undefined),
       progressPeerTransport: vi.fn(() => Promise.reject(failure)),
       retirePeerTransport: vi.fn(() => Promise.reject(retirementFailure)),
       reportRemoteServerTransportError: vi.fn(),
@@ -487,6 +578,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
     const runtime = {
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
+      onLocalSettlementChange: vi.fn(() => () => undefined),
       progressPeerTransport: vi.fn(async () => undefined),
       retirePeerTransport: vi.fn(async () => undefined),
       reportRemoteServerTransportError: vi.fn(),
@@ -549,6 +641,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
     const runtime = {
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
+      onLocalSettlementChange: vi.fn(() => () => undefined),
       progressPeerTransport: vi.fn(async () => undefined),
       retirePeerTransport: vi.fn(async () => undefined),
       clearRemoteServerTransportError: vi.fn(),
@@ -602,6 +695,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
     const runtime = {
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
+      onLocalSettlementChange: vi.fn(() => () => undefined),
       progressPeerTransport: vi.fn(async () => undefined),
       retirePeerTransport: vi.fn(async () => undefined),
       clearRemoteServerTransportError: vi.fn(),

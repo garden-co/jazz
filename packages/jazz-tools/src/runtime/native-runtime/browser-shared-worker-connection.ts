@@ -122,6 +122,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     readonly node: Uint8Array,
     readonly confirmedTxTime: bigint,
     private readonly leaseId: string,
+    readonly workerRealmId?: string,
   ) {}
 
   static async acquire(
@@ -315,6 +316,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
           message.node.slice(),
           BigInt(message.confirmedTxTime),
           message.leaseId,
+          message.workerRealmId,
         );
         lease.worker = worker;
         lease.port = port;
@@ -373,6 +375,12 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
   }
 
   releaseAfterStorageReset(reason: Error): void {
+    this.failFinish(reason);
+  }
+
+  releaseAfterWorkerReplacement(reason: Error): void {
+    // The foreground has quiesced and the fenced successor owns persistence.
+    // Never return this identity as reusable through a dead predecessor port.
     this.failFinish(reason);
   }
 
@@ -722,6 +730,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         });
       }
     });
+  }
+
+  getWorkerRealmId(): string | undefined {
+    return this.connection?.getWorkerRealmId();
   }
 
   ready(): Promise<void> {
