@@ -38,9 +38,8 @@ export type EncryptedTableScenario =
   | "subscription-error"
   | "offline-at-submit"
   | "byoc-buffer"
-  | "ordinary-insert"
   | "ordinary-insert-error"
-  | "ordinary-update"
+  | "ordinary-insert-and-update"
   | "ordinary-upsert"
   | "ordinary-restore"
   | "ordinary-scope-upsert"
@@ -260,7 +259,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
         },
       },
     });
-    if (timing.startsWith("ordinary-insert") || timing === "ordinary-update") {
+    if (timing === "ordinary-insert-error" || timing === "ordinary-insert-and-update") {
       const project = db.insert(app.projects, { title: "Project" });
       expect(project).not.toBeInstanceOf(Promise);
       await project.wait({ tier: "global" });
@@ -287,66 +286,58 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       );
       expect(encrypted).toBeGreaterThan(0);
       expect(decrypted).toBeGreaterThan(0);
-      if (timing === "ordinary-update") {
-        const beforePlaintextUpdate = encrypted;
-        const plaintext = db.update(app.notes, note.value.id, { done: true });
-        expect(plaintext).not.toBeInstanceOf(Promise);
-        await plaintext.wait({ tier: "global" });
-        expect(encrypted).toBe(beforePlaintextUpdate);
-        const update = db.update(app.notes, note.value.id, {
-          title: "Changed encrypted title",
-          payload: new Uint8Array([10, 11]),
-        });
-        expect(update).not.toBeInstanceOf(Promise);
-        await update.wait({ tier: "global" });
-        expect(
-          await db.one(app.notes.where({ id: note.value.id }), { tier: "global" }),
-        ).toMatchObject({
-          title: "Changed encrypted title",
-          payload: new Uint8Array([10, 11]),
-          done: true,
-        });
-        const tx = db.beginTransaction();
-        expect(
-          tx.update(app.notes, note.value.id, { title: "Transaction update" }),
-        ).toBeUndefined();
-        await tx.commit().wait({ tier: "global" });
-        expect(
-          await db.one(app.notes.where({ id: note.value.id }), { tier: "global" }),
-        ).toMatchObject({
-          title: "Transaction update",
-          payload: new Uint8Array([10, 11]),
-          done: true,
-        });
-        const other = db.insert(app.projects, { title: "Other project" });
-        await other.wait({ tier: "global" });
-        await expect(
-          db
-            .update(app.notes, note.value.id, { projectId: other.value.id })
-            .wait({ tier: "global" }),
-        ).rejects.toThrow("immutable");
-        const beforeSameSpace = encrypted;
-        await db
-          .update(app.notes, note.value.id, { projectId: project.value.id, done: false })
-          .wait({ tier: "global" });
-        expect(encrypted).toBe(beforeSameSpace);
-        failEncryption = true;
-        const failed = db.update(app.notes, note.value.id, {
-          title: "Must not replace the value",
-        });
-        expect(failed).not.toBeInstanceOf(Promise);
-        await expect(failed.wait({ tier: "global" })).rejects.toThrow(
-          "Could not encrypt the value",
-        );
-        failEncryption = false;
-        expect(
-          await db.one(app.notes.where({ id: note.value.id }), { tier: "global" }),
-        ).toMatchObject({
-          projectId: project.value.id,
-          title: "Transaction update",
-          done: false,
-        });
-      }
+      const beforePlaintextUpdate = encrypted;
+      const plaintext = db.update(app.notes, note.value.id, { done: true });
+      expect(plaintext).not.toBeInstanceOf(Promise);
+      await plaintext.wait({ tier: "global" });
+      expect(encrypted).toBe(beforePlaintextUpdate);
+      const update = db.update(app.notes, note.value.id, {
+        title: "Changed encrypted title",
+        payload: new Uint8Array([10, 11]),
+      });
+      expect(update).not.toBeInstanceOf(Promise);
+      await update.wait({ tier: "global" });
+      expect(
+        await db.one(app.notes.where({ id: note.value.id }), { tier: "global" }),
+      ).toMatchObject({
+        title: "Changed encrypted title",
+        payload: new Uint8Array([10, 11]),
+        done: true,
+      });
+      const tx = db.beginTransaction();
+      expect(tx.update(app.notes, note.value.id, { title: "Transaction update" })).toBeUndefined();
+      await tx.commit().wait({ tier: "global" });
+      expect(
+        await db.one(app.notes.where({ id: note.value.id }), { tier: "global" }),
+      ).toMatchObject({
+        title: "Transaction update",
+        payload: new Uint8Array([10, 11]),
+        done: true,
+      });
+      const other = db.insert(app.projects, { title: "Other project" });
+      await other.wait({ tier: "global" });
+      await expect(
+        db.update(app.notes, note.value.id, { projectId: other.value.id }).wait({ tier: "global" }),
+      ).rejects.toThrow("immutable");
+      const beforeSameSpace = encrypted;
+      await db
+        .update(app.notes, note.value.id, { projectId: project.value.id, done: false })
+        .wait({ tier: "global" });
+      expect(encrypted).toBe(beforeSameSpace);
+      failEncryption = true;
+      const failed = db.update(app.notes, note.value.id, {
+        title: "Must not replace the value",
+      });
+      expect(failed).not.toBeInstanceOf(Promise);
+      await expect(failed.wait({ tier: "global" })).rejects.toThrow("Could not encrypt the value");
+      failEncryption = false;
+      expect(
+        await db.one(app.notes.where({ id: note.value.id }), { tier: "global" }),
+      ).toMatchObject({
+        projectId: project.value.id,
+        title: "Transaction update",
+        done: false,
+      });
       return;
     }
     const scopeId = globalThis.crypto.randomUUID();

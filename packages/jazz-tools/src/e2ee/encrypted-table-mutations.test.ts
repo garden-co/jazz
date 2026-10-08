@@ -2,9 +2,8 @@ import { it } from "vitest";
 import { runEncryptedTableScenario } from "./fixtures/encrypted-table-scenarios.js";
 
 it.each([
-  "ordinary-insert",
   "ordinary-insert-error",
-  "ordinary-update",
+  "ordinary-insert-and-update",
   "ordinary-upsert",
   "ordinary-restore",
   "byoc-buffer",
