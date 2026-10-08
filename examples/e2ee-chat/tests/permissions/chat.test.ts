@@ -99,7 +99,7 @@ async function withChat(run: (fixture: Awaited<ReturnType<typeof setupChat>>) =>
   }
 }
 
-it("retries sharing after membership acceptance and lets the enrolled recipient send", async () => {
+it("retries enrollment and keeps immutable administration isolated", async () => {
   await withChat(async ({ owner, chat, configs, clients }) => {
     // Membership is accepted but this recipient has not enrolled an E2EE device yet.
     await expect(shareChat(owner, chat.id, configs[1]!.account.id)).rejects.toThrow();
@@ -145,13 +145,6 @@ it("retries sharing after membership acceptance and lets the enrolled recipient 
     expect(
       await owner.all(app.messages.where({ chatId: chat.id }), { tier: "global" }),
     ).toContainEqual(expect.objectContaining({ text: "A recipient can send" }));
-  });
-}, 60_000);
-
-it("keeps administration with the immutable owner and rejects forged descendants atomically", async () => {
-  await withChat(async ({ owner, chat, configs, clients }) => {
-    const recipient = await createDb(configs[1]!);
-    clients.push(recipient);
     const outsider = await createDb(configs[2]!);
     clients.push(outsider);
     await recipient.e2ee.devices.list();
@@ -270,7 +263,7 @@ it("keeps administration with the immutable owner and rejects forged descendants
       }),
     ).toEqual([]);
   });
-}, 60_000);
+}, 120_000);
 
 it("keeps image ciphertext separate from ordinary membership and decryption authority", async () => {
   await withChat(async ({ owner, chat, configs, clients, server }) => {
