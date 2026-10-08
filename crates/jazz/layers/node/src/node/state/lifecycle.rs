@@ -52,6 +52,11 @@ where
     }
 
     #[doc(hidden)]
+    pub fn has_authenticated_catalogue(&self) -> bool {
+        self.authenticated_catalogue_ready
+    }
+
+    #[doc(hidden)]
     pub fn take_authenticated_catalogue_state(&mut self) -> (Option<Vec<u8>>, bool) {
         (
             self.authenticated_catalogue_capture.take(),

@@ -571,6 +571,12 @@ async fn schema_view_cannot_drain_authenticated_catalogue_capture_from_runtime_o
     }
     let alias = owner.register_schema(schema.clone()).unwrap();
     assert!(alias.take_authenticated_catalogue_state().is_err());
+    assert_eq!(
+        await_promise(alias.has_authenticated_catalogue().unwrap())
+            .await
+            .as_bool(),
+        Some(true)
+    );
     let state = await_promise(owner.take_authenticated_catalogue_state().unwrap()).await;
     assert_eq!(
         js_sys::Reflect::get(&state, &"ready".into())

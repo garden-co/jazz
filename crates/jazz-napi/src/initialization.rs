@@ -142,6 +142,42 @@ impl NapiDb {
             .map_err(BindingError::from)
     }
 
+    #[napi(js_name = "hasAuthenticatedCatalogue")]
+    pub fn has_authenticated_catalogue(
+        &self,
+    ) -> js::Result<Either<bool, PendingNativeCatalogueState>> {
+        self.streaming.ensure_admitted(self.view_id)?;
+        let inner = self.inner.borrow();
+        let inner = inner
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        macro_rules! observe {
+            ($db:expr) => {{
+                let db = Rc::clone($db);
+                Box::pin(async move {
+                    let ready = db.has_authenticated_catalogue().await.map_err(napi_error)?;
+                    Ok(NativeCatalogueState {
+                        capture: None,
+                        ready,
+                    })
+                }) as LocalBoxFuture<'static, napi::Result<NativeCatalogueState>>
+            }};
+        }
+        let future = match inner {
+            NapiDbInnerStorage::Memory(db) => observe!(db),
+            NapiDbInnerStorage::Persistent(db) => observe!(db),
+        };
+        let pending = PendingNativeCatalogueState {
+            future: RefCell::new(Some(future)),
+            lifecycle: Rc::clone(&self.streaming),
+            view_id: self.view_id,
+        };
+        match pending.poll_once()? {
+            Some(state) => Ok(Either::A(state.ready)),
+            None => Ok(Either::B(pending)),
+        }
+    }
+
     #[napi(js_name = "takeAuthenticatedCatalogueState")]
     pub fn take_authenticated_catalogue_state(
         &self,

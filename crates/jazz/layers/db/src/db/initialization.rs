@@ -321,6 +321,21 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Qualify this schema view without moving the owner's capture bytes.
+    /// Hosts must subsequently publish the owner's capture before exposing readiness.
+    #[doc(hidden)]
+    pub async fn has_authenticated_catalogue(&self) -> Result<bool, Error> {
+        let node = self.node.node.lock().await;
+        Ok(node.has_authenticated_catalogue()
+            && (!self.requires_open_schema_admission
+                || self
+                    .node
+                    .open_schema_admission
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|pending| matches!(pending.result.as_ref(), Some(Ok(()))))))
+    }
+
     /// Await the catalogue owner, then qualify readiness for this handle's requested
     /// schema and drain its capture under the same lock. Contention is pending,
     /// never an empty observation; pending admission does not suppress a capture.

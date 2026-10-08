@@ -13,6 +13,32 @@ impl WasmDb {
         jazz::db::validate_catalogue_capture_replacement(&previous, &next).map_err(to_js_error)
     }
 
+    #[wasm_bindgen(js_name = hasAuthenticatedCatalogue)]
+    pub fn has_authenticated_catalogue(&self) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.open_inner()?;
+        let lifecycle = Rc::clone(&self.inner);
+        Ok(future_to_promise(async move {
+            let observation = async {
+                match inner {
+                    WasmDbInner::Memory(db) => db.has_authenticated_catalogue().await,
+                    #[cfg(target_arch = "wasm32")]
+                    WasmDbInner::Browser(db) => db.has_authenticated_catalogue().await,
+                    WasmDbInner::Closed => unreachable!("open_inner rejects closed runtimes"),
+                }
+                .map_err(to_js_error)
+            };
+            let mut observation = std::pin::pin!(observation);
+            let state = std::future::poll_fn(|context| {
+                if lifecycle.borrow().is_none() {
+                    return std::task::Poll::Ready(Err(JsValue::from_str("WasmDb is closed")));
+                }
+                observation.as_mut().poll(context)
+            })
+            .await?;
+            Ok(state.into())
+        }))
+    }
+
     #[wasm_bindgen(js_name = takeAuthenticatedCatalogueState)]
     pub fn take_authenticated_catalogue_state(&self) -> Result<js_sys::Promise, JsValue> {
         let inner = self.open_inner()?;
