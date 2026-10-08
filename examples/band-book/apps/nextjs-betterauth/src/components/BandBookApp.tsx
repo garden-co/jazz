@@ -6,6 +6,7 @@ import { useAll, useJazzAuth, useSession } from "jazz-tools/react";
 import {
   AppShell,
   Avatar,
+  Button,
   DropdownMenu,
   EmptyState,
   Spinner,
@@ -25,7 +26,17 @@ import { WorkspaceProvider, type WorkspaceState } from "./workspace-context";
  * selected page in the main area. The URL holds the selection (`?w=&p=`), so
  * a page can be linked to and survives a reload.
  */
-export function BandBookApp({ homeWorkspaceId }: { homeWorkspaceId: string }) {
+export function BandBookApp({
+  homeWorkspaceId,
+  settingUp = false,
+  setupError = null,
+}: {
+  /** The account's demo workspace, once known. */
+  homeWorkspaceId: string | null;
+  /** The server is still creating the demo workspace. */
+  settingUp?: boolean;
+  setupError?: { message: string; retry: () => void } | null;
+}) {
   const me = useSession()?.user.account ?? null;
   const { logout } = useJazzAuth();
   const router = useRouter();
@@ -116,10 +127,22 @@ export function BandBookApp({ homeWorkspaceId }: { homeWorkspaceId: string }) {
   if (!workspace)
     return (
       <AppShell topNav={topNav} contentPadding={4}>
-        <EmptyState
-          title="No band yet"
-          description="Your demo band is being set up. Reload in a moment, or open an invite link from a bandmate."
-        />
+        {setupError ? (
+          <EmptyState
+            title="Could not set up your band"
+            description={setupError.message}
+            actions={<Button label="Try again" onClick={setupError.retry} />}
+          />
+        ) : settingUp ? (
+          <VStack height="60dvh" justify="center" align="center">
+            <Spinner size="lg" label="Setting up your band" />
+          </VStack>
+        ) : (
+          <EmptyState
+            title="No band yet"
+            description="Your demo band is being set up. Reload in a moment, or open an invite link from a bandmate."
+          />
+        )}
       </AppShell>
     );
 
