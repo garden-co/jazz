@@ -31,7 +31,6 @@ export async function authJazzClient(): Promise<JazzClient> {
     serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
     initial: { backendSecret },
     env: jazzEnv,
-    tier: "global",
   }));
   try {
     const session = await pending;

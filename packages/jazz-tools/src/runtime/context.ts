@@ -154,11 +154,4 @@ export interface AppContext {
    * On `/ws`, a valid admin secret authenticates this client as the backend.
    */
   adminSecret?: string;
-
-  /**
-   * Durability tier identity for this node (or identities for multi-role nodes).
-   * Set for server nodes to enable durability notifications.
-   * Clients typically leave this undefined.
-   */
-  tier?: "local" | "global" | Array<"local" | "global">;
 }

@@ -15,7 +15,6 @@ export async function liveAuthorityBackendOpen(info: JazzServerInfo): Promise<Li
     app,
     permissions: liveAuthorityPermissions,
     driver: { type: "memory" },
-    tier: "global",
   });
   sessions.set(info.appId, session);
   try {

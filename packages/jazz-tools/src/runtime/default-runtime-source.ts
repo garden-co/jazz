@@ -240,7 +240,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       jwtToken: config.jwtToken,
       cookieSession: config.cookieSession,
       adminSecret: config.adminSecret,
-      tier: "local",
     };
     setTrustedReservedSession(context, getTrustedReservedSession(config));
     return JazzClient.connectWithRuntime(

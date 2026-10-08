@@ -278,27 +278,6 @@ describe("backend/create-jazz-context", () => {
     );
   });
 
-  it("BC-U01aa: preserves the connected backend node tier", () => {
-    const context = createJazzContext({
-      appId: "server-app",
-      app: { wasmSchema: SCHEMA_A },
-      permissions: {},
-      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
-      serverUrl: "http://localhost:1625",
-      tier: "global",
-    });
-
-    context.db();
-
-    expect(mocks.connectWithRuntime).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        tier: "global",
-      }),
-      expect.anything(),
-    );
-  });
-
   it("BC-U01b: rejects configuring both jwksUrl and jwtPublicKey", () => {
     expect(() =>
       createJazzContext({

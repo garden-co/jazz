@@ -24,7 +24,6 @@ export async function largeValueRewriteBackendOpen(info: JazzServerInfo): Promis
     app,
     permissions: largeValueRewritePermissions,
     driver: { type: "memory" },
-    tier: "global",
   });
   sessions.set(info.appId, session);
 }

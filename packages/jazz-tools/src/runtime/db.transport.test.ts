@@ -45,7 +45,6 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
         jwtToken: config.jwtToken,
         cookieSession: config.cookieSession,
         adminSecret: config.adminSecret,
-        tier: "local",
       },
       {
         onAuthFailure,

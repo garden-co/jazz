@@ -31,7 +31,6 @@ export async function backendJazzClient(): Promise<JazzClient> {
     serverUrl: jazzServerUrl,
     initial: { backendSecret: serverSecret("BACKEND_SECRET") },
     env: jazzEnv,
-    tier: "global",
   }));
   try {
     const session = await pending;

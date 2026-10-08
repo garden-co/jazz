@@ -268,7 +268,6 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           env: context.config.env,
           jwtToken: context.config.jwtToken,
           cookieSession: context.config.cookieSession,
-          tier: "local",
         };
         setTrustedReservedSession(appContext, getTrustedReservedSession(context.config));
         return JazzRuntimeClient.connectWithRuntime(runtime, appContext, {

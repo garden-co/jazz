@@ -32,7 +32,6 @@ beforeAll(async () => {
     serverUrl: server.url,
     initial: { backendSecret },
     env: "test",
-    tier: "global",
   });
   const snapshot = session.getSnapshot();
   if (snapshot.status !== "ready" || !snapshot.client)
