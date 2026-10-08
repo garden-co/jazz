@@ -80,6 +80,25 @@ pub(super) fn finish_status(
     panic!("native initialization status did not complete");
 }
 
+fn finish_catalogue_readiness(db: &NapiDb) -> bool {
+    let pending = match db.has_authenticated_catalogue().unwrap() {
+        Either::A(ready) => return ready,
+        Either::B(pending) => pending,
+    };
+    for _ in 0..1024 {
+        if let Some(state) = pending.poll().unwrap() {
+            assert!(
+                state.capture.is_none(),
+                "view readiness must never drain captures"
+            );
+            return state.ready;
+        }
+        db.tick().unwrap();
+        std::thread::yield_now();
+    }
+    panic!("native catalogue readiness did not complete");
+}
+
 fn finish_catalogue(db: &NapiDb) -> crate::initialization::NativeCatalogueState {
     let pending = match db.take_authenticated_catalogue_state().unwrap() {
         Either::A(state) => return state,
@@ -306,6 +325,8 @@ fn schema_view_cannot_drain_authenticated_catalogue_capture_from_runtime_owner()
         .register_schema(Uint8Array::new(schema.clone()))
         .unwrap();
     assert!(alias.take_authenticated_catalogue_state().is_err());
+    assert!(finish_catalogue_readiness(&alias));
+    assert!(finish_catalogue_readiness(&alias));
     let state = finish_catalogue(&owner);
     assert!(state.ready);
     let capture = state

@@ -246,6 +246,8 @@ fn authenticated_initialization_owner(authority_node: u8) -> Db {
 
 fn authenticated_initialization_catalogue(authority_node: u8) -> Vec<u8> {
     let db = authenticated_initialization_owner(authority_node);
+    assert!(block_on(db.has_authenticated_catalogue()).unwrap());
+    assert!(block_on(db.has_authenticated_catalogue()).unwrap());
     let state = block_on(db.take_authenticated_catalogue_state()).unwrap();
     assert!(state.ready);
     let capture = state
@@ -333,7 +335,9 @@ fn initialization_catalogue_readiness_requires_requested_schema_admission() {
             .unwrap()
             .ready
     );
+    assert!(block_on(known.has_authenticated_catalogue()).unwrap());
     let pending = open(requested.clone(), 0xfa);
+    assert!(!block_on(pending.has_authenticated_catalogue()).unwrap());
     assert_eq!(
         block_on(pending.table_identity("todos")).unwrap(),
         Some(known_identity)

@@ -332,8 +332,11 @@ type NativeDb = {
     | NativeCatalogueStateResult
     | Promise<NativeCatalogueStateResult>;
   validateCatalogueCaptureReplacement?(previous: Uint8Array, next: Uint8Array): void;
-  /** Native relay foregrounds delegate non-consuming readiness to their durable owner. */
-  hasAuthenticatedCatalogue?(): boolean | Promise<boolean>;
+  /** Qualify this schema view without draining the runtime owner's capture. */
+  hasAuthenticatedCatalogue?():
+    | boolean
+    | PendingNativeCatalogueState
+    | Promise<boolean | PendingNativeCatalogueState>;
   allSettlementMetadata?(
     query: Uint8Array,
     opts: unknown,
@@ -2220,7 +2223,18 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   async hasAuthenticatedCatalogue(): Promise<boolean> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.hasAuthenticatedCatalogue();
+    if (this !== this.ownerRuntime) {
+      if (this.closed) throw new Error("Catalogue view is closed");
+      const qualify = this.db.hasAuthenticatedCatalogue;
+      if (!qualify) throw new InitializationCapabilityError("requested schema catalogue readiness");
+      const started = await qualify.call(this.db);
+      const ready =
+        typeof started === "boolean" ? started : (await this.awaitCataloguePending(started)).ready;
+      // Admission is monotone. Publish the latest owner capture after checking
+      // this view, including captures received while this view is unadmitted.
+      const published = await this.ownerRuntime.hasAuthenticatedCatalogue();
+      return ready && published && !this.closed && !this.ownerRuntime.closed;
+    }
     if (this.closed) throw new Error("Catalogue owner is closed");
     if (this.nonDurableClient && !this.catalogueReadinessOwner)
       throw new InitializationCapabilityError("admitted durable catalogue owner");
@@ -2232,7 +2246,10 @@ export class NativeRuntimeAdapter implements Runtime {
     // React Native exposes the durable relay's readiness, not a capture drain.
     const operation = this.db.hasAuthenticatedCatalogue;
     if (!operation) throw new InitializationCapabilityError("takeAuthenticatedCatalogueState");
-    if (!(await operation.call(this.db))) return false;
+    const started = await operation.call(this.db);
+    const ready =
+      typeof started === "boolean" ? started : (await this.awaitCataloguePending(started)).ready;
+    if (!ready) return false;
     return this.catalogueReadinessOwner ? this.catalogueReadinessOwner() : true;
   }
 

@@ -63,15 +63,21 @@ impl RelayWorker {
                     })?;
                 let owner = Rc::clone(&self.persistent);
                 Box::pin(async move {
+                    let requested_ready = db
+                        .has_authenticated_catalogue()
+                        .await
+                        .map_err(RelayError::Db)?;
                     let ready = std::future::poll_fn(move |context| {
                         cache.borrow_mut().poll_refresh(&owner, context)
                     })
                     .await?;
-                    Ok(ForegroundOperationResult::Rows(if ready {
-                        b"true".to_vec()
-                    } else {
-                        b"false".to_vec()
-                    }))
+                    Ok(ForegroundOperationResult::Rows(
+                        if requested_ready && ready {
+                            b"true".to_vec()
+                        } else {
+                            b"false".to_vec()
+                        },
+                    ))
                 })
             }
             InitializationAction::Seal { transaction } => {
