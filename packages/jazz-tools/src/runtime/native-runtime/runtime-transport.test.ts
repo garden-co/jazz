@@ -317,7 +317,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
-    const transport = new FakeTransport([Uint8Array.from([1, 2, 3])]);
+    const transport = new FakeTransport([Uint8Array.from([2, 2, 3])]);
     const runtimeAuthor = new TextEncoder().encode('["urn:jazz:test","runtime-user"]');
     const runtime = new NativeRuntimeAdapter(
       {
@@ -348,7 +348,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(helloBatch).toHaveLength(1);
     expect(isWireHello(helloBatch[0]!)).toBe(true);
     expect(decodeWebSocketFrameBatch(sockets[0]!.sent[2]! as Uint8Array)).toEqual([
-      Uint8Array.from([1, 2, 3]),
+      Uint8Array.from([2, 2, 3]),
     ]);
     expect(transport.closed).toBe(false);
 
@@ -629,7 +629,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
       await runtime.waitForUpstreamServerConnection();
       const error = new PostcardWriter();
-      error.u64(2); // WireFrame::Error
+      error.u64(1); // WireFrame::Error
       error.u64(code);
       error.u64(3); // Later
       error.string(message);
@@ -1762,7 +1762,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
       await runtime.waitForUpstreamServerConnection();
       const frame = new PostcardWriter();
-      frame.u64(2);
+      frame.u64(1);
       frame.u64(code);
       frame.u64(retry);
       frame.string(message);
@@ -1920,7 +1920,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       peerWork.push(requiresDistinctPass),
     );
 
-    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([2, 42])]));
     await vi.waitFor(() => expect(transport.received).toHaveLength(1));
 
     expect(peerWork).toContain(true);
@@ -1933,7 +1933,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const received: Uint8Array[] = [];
     socket.addEventListener("message", (event) => received.push(event.data as Uint8Array));
 
-    socket.send(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
+    socket.send(encodeWebSocketFrameBatch([Uint8Array.from([2, 42])]));
     await Promise.resolve();
     expect(received).toEqual([]);
 
@@ -2009,7 +2009,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
     expect(transportTicks).toBe(1);
 
-    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([2, 42])]));
     await wait;
 
     expect(transportTicks).toBeGreaterThanOrEqual(2);
@@ -2269,7 +2269,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
     expect(transportTicks).toBe(1);
 
-    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([2, 42])]));
     await wait;
 
     expect(transportTicks).toBeGreaterThanOrEqual(2);
@@ -2844,7 +2844,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.waitForUpstreamServerConnection();
     transport.tickCount = 0;
 
-    const frames = [Uint8Array.from([1]), Uint8Array.from([1, 42]), Uint8Array.from([1, 43])];
+    const frames = [Uint8Array.from([2]), Uint8Array.from([2, 42]), Uint8Array.from([2, 43])];
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch(frames));
     await Promise.resolve();
     await waitForServerPumpTimer();
@@ -2862,7 +2862,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       }
     } as unknown as typeof WebSocket;
     let releaseFirstTick!: () => void;
-    const first = new FakeTransport([Uint8Array.from([1, 99])]);
+    const first = new FakeTransport([Uint8Array.from([2, 99])]);
     first.tick = (() =>
       new Promise<number>((resolve) => {
         releaseFirstTick = () => resolve(0);
@@ -2902,7 +2902,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       sockets[1]!.sent
         .filter((frame): frame is Uint8Array => frame instanceof Uint8Array)
         .flatMap((batch) => decodeWebSocketFrameBatch(batch)),
-    ).not.toContainEqual(Uint8Array.from([1, 99]));
+    ).not.toContainEqual(Uint8Array.from([2, 99]));
     runtime.close();
   });
 
@@ -2937,8 +2937,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.waitForUpstreamServerConnection();
     transport.tickCount = 0;
 
-    const first = Uint8Array.from([1, 10]);
-    const second = Uint8Array.from([1, 11]);
+    const first = Uint8Array.from([2, 10]);
+    const second = Uint8Array.from([2, 11]);
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([first]));
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([second]));
     await Promise.resolve();

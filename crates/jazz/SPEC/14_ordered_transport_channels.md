@@ -197,11 +197,10 @@ Frame grants and buffer grants share the same reliable ordered control stream
 and grant sequence. Holding a decoded buffer does not hold physical-frame
 credit, and releasing physical-frame credit does not release the decoded lease.
 
-### Explicit v3 postcard byte contract
+### Explicit v5 postcard byte contract
 
-The outer `WireFrame` is encoded with postcard-v1. Channel is appended enum tag
-4 and ChannelCredit tag 5; prior tags remain corpus/handshake identities, not an
-alternate live message transport. A Channel envelope encodes protocol version
+The outer `WireFrame` is encoded with postcard-v1. Its compact v5 tags are
+Hello 0, Error 1, Channel 2, and ChannelCredit 3. A Channel envelope encodes protocol version
 (u16), features (u64), optional WireSession, then the channel extent. The extent's
 field order is slot (u16), generation (u64), sequence (u64), class enum, first
 (bool), last (bool), semantic message size (u32), decoded extent size (u32), and

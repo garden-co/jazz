@@ -203,23 +203,27 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
-/// Test-only direct execution of one frozen complete v1 frame through the
+/// Test-only execution of a frozen v5 frame batch through the
 /// generated WASM artifact. This reaches the production Rust frame, feature,
 /// compression, and semantic-payload decoders; it is not a browser transport
 /// API.
-#[wasm_bindgen(js_name = __testValidateWireFrameCorpus)]
-pub fn test_validate_wire_frame_corpus(
+#[wasm_bindgen(js_name = __testValidateWireFrameBatchCorpus)]
+pub fn test_validate_wire_frame_batch_corpus(
     frame: Vec<u8>,
     negotiated_features: String,
 ) -> Result<(), JsValue> {
     let negotiated_features = negotiated_features
         .parse()
         .map_err(|_| JsValue::from_str("test wire corpus features must be a u64 decimal"))?;
-    jazz::wire::validate_frame_for_artifact_corpus(&frame, negotiated_features)
+    jazz::wire::decode_websocket_frame_batch(&frame)
+        .map_err(|error| error.to_string())
+        .and_then(|frames| {
+            jazz::wire::validate_frames_for_artifact_corpus(&frames, negotiated_features)
+        })
         .map_err(|error| error.into())
 }
 
-/// Test-only feature inventory paired with [`test_validate_wire_frame_corpus`].
+/// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
 #[wasm_bindgen(js_name = __testWireFrameCorpusFeatures)]
 pub fn test_wire_frame_corpus_features() -> String {
     jazz::wire::current_wire_features().to_string()
@@ -4488,20 +4492,15 @@ mod dynamic_schema_view_tests {
                     result: jazz::protocol::ChunkResponse::Unavailable,
                 }],
             });
-        let one_response_bytes =
-            jazz::wire::encode_sync_message_for_features(&one_response, features)
-                .expect("encode expected auxiliary response");
-        let one_response_frame = jazz::wire::encode_frame(&jazz::wire::WireFrame::Message(
-            jazz::wire::WireEnvelope::new(
-                jazz::wire::WIRE_PROTOCOL_VERSION,
-                features,
-                one_response_bytes,
-            ),
-        ))
-        .expect("frame expected auxiliary response");
+        let context =
+            jazz::wire::WireInboundContext::new(jazz::wire::WIRE_PROTOCOL_VERSION, features, None);
+        let mut expected_sender = jazz::db::AuxiliaryChannelEndpoint::new(context.clone()).unwrap();
+        expected_sender.enqueue(one_response).unwrap();
+        let one_response_frame = expected_sender.peek_outbound().unwrap().unwrap();
         let byte_budget = one_response_frame.len() as u32;
+        let mut receiver = jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
 
-        let decode_ids = |frames: js_sys::Array| {
+        let mut decode_ids = |frames: js_sys::Array| {
             frames
                 .iter()
                 .map(|frame| {
@@ -4510,13 +4509,17 @@ mod dynamic_schema_view_tests {
                         bytes.len() <= byte_budget as usize,
                         "each actual WASM result stays within the requested byte budget"
                     );
-                    let jazz::wire::WireFrame::Message(envelope) = jazz::wire::decode_frame(&bytes)
+                    let jazz::wire::WireFrame::Channel(envelope) = jazz::wire::decode_frame(&bytes)
                         .expect("decode actual wasm response frame")
                     else {
-                        panic!("auxiliary output remains a complete message frame");
+                        panic!("auxiliary output uses channel framing");
                     };
+                    let received = receiver
+                        .receive(envelope, bytes.len())
+                        .unwrap()
+                        .expect("complete response");
                     let response =
-                        jazz::wire::decode_sync_message_for_features(&envelope.payload, features)
+                        jazz::wire::decode_sync_message_for_features(&received.payload, features)
                             .expect("decode actual wasm auxiliary response");
                     let jazz::protocol::SyncMessage::ChunkResponseBatch(batch) = response else {
                         panic!("subscriber sends a chunk response on the auxiliary lane");

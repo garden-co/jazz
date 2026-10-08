@@ -56,9 +56,8 @@ use crate::protocol::{
     VersionBundle, VersionBundleScope, VersionCarrier,
 };
 use crate::protocol_limits::{
-    MAX_FETCH_ROW_VERSIONS, MAX_FRAGMENT_REASSEMBLY_AGE_MS, MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
-    MAX_INFLIGHT_LOGICAL_MESSAGES, MAX_KNOWN_STATE_EXACT_REFS, MAX_LOGICAL_MESSAGE_BYTES,
-    MAX_SHAPE_REGISTRATION_BYTES, MAX_WIRE_FRAME_BYTES,
+    MAX_FETCH_ROW_VERSIONS, MAX_FRAGMENT_REASSEMBLY_IDLE_MS, MAX_KNOWN_STATE_EXACT_REFS,
+    MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_REGISTRATION_BYTES, MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
     ArraySubquery, BindingId, Include, JoinMode, OrderDirection, Predicate, RelationOrderBy,
@@ -70,9 +69,9 @@ use crate::time::{GlobalTime, TxTime};
 use crate::tx::TxId;
 use crate::wire::{
     FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD,
-    WIRE_PROTOCOL_VERSION, WireEnvelope, WireError, WireErrorCode, WireFrame, WireMessageFragment,
-    WireRetry, WireSession, WireStreamDecoder, WireTransport, current_wire_features, decode_frame,
-    decode_sync_message, encode_frame,
+    WIRE_PROTOCOL_VERSION, WireError, WireErrorCode, WireFrame, WireRetry, WireSession,
+    WireStreamDecoder, WireTransport, current_wire_features, decode_frame, decode_sync_message,
+    encode_frame, encode_sync_message,
 };
 
 use super::peer_connection::{

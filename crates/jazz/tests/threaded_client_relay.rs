@@ -17,8 +17,8 @@ use jazz::tools::{
 };
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, TxId};
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, decode_frame,
-    decode_sync_message, encode_frame, encode_sync_message,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireFrame, decode_frame,
+    decode_sync_message, encode_sync_message,
 };
 use jazz_storage_rocksdb::RocksDbStorage;
 
@@ -38,26 +38,45 @@ enum Wire {
 impl Wire {
     fn encoded(message: SyncMessage) -> Self {
         let payload = encode_sync_message(&message).unwrap();
-        let frame = WireFrame::Message(WireEnvelope::new(
+        let context = jazz::wire::WireInboundContext::new(
             WIRE_PROTOCOL_VERSION,
             FEATURE_SYNC_MESSAGE_PAYLOAD,
-            payload,
-        ));
-        Wire::Frame(encode_frame(&frame).unwrap())
+            None,
+        );
+        let mut sender = jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
+        sender
+            .enqueue(0, 0, jazz::wire::channels::ChannelClass::Control, payload)
+            .unwrap();
+        let mut frames = Vec::new();
+        while let Some(frame) = sender.peek_outbound().unwrap() {
+            frames.push(frame);
+            sender.accept_outbound().unwrap();
+        }
+        Wire::Frame(postcard::to_allocvec(&frames).unwrap())
     }
 
     fn into_sync(self) -> Option<Box<SyncMessage>> {
         match self {
             Wire::Sync(sync) => Some(sync),
             Wire::Frame(bytes) => {
-                let frame = decode_frame(&bytes).unwrap();
-                let WireFrame::Message(envelope) = frame else {
-                    panic!("expected wire message frame");
-                };
-                assert_eq!(envelope.protocol_version, WIRE_PROTOCOL_VERSION);
-                assert_eq!(envelope.features, FEATURE_SYNC_MESSAGE_PAYLOAD);
-                assert!(envelope.session.is_none());
-                Some(Box::new(decode_sync_message(&envelope.payload).unwrap()))
+                let context = jazz::wire::WireInboundContext::new(
+                    WIRE_PROTOCOL_VERSION,
+                    FEATURE_SYNC_MESSAGE_PAYLOAD,
+                    None,
+                );
+                let mut receiver =
+                    jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
+                let mut message = None;
+                for bytes in jazz::wire::decode_websocket_frame_batch(&bytes).unwrap() {
+                    let WireFrame::Channel(envelope) = decode_frame(&bytes).unwrap() else {
+                        panic!("expected channel frame");
+                    };
+                    if let Some(received) = receiver.receive(envelope, bytes.len()).unwrap() {
+                        assert!(message.is_none());
+                        message = Some(Box::new(decode_sync_message(&received.payload).unwrap()));
+                    }
+                }
+                Some(message.expect("complete message"))
             }
             Wire::Stop => None,
         }

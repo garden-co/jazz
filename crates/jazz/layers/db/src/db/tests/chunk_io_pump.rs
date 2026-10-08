@@ -8,8 +8,8 @@ use groove::chunks::{ChunkKvStorage, ChunkProvider, ChunkStorage, MissingChunkRe
 
 use super::super::*;
 use super::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, duplex,
-    encode_frame, open_db, schema,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireFrame, duplex, encode_frame, open_db,
+    schema,
 };
 
 #[derive(Default)]

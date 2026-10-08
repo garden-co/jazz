@@ -19,7 +19,6 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
   isWireError,
-  isWireMessage,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
 } from "./websocket.js";
@@ -458,7 +457,6 @@ describe("websocket frame carrier", () => {
     const reader = new PostcardReader(hello);
 
     expect(isWireHello(hello)).toBe(true);
-    expect(isWireMessage(hello)).toBe(false);
     expect(reader.u64()).toBe(0);
     expect(reader.u64()).toBe(MIN_WIRE_PROTOCOL_VERSION);
     expect(reader.u64()).toBe(MAX_WIRE_PROTOCOL_VERSION);
@@ -880,12 +878,12 @@ describe("websocket frame carrier", () => {
     });
 
     const suffixed = Uint8Array.from([...encoded, 0]);
-    expect(new PostcardReader(suffixed).u64()).toBe(2);
+    expect(new PostcardReader(suffixed).u64()).toBe(1);
     expect(() => isWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
     expect(() => decodeWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
 
-    expect(encoded[0]).toBe(2);
-    const nonminimalTag = Uint8Array.from([0x82, 0x00, ...encoded.slice(1)]);
+    expect(encoded[0]).toBe(1);
+    const nonminimalTag = Uint8Array.from([0x81, 0x00, ...encoded.slice(1)]);
     expect(() => isWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
     expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
 
@@ -925,46 +923,26 @@ describe("websocket frame carrier", () => {
     expect(errors).toEqual([{ code: "auth_failed", retry: "after_auth", message: "expired" }]);
   });
 
-  it("round-trips run-bearing Rust wire fixtures through the TS websocket frame codec", () => {
+  it("round-trips channel batches from Rust wire fixtures through the TS websocket codec", () => {
     const manifest = rustWireFixtureManifest();
+    expect(manifest.protocol_version).toBe(WIRE_PROTOCOL_VERSION);
+    for (const fixture of manifest.fixtures) {
+      const batch = hexToBytes(fixture.batch_hex);
+      const frames = decodeWebSocketFrameBatch(batch);
+      expect(bytesEqual(encodeWebSocketFrameBatch(frames), batch), fixture.name).toBe(true);
+      for (const frame of frames) {
+        const reader = new PostcardReader(frame);
+        expect(reader.u64()).toBe(2); // WireFrame::Channel
+        expect(reader.u64()).toBe(WIRE_PROTOCOL_VERSION);
+        expect(reader.u64()).toBe(FEATURE_SYNC_MESSAGE_PAYLOAD);
+        expect(reader.option(() => "session")).toBeUndefined();
+      }
+    }
     const fixture = manifest.fixtures.find(
       (candidate) => candidate.name === "view_update_mixed_version_carrier_runs",
     );
-
-    expect(manifest.protocol_version).toBe(WIRE_PROTOCOL_VERSION);
-    for (const candidate of manifest.fixtures) {
-      const candidateFrame = hexToBytes(candidate.frame_hex);
-      expect(isWireMessage(candidateFrame), candidate.name).toBe(true);
-      expect(
-        bytesEqual(
-          decodeWebSocketFrameBatch(encodeWebSocketFrameBatch([candidateFrame]))[0]!,
-          candidateFrame,
-        ),
-        candidate.name,
-      ).toBe(true);
-      const suffixed = Uint8Array.from([...candidateFrame, 0]);
-      expect(() => isWireMessage(suffixed), candidate.name).toThrow(
-        "WireFrame::Message has trailing postcard bytes",
-      );
-    }
-    expect(fixture?.name).toBe("view_update_mixed_version_carrier_runs");
     expect(fixture?.message_family).toBe("ViewUpdate");
-
-    const frame = hexToBytes(fixture!.frame_hex);
-    expect(isWireMessage(frame)).toBe(true);
-    expect([...decodeWebSocketFrameBatch(encodeWebSocketFrameBatch([frame]))[0]!]).toEqual([
-      ...frame,
-    ]);
-
-    const reader = new PostcardReader(frame);
-    expect(reader.u64()).toBe(1);
-    expect(reader.u64()).toBe(WIRE_PROTOCOL_VERSION);
-    expect(reader.u64()).toBe(FEATURE_SYNC_MESSAGE_PAYLOAD);
-    expect(reader.option(() => "session")).toBeUndefined();
-    const payload = reader.bytes();
-    // Protocol v11 removed the legacy branch-metadata variants; the two
-    // auxiliary chunk-I/O variants now precede ViewUpdate in the postcard enum.
-    expect(payload[0]).toBe(14);
+    expect(hexToBytes(fixture!.payload_hex)[0]).toBe(13);
   });
 });
 
@@ -973,7 +951,8 @@ type RustWireFixtureManifest = {
   fixtures: Array<{
     name: string;
     message_family: string;
-    frame_hex: string;
+    batch_hex: string;
+    payload_hex: string;
   }>;
 };
 
@@ -1026,7 +1005,7 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 
 function encodeWireError(code: number, retry: number, message: string): Uint8Array {
   const writer = new PostcardWriter();
-  writer.u64(2);
+  writer.u64(1);
   writer.u64(code);
   writer.u64(retry);
   writer.string(message);

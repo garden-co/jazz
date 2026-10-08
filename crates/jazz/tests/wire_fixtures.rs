@@ -33,8 +33,8 @@ use jazz::wire::{
     FEATURE_AUTHORIZATION_SCOPE_RECEIPTS, FEATURE_AUTHORIZATION_SCOPE_VIEWS,
     FEATURE_AUXILIARY_CHUNKS, FEATURE_MESSAGE_FRAGMENTATION, FEATURE_PAYLOAD_LZ4,
     FEATURE_PAYLOAD_ZSTD, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD,
-    WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, WireHello, WirePeerRole, decode_sync_message,
-    encode_frame, encode_sync_message,
+    WIRE_PROTOCOL_VERSION, WireFrame, WireHello, WirePeerRole, decode_sync_message, encode_frame,
+    encode_sync_message,
 };
 use serde::{Deserialize, Serialize};
 
@@ -103,8 +103,8 @@ struct Manifest {
 struct Fixture {
     name: &'static str,
     message_family: &'static str,
-    frame_hex: String,
-    frame_base64: String,
+    batch_hex: String,
+    batch_base64: String,
     payload_hex: String,
 }
 
@@ -792,17 +792,13 @@ fn fixture_manifest() -> Manifest {
             });
             let payload = encode_sync_message(&message)
                 .unwrap_or_else(|error| panic!("wire fixture {name} cannot encode: {error}"));
-            let frame = WireFrame::Message(WireEnvelope::new(
-                WIRE_PROTOCOL_VERSION,
-                FEATURE_SYNC_MESSAGE_PAYLOAD,
-                payload.clone(),
-            ));
-            let frame_bytes = encode_frame(&frame).expect("wire frame encodes");
+            let frames = channel_frames(payload.clone(), WIRE_PROTOCOL_VERSION);
+            let frame_bytes = postcard::to_allocvec(&frames).expect("wire batch encodes");
             Fixture {
                 name,
                 message_family,
-                frame_hex: hex(&frame_bytes),
-                frame_base64: base64(&frame_bytes),
+                batch_hex: hex(&frame_bytes),
+                batch_base64: base64(&frame_bytes),
                 payload_hex: hex(&payload),
             }
         })
@@ -810,7 +806,7 @@ fn fixture_manifest() -> Manifest {
 
     Manifest {
         fixture_set: "jazz-wire-message-frames-v5",
-        codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
+        codec: "postcard Vec<Vec<u8>> of WireFrame::Channel carrying encode_sync_message(..)",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
         fixtures,
@@ -963,34 +959,37 @@ fn wire_hello_frame_fixtures_decode_exactly() {
     }
 }
 
-/// The historical edge-publication frame remains rejected by version admission.
-/// Its old payload tag may now name a different v5 message.
+/// Historical whole-message frames cannot enter the current channel protocol.
 #[test]
-fn retired_edge_publication_frame_rejects_version_admission() {
-    let fixture: Fixture =
+fn retired_edge_publication_frame_rejects_admission() {
+    let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../fixtures/retired_edge_publication.json")).unwrap();
-    let bytes = parse_hex(&fixture.frame_hex);
-    let WireFrame::Message(envelope) = jazz::wire::decode_frame(&bytes).unwrap() else {
-        panic!("legacy fixture is a complete message frame");
-    };
-    assert_eq!(envelope.payload[0], 30);
+    let bytes = parse_hex(fixture["frame_hex"].as_str().unwrap());
     assert!(jazz::wire::validate_frame_for_artifact_corpus(&bytes, u64::MAX).is_err());
 }
 
-/// A historical catalogue payload keeps its original bytes and fails at the
-/// old frame's version boundary, even though v5 now reuses payload tag 12.
+/// Historical catalogue bytes remain frozen and cannot pass current admission.
 #[test]
 fn historical_catalogue_payload_rejects_version_admission() {
     let payload = parse_hex(
         "0c5f5b2265356565633830332d626565372d353566352d613162382d646330383032396338346235222c2275726e3a6a617a7a3a74657374222c2235353535353535352d353535352d353535352d353535352d353535353535353535353535225d091045454545454545454545454545454545",
     );
-    let frame = encode_frame(&WireFrame::Message(WireEnvelope::new(
-        1,
-        FEATURE_SYNC_MESSAGE_PAYLOAD,
-        payload,
-    )))
-    .unwrap();
-    assert!(jazz::wire::validate_frame_for_artifact_corpus(&frame, u64::MAX).is_err());
+    let frames = channel_frames(payload, 1);
+    assert!(jazz::wire::validate_frames_for_artifact_corpus(&frames, u64::MAX).is_err());
+}
+
+fn channel_frames(payload: Vec<u8>, version: u16) -> Vec<Vec<u8>> {
+    let context = jazz::wire::WireInboundContext::new(version, FEATURE_SYNC_MESSAGE_PAYLOAD, None);
+    let mut sender = jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
+    sender
+        .enqueue(0, 0, jazz::wire::channels::ChannelClass::Control, payload)
+        .unwrap();
+    let mut frames = Vec::new();
+    while let Some(frame) = sender.peek_outbound().unwrap() {
+        frames.push(frame);
+        sender.accept_outbound().unwrap();
+    }
+    frames
 }
 
 /// Pin the final compact v5 tag as well as the message families in the corpus.
@@ -1041,43 +1040,29 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
     {
         assert_eq!(fixture.name, name);
         assert_eq!(fixture.message_family, message_family);
-        let frame_bytes = parse_hex(&fixture.frame_hex);
-        assert_eq!(base64(&frame_bytes), fixture.frame_base64);
-        let WireFrame::Message(envelope) =
-            jazz::wire::decode_frame(&frame_bytes).expect("fixture frame decodes")
-        else {
-            panic!("expected message fixture {}", fixture.name);
-        };
-
-        assert_eq!(envelope.protocol_version, WIRE_PROTOCOL_VERSION);
-        assert_eq!(envelope.features, FEATURE_SYNC_MESSAGE_PAYLOAD);
-        assert_eq!(envelope.session, None);
-        assert_eq!(hex(&envelope.payload), fixture.payload_hex);
-        let decoded = decode_sync_message(&envelope.payload)
-            .unwrap_or_else(|error| panic!("fixture {name} fails to decode: {error}"));
-        assert_eq!(decoded, expected);
+        let batch = parse_hex(&fixture.batch_hex);
+        assert_eq!(base64(&batch), fixture.batch_base64);
+        let frames = jazz::wire::decode_websocket_frame_batch(&batch).unwrap();
+        jazz::wire::validate_frames_for_artifact_corpus(&frames, u64::MAX).unwrap();
+        let payload = parse_hex(&fixture.payload_hex);
         assert_eq!(
-            encode_frame(&WireFrame::Message(envelope.clone())).expect("fixture frame reencodes"),
-            frame_bytes,
-            "{name}: semantic frame re-encodes to its frozen exact bytes"
+            frames,
+            channel_frames(payload.clone(), WIRE_PROTOCOL_VERSION)
         );
-        assert_eq!(
-            encode_sync_message(&decoded).expect("fixture payload reencodes"),
-            envelope.payload,
-            "{name}: semantic payload re-encodes to its frozen exact bytes"
-        );
-
-        let mut trailing_frame = frame_bytes;
-        trailing_frame.push(0);
-        assert!(
-            jazz::wire::decode_frame(&trailing_frame).is_err(),
-            "{name}: a canonical frame must reject a suffix"
-        );
-        let mut trailing_payload = envelope.payload;
+        assert_eq!(decode_sync_message(&payload).unwrap(), expected);
+        assert_eq!(encode_sync_message(&expected).unwrap(), payload);
+        for mut frame in frames {
+            frame.push(0);
+            assert!(
+                jazz::wire::decode_frame(&frame).is_err(),
+                "{name}: frame suffix"
+            );
+        }
+        let mut trailing_payload = payload;
         trailing_payload.push(0);
         assert!(
             decode_sync_message(&trailing_payload).is_err(),
-            "{name}: a canonical payload must reject a suffix"
+            "{name}: payload suffix"
         );
     }
 }
@@ -1150,10 +1135,11 @@ fn v1_delegated_policy_fields_reject_old_shapes_and_pin_claim_bytes() {
 
 #[test]
 fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
-    let corpus: WireFrameArtifactCorpus =
-        serde_json::from_str(include_str!("../fixtures/wire_frame_artifact_corpus.json"))
-            .expect("artifact corpus manifest parses");
-    assert_eq!(corpus.format, "jazz-wire-frame-artifact-corpus-v1");
+    let corpus: WireFrameArtifactCorpus = serde_json::from_str(include_str!(
+        "../fixtures/wire_frame_artifact_corpus_v5.json"
+    ))
+    .expect("artifact corpus manifest parses");
+    assert_eq!(corpus.format, "jazz-wire-frame-artifact-corpus-v5");
 
     let hello: HelloManifest =
         serde_json::from_str(include_str!("../fixtures/wire_hello_frames_v5.json"))
@@ -1279,13 +1265,8 @@ fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
         "postcard's prefix parser is the planted semantic bypass"
     );
     assert!(decode_sync_message(&payload).is_err());
-    let frame = encode_frame(&WireFrame::Message(WireEnvelope::new(
-        WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD,
-        payload,
-    )))
-    .expect("outer semantic-trailing envelope is canonical");
-    assert!(jazz::wire::validate_frame_for_artifact_corpus(&frame, u64::MAX).is_err());
+    let frames = channel_frames(payload, WIRE_PROTOCOL_VERSION);
+    assert!(jazz::wire::validate_frames_for_artifact_corpus(&frames, u64::MAX).is_err());
 }
 
 fn execute_complete_artifact_frames(
@@ -1303,11 +1284,10 @@ fn execute_complete_artifact_frames(
         executed.insert(format!("hello:{}", fixture.name));
     }
     for fixture in &messages.fixtures {
-        jazz::wire::validate_frame_for_artifact_corpus(
-            &parse_hex(&fixture.frame_hex),
-            negotiated_features,
-        )
-        .map_err(|error| format!("message:{} rejects: {error}", fixture.name))?;
+        let frames = jazz::wire::decode_websocket_frame_batch(&parse_hex(&fixture.batch_hex))
+            .map_err(|error| error.to_string())?;
+        jazz::wire::validate_frames_for_artifact_corpus(&frames, negotiated_features)
+            .map_err(|error| format!("message:{} rejects: {error}", fixture.name))?;
         executed.insert(format!("message:{}", fixture.name));
     }
     Ok(executed)

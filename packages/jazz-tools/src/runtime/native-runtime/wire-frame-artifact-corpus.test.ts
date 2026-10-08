@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { hasJazzNapiBuild, loadNapiModule } from "../testing/napi-runtime-test-utils.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
-import { FEATURE_PAYLOAD_ZSTD, decodeWireError } from "./websocket.js";
+import { FEATURE_PAYLOAD_ZSTD, decodeWireError, encodeWebSocketFrameBatch } from "./websocket.js";
 
 type FrameFixture = { name: string; frame_hex: string };
 type ArtifactCorpus = {
@@ -20,7 +20,7 @@ type ArtifactCorpus = {
 };
 
 type ArtifactFrameValidator = {
-  __testValidateWireFrameCorpus(frame: Uint8Array, negotiatedFeatures: string): void;
+  __testValidateWireFrameBatchCorpus(frame: Uint8Array, negotiatedFeatures: string): void;
   __testWireFrameCorpusFeatures(): string;
 };
 
@@ -61,8 +61,17 @@ describe("wire frame artifact corpus", () => {
     "executes every complete v1 frame and rejects malformed input through NAPI and WASM",
     async () => {
       const corpus = artifactCorpus();
-      expect(corpus.format).toBe("jazz-wire-frame-artifact-corpus-v1");
-      const accepted = [...rustHelloFixtures(), ...rustMessageFixtures(), ...corpus.error_frames];
+      expect(corpus.format).toBe("jazz-wire-frame-artifact-corpus-v5");
+      const accepted = [
+        ...[...rustHelloFixtures(), ...corpus.error_frames].map((frame) => ({
+          name: frame.name,
+          batch: encodeWebSocketFrameBatch([hexToBytes(frame.frame_hex)]),
+        })),
+        ...rustMessageFixtures().map((fixture) => ({
+          name: fixture.name,
+          batch: hexToBytes(fixture.batch_hex),
+        })),
+      ];
       const [napi, wasm] = await Promise.all([
         // This is a deliberately test-only export (`skip_typescript` in
         // napi-rs), so production declarations must not advertise it.
@@ -88,19 +97,15 @@ describe("wire frame artifact corpus", () => {
         const negotiatedFeatures = artifact.__testWireFrameCorpusFeatures();
         for (const frame of accepted) {
           expect(
-            () =>
-              artifact.__testValidateWireFrameCorpus(
-                hexToBytes(frame.frame_hex),
-                negotiatedFeatures,
-              ),
+            () => artifact.__testValidateWireFrameBatchCorpus(frame.batch, negotiatedFeatures),
             frame.name,
           ).not.toThrow();
         }
         for (const rejection of corpus.rejections) {
           expect(
             () =>
-              artifact.__testValidateWireFrameCorpus(
-                hexToBytes(rejection.frame_hex),
+              artifact.__testValidateWireFrameBatchCorpus(
+                encodeWebSocketFrameBatch([hexToBytes(rejection.frame_hex)]),
                 rejection.negotiated_features,
               ),
             rejection.name,
@@ -112,15 +117,19 @@ describe("wire frame artifact corpus", () => {
 });
 
 function artifactCorpus(): ArtifactCorpus {
-  return readJson("wire_frame_artifact_corpus.json") as ArtifactCorpus;
+  return readJson("wire_frame_artifact_corpus_v5.json") as ArtifactCorpus;
 }
 
 function rustHelloFixtures(): FrameFixture[] {
   return (readJson("wire_hello_frames_v5.json") as { fixtures: FrameFixture[] }).fixtures;
 }
 
-function rustMessageFixtures(): FrameFixture[] {
-  return (readJson("wire_message_frames_v5.json") as { fixtures: FrameFixture[] }).fixtures;
+function rustMessageFixtures(): Array<{ name: string; batch_hex: string }> {
+  return (
+    readJson("wire_message_frames_v5.json") as {
+      fixtures: Array<{ name: string; batch_hex: string }>;
+    }
+  ).fixtures;
 }
 
 function readJson(name: string): unknown {

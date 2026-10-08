@@ -14,8 +14,8 @@ use jazz::protocol::{RegisterShapeOptions, ShapeAst};
 use jazz::query::{QUERY_NAMESPACE, Query, ShapeId};
 use jazz::schema::JazzSchema;
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, decode_frame,
-    decode_sync_message, encode_frame, encode_sync_message,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireFrame, decode_frame,
+    decode_sync_message, encode_sync_message,
 };
 use serde_json::{Map, Value, json};
 use std::cmp::Ordering;
@@ -901,58 +901,79 @@ pub fn loopback_transport_message(
             let encode_start = Instant::now();
             let encoded_payload =
                 encode_sync_message(&message).expect("simulator sync-message encode");
-            let encoded_frame = match codec {
-                SimulatorTransportCodec::WireFrames => {
-                    let envelope = WireEnvelope::new(
-                        WIRE_PROTOCOL_VERSION,
-                        FEATURE_SYNC_MESSAGE_PAYLOAD,
-                        encoded_payload.clone(),
-                    );
-                    Some(
-                        encode_frame(&WireFrame::Message(envelope))
-                            .expect("simulator frame encode"),
+            let encoded_len = encoded_payload.len();
+            let mut encode_time = encode_start.elapsed();
+            let mut decode_time = std::time::Duration::ZERO;
+            let payload = if codec == SimulatorTransportCodec::WireFrames {
+                let context = jazz::wire::WireInboundContext::new(
+                    WIRE_PROTOCOL_VERSION,
+                    FEATURE_SYNC_MESSAGE_PAYLOAD,
+                    None,
+                );
+                let mut sender =
+                    jazz::wire::stream_backend::OrderedChannelBackend::new(context.clone())
+                        .unwrap();
+                let mut receiver =
+                    jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
+                sender
+                    .enqueue(
+                        1,
+                        0,
+                        jazz::wire::channels::ChannelClass::Writes,
+                        encoded_payload,
                     )
-                }
-                SimulatorTransportCodec::Native | SimulatorTransportCodec::WireBytes => None,
-            };
-            let encode_us = encode_start
-                .elapsed()
-                .as_micros()
-                .try_into()
-                .unwrap_or(u64::MAX);
-            metrics.incr("transport_codec_encode_count", 1);
-            metrics.incr("transport_codec_encode_total_us", encode_us);
-            metrics.incr(
-                "transport_codec_encoded_bytes",
-                encoded_payload.len() as u64,
-            );
-            if let Some(frame) = &encoded_frame {
-                metrics.incr("transport_codec_encoded_frame_bytes", frame.len() as u64);
-            }
-            metrics.record_latency("transport_codec_encode", encode_us);
-
-            let decode_start = Instant::now();
-            let payload = match encoded_frame {
-                Some(frame_bytes) => {
-                    match decode_frame(&frame_bytes).expect("simulator frame decode") {
-                        WireFrame::Message(envelope) => envelope.payload,
-                        WireFrame::Hello(_)
-                        | WireFrame::Error(_)
-                        | WireFrame::MessageFragment(_)
-                        | WireFrame::Channel(_)
-                        | WireFrame::ChannelCredit(_) => {
-                            panic!("simulator frame decode returned non-message frame")
-                        }
+                    .unwrap();
+                let mut payload = None;
+                let mut frame_bytes = 0;
+                while sender.has_pending() {
+                    let start = Instant::now();
+                    let frame = sender
+                        .peek_outbound()
+                        .unwrap()
+                        .expect("loopback returns credits every frame");
+                    sender.accept_outbound().unwrap();
+                    encode_time += start.elapsed();
+                    frame_bytes += frame.len() as u64;
+                    let start = Instant::now();
+                    let WireFrame::Channel(envelope) =
+                        decode_frame(&frame).expect("simulator frame decode")
+                    else {
+                        panic!("simulator expected channel frame");
+                    };
+                    if let Some(received) = receiver.receive(envelope, frame.len()).unwrap() {
+                        assert!(payload.is_none());
+                        payload = Some(received.payload);
+                    }
+                    decode_time += start.elapsed();
+                    let credits = receiver.channel_credits();
+                    let mut credits = credits.lock().unwrap();
+                    while let Some(grant) = credits.peek_grant().unwrap() {
+                        let WireFrame::ChannelCredit(grant) = decode_frame(&grant).unwrap() else {
+                            unreachable!()
+                        };
+                        sender
+                            .channel_credits()
+                            .lock()
+                            .unwrap()
+                            .receive_credit(grant)
+                            .unwrap();
+                        credits.accept_grant().unwrap();
                     }
                 }
-                None => encoded_payload,
+                metrics.incr("transport_codec_encoded_frame_bytes", frame_bytes);
+                payload.expect("simulator received complete message")
+            } else {
+                encoded_payload
             };
+            let start = Instant::now();
             let decoded = decode_sync_message(&payload).expect("simulator sync-message decode");
-            let decode_us = decode_start
-                .elapsed()
-                .as_micros()
-                .try_into()
-                .unwrap_or(u64::MAX);
+            decode_time += start.elapsed();
+            let encode_us = encode_time.as_micros().try_into().unwrap_or(u64::MAX);
+            let decode_us = decode_time.as_micros().try_into().unwrap_or(u64::MAX);
+            metrics.incr("transport_codec_encode_count", 1);
+            metrics.incr("transport_codec_encode_total_us", encode_us);
+            metrics.incr("transport_codec_encoded_bytes", encoded_len as u64);
+            metrics.record_latency("transport_codec_encode", encode_us);
             metrics.incr("transport_codec_decode_count", 1);
             metrics.incr("transport_codec_decode_total_us", decode_us);
             metrics.record_latency("transport_codec_decode", decode_us);
@@ -1383,6 +1404,29 @@ mod tests {
         assert_eq!(driver.metrics.counters["transport_codec_encode_count"], 1);
         assert_eq!(driver.metrics.counters["transport_codec_decode_count"], 1);
         assert!(driver.metrics.counters["transport_codec_encoded_bytes"] > 0);
+    }
+
+    /// Alice's simulated channel transfer returns credits while Bob consumes
+    /// extents, so a message larger than the physical window still completes.
+    /// This codec-level test is needed because the simulator owns its loopback.
+    #[test]
+    fn wire_frame_transport_codec_returns_credits_for_large_messages() {
+        let message = SyncMessage::SessionClaims {
+            identity: jazz::ids::AuthorSubject::for_test_bytes([0x42; 16]),
+            claims: BTreeMap::from([(
+                "data".to_owned(),
+                jazz::groove::records::Value::Bytes(vec![0x42; 5 * 1024 * 1024]),
+            )]),
+        };
+        let mut metrics = Metrics::default();
+        assert_eq!(
+            loopback_transport_message(
+                SimulatorTransportCodec::WireFrames,
+                message.clone(),
+                &mut metrics
+            ),
+            message
+        );
     }
 
     #[test]

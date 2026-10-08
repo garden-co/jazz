@@ -189,20 +189,9 @@ export function isWireHello(frame: Uint8Array): boolean {
   return true;
 }
 
-export function isWireMessage(frame: Uint8Array): boolean {
-  const reader = new PostcardReader(frame);
-  if (reader.u64() !== 1) return false;
-  reader.u64(); // protocol_version
-  reader.u64(); // features
-  reader.option(readWireSession);
-  reader.bytes(); // semantic payload
-  assertReaderDone(reader, "WireFrame::Message");
-  return true;
-}
-
 export function isWireError(frame: Uint8Array): boolean {
   const reader = new PostcardReader(frame);
-  if (reader.u64() !== 2) return false;
+  if (reader.u64() !== 1) return false;
   readWireErrorBodyExact(reader);
   return true;
 }
@@ -210,7 +199,7 @@ export function isWireError(frame: Uint8Array): boolean {
 export function decodeWireError(frame: Uint8Array): WireError {
   const reader = new PostcardReader(frame);
   const tag = reader.u64();
-  if (tag !== 2) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
+  if (tag !== 1) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
   return readWireErrorBodyExact(reader);
 }
 
@@ -478,12 +467,6 @@ function readWireHelloBodyExact(reader: PostcardReader): {
   });
   assertReaderDone(reader, "WireFrame::Hello");
   return { min, max, features, role, authority };
-}
-
-function readWireSession(reader: PostcardReader): void {
-  reader.string(); // session_id
-  reader.u64BigInt(); // epoch
-  reader.option((identity) => identity.string()); // canonical AuthorSubject
 }
 
 function assertReaderDone(reader: PostcardReader, payload: string): void {

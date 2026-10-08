@@ -125,8 +125,9 @@ shape is intended, but the current implementation does not guarantee it. Its
 aggregation and covering-shape semantics remain an open design question below.
 
 The peer wire form is binary-first. `WireFrame` wraps `Hello`,
-`Message(WireEnvelope)`, and `Error`; `WireEnvelope.payload` contains a
-postcard-encoded `SyncMessage` plus protocol version and feature bits. Postcard
+`Error`, `Channel`, and `ChannelCredit`. Ordered channel extents carry a
+postcard-encoded `SyncMessage` with protocol version, feature bits, and session
+metadata. Postcard
 is the canonical runtime frame/envelope format; JSON fixtures are only
 human-readable golden checks. Row/version payloads remain groove custom
 `Record` bytes inside protocol messages; postcard wraps those bytes, it does not
@@ -202,10 +203,10 @@ evaluate policy. `SYSTEM` is never a relay transport identity or delegated
 subject. This is a deliberate redefinition of the sole, unreleased v1 layout:
 there is no old-shape decoder or compatibility path.
 
-### 8.1.1 Frozen wire-protocol v3 byte contract
+### 8.1.1 Frozen wire-protocol v5 byte contract
 
-`WireFrame` and its `WireEnvelope.payload` are each **one complete postcard
-value**. A conformant decoder MUST reject a valid prefix followed by any
+`WireFrame` and each reassembled semantic channel message are **one complete
+postcard value**. A conformant decoder MUST reject a valid prefix followed by any
 trailing byte; concatenation belongs only to the documented WebSocket
 `Vec<Vec<u8>>` batch carrier. In particular, a binding MUST NOT hand a byte
 suffix from one frame to the semantic decoder, and a semantic decoder MUST NOT
@@ -237,7 +238,7 @@ discriminants (decimal):
 
 | enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WireFrame`     | `Hello=0`, `Message=1`, `Error=2`, `MessageFragment=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `WireFrame`     | `Hello=0`, `Error=1`, `Channel=2`, `ChannelCredit=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `WirePeerRole`  | `Client=0`, `Core=1`, retired/rejected `2`, `Relay=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `WireErrorCode` | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `WireRetry`     | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -266,22 +267,22 @@ Any unsupported low or high bit, including `1<<32`, rejects the Hello before
 its accepted mask is converted to a narrower runtime type. The feature mask
 and authority epoch remain `bigint` through wire decoding, so canonical values
 through `2^64-1` are representable without a JavaScript number conversion. Exactly
-one compression bit may be active on an envelope; when both codecs are
-negotiated, an outbound wire-protocol v3 sender selects LZ4 and emits only its bit. A
-receiver rejects an envelope declaring both codecs, a codec change within one
-connection, corrupt compressed bytes, or an encoded payload exceeding `E`
-before fragment admission, or a decompressed payload exceeding `D`.
-Compression is applied before fragmentation and removed only after complete
-fragment reassembly; it never changes semantic bytes.
+one compression bit may be active on a channel extent; when both codecs are
+negotiated, an outbound sender selects LZ4 and emits only its bit. Compression
+is streamed per channel generation. Receivers enforce contiguous sequence
+numbers, unchanged authenticated metadata, bounded decoded chunks, and complete
+logical-message coverage before semantic admission. The resource limits and
+expiry rules are normative in `SPEC/13_transport_message_fragmentation.md`.
 
-`WireMessageFragment` is the complete physical-fragment layout in field order:
-`protocol_version`, `features`, `session`, `message_id`, `message_digest`,
-`total_len`, `offset`, `payload`. Its digest covers the entire compressed
-payload; reassembly admits only negotiated, session-authenticated, in-range,
-non-overlapping extents with exact contiguous coverage and matching metadata,
-then verifies that digest before decompression or semantic decode. The resource
-limits and expiry/deduplication rules are normative in
-`SPEC/13_transport_message_fragmentation.md`.
+Wire v5 removes the obsolete `Message` and `MessageFragment` frames, their
+envelope/fragment layouts, and the old digest-based reassembler. The remaining
+outer tags are compacted as above, within this branch's existing v5 break.
+For example, a small semantic message occupies one `Channel` frame; a larger
+message spans ordered extents and is admitted only after the final extent.
+A missing or reordered extent fails channel admission. Prior-version peers
+fail Hello negotiation; there is no old-frame decoder or storage-format change.
+Historical fixtures remain unchanged, while current v5 fixtures use channel
+batches and the compact error tag.
 
 JSON version cells use the schema-derived `StoredScalar(Json)` descriptor,
 including inline cells. This is the same existing scalar codec used by local
@@ -300,9 +301,8 @@ The wire-protocol v5 frozen corpora are `crates/jazz/fixtures/wire_message_frame
 `crates/jazz/fixtures/wire_hello_frames_v5.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic
 value to the exact same payload and frame bytes, and TypeScript independently
-reads every transport envelope through its production postcard reader, rejects
-a suffix on every corpus frame, and round-trips each through the exact batch
-carrier. The Hello corpus crosses every frozen peer role with both absent and
+round-trips every channel batch through its production batch codec. Rust
+rejects suffixes on each frame and semantic payload. The Hello corpus crosses every frozen peer role with both absent and
 present authority endpoints and one- and multi-byte feature masks; supported
 Core cases additionally pass through the production TypeScript WebSocket
 negotiation path. Its
@@ -619,7 +619,7 @@ transaction payload coverage, not broad "known versions" and not partial row
 payload coverage. Partial and version-level dedup is the committed known-state
 design (§8.11), which retires this inventory rather than extending it.
 
-The postcard `WireFrame`/`WireEnvelope` format and groove row `Record` encoding
+The postcard `WireFrame` channel format and groove row `Record` encoding
 do not change when future inventory fields are added.
 
 ### 8.8 Protocol size limits
@@ -627,23 +627,14 @@ do not change when future inventory fields are added.
 Protocol size limits are enforced at the layer that can recover correctly:
 
 - An encoded `WireFrame` is capped at 2 MiB before postcard frame decode.
-  `WireEnvelope.payload` is one physical fragment, not a semantic-message
-  ceiling. Generic fragmentation/reassembly carries an encoded `SyncMessage`
-  within the separate D/E payload budgets atomically across bounded frames.
-- A logical `SyncMessage` has two independent payload budgets. `D =
-MAX_LOGICAL_MESSAGE_BYTES` is the decoded semantic payload ceiling, checked
-  by the sender before compression and by the decoder after decompression.
-  `E = MAX_ENCODED_MESSAGE_BYTES = D + D/10 + 24` is the encoded payload
-  ceiling, checked by the sender after compression and by reassembly against
-  each fragment's advertised `total_len`. Aggregate staged encoded bytes use
-  `MAX_INFLIGHT_ENCODED_MESSAGE_BYTES`; decompressed output and uncompressed
-  semantic queues retain the `D` bound.
-- At `D = 256 MiB`, `E = 295,279,025` bytes, so a 512 KiB fragment extent
-  needs at most 564 extents. The installed LZ4 worst-case bound is
-  `floor(1.1 * D) + 20`, and `compress_prepend_size` adds its four-byte
-  decoded-size prefix. The installed zstd `ZSTD_compressBound(D)` also fits
-  within `E`. The addition/division formula avoids intermediate multiplication
-  overflow on wasm32.
+  Channel extents carry at most 64 KiB of decoded bytes per codec flush.
+  Complete messages are admitted atomically after bounded channel reassembly.
+- A logical `SyncMessage` has independent decoded and encoded payload budgets:
+  `D = MAX_LOGICAL_MESSAGE_BYTES` and `E = MAX_ENCODED_MESSAGE_BYTES`.
+  Channels check the advertised decoded message length before reserving a
+  buffer, enforce the exact decoded chunk length, and accumulate encoded bytes
+  against `E`. Channel credits bound physical queues and retained decoded
+  buffers independently. See chapter 13 for channel resource and timeout rules.
 - A `RegisterShape` AST is capped at 64 KiB encoded. This is a semantic
   admission limit for the shape-registration request; the connection may
   continue after the rejected request. Server shells may expose this as
@@ -1062,7 +1053,7 @@ current-row availability contract for authorization and receipt validation.
 - `Snapshot { revision: [u8;16], rows: Vec<SupportingRow> }`.
 - `Delta { predecessor: [u8;16], revision: [u8;16], adds: Vec<SupportingRow>, removes: Vec<SupportingRow> }`.
 
-The named semantic encoding is postcard in the version-5 WireEnvelope. Enum
+The named semantic encoding is postcard in version-5 channel messages. Enum
 discriminants are respectively 0 and 1, followed by fields in declaration order.
 Revisions are exactly 16 raw array bytes (no length prefix). Vectors use postcard
 lengths and the existing exact SupportingRow field encoding. Populated snapshots

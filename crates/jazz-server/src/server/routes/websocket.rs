@@ -1125,7 +1125,7 @@ mod tests {
     use jazz::wire::decode_frame;
     use jazz::wire::{
         FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
-        WIRE_PROTOCOL_VERSION, WireMessageFragment, WireTransport,
+        WIRE_PROTOCOL_VERSION, WireTransport,
     };
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
@@ -2455,24 +2455,31 @@ mod tests {
             features,
         )
         .await;
-        let fragment_payload_len = 512 * 1024;
-        let logical_payload = vec![0x42; fragment_payload_len * 4];
-        let message_digest = [0; 32];
-        let encoded = (0..3)
+        let chunk_len = jazz::wire::channels::CHANNEL_CHUNK_BYTES;
+        let encoded = (0..24)
             .map(|index| {
-                let offset = index * fragment_payload_len;
-                let fragment = WireMessageFragment {
+                let envelope = jazz::wire::WireChannelEnvelope {
                     protocol_version: WIRE_PROTOCOL_VERSION,
                     features,
                     session: None,
-                    message_id: 1,
-                    message_digest,
-                    total_len: logical_payload.len() as u64,
-                    offset: offset as u64,
-                    payload: logical_payload[offset..offset + fragment_payload_len].to_vec(),
+                    extent: jazz::wire::channels::ChannelFrame {
+                        channel: 1,
+                        generation: 0,
+                        sequence: index,
+                        class: jazz::wire::channels::ChannelClass::Writes,
+                        first: index == 0,
+                        last: false,
+                        message_len: if index == 0 {
+                            (chunk_len * 32) as u32
+                        } else {
+                            0
+                        },
+                        decoded_len: chunk_len as u32,
+                        payload: vec![0x42; chunk_len],
+                    },
                 };
-                encode_frame(&WireFrame::MessageFragment(fragment))
-                    .expect("encode large websocket fragment")
+                encode_frame(&WireFrame::Channel(envelope))
+                    .expect("encode large websocket channel batch")
             })
             .collect::<Vec<_>>();
         let batch = postcard::to_allocvec(&encoded).expect("encode large websocket batch");

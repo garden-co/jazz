@@ -27,12 +27,12 @@ use crate::protocol_limits::{
 /// formats and are not wire-protocol compatibility aliases.
 pub const WIRE_PROTOCOL_VERSION: u16 = 5;
 
-/// Frozen v1 full-frame artifact rejection corpus. NAPI and WASM execute every
+/// Frozen v5 full-frame artifact rejection corpus. NAPI and WASM execute every
 /// frame in the complete Rust message/Hello fixtures, plus these explicit
 /// rejection cases, through this module's production decoders. This is
 /// test-only input, not a second wire format.
 pub const WIRE_FRAME_ARTIFACT_CORPUS: &str =
-    include_str!("../../../fixtures/wire_frame_artifact_corpus.json");
+    include_str!("../../../fixtures/wire_frame_artifact_corpus_v5.json");
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -74,15 +74,11 @@ pub type WireFeatures = u64;
 pub enum WireFrame {
     /// Capability and version negotiation frame.
     Hello(WireHello),
-    /// Opaque semantic sync payload with negotiated framing metadata.
-    Message(WireEnvelope),
     /// Structured protocol/session error.
     Error(WireError),
-    /// One physical extent of an encoded logical sync message.
-    MessageFragment(WireMessageFragment),
-    /// One ordered channel extent. Postcard-v1 enum tag 4 within wire v5.
+    /// One ordered channel extent. Postcard-v1 enum tag 2 within wire v5.
     Channel(WireChannelEnvelope),
-    /// Receiver-consumption byte grant. Postcard-v1 enum tag 5 within wire v5.
+    /// Receiver-consumption byte grant. Postcard-v1 enum tag 3 within wire v5.
     ChannelCredit(WireChannelCredit),
 }
 
@@ -130,42 +126,6 @@ pub struct WireChannelEnvelope {
     pub session: Option<WireSession>,
     /// Explicit postcard-v1 channel metadata and bounded payload.
     pub extent: channels::ChannelFrame,
-}
-
-/// A bounded physical extent of one encoded logical message.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireMessageFragment {
-    /// Negotiated protocol version used by the logical message.
-    pub protocol_version: u16,
-    /// Optional features active for the encoded logical message.
-    pub features: WireFeatures,
-    /// Optional authenticated/resumable session metadata.
-    pub session: Option<WireSession>,
-    /// Monotone identity within this connection direction.
-    pub message_id: u64,
-    /// Integrity digest of the complete encoded payload.
-    pub message_digest: [u8; 32],
-    /// Exact encoded payload length before fragmentation.
-    pub total_len: u64,
-    /// Byte offset of this extent in the encoded payload.
-    pub offset: u64,
-    /// Bytes at `offset`.
-    pub payload: Vec<u8>,
-}
-
-impl std::fmt::Debug for WireMessageFragment {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WireMessageFragment")
-            .field("protocol_version", &self.protocol_version)
-            .field("features", &self.features)
-            .field("session", &self.session)
-            .field("message_id", &self.message_id)
-            .field("message_digest", &hex::encode(self.message_digest))
-            .field("total_len", &self.total_len)
-            .field("offset", &self.offset)
-            .field("payload_len", &self.payload.len())
-            .finish()
-    }
 }
 
 /// Link role advertised during handshake.
@@ -317,48 +277,6 @@ impl std::fmt::Debug for WireSession {
     }
 }
 
-/// Metadata and payload for one semantic sync message.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireEnvelope {
-    /// Negotiated protocol version used to encode this payload.
-    pub protocol_version: u16,
-    /// Optional features active for this frame.
-    pub features: WireFeatures,
-    /// Optional session metadata for reconnectable links.
-    pub session: Option<WireSession>,
-    /// Encoded semantic payload, usually a [`crate::protocol::SyncMessage`].
-    pub payload: Vec<u8>,
-}
-
-impl std::fmt::Debug for WireEnvelope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WireEnvelope")
-            .field("protocol_version", &self.protocol_version)
-            .field("features", &self.features)
-            .field("session", &self.session)
-            .field("payload_len", &self.payload.len())
-            .finish()
-    }
-}
-
-impl WireEnvelope {
-    /// Construct a payload frame with no session metadata.
-    pub fn new(protocol_version: u16, features: WireFeatures, payload: Vec<u8>) -> Self {
-        Self {
-            protocol_version,
-            features,
-            session: None,
-            payload,
-        }
-    }
-
-    /// Attach session metadata to the envelope.
-    pub fn with_session(mut self, session: WireSession) -> Self {
-        self.session = Some(session);
-        self
-    }
-}
-
 /// Immutable admission requirements for complete inbound envelopes.
 #[doc(hidden)]
 #[derive(Clone)]
@@ -410,12 +328,11 @@ impl WireInboundContext {
     }
 
     pub fn validate_channel_metadata(&self, frame: &WireChannelEnvelope) -> Result<(), WireError> {
-        self.validate_envelope_metadata(&WireEnvelope {
-            protocol_version: frame.protocol_version,
-            features: frame.features,
-            session: frame.session.clone(),
-            payload: Vec::new(),
-        })
+        self.validate_metadata(
+            frame.protocol_version,
+            frame.features,
+            frame.session.as_ref(),
+        )
     }
 
     pub fn decode_frame(&self, bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
@@ -436,14 +353,6 @@ impl WireInboundContext {
 
     pub fn expected_session(&self) -> Option<&WireSession> {
         self.expected_session.as_ref()
-    }
-
-    pub fn validate_envelope_metadata(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
-        self.validate_metadata(
-            envelope.protocol_version,
-            envelope.features,
-            envelope.session.as_ref(),
-        )
     }
 
     fn validate_metadata(
@@ -580,78 +489,17 @@ impl WireError {
     }
 }
 
-/// Admit one decoded complete envelope through the canonical wire checks.
-pub fn admit_complete_envelope(
-    context: &WireInboundContext,
-    decoder: &mut WireStreamDecoder,
-    envelope: WireEnvelope,
-) -> Result<SyncMessage, WireError> {
-    context.validate_envelope_metadata(&envelope)?;
-    let payload = decoder
-        .decode_message_borrowed(&envelope.payload, envelope.features)
-        .map_err(|message| {
-            WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
-        })?;
-    validate_logical_message_len(payload.len()).map_err(|message| {
-        WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
-    })?;
-    let decoded = if context.trusted_encoder {
-        decode_sync_message_trusted(&payload)
-            .map_err(|error| {
-                WireError::new(
-                    WireErrorCode::MalformedFrame,
-                    WireRetry::Never,
-                    error.to_string(),
-                )
-            })
-            .and_then(|message| {
-                ensure_sync_message_features(&message, context.negotiated_features)?;
-                Ok(message)
-            })
-    } else {
-        decode_sync_message_for_features(&payload, context.negotiated_features)
-    };
-    decoded.map_err(|error| {
-        WireError::new(
-            error.code,
-            error.retry,
-            format!(
-                "{}; payload_bytes={}; payload_hex={}",
-                error.message,
-                payload.len(),
-                hex_diagnostic(&payload)
-            ),
-        )
-    })
-}
-
-fn hex_diagnostic(bytes: &[u8]) -> String {
-    if bytes.len() <= 128 {
-        return hex_prefix(bytes, bytes.len());
-    }
-    hex_prefix(bytes, 16)
-}
-
-fn hex_prefix(bytes: &[u8], max: usize) -> String {
-    bytes
-        .iter()
-        .take(max)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join("")
-}
-
 /// Serialize a wire frame with the canonical Jazz frame codec.
 pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, postcard::Error> {
     to_allocvec(frame)
 }
 
 /// Whether encoded frame bytes carry a [`WireFrame::ChannelCredit`] grant,
-/// judged by its pinned postcard-v1 enum tag (5) alone. Callers still decode
+/// judged by its pinned postcard-v1 enum tag (3) alone. Callers still decode
 /// and validate the grant; this only lets a receiver route credit frames
 /// without decoding every channel payload.
 pub fn is_channel_credit_frame(bytes: &[u8]) -> bool {
-    bytes.first() == Some(&5)
+    bytes.first() == Some(&3)
 }
 
 /// Decode a wire frame serialized by [`encode_frame`].
@@ -675,29 +523,44 @@ pub fn validate_frame_for_artifact_corpus(
     bytes: &[u8],
     negotiated_features: WireFeatures,
 ) -> Result<(), String> {
-    let frame = decode_frame(bytes).map_err(|error| format!("malformed wire frame: {error}"))?;
-    match frame {
-        WireFrame::Hello(hello) => negotiate_wire(&hello, negotiated_features)
-            .map(|_| ())
-            .map_err(|error| format!("hello negotiation rejected: {}", error.message)),
-        WireFrame::Message(envelope) => {
-            let context = WireInboundContext::new(WIRE_PROTOCOL_VERSION, negotiated_features, None);
-            let mut decoder = WireStreamDecoder::new(negotiated_features)?;
-            admit_complete_envelope(&context, &mut decoder, envelope)
-                .map(|_| ())
-                .map_err(|error| format!("semantic payload rejected: {}", error.message))
+    validate_frames_for_artifact_corpus(&[bytes.to_vec()], negotiated_features)
+}
+
+/// Execute a complete frozen frame sequence through the production channel decoder.
+#[doc(hidden)]
+pub fn validate_frames_for_artifact_corpus(
+    frames: &[Vec<u8>],
+    negotiated_features: WireFeatures,
+) -> Result<(), String> {
+    let context = WireInboundContext::new(WIRE_PROTOCOL_VERSION, negotiated_features, None);
+    let mut receiver = stream_backend::OrderedChannelBackend::new(context.clone())?;
+    let mut pending = std::collections::BTreeSet::new();
+    for bytes in frames {
+        match decode_frame(bytes).map_err(|error| format!("malformed wire frame: {error}"))? {
+            WireFrame::Hello(hello) => {
+                negotiate_wire(&hello, negotiated_features)
+                    .map_err(|error| format!("hello negotiation rejected: {}", error.message))?;
+            }
+            WireFrame::Channel(envelope) => {
+                let channel = envelope.extent.channel;
+                pending.insert(channel);
+                if let Some(message) = receiver.receive(envelope, bytes.len())? {
+                    context
+                        .decode_semantic_payload(&message.payload)
+                        .map_err(|error| format!("semantic payload rejected: {}", error.message))?;
+                    pending.remove(&channel);
+                }
+            }
+            WireFrame::Error(_) => {}
+            WireFrame::ChannelCredit(_) => {
+                return Err("credit frames require a persistent admitted endpoint".to_owned());
+            }
         }
-        WireFrame::Error(_) => Ok(()),
-        WireFrame::ChannelCredit(_) => {
-            Err("credit frames require a persistent admitted endpoint".to_owned())
-        }
-        WireFrame::Channel(_) => {
-            Err("channel frames require a persistent admitted endpoint".to_owned())
-        }
-        WireFrame::MessageFragment(_) => Err(
-            "artifact corpus has no peer reassembly context for a standalone fragment".to_owned(),
-        ),
     }
+    if !pending.is_empty() {
+        return Err("incomplete channel message in artifact corpus".to_owned());
+    }
+    Ok(())
 }
 
 /// Serialize a semantic sync message with the canonical Jazz payload codec.
@@ -1163,6 +1026,25 @@ pub fn negotiate_wire(
 mod tests {
     // The entropy boundary needs a controlled internal test: a real process
     // restart cannot deterministically assert random allocation or zero retry.
+    fn test_channel_frame(version: u16, features: u64, payload: Vec<u8>) -> WireFrame {
+        WireFrame::Channel(WireChannelEnvelope {
+            protocol_version: version,
+            features,
+            session: None,
+            extent: channels::ChannelFrame {
+                channel: 0,
+                generation: 0,
+                sequence: 0,
+                class: channels::ChannelClass::Control,
+                first: true,
+                last: true,
+                message_len: payload.len() as u32,
+                decoded_len: payload.len() as u32,
+                payload,
+            },
+        })
+    }
+
     #[test]
     fn authority_incarnations_use_fresh_entropy_across_allocator_restarts() {
         let node = super::NodeUuid::from_bytes([91; 16]);
@@ -1242,59 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn message_payload_round_trips_as_bytes() {
-        let session = WireSession {
-            session_id: "session-1".to_owned(),
-            epoch: 3,
-            identity: Some(AuthorSubject::for_test_bytes([0x42; 16])),
-        };
-        let frame = WireFrame::Message(
-            WireEnvelope::new(1, FEATURE_SESSION_FRAME, vec![1, 2, 3, 4])
-                .with_session(session.clone()),
-        );
-
-        let encoded = serde_json::to_vec(&frame).unwrap();
-        let decoded: WireFrame = serde_json::from_slice(&encoded).unwrap();
-
-        assert_eq!(
-            decoded,
-            WireFrame::Message(
-                WireEnvelope::new(1, FEATURE_SESSION_FRAME, vec![1, 2, 3, 4]).with_session(session)
-            )
-        );
-    }
-
-    #[test]
-    fn wire_payload_debug_is_bounded_and_content_safe() {
-        let secret = b"do-not-log-wire-payload";
-        let envelope = WireEnvelope::new(1, 0, vec![b'x'; 1_000_000]);
-        let envelope_debug = format!("{envelope:?}");
-        assert_eq!(
-            envelope_debug,
-            "WireEnvelope { protocol_version: 1, features: 0, session: None, payload_len: 1000000 }"
-        );
-        assert!(envelope_debug.len() < 128);
-        assert!(!envelope_debug.contains(std::str::from_utf8(secret).unwrap()));
-
-        let fragment = WireMessageFragment {
-            protocol_version: 1,
-            features: 0,
-            session: None,
-            message_id: 7,
-            message_digest: [0xab; 32],
-            total_len: 1_000_000,
-            offset: 0,
-            payload: vec![b'x'; 1_000_000],
-        };
-        let fragment_debug = format!("{fragment:?}");
-        assert!(fragment_debug.contains("message_digest: \"abab"));
-        assert!(fragment_debug.contains("payload_len: 1000000"));
-        assert!(fragment_debug.len() < 256);
-        assert!(!fragment_debug.contains("xxxxx"));
-    }
-
-    #[test]
-    fn wire_session_debug_stays_bounded_when_nested_in_payload_frames() {
+    fn wire_session_debug_stays_bounded() {
         let session = WireSession {
             session_id: "credential-bearing-session-id".repeat(10_000),
             epoch: 3,
@@ -1309,25 +1139,6 @@ mod tests {
         assert!(session_debug.len() < 256);
         assert!(!session_debug.contains("credential-bearing-session-id"));
         assert_ne!(session_debug, format!("{distinct_session:?}"));
-
-        let envelope = WireEnvelope::new(1, 0, vec![]).with_session(session.clone());
-        let envelope_debug = format!("{envelope:?}");
-        assert!(envelope_debug.len() < 384);
-        assert!(!envelope_debug.contains("credential-bearing-session-id"));
-
-        let fragment = WireMessageFragment {
-            protocol_version: 1,
-            features: 0,
-            session: Some(session),
-            message_id: 7,
-            message_digest: [0xab; 32],
-            total_len: 0,
-            offset: 0,
-            payload: vec![],
-        };
-        let fragment_debug = format!("{fragment:?}");
-        assert!(fragment_debug.len() < 512);
-        assert!(!fragment_debug.contains("credential-bearing-session-id"));
     }
 
     #[test]
@@ -1364,8 +1175,8 @@ mod tests {
         );
 
         let canonical_frame = encode_frame(&frame).expect("frame encodes");
-        assert_eq!(canonical_frame[0], 2, "WireFrame::Error is tag 2");
-        let nonminimal_frame = [vec![0x82, 0], canonical_frame[1..].to_vec()].concat();
+        assert_eq!(canonical_frame[0], 1, "WireFrame::Error is tag 1");
+        let nonminimal_frame = [vec![0x81, 0], canonical_frame[1..].to_vec()].concat();
         assert!(
             postcard::from_bytes::<WireFrame>(&nonminimal_frame).is_ok(),
             "planted sensitivity: postcard accepts the overlong 02 -> 82 00 tag"
@@ -1989,21 +1800,13 @@ mod tests {
         );
         let mut trusted = WireInboundContext::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, None);
         trusted.set_trusted_encoder(true);
-        let mut decoder = WireStreamDecoder::new(FEATURE_NONE).unwrap();
-        let envelope = WireEnvelope::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, payload.clone());
-        assert_eq!(
-            admit_complete_envelope(&trusted, &mut decoder, envelope.clone()).unwrap(),
-            message
-        );
+        assert_eq!(trusted.decode_semantic_payload(&payload).unwrap(), message);
         assert_eq!(
             crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()),
             0
         );
         let session = WireInboundContext::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, None);
-        assert_eq!(
-            admit_complete_envelope(&session, &mut decoder, envelope).unwrap(),
-            message
-        );
+        assert_eq!(session.decode_semantic_payload(&payload).unwrap(), message);
         assert!(crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()) > 0);
     }
 
@@ -2132,15 +1935,15 @@ mod tests {
         let emitted_features =
             (negotiated.features & !FEATURE_PAYLOAD_COMPRESSION_MASK) | encoder.active_feature();
         let frame = decode_frame(
-            &encode_frame(&WireFrame::Message(WireEnvelope::new(
+            &encode_frame(&test_channel_frame(
                 negotiated.protocol_version,
                 emitted_features,
                 payload.clone(),
-            )))
+            ))
             .expect("selected-codec envelope encodes"),
         )
         .expect("selected-codec envelope decodes");
-        let WireFrame::Message(envelope) = frame else {
+        let WireFrame::Channel(envelope) = frame else {
             panic!("expected message envelope")
         };
         assert_eq!(
@@ -2324,18 +2127,18 @@ mod tests {
 
         for message in messages {
             let payload = encode_sync_message(&message).unwrap();
-            let frame = WireFrame::Message(WireEnvelope::new(
-                WIRE_PROTOCOL_VERSION,
-                FEATURE_SYNC_MESSAGE_PAYLOAD,
-                payload,
-            ));
+            let frame =
+                test_channel_frame(WIRE_PROTOCOL_VERSION, FEATURE_SYNC_MESSAGE_PAYLOAD, payload);
 
             let decoded = decode_frame(&encode_frame(&frame).unwrap()).unwrap();
-            let WireFrame::Message(envelope) = decoded else {
+            let WireFrame::Channel(envelope) = decoded else {
                 panic!("expected message frame");
             };
 
-            assert_eq!(decode_sync_message(&envelope.payload).unwrap(), message);
+            assert_eq!(
+                decode_sync_message(&envelope.extent.payload).unwrap(),
+                message
+            );
         }
     }
 

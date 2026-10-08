@@ -589,16 +589,6 @@ where
         .count()
 }
 
-pub(super) fn decode_wire_message_payload(
-    decoder: &mut WireStreamDecoder,
-    envelope: &crate::wire::WireEnvelope,
-) -> SyncMessage {
-    let payload = decoder
-        .decode_message(&envelope.payload, envelope.features)
-        .unwrap();
-    decode_sync_message(&payload).unwrap()
-}
-
 pub(super) fn delta_rows(
     event: SubscriptionEvent,
 ) -> (Vec<CurrentRow>, Vec<CurrentRow>, Vec<RemovedRow>) {
