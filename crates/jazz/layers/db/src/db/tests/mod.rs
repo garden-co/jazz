@@ -75,8 +75,7 @@ use crate::wire::{
 
 use super::peer_connection::{
     PendingRowVersionRepair, SubscriberConnectionState, UpstreamConnectionState,
-    aggregate_authorization_scope_bounds, authorization_progress_for_view_receipt,
-    authorization_scope_receipt_matches_transport_context, remove_scope_aggregate_member,
+    aggregate_authorization_scope_bounds, authorization_scope_receipt_matches_transport_context,
     send_subscriber_with_sync_context,
 };
 

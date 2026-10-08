@@ -1414,7 +1414,7 @@ fn rejected_dynamic_channel_admission_preserves_generation() {
             self.inner.try_recv_frame()
         }
     }
-    let reply = |byte| SyncMessage::PermissionAdviceResponse {
+    let reply = |byte| SyncMessage::AuthorizationScopeDecision {
         request_id: crate::protocol::PermissionAdviceRequestId([byte; 16]),
         advice: crate::protocol::PermissionAdvice::Unknown,
     };

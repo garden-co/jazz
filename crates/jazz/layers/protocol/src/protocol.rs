@@ -126,22 +126,6 @@ pub enum SyncMessage {
     /// Trusted upstream catalogue metadata required to decode immutable
     /// authored-version payloads before their view update arrives.
     CatalogueSnapshot(Box<CatalogueSnapshot>),
-    /// One-shot permission preflight. The authenticated link identity is the
-    /// subject; identity and claims are intentionally absent from the payload.
-    PermissionAdviceRequest {
-        /// Client-generated opaque id, unique among requests on this live link.
-        request_id: PermissionAdviceRequestId,
-        /// Hypothetical operation to evaluate without mutation.
-        action: PermissionAdviceAction,
-    },
-    /// One-shot permission preflight result. No supporting rows or denial
-    /// reason are carried across this boundary.
-    PermissionAdviceResponse {
-        /// Opaque id copied from the request.
-        request_id: PermissionAdviceRequestId,
-        /// Final serving-authority result, or `Unknown` when unavailable.
-        advice: PermissionAdvice,
-    },
     /// Authority proof emitted after the matching support `ViewUpdate`.
     AuthorizationScopeReceipt {
         /// Support view that the receiver must apply before accepting proof.

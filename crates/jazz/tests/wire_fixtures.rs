@@ -985,7 +985,7 @@ fn current_rows_cancel_uses_compact_v5_tag() {
     let message = SyncMessage::CurrentRowsCancel {
         request_id: jazz::protocol::PermissionAdviceRequestId([0x42; 16]),
     };
-    let mut expected = vec![30];
+    let mut expected = vec![28];
     expected.extend_from_slice(&[0x42; 16]);
     assert_eq!(encode_sync_message(&message).unwrap(), expected);
     assert_eq!(decode_sync_message(&expected).unwrap(), message);

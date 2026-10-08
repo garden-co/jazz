@@ -571,8 +571,7 @@ fn delivery_route_key(message: &SyncMessage) -> Vec<u8> {
         AuthorizationScopeView { request_id, .. }
         | AuthorizationScopeAggregateReceipt { request_id, .. }
         | AuthorizationScopeUnavailable { request_id }
-        | AuthorizationScopeDecision { request_id, .. }
-        | PermissionAdviceResponse { request_id, .. } => (1, request_id.0.to_vec()),
+        | AuthorizationScopeDecision { request_id, .. } => (1, request_id.0.to_vec()),
         CurrentRowsReceipt(receipt) => (2, receipt.request_id.0.to_vec()),
         ChunkUploadStart(upload) => (3, upload.value_ref.root.object_hash.0.to_vec()),
         ChunkUploadNodes(upload) => (3, upload.value_ref.root.object_hash.0.to_vec()),

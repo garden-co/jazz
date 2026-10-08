@@ -153,7 +153,6 @@ pub(super) fn message_class(message: &SyncMessage) -> (ChannelClass, bool) {
         | Subscribe(_)
         | Unsubscribe { .. }
         | FetchRowVersions { .. }
-        | PermissionAdviceRequest { .. }
         | AuthorizationScopeIntent { .. }
         | CurrentRowsRequest(_)
         | CurrentRowsCancel { .. } => (ChannelClass::Requests, false),
@@ -354,7 +353,7 @@ pub mod tests {
                 result: ChunkResponse::Found(vec![7; 200_000]),
             }],
         });
-        let query = SyncMessage::PermissionAdviceResponse {
+        let query = SyncMessage::AuthorizationScopeDecision {
             request_id: PermissionAdviceRequestId([1; 16]),
             advice: PermissionAdvice::Unknown,
         };

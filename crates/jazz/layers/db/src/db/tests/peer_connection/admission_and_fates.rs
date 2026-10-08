@@ -4522,19 +4522,24 @@ fn probe_3386_update_advice_latency() {
     }
 }
 
+/// Alice receives only Bob's correlated decision, without policy rows or reasons.
+/// Pin the wire bytes here because the public advice API hides the payload layout.
 #[test]
 fn permission_advice_response_wire_cannot_carry_policy_rows_or_reasons() {
-    let request_id = PermissionAdviceRequestId([7; 16]);
-    let message = SyncMessage::PermissionAdviceResponse {
-        request_id,
+    let message = SyncMessage::AuthorizationScopeDecision {
+        request_id: PermissionAdviceRequestId([7; 16]),
         advice: PermissionAdvice::Denied,
     };
+    let mut expected = vec![22]; // AuthorizationScopeDecision in wire v5.
+    expected.extend_from_slice(&[7; 16]);
+    expected.push(1); // Denied.
     assert_eq!(
-        message,
-        SyncMessage::PermissionAdviceResponse {
-            request_id,
-            advice: PermissionAdvice::Denied,
-        }
+        crate::wire::encode_sync_message(&message).unwrap(),
+        expected
+    );
+    assert_eq!(
+        crate::wire::decode_sync_message(&expected).unwrap(),
+        message
     );
 }
 
