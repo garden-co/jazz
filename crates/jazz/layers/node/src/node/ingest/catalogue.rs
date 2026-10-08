@@ -108,7 +108,6 @@ where
                 return Err(Error::CatalogueActivationFailed);
             }
             match message {
-                SyncMessage::Reserved30(retired) => match retired {},
                 SyncMessage::ChunkUploadStart(start) => {
                     if !self.admit_large_value_ingress(
                         super::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,

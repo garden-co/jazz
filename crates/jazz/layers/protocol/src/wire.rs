@@ -1783,7 +1783,6 @@ mod tests {
             V10,
             V11,
             V12,
-            V13,
             ViewUpdate {
                 subscription: SubscriptionKey,
                 settled_through: GlobalTime,

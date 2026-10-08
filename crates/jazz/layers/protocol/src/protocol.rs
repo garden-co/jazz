@@ -26,11 +26,6 @@ use crate::time::GlobalTime;
 use crate::time::TxTime;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId};
 
-/// Uninhabited payload preserving retired postcard discriminants.
-#[doc(hidden)]
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub enum ReservedWireMessage {}
-
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
@@ -111,9 +106,6 @@ pub enum SyncMessage {
         /// Lens payload.
         lens: MigrationLens,
     },
-    /// Retired wire tag. Uninhabited so it cannot be sent or received.
-    #[doc(hidden)]
-    Reserved12(ReservedWireMessage),
     /// Catalogue-lane acknowledgement.
     CatalogueAck(CatalogueAck),
     /// Downstream current-row view update.
@@ -229,8 +221,6 @@ pub enum SyncMessage {
     ChunkUploadNodes(ChunkUploadNodes),
     /// Receiver acknowledgement for a pushed upload.
     ChunkUploadResult(ChunkUploadResult),
-    /// Retired edge-publication tag. No current message may use this slot.
-    Reserved30(ReservedWireMessage),
     /// Bounded known-row revalidation in the current default view.
     CurrentRowsRequest(CurrentRowsRequest),
     /// Core-backed current-row evidence, scoped to one admitted request.

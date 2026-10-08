@@ -963,10 +963,10 @@ fn wire_hello_frame_fixtures_decode_exactly() {
     }
 }
 
-/// A complete legacy publication must fail decoding before any trust-specific
-/// admission path can see it. Pin the real old bytes, not only truncated tags.
+/// The historical edge-publication frame remains rejected by version admission.
+/// Its old payload tag may now name a different v5 message.
 #[test]
-fn retired_edge_publication_rejects_at_every_decoder_boundary() {
+fn retired_edge_publication_frame_rejects_version_admission() {
     let fixture: Fixture =
         serde_json::from_str(include_str!("../fixtures/retired_edge_publication.json")).unwrap();
     let bytes = parse_hex(&fixture.frame_hex);
@@ -974,24 +974,37 @@ fn retired_edge_publication_rejects_at_every_decoder_boundary() {
         panic!("legacy fixture is a complete message frame");
     };
     assert_eq!(envelope.payload[0], 30);
-    for payload in [&[30][..], &[30, 0][..], envelope.payload.as_slice()] {
-        assert!(decode_sync_message(payload).is_err());
-        assert!(jazz::wire::decode_sync_message_trusted(payload).is_err());
-    }
     assert!(jazz::wire::validate_frame_for_artifact_corpus(&bytes, u64::MAX).is_err());
 }
 
-/// Retired tags must fail even at the trusted codec boundary; the other
-/// fixtures pin every remaining message's existing discriminant.
+/// A historical catalogue payload keeps its original bytes and fails at the
+/// old frame's version boundary, even though v5 now reuses payload tag 12.
 #[test]
-fn retired_wire_tag_12_rejects_decoding() {
-    let retired_payload = parse_hex(
+fn historical_catalogue_payload_rejects_version_admission() {
+    let payload = parse_hex(
         "0c5f5b2265356565633830332d626565372d353566352d613162382d646330383032396338346235222c2275726e3a6a617a7a3a74657374222c2235353535353535352d353535352d353535352d353535352d353535353535353535353535225d091045454545454545454545454545454545",
     );
-    for payload in [&[12][..], &[12, 0][..], retired_payload.as_slice()] {
-        assert!(decode_sync_message(payload).is_err());
-        assert!(jazz::wire::decode_sync_message_trusted(payload).is_err());
-    }
+    let frame = encode_frame(&WireFrame::Message(WireEnvelope::new(
+        1,
+        FEATURE_SYNC_MESSAGE_PAYLOAD,
+        payload,
+    )))
+    .unwrap();
+    assert!(jazz::wire::validate_frame_for_artifact_corpus(&frame, u64::MAX).is_err());
+}
+
+/// Pin the final compact v5 tag as well as the message families in the corpus.
+/// A byte-level codec test is needed because public round trips alone would
+/// accept accidental renumbering.
+#[test]
+fn current_rows_cancel_uses_compact_v5_tag() {
+    let message = SyncMessage::CurrentRowsCancel {
+        request_id: jazz::protocol::PermissionAdviceRequestId([0x42; 16]),
+    };
+    let mut expected = vec![31];
+    expected.extend_from_slice(&[0x42; 16]);
+    assert_eq!(encode_sync_message(&message).unwrap(), expected);
+    assert_eq!(decode_sync_message(&expected).unwrap(), message);
 }
 
 #[test]
@@ -1254,34 +1267,25 @@ fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
     // `postcard::from_bytes` is the planted semantic-decoder bypass: it accepts
     // the canonical prefix, while Jazz's exact semantic decoder and the
     // generated-host bridge must reject the whole payload.
-    let trailing_payload = corpus
-        .rejections
-        .iter()
-        .find(|rejection| {
-            rejection.name == "trailing semantic payload inside a complete message envelope"
-        })
-        .expect("semantic trailing rejection is frozen");
-    let WireFrame::Message(envelope) =
-        jazz::wire::decode_frame(&parse_hex(&trailing_payload.frame_hex))
-            .expect("outer semantic-trailing envelope is canonical")
-    else {
-        panic!("semantic trailing corpus case is a message frame");
-    };
+    // Keep the historical corpus bytes frozen, but exercise the permissive
+    // parser with a current message: retired tags may now mean another variant.
+    let mut payload = encode_sync_message(&SyncMessage::CurrentRowsCancel {
+        request_id: jazz::protocol::PermissionAdviceRequestId([0x42; 16]),
+    })
+    .expect("current message encodes");
+    payload.push(0);
     assert!(
-        postcard::from_bytes::<SyncMessage>(&envelope.payload).is_ok(),
+        postcard::from_bytes::<SyncMessage>(&payload).is_ok(),
         "postcard's prefix parser is the planted semantic bypass"
     );
-    assert!(decode_sync_message(&envelope.payload).is_err());
-    assert!(
-        jazz::wire::validate_frame_for_artifact_corpus(
-            &parse_hex(&trailing_payload.frame_hex),
-            trailing_payload
-                .negotiated_features
-                .parse()
-                .expect("feature bits parse"),
-        )
-        .is_err()
-    );
+    assert!(decode_sync_message(&payload).is_err());
+    let frame = encode_frame(&WireFrame::Message(WireEnvelope::new(
+        WIRE_PROTOCOL_VERSION,
+        FEATURE_SYNC_MESSAGE_PAYLOAD,
+        payload,
+    )))
+    .expect("outer semantic-trailing envelope is canonical");
+    assert!(jazz::wire::validate_frame_for_artifact_corpus(&frame, u64::MAX).is_err());
 }
 
 fn execute_complete_artifact_frames(

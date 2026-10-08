@@ -1993,7 +1993,6 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
     // message itself here: claims and row payloads must not escape through a
     // transport diagnostic.
     match message {
-        SyncMessage::Reserved12(retired) => match *retired {},
         SyncMessage::ChunkRequestBatch(_) => "ChunkRequestBatch",
         SyncMessage::ChunkResponseBatch(_) => "ChunkResponseBatch",
         SyncMessage::ChunkUploadStart(_) => "ChunkUploadStart",
@@ -2001,7 +2000,6 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::ChunkUploadResult(_) => "ChunkUploadResult",
         SyncMessage::SessionClaims { .. } => "SessionClaims",
         SyncMessage::CommitUnit { .. } => "CommitUnit",
-        SyncMessage::Reserved30(retired) => match *retired {},
         SyncMessage::FateUpdate { .. } => "FateUpdate",
         SyncMessage::RegisterShape { .. } => "RegisterShape",
         SyncMessage::Subscribe(_) => "Subscribe",
