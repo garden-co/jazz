@@ -3,7 +3,9 @@
 import { useEffect, useState } from "react";
 import {
   AppShell,
+  Banner,
   Button,
+  Center,
   EmptyState,
   LayoutContent,
   NavHeadingMenu,
@@ -12,6 +14,7 @@ import {
   SideNavHeading,
   SideNavItem,
   SideNavSection,
+  Spinner,
   Text,
   TopNav,
   TopNavHeading,
@@ -41,7 +44,19 @@ const navigation = [
   { label: "Settings", href: href.settings, pages: ["settings"] },
 ] as const;
 
-export function Operations({ email, onSignOut }: { email: string; onSignOut: () => void }) {
+export function Operations({
+  email,
+  preparing = false,
+  setupError = null,
+  onSignOut,
+}: {
+  email: string;
+  /** The server is still creating the personal label. */
+  preparing?: boolean;
+  /** Setting up the personal label failed; shown as a banner with a retry. */
+  setupError?: { message: string; retry: () => void } | null;
+  onSignOut: () => void;
+}) {
   const session = useSession();
   const route = useRoute();
   const account = session?.user.account;
@@ -96,15 +111,31 @@ export function Operations({ email, onSignOut }: { email: string; onSignOut: () 
     />
   );
 
+  const setupBanner = setupError ? (
+    <Banner
+      status="error"
+      title="Couldn't set up your personal label"
+      description={setupError.message}
+      endContent={<Button label="Try again" size="sm" onClick={setupError.retry} />}
+    />
+  ) : null;
+
   if (!organization)
     return (
       <AppShell topNav={topNav} height="auto" variant="section">
         <LayoutContent padding={8}>
-          {!isLoading && (
-            <EmptyState
-              title="No label yet"
-              description="Your personal label is created when you first sign in. Reload to try again."
-            />
+          {setupBanner}
+          {setupBanner ? null : preparing ? (
+            <Center>
+              <Spinner label="Preparing your personal label…" />
+            </Center>
+          ) : (
+            !isLoading && (
+              <EmptyState
+                title="No label yet"
+                description="Your personal label is created when you first sign in. Reload to try again."
+              />
+            )
           )}
         </LayoutContent>
       </AppShell>
@@ -150,6 +181,7 @@ export function Operations({ email, onSignOut }: { email: string; onSignOut: () 
       }
     >
       <LayoutContent padding={8} isScrollable={false}>
+        {setupBanner}
         <OrganizationProvider organization={organization}>
           <Page key={organization.id} route={route} />
         </OrganizationProvider>
