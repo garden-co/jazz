@@ -1058,22 +1058,23 @@ export class Spaces {
         expectation: { founder: founder.id, deviceId, epochId: founder.epochId, recipients },
       };
     }
-    // A new space is provisional even when its author already has accepted keys.
-    // Local accepted history selects its epoch; authority verifies the original
-    // exclusive unit later, independently of the caller's local receipt.
+    // Recipient eligibility belongs to the public transaction's fixed snapshot.
+    // Online reads cover cold history at that coordinate; offline reads use only
+    // accepted local rows from that same snapshot.
+    const offline = await this.db.e2eeIsExplicitlyOffline();
+    const reader: E2eeHistoryReader = offline
+      ? { allSettledForE2ee: (query) => tx.allSettledForE2ee(query, "local-only") }
+      : tx;
     try {
-      return await observeE2eeHistory(this.db, (reader) =>
-        this.acceptedInitialEligibility(reader, deviceId, recipientIds),
-      );
+      return await this.acceptedInitialEligibility(reader, deviceId, recipientIds);
     } catch (error) {
       if (
-        !(error instanceof E2eeHistoryUnavailable) &&
-        !(error instanceof E2eeInitializationNotReady)
+        !offline ||
+        (!(error instanceof E2eeHistoryUnavailable) &&
+          !(error instanceof E2eeInitializationNotReady))
       )
         throw error;
-      if (await this.db.e2eeIsExplicitlyOffline())
-        throw new E2eeInitializationNotReady("Initial recipient history is not locally available");
-      return this.acceptedInitialEligibility(tx, deviceId, recipientIds);
+      throw new E2eeInitializationNotReady("Initial recipient history is not locally available");
     }
   }
 
