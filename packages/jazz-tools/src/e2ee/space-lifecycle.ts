@@ -1064,9 +1064,10 @@ export class Spaces {
     // Online reads cover cold history at that coordinate; offline reads use only
     // accepted local rows from that same snapshot.
     const offline = await this.db.e2eeIsExplicitlyOffline();
-    const reader: E2eeHistoryReader = offline
-      ? { allSettledForE2ee: (query) => tx.allSettledForE2ee(query, "local-only") }
-      : tx;
+    const reader: E2eeHistoryReader = {
+      allSettledForE2ee: (query) =>
+        tx.allSettledForE2ee(query, offline ? "local-only" : undefined, true),
+    };
     try {
       return await this.acceptedInitialEligibility(reader, deviceId, recipientIds);
     } catch (error) {

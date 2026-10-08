@@ -371,8 +371,10 @@ where
     {
         ensure_default_read_view(&opts)?;
         let _ = std::mem::take(&mut opts.empty_opening);
-        // A local publishing read retains the original transaction's evidence.
-        // A fresh observation keeps the existing strict snapshot restriction.
+        // An accepted-at-begin publishing read retains the original transaction's
+        // evidence in both Full and LocalOnly propagation modes. Ordinary Full reads
+        // retain their historical settlement-at-read behavior. A private LocalOnly
+        // observation keeps the existing strict fresh snapshot restriction.
         let child = if e2ee_snapshot_at_begin {
             let mut node = self.lock_for_transaction_operation(open_tx).await?;
             let child = OpenTransactionId::new();

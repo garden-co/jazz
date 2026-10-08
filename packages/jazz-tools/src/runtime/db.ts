@@ -2520,13 +2520,17 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   /**
-   * @internal Accepted E2EE rows and their authority order. Default reads require
-   * covered history and this transaction's Global acceptance. Local-only reads
-   * validate retained accepted history in the fixed snapshot, not live freshness.
+   * @internal Accepted E2EE rows and their authority order. Ordinary Global reads
+   * qualify this transaction's visible witnesses at read time and require covered
+   * history plus this transaction's Global acceptance. snapshotAtBegin additionally
+   * requires those witnesses accepted when this transaction began; initial recipient
+   * eligibility selects it explicitly. Local-only reads default to that stronger cut
+   * and validate retained history without claiming live authority freshness.
    */
   allSettledForE2ee<T extends { id: string }>(
     query: QueryBuilder<T>,
     propagation?: "local-only",
+    snapshotAtBegin = propagation === "local-only",
   ): Promise<{ rows: T[]; settlements: RowSettlement[] }> {
     if (this.kind !== "exclusive")
       throw new Error("E2EE settlement reads require an exclusive transaction");
@@ -2536,6 +2540,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         { tier: "global" },
         "with-rows",
         propagation,
+        snapshotAtBegin,
       );
       checkTransactionSettlements(rows, settlements);
       return { rows, settlements };
@@ -2552,12 +2557,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     options: QueryOptions | undefined,
     settlementMetadata: "with-rows",
     propagation?: "local-only",
+    snapshotAtBegin?: boolean,
   ): Promise<SettledRows<T>>;
   private async readAll<T>(
     query: QueryBuilder<T>,
     options: QueryOptions | undefined,
     settlementMetadata: false | "with-rows" = false,
     propagation?: "local-only",
+    snapshotAtBegin = false,
   ): Promise<T[] | SettledRows<T>> {
     this.bindQuery(query);
     const client = this.resolveClient(query._schema);
@@ -2566,7 +2573,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       options,
       settlementMetadata,
       this.requireBinding("query"),
-      transactionHistoryQueries(client, propagation, settlementMetadata === "with-rows"),
+      transactionHistoryQueries(client, propagation, snapshotAtBegin),
       this.e2ee
         ? (table, rows) =>
             decryptCellRows(this.e2ee!.db, query._schema, table, rows, this.initialSpaceKeys)
@@ -2984,14 +2991,14 @@ function preparedTransactionScope(
       );
       return transformOutputRow(table, transformRow(row, table._schema, table._table));
     },
-    async allSettledForE2ee(query, propagation) {
+    async allSettledForE2ee(query, propagation, snapshotAtBegin = propagation === "local-only") {
       binding.resolveClient(query._schema);
       const { rows, settlements } = await readTransactionRows(
         query,
         { tier: "global" },
         "with-rows",
         binding,
-        transactionHistoryQueries(io, propagation, true),
+        transactionHistoryQueries(io, propagation, snapshotAtBegin),
       );
       checkTransactionSettlements(rows, settlements);
       return { rows, settlements };
