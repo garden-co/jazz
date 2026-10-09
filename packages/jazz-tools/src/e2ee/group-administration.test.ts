@@ -31,7 +31,7 @@ it("supports account-claim checks in group membership administration policies", 
   }
 });
 
-it("separates administration from key possession and rejects forged membership candidates", async () => {
+it("separates administration from key possession and self-removal, rejects forged membership and seals empty groups", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
@@ -39,7 +39,7 @@ it("separates administration from key possession and rejects forged membership c
     const bob = await localAccountConfig(server.appId, server.url);
     const admin = await localAccountConfig(server.appId, server.url);
     const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
-    const policies = definePermissions(app, ({ policy, session, allOf }) => {
+    const policies = definePermissions(app, ({ policy, session, allOf, anyOf }) => {
       policy.__e2ee_group_repairs.allowRead.where(
         session.where({ authMode: { in: ["local-first", "external"] } }),
       );
@@ -53,7 +53,13 @@ it("separates administration from key possession and rejects forged membership c
       policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
       policy.__e2ee_group_membership.allowRead.where(authenticated);
       policy.__e2ee_group_membership.allowInsert.where(
-        allOf([{ authorAccountId: session.user.account }, { authorAccountId: admin.account.id }]),
+        allOf([
+          { authorAccountId: session.user.account },
+          anyOf([
+            { authorAccountId: admin.account.id },
+            { operation: "remove", memberKind: "account", memberId: session.user.account },
+          ]),
+        ]),
       );
       policy.__e2ee_group_deliveries.allowRead.where(authenticated);
       policy.__e2ee_group_deliveries.allowInsert.where((row) =>
@@ -100,7 +106,39 @@ it("separates administration from key possession and rejects forged membership c
     const owner = await open(alice);
     const recipient = await open(bob);
     const administrator = await open(admin);
+    const sealed = owner.e2ee.groups.create();
+    await sealed.wait();
+    const roots = await owner.all(app.__e2ee_groups.where({ id: sealed.id }), { tier: "remote" });
+    const deliveries = await owner.all(app.__e2ee_group_deliveries.where({ groupId: sealed.id }), {
+      tier: "remote",
+    });
+    await owner.e2ee.groups.leave(sealed.id).wait();
+    expect(await owner.e2ee.explain({ groupId: sealed.id })).toMatchObject({ state: "refused" });
+    // Ordinary policy permits the independent administrator to revive membership.
+    // Empty accepted membership must nevertheless make the lineage terminal.
+    await expect(
+      administrator.e2ee.groups.add(sealed.id, { kind: "account", id: alice.account.id }).wait(),
+    ).rejects.toThrow("sealed");
+    expect(await owner.e2ee.explain({ groupId: sealed.id })).toEqual({
+      state: "refused",
+      reason: "group-sealed",
+    });
+    expect(await owner.all(app.__e2ee_groups.where({ id: sealed.id }), { tier: "remote" })).toEqual(
+      roots,
+    );
+    expect(
+      await owner.all(app.__e2ee_group_deliveries.where({ groupId: sealed.id }), {
+        tier: "remote",
+      }),
+    ).toEqual(deliveries);
+    expect(
+      await owner.all(app.__e2ee_group_successors.where({ groupId: sealed.id }), {
+        tier: "remote",
+      }),
+    ).toEqual([]);
     const { id } = await owner.e2ee.groups.create().wait();
+    expect(id).not.toBe(sealed.id);
+    expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
     expect(await administrator.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
     await administrator.e2ee.groups.add(id, { kind: "account", id: bob.account.id }).wait();
     // Acceptance changes desired membership; an administrator without the key
@@ -174,6 +212,39 @@ it("separates administration from key possession and rejects forged membership c
       state: "unavailable",
     });
     expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
+    expect(await administrator.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
+    // The admitted recipient may remove itself, but still cannot remove another account.
+    // Reuse this group to prove rotation and exclusion from the next epoch.
+    const before = await recipient.all(
+      app.__e2ee_group_deliveries.where({ groupId: id, recipientAccountId: bob.account.id }),
+      { tier: "remote" },
+    );
+    expect(before).toHaveLength(1);
+    await expect(
+      recipient.e2ee.groups.remove(id, { kind: "account", id: alice.account.id }).wait(),
+    ).rejects.toThrow();
+    const leaving = recipient.e2ee.groups.leave(id);
+    expect(leaving).not.toBeInstanceOf(Promise);
+    await leaving.wait();
+    expect(await recipient.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
+    expect(
+      await owner.all(app.__e2ee_group_successors.where({ groupId: id }), { tier: "remote" }),
+    ).toEqual([]);
+    expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
+    const successors = await owner.all(app.__e2ee_group_successors.where({ groupId: id }), {
+      tier: "remote",
+    });
+    expect(successors).toHaveLength(1);
+    expect(successors[0]!.epochId).not.toBe(before[0]!.epochId);
+    expect(
+      await recipient.all(
+        app.__e2ee_group_deliveries.where({
+          groupId: id,
+          recipientAccountId: bob.account.id,
+        }),
+        { tier: "remote" },
+      ),
+    ).toEqual(before);
     expect(await administrator.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));

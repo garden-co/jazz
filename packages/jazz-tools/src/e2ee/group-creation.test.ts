@@ -13,7 +13,6 @@ import { groupDeliveryBytes } from "./group-format.js";
 
 it.each([
   "delivery-candidates",
-  "resume-signed-malformed",
   "resume-staging",
   "resume-revoked",
   "staged-fixture",
@@ -141,9 +140,7 @@ it.each([
       // Malformed-candidate, history-race and inactive-creator checks retain a pending client.
       const pending = invalidSignatures
         ? await createDb({ ...account })
-        : second &&
-            (variant === "staged-fixture" ||
-              (variant.startsWith("resume") && variant !== "resume-signed-malformed"))
+        : second && (variant === "staged-fixture" || variant.startsWith("resume"))
           ? second
           : await createDb({ ...account, e2ee: { app, store: store() } });
       if (pending !== second) clients.push(pending);
@@ -153,6 +150,7 @@ it.each([
           : (await pending.e2ee.devices.list()).find((device) => device.state === "pending");
       if (!invalidSignatures && pending !== second) expect(pendingDevice).toBeDefined();
       // Signature publication checks only need a reader, not another enrolled device.
+      // Signed malformed resumption uses the approved reader as its raw writer.
       // Each delivery candidate keeps its own group and reopened creator.
       // Interrupted groups also retain their own rejection and same-client retry.
       // Only account enrolment, approval and the independent readers are shared.
@@ -160,7 +158,13 @@ it.each([
         variant === "delivery-candidates"
           ? (["ordinary", "forged", "signed-malformed"] as const)
           : variant === "resume-staging"
-            ? (["resume", "resume-wrong-key", "resume-wrong-epoch", "resume-bad-envelope"] as const)
+            ? ([
+                "resume",
+                "resume-wrong-key",
+                "resume-wrong-epoch",
+                "resume-bad-envelope",
+                "resume-signed-malformed",
+              ] as const)
             : variant === "invalid-signatures"
               ? (["root-signature", "delivery-signature"] as const)
               : [variant];
