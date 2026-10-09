@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -15,96 +15,144 @@ import { encodePublicApprovalRevision } from "./account-successor.js";
 import { encodeGroupMembership } from "./group-successor.js";
 import { beginInitialSpaceTransaction, prepareInitialSpaceForTransaction } from "./lifecycle.js";
 
-it.each(
-  ["wasm", "native"].flatMap((runtime) =>
-    [false, true].map((successor) => ({ runtime, successor })),
-  ),
-)(
-  "ignores ineligible initial lifecycle rows ($runtime, successor=$successor)",
-  async ({ runtime, successor }) => {
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...spaceSchema,
-      projects: s.table({ title: s.string() }, {}),
-    });
-    const policies = definePermissions(app, ({ policy, session }) => {
-      policy.projects.allowRead.always();
-      policy.projects.allowInsert.always();
-      policy.__e2ee_spaces.allowRead.always();
-      policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
-      policy.__e2ee_space_grants.allowRead.always();
-      // Deliberately admit adversarial rows: E2EE replay must still authenticate them.
-      policy.__e2ee_space_grants.allowInsert.always();
-      policy.__e2ee_space_deliveries.allowRead.always();
-      policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
-      policy.__e2ee_space_successors.allowRead.always();
-      policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
-    });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    const clients: Awaited<ReturnType<typeof createDb>>[] = [];
-    let nativeSession: Awaited<ReturnType<typeof createJazzSession>> | undefined;
-    const store = () => {
-      let value: string | null = null;
-      return {
-        async read() {
-          return value;
-        },
-        async update(transform: (current: string | null) => string) {
-          value = transform(value);
-        },
-      };
+async function createFixture(runtime: "wasm" | "native") {
+  const app = s.defineApp({
+    ...deviceRequestSchema,
+    ...spaceSchema,
+    projects: s.table({ title: s.string() }, {}),
+  });
+  const policies = definePermissions(app, ({ policy, session }) => {
+    policy.projects.allowRead.always();
+    policy.projects.allowInsert.always();
+    policy.__e2ee_spaces.allowRead.always();
+    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_space_grants.allowRead.always();
+    // Deliberately admit adversarial rows: E2EE replay must still authenticate them.
+    policy.__e2ee_space_grants.allowInsert.always();
+    policy.__e2ee_space_deliveries.allowRead.always();
+    policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+    policy.__e2ee_space_successors.allowRead.always();
+    policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
+  });
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const clients: Awaited<ReturnType<typeof createDb>>[] = [];
+  let nativeSession: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  const store = () => {
+    let value: string | null = null;
+    return {
+      async read() {
+        return value;
+      },
+      async update(transform: (current: string | null) => string) {
+        value = transform(value);
+      },
     };
-    const stores = [store(), store(), store()];
+  };
+  const stores = [store(), store(), store()];
+  const signingKeys: Uint8Array[] = [];
+  const close = async () => {
+    for (const key of signingKeys) key.fill(0);
+    await Promise.all(clients.map((client) => client.shutdown()));
+    await nativeSession?.close();
+    await server.stop();
+  };
+  try {
     const crypto = await (runtime === "native" ? createNativeCrypto() : createBrowserCrypto());
-    const signingKeys: Uint8Array[] = [];
-    try {
-      await deploy({
-        serverUrl: server.url,
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    let creator: Awaited<ReturnType<typeof createDb>>;
+    let creatorId: string;
+    if (runtime === "native") {
+      nativeSession = await createJazzSession({
         appId: server.appId,
-        adminSecret: server.adminSecret,
-        schema: app,
+        serverUrl: server.url,
+        app,
         permissions: { ...deviceRequestPermissions, ...policies },
+        driver: { type: "memory" },
+        initial: "local-first",
+        e2ee: { app, crypto, store: stores[0]! },
       });
-      let creator: Awaited<ReturnType<typeof createDb>>;
-      let creatorId: string;
-      if (runtime === "native") {
-        nativeSession = await createJazzSession({
-          appId: server.appId,
-          serverUrl: server.url,
-          app,
-          permissions: { ...deviceRequestPermissions, ...policies },
-          driver: { type: "memory" },
-          initial: "local-first",
-          e2ee: { app, crypto, store: stores[0]! },
-        });
-        creator = nativeSession.getSnapshot().client!.db;
-        creatorId = nativeSession.getSnapshot().account!.id;
-      } else {
-        const account = await localAccountConfig(server.appId, server.url);
-        creator = await createDb({ ...account, e2ee: { app, crypto, store: stores[0]! } });
-        creatorId = account.account.id;
-      }
-      clients.push(creator);
-      const recipientIds = [creatorId];
-      for (let index = 1; index < 3; index++) {
-        const account = await localAccountConfig(server.appId, server.url);
-        recipientIds.push(account.account.id);
-        clients.push(await createDb({ ...account, e2ee: { app, store: stores[index]! } }));
-      }
-      for (const client of clients) await client.e2ee.devices.list();
-      const devices = await Promise.all(
-        stores.map(async (entry) => JSON.parse((await entry.read())!).devices[0]),
-      );
-      for (const device of devices) signingKeys.push(Uint8Array.from(device.signingPrivateKey));
-      const identities = await Promise.all(
-        recipientIds.map((id) =>
-          creator.one(app.__e2ee_account_roots.where({ accountId: id }), { tier: "global" }),
-        ),
-      );
+      creator = nativeSession.getSnapshot().client!.db;
+      creatorId = nativeSession.getSnapshot().account!.id;
+    } else {
+      const account = await localAccountConfig(server.appId, server.url);
+      creator = await createDb({ ...account, e2ee: { app, crypto, store: stores[0]! } });
+      creatorId = account.account.id;
+    }
+    clients.push(creator);
+    const recipientIds = [creatorId];
+    for (let index = 1; index < 3; index++) {
+      const account = await localAccountConfig(server.appId, server.url);
+      recipientIds.push(account.account.id);
+      clients.push(await createDb({ ...account, e2ee: { app, store: stores[index]! } }));
+    }
+    for (const client of clients) await client.e2ee.devices.list();
+    const devices = await Promise.all(
+      stores.map(async (entry) => JSON.parse((await entry.read())!).devices[0]),
+    );
+    for (const device of devices) signingKeys.push(Uint8Array.from(device.signingPrivateKey));
+    const identities = await Promise.all(
+      recipientIds.map((id) =>
+        creator.one(app.__e2ee_account_roots.where({ accountId: id }), { tier: "global" }),
+      ),
+    );
+    for (const identity of identities) expect(identity).not.toBeNull();
+    return {
+      app,
+      creator,
+      creatorId,
+      clients,
+      recipientIds,
+      devices,
+      identities,
+      crypto,
+      signingKeys,
+      close,
+    };
+  } catch (error) {
+    await close();
+    throw error;
+  }
+}
+
+// Reuse enrolled accounts within each runtime. Every case prepares a new space,
+// and checks that its adversarial history leaves earlier spaces untouched.
+describe.each(["wasm", "native"] as const)("initial lifecycle rows (%s)", (runtime) => {
+  let fixture: Awaited<ReturnType<typeof createFixture>>;
+  beforeAll(async () => {
+    fixture = await createFixture(runtime);
+  }, 60_000);
+  afterAll(async () => {
+    await fixture?.close();
+  });
+  it.each([false, true])(
+    "ignores ineligible initial lifecycle rows (successor=%s)",
+    async (successor) => {
+      const {
+        app,
+        creator,
+        creatorId,
+        clients,
+        recipientIds,
+        devices,
+        identities,
+        crypto,
+        signingKeys,
+      } = fixture;
+      const before = {
+        grants: await creator.all(app.__e2ee_space_grants, { tier: "global" }),
+        deliveries: await creator.all(app.__e2ee_space_deliveries, { tier: "global" }),
+        successors: await creator.all(app.__e2ee_space_successors, { tier: "global" }),
+      };
       const tx = beginInitialSpaceTransaction(creator, recipientIds);
-      for (const identity of identities) expect(identity).not.toBeNull();
       const project = tx.insert(app.projects, { title: "Adversarial initial grants" });
       const injectedIds: string[] = [];
+      let spaceId = "";
       let initialEpoch = "";
       let successorId = "";
       await prepareInitialSpaceForTransaction(
@@ -113,6 +161,7 @@ it.each(
         app.projects,
         project.id,
         async (key, root, prepared) => {
+          spaceId = root.id;
           initialEpoch = root.epochId;
           if (successor) {
             const nextKey = globalThis.crypto.getRandomValues(new Uint8Array(32));
@@ -246,9 +295,12 @@ it.each(
         },
         recipientIds.slice(0, 2),
       );
-      expect(await creator.all(app.__e2ee_space_deliveries, { tier: "global" })).toEqual([]);
+      expect(await creator.all(app.__e2ee_space_deliveries, { tier: "global" })).toEqual(
+        before.deliveries,
+      );
       await tx.commit().wait({ tier: "global" });
-      const grants = await creator.all(app.__e2ee_space_grants, { tier: "global" });
+      const allGrants = await creator.all(app.__e2ee_space_grants, { tier: "global" });
+      const grants = allGrants.filter((row) => row.spaceId === spaceId);
       expect(grants).toHaveLength(8);
       expect(injectedIds.every((id) => grants.some((row) => row.id === id))).toBe(true);
       const target = { scope: app.projects, identifier: project.id };
@@ -258,22 +310,28 @@ it.each(
         state: "refused",
         reason: "not-a-space-recipient",
       });
-      const deliveries = await creator.all(app.__e2ee_space_deliveries, { tier: "global" });
+      const allDeliveries = await creator.all(app.__e2ee_space_deliveries, { tier: "global" });
+      const deliveries = allDeliveries.filter((row) => row.spaceId === spaceId);
       expect([...new Set(deliveries.map((row) => row.recipientAccountId))].sort()).toEqual(
         recipientIds.slice(0, 2).sort(),
       );
       expect(deliveries.every((row) => row.epochId === initialEpoch)).toBe(true);
-      const successors = await creator.all(app.__e2ee_space_successors, { tier: "global" });
+      const allSuccessors = await creator.all(app.__e2ee_space_successors, { tier: "global" });
+      const successors = allSuccessors.filter((row) => row.spaceId === spaceId);
       if (successor) {
         expect(successors).toHaveLength(1);
         expect(successors[0]).toMatchObject({ id: successorId, predecessor: initialEpoch });
       } else expect(successors).toEqual([]);
-    } finally {
-      for (const key of signingKeys) key.fill(0);
-      await Promise.all(clients.map((client) => client.shutdown()));
-      await nativeSession?.close();
-      await server.stop();
-    }
-  },
-  60_000,
-);
+      for (const [rows, previous] of [
+        [allGrants, before.grants],
+        [allDeliveries, before.deliveries],
+        [allSuccessors, before.successors],
+      ] as const) {
+        const unrelated = rows.filter((row) => row.spaceId !== spaceId);
+        expect(unrelated).toHaveLength(previous.length);
+        expect(unrelated).toEqual(expect.arrayContaining<unknown>(previous));
+      }
+    },
+    60_000,
+  );
+});
