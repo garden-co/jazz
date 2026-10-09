@@ -156,7 +156,19 @@ async function prepareAdapterMatrix() {
     const ownerStore = f.memoryStore();
     const owner = await f.open(f.native, ownerStore);
     const groupId = await createReadyGroup(owner);
-    const root = await f.recovery(owner);
+    const roots = [await f.recovery(owner), await f.recovery(owner)];
+    const [root] = roots;
+    if (!root) throw new Error("Missing recovery root");
+    const protectors = await owner.all(app.__e2ee_recovery_protectors, { tier: "global" });
+    expect(protectors).toHaveLength(2);
+    for (const entry of roots) {
+      expect(protectors.some((row) => row.rootId === entry.rootId)).toBe(true);
+      const deliveries = await owner.all(
+        app.__e2ee_group_recovery_deliveries.where({ groupId, recoveryRootId: entry.rootId }),
+        { tier: "global" },
+      );
+      expect(deliveries).toHaveLength(1);
+    }
     // One successful control with unwrapped native adapters for this fixed history.
     const normal = await f.open();
     await readyStatus(normal, root, groupId);
@@ -165,14 +177,14 @@ async function prepareAdapterMatrix() {
     const ownerRecord = (await ownerStore.read())!;
     await f.close(normal);
     await f.close(owner);
-    return { f, groupId, root, ownerRecord };
+    return { f, groupId, root, roots, ownerRecord };
   } catch (error) {
     await f.cleanup();
     throw error;
   }
 }
 
-describe("group recovery adapter classification", () => {
+describe("group recovery adapter classification and fallback", () => {
   let prepared: Awaited<ReturnType<typeof prepareAdapterMatrix>>;
   beforeAll(async () => {
     prepared = await prepareAdapterMatrix();
@@ -313,71 +325,58 @@ describe("group recovery adapter classification", () => {
     },
     180000,
   );
-});
 
-it("tries another protected recovery root when the first group delivery is unusable", async () => {
-  const f = await fixture();
-  try {
-    const owner = await f.open();
-    const groupId = await createReadyGroup(owner);
-    const roots = [await f.recovery(owner), await f.recovery(owner)];
-    const protectors = await owner.all(app.__e2ee_recovery_protectors, { tier: "global" });
-    expect(protectors).toHaveLength(2);
-    for (const root of roots) {
-      expect(protectors.some((row) => row.rootId === root.rootId)).toBe(true);
-      const deliveries = await owner.all(
-        app.__e2ee_group_recovery_deliveries.where({ groupId, recoveryRootId: root.rootId }),
-        { tier: "global" },
-      );
-      expect(deliveries).toHaveLength(1);
-    }
-    await f.close(owner);
-    const normal = await f.open();
-    await normal.e2ee.recovery.use().wait();
-    expect(await normal.e2ee.explain({ groupId })).toEqual({ state: "ready" });
-    await f.close(normal);
-    let armed = false;
-    let failedRoot: string | undefined;
-    let failures = 0;
-    const attempts: string[] = [];
-    const observer = await f.open({
-      ...f.native,
-      keyEnvelope: {
-        ...f.native.keyEnvelope,
-        async open(pair, context, envelope) {
-          const text = decoder.decode(context);
-          if (armed && text.includes("__e2ee_group_recovery_deliveries")) {
-            const root = roots.find((entry) => text.includes(entry.rootId));
-            if (!root) throw new Error("Group recovery context names an unknown root");
-            attempts.push(root.rootId);
-            // Learn the actual first candidate; database row ordering is not a contract.
-            if (failedRoot === undefined) {
-              failedRoot = root.rootId;
-              failures++;
-              throw new Error("Synthetic first encountered group envelope rejection");
+  it("tries another protected recovery root when the first group delivery is unusable", async () => {
+    const { f, groupId, roots } = prepared;
+    let observer: Db | undefined;
+    try {
+      const normal = await f.open();
+      await normal.e2ee.recovery.use().wait();
+      expect(await normal.e2ee.explain({ groupId })).toEqual({ state: "ready" });
+      await f.close(normal);
+      let armed = false;
+      let failedRoot: string | undefined;
+      let failures = 0;
+      const attempts: string[] = [];
+      const active = (observer = await f.open({
+        ...f.native,
+        keyEnvelope: {
+          ...f.native.keyEnvelope,
+          async open(pair, context, envelope) {
+            const text = decoder.decode(context);
+            if (armed && text.includes("__e2ee_group_recovery_deliveries")) {
+              const root = roots.find((entry) => text.includes(entry.rootId));
+              if (!root) throw new Error("Group recovery context names an unknown root");
+              attempts.push(root.rootId);
+              // Learn the actual first candidate; database row ordering is not a contract.
+              if (failedRoot === undefined) {
+                failedRoot = root.rootId;
+                failures++;
+                throw new Error("Synthetic first encountered group envelope rejection");
+              }
             }
-          }
-          return f.native.keyEnvelope.open(pair, context, envelope);
+            return f.native.keyEnvelope.open(pair, context, envelope);
+          },
         },
-      },
-    });
-    for (const root of roots) await readyStatus(observer, root, groupId);
-    armed = true;
-    const implicit = await capture(() => observer.e2ee.recovery.use().wait());
-    armed = false;
-    const implicitReadiness = implicit.ok ? await observer.e2ee.explain({ groupId }) : undefined;
-    expect(failures).toBe(1);
-    expect(failedRoot).toBeDefined();
-    const other = roots.find((root) => root.rootId !== failedRoot);
-    if (!other) throw new Error("Missing independent second protector");
-    // Run the independent control even when implicit recovery fails on the baseline.
-    await readyStatus(observer, other, groupId);
-    await observer.e2ee.recovery.use(other.material).wait();
-    expect(await observer.e2ee.explain({ groupId })).toEqual({ state: "ready" });
-    expect(attempts).toContain(other.rootId);
-    expect(implicit.ok).toBe(true);
-    expect(implicitReadiness).toEqual({ state: "ready" });
-  } finally {
-    await f.cleanup();
-  }
-}, 180000);
+      }));
+      for (const root of roots) await readyStatus(active, root, groupId);
+      armed = true;
+      const implicit = await capture(() => active.e2ee.recovery.use().wait());
+      armed = false;
+      const implicitReadiness = implicit.ok ? await active.e2ee.explain({ groupId }) : undefined;
+      expect(failures).toBe(1);
+      expect(failedRoot).toBeDefined();
+      const other = roots.find((root) => root.rootId !== failedRoot);
+      if (!other) throw new Error("Missing independent second protector");
+      // Run the independent control even when implicit recovery fails on the baseline.
+      await readyStatus(active, other, groupId);
+      await active.e2ee.recovery.use(other.material).wait();
+      expect(await active.e2ee.explain({ groupId })).toEqual({ state: "ready" });
+      expect(attempts).toContain(other.rootId);
+      expect(implicit.ok).toBe(true);
+      expect(implicitReadiness).toEqual({ state: "ready" });
+    } finally {
+      if (observer) await f.close(observer);
+    }
+  }, 180000);
+});
