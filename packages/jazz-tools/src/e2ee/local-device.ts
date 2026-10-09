@@ -71,7 +71,7 @@ function validate(device: StoredDevice): void {
     !device ||
     typeof device.scope !== "string" ||
     typeof device.id !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(device.id) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(device.id) ||
     !bytes(device.publicKey) ||
     !bytes(device.privateKey) ||
     !bytes(device.challenge) ||

@@ -8,7 +8,7 @@ export function groupRepairBytes(
   application: string,
   record: Omit<GroupRepair, "signature">,
 ): Uint8Array {
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   if (
     ![
       record.id,
@@ -40,7 +40,7 @@ export function groupMembershipBytes(
   application: string,
   record: Omit<GroupMembership, "signature">,
 ): Uint8Array {
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   if (
     ![record.id, record.epochId, record.authorDeviceId, record.authorEpochId].every(
       (id) => typeof id === "string" && uuid.test(id),
@@ -94,7 +94,7 @@ export function groupRootBytes(
   application: string,
   root: Omit<GroupRoot, "signature">,
 ): Uint8Array {
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   if (
     ![root.id, root.epochId, root.deviceId, root.accountEpochId].every(
       (id) => typeof id === "string" && uuid.test(id),

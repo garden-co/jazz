@@ -5,7 +5,7 @@ import type { GroupSuccessor } from "./groups.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export function encodeGroupMembership(members: ReadonlyMap<string, string>): Uint8Array {
   const entries = [...members].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));

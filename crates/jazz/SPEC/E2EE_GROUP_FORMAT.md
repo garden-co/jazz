@@ -9,7 +9,7 @@ creator generates a random 32-byte symmetric epoch secret; no extra group
 asymmetric keypair is needed. `verification` wraps 32 zero bytes under that
 secret, using the configured key-envelope adapter.
 
-Root framing rejects non-UUIDv4 group, initial-epoch, device or account-epoch
+Root framing accepts UUIDv4 or UUIDv7 group, initial-epoch, device and account-epoch
 coordinates before signature acceptance. The creator account ID must be a
 non-empty string; it is not required to be a UUID.
 
@@ -105,7 +105,7 @@ table `__e2ee_group_membership`, and the candidate ID as row. The column is the
 compact JSON array `[operation, authorAccountId, authorDeviceId, authorEpochId]`.
 The epoch is the group epoch ID; recipient is `[memberKind, memberId]`, also
 compact JSON. Operations are `add` or `remove`; member kinds are `account` or
-`group`. Candidate, epoch, author-device and author-epoch IDs are UUID v4.
+`group`. Candidate, epoch, author-device and author-epoch IDs are UUID v4 or v7.
 Account and member IDs must be non-empty; context field limits also apply.
 The record stores these fields plus the device signature. Public `add` and
 `remove` require the same explicit account/group kind in a `GroupMember`

@@ -68,7 +68,9 @@ export async function decodeRecoveryMaterial(
       throw new Error("E2EE recovery material belongs to another account scope");
     if (
       typeof parsed.rootId !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(parsed.rootId)
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        parsed.rootId,
+      )
     )
       throw new Error("Invalid E2EE recovery root ID");
     if (

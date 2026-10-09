@@ -20,15 +20,16 @@ verification envelope, history envelope and author self-envelope. Context uses p
 `jazz.e2ee.group-successor.v1`, scope `group`, group ID as identifier, table
 `__e2ee_group_successors`, proposal ID as row, column `signature`, new epoch ID
 as epoch, and compact JSON `[authorAccountId, authorDeviceId, authorEpochId]`
-as recipient. Coordinates other than the non-empty account ID are UUID v4.
+as recipient. Coordinates other than the non-empty account ID are UUID v4 or v7.
 The predecessor and new epoch must differ.
 
 Revision is canonical JSON containing the sorted, unique IDs of all relevant
-accepted membership candidate rows, including invalid candidates. This binds
-the authoritative read set, not just the subset that changes effective access.
+accepted membership candidate rows, including invalid candidates. This binds the
+authoritative read set, not just the subset that changes effective access.
 Membership is canonical JSON of sorted, unique `[accountId, accountEpochId]`
-pairs. Account IDs are non-empty; epoch IDs are UUID v4. The format fixture pins
-literal transcript bytes, signature binding and canonical metadata rejection.
+pairs. Account IDs are non-empty; epoch IDs are UUID v4 or v7. The format
+fixture pins literal transcript bytes, signature binding and canonical metadata
+rejection.
 
 Signature validity alone does not activate an epoch. Reconciliation must read
 the accepted predecessor and complete membership history in an exclusive

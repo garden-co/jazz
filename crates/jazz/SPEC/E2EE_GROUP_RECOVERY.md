@@ -37,7 +37,7 @@ The envelope context is JE2C version 1 with these fields:
 The signature transcript contains two `frameCryptoRecord` fields: this context
 and the complete envelope bytes, each prefixed by its unsigned 32-bit big-endian
 byte length. The proposal, group, epoch, sender-device and recovery-root IDs
-must be lowercase UUID v4 values. Account IDs must be non-empty strings.
+must be lowercase UUID v4 or v7 values. Account IDs must be non-empty strings.
 The byte fixture is framed independently with Python's `struct.pack`, and the
 signature test changes each coordinate and the ciphertext independently.
 

@@ -20,7 +20,7 @@ A request is signed by the recipient device. The signed bytes use JE2C v1 from
 `jazz.e2ee.group-repair.v1`, scope `group`, the group ID as identifier, table
 `__e2ee_group_repairs`, and the request ID as row. Column is compact JSON
 `[deliveryId, accountId, deviceId]`; epoch is `epochId`; recipient is
-`accountEpochId`. All IDs except the account ID are UUID v4. The account ID is
+`accountEpochId`. All IDs except the account ID are UUID v4 or v7. The account ID is
 non-empty. `group-repair-format.test.ts` pins literal bytes and signature binding.
 
 Only a globally accepted request from the delivery's recipient is eligible.
