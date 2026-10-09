@@ -8,15 +8,13 @@ import {
 } from "./fixtures/recovery-verifier-fixture.js";
 
 describe.each(["status", "use"] as const)("recovery %s verifier boundaries", (operation) => {
-  let statusHistory: RotatedRecovery | undefined;
+  let history: RotatedRecovery | undefined;
   beforeAll(async () => {
-    if (operation === "status") statusHistory = await createRotatedRecovery();
+    history = await createRotatedRecovery();
   }, 60_000);
   afterAll(async () => {
-    if (operation === "status") {
-      await statusHistory?.shutdown();
-      statusHistory = undefined;
-    }
+    await history?.shutdown();
+    history = undefined;
   });
   for (const input of ["explicit", "protected"] as const) {
     it(`aborts ${input} recovery ${operation} on plain and code-collision ancestry errors`, async () => {
@@ -28,7 +26,7 @@ describe.each(["status", "use"] as const)("recovery %s verifier boundaries", (op
       let protectorsOpened = 0;
       const returnedSecrets: Uint8Array[] = [];
       await withRotatedRecovery(
-        statusHistory,
+        history,
         (native) => ({
           ...native,
           cellCipher: {
@@ -77,6 +75,8 @@ describe.each(["status", "use"] as const)("recovery %s verifier boundaries", (op
         async ({ client, material, creatorId, removedId, saved }) => {
           // Prepare use before arming; status must not enrol at all.
           const beforeDevices = operation === "use" ? await client.e2ee.devices.list() : null;
+          if (beforeDevices)
+            expect(beforeDevices.filter((device) => device.state === "pending")).toHaveLength(1);
           const before = await recoveryRecords(client);
           const savedBefore = saved();
           const value = input === "explicit" ? material : undefined;
@@ -119,7 +119,19 @@ describe.each(["status", "use"] as const)("recovery %s verifier boundaries", (op
           } else {
             const pending = beforeDevices!.find((row) => row.state === "pending")!;
             await client.e2ee.recovery.use(value).wait();
-            expect(await client.e2ee.devices.list()).toEqual(
+            const accepted = await client.e2ee.devices.list();
+            expect(accepted).toEqual(
+              expect.arrayContaining(
+                beforeDevices!
+                  .filter((device) => device.state === "active" || device.state === "revoked")
+                  .map(({ id, state }) => expect.objectContaining({ id, state })),
+              ),
+            );
+            const records = await recoveryRecords(client);
+            for (let index = 0; index < before.length; index++) {
+              expect(records[index]).toEqual(expect.arrayContaining<unknown>(before[index]!));
+            }
+            expect(accepted).toEqual(
               expect.arrayContaining([
                 expect.objectContaining({ id: creatorId, state: "active" }),
                 expect.objectContaining({ id: removedId, state: "revoked" }),
