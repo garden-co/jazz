@@ -120,13 +120,6 @@ async function fixture() {
   }
 }
 
-async function createReadyGroup(db: Db) {
-  const group = db.e2ee.groups.create();
-  await group.wait();
-  expect(await db.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
-  return group.id;
-}
-
 async function recoveryPath(db: Db, recovery: Recovery, groupId: string) {
   const status = await db.e2ee.recovery.status(recovery.material);
   expect(status.account.validation).toBe("validated");
@@ -155,8 +148,10 @@ async function prepareAdapterMatrix() {
   try {
     const ownerStore = f.memoryStore();
     const owner = await f.open(f.native, ownerStore);
-    const groupId = await createReadyGroup(owner);
-    const roots = [await f.recovery(owner), await f.recovery(owner)];
+    // Cover automatic protection and later backfill on the same group.
+    const early = await f.recovery(owner);
+    const { id: groupId } = await owner.e2ee.groups.create().wait();
+    const roots = [early, await f.recovery(owner)];
     const [root] = roots;
     if (!root) throw new Error("Missing recovery root");
     const protectors = await owner.all(app.__e2ee_recovery_protectors, { tier: "global" });
@@ -169,16 +164,19 @@ async function prepareAdapterMatrix() {
       );
       expect(deliveries).toHaveLength(1);
     }
-    // One native control covers automatic protector discovery for this history.
-    // The matrix below also checks explicit material before injecting its faults.
-    const normal = await f.open();
+    // One cold native control covers automatic protector discovery for this history.
+    // Explicit cold recovery is covered by group-recovery-membership.test.ts;
+    // the fallback case below also verifies explicit use of the second root.
+    const recoveredStore = f.memoryStore();
+    const normal = await f.open(f.native, recoveredStore);
     await readyStatus(normal, root, groupId);
     await normal.e2ee.recovery.use().wait();
     expect(await normal.e2ee.explain({ groupId })).toEqual({ state: "ready" });
     const ownerRecord = (await ownerStore.read())!;
+    const recoveredRecord = (await recoveredStore.read())!;
     await f.close(normal);
     await f.close(owner);
-    return { f, groupId, root, roots, ownerRecord };
+    return { f, groupId, root, roots, ownerRecord, recoveredRecord };
   } catch (error) {
     await f.cleanup();
     throw error;
@@ -201,7 +199,7 @@ describe("group recovery adapter classification and fallback", () => {
   ] as const)(
     "classifies synchronous and rejected group envelope faults identically through $surface/$method",
     async ({ surface, method }) => {
-      const { f, groupId, root, ownerRecord } = prepared;
+      const { f, groupId, root, ownerRecord, recoveredRecord } = prepared;
       let client: Db | undefined;
       try {
         const envelopeFault = new Error("Synthetic group envelope fault");
@@ -255,17 +253,18 @@ describe("group recovery adapter classification and fallback", () => {
             },
           },
         };
-        // Only explain needs the retained owner. Status and use exercise a fresh
-        // observer; an extra owner would only repeat already-proven readiness.
+        // Reopen the clean control's recovered device for explicit-use faults.
+        // Each case gets its own client/store; status observers remain unenrolled.
+        // Cold explicit recovery is also covered by group-recovery-membership.test.ts.
         const store = f.memoryStore();
         if (surface === "explain") await store.update(() => ownerRecord);
+        else if (surface === "use") await store.update(() => recoveredRecord);
         const active = (client = await f.open(adapters, store, surface !== "status"));
         if (surface === "status") expect(await store.read()).toBeNull();
         if (surface === "explain") {
           expect(await active.e2ee.explain({ groupId })).toEqual({ state: "ready" });
         } else {
           await readyStatus(active, root, groupId);
-          if (surface === "use") await active.e2ee.recovery.use(root.material).wait();
         }
         const invoke = async () => {
           if (surface === "status") return recoveryPath(active, root, groupId);
@@ -368,7 +367,6 @@ describe("group recovery adapter classification and fallback", () => {
       const other = roots.find((root) => root.rootId !== failedRoot);
       if (!other) throw new Error("Missing independent second protector");
       // Run the independent control even when implicit recovery fails on the baseline.
-      await readyStatus(active, other, groupId);
       await active.e2ee.recovery.use(other.material).wait();
       expect(await active.e2ee.explain({ groupId })).toEqual({ state: "ready" });
       expect(attempts).toContain(other.rootId);
