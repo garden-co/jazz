@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it } from "vitest";
 import { createAccountManager } from "../accounts/create-account-manager.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -25,7 +25,7 @@ function isSpaceRecovery(bytes: Uint8Array) {
   return text.includes("jazz.e2ee.space.v1") && text.includes("recovery-delivery");
 }
 
-async function fixture(rootCount = 2) {
+async function fixture() {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients = new Set<Db>();
   const clearStores: (() => void)[] = [];
@@ -99,7 +99,9 @@ async function fixture(rootCount = 2) {
       store: store(),
     });
     const account = manager.createLocalFirst();
-    const open = async (crypto: JazzCrypto = native) => {
+    const open = async (crypto: JazzCrypto = native, pending = false) => {
+      // Recovery must have no live previous owner or replacement to deliver keys.
+      if (pending) expect(clients.size).toBe(0);
       const db = await createDb({
         appId: server.appId,
         serverUrl: server.url,
@@ -108,7 +110,8 @@ async function fixture(rootCount = 2) {
         e2ee: { app, store: store(), crypto },
       });
       clients.add(db);
-      await db.e2ee.devices.list();
+      const devices = await db.e2ee.devices.list();
+      if (pending) expect(devices.filter((device) => device.state === "pending")).toHaveLength(1);
       return db;
     };
     const owner = await open();
@@ -118,7 +121,7 @@ async function fixture(rootCount = 2) {
     await owner.e2ee.spaces.grant(app.projects, project.id, account.id).wait();
     const target = { scope: app.projects, identifier: project.id };
     expect(await owner.e2ee.explain(target)).toEqual({ state: "ready" });
-    for (let index = 0; index < rootCount; index++) {
+    for (let index = 0; index < 2; index++) {
       const before = new Set(
         (await owner.all(app.__e2ee_recovery_roots, { tier: "global" })).map((row) => row.id),
       );
@@ -141,7 +144,16 @@ async function fixture(rootCount = 2) {
       new Set(roots.map((root) => root.rootId)),
     );
     await close(owner);
-    return { native, roots, target, open, cleanup };
+    return {
+      native,
+      roots,
+      target,
+      open: (crypto: JazzCrypto) => open(crypto, true),
+      async closeClients() {
+        for (const db of [...clients].reverse()) await close(db);
+      },
+      cleanup,
+    };
   } catch (error) {
     await cleanup();
     throw error;
@@ -157,8 +169,19 @@ async function capture(action: () => Promise<unknown>) {
   }
 }
 
+// The account, accepted space and two independent protectors are prepared once.
+// Every case opens a new pending device with its own store/adapters, then closes
+// it before another case can recover. No local keys or responder are shared.
+let prepared: Awaited<ReturnType<typeof fixture>>;
+beforeAll(async () => {
+  prepared = await fixture();
+}, 60_000);
+afterAll(async () => {
+  await prepared?.cleanup();
+});
+
 it("tries another protected recovery root when the first space delivery is unusable", async () => {
-  const f = await fixture();
+  const f = prepared;
   try {
     let armed = false;
     let failedRoot: string | undefined;
@@ -221,28 +244,34 @@ it("tries another protected recovery root when the first space delivery is unusa
     expect(returnedSecrets.length).toBeGreaterThan(0);
     expect(returnedSecrets.every((secret) => secret.every((byte) => byte === 0))).toBe(true);
   } finally {
-    await f.cleanup();
+    await f.closeClients();
   }
 }, 60_000);
 
 it("reports fixed space recovery exhaustion for explicit material", async () => {
-  // Explicit recovery addresses one root. The other tests retain two protectors
-  // to prove fallback and abort-before-fallback independently.
-  const f = await fixture(1);
+  // Only the selected root fails. The other root is usable, so explicit material
+  // must report exhaustion rather than silently falling back to its protector.
+  const f = prepared;
   try {
     const failure = new Error("private-space-envelope-diagnostic", {
       cause: { secret: "private-space-envelope-diagnostic" },
     });
     let armed = false;
     let rejected = 0;
+    const attemptedRoots: string[] = [];
     const observer = await f.open({
       ...f.native,
       keyEnvelope: {
         ...f.native.keyEnvelope,
         async open(pair, context, envelope) {
           if (armed && isSpaceRecovery(context)) {
-            rejected++;
-            throw failure;
+            const root = f.roots.find((entry) => decoder.decode(context).includes(entry.rootId));
+            if (!root) throw new Error("Space recovery context names an unknown root");
+            attemptedRoots.push(root.rootId);
+            if (root.rootId === f.roots[0]!.rootId) {
+              rejected++;
+              throw failure;
+            }
           }
           return f.native.keyEnvelope.open(pair, context, envelope);
         },
@@ -252,6 +281,7 @@ it("reports fixed space recovery exhaustion for explicit material", async () => 
     const result = await capture(() => observer.e2ee.recovery.use(f.roots[0]!.material).wait());
     armed = false;
     expect(rejected).toBeGreaterThan(0);
+    expect(new Set(attemptedRoots)).toEqual(new Set([f.roots[0]!.rootId]));
     await observer.e2ee.recovery.use(f.roots[0]!.material).wait();
     expect(await observer.e2ee.explain(f.target)).toEqual({ state: "ready" });
     expect(result.ok).toBe(false);
@@ -265,12 +295,12 @@ it("reports fixed space recovery exhaustion for explicit material", async () => 
     expect(result.error).not.toHaveProperty("cause");
     expect(String(result.error)).not.toContain("private-space-envelope-diagnostic");
   } finally {
-    await f.cleanup();
+    await f.closeClients();
   }
 }, 60_000);
 
 it("aborts protected space recovery on a public recovery-code collision without trying another protector", async () => {
-  const f = await fixture();
+  const f = prepared;
   try {
     const failure = new E2eeRecoveryError("recovery-space-delivery-unavailable");
     let armed = false;
@@ -317,6 +347,6 @@ it("aborts protected space recovery on a public recovery-code collision without 
     await observer.e2ee.recovery.use(other.material).wait();
     expect(await observer.e2ee.explain(f.target)).toEqual({ state: "ready" });
   } finally {
-    await f.cleanup();
+    await f.closeClients();
   }
 }, 60_000);
