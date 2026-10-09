@@ -153,12 +153,12 @@ it.each([
       if (!invalidSignatures && pending !== second) expect(pendingDevice).toBeDefined();
       // Signature publication checks only need a reader, not another enrolled device.
       // Signed malformed resumption uses the approved reader as its raw writer.
-      // Each delivery candidate keeps its own group and reopened creator.
+      // Clean and poisoned delivery histories each keep a reopened creator.
       // Interrupted groups also retain their own rejection and same-client retry.
       // Only account enrolment, approval and the independent readers are shared.
       const scenarios =
         variant === "delivery-candidates"
-          ? (["ordinary", "forged", "signed-malformed"] as const)
+          ? (["ordinary", "mixed-deliveries"] as const)
           : variant === "resume-staging"
             ? ([
                 "resume",
@@ -208,49 +208,58 @@ it.each([
             injected = true;
           };
         }
-        if (
-          scenario === "forged" ||
-          scenario === "signed-malformed" ||
-          scenario === "resume-signed-malformed"
-        )
+        if (scenario === "mixed-deliveries" || scenario === "resume-signed-malformed")
           beforeSeal = async () => {
             const root = await pending.one(app.__e2ee_groups.where({ id: group.id }), {
               tier: "remote",
             });
             expect(root).toBeDefined();
-            const delivery = {
-              id:
-                scenario === "signed-malformed"
-                  ? "00000000-0000-4000-8000-000000000002"
-                  : "00000000-0000-4000-8000-000000000001",
-              groupId: group.id,
-              epochId: root!.epochId,
-              senderAccountId: root!.accountId,
-              senderDeviceId: creator.id,
-              recipientAccountId: root!.accountId,
-              recipientDeviceId: creator.id,
-              envelope: new Uint8Array([1]),
-            };
-            let signature = new Uint8Array(64);
-            if (scenario !== "forged") {
-              const retainedDevice = JSON.parse((await retained.read())!).devices[0];
-              const privateKey = Uint8Array.from(retainedDevice.signingPrivateKey);
-              try {
-                signature = new Uint8Array(
-                  await signer.sign(
-                    privateKey,
-                    groupDeliveryBytes(retainedDevice.scope, root!, delivery),
-                  ),
-                );
-              } finally {
-                privateKey.fill(0);
+            // Both invalid signatures and authenticated unusable envelopes must
+            // leave concurrent creation free to publish its legitimate delivery.
+            const candidates =
+              scenario === "mixed-deliveries"
+                ? ["forged", "signed-malformed"]
+                : ["signed-malformed"];
+            for (const kind of candidates) {
+              const delivery = {
+                id:
+                  scenario === "mixed-deliveries" && kind === "signed-malformed"
+                    ? "00000000-0000-4000-8000-000000000002"
+                    : "00000000-0000-4000-8000-000000000001",
+                groupId: group.id,
+                epochId: root!.epochId,
+                senderAccountId: root!.accountId,
+                senderDeviceId: creator.id,
+                recipientAccountId: root!.accountId,
+                recipientDeviceId: creator.id,
+                envelope: new Uint8Array([1]),
+              };
+              let signature = new Uint8Array(64);
+              if (kind !== "forged") {
+                const retainedDevice = JSON.parse((await retained.read())!).devices[0];
+                const privateKey = Uint8Array.from(retainedDevice.signingPrivateKey);
+                try {
+                  signature = new Uint8Array(
+                    await signer.sign(
+                      privateKey,
+                      groupDeliveryBytes(retainedDevice.scope, root!, delivery),
+                    ),
+                  );
+                } finally {
+                  privateKey.fill(0);
+                }
               }
+              // An account-owned insert is not proof that its claimed device signed it.
+              const { id, ...values } = delivery;
+              await pending
+                .insert(app.__e2ee_group_deliveries, { ...values, signature }, { id })
+                .wait({ tier: "global" });
             }
-            // An account-owned insert is not proof that its claimed device signed it.
-            const { id, ...values } = delivery;
-            await pending
-              .insert(app.__e2ee_group_deliveries, { ...values, signature }, { id })
-              .wait({ tier: "global" });
+            expect(
+              await pending.all(app.__e2ee_group_deliveries.where({ groupId: group.id }), {
+                tier: "remote",
+              }),
+            ).toHaveLength(candidates.length);
           };
         signatureFault =
           scenario === "root-signature"
