@@ -274,7 +274,7 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
 }, 60000);
 
 it("rejects recovery creation when a required ready group loses membership", async () => {
-  await withFixture(async ({ account, open, native }) => {
+  await withFixture(async ({ account, open, native, stored }) => {
     const entered = deferred();
     const released = deferred();
     let armed = false;
@@ -302,10 +302,6 @@ it("rejects recovery creation when a required ready group loses membership", asy
     const administratorAccount = await account();
     const administrator = await open(administratorAccount);
     const groupId = await readyGroup(owner);
-    await owner.e2ee.groups
-      .add(groupId, { kind: "account", id: administratorAccount.account.id })
-      .wait();
-    expect(await administrator.e2ee.explain({ groupId })).toEqual({ state: "ready" });
     const control = await owner.e2ee.recovery.create().wait();
     await expectRecoveryPath(owner, control.material, groupId);
     expect(await owner.e2ee.explain({ groupId })).toEqual({ state: "ready" });
@@ -334,6 +330,45 @@ it("rejects recovery creation when a required ready group loses membership", asy
       expect(first).toBe("gate");
       expect(hits).toBe(1);
       expect(completed).toBe(false);
+      // The administrator keeps the group nonempty without needing its key. Admit
+      // its signed membership now, after protection, so setup cannot deliver that key.
+      const root = (await owner.one(app.__e2ee_groups.where({ id: groupId }), {
+        tier: "global",
+      }))!;
+      const device = JSON.parse((await stored(owner))!).devices[0];
+      const privateKey = Uint8Array.from(device.signingPrivateKey);
+      try {
+        const record = {
+          id: crypto.randomUUID(),
+          groupId,
+          epochId: root.epochId,
+          authorAccountId: root.accountId,
+          authorDeviceId: root.deviceId,
+          authorEpochId: root.accountEpochId,
+          operation: "add",
+          memberKind: "account",
+          memberId: administratorAccount.account.id,
+        };
+        const bytes = groupMembershipBytes(device.scope, record);
+        const signature = await native.deviceSigner.sign(privateKey, bytes);
+        expect(
+          await native.deviceSigner.verify(
+            Uint8Array.from(device.signingPublicKey),
+            bytes,
+            signature,
+          ),
+        ).toBe(true);
+        const { id, ...values } = record;
+        await owner
+          .insert(app.__e2ee_group_membership, { ...values, signature }, { id })
+          .wait({ tier: "global" });
+      } finally {
+        privateKey.fill(0);
+      }
+      expect(await administrator.e2ee.explain({ groupId })).toMatchObject({
+        state: "unavailable",
+        reason: "group-key-pending",
+      });
       // Final recovery-path verification starts after protection collected ready groups.
       // Public removal waits for global acceptance before the native adapter resumes.
       await administrator.e2ee.groups

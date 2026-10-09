@@ -6,6 +6,8 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { groupSchema } from "./groups.js";
+import { createBrowserDeviceSigner } from "./browser.js";
+import { groupMembershipBytes } from "./group-format.js";
 
 it("inherits child-group access, preserves an alternate path, and rotates after the last path is removed", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
@@ -61,15 +63,49 @@ it("inherits child-group access, preserves an alternate path, and rotates after 
       });
       clients.push(db);
       await db.e2ee.devices.list();
-      return { db, id: account.account.id };
+      return { db, id: account.account.id, stored: () => saved! };
     };
-    const { db: owner } = await open();
+    const { db: owner, stored } = await open();
     const { db: recipient, id: bobId } = await open();
     const parent = owner.e2ee.groups.create();
     await parent.wait();
     const child = owner.e2ee.groups.create();
     await child.wait();
-    await owner.e2ee.groups.add(child.id, { kind: "account", id: bobId }).wait();
+    // Account admission is setup here; the public operations below exercise inherited
+    // access and removal. Signed records still pass ordinary policy and global acceptance.
+    const signer = await createBrowserDeviceSigner();
+    const addAccount = async (groupId: string) => {
+      const root = (await owner.one(app.__e2ee_groups.where({ id: groupId }), {
+        tier: "global",
+      }))!;
+      const device = JSON.parse(stored()).devices[0];
+      const privateKey = Uint8Array.from(device.signingPrivateKey);
+      try {
+        const record = {
+          id: crypto.randomUUID(),
+          groupId,
+          epochId: root.epochId,
+          authorAccountId: root.accountId,
+          authorDeviceId: root.deviceId,
+          authorEpochId: root.accountEpochId,
+          operation: "add",
+          memberKind: "account",
+          memberId: bobId,
+        };
+        const bytes = groupMembershipBytes(device.scope, record);
+        const signature = await signer.sign(privateKey, bytes);
+        expect(
+          await signer.verify(Uint8Array.from(device.signingPublicKey), bytes, signature),
+        ).toBe(true);
+        const { id, ...values } = record;
+        await owner
+          .insert(app.__e2ee_group_membership, { ...values, signature }, { id })
+          .wait({ tier: "global" });
+      } finally {
+        privateKey.fill(0);
+      }
+    };
+    await addAccount(child.id);
     expect(await recipient.e2ee.explain({ groupId: parent.id })).toMatchObject({
       state: "refused",
     });
@@ -83,7 +119,7 @@ it("inherits child-group access, preserves an alternate path, and rotates after 
       { tier: "remote" },
     );
     expect(deliveries.length).toBeGreaterThan(0);
-    await owner.e2ee.groups.add(parent.id, { kind: "account", id: bobId }).wait();
+    await addAccount(parent.id);
     await owner.e2ee.groups.remove(child.id, { kind: "account", id: bobId }).wait();
     expect(await owner.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
     expect(await recipient.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
