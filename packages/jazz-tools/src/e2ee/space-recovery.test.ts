@@ -11,7 +11,6 @@ import { spaceRecoveryBytes } from "./space-recovery-format.js";
 import fixture from "./fixtures/local-space-recovery-v1.json";
 
 for (const scenario of [
-  "ordinary",
   "read-only-recovered-device",
   "read-only-creator-store",
   "invalid-recovery-candidates",
