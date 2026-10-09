@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { schema as s } from "../../schema-namespace.js";
 import { definePermissions } from "../../permissions/index.js";
 import { createDb } from "../../runtime/default-create-db.js";
+import type { QueryBuilder } from "../../runtime/db.js";
 import { localAccountConfig } from "../../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../../testing/index.js";
 import { createBrowserCrypto } from "../browser.js";
@@ -15,10 +16,7 @@ export type EncryptedTableScenario =
   | "after-yield"
   | "plaintext-first"
   | "transaction-read"
-  | "projection"
-  | "nested-results"
-  | "nested-projection"
-  | "nested-reference"
+  | "projections"
   | "equality-index"
   | "equality-collision"
   | "equality-owned-bytes"
@@ -33,9 +31,6 @@ export type EncryptedTableScenario =
   | "equality-subscription-epoch"
   | "equality-epoch-race"
   | "transaction-projection"
-  | "subscription-projection"
-  | "subscription"
-  | "subscription-error"
   | "offline-at-submit"
   | "byoc-buffer"
   | "ordinary-insert-error"
@@ -740,42 +735,125 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       ]);
       return;
     }
-    if (timing === "nested-reference") {
-      const linked = db.insert(app.linkedNotes, { project: project.id, title: "Linked secret" });
+    if (timing === "projections") {
+      // All read shapes use the same accepted ciphertext. Enrolment and atomic
+      // creation have their own cold fixtures; these checks exercise decoding
+      // and live results, including a separate terminal-error subscription.
+      const database = db;
+      const query = app.notes.where({ id: note.id });
+      expect(await database.one(query.select("id", "title"), { tier: "global" })).toEqual({
+        id: note.id,
+        title: note.title,
+      });
+      const target = { scope: app.projects, identifier: project.id };
+      // Concurrent delivery checks may follow the read's background maintenance.
+      expect(
+        await Promise.allSettled([database.e2ee.explain(target), database.e2ee.explain(target)]),
+      ).toEqual([
+        { status: "fulfilled", value: { state: "ready" } },
+        { status: "fulfilled", value: { state: "ready" } },
+      ]);
+      expect(await database.one(query, { tier: "global" })).toEqual(note);
+      expect(encrypted).toBeGreaterThan(0);
+      expect(decrypted).toBeGreaterThan(0);
+
+      const linked = database.insert(app.linkedNotes, {
+        project: project.id,
+        title: "Linked secret",
+      });
       await linked.wait({ tier: "global" });
-      const query = app.projects.where({ id: project.id }).include({
+      const reference = app.projects.where({ id: project.id }).include({
         linkedNotesViaProject: app.linkedNotes.include({ projectRelation: true }),
       });
-      const expected = {
+      const expectedReference = {
         ...project,
         linkedNotesViaProject: [{ ...linked.value, projectRelation: project }],
       };
-      expect(await db.one(query, { tier: "global" })).toEqual(expected);
-      const reader = db.beginTransaction();
+      expect(await database.one(reference, { tier: "global" })).toEqual(expectedReference);
+      const referenceReader = database.beginTransaction();
       try {
-        expect(await reader.one(query, { tier: "local" })).toEqual(expected);
+        expect(await referenceReader.one(reference, { tier: "local" })).toEqual(expectedReference);
       } finally {
-        await reader.rollback();
+        await referenceReader.rollback();
       }
-      return;
-    }
-    if (timing.startsWith("nested-")) {
-      const projected = timing === "nested-projection";
-      const query = app.projects.where({ id: project.id }).include({
-        notesViaProject: projected ? app.notes.select("id", "title") : true,
-      });
-      const child = projected ? { id: note.id, title: note.title } : note;
-      const expected = { ...project, notesViaProject: [child] };
-      expect(await db.one(query, { tier: "global" })).toEqual(expected);
-      const reader = db.beginTransaction();
+
+      const stops: (() => void)[] = [];
+      const checkUpdates: (() => Promise<void>)[] = [];
+      async function observe<T extends { id: string }>(
+        label: string,
+        observedQuery: QueryBuilder<T>,
+        initial: T,
+        updated: T,
+      ) {
+        const snapshots: T[][] = [];
+        let failure: Error | undefined;
+        const before = decrypted;
+        stops.push(
+          database.subscribe(
+            observedQuery,
+            {
+              onUpdate: (rows) => snapshots.push(rows),
+              onError: (error) => {
+                failure = error;
+              },
+            },
+            { tier: "global" },
+          ),
+        );
+        await expect
+          .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000, message: label })
+          .toEqual([initial]);
+        expect(decrypted, label).toBeGreaterThan(before);
+        checkUpdates.push(async () => {
+          await expect
+            .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000, message: label })
+            .toEqual([updated]);
+          expect(failure, label).toBeUndefined();
+        });
+      }
       try {
-        expect(await reader.one(query, { tier: "local" })).toEqual(expected);
+        for (const projected of [false, true]) {
+          const nested = app.projects.where({ id: project.id }).include({
+            notesViaProject: projected ? app.notes.select("id", "title") : true,
+          });
+          const child = projected ? { id: note.id, title: note.title } : note;
+          const expected = { ...project, notesViaProject: [child] };
+          expect(await database.one(nested, { tier: "global" })).toEqual(expected);
+          const reader = database.beginTransaction();
+          try {
+            expect(await reader.one(nested, { tier: "local" })).toEqual(expected);
+          } finally {
+            await reader.rollback();
+          }
+          await observe(projected ? "nested projection" : "nested full row", nested, expected, {
+            ...project,
+            notesViaProject: [{ ...child, title: "Subscription update" }],
+          });
+        }
+        await observe("full row", query, note, { ...note, title: "Subscription update" });
+        await observe(
+          "projection",
+          query.select("id", "title"),
+          { id: note.id, title: note.title },
+          {
+            id: note.id,
+            title: "Subscription update",
+          },
+        );
+        // Each subscription has its own callbacks and must observe both states.
+        await database
+          .update(app.notes, note.id, { title: "Subscription update" })
+          .wait({ tier: "global" });
+        for (const check of checkUpdates) await check();
       } finally {
-        await reader.rollback();
+        for (const stop of stops) stop();
       }
+
       const snapshots: unknown[][] = [];
       let failure: Error | undefined;
-      const stop = db.subscribe(
+      const beforeFailure = decrypted;
+      failDecryption = true;
+      const stop = database.subscribe(
         query,
         {
           onUpdate: (rows) => snapshots.push(rows),
@@ -787,33 +865,20 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       );
       try {
         await expect
-          .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
-          .toEqual([expected]);
-        await db.update(app.notes, note.id, { title: "Nested update" }).wait({ tier: "global" });
-        await expect
-          .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
-          .toEqual([{ ...project, notesViaProject: [{ ...child, title: "Nested update" }] }]);
-        expect(failure).toBeUndefined();
+          .poll(() => failure?.message, { timeout: 10_000 })
+          .toBe("Encrypted data could not be authenticated or decoded");
+        expect(decrypted).toBeGreaterThan(beforeFailure);
+        expect(failure).toMatchObject({ name: "E2eeDataError", code: "invalid-ciphertext" });
+        expect(failure).not.toHaveProperty("cause");
+        expect(snapshots).toEqual([]);
       } finally {
         stop();
+        failDecryption = false;
       }
       return;
     }
     if (event) {
       expect(await db.one(app.events.where({ id: event.id }), { tier: "global" })).toEqual(event);
-    }
-    if (timing === "projection") {
-      expect(
-        await db.one(app.notes.where({ id: note.id }).select("id", "title"), {
-          tier: "global",
-        }),
-      ).toEqual({ id: note.id, title: "Private title" });
-      const target = { scope: app.projects, identifier: project.id };
-      // Concurrent delivery checks may follow the read's background maintenance.
-      expect(await Promise.allSettled([db.e2ee.explain(target), db.e2ee.explain(target)])).toEqual([
-        { status: "fulfilled", value: { state: "ready" } },
-        { status: "fulfilled", value: { state: "ready" } },
-      ]);
     }
     if (timing === "transaction-scope-upsert") {
       expect(await db.one(app.projects.where({ id: scopeId }), { tier: "global" })).toEqual({
@@ -925,47 +990,6 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
           .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
           .toEqual([{ id: note.id, title: note.title }]);
         expect(failure).toBeUndefined();
-      } finally {
-        stop();
-      }
-    }
-    if (timing.startsWith("subscription")) {
-      const projected = timing === "subscription-projection";
-      const query = app.notes.where({ id: note.id });
-      const expected = projected ? { id: note.id, title: note.title } : note;
-      const snapshots: unknown[][] = [];
-      let failure: Error | undefined;
-      failDecryption = timing === "subscription-error";
-      const stop = db.subscribe(
-        projected ? query.select("id", "title") : query,
-        {
-          onUpdate: (rows) => snapshots.push(rows),
-          onError: (error) => {
-            failure = error;
-          },
-        },
-        { tier: "global" },
-      );
-      try {
-        if (failDecryption) {
-          await expect
-            .poll(() => failure?.message, { timeout: 10_000 })
-            .toBe("Encrypted data could not be authenticated or decoded");
-          expect(failure).toMatchObject({ name: "E2eeDataError", code: "invalid-ciphertext" });
-          expect(failure).not.toHaveProperty("cause");
-          expect(snapshots).toEqual([]);
-        } else {
-          await expect
-            .poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 })
-            .toEqual([expected]);
-          await db
-            .update(app.notes, note.id, { title: "Subscription update" })
-            .wait({ tier: "global" });
-          await expect
-            .poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 })
-            .toEqual([{ ...expected, title: "Subscription update" }]);
-          expect(failure).toBeUndefined();
-        }
       } finally {
         stop();
       }

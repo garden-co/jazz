@@ -1,16 +1,8 @@
 import { it } from "vitest";
 import { runEncryptedTableScenario } from "./fixtures/encrypted-table-scenarios.js";
 
-it.each([
-  "projection",
-  "nested-results",
-  "nested-projection",
-  "nested-reference",
-  "subscription-projection",
-  "subscription",
-  "subscription-error",
-] as const)(
-  "atomically creates a creator-owned space and encrypted data through ordinary mutations (%s)",
-  runEncryptedTableScenario,
+it(
+  "decodes encrypted projections, nested reads and live updates, and sanitises subscription failures",
+  () => runEncryptedTableScenario("projections"),
   120_000,
 );
