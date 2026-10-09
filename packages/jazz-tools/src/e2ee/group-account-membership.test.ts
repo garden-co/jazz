@@ -75,6 +75,9 @@ it.each(["creation-repair-rotation-retries", "removal-forged-successor"])(
       const alice = await localAccountConfig(server.appId, server.url);
       const bob = await localAccountConfig(server.appId, server.url);
       const keys = await createBrowserKeyEnvelope();
+      const signer = await createBrowserDeviceSigner();
+      let signatureFault: "root" | "delivery" | undefined;
+      let signatureFaultHits = 0;
       const stores = new Map<string, () => string | null>();
       let corruptNextEnvelope = false;
       let corruptWrapColumn: string | undefined;
@@ -86,6 +89,20 @@ it.each(["creation-repair-rotation-retries", "removal-forged-successor"])(
           e2ee: {
             app,
             crypto: {
+              deviceSigner: {
+                ...signer,
+                async sign(privateKey, bytes) {
+                  if (
+                    account === alice &&
+                    signatureFault &&
+                    new TextDecoder().decode(bytes).includes(`["${signatureFault}",`)
+                  ) {
+                    signatureFaultHits++;
+                    return new Uint8Array(64);
+                  }
+                  return signer.sign(privateKey, bytes);
+                },
+              },
               keyEnvelope: {
                 ...keys,
                 async wrap(secret, context, plaintext) {
@@ -132,6 +149,29 @@ it.each(["creation-repair-rotation-retries", "removal-forged-successor"])(
         expect(await owner.all(app.__e2ee_groups, { tier: "remote" })).toEqual([]);
       }
       const recipient = await open(bob);
+      if (repair) {
+        // Reuse this workflow's successful creation as the signature-fault retry.
+        // Each failure still gets a distinct group and an independent reader.
+        for (const fault of ["root", "delivery"] as const) {
+          signatureFault = fault;
+          signatureFaultHits = 0;
+          const attempted = owner.e2ee.groups.create();
+          await expect(attempted.wait()).rejects.toThrow(/signature/i);
+          expect(signatureFaultHits, fault).toBe(1);
+          expect(
+            await recipient.all(app.__e2ee_group_deliveries.where({ groupId: attempted.id }), {
+              tier: "remote",
+            }),
+          ).toEqual([]);
+          const root = await recipient.one(app.__e2ee_groups.where({ id: attempted.id }), {
+            tier: "remote",
+          });
+          if (fault === "root") expect(root).toBeNull();
+          // Reaching delivery signing proves root signing recovered after its fault.
+          else expect(root).not.toBeNull();
+          signatureFault = undefined;
+        }
+      }
       const { id } = await owner.e2ee.groups.create().wait();
       if (repair) expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
       if (checkTopology) {
@@ -277,7 +317,6 @@ it.each(["creation-repair-rotation-retries", "removal-forged-successor"])(
         );
         const bobDevice = JSON.parse(stores.get(bob.account.id)!()!).devices[0];
         const scope = JSON.parse(stores.get(alice.account.id)!()!).devices[0].scope;
-        const signer = await createBrowserDeviceSigner();
         const privateKey = Uint8Array.from(bobDevice.signingPrivateKey);
         const record = {
           id: crypto.randomUUID(),

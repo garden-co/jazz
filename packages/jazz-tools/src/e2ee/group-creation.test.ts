@@ -15,7 +15,6 @@ it.each([
   "delivery-candidates",
   "resume-staging",
   "resume-revoked",
-  "invalid-signatures",
   "root-history-race",
   "delivery-history-race",
 ] as const)(
@@ -81,8 +80,6 @@ it.each([
       if (checkStagedFixture) await retained.update(() => JSON.stringify(stagedFixture));
       const keys = await createBrowserKeyEnvelope();
       const signer = await createBrowserDeviceSigner();
-      let signatureFault: "root" | "delivery" | undefined;
-      let signatureFaultHits = 0;
       let beforeSeal: (() => Promise<void>) | undefined;
       let beforeOpen: (() => Promise<void>) | undefined;
       const openCreator = () =>
@@ -92,19 +89,7 @@ it.each([
             app,
             store: retained,
             crypto: {
-              deviceSigner: {
-                ...signer,
-                async sign(privateKey, bytes) {
-                  if (
-                    signatureFault &&
-                    new TextDecoder().decode(bytes).includes(`["${signatureFault}",`)
-                  ) {
-                    signatureFaultHits++;
-                    return new Uint8Array(64);
-                  }
-                  return signer.sign(privateKey, bytes);
-                },
-              },
+              deviceSigner: signer,
               keyEnvelope: {
                 ...keys,
                 async open(device, context, envelope) {
@@ -126,8 +111,7 @@ it.each([
       const creator = (await first.e2ee.devices.list()).find(
         (device) => device.state === "active",
       )!;
-      const invalidSignatures = variant === "invalid-signatures";
-      const needsApprovedSecond = !invalidSignatures && !variant.endsWith("history-race");
+      const needsApprovedSecond = !variant.endsWith("history-race");
       let second: Awaited<ReturnType<typeof createDb>> | undefined;
       if (needsApprovedSecond) {
         second = await createDb({ ...account, e2ee: { app, store: store() } });
@@ -140,18 +124,16 @@ it.each([
       }
       // Resume cases only need the approved device as an independent reader.
       // Malformed-candidate, history-race and inactive-creator checks retain a pending client.
-      const pending = invalidSignatures
-        ? await createDb({ ...account })
-        : second && variant.startsWith("resume")
+      const pending =
+        second && variant.startsWith("resume")
           ? second
           : await createDb({ ...account, e2ee: { app, store: store() } });
       if (pending !== second) clients.push(pending);
       const pendingDevice =
-        invalidSignatures || pending === second
+        pending === second
           ? undefined
           : (await pending.e2ee.devices.list()).find((device) => device.state === "pending");
-      if (!invalidSignatures && pending !== second) expect(pendingDevice).toBeDefined();
-      // Signature publication checks only need a reader, not another enrolled device.
+      if (pending !== second) expect(pendingDevice).toBeDefined();
       // Signed malformed resumption uses the approved reader as its raw writer.
       // Clean and poisoned delivery histories each keep a reopened creator.
       // Clean, faulty and signed-malformed resumption keep separate interrupted groups.
@@ -161,9 +143,7 @@ it.each([
           ? (["ordinary", "mixed-deliveries"] as const)
           : variant === "resume-staging"
             ? (["resume", "resume-faults", "resume-signed-malformed"] as const)
-            : variant === "invalid-signatures"
-              ? (["root-signature", "delivery-signature"] as const)
-              : [variant];
+            : [variant];
       for (const scenario of scenarios) {
         let injected = false;
         if (scenario.endsWith("history-race")) {
@@ -255,13 +235,6 @@ it.each([
               }),
             ).toHaveLength(candidates.length);
           };
-        signatureFault =
-          scenario === "root-signature"
-            ? "root"
-            : scenario === "delivery-signature"
-              ? "delivery"
-              : undefined;
-        signatureFaultHits = 0;
         if (scenario.startsWith("resume")) {
           const inject = beforeSeal;
           beforeSeal = async () => {
@@ -401,29 +374,6 @@ it.each([
               await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
             ).toBeNull();
           return;
-        }
-        if (signatureFault) {
-          await expect(group.wait()).rejects.toThrow(/signature/i);
-          expect(signatureFaultHits).toBe(1);
-          expect(
-            await pending.all(app.__e2ee_group_deliveries.where({ groupId: group.id }), {
-              tier: "remote",
-            }),
-          ).toEqual([]);
-          if (scenario === "root-signature")
-            expect(
-              await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
-            ).toBeNull();
-          signatureFault = undefined;
-          if (scenario === "root-signature") continue;
-          // The delivery-signature attempt already retried root signing successfully.
-          expect(
-            await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
-          ).not.toBeNull();
-          const retry = first.e2ee.groups.create();
-          await retry.wait();
-          expect(await first.e2ee.explain({ groupId: retry.id })).toMatchObject({ state: "ready" });
-          continue;
         }
         expect(await group.wait()).toEqual({ id: group.id });
         if (checkStagedFixture)
