@@ -62,14 +62,15 @@ it("protects every inherited path and restores both groups without ordinary deli
     const alice = await open(await localAccountConfig(server.appId, server.url));
     const bobAccount = await localAccountConfig(server.appId, server.url);
     const bob = await open(bobAccount);
+    const admin = await open(await localAccountConfig(server.appId, server.url));
     const parent = alice.e2ee.groups.create();
     await parent.wait();
     const child = bob.e2ee.groups.create();
     await child.wait();
-    // Ordinary policy lets Bob record this edge without having the parent key.
-    // The edge grants inherited membership, leaving its key unavailable.
-    expect(await bob.e2ee.explain({ groupId: parent.id })).toMatchObject({ state: "refused" });
-    await bob.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
+    // An authorised administrator without the parent key can record this edge,
+    // but cannot deliver the parent's key to its new inherited member.
+    await admin.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
+    expect(await admin.e2ee.explain({ groupId: parent.id })).toMatchObject({ state: "refused" });
     expect(
       await bob.all(
         app.__e2ee_group_deliveries.where({
@@ -104,6 +105,7 @@ it("protects every inherited path and restores both groups without ordinary deli
     );
     await alice.shutdown();
     await bob.shutdown();
+    await admin.shutdown();
     // A fresh device has no old local store and no other live group key holder.
     const recovered = await open(bobAccount);
     const pending = (await recovered.e2ee.devices.list()).find(
