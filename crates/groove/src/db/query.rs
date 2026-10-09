@@ -709,21 +709,27 @@ impl Database {
     /// ```
     pub async fn prepare_query(&mut self, query: Query) -> Result<PreparedShape, Error> {
         self.ensure_not_poisoned()?;
-        let planned = plan_prepared_shape(&query, self.ivm_runtime.schema())?;
+        let sql = crate::ivm::plan_sql_prepared_shape(&query, self.ivm_runtime.schema())?;
+        let planned = sql.prepared;
         let output = RecordDescriptor::new(
             planned
                 .public_output
                 .iter()
                 .map(|field| (field.name.clone(), field.value_type.clone())),
         );
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         let shape = self
-            .prepare_one_sink(
+            .ivm_runtime
+            .prepare_sql_one_sink(
                 planned.planned.graph,
                 planned.shape,
                 planned.binding_descriptor,
-                planned.output_key_fields,
+                sql.route_selectors,
+                &storage,
             )
-            .await?;
+            .await
+            .map_err(Error::IvmRuntime)?;
         Ok(PreparedShape {
             id: shape.id(),
             parameters: planned.parameters,

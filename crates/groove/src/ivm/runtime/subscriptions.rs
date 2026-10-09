@@ -555,6 +555,7 @@ impl PredicateExpr {
         match self {
             Self::TemplateArgument { fields, .. } => output.extend(fields.iter().cloned()),
             Self::Eq { field, .. }
+            | Self::BindingIdentityEq { field, .. }
             | Self::Neq { field, .. }
             | Self::Contains { field, .. }
             | Self::Gt { field, .. }
@@ -590,6 +591,9 @@ impl PredicateExpr {
     ) -> Result<bool, IvmRuntimeError> {
         match self {
             Self::TemplateArgument { .. } => Err(IvmRuntimeError::UnsupportedOperator),
+            Self::BindingIdentityEq { field, value } => {
+                record.binding_identity_matches(field, value)
+            }
             Self::Eq { field, value } => {
                 compare_record_field(record, field, value, |ord| ord.is_eq(), comparison)
             }
@@ -621,6 +625,12 @@ impl PredicateExpr {
             Self::LtEq { field, value } => {
                 compare_record_field(record, field, value, |ord| ord.is_le(), comparison)
             }
+            Self::IsNull { field } if comparison == ValueComparison::WholeValue => {
+                record.binding_identity_matches(field, &LiteralValue::Nullable(None))
+            }
+            Self::IsNotNull { field } if comparison == ValueComparison::WholeValue => record
+                .binding_identity_matches(field, &LiteralValue::Nullable(None))
+                .map(|is_null| !is_null),
             Self::IsNull { field } => Ok(is_sql_null_value(&resolved_record_value(record, field)?)),
             Self::IsNotNull { field } => {
                 Ok(!is_sql_null_value(&resolved_record_value(record, field)?))
@@ -774,11 +784,11 @@ pub(super) struct RoutedMultisinkShapeState {
     /// with identical terminals reuse it, and it retires itself once its
     /// last retained binding unsubscribes.
     pub(super) shared_key: Option<SharedShapeKey>,
+    pub(super) exact_binding_identity: bool,
 }
 
-/// Identity of a shared prepared shape: its binding source plus its
-/// terminals in sink order.
-pub(super) type SharedShapeKey = (String, Vec<RoutedMultisinkTerminal>);
+/// Identity of a shared prepared shape includes binding-route semantics.
+pub(super) type SharedShapeKey = (String, Vec<RoutedMultisinkTerminal>, bool);
 
 #[derive(Clone, Debug)]
 pub(super) struct RoutedMultisinkTerminalState {
@@ -1686,16 +1696,26 @@ fn bound_routed_multisink_graph(
     terminal: &RoutedMultisinkTerminal,
     binding_values: &[Value],
     output: &RecordDescriptor,
+    sql_literals: Option<&[Arc<LiteralValue>]>,
 ) -> Result<GraphBuilder, IvmRuntimeError> {
     let predicates = terminal
         .route_fields
         .iter()
         .zip(&terminal.route_value_indices)
-        .map(|(field, index)| route_predicate(field, &binding_values[*index]))
-        .collect::<Vec<_>>();
-    let predicate = match predicates.as_slice() {
-        [] => None,
-        [predicate] => Some(predicate.clone()),
+        .map(|(field, index)| {
+            if let Some(literals) = sql_literals {
+                Ok(PredicateExpr::BindingIdentityEq {
+                    field: field.clone(),
+                    value: Arc::clone(&literals[*index]),
+                })
+            } else {
+                Ok(route_predicate(field, &binding_values[*index]))
+            }
+        })
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+    let predicate = match predicates.len() {
+        0 => None,
+        1 => predicates.into_iter().next(),
         _ => Some(PredicateExpr::And(predicates).canonicalize()),
     };
     if let GraphBuilder::CollectBy { input, collect } = &terminal.graph {
@@ -1743,6 +1763,70 @@ fn bound_routed_multisink_graph(
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
     Ok(graph.project_fields(fields))
+}
+
+/// Build the one canonical owned SQL literal directly from its borrowed
+/// binding value and declared type. Never clone an intermediate Value tree.
+fn sql_route_literal(
+    value: &Value,
+    value_type: &ValueType,
+) -> Result<LiteralValue, IvmRuntimeError> {
+    Ok(match value {
+        Value::U8(value) => LiteralValue::U8(*value),
+        Value::U16(value) => LiteralValue::U16(*value),
+        Value::U32(value) => LiteralValue::U32(*value),
+        Value::U64(value) => LiteralValue::U64(*value),
+        Value::I32(value) => LiteralValue::I32(*value),
+        Value::I64(value) => LiteralValue::I64(*value),
+        Value::F64(value) => LiteralValue::F64(value.to_bits()),
+        Value::Bool(value) => LiteralValue::Bool(*value),
+        Value::Uuid(value) => LiteralValue::Uuid(*value),
+        Value::EnumTag(value) => LiteralValue::EnumTag(*value),
+        Value::String(value) => match value_type {
+            ValueType::EnumTag(schema) => LiteralValue::EnumTag(schema.discriminant(value)?),
+            _ => LiteralValue::String(value.clone()),
+        },
+        Value::Bytes(value) => LiteralValue::Bytes(value.clone()),
+        Value::Array(values) => {
+            let ValueType::Array(inner) = value_type else {
+                unreachable!("validated binding type")
+            };
+            LiteralValue::Array(
+                values
+                    .iter()
+                    .map(|value| sql_route_literal(value, inner))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+        Value::Tuple(values) => {
+            let ValueType::Tuple(members) = value_type else {
+                unreachable!("validated binding type")
+            };
+            LiteralValue::Tuple(
+                values
+                    .iter()
+                    .zip(members)
+                    .map(|(value, member)| sql_route_literal(value, member))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+        Value::Nullable(value) => {
+            let ValueType::Nullable(inner) = value_type else {
+                unreachable!("validated binding type")
+            };
+            LiteralValue::Nullable(
+                value
+                    .as_deref()
+                    .map(|value| sql_route_literal(value, inner).map(Box::new))
+                    .transpose()?,
+            )
+        }
+        Value::Record(_) | Value::Enum(_) | Value::Large(_) => {
+            return Err(IvmRuntimeError::UnsupportedWholeValueType(
+                value_type.clone(),
+            ));
+        }
+    })
 }
 
 /// A routed terminal is compiled once but a bound subscription executes one
@@ -3620,6 +3704,28 @@ impl IvmRuntime {
         I: IntoIterator<Item = RoutedMultisinkTerminal>,
         S: OrderedKvStorage,
     {
+        self.prepare_with_route_identity(
+            terminals,
+            binding_source_shape,
+            binding_descriptor,
+            storage,
+            false,
+        )
+        .await
+    }
+
+    async fn prepare_with_route_identity<I, S>(
+        &mut self,
+        terminals: I,
+        binding_source_shape: impl Into<String>,
+        binding_descriptor: RecordDescriptor,
+        storage: &S,
+        exact_binding_identity: bool,
+    ) -> Result<PreparedShape, IvmRuntimeError>
+    where
+        I: IntoIterator<Item = RoutedMultisinkTerminal>,
+        S: OrderedKvStorage,
+    {
         self.flush_pending_binding_retractions(storage).await?;
         let terminals = terminals.into_iter().collect::<Vec<_>>();
         if terminals.is_empty() {
@@ -3632,7 +3738,9 @@ impl IvmRuntime {
                     terminal.sink.clone(),
                 ));
             }
-            if terminal.route_fields.len() > binding_descriptor.fields().len() {
+            if !exact_binding_identity
+                && terminal.route_fields.len() > binding_descriptor.fields().len()
+            {
                 return Err(IvmRuntimeError::RoutedMultisinkRouteArityMismatch {
                     sink: terminal.sink.clone(),
                     expected: binding_descriptor.fields().len(),
@@ -3657,6 +3765,25 @@ impl IvmRuntime {
             for field in &terminal.route_fields {
                 if output.field_index(field).is_none() {
                     return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
+                }
+            }
+            if exact_binding_identity {
+                for (field, index) in terminal
+                    .route_fields
+                    .iter()
+                    .zip(&terminal.route_value_indices)
+                {
+                    let field_index = output
+                        .field_index(field)
+                        .ok_or_else(|| IvmRuntimeError::ShapeKeyFieldNotFound(field.clone()))?;
+                    let actual = &output.fields()[field_index].value_type;
+                    let expected = &binding_descriptor.fields()[*index].value_type;
+                    if actual != expected {
+                        return Err(IvmRuntimeError::WholeValueTypeMismatch {
+                            left: actual.clone(),
+                            right: expected.clone(),
+                        });
+                    }
                 }
             }
             for field in &terminal.public_fields {
@@ -3722,6 +3849,7 @@ impl IvmRuntime {
                 terminals: terminal_states,
                 auto_family_key: None,
                 shared_key: None,
+                exact_binding_identity,
             },
         );
         install.commit();
@@ -3747,12 +3875,11 @@ impl IvmRuntime {
         let shape = binding_source_shape.into();
         let mut terminals = terminals.into_iter().collect::<Vec<_>>();
         terminals.sort_by(|left, right| left.sink.cmp(&right.sink));
-        let key: SharedShapeKey = (shape.clone(), terminals.clone());
+        let key: SharedShapeKey = (shape.clone(), terminals.clone(), false);
         if let Some(shape_id) = self.shared_prepared_shapes.get(&key).copied()
-            && self
-                .prepared_shapes
-                .get(&shape_id)
-                .is_some_and(|state| state.binding_descriptor == binding_descriptor)
+            && self.prepared_shapes.get(&shape_id).is_some_and(|state| {
+                state.binding_descriptor == binding_descriptor && !state.exact_binding_identity
+            })
         {
             self.flush_pending_binding_retractions(storage).await?;
             return Ok(PreparedShape { id: shape_id });
@@ -3909,6 +4036,17 @@ impl IvmRuntime {
         if let Some(live) = &live {
             debug_assert_eq!(live.binding_key, binding_key);
         }
+        let sql_literals = if shape.exact_binding_identity {
+            Some(
+                binding_values
+                    .iter()
+                    .zip(shape.binding_descriptor.fields())
+                    .map(|(value, field)| sql_route_literal(value, &field.value_type).map(Arc::new))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else {
+            None
+        };
         let subscription_id = self.next_subscription_id();
         let (outputs, binding_snapshots, route_barriers, binding_added) = {
             let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
@@ -3929,6 +4067,7 @@ impl IvmRuntime {
                     &terminal,
                     binding_values,
                     &prepared_terminal.output.output,
+                    sql_literals.as_deref(),
                 )?;
                 let output = runtime.add_dedup_graph(&graph)?;
                 if lifetime == SubscriptionLifetime::Retained
@@ -4073,6 +4212,31 @@ impl IvmRuntime {
             waiter,
             _receiver_liveness: receiver_liveness,
         })
+    }
+
+    pub(crate) async fn prepare_sql_one_sink(
+        &mut self,
+        graph: GraphBuilder,
+        binding_source_shape: impl Into<String>,
+        binding_descriptor: RecordDescriptor,
+        route_selectors: Vec<(String, usize)>,
+        storage: &impl OrderedKvStorage,
+    ) -> Result<PreparedShape, IvmRuntimeError> {
+        let output = self.infer_builder_output(&graph)?;
+        let public_fields = descriptor_field_names(&output)?;
+        let (route_fields, route_value_indices): (Vec<_>, Vec<_>) =
+            route_selectors.into_iter().unzip();
+        self.prepare_with_route_identity(
+            [
+                RoutedMultisinkTerminal::new(DEFAULT_SINK, graph, route_fields, public_fields)
+                    .with_route_value_indices(route_value_indices),
+            ],
+            binding_source_shape,
+            binding_descriptor,
+            storage,
+            true,
+        )
+        .await
     }
 
     pub async fn prepare_one_sink(
@@ -4841,9 +5005,40 @@ impl IvmRuntime {
                 }
                 Ok(output.unwrap_or_default())
             }
-            GraphBuilder::Join { left, right, .. } => {
+            GraphBuilder::Join {
+                left,
+                right,
+                left_on,
+                right_on,
+                comparison,
+            } => {
                 let left = self.infer_builder_output_cached(left, output_memo)?;
                 let right = self.infer_builder_output_cached(right, output_memo)?;
+                if *comparison == ValueComparison::WholeValue {
+                    if left_on.len() != right_on.len() {
+                        return Err(IvmRuntimeError::JoinKeyArityMismatch {
+                            left: left_on.len(),
+                            right: right_on.len(),
+                        });
+                    }
+                    for (left_key, right_key) in left_on.iter().zip(right_on) {
+                        let left_index = resolve_field_ref(&left, left_key)?;
+                        let right_index = resolve_field_ref(&right, right_key)?;
+                        let left_type = &left.fields()[left_index].value_type;
+                        let right_type = &right.fields()[right_index].value_type;
+                        if left_type != right_type {
+                            return Err(IvmRuntimeError::WholeValueTypeMismatch {
+                                left: left_type.clone(),
+                                right: right_type.clone(),
+                            });
+                        }
+                        if !records::supports_whole_value(left_type) {
+                            return Err(IvmRuntimeError::UnsupportedWholeValueType(
+                                left_type.clone(),
+                            ));
+                        }
+                    }
+                }
                 Ok(join_descriptor(&left, &right))
             }
             GraphBuilder::SemiJoin { left, .. } => {

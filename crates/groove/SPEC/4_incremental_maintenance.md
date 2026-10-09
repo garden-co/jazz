@@ -45,6 +45,24 @@ Invariant digest:
 - `INV-TICK-19`: Hydrating or querying a graph MUST NOT perturb an existing subscription stream's future tick deltas.
 - `INV-TICK-20`: Contextual recursive child state MUST NOT be persisted in `operator_states` after recursive recompute; retained child operator state outside `FrontierSource` context remains root-scoped.
 
+SQL whole-value arrangements preserve chapter 3's complete-key equality in
+hydration, probes and incremental insertion/retraction. Their comparison mode
+is part of arrangement identity; they must not share an element-membership
+arrangement with an Exact or Policy join. Each input record contributes one
+framed key, including an empty array, and matching weights use the ordinary
+product and same-tick cross-term rules.
+
+SQL prepared binding routes retain raw binding identity independently of
+whole-value equality. Recursive signed-zero normalisation in a join must not
+normalise binding records, refcounts or retraction bytes. Each bound terminal
+admits only its own raw identity during hydration, live attach, updates and
+queued final retraction cancellation (`INV-TICK-14`, `INV-SHAPE-8`).
+The retained SQL route map includes all actual binding-origin carriers and
+their binding value indexes, including repeated indexes. Every selector must
+match; selecting only one independently varying occurrence would admit mixed
+binding derivations. Canonical enum-label literals share the existing ordinal
+binding key and refcounts, while signed-zero raw keys remain distinct.
+
 Subscription management handles are ephemeral and identify both the creating
 runtime namespace and its local subscription sequence. A handle from a replaced
 runtime MUST NOT address any subscription in its replacement, even when their
