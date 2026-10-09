@@ -3782,6 +3782,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverConnectionAttempt = null;
     this.serverCarrier = null;
     this.finishServerConnectionAttempt(attempt, new Error(error.message));
+    // Frames the retired socket buffered belong to its channel state, not the next connection's.
+    this.pendingInboundServerFrames.length = 0;
     const generation = this.serverConnectionGeneration;
     this.resolveServerTransportWorkWaiters();
     const now = Date.now();

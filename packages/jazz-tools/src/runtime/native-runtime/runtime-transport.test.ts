@@ -532,6 +532,64 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
+  it("drops inbound frames a dropped connection left unpumped instead of feeding them to its reconnect", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transports: FakeTransport[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              const transport = new FakeTransport([]);
+              transports.push(transport);
+              return transport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    await waitForServerPumpTimer();
+    expect(transports).toHaveLength(1);
+
+    // The server delivers a frame, and the socket drops before the debounced
+    // pump routes it into the first connection's transport.
+    const staleFrame = Uint8Array.from([7, 7, 7]);
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([staleFrame]));
+    await waitForFakeWebSocketNegotiation();
+    expect(transports[0]!.received).toEqual([]);
+    sockets[0]!.emitServerClose();
+
+    await runtime.waitForUpstreamServerConnection();
+    await waitForServerPumpTimer();
+    expect(sockets).toHaveLength(2);
+    expect(transports).toHaveLength(2);
+    expect(transports[0]!.closed).toBe(true);
+    // The frame belongs to the dropped connection's channel state; the
+    // reconnected transport must never see it.
+    expect(transports[0]!.received).toEqual([]);
+    expect(transports[1]!.received).toEqual([]);
+    expect(terminal).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+
   it("turns a pump failure during a parked read into a transport error, not an unhandled rejection", async () => {
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     const pumpFailure = new Error("core tick failed");
