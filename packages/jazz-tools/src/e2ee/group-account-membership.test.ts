@@ -21,15 +21,11 @@ function contextColumn(context: Uint8Array): string {
 }
 
 // The forged-successor case proves ordinary addition and removal before the forgery.
-it.each([
-  "creation-repair-removal-invalid-verification",
-  "removal-forged-successor",
-  "removal-invalid-history",
-])(
+it.each(["creation-repair-rotation-retries", "removal-forged-successor"])(
   "adds an account to a group and supplies its active devices with the accepted key (%s)",
   async (scenario) => {
     const checkTopology = scenario === "removal-forged-successor";
-    const repair = scenario === "creation-repair-removal-invalid-verification";
+    const repair = scenario === "creation-repair-rotation-retries";
     const app = s.defineApp({
       ...deviceRequestSchema,
       ...groupSchema,
@@ -94,8 +90,9 @@ it.each([
                 ...keys,
                 async wrap(secret, context, plaintext) {
                   if (account === alice && corruptWrapColumn === contextColumn(context)) {
+                    const column = corruptWrapColumn;
                     corruptWrapColumn = undefined;
-                    if (scenario === "removal-invalid-history") {
+                    if (column === "history") {
                       // A well-formed envelope can still contain the wrong predecessor key.
                       return keys.wrap(secret, context, new Uint8Array(plaintext.length).fill(7));
                     }
@@ -198,21 +195,30 @@ it.each([
         tier: "remote",
       });
       const originalEpoch = before[0]!.epochId;
-      corruptWrapColumn = repair
-        ? "verification"
-        : scenario === "removal-invalid-history"
-          ? "history"
-          : undefined;
+      corruptWrapColumn = repair ? "verification" : undefined;
       const removal = owner.e2ee.groups.remove(id, { kind: "account", id: bob.account.id });
       expect(removal).not.toHaveProperty("then");
-      if (repair || scenario === "removal-invalid-history") {
+      if (repair) {
         await expect(removal.wait()).rejects.toThrow();
         expect(corruptWrapColumn).toBeUndefined();
         expect(
           await owner.all(app.__e2ee_group_successors.where({ groupId: id }), { tier: "remote" }),
         ).toEqual([]);
-        // The removal remains accepted, but a faulty crypto adapter must not
-        // publish an unusable epoch. Loading retries with fresh valid crypto.
+        // Removal remains accepted after faulty rotation. On the next load,
+        // valid verification must not excuse a well-formed but wrong history key.
+        expect(await recipient.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
+        corruptWrapColumn = "history";
+        await expect(owner.e2ee.explain({ groupId: id })).rejects.toThrow(
+          "Invalid generated E2EE group wrapped value",
+        );
+        expect(corruptWrapColumn).toBeUndefined();
+        expect(
+          await owner.all(app.__e2ee_group_successors.where({ groupId: id }), { tier: "remote" }),
+        ).toEqual([]);
+        expect(
+          await owner.all(app.__e2ee_group_deliveries.where({ groupId: id }), { tier: "remote" }),
+        ).toEqual(before);
+        // A further load with healthy crypto must complete the same rotation.
       } else {
         await removal.wait();
       }
