@@ -6,6 +6,7 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { groupSchema } from "./groups.js";
+import { withGroupTopologyPermissions } from "./index.js";
 import { createBrowserKeyEnvelope, createBrowserDeviceSigner } from "./browser.js";
 import { groupSuccessorSigningBytes } from "./group-successor.js";
 
@@ -29,23 +30,25 @@ it.each([
 ])(
   "adds an account to a group and supplies its active devices with the accepted key (%s)",
   async (scenario) => {
-    const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
+    const checkTopology = scenario === "removal-forged-successor";
+    const app = s.defineApp({
+      ...deviceRequestSchema,
+      ...groupSchema,
+      notes: s.table({ text: s.string() }, {}),
+    });
     const policies = definePermissions(app, ({ policy, session, allOf }) => {
-      policy.__e2ee_group_repairs.allowRead.where(
-        session.where({ authMode: { in: ["local-first", "external"] } }),
-      );
+      const own = { "$createdBy.account": session.user.account };
+      const topologyRead = () =>
+        checkTopology ? own : session.where({ authMode: { in: ["local-first", "external"] } });
+      policy.notes.allowRead.where(own);
+      policy.notes.allowInsert.where(own);
+      policy.__e2ee_group_repairs.allowRead.where(topologyRead);
       policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
-      policy.__e2ee_group_successors.allowRead.where(
-        session.where({ authMode: { in: ["local-first", "external"] } }),
-      );
+      policy.__e2ee_group_successors.allowRead.where(topologyRead);
       policy.__e2ee_group_successors.allowInsert.where({ authorAccountId: session.user.account });
-      policy.__e2ee_groups.allowRead.where(
-        session.where({ authMode: { in: ["local-first", "external"] } }),
-      );
+      policy.__e2ee_groups.allowRead.where(topologyRead);
       policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
-      policy.__e2ee_group_membership.allowRead.where(
-        session.where({ authMode: { in: ["local-first", "external"] } }),
-      );
+      policy.__e2ee_group_membership.allowRead.where(topologyRead);
       policy.__e2ee_group_membership.allowInsert.where((row) =>
         allOf([
           { authorAccountId: session.user.account },
@@ -70,14 +73,9 @@ it.each([
         appId: server.appId,
         adminSecret: server.adminSecret,
         schema: app,
-        permissions: {
-          ...deviceRequestPermissions,
-          __e2ee_groups: policies.__e2ee_groups!,
-          __e2ee_group_membership: policies.__e2ee_group_membership!,
-          __e2ee_group_repairs: policies.__e2ee_group_repairs!,
-          __e2ee_group_successors: policies.__e2ee_group_successors!,
-          __e2ee_group_deliveries: policies.__e2ee_group_deliveries!,
-        },
+        permissions: checkTopology
+          ? withGroupTopologyPermissions(app, { ...deviceRequestPermissions, ...policies })
+          : { ...deviceRequestPermissions, ...policies },
       });
       const alice = await localAccountConfig(server.appId, server.url);
       const bob = await localAccountConfig(server.appId, server.url);
@@ -141,6 +139,10 @@ it.each([
       }
       const recipient = await open(bob);
       const { id } = await owner.e2ee.groups.create().wait();
+      if (checkTopology) {
+        await owner.insert(app.notes, { text: "private" }).wait({ tier: "global" });
+        expect(await owner.all(app.notes, { tier: "remote" })).toMatchObject([{ text: "private" }]);
+      }
       expect(await recipient.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
       expect(
         await recipient.all(
@@ -229,6 +231,39 @@ it.each([
           ),
         ).toBe(true);
         if (scenario === "removal-forged-successor") {
+          // Public topology survives removal; private data and administration do not.
+          const roots = await owner.all(app.__e2ee_groups.where({ id }), { tier: "remote" });
+          const members = await owner.all(app.__e2ee_group_membership.where({ groupId: id }), {
+            tier: "remote",
+          });
+          const epochs = await owner.all(app.__e2ee_group_successors.where({ groupId: id }), {
+            tier: "remote",
+          });
+          expect(roots).toHaveLength(1);
+          expect(members).toHaveLength(2);
+          expect(epochs).toHaveLength(1);
+          expect(await recipient.all(app.__e2ee_groups.where({ id }), { tier: "remote" })).toEqual(
+            roots,
+          );
+          expect(
+            await recipient.all(app.__e2ee_group_membership.where({ groupId: id }), {
+              tier: "remote",
+            }),
+          ).toEqual(members);
+          expect(
+            await recipient.all(app.__e2ee_group_successors.where({ groupId: id }), {
+              tier: "remote",
+            }),
+          ).toEqual(epochs);
+          expect(await recipient.all(app.notes, { tier: "remote" })).toEqual([]);
+          await expect(
+            recipient.e2ee.groups.add(id, { kind: "account", id: bob.account.id }).wait(),
+          ).rejects.toThrow();
+          expect(
+            await owner.all(app.__e2ee_group_membership.where({ groupId: id }), {
+              tier: "remote",
+            }),
+          ).toEqual(members);
           const successors = app.__e2ee_group_successors.where({ groupId: id });
           const accepted = (await owner.all(successors, { tier: "remote" }))[0]!;
           const bobRoot = await recipient.one(

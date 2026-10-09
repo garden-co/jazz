@@ -7,7 +7,7 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { groupSchema } from "./groups.js";
 
-it("lets an account leave under self-removal policy without receiving the replacement epoch", async () => {
+it("seals an empty group and lets an account leave its replacement without receiving the next epoch", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
@@ -63,8 +63,40 @@ it("lets an account leave under self-removal policy without receiving the replac
     const recipient = await createDb({ ...bob, e2ee: { app, store: store() } });
     clients.push(recipient);
     await recipient.e2ee.devices.list();
+    const sealed = owner.e2ee.groups.create();
+    await sealed.wait();
+    const roots = await owner.all(app.__e2ee_groups.where({ id: sealed.id }), { tier: "remote" });
+    const deliveries = await owner.all(app.__e2ee_group_deliveries.where({ groupId: sealed.id }), {
+      tier: "remote",
+    });
+    await owner.e2ee.groups.leave(sealed.id).wait();
+    expect(await owner.e2ee.explain({ groupId: sealed.id })).toMatchObject({ state: "refused" });
+    // Ordinary policy still permits this account to administer the group.
+    // Empty accepted membership must nevertheless make the lineage terminal.
+    await expect(
+      owner.e2ee.groups.add(sealed.id, { kind: "account", id: alice.account.id }).wait(),
+    ).rejects.toThrow("sealed");
+    expect(await owner.e2ee.explain({ groupId: sealed.id })).toEqual({
+      state: "refused",
+      reason: "group-sealed",
+    });
+    expect(await owner.all(app.__e2ee_groups.where({ id: sealed.id }), { tier: "remote" })).toEqual(
+      roots,
+    );
+    expect(
+      await owner.all(app.__e2ee_group_deliveries.where({ groupId: sealed.id }), {
+        tier: "remote",
+      }),
+    ).toEqual(deliveries);
+    expect(
+      await owner.all(app.__e2ee_group_successors.where({ groupId: sealed.id }), {
+        tier: "remote",
+      }),
+    ).toEqual([]);
     const group = owner.e2ee.groups.create();
     await group.wait();
+    expect(group.id).not.toBe(sealed.id);
+    expect(await owner.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
     await owner.e2ee.groups.add(group.id, { kind: "account", id: bob.account.id }).wait();
     expect(await recipient.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
     const before = await recipient.all(
