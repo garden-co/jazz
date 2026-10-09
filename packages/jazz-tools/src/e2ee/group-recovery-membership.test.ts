@@ -11,33 +11,47 @@ import { groupSchema } from "./groups.js";
 import { withGroupTopologyPermissions } from "./group-topology.js";
 import { createNativeCrypto } from "./native.js";
 import type { CryptoAdapters } from "./types.js";
+import { createBrowserCrypto } from "./browser.js";
+import { groupMembershipBytes } from "./group-format.js";
 
 const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
-const policies = definePermissions(app, ({ policy, session }) => {
-  const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
-  policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
-  policy.__e2ee_group_membership.allowInsert.where({ authorAccountId: session.user.account });
-  policy.__e2ee_group_successors.allowInsert.where({ authorAccountId: session.user.account });
-  policy.__e2ee_group_deliveries.allowRead.where(authenticated);
-  policy.__e2ee_group_deliveries.allowInsert.where({ senderAccountId: session.user.account });
-  policy.__e2ee_group_recovery_deliveries.allowRead.where(authenticated);
-  policy.__e2ee_group_recovery_deliveries.allowInsert.where({
-    senderAccountId: session.user.account,
+const policies = (ownerOnly: boolean) =>
+  definePermissions(app, ({ policy, session, allOf }) => {
+    const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
+    policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_group_membership.allowInsert.where((row) =>
+      ownerOnly
+        ? allOf([
+            { authorAccountId: session.user.account },
+            policy.__e2ee_groups.exists.where({ id: row.groupId, accountId: session.user.account }),
+          ])
+        : { authorAccountId: session.user.account },
+    );
+    policy.__e2ee_group_successors.allowInsert.where({ authorAccountId: session.user.account });
+    policy.__e2ee_group_deliveries.allowRead.where(authenticated);
+    policy.__e2ee_group_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+    policy.__e2ee_group_recovery_deliveries.allowRead.where(authenticated);
+    policy.__e2ee_group_recovery_deliveries.allowInsert.where({
+      senderAccountId: session.user.account,
+    });
+    policy.__e2ee_group_repairs.allowRead.where(authenticated);
+    policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
   });
-  policy.__e2ee_group_repairs.allowRead.where(authenticated);
-  policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
-});
 
 type Fixture = {
   native: CryptoAdapters;
   account(): Promise<AccountDbConfig>;
+  stored(db: Db): Promise<string | null>;
   open(account: AccountDbConfig, crypto?: CryptoAdapters, enrolled?: boolean): Promise<Db>;
 };
 
-async function withFixture(run: (fixture: Fixture) => Promise<void>): Promise<void> {
+async function withFixture(
+  run: (fixture: Fixture) => Promise<void>,
+  ownerOnly = false,
+): Promise<void> {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
-  const stores: { clear(): void }[] = [];
+  const stores = new Map<Db, ReturnType<typeof store>>();
   const store = () => {
     let saved: string | null = null;
     const result = {
@@ -51,7 +65,6 @@ async function withFixture(run: (fixture: Fixture) => Promise<void>): Promise<vo
         saved = null;
       },
     };
-    stores.push(result);
     return result;
   };
   try {
@@ -63,18 +76,21 @@ async function withFixture(run: (fixture: Fixture) => Promise<void>): Promise<vo
       schema: app,
       permissions: withGroupTopologyPermissions(app, {
         ...deviceRequestPermissions,
-        ...policies,
+        ...policies(ownerOnly),
       }),
     });
     const native = await createNativeCrypto();
     await run({
       native,
       account: () => localAccountConfig(server.appId, server.url),
+      stored: (db) => stores.get(db)!.read(),
       async open(account, crypto = native, enrolled = true) {
+        const saved = store();
         const db = await createDb({
           ...account,
-          ...(enrolled ? { e2ee: { app, store: store(), crypto } } : {}),
+          ...(enrolled ? { e2ee: { app, store: saved, crypto } } : {}),
         });
+        stores.set(db, saved);
         clients.push(db);
         if (enrolled) await db.e2ee.devices.list();
         return db;
@@ -85,7 +101,7 @@ async function withFixture(run: (fixture: Fixture) => Promise<void>): Promise<vo
     try {
       await server.stop();
     } finally {
-      for (const saved of stores) saved.clear();
+      for (const saved of stores.values()) saved.clear();
     }
     for (const result of closed) {
       if (result.status === "rejected") throw result.reason;
@@ -118,10 +134,11 @@ function deferred() {
   return { promise, resolve };
 }
 
-it("recovers a legitimate group despite an unrelated ineligible recovery delivery", async () => {
-  await withFixture(async ({ account, open, native }) => {
+it("isolates pre-enrolment authors, recipients and recovery deliveries from legitimate groups", async () => {
+  await withFixture(async ({ account, open, native, stored }) => {
+    const browser = await createBrowserCrypto();
     const ownerAccount = await account();
-    const owner = await open(ownerAccount);
+    const owner = await open(ownerAccount, browser);
     const groupId = await readyGroup(owner);
     const before = new Set(
       (await owner.all(app.__e2ee_recovery_roots, { tier: "global" })).map((row) => row.id),
@@ -132,7 +149,10 @@ it("recovers a legitimate group despite an unrelated ineligible recovery deliver
     );
     expect(added).toHaveLength(1);
     const recoveryRootId = added[0]!.id;
-    const root = await owner.one(app.__e2ee_groups.where({ id: groupId }), { tier: "global" });
+    const mallory = await open(await account(), browser);
+    const other = mallory.e2ee.groups.create();
+    await other.wait();
+    const root = await mallory.one(app.__e2ee_groups.where({ id: other.id }), { tier: "global" });
     expect(root).toBeDefined();
 
     const futureAccount = await account();
@@ -161,9 +181,58 @@ it("recovers a legitimate group despite an unrelated ineligible recovery deliver
         { id: unrelatedId },
       )
       .wait({ tier: "global" });
-    // Later real enrolment cannot authorise this earlier root retroactively.
-    await open(futureAccount);
+    // An otherwise valid administrator signature still cannot enrol a recipient
+    // whose account root has not been accepted at the time of the proposal.
+    const device = JSON.parse((await stored(mallory))!).devices[0];
+    const privateKey = Uint8Array.from(device.signingPrivateKey);
+    const record = {
+      id: crypto.randomUUID(),
+      groupId: other.id,
+      epochId: root!.epochId,
+      authorAccountId: root!.accountId,
+      authorDeviceId: root!.deviceId,
+      authorEpochId: root!.accountEpochId,
+      operation: "add",
+      memberKind: "account",
+      memberId: futureAccount.account.id,
+    };
+    try {
+      const bytes = groupMembershipBytes(device.scope, record);
+      const signature = await browser.deviceSigner.sign(privateKey, bytes);
+      expect(
+        await browser.deviceSigner.verify(
+          Uint8Array.from(device.signingPublicKey),
+          bytes,
+          signature,
+        ),
+      ).toBe(true);
+      const { id, ...values } = record;
+      await mallory
+        .insert(app.__e2ee_group_membership, { ...values, signature }, { id })
+        .wait({ tier: "global" });
+    } finally {
+      privateKey.fill(0);
+    }
+    expect(await owner.e2ee.explain({ groupId })).toEqual({ state: "ready" });
+    expect(await mallory.e2ee.explain({ groupId: other.id })).toEqual({ state: "ready" });
 
+    // Later real enrolment cannot authorise either the earlier root or add.
+    const recipient = await open(futureAccount, browser);
+    expect(await owner.e2ee.explain({ groupId })).toEqual({ state: "ready" });
+    expect(await mallory.e2ee.explain({ groupId: other.id })).toEqual({ state: "ready" });
+    expect(await recipient.e2ee.explain({ groupId: other.id })).toMatchObject({ state: "refused" });
+    expect(
+      await mallory.all(
+        app.__e2ee_group_deliveries.where({
+          groupId: other.id,
+          recipientAccountId: futureAccount.account.id,
+        }),
+        { tier: "global" },
+      ),
+    ).toEqual([]);
+
+    // Recovery uses a fresh store, with no original key-holding client online.
+    await Promise.all([owner, mallory, recipient].map((db) => db.shutdown()));
     const recovered = await open(ownerAccount);
     await expectRecoveryPath(recovered, material, groupId);
     await recovered.e2ee.recovery.use(material).wait();
@@ -201,7 +270,7 @@ it("recovers a legitimate group despite an unrelated ineligible recovery deliver
       );
     expect(await recovered.e2ee.explain({ groupId })).toEqual({ state: "ready" });
     expect(outcome).toBe("fulfilled");
-  });
+  }, true);
 }, 60000);
 
 it("rejects recovery creation when a required ready group loses membership", async () => {
