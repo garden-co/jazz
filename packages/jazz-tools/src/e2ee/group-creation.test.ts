@@ -15,7 +15,6 @@ it.each([
   "delivery-candidates",
   "resume-staging",
   "resume-revoked",
-  "staged-fixture",
   "invalid-signatures",
   "root-history-race",
   "delivery-history-race",
@@ -76,7 +75,10 @@ it.each([
       const stagedFixture = JSON.parse(
         readFileSync(new URL("./fixtures/local-group-staging-v1.json", import.meta.url), "utf8"),
       );
-      if (variant === "staged-fixture") await retained.update(() => JSON.stringify(stagedFixture));
+      // The ordinary creation control also proves that the frozen host format
+      // loads and preserves staging belonging to another scope.
+      const checkStagedFixture = variant === "delivery-candidates";
+      if (checkStagedFixture) await retained.update(() => JSON.stringify(stagedFixture));
       const keys = await createBrowserKeyEnvelope();
       const signer = await createBrowserDeviceSigner();
       let signatureFault: "root" | "delivery" | undefined;
@@ -136,11 +138,11 @@ it.each([
         expect(request).toBeDefined();
         await first.e2ee.devices.approve(request.id).wait();
       }
-      // Most resume cases and the compatibility fixture only need an independent reader.
+      // Resume cases only need the approved device as an independent reader.
       // Malformed-candidate, history-race and inactive-creator checks retain a pending client.
       const pending = invalidSignatures
         ? await createDb({ ...account })
-        : second && (variant === "staged-fixture" || variant.startsWith("resume"))
+        : second && variant.startsWith("resume")
           ? second
           : await createDb({ ...account, e2ee: { app, store: store() } });
       if (pending !== second) clients.push(pending);
@@ -334,9 +336,12 @@ it.each([
           expect(await reopened.e2ee.explain({ groupId: group.id })).toMatchObject({
             state: "ready",
           });
-          expect(await second!.e2ee.explain({ groupId: group.id })).toMatchObject({
-            state: "ready",
-          });
+          // Check cross-device delivery on clean resume and malformed-candidate
+          // replacement. The staging fault cases prove their own rejection/retry.
+          if (scenario === "resume" || scenario === "resume-signed-malformed")
+            expect(await second!.e2ee.explain({ groupId: group.id })).toMatchObject({
+              state: "ready",
+            });
           expect(
             await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
           ).toEqual(original);
@@ -387,12 +392,17 @@ it.each([
           continue;
         }
         expect(await group.wait()).toEqual({ id: group.id });
-        if (scenario === "staged-fixture")
+        if (checkStagedFixture)
           expect(JSON.parse((await retained.read())!).stagedGroupKeysV1).toEqual(
             stagedFixture.stagedGroupKeysV1,
           );
         expect(await first.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "ready" });
-        expect(await second!.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "ready" });
+        // The malformed candidates target the creator, whose readiness and
+        // reopening are checked for each. One control covers the second device.
+        if (scenario === "ordinary")
+          expect(await second!.e2ee.explain({ groupId: group.id })).toMatchObject({
+            state: "ready",
+          });
         await first.shutdown();
 
         const reopened = await openCreator();
@@ -400,9 +410,13 @@ it.each([
         expect(await reopened.e2ee.explain({ groupId: group.id })).toMatchObject({
           state: "ready",
         });
+        if (checkStagedFixture)
+          expect(JSON.parse((await retained.read())!).stagedGroupKeysV1).toEqual(
+            stagedFixture.stagedGroupKeysV1,
+          );
 
         // These account/device boundaries do not depend on delivery corruption or
-        // the compatibility store. Keep one live check of each in the ordinary case.
+        // retained staging. Keep one live check of each in the ordinary case.
         if (scenario === "ordinary") {
           await expect(pending.e2ee.groups.create().wait()).rejects.toThrow(/active|approved/i);
 
