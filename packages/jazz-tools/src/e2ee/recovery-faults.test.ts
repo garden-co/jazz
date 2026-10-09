@@ -1,4 +1,4 @@
-import { expect, it, vi } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
@@ -6,21 +6,57 @@ import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js
 import { createNativeCrypto } from "./native.js";
 import { E2eeRecoveryError } from "./index.js";
 
+let server: Awaited<ReturnType<typeof startLocalJazzServer>> | undefined;
+let account: Awaited<ReturnType<typeof localAccountConfig>>;
+let adapters: Awaited<ReturnType<typeof createNativeCrypto>>;
+let material: string;
+
+beforeAll(async () => {
+  server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  await deploy({
+    serverUrl: server.url,
+    appId: server.appId,
+    adminSecret: server.adminSecret,
+    schema: deviceRequestApp,
+    permissions: deviceRequestPermissions,
+  });
+  account = await localAccountConfig(server.appId, server.url);
+  adapters = await createNativeCrypto();
+  let saved: string | null = null;
+  const owner = await createDb({
+    ...account,
+    e2ee: {
+      crypto: adapters,
+      store: {
+        async read() {
+          return saved;
+        },
+        async update(transform) {
+          saved = transform(saved);
+        },
+      },
+    },
+  });
+  try {
+    await owner.e2ee.devices.list();
+    ({ material } = await owner.e2ee.recovery.create().wait());
+  } finally {
+    await owner.shutdown();
+  }
+}, 60_000);
+
+afterAll(async () => {
+  await server?.stop();
+});
+
+// Cases share accepted history but open and close their own pending device.
+// Earlier recovered devices must never satisfy a later case's success checks.
+
 it.each(["device-envelope", "delivery-verification"])(
   "rejects a faulty recovery %s before publishing it and permits retry",
   async (fault) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId: server.appId,
-        adminSecret: server.adminSecret,
-        schema: deviceRequestApp,
-        permissions: deviceRequestPermissions,
-      });
-      const account = await localAccountConfig(server.appId, server.url);
-      const adapters = await createNativeCrypto();
       let corrupt = false;
       let injected = 0;
       const open = async () => {
@@ -69,44 +105,46 @@ it.each(["device-envelope", "delivery-verification"])(
         clients.push(client);
         return client;
       };
-      const first = await open();
-      const [creator] = await first.e2ee.devices.list();
-      const { material } = await first.e2ee.recovery.create().wait();
-      await first.shutdown();
       const second = await open();
-      const pending = (await second.e2ee.devices.list()).find((row) => row.id !== creator!.id)!;
+      const before = await second.e2ee.devices.list();
+      const pendingDevices = before.filter((row) => row.state === "pending");
+      expect(pendingDevices).toHaveLength(1);
+      const pending = pendingDevices[0]!;
+      const deliveries = await second.all(deviceRequestApp.__e2ee_device_deliveries, {
+        tier: "remote",
+      });
       corrupt = true;
       await expect(second.e2ee.recovery.use(material).wait()).rejects.toThrow();
       expect(injected).toBeGreaterThan(0);
       expect(
         await second.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "remote" }),
-      ).toEqual([]);
+      ).toEqual(deliveries);
       corrupt = false;
       await second.e2ee.recovery.use(material).wait();
-      expect(await second.e2ee.devices.list()).toContainEqual(
+      const accepted = await second.e2ee.devices.list();
+      expect(accepted).toContainEqual(
         expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
       );
+      expect(accepted).toEqual(
+        expect.arrayContaining(
+          before
+            .filter((row) => row.id !== pending.id)
+            .map(({ id, state }) => expect.objectContaining({ id, state })),
+        ),
+      );
+      expect(
+        await second.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "remote" }),
+      ).toEqual(expect.arrayContaining(deliveries));
     } finally {
       await Promise.all(clients.map((client) => client.shutdown()));
-      await server.stop();
     }
   },
   60_000,
 );
 
 it("keeps failed imports and approval attempts unpublished, sanitises import errors and permits retry", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: deviceRequestApp,
-      permissions: deviceRequestPermissions,
-    });
-    const account = await localAccountConfig(server.appId, server.url);
-    const adapters = await createNativeCrypto();
     const sensitive = "private-recovery-import-diagnostic";
     const adapterError = new Error(sensitive, { cause: { privateKey: sensitive } });
     let failImport = false;
@@ -164,13 +202,11 @@ it("keeps failed imports and approval attempts unpublished, sanitises import err
       clients.push(client);
       return client;
     };
-    const owner = await open();
-    const [creator] = await owner.e2ee.devices.list();
-    const { material } = await owner.e2ee.recovery.create().wait();
-    await owner.shutdown();
     const client = await open();
     const before = await client.e2ee.devices.list();
-    const pending = before.find((row) => row.id !== creator!.id)!;
+    const pendingDevices = before.filter((row) => row.state === "pending");
+    expect(pendingDevices).toHaveLength(1);
+    const pending = pendingDevices[0]!;
     const approvals = await client.all(deviceRequestApp.__e2ee_device_approvals, {
       tier: "remote",
     });
@@ -283,11 +319,21 @@ it("keeps failed imports and approval attempts unpublished, sanitises import err
     }
     // Every preceding failure leaves this device able to retry with the original material.
     await client.e2ee.recovery.use(material).wait();
-    expect(await client.e2ee.devices.list()).toContainEqual(
+    const accepted = await client.e2ee.devices.list();
+    expect(accepted).toContainEqual(
       expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
+    );
+    expect(accepted).toEqual(
+      expect.arrayContaining(
+        before
+          .filter((row) => row.id !== pending.id)
+          .map(({ id, state }) => expect.objectContaining({ id, state })),
+      ),
+    );
+    expect(await client.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "remote" })).toEqual(
+      expect.arrayContaining(deliveries),
     );
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
-    await server.stop();
   }
 }, 60_000);

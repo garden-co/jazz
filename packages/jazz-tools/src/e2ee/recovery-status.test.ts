@@ -4,7 +4,7 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
-it("inspects recovery registration without enrolling a device or claiming recoverability", async () => {
+it("inspects recovery without enrolment, then explicitly restores protected material", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const store = () => {
@@ -68,6 +68,31 @@ it("inspects recovery registration without enrolling a device or claiming recove
       code: "recovery-root-mismatch",
       message: "Recovery material does not match an accepted recovery root",
     });
+    const protectors = await owner.all(deviceRequestApp.__e2ee_recovery_protectors, {
+      tier: "remote",
+    });
+    expect(protectors).toHaveLength(1);
+    expect(new TextDecoder().decode(protectors[0]!.material)).not.toContain(material);
+    const outsider = await createDb(await localAccountConfig(server.appId, server.url));
+    clients.push(outsider);
+    expect(
+      await outsider.all(deviceRequestApp.__e2ee_recovery_protectors, { tier: "remote" }),
+    ).toEqual([]);
+    await expect(
+      outsider
+        .insert(deviceRequestApp.__e2ee_recovery_protectors, {
+          rootId: protectors[0]!.rootId,
+          material: new Uint8Array([1]),
+        })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    await expect(
+      owner
+        .update(deviceRequestApp.__e2ee_recovery_protectors, protectors[0]!.id, {
+          material: new Uint8Array([1]),
+        })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
     const requests = await owner.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" });
     await owner.shutdown();
 
@@ -94,6 +119,15 @@ it("inspects recovery registration without enrolling a device or claiming recove
       deviceRequestApp.__e2ee_public_device_approvals,
     ])
       expect(await observer.all<{ id: string }>(table, { tier: "remote" })).toEqual([]);
+
+    // Read-only inspection above must leave this client untouched. Enrol only
+    // when the caller explicitly requests recovery with the protected material.
+    const pending = (await observer.e2ee.devices.list()).find((row) => row.state === "pending")!;
+    expect(pending).toBeDefined();
+    await observer.e2ee.recovery.use().wait();
+    expect(await observer.e2ee.devices.list()).toContainEqual(
+      expect.objectContaining({ id: pending.id, state: "active" }),
+    );
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

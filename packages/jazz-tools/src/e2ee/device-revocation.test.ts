@@ -5,7 +5,7 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createNativeCrypto } from "./native.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
-it("rotates device keys and retains recovery after revoking its registering device", async () => {
+it("rejects racing recovery registration, retries rotation and retains independent recovery", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const delivered: { recipient: Uint8Array; secret: Uint8Array }[] = [];
@@ -19,6 +19,7 @@ it("rotates device keys and retains recovery after revoking its registering devi
     });
     const account = await localAccountConfig(server.appId, server.url);
     const adapters = await createNativeCrypto();
+    let beforeRotationSeal: (() => Promise<void>) | undefined;
     const open = async () => {
       let saved: string | null = null;
       const db = await createDb({
@@ -37,6 +38,11 @@ it("rotates device keys and retains recovery after revoking its registering devi
             keyEnvelope: {
               ...adapters.keyEnvelope,
               async seal(recipient, context, secret) {
+                if (new TextDecoder().decode(context).includes("jazz.e2ee.account-successor.v1")) {
+                  const action = beforeRotationSeal;
+                  beforeRotationSeal = undefined;
+                  await action?.();
+                }
                 delivered.push({ recipient: recipient.slice(), secret: secret.slice() });
                 return adapters.keyEnvelope.seal(recipient, context, secret);
               },
@@ -84,7 +90,27 @@ it("rotates device keys and retains recovery after revoking its registering devi
     // Continue the already-approved device workflow into recovery. The recovery
     // root's author and the remaining approver are both revoked in turn, and
     // every earlier client is closed before each fresh device recovers.
-    const { material } = await first.e2ee.recovery.create().wait();
+    const privateSuccessors = await first.all(deviceRequestApp.__e2ee_account_successors, {
+      tier: "remote",
+    });
+    const publicSuccessors = await first.all(deviceRequestApp.__e2ee_public_account_successors, {
+      tier: "remote",
+    });
+    let material: string | undefined;
+    beforeRotationSeal = async () => {
+      ({ material } = await first.e2ee.recovery.create().wait());
+    };
+    await expect(third.e2ee.devices.revoke(creator!.id).wait()).rejects.toThrow(/conflict|stale/i);
+    expect(material).toBeTypeOf("string");
+    expect(await first.all(deviceRequestApp.__e2ee_account_successors, { tier: "remote" })).toEqual(
+      privateSuccessors,
+    );
+    expect(
+      await first.all(deviceRequestApp.__e2ee_public_account_successors, { tier: "remote" }),
+    ).toEqual(publicSuccessors);
+    expect(await first.e2ee.devices.list()).toContainEqual(
+      expect.objectContaining({ id: creator!.id, state: "active" }),
+    );
     const roots = await first.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" });
     expect(roots).toHaveLength(1);
     await third.e2ee.devices.revoke(creator!.id).wait();
@@ -98,7 +124,7 @@ it("rotates device keys and retains recovery after revoking its registering devi
       (device) => device.state === "pending",
     )!;
     expect(recovering).toBeDefined();
-    await recovered.e2ee.recovery.use(material).wait();
+    await recovered.e2ee.recovery.use(material!).wait();
     expect(await recovered.e2ee.devices.list()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: recovering.id, state: "active" }),
@@ -115,7 +141,7 @@ it("rotates device keys and retains recovery after revoking its registering devi
     const reopened = await open();
     const last = (await reopened.e2ee.devices.list()).find((device) => device.state === "pending")!;
     expect(last).toBeDefined();
-    await reopened.e2ee.recovery.use(material).wait();
+    await reopened.e2ee.recovery.use(material!).wait();
     expect(await reopened.e2ee.devices.list()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: last.id, state: "active" }),
