@@ -12,14 +12,12 @@ import { publicDeviceApprovalBytes } from "./public-device-approval.js";
 import { groupDeliveryBytes } from "./group-format.js";
 
 it.each([
-  "ordinary",
+  "delivery-candidates",
   "resume",
   "resume-signed-malformed",
   "resume-invalid-staging",
   "resume-revoked",
   "staged-fixture",
-  "forged",
-  "signed-malformed",
   "root-signature",
   "delivery-signature",
   "root-history-race",
@@ -88,35 +86,37 @@ it.each([
       let faultAt = 0;
       let beforeSeal: (() => Promise<void>) | undefined;
       let beforeOpen: (() => Promise<void>) | undefined;
-      let first = await createDb({
-        ...account,
-        e2ee: {
-          app,
-          store: retained,
-          crypto: {
-            deviceSigner: {
-              ...signer,
-              async sign(privateKey, bytes) {
-                if (faultAt && ++signingAttempt === faultAt) return new Uint8Array(64);
-                return signer.sign(privateKey, bytes);
+      const openCreator = () =>
+        createDb({
+          ...account,
+          e2ee: {
+            app,
+            store: retained,
+            crypto: {
+              deviceSigner: {
+                ...signer,
+                async sign(privateKey, bytes) {
+                  if (faultAt && ++signingAttempt === faultAt) return new Uint8Array(64);
+                  return signer.sign(privateKey, bytes);
+                },
               },
-            },
-            keyEnvelope: {
-              ...keys,
-              async open(device, context, envelope) {
-                await beforeOpen?.();
-                return keys.open(device, context, envelope);
-              },
-              async seal(publicKey, context, key) {
-                const action = beforeSeal;
-                beforeSeal = undefined;
-                await action?.();
-                return keys.seal(publicKey, context, key);
+              keyEnvelope: {
+                ...keys,
+                async open(device, context, envelope) {
+                  await beforeOpen?.();
+                  return keys.open(device, context, envelope);
+                },
+                async seal(publicKey, context, key) {
+                  const action = beforeSeal;
+                  beforeSeal = undefined;
+                  await action?.();
+                  return keys.seal(publicKey, context, key);
+                },
               },
             },
           },
-        },
-      });
+        });
+      let first = await openCreator();
       clients.push(first);
       const creator = (await first.e2ee.devices.list()).find(
         (device) => device.state === "active",
@@ -149,12 +149,15 @@ it.each([
           ? undefined
           : (await pending.e2ee.devices.list()).find((device) => device.state === "pending");
       if (pending !== second) expect(pendingDevice).toBeDefined();
-      // Each fault keeps its own interrupted group and same-client retry. Only
-      // enrolment and the approved independent reader are shared across them.
+      // Each delivery candidate keeps its own group and reopened creator.
+      // Interrupted groups also retain their own rejection and same-client retry.
+      // Only account enrolment, approval and the independent readers are shared.
       const scenarios =
-        variant === "resume-invalid-staging"
-          ? (["resume-wrong-key", "resume-wrong-epoch", "resume-bad-envelope"] as const)
-          : [variant];
+        variant === "delivery-candidates"
+          ? (["ordinary", "forged", "signed-malformed"] as const)
+          : variant === "resume-invalid-staging"
+            ? (["resume-wrong-key", "resume-wrong-epoch", "resume-bad-envelope"] as const)
+            : [variant];
       for (const scenario of scenarios) {
         let injected = false;
         if (scenario.endsWith("history-race")) {
@@ -204,7 +207,10 @@ it.each([
             });
             expect(root).toBeDefined();
             const delivery = {
-              id: "00000000-0000-4000-8000-000000000001",
+              id:
+                scenario === "signed-malformed"
+                  ? "00000000-0000-4000-8000-000000000002"
+                  : "00000000-0000-4000-8000-000000000001",
               groupId: group.id,
               epochId: root!.epochId,
               senderAccountId: root!.accountId,
@@ -372,7 +378,7 @@ it.each([
         expect(await second!.e2ee.explain({ groupId: group.id })).toMatchObject({ state: "ready" });
         await first.shutdown();
 
-        const reopened = await createDb({ ...account, e2ee: { app, store: retained } });
+        const reopened = await openCreator();
         clients.push(reopened);
         expect(await reopened.e2ee.explain({ groupId: group.id })).toMatchObject({
           state: "ready",
@@ -391,7 +397,9 @@ it.each([
           expect(await outsider.e2ee.explain({ groupId: group.id })).toMatchObject({
             state: "refused",
           });
+          await outsider.shutdown();
         }
+        first = reopened;
       }
     } finally {
       await Promise.all(clients.map((client) => client.shutdown()));

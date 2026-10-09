@@ -87,7 +87,7 @@ async function fixture() {
       store: memoryStore(),
     });
     const account = manager.createLocalFirst();
-    const open = async (crypto: JazzCrypto = native, store = memoryStore()) => {
+    const open = async (crypto: JazzCrypto = native, store = memoryStore(), enrol = true) => {
       const db = await createDb({
         appId: server.appId,
         serverUrl: server.url,
@@ -96,7 +96,7 @@ async function fixture() {
         e2ee: { app, store, crypto },
       });
       clients.add(db);
-      await db.e2ee.devices.list();
+      if (enrol) await db.e2ee.devices.list();
       return db;
     };
     const recovery = async (db: Db): Promise<Recovery> => {
@@ -169,10 +169,11 @@ async function prepareAdapterMatrix() {
       );
       expect(deliveries).toHaveLength(1);
     }
-    // One successful control with unwrapped native adapters for this fixed history.
+    // One native control covers automatic protector discovery for this history.
+    // The matrix below also checks explicit material before injecting its faults.
     const normal = await f.open();
     await readyStatus(normal, root, groupId);
-    await normal.e2ee.recovery.use(root.material).wait();
+    await normal.e2ee.recovery.use().wait();
     expect(await normal.e2ee.explain({ groupId })).toEqual({ state: "ready" });
     const ownerRecord = (await ownerStore.read())!;
     await f.close(normal);
@@ -258,7 +259,8 @@ describe("group recovery adapter classification and fallback", () => {
         // observer; an extra owner would only repeat already-proven readiness.
         const store = f.memoryStore();
         if (surface === "explain") await store.update(() => ownerRecord);
-        const active = (client = await f.open(adapters, store));
+        const active = (client = await f.open(adapters, store, surface !== "status"));
+        if (surface === "status") expect(await store.read()).toBeNull();
         if (surface === "explain") {
           expect(await active.e2ee.explain({ groupId })).toEqual({ state: "ready" });
         } else {
@@ -298,6 +300,7 @@ describe("group recovery adapter classification and fallback", () => {
           expect(await active.e2ee.explain({ groupId })).toEqual({ state: "ready" });
         else await readyStatus(active, root, groupId);
         if (surface === "status") {
+          expect(await store.read()).toBeNull();
           expect(rejected).toMatchObject({
             ok: true,
             value: { validation: "unavailable", reason: "unusable-recovery-delivery" },
@@ -330,10 +333,6 @@ describe("group recovery adapter classification and fallback", () => {
     const { f, groupId, roots } = prepared;
     let observer: Db | undefined;
     try {
-      const normal = await f.open();
-      await normal.e2ee.recovery.use().wait();
-      expect(await normal.e2ee.explain({ groupId })).toEqual({ state: "ready" });
-      await f.close(normal);
       let armed = false;
       let failedRoot: string | undefined;
       let failures = 0;

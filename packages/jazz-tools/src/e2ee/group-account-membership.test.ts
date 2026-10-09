@@ -22,15 +22,14 @@ function contextColumn(context: Uint8Array): string {
 
 // The forged-successor case proves ordinary addition and removal before the forgery.
 it.each([
-  "repair",
+  "creation-repair-removal-invalid-verification",
   "removal-forged-successor",
-  "removal-invalid-verification",
   "removal-invalid-history",
-  "creation-invalid-verification",
 ])(
   "adds an account to a group and supplies its active devices with the accepted key (%s)",
   async (scenario) => {
     const checkTopology = scenario === "removal-forged-successor";
+    const repair = scenario === "creation-repair-removal-invalid-verification";
     const app = s.defineApp({
       ...deviceRequestSchema,
       ...groupSchema,
@@ -128,17 +127,16 @@ it.each([
         return db;
       };
       const owner = await open(alice);
-      if (scenario === "creation-invalid-verification") {
+      // Reuse the successful creation retry for repair and rotation checks.
+      if (repair) {
         corruptWrapColumn = "verification";
         await expect(owner.e2ee.groups.create().wait()).rejects.toThrow();
         expect(corruptWrapColumn).toBeUndefined();
         expect(await owner.all(app.__e2ee_groups, { tier: "remote" })).toEqual([]);
-        const { id } = await owner.e2ee.groups.create().wait();
-        expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
-        return;
       }
       const recipient = await open(bob);
       const { id } = await owner.e2ee.groups.create().wait();
+      if (repair) expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
       if (checkTopology) {
         await owner.insert(app.notes, { text: "private" }).wait({ tier: "global" });
         expect(await owner.all(app.notes, { tier: "remote" })).toMatchObject([{ text: "private" }]);
@@ -150,9 +148,9 @@ it.each([
           { tier: "remote" },
         ),
       ).toEqual([]);
-      corruptNextEnvelope = scenario === "repair";
+      corruptNextEnvelope = repair;
       await owner.e2ee.groups.add(id, { kind: "account", id: bob.account.id }).wait();
-      if (scenario === "repair") {
+      if (repair) {
         expect(corruptNextEnvelope).toBe(false);
         const delivered = await recipient.all(
           app.__e2ee_group_deliveries.where({ groupId: id, recipientAccountId: bob.account.id }),
@@ -163,17 +161,20 @@ it.each([
           app.__e2ee_account_roots.where({ accountId: bob.account.id }),
           { tier: "remote" },
         );
-        // Ordinary account policy is not proof that the requesting device signed.
+        const forgedRepair = {
+          groupId: id,
+          epochId: delivered[0]!.epochId,
+          deliveryId: delivered[0]!.id,
+          accountId: bob.account.id,
+          deviceId: delivered[0]!.recipientDeviceId,
+          accountEpochId: accountRoot!.epochId,
+          signature: new Uint8Array(64),
+        };
+        // Jazz generates UUID v7 row IDs; explicit UUID v4 IDs are valid too.
+        // Neither format makes this forged device signature authentic.
+        await recipient.insert(app.__e2ee_group_repairs, forgedRepair).wait({ tier: "global" });
         await recipient
-          .insert(app.__e2ee_group_repairs, {
-            groupId: id,
-            epochId: delivered[0]!.epochId,
-            deliveryId: delivered[0]!.id,
-            accountId: bob.account.id,
-            deviceId: delivered[0]!.recipientDeviceId,
-            accountEpochId: accountRoot!.epochId,
-            signature: new Uint8Array(64),
-          })
+          .insert(app.__e2ee_group_repairs, forgedRepair, { id: crypto.randomUUID() })
           .wait({ tier: "global" });
         expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
         expect(
@@ -184,135 +185,132 @@ it.each([
         ).toHaveLength(1);
         await expect(recipient.e2ee.explain({ groupId: id })).rejects.toThrow();
         const requests = app.__e2ee_group_repairs.where({ groupId: id });
-        expect(await recipient.all(requests, { tier: "remote" })).toHaveLength(2);
+        expect(await recipient.all(requests, { tier: "remote" })).toHaveLength(3);
         await expect(recipient.e2ee.explain({ groupId: id })).rejects.toThrow();
-        expect(await recipient.all(requests, { tier: "remote" })).toHaveLength(2);
+        expect(await recipient.all(requests, { tier: "remote" })).toHaveLength(3);
         // A capable member loading the group repairs the recipient's unusable
         // delivery without changing membership or requiring a new public method.
         expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
       }
       expect(await recipient.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
       expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
-      if (scenario.startsWith("removal")) {
-        const before = await owner.all(app.__e2ee_group_deliveries.where({ groupId: id }), {
+      const before = await owner.all(app.__e2ee_group_deliveries.where({ groupId: id }), {
+        tier: "remote",
+      });
+      const originalEpoch = before[0]!.epochId;
+      corruptWrapColumn = repair
+        ? "verification"
+        : scenario === "removal-invalid-history"
+          ? "history"
+          : undefined;
+      const removal = owner.e2ee.groups.remove(id, { kind: "account", id: bob.account.id });
+      expect(removal).not.toHaveProperty("then");
+      if (repair || scenario === "removal-invalid-history") {
+        await expect(removal.wait()).rejects.toThrow();
+        expect(corruptWrapColumn).toBeUndefined();
+        expect(
+          await owner.all(app.__e2ee_group_successors.where({ groupId: id }), { tier: "remote" }),
+        ).toEqual([]);
+        // The removal remains accepted, but a faulty crypto adapter must not
+        // publish an unusable epoch. Loading retries with fresh valid crypto.
+      } else {
+        await removal.wait();
+      }
+      expect(await recipient.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
+      expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
+      const after = await owner.all(app.__e2ee_group_deliveries.where({ groupId: id }), {
+        tier: "remote",
+      });
+      expect(after.filter((row) => row.recipientAccountId === bob.account.id)).toEqual(
+        before.filter((row) => row.recipientAccountId === bob.account.id),
+      );
+      expect(
+        after.some(
+          (row) => row.recipientAccountId === alice.account.id && row.epochId !== originalEpoch,
+        ),
+      ).toBe(true);
+      if (scenario === "removal-forged-successor") {
+        // Public topology survives removal; private data and administration do not.
+        const roots = await owner.all(app.__e2ee_groups.where({ id }), { tier: "remote" });
+        const members = await owner.all(app.__e2ee_group_membership.where({ groupId: id }), {
           tier: "remote",
         });
-        const originalEpoch = before[0]!.epochId;
-        corruptWrapColumn =
-          scenario === "removal-invalid-verification"
-            ? "verification"
-            : scenario === "removal-invalid-history"
-              ? "history"
-              : undefined;
-        const removal = owner.e2ee.groups.remove(id, { kind: "account", id: bob.account.id });
-        expect(removal).not.toHaveProperty("then");
-        if (scenario.startsWith("removal-invalid-")) {
-          await expect(removal.wait()).rejects.toThrow();
-          expect(corruptWrapColumn).toBeUndefined();
-          expect(
-            await owner.all(app.__e2ee_group_successors.where({ groupId: id }), { tier: "remote" }),
-          ).toEqual([]);
-          // The removal remains accepted, but a faulty crypto adapter must not
-          // publish an unusable epoch. Loading retries with fresh valid crypto.
-        } else {
-          await removal.wait();
-        }
-        expect(await recipient.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
-        expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
-        const after = await owner.all(app.__e2ee_group_deliveries.where({ groupId: id }), {
+        const epochs = await owner.all(app.__e2ee_group_successors.where({ groupId: id }), {
           tier: "remote",
         });
-        expect(after.filter((row) => row.recipientAccountId === bob.account.id)).toEqual(
-          before.filter((row) => row.recipientAccountId === bob.account.id),
+        expect(roots).toHaveLength(1);
+        expect(members).toHaveLength(2);
+        expect(epochs).toHaveLength(1);
+        expect(await recipient.all(app.__e2ee_groups.where({ id }), { tier: "remote" })).toEqual(
+          roots,
         );
         expect(
-          after.some(
-            (row) => row.recipientAccountId === alice.account.id && row.epochId !== originalEpoch,
-          ),
-        ).toBe(true);
-        if (scenario === "removal-forged-successor") {
-          // Public topology survives removal; private data and administration do not.
-          const roots = await owner.all(app.__e2ee_groups.where({ id }), { tier: "remote" });
-          const members = await owner.all(app.__e2ee_group_membership.where({ groupId: id }), {
+          await recipient.all(app.__e2ee_group_membership.where({ groupId: id }), {
             tier: "remote",
-          });
-          const epochs = await owner.all(app.__e2ee_group_successors.where({ groupId: id }), {
+          }),
+        ).toEqual(members);
+        expect(
+          await recipient.all(app.__e2ee_group_successors.where({ groupId: id }), {
             tier: "remote",
-          });
-          expect(roots).toHaveLength(1);
-          expect(members).toHaveLength(2);
-          expect(epochs).toHaveLength(1);
-          expect(await recipient.all(app.__e2ee_groups.where({ id }), { tier: "remote" })).toEqual(
-            roots,
-          );
+          }),
+        ).toEqual(epochs);
+        expect(await recipient.all(app.notes, { tier: "remote" })).toEqual([]);
+        await expect(
+          recipient.e2ee.groups.add(id, { kind: "account", id: bob.account.id }).wait(),
+        ).rejects.toThrow();
+        expect(
+          await owner.all(app.__e2ee_group_membership.where({ groupId: id }), {
+            tier: "remote",
+          }),
+        ).toEqual(members);
+        const successors = app.__e2ee_group_successors.where({ groupId: id });
+        const accepted = (await owner.all(successors, { tier: "remote" }))[0]!;
+        const bobRoot = await recipient.one(
+          app.__e2ee_account_roots.where({ accountId: bob.account.id }),
+          { tier: "remote" },
+        );
+        const bobDevice = JSON.parse(stores.get(bob.account.id)!()!).devices[0];
+        const scope = JSON.parse(stores.get(alice.account.id)!()!).devices[0].scope;
+        const signer = await createBrowserDeviceSigner();
+        const privateKey = Uint8Array.from(bobDevice.signingPrivateKey);
+        const record = {
+          id: crypto.randomUUID(),
+          groupId: id,
+          predecessor: accepted.epochId,
+          epochId: crypto.randomUUID(),
+          authorAccountId: bob.account.id,
+          authorDeviceId: bobRoot!.deviceId,
+          authorEpochId: bobRoot!.epochId,
+          revision: accepted.revision,
+          membership: accepted.membership,
+          verification: accepted.verification,
+          history: accepted.history,
+          authorEnvelope: accepted.authorEnvelope,
+        };
+        const bytes = groupSuccessorSigningBytes(scope, record);
+        try {
+          const signature = await signer.sign(privateKey, bytes);
           expect(
-            await recipient.all(app.__e2ee_group_membership.where({ groupId: id }), {
-              tier: "remote",
-            }),
-          ).toEqual(members);
-          expect(
-            await recipient.all(app.__e2ee_group_successors.where({ groupId: id }), {
-              tier: "remote",
-            }),
-          ).toEqual(epochs);
-          expect(await recipient.all(app.notes, { tier: "remote" })).toEqual([]);
-          await expect(
-            recipient.e2ee.groups.add(id, { kind: "account", id: bob.account.id }).wait(),
-          ).rejects.toThrow();
-          expect(
-            await owner.all(app.__e2ee_group_membership.where({ groupId: id }), {
-              tier: "remote",
-            }),
-          ).toEqual(members);
-          const successors = app.__e2ee_group_successors.where({ groupId: id });
-          const accepted = (await owner.all(successors, { tier: "remote" }))[0]!;
-          const bobRoot = await recipient.one(
-            app.__e2ee_account_roots.where({ accountId: bob.account.id }),
-            { tier: "remote" },
-          );
-          const bobDevice = JSON.parse(stores.get(bob.account.id)!()!).devices[0];
-          const scope = JSON.parse(stores.get(alice.account.id)!()!).devices[0].scope;
-          const signer = await createBrowserDeviceSigner();
-          const privateKey = Uint8Array.from(bobDevice.signingPrivateKey);
-          const record = {
-            id: crypto.randomUUID(),
-            groupId: id,
-            predecessor: accepted.epochId,
-            epochId: crypto.randomUUID(),
-            authorAccountId: bob.account.id,
-            authorDeviceId: bobRoot!.deviceId,
-            authorEpochId: bobRoot!.epochId,
-            revision: accepted.revision,
-            membership: accepted.membership,
-            verification: accepted.verification,
-            history: accepted.history,
-            authorEnvelope: accepted.authorEnvelope,
-          };
-          const bytes = groupSuccessorSigningBytes(scope, record);
-          try {
-            const signature = await signer.sign(privateKey, bytes);
-            expect(
-              await signer.verify(Uint8Array.from(bobDevice.signingPublicKey), bytes, signature),
-            ).toBe(true);
-            const { id: rowId, ...values } = record;
-            // Jazz accepts this account-owned proposal, and Bob's device is
-            // still active. Neither fact makes him a remaining group member.
-            await recipient
-              .insert(app.__e2ee_group_successors, { ...values, signature }, { id: rowId })
-              .wait({ tier: "global" });
-          } finally {
-            privateKey.fill(0);
-          }
-          expect(
-            (await recipient.e2ee.devices.list()).find((device) => device.id === bobRoot!.deviceId),
-          ).toMatchObject({ state: "active" });
-          expect(await owner.all(successors, { tier: "remote" })).toHaveLength(2);
-          expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
-          expect(await recipient.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
-          expect(
-            await owner.all(app.__e2ee_group_deliveries.where({ groupId: id }), { tier: "remote" }),
-          ).toEqual(after);
+            await signer.verify(Uint8Array.from(bobDevice.signingPublicKey), bytes, signature),
+          ).toBe(true);
+          const { id: rowId, ...values } = record;
+          // Jazz accepts this account-owned proposal, and Bob's device is
+          // still active. Neither fact makes him a remaining group member.
+          await recipient
+            .insert(app.__e2ee_group_successors, { ...values, signature }, { id: rowId })
+            .wait({ tier: "global" });
+        } finally {
+          privateKey.fill(0);
         }
+        expect(
+          (await recipient.e2ee.devices.list()).find((device) => device.id === bobRoot!.deviceId),
+        ).toMatchObject({ state: "active" });
+        expect(await owner.all(successors, { tier: "remote" })).toHaveLength(2);
+        expect(await owner.e2ee.explain({ groupId: id })).toEqual({ state: "ready" });
+        expect(await recipient.e2ee.explain({ groupId: id })).toMatchObject({ state: "refused" });
+        expect(
+          await owner.all(app.__e2ee_group_deliveries.where({ groupId: id }), { tier: "remote" }),
+        ).toEqual(after);
       }
     } finally {
       await Promise.all(clients.map((client) => client.shutdown()));
