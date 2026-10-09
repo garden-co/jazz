@@ -92,7 +92,6 @@ async function withFixture(
         });
         stores.set(db, saved);
         clients.push(db);
-        if (enrolled) await db.e2ee.devices.list();
         return db;
       },
     });
@@ -218,6 +217,7 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
 
     // Later real enrolment cannot authorise either the earlier root or add.
     const recipient = await open(futureAccount, browser);
+    await recipient.e2ee.devices.list();
     expect(await owner.e2ee.explain({ groupId })).toEqual({ state: "ready" });
     expect(await mallory.e2ee.explain({ groupId: other.id })).toEqual({ state: "ready" });
     expect(await recipient.e2ee.explain({ groupId: other.id })).toMatchObject({ state: "refused" });
@@ -301,6 +301,7 @@ it("rejects recovery creation when a required ready group loses membership", asy
     const owner = await open(ownerAccount, adapters);
     const administratorAccount = await account();
     const administrator = await open(administratorAccount);
+    await administrator.e2ee.devices.list();
     const groupId = await readyGroup(owner);
     const control = await owner.e2ee.recovery.create().wait();
     await expectRecoveryPath(owner, control.material, groupId);

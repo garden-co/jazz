@@ -198,6 +198,8 @@ it("inspects inherited recovery coverage without repairing or staging group keys
     expect(parentPath.epochId).not.toBe(
       ready.groups.paths.find((path) => path.groupId === parent.id)!.epochId,
     );
+    expect(observer.saved()).toBeNull();
+    await observer.db.shutdown();
     const fresh = await open(bobAccount, true);
     failAfterHistory = true;
     await expect(fresh.db.e2ee.recovery.status(material)).rejects.toBe(sentinel);
@@ -219,11 +221,11 @@ it("inspects inherited recovery coverage without repairing or staging group keys
       ]),
     });
     await alice.e2ee.groups.remove(parent.id, { kind: "group", id: child.id }).wait();
-    const removed = await observer.db.e2ee.recovery.status(material);
+    const removed = await fresh.db.e2ee.recovery.status(material);
     if (removed.groups.validation !== "checked") throw new Error("Group coverage was not checked");
     expect(removed.groups.paths).toHaveLength(1);
     expect(removed.groups.paths[0]).toMatchObject({ groupId: child.id, validation: "validated" });
-    expect(observer.saved()).toBeNull();
+    expect(fresh.saved()).toBeNull();
     expect(await bob.all(app.__e2ee_device_requests, { tier: "remote" })).toEqual(requests);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));

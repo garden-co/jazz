@@ -56,7 +56,6 @@ it("protects every inherited path and restores both groups without ordinary deli
         },
       });
       clients.push(db);
-      await db.e2ee.devices.list();
       return db;
     };
     const alice = await open(await localAccountConfig(server.appId, server.url));

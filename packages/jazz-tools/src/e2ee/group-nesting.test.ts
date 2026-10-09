@@ -62,11 +62,11 @@ it("inherits child-group access, preserves an alternate path, and rotates after 
         },
       });
       clients.push(db);
-      await db.e2ee.devices.list();
       return { db, id: account.account.id, stored: () => saved! };
     };
     const { db: owner, stored } = await open();
     const { db: recipient, id: bobId } = await open();
+    await recipient.e2ee.devices.list();
     const parent = owner.e2ee.groups.create();
     await parent.wait();
     const child = owner.e2ee.groups.create();

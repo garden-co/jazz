@@ -296,7 +296,6 @@ it.each([
             },
           });
           clients.push(reopened);
-          await reopened.e2ee.devices.list();
           const expectUnpublished = async () => {
             expect(
               await pending.all(app.__e2ee_group_deliveries.where({ groupId: group.id }), {

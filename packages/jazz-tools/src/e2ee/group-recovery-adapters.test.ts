@@ -165,8 +165,8 @@ async function prepareAdapterMatrix() {
       expect(deliveries).toHaveLength(1);
     }
     // One cold native control covers automatic protector discovery for this history.
-    // Explicit cold recovery is covered by group-recovery-membership.test.ts;
-    // the fallback case below also verifies explicit use of the second root.
+    // Explicit cold recovery is covered by group-recovery-membership.test.ts
+    // and group-nested-recovery.test.ts.
     const recoveredStore = f.memoryStore();
     const normal = await f.open(f.native, recoveredStore);
     await readyStatus(normal, root, groupId);
@@ -367,9 +367,6 @@ describe("group recovery adapter classification and fallback", () => {
       expect(failedRoot).toBeDefined();
       const other = roots.find((root) => root.rootId !== failedRoot);
       if (!other) throw new Error("Missing independent second protector");
-      // Run the independent control even when implicit recovery fails on the baseline.
-      await active.e2ee.recovery.use(other.material).wait();
-      expect(await active.e2ee.explain({ groupId })).toEqual({ state: "ready" });
       expect(attempts).toContain(other.rootId);
       expect(implicit.ok).toBe(true);
       expect(implicitReadiness).toEqual({ state: "ready" });

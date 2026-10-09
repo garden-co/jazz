@@ -100,11 +100,11 @@ it("separates administration from key possession and self-removal, rejects forge
         },
       });
       clients.push(db);
-      await db.e2ee.devices.list();
       return db;
     };
     const owner = await open(alice);
     const recipient = await open(bob);
+    await recipient.e2ee.devices.list();
     const administrator = await open(admin);
     const sealed = owner.e2ee.groups.create();
     await sealed.wait();
