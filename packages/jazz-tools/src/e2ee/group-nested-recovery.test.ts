@@ -8,18 +8,23 @@ import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests
 import { groupSchema } from "./groups.js";
 import { withGroupTopologyPermissions } from "./group-topology.js";
 
-it("does not omit an undelivered inherited group from recovery protection and later restores both paths", async () => {
+it("protects every inherited path and restores both groups without ordinary delivery permission", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
     const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
-    const policies = definePermissions(app, ({ policy, session }) => {
+    const policies = definePermissions(app, ({ policy, session, allOf }) => {
       const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
       policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
       policy.__e2ee_group_membership.allowInsert.where({ authorAccountId: session.user.account });
       policy.__e2ee_group_successors.allowInsert.where({ authorAccountId: session.user.account });
       policy.__e2ee_group_deliveries.allowRead.where(authenticated);
-      policy.__e2ee_group_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+      policy.__e2ee_group_deliveries.allowInsert.where((row) =>
+        allOf([
+          { senderAccountId: session.user.account },
+          policy.__e2ee_groups.exists.where({ id: row.groupId, deviceId: row.senderDeviceId }),
+        ]),
+      );
       policy.__e2ee_group_recovery_deliveries.allowRead.where(authenticated);
       policy.__e2ee_group_recovery_deliveries.allowInsert.where({
         senderAccountId: session.user.account,
@@ -57,15 +62,14 @@ it("does not omit an undelivered inherited group from recovery protection and la
     const alice = await open(await localAccountConfig(server.appId, server.url));
     const bobAccount = await localAccountConfig(server.appId, server.url);
     const bob = await open(bobAccount);
-    const admin = await open(await localAccountConfig(server.appId, server.url));
     const parent = alice.e2ee.groups.create();
     await parent.wait();
     const child = bob.e2ee.groups.create();
     await child.wait();
-    // An authorised administrator without the parent key can record this edge,
-    // but cannot deliver the parent's key to its new inherited member.
-    await admin.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
-    expect(await admin.e2ee.explain({ groupId: parent.id })).toMatchObject({ state: "refused" });
+    // Ordinary policy lets Bob record this edge without having the parent key.
+    // The edge grants inherited membership, leaving its key unavailable.
+    expect(await bob.e2ee.explain({ groupId: parent.id })).toMatchObject({ state: "refused" });
+    await bob.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
     expect(
       await bob.all(
         app.__e2ee_group_deliveries.where({
@@ -100,7 +104,6 @@ it("does not omit an undelivered inherited group from recovery protection and la
     );
     await alice.shutdown();
     await bob.shutdown();
-    await admin.shutdown();
     // A fresh device has no old local store and no other live group key holder.
     const recovered = await open(bobAccount);
     const pending = (await recovered.e2ee.devices.list()).find(
@@ -109,10 +112,19 @@ it("does not omit an undelivered inherited group from recovery protection and la
     expect(pending).toBeDefined();
     await recovered.e2ee.recovery.use(material).wait();
     expect(await recovered.e2ee.devices.list()).toContainEqual(
-      expect.objectContaining({ id: pending.id, state: "active" }),
+      expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
     );
     expect(await recovered.e2ee.explain({ groupId: child.id })).toEqual({ state: "ready" });
     expect(await recovered.e2ee.explain({ groupId: parent.id })).toEqual({ state: "ready" });
+    // This clean cold-recovery control also covers read-only groups. Neither
+    // creator is online, and the replacement cannot publish ordinary deliveries.
+    for (const groupId of [parent.id, child.id])
+      expect(
+        await recovered.all(
+          app.__e2ee_group_deliveries.where({ groupId, recipientDeviceId: pending.id }),
+          { tier: "remote" },
+        ),
+      ).toEqual([]);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

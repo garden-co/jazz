@@ -8,7 +8,7 @@ import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests
 import { groupSchema } from "./groups.js";
 import { createBrowserKeyEnvelope } from "./browser.js";
 
-it("recovers read-only groups past a malformed candidate and retries interrupted device-loss recovery", async () => {
+it("retries interrupted read-only group recovery past a malformed candidate", async () => {
   const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
   const policies = definePermissions(app, ({ policy, session, allOf }) => {
     const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
@@ -118,68 +118,58 @@ it("recovers read-only groups past a malformed candidate and retries interrupted
     expect(injected).toBe(true);
     await first.shutdown();
 
-    // The earlier malformed candidate must not poison protection or either cold recovery.
-    // Successful and interrupted recovery each use a fresh store.
-    // Reuse preparation, closing each recovered client before opening the next.
-    for (const interrupted of [false, true]) {
-      // No old local store or live key holder is available to the replacement.
-      const recoveredStore = store();
-      let interrupt = interrupted;
-      let recoveryOpens = 0;
-      const second = await createDb({
-        ...account,
-        e2ee: {
-          app,
-          store: recoveredStore,
-          crypto: {
-            keyEnvelope: {
-              ...keys,
-              async open(pair, context, envelope) {
-                if (
-                  interrupt &&
-                  new TextDecoder().decode(context).includes("__e2ee_group_recovery_deliveries") &&
-                  ++recoveryOpens === 2
-                ) {
-                  throw new Error("Injected later group recovery failure");
-                }
-                return keys.open(pair, context, envelope);
-              },
+    // Clean cold read-only recovery is covered by group-nested-recovery.test.ts.
+    // This replacement has a fresh store and no live key holder, and must retry
+    // after a failure partway through restoring the two groups.
+    const recoveredStore = store();
+    let interrupt = true;
+    let recoveryOpens = 0;
+    const second = await createDb({
+      ...account,
+      e2ee: {
+        app,
+        store: recoveredStore,
+        crypto: {
+          keyEnvelope: {
+            ...keys,
+            async open(pair, context, envelope) {
+              if (
+                interrupt &&
+                new TextDecoder().decode(context).includes("__e2ee_group_recovery_deliveries") &&
+                ++recoveryOpens === 2
+              ) {
+                throw new Error("Injected later group recovery failure");
+              }
+              return keys.open(pair, context, envelope);
             },
           },
         },
-      });
-      clients.push(second);
-      try {
-        const pending = (await second.e2ee.devices.list()).find(
-          (device) => device.state === "pending",
-        )!;
-        expect(pending).toBeDefined();
-        if (interrupted) {
-          await expect(second.e2ee.recovery.use(material).wait()).rejects.toThrow();
-          expect(recoveryOpens).toBe(2);
-          interrupt = false;
-        }
-        await second.e2ee.recovery.use(material).wait();
-        expect(await second.e2ee.devices.list()).toContainEqual(
-          expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
-        );
-        expect(await second.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
-        expect(await second.e2ee.explain({ groupId: additional.id })).toEqual({
-          state: "ready",
-        });
-        // Recovery makes both keys usable without bypassing creator-only delivery policy.
-        for (const groupId of [group.id, additional.id])
-          expect(
-            await second.all(
-              app.__e2ee_group_deliveries.where({ groupId, recipientDeviceId: pending.id }),
-              { tier: "remote" },
-            ),
-          ).toEqual([]);
-      } finally {
-        // The next replacement must restore keys from recovery material alone.
-        await second.shutdown();
-      }
-    }
+      },
+    });
+    clients.push(second);
+    const pending = (await second.e2ee.devices.list()).find(
+      (device) => device.state === "pending",
+    )!;
+    expect(pending).toBeDefined();
+    await expect(second.e2ee.recovery.use(material).wait()).rejects.toThrow();
+    expect(recoveryOpens).toBe(2);
+    interrupt = false;
+    await second.e2ee.recovery.use(material).wait();
+    expect(await second.e2ee.devices.list()).toContainEqual(
+      expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
+    );
+    expect(await second.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
+    expect(await second.e2ee.explain({ groupId: additional.id })).toEqual({
+      state: "ready",
+    });
+    // Recovery makes both keys usable without bypassing creator-only delivery policy.
+    for (const groupId of [group.id, additional.id])
+      expect(
+        await second.all(
+          app.__e2ee_group_deliveries.where({ groupId, recipientDeviceId: pending.id }),
+          { tier: "remote" },
+        ),
+      ).toEqual([]);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
