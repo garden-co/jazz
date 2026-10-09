@@ -3,9 +3,11 @@ import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createNativeCrypto } from "./native.js";
+import { readAccountMembership } from "./public-membership.js";
+import { recoveryRootBytes } from "./recovery-format.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
-it("revokes a device with a fresh epoch delivered only to remaining devices", async () => {
+it("rejects racing recovery registration, retries rotation and retains independent recovery", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const delivered: { recipient: Uint8Array; secret: Uint8Array }[] = [];
@@ -19,6 +21,7 @@ it("revokes a device with a fresh epoch delivered only to remaining devices", as
     });
     const account = await localAccountConfig(server.appId, server.url);
     const adapters = await createNativeCrypto();
+    let beforeRotationSeal: (() => Promise<void>) | undefined;
     const open = async () => {
       let saved: string | null = null;
       const db = await createDb({
@@ -37,6 +40,11 @@ it("revokes a device with a fresh epoch delivered only to remaining devices", as
             keyEnvelope: {
               ...adapters.keyEnvelope,
               async seal(recipient, context, secret) {
+                if (new TextDecoder().decode(context).includes("jazz.e2ee.account-successor.v1")) {
+                  const action = beforeRotationSeal;
+                  beforeRotationSeal = undefined;
+                  await action?.();
+                }
                 delivered.push({ recipient: recipient.slice(), secret: secret.slice() });
                 return adapters.keyEnvelope.seal(recipient, context, secret);
               },
@@ -45,11 +53,11 @@ it("revokes a device with a fresh epoch delivered only to remaining devices", as
         },
       });
       clients.push(db);
-      return db;
+      return { db, readStore: () => saved };
     };
-    const first = await open();
+    const { db: first } = await open();
     const [creator] = await first.e2ee.devices.list();
-    const second = await open();
+    const { db: second } = await open();
     const removed = (await second.e2ee.devices.list()).find((d) => d.id !== creator!.id)!;
     await first.e2ee.devices.approve(removed.id).wait();
     const oldSecrets = delivered.map((item) => item.secret.slice());
@@ -69,7 +77,7 @@ it("revokes a device with a fresh epoch delivered only to remaining devices", as
       expect(await db.e2ee.devices.list()).toContainEqual(
         expect.objectContaining({ id: removed.id, state: "revoked" }),
       );
-    const third = await open();
+    const { db: third, readStore: thirdStore } = await open();
     const pending = (await third.e2ee.devices.list()).find(
       (d) => d.id !== creator!.id && d.id !== removed.id,
     )!;
@@ -79,6 +87,138 @@ it("revokes a device with a fresh epoch delivered only to remaining devices", as
     await first.e2ee.devices.approve(pending.id).wait();
     expect(await third.e2ee.devices.list()).toContainEqual(
       expect.objectContaining({ id: pending.id, state: "active" }),
+    );
+
+    // Continue the already-approved device workflow into recovery. The recovery
+    // root's author and the remaining approver are both revoked in turn, and
+    // every earlier client is closed before each fresh device recovers.
+    const privateSuccessors = await first.all(deviceRequestApp.__e2ee_account_successors, {
+      tier: "remote",
+    });
+    const publicSuccessors = await first.all(deviceRequestApp.__e2ee_public_account_successors, {
+      tier: "remote",
+    });
+    let material: string | undefined;
+    beforeRotationSeal = async () => {
+      ({ material } = await first.e2ee.recovery.create().wait());
+    };
+    await expect(third.e2ee.devices.revoke(creator!.id).wait()).rejects.toThrow(/conflict|stale/i);
+    expect(material).toBeTypeOf("string");
+    expect(await first.all(deviceRequestApp.__e2ee_account_successors, { tier: "remote" })).toEqual(
+      privateSuccessors,
+    );
+    expect(
+      await first.all(deviceRequestApp.__e2ee_public_account_successors, { tier: "remote" }),
+    ).toEqual(publicSuccessors);
+    expect(await first.e2ee.devices.list()).toContainEqual(
+      expect.objectContaining({ id: creator!.id, state: "active" }),
+    );
+    const roots = await first.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" });
+    expect(roots).toHaveLength(1);
+    await third.e2ee.devices.revoke(creator!.id).wait();
+    expect(await third.e2ee.devices.list()).toContainEqual(
+      expect.objectContaining({ id: creator!.id, state: "revoked" }),
+    );
+    await Promise.all(clients.map((db) => db.shutdown()));
+
+    const { db: recovered } = await open();
+    const recovering = (await recovered.e2ee.devices.list()).find(
+      (device) => device.state === "pending",
+    )!;
+    expect(recovering).toBeDefined();
+    await recovered.e2ee.recovery.use(material!).wait();
+    expect(await recovered.e2ee.devices.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: recovering.id, state: "active" }),
+        expect.objectContaining({ id: creator!.id, state: "revoked" }),
+        expect.objectContaining({ id: removed.id, state: "revoked" }),
+      ]),
+    );
+    expect(await recovered.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" })).toEqual(
+      roots,
+    );
+    // The approved, non-founding device can register authority while active.
+    // Its retained signing key must not confer authority after revocation.
+    const observer = await createDb(await localAccountConfig(server.appId, server.url));
+    clients.push(observer);
+    const device = JSON.parse(thirdStore()!).devices[0];
+    const signingKey = Uint8Array.from(device.signingPrivateKey);
+    const recoverySigner = await adapters.deviceSigner.createKeyPair();
+    const recoveryKeys = await adapters.keyEnvelope.createKeyPair();
+    recoverySigner.privateKey.fill(0);
+    recoveryKeys.privateKey.fill(0);
+    const membership = () =>
+      readAccountMembership(observer, account.account.id, device.scope, adapters.deviceSigner);
+    const register = async (epochId: string) => {
+      const root = {
+        id: globalThis.crypto.randomUUID(),
+        accountId: account.account.id,
+        epochId,
+        signerId: pending.id,
+        signingPublicKey: recoverySigner.publicKey,
+        signingMechanism: adapters.deviceSigner.mechanism.id,
+        signingVersion: adapters.deviceSigner.mechanism.version,
+        publicKey: recoveryKeys.publicKey,
+        mechanism: adapters.keyEnvelope.mechanism.id,
+        version: adapters.keyEnvelope.mechanism.version,
+      };
+      const signature = await adapters.deviceSigner.sign(
+        signingKey,
+        recoveryRootBytes(device.scope, root),
+      );
+      const { id, ...columns } = root;
+      // Raw account writes publish the signature even though its original
+      // signing client is offline. Public replay decides its authority.
+      await recovered
+        .insert(deviceRequestApp.__e2ee_recovery_roots, { ...columns, signature }, { id })
+        .wait({ tier: "global" });
+      return id;
+    };
+    let rootsAfterRegistrations: typeof roots;
+    try {
+      const initial = await membership();
+      expect(initial.active.has(pending.id)).toBe(true);
+      const accepted = await register(initial.epochId);
+      await recovered.e2ee.devices.revoke(pending.id).wait();
+      const revoked = await membership();
+      expect([...revoked.revoked]).toContain(pending.id);
+      const rejected = await register(revoked.epochId);
+      const result = await membership();
+      expect(result.recoveryRoots.map((root) => root.id).sort()).toEqual(
+        [...roots.map((root) => root.id), accepted].sort(),
+      );
+      expect(result.recoveryRoots.map((root) => root.id)).not.toContain(rejected);
+      expect(
+        await observer.all(deviceRequestApp.__e2ee_account_identities, { tier: "remote" }),
+      ).toEqual([]);
+      rootsAfterRegistrations = await recovered.all(deviceRequestApp.__e2ee_recovery_roots, {
+        tier: "remote",
+      });
+      expect(rootsAfterRegistrations.map((root) => root.id).sort()).toEqual(
+        [...roots.map((root) => root.id), accepted, rejected].sort(),
+      );
+      expect(
+        rootsAfterRegistrations.filter((root) => roots.some((prior) => prior.id === root.id)),
+      ).toEqual(roots);
+    } finally {
+      signingKey.fill(0);
+    }
+    await Promise.all(clients.map((db) => db.shutdown()));
+
+    const { db: reopened } = await open();
+    const last = (await reopened.e2ee.devices.list()).find((device) => device.state === "pending")!;
+    expect(last).toBeDefined();
+    await reopened.e2ee.recovery.use(material!).wait();
+    expect(await reopened.e2ee.devices.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: last.id, state: "active" }),
+        expect.objectContaining({ id: creator!.id, state: "revoked" }),
+        expect.objectContaining({ id: removed.id, state: "revoked" }),
+        expect.objectContaining({ id: pending.id, state: "revoked" }),
+      ]),
+    );
+    expect(await reopened.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" })).toEqual(
+      rootsAfterRegistrations,
     );
   } finally {
     for (const item of delivered) item.secret.fill(0);
