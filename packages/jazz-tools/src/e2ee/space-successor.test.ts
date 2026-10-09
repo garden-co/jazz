@@ -40,6 +40,30 @@ it("binds space coordinates, predecessor, membership and encrypted history to th
     const bytes = spaceSuccessorBytes("fixture", root, record);
     const signature = await signer.sign(device.privateKey, bytes);
     expect(await signer.verify(device.publicKey, bytes, signature)).toBe(true);
+    // Generated successor/device/epoch IDs accept v7 alongside v4. The space
+    // root still accepts its deterministic v8 identity, unchanged by this rule.
+    const v8Root = { ...root, id: "11111111-1111-8111-8111-111111111111" };
+    const v7Record = {
+      ...record,
+      id: "66666666-6666-7666-8666-666666666666",
+      spaceId: v8Root.id,
+      predecessor: "33333333-3333-7333-8333-333333333333",
+      epochId: "22222222-2222-7222-8222-222222222222",
+      authorDeviceId: "44444444-4444-7444-8444-444444444444",
+      authorEpochId: "55555555-5555-7555-8555-555555555555",
+      membership: encoder.encode('[["account-id","55555555-5555-7555-8555-555555555555"]]'),
+    };
+    const v7Bytes = spaceSuccessorBytes("fixture", v8Root, v7Record);
+    const v7Signature = await signer.sign(device.privateKey, v7Bytes);
+    expect(await signer.verify(device.publicKey, v7Bytes, v7Signature)).toBe(true);
+    expect(await signer.verify(device.publicKey, v7Bytes, signature)).toBe(false);
+    expect(
+      await signer.verify(
+        device.publicKey,
+        spaceSuccessorBytes("fixture", v8Root, { ...v7Record, epochId: record.epochId }),
+        v7Signature,
+      ),
+    ).toBe(false);
     for (const changes of [
       { id: other },
       { predecessor: other },

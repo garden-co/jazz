@@ -226,7 +226,10 @@ root. A public diagnostic with that code from an operational adapter does not.
 `epochId`, `authorAccountId`, `authorDeviceId` and `authorEpochId`, plus byte
 columns `revision`, `membership`, `verification`, `history`, `authorEnvelope`
 and `signature`. These are ordinary managed Jazz rows, not a new core wire
-message. Predecessor and successor epoch IDs must differ; replay rejects epoch
+message. Proposal, predecessor, epoch and author-device/account-epoch IDs accept
+lowercase UUIDv4 or UUIDv7, following the account format compatibility rule.
+Deterministic space root IDs retain their UUIDv8 derivation.
+Predecessor and successor epoch IDs must differ; replay rejects epoch
 reuse and proposals that do not name the accepted predecessor.
 
 The transcript reuses `JE2C` v1 and policy `jazz.e2ee.space.v1`. Scope,
