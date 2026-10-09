@@ -218,80 +218,55 @@ it("retires one recovery root with an epoch rotation and preserves other authori
     expect(await recovering.e2ee.devices.list()).toContainEqual(
       expect.objectContaining({ id: pending.id, state: "active" }),
     );
-  } finally {
-    await Promise.all(clients.map((client) => client.shutdown()));
-    await server.stop();
-  }
-}, 60_000);
 
-it("does not accept a recovery approval at the retirement transaction position", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  const clients: Db[] = [];
-  try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: deviceRequestApp,
-      permissions: deviceRequestPermissions,
-    });
-    const account = await localAccountConfig(server.appId, server.url);
-    const crypto = await createNativeCrypto();
-    const stores: MemoryStore[] = [];
-    const open = async () => {
-      const local = memoryStore();
-      stores.push(local);
-      const client = await createDb({ ...account, e2ee: { store: local.store, crypto } });
-      clients.push(client);
-      return client;
-    };
-    const owner = await open();
-    const [creator] = await owner.e2ee.devices.list();
-    const { material } = await owner.e2ee.recovery.create().wait();
-    const rootId = JSON.parse(material).rootId as string;
-    const pendingClient = await open();
-    const pending = (await pendingClient.e2ee.devices.list()).find(
-      (device) => device.id !== creator!.id,
-    )!;
-    const rootMaterial = JSON.parse(material) as { signingPrivateKey: number[] };
-    const identity = await owner.one(
-      deviceRequestApp.__e2ee_account_identities.where({ id: account.account.id }),
-      { tier: "remote" },
+    // Continue with the retained root: an approval at its retirement's exact
+    // authority position must not add another member or block the transition.
+    await Promise.all(
+      [second, recoveryMemberClient, recovering].map((client) => client.shutdown()),
     );
-    const ownerStore = JSON.parse((await stores[0]!.store.read())!) as {
-      devices: { id: string; scope: string; signingPrivateKey: number[] }[];
+    const orderingClient = await open();
+    const orderingPending = (await orderingClient.e2ee.devices.list()).find(
+      (device) => device.state === "pending",
+    )!;
+    expect(orderingPending).toBeDefined();
+    const membership = [creator!.id, secondDevice.id, recoveryMember.id, pending.id].sort();
+    const revision = (
+      await owner.all(deviceRequestApp.__e2ee_public_device_approvals, { tier: "remote" })
+    )
+      .filter((row) => row.epochId === after.account.epochId)
+      .map((row) => row.id)
+      .sort();
+    const rootMaterial = JSON.parse(retained.material) as { signingPrivateKey: number[] };
+    const orderingStore = JSON.parse((await stores[stores.length - 1]!.store.read())!) as {
+      devices: { id: string; signingPrivateKey: number[] }[];
     };
-    const ownerDevice = ownerStore.devices.find((device) => device.id === creator!.id)!;
-    const pendingStore = JSON.parse((await stores[1]!.store.read())!) as {
-      devices: { id: string; scope: string; signingPrivateKey: number[] }[];
-    };
-    const pendingDeviceKey = Uint8Array.from(
-      pendingStore.devices.find((device) => device.id === pending.id)!.signingPrivateKey,
+    const orderingDeviceKey = Uint8Array.from(
+      orderingStore.devices.find((device) => device.id === orderingPending.id)!.signingPrivateKey,
     );
     const ownerDeviceKey = Uint8Array.from(ownerDevice.signingPrivateKey);
     const rootSignatureKey = Uint8Array.from(rootMaterial.signingPrivateKey);
     const approval = {
       id: globalThis.crypto.randomUUID(),
       accountId: account.account.id,
-      epochId: identity!.epochId,
-      deviceId: pending.id,
-      signerId: pending.id,
-      recoveryRootId: rootId,
+      epochId: after.account.epochId!,
+      deviceId: orderingPending.id,
+      signerId: orderingPending.id,
+      recoveryRootId: retainedRootId,
     };
     const successor = {
       id: globalThis.crypto.randomUUID(),
       accountId: account.account.id,
-      predecessor: identity!.epochId,
+      predecessor: after.account.epochId!,
       epochId: globalThis.crypto.randomUUID(),
       signerId: creator!.id,
       action: "retire-recovery-root" as const,
-      retiredRecoveryRootId: rootId,
-      membership: new TextEncoder().encode(JSON.stringify([creator!.id])),
-      revision: new TextEncoder().encode("[]"),
+      retiredRecoveryRootId: retainedRootId,
+      membership: new TextEncoder().encode(JSON.stringify(membership)),
+      revision: new TextEncoder().encode(JSON.stringify(revision)),
     };
     try {
       const approvalBytes = publicDeviceApprovalBytes(ownerDevice.scope, approval);
-      const approvalSignature = await crypto.deviceSigner.sign(pendingDeviceKey, approvalBytes);
+      const approvalSignature = await crypto.deviceSigner.sign(orderingDeviceKey, approvalBytes);
       const recoverySignature = await crypto.deviceSigner.sign(rootSignatureKey, approvalBytes);
       const successorBytes = publicSuccessorSigningBytes(ownerDevice.scope, successor);
       const successorSignature = await crypto.deviceSigner.sign(ownerDeviceKey, successorBytes);
@@ -317,11 +292,12 @@ it("does not accept a recovery approval at the retirement transaction position",
         crypto.deviceSigner,
       );
       expect(replayed.epochId).toBe(successor.epochId);
-      expect(replayed.active.has(pending.id)).toBe(false);
-      expect(replayed.active.has(creator!.id)).toBe(true);
+      expect(replayed.active.has(orderingPending.id)).toBe(false);
+      expect([...replayed.active].sort()).toEqual(membership);
+      expect(replayed.recoveryRoots).toEqual([]);
     } finally {
       rootSignatureKey.fill(0);
-      pendingDeviceKey.fill(0);
+      orderingDeviceKey.fill(0);
       ownerDeviceKey.fill(0);
     }
   } finally {

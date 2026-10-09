@@ -7,16 +7,22 @@ import {
   type RotatedRecovery,
 } from "./fixtures/recovery-verifier-fixture.js";
 
-describe.each(["status", "use"] as const)("recovery %s adapter boundaries", (operation) => {
-  let history: RotatedRecovery | undefined;
-  beforeAll(async () => {
-    history = await createRotatedRecovery();
-  }, 60_000);
-  afterAll(async () => {
-    await history?.shutdown();
-    history = undefined;
-  });
+let history: RotatedRecovery | undefined;
+// Track only devices whose successful recovery this suite has already checked.
+// Status must preserve that exact membership even when use cases run first.
+const activeDeviceIds = new Set<string>();
+beforeAll(async () => {
+  history = await createRotatedRecovery();
+  activeDeviceIds.clear();
+  activeDeviceIds.add(history.creatorId);
+}, 60_000);
+afterAll(async () => {
+  await history?.shutdown();
+  history = undefined;
+  activeDeviceIds.clear();
+});
 
+describe.each(["status", "use"] as const)("recovery %s adapter boundaries", (operation) => {
   it.each(["rejected-open", "thrown-open", "thrown-confirmation", "thrown-history"] as const)(
     `sanitises %s and still falls back to a usable protector during ${operation}`,
     async (failureAt) => {
@@ -73,7 +79,7 @@ describe.each(["status", "use"] as const)("recovery %s adapter boundaries", (ope
             },
           },
         }),
-        async ({ client, material, creatorId, saved }) => {
+        async ({ client, material, saved }) => {
           const devices = operation === "use" ? await client.e2ee.devices.list() : null;
           // Every use case starts with its own pending device. Prior cases may
           // have recovered other devices, but cannot satisfy this one's checks.
@@ -105,7 +111,7 @@ describe.each(["status", "use"] as const)("recovery %s adapter boundaries", (ope
           if (operation === "status") {
             expect(await client.e2ee.recovery.status()).toMatchObject({
               configured: true,
-              account: { validation: "validated", activeDeviceIds: [creatorId] },
+              account: { validation: "validated", activeDeviceIds: [...activeDeviceIds].sort() },
             });
             expect(saved()).toBeNull();
             expect(await recoveryRecords(client)).toEqual(before);
@@ -131,6 +137,7 @@ describe.each(["status", "use"] as const)("recovery %s adapter boundaries", (ope
                 keyReadiness: "verified",
               }),
             );
+            activeDeviceIds.add(pending.id);
           }
           expect(injected).toBe(2);
           expect(protectorsOpened).toBe(2);
@@ -236,7 +243,7 @@ describe.each(["status", "use"] as const)("recovery %s adapter boundaries", (ope
           if (operation === "status") {
             expect(await client.e2ee.recovery.status(value)).toMatchObject({
               configured: true,
-              account: { validation: "validated", activeDeviceIds: [creatorId] },
+              account: { validation: "validated", activeDeviceIds: [...activeDeviceIds].sort() },
             });
             expect(await recoveryRecords(client)).toEqual(before);
             expect(saved()).toBeNull();
@@ -266,6 +273,7 @@ describe.each(["status", "use"] as const)("recovery %s adapter boundaries", (ope
                 }),
               ]),
             );
+            activeDeviceIds.add(pending.id);
           }
         },
       );
