@@ -3,6 +3,8 @@ import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createNativeCrypto } from "./native.js";
+import { readAccountMembership } from "./public-membership.js";
+import { recoveryRootBytes } from "./recovery-format.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
 it("rejects racing recovery registration, retries rotation and retains independent recovery", async () => {
@@ -51,11 +53,11 @@ it("rejects racing recovery registration, retries rotation and retains independe
         },
       });
       clients.push(db);
-      return db;
+      return { db, readStore: () => saved };
     };
-    const first = await open();
+    const { db: first } = await open();
     const [creator] = await first.e2ee.devices.list();
-    const second = await open();
+    const { db: second } = await open();
     const removed = (await second.e2ee.devices.list()).find((d) => d.id !== creator!.id)!;
     await first.e2ee.devices.approve(removed.id).wait();
     const oldSecrets = delivered.map((item) => item.secret.slice());
@@ -75,7 +77,7 @@ it("rejects racing recovery registration, retries rotation and retains independe
       expect(await db.e2ee.devices.list()).toContainEqual(
         expect.objectContaining({ id: removed.id, state: "revoked" }),
       );
-    const third = await open();
+    const { db: third, readStore: thirdStore } = await open();
     const pending = (await third.e2ee.devices.list()).find(
       (d) => d.id !== creator!.id && d.id !== removed.id,
     )!;
@@ -119,7 +121,7 @@ it("rejects racing recovery registration, retries rotation and retains independe
     );
     await Promise.all(clients.map((db) => db.shutdown()));
 
-    const recovered = await open();
+    const { db: recovered } = await open();
     const recovering = (await recovered.e2ee.devices.list()).find(
       (device) => device.state === "pending",
     )!;
@@ -135,10 +137,75 @@ it("rejects racing recovery registration, retries rotation and retains independe
     expect(await recovered.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" })).toEqual(
       roots,
     );
-    await recovered.e2ee.devices.revoke(pending.id).wait();
-    await recovered.shutdown();
+    // The approved, non-founding device can register authority while active.
+    // Its retained signing key must not confer authority after revocation.
+    const observer = await createDb(await localAccountConfig(server.appId, server.url));
+    clients.push(observer);
+    const device = JSON.parse(thirdStore()!).devices[0];
+    const signingKey = Uint8Array.from(device.signingPrivateKey);
+    const recoverySigner = await adapters.deviceSigner.createKeyPair();
+    const recoveryKeys = await adapters.keyEnvelope.createKeyPair();
+    recoverySigner.privateKey.fill(0);
+    recoveryKeys.privateKey.fill(0);
+    const membership = () =>
+      readAccountMembership(observer, account.account.id, device.scope, adapters.deviceSigner);
+    const register = async (epochId: string) => {
+      const root = {
+        id: globalThis.crypto.randomUUID(),
+        accountId: account.account.id,
+        epochId,
+        signerId: pending.id,
+        signingPublicKey: recoverySigner.publicKey,
+        signingMechanism: adapters.deviceSigner.mechanism.id,
+        signingVersion: adapters.deviceSigner.mechanism.version,
+        publicKey: recoveryKeys.publicKey,
+        mechanism: adapters.keyEnvelope.mechanism.id,
+        version: adapters.keyEnvelope.mechanism.version,
+      };
+      const signature = await adapters.deviceSigner.sign(
+        signingKey,
+        recoveryRootBytes(device.scope, root),
+      );
+      const { id, ...columns } = root;
+      // Raw account writes publish the signature even though its original
+      // signing client is offline. Public replay decides its authority.
+      await recovered
+        .insert(deviceRequestApp.__e2ee_recovery_roots, { ...columns, signature }, { id })
+        .wait({ tier: "global" });
+      return id;
+    };
+    let rootsAfterRegistrations: typeof roots;
+    try {
+      const initial = await membership();
+      expect(initial.active.has(pending.id)).toBe(true);
+      const accepted = await register(initial.epochId);
+      await recovered.e2ee.devices.revoke(pending.id).wait();
+      const revoked = await membership();
+      expect([...revoked.revoked]).toContain(pending.id);
+      const rejected = await register(revoked.epochId);
+      const result = await membership();
+      expect(result.recoveryRoots.map((root) => root.id).sort()).toEqual(
+        [...roots.map((root) => root.id), accepted].sort(),
+      );
+      expect(result.recoveryRoots.map((root) => root.id)).not.toContain(rejected);
+      expect(
+        await observer.all(deviceRequestApp.__e2ee_account_identities, { tier: "remote" }),
+      ).toEqual([]);
+      rootsAfterRegistrations = await recovered.all(deviceRequestApp.__e2ee_recovery_roots, {
+        tier: "remote",
+      });
+      expect(rootsAfterRegistrations.map((root) => root.id).sort()).toEqual(
+        [...roots.map((root) => root.id), accepted, rejected].sort(),
+      );
+      expect(
+        rootsAfterRegistrations.filter((root) => roots.some((prior) => prior.id === root.id)),
+      ).toEqual(roots);
+    } finally {
+      signingKey.fill(0);
+    }
+    await Promise.all(clients.map((db) => db.shutdown()));
 
-    const reopened = await open();
+    const { db: reopened } = await open();
     const last = (await reopened.e2ee.devices.list()).find((device) => device.state === "pending")!;
     expect(last).toBeDefined();
     await reopened.e2ee.recovery.use(material!).wait();
@@ -151,7 +218,7 @@ it("rejects racing recovery registration, retries rotation and retains independe
       ]),
     );
     expect(await reopened.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" })).toEqual(
-      roots,
+      rootsAfterRegistrations,
     );
   } finally {
     for (const item of delivered) item.secret.fill(0);
