@@ -154,19 +154,13 @@ it.each([
       // Signature publication checks only need a reader, not another enrolled device.
       // Signed malformed resumption uses the approved reader as its raw writer.
       // Clean and poisoned delivery histories each keep a reopened creator.
-      // Interrupted groups also retain their own rejection and same-client retry.
+      // Clean, faulty and signed-malformed resumption keep separate interrupted groups.
       // Only account enrolment, approval and the independent readers are shared.
       const scenarios =
         variant === "delivery-candidates"
           ? (["ordinary", "mixed-deliveries"] as const)
           : variant === "resume-staging"
-            ? ([
-                "resume",
-                "resume-wrong-key",
-                "resume-wrong-epoch",
-                "resume-bad-envelope",
-                "resume-signed-malformed",
-              ] as const)
+            ? (["resume", "resume-faults", "resume-signed-malformed"] as const)
             : variant === "invalid-signatures"
               ? (["root-signature", "delivery-signature"] as const)
               : [variant];
@@ -292,18 +286,20 @@ it.each([
           else expect(interruptedDeliveries).toEqual([]);
           await first.shutdown();
           const saved = (await retained.read())!;
-          if (scenario === "resume-wrong-key" || scenario === "resume-wrong-epoch")
-            await retained.update((current) => {
-              const state = JSON.parse(current!);
+          const corruptStaging = async (fault: "key" | "epoch") =>
+            retained.update(() => {
+              const state = JSON.parse(saved);
               const staged = state.stagedGroupKeysV1.find(
                 (entry: { groupId: string }) => entry.groupId === group.id,
               );
-              if (scenario === "resume-wrong-key") staged.payload[0] ^= 1;
+              if (fault === "key") staged.payload[0] ^= 1;
               else staged.epochId = "99999999-9999-4999-8999-999999999999";
               return JSON.stringify(state);
             });
+          if (scenario === "resume-faults") await corruptStaging("key");
           if (scenario === "resume-revoked") await second!.e2ee.devices.revoke(creator.id).wait();
           let badEnvelope = false;
+          let badEnvelopeHits = 0;
           const reopened = await createDb({
             ...account,
             e2ee: {
@@ -316,7 +312,11 @@ it.each([
                     const action = beforeSeal;
                     beforeSeal = undefined;
                     await action?.();
-                    return badEnvelope ? new Uint8Array([1]) : keys.seal(publicKey, context, key);
+                    if (badEnvelope) {
+                      badEnvelopeHits++;
+                      return new Uint8Array([1]);
+                    }
+                    return keys.seal(publicKey, context, key);
                   },
                 },
               },
@@ -324,21 +324,41 @@ it.each([
           });
           clients.push(reopened);
           await reopened.e2ee.devices.list();
-          badEnvelope = scenario === "resume-bad-envelope";
-          if (scenario !== "resume" && scenario !== "resume-signed-malformed") {
-            if (scenario === "resume-revoked")
-              expect(await reopened.e2ee.explain({ groupId: group.id })).toMatchObject({
-                state: "refused",
-              });
-            else await expect(reopened.e2ee.explain({ groupId: group.id })).rejects.toThrow();
+          const expectUnpublished = async () => {
             expect(
               await pending.all(app.__e2ee_group_deliveries.where({ groupId: group.id }), {
                 tier: "remote",
               }),
             ).toEqual([]);
             expect(JSON.parse((await retained.read())!).stagedGroupKeysV1).toHaveLength(1);
-            if (scenario === "resume-revoked") return;
-            // Restoring the original host record permits retry; no device reset is needed.
+            expect(
+              await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
+            ).toEqual(original);
+          };
+          if (scenario === "resume-revoked") {
+            expect(await reopened.e2ee.explain({ groupId: group.id })).toMatchObject({
+              state: "refused",
+            });
+            await expectUnpublished();
+            return;
+          }
+          if (scenario === "resume-faults") {
+            // Each attempt reads staging from the host store. Correct one fault
+            // before introducing the next, then finish on this same reopened client.
+            await expect(reopened.e2ee.explain({ groupId: group.id })).rejects.toThrow(
+              "Unable to authenticate E2EE group key",
+            );
+            await expectUnpublished();
+            await corruptStaging("epoch");
+            await expect(reopened.e2ee.explain({ groupId: group.id })).rejects.toThrow(
+              "Staged E2EE group epoch does not match",
+            );
+            await expectUnpublished();
+            await retained.update(() => saved);
+            badEnvelope = true;
+            await expect(reopened.e2ee.explain({ groupId: group.id })).rejects.toThrow();
+            expect(badEnvelopeHits).toBeGreaterThan(0);
+            await expectUnpublished();
             await retained.update(() => saved);
             badEnvelope = false;
           }
@@ -346,7 +366,7 @@ it.each([
             state: "ready",
           });
           // Check cross-device delivery on clean resume and malformed-candidate
-          // replacement. The staging fault cases prove their own rejection/retry.
+          // replacement. The fault sequence proves each rejection and the final retry.
           if (scenario === "resume" || scenario === "resume-signed-malformed")
             expect(await second!.e2ee.explain({ groupId: group.id })).toMatchObject({
               state: "ready",
@@ -395,6 +415,11 @@ it.each([
               await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
             ).toBeNull();
           signatureFault = undefined;
+          if (scenario === "root-signature") continue;
+          // The delivery-signature attempt already retried root signing successfully.
+          expect(
+            await pending.one(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
+          ).not.toBeNull();
           const retry = first.e2ee.groups.create();
           await retry.wait();
           expect(await first.e2ee.explain({ groupId: retry.id })).toMatchObject({ state: "ready" });

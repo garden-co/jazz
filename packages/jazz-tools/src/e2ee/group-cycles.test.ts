@@ -81,7 +81,6 @@ it("accepts only one of two overlapping group edges that would form a cycle", as
         },
       });
       clients.push(db);
-      await db.e2ee.devices.list();
       const group = db.e2ee.groups.create();
       await group.wait();
       return { db, id: group.id, stored: () => saved! };

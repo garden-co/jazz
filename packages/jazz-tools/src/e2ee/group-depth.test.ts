@@ -55,7 +55,6 @@ it("accepts eight group edges but rejects a ninth below existing ancestors, incl
         },
       });
       clients.push(db);
-      await db.e2ee.devices.list();
       return { db, accountId: account.account.id, stored: () => saved! };
     };
     const owner = await open();

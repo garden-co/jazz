@@ -191,20 +191,16 @@ describe("group recovery adapter classification and fallback", () => {
   afterAll(async () => {
     if (prepared) await prepared.f.cleanup();
   });
-  it.each([
-    { surface: "status", method: "open" },
-    { surface: "status", method: "unwrap" },
-    { surface: "use", method: "open" },
-    { surface: "explain", method: "open" },
-  ] as const)(
-    "classifies synchronous and rejected group envelope faults identically through $surface/$method",
-    async ({ surface, method }) => {
+  it.each(["status", "use", "explain"] as const)(
+    "classifies synchronous and rejected group envelope faults identically through %s",
+    async (surface) => {
       const { f, groupId, root, ownerRecord, recoveredRecord } = prepared;
       let client: Db | undefined;
       try {
         const envelopeFault = new Error("Synthetic group envelope fault");
         const signerFault = new Error("Synthetic group recovery signer fault");
         let kind: "sync" | "async" | undefined;
+        let method: "open" | "unwrap" = "open";
         let hits = 0;
         let signerArmed = false;
         let signerHits = 0;
@@ -276,50 +272,55 @@ describe("group recovery adapter classification and fallback", () => {
           hits = 0;
           try {
             const result = await capture(invoke);
-            expect(hits).toBeGreaterThan(0);
+            expect(hits, `${surface}/${method}/${fault}`).toBeGreaterThan(0);
             return result;
           } finally {
             kind = undefined;
           }
         };
-        const rejected = await attempt("async");
-        const thrown = await attempt("sync");
-        // This is the same status/signer check for every envelope case. Exercise
-        // it once; envelope fault classification still covers every surface above.
-        if (surface === "status" && method === "open") {
-          signerArmed = true;
-          try {
-            await expect(active.e2ee.recovery.status(root.material)).rejects.toBe(signerFault);
-            expect(signerHits).toBeGreaterThan(0);
-          } finally {
-            signerArmed = false;
+        // Both read-only status methods share one unenrolled observer. A healthy
+        // check after each pair is also the next method's positive control.
+        const methods = surface === "status" ? (["open", "unwrap"] as const) : (["open"] as const);
+        for (const operation of methods) {
+          method = operation;
+          const rejected = await attempt("async");
+          const thrown = await attempt("sync");
+          // Check signer propagation once, independently of both envelope methods.
+          if (surface === "status" && method === "open") {
+            signerArmed = true;
+            try {
+              await expect(active.e2ee.recovery.status(root.material)).rejects.toBe(signerFault);
+              expect(signerHits).toBeGreaterThan(0);
+            } finally {
+              signerArmed = false;
+            }
           }
-        }
-        if (surface === "explain")
-          expect(await active.e2ee.explain({ groupId })).toEqual({ state: "ready" });
-        else await readyStatus(active, root, groupId);
-        if (surface === "status") {
-          expect(await store.read()).toBeNull();
-          expect(rejected).toMatchObject({
-            ok: true,
-            value: { validation: "unavailable", reason: "unusable-recovery-delivery" },
-          });
-          expect(thrown).toEqual(rejected);
-        } else {
-          expect(rejected.ok).toBe(false);
-          expect(thrown.ok).toBe(false);
-          if (rejected.ok || thrown.ok) throw new Error("Faulty group envelope was accepted");
-          const message = surface === "use" ? exhausted : "Unable to authenticate E2EE group key";
-          expect(rejected.error).toBeInstanceOf(Error);
-          expect(rejected.error).toMatchObject({ message });
-          expect(thrown.error).toMatchObject({ message });
-          expect(thrown.error).not.toBe(envelopeFault);
-          expect(rejected.error).not.toBe(envelopeFault);
-          if (surface === "explain") {
-            expect((rejected.error as Error).cause).toBe(envelopeFault);
-            expect((thrown.error as Error).cause).toBe(envelopeFault);
+          if (surface === "explain")
+            expect(await active.e2ee.explain({ groupId })).toEqual({ state: "ready" });
+          else await readyStatus(active, root, groupId);
+          if (surface === "status") {
+            expect(await store.read()).toBeNull();
+            expect(rejected).toMatchObject({
+              ok: true,
+              value: { validation: "unavailable", reason: "unusable-recovery-delivery" },
+            });
+            expect(thrown).toEqual(rejected);
+          } else {
+            expect(rejected.ok).toBe(false);
+            expect(thrown.ok).toBe(false);
+            if (rejected.ok || thrown.ok) throw new Error("Faulty group envelope was accepted");
+            const message = surface === "use" ? exhausted : "Unable to authenticate E2EE group key";
+            expect(rejected.error).toBeInstanceOf(Error);
+            expect(rejected.error).toMatchObject({ message });
+            expect(thrown.error).toMatchObject({ message });
+            expect(thrown.error).not.toBe(envelopeFault);
+            expect(rejected.error).not.toBe(envelopeFault);
+            if (surface === "explain") {
+              expect((rejected.error as Error).cause).toBe(envelopeFault);
+              expect((thrown.error as Error).cause).toBe(envelopeFault);
+            }
+            expect(thrown.error).toEqual(rejected.error);
           }
-          expect(thrown.error).toEqual(rejected.error);
         }
       } finally {
         if (client) await f.close(client);
