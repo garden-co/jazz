@@ -61,6 +61,7 @@ it("shares a space only after an authorised account grant, excluding pending dev
     let deliveryFailures = 0;
     let removeDuringConfirmation: (() => Promise<void>) | undefined;
     let confirmations = 0;
+    const openedDuringRemoval: Uint8Array[] = [];
     const deliveryError = new Error("Space delivery provider unavailable");
     const creator = await createDb({ ...alice, e2ee: { app, store: store(), crypto } });
     const recipient = await createDb({
@@ -79,8 +80,8 @@ it("shares a space only after an authorised account grant, excluding pending dev
                 new TextDecoder().decode(context).includes("jazz.e2ee.space.v1")
               ) {
                 confirmations++;
-                // First confirmation opens the inspected key; the second is
-                // inside the fresh, otherwise read-only delivery transaction.
+                // Interrupt delivery confirmation after the key has opened.
+                // Its authority transaction must reject even with no writes.
                 if (confirmations === 2) {
                   const remove = removeDuringConfirmation;
                   removeDuringConfirmation = undefined;
@@ -97,7 +98,13 @@ it("shares a space only after an authorised account grant, excluding pending dev
                 if (failureMode === "throw") throw deliveryError;
                 return Promise.reject(deliveryError);
               }
-              return crypto.keyEnvelope.open(pair, context, envelope);
+              const result = crypto.keyEnvelope.open(pair, context, envelope);
+              if (removeDuringConfirmation)
+                return result.then((opened) => {
+                  openedDuringRemoval.push(opened);
+                  return opened;
+                });
+              return result;
             },
           },
         },
@@ -157,6 +164,8 @@ it("shares a space only after an authorised account grant, excluding pending dev
     });
     expect(confirmations).toBe(2);
     expect(removed).toBe(true);
+    expect(openedDuringRemoval.length).toBeGreaterThan(0);
+    expect(openedDuringRemoval.every((secret) => secret.every((byte) => byte === 0))).toBe(true);
     expect(await creator.all(app.__e2ee_space_deliveries, { tier: "global" })).toEqual(
       beforeRemoval,
     );
