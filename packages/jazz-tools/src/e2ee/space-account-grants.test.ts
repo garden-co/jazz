@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
+import { PersistedWriteRejectedError, type TxId } from "../runtime/client.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
@@ -63,7 +64,33 @@ it("shares a space only after an authorised account grant, excluding pending dev
     let confirmations = 0;
     const openedDuringRemoval: Uint8Array[] = [];
     const deliveryError = new Error("Space delivery provider unavailable");
-    const creator = await createDb({ ...alice, e2ee: { app, store: store(), crypto } });
+    let creatorOpeningError: Error | undefined;
+    const creator = await createDb({
+      ...alice,
+      e2ee: {
+        app,
+        store: store(),
+        crypto: {
+          ...crypto,
+          keyEnvelope: {
+            ...crypto.keyEnvelope,
+            open(pair, context, envelope) {
+              const text = new TextDecoder().decode(context);
+              if (
+                creatorOpeningError &&
+                text.includes("jazz.e2ee.space.v1") &&
+                text.includes("author")
+              ) {
+                const error = creatorOpeningError;
+                creatorOpeningError = undefined;
+                throw error;
+              }
+              return crypto.keyEnvelope.open(pair, context, envelope);
+            },
+          },
+        },
+      },
+    });
     const recipient = await createDb({
       ...bob,
       e2ee: {
@@ -132,6 +159,19 @@ it("shares a space only after an authorised account grant, excluding pending dev
     const grant = creator.e2ee.spaces.grant(app.projects, project.id, bob.account.id);
     expect(grant).not.toBeInstanceOf(Promise);
     await grant.wait();
+    expect(await creator.e2ee.explain(target)).toEqual({ state: "ready" });
+    // An adapter's one-off SDK-shaped error must surface unchanged; treating
+    // it as delivery denial would retry inspection and silently report ready.
+    for (const code of ["permission_denied", "exclusive_conflict"]) {
+      const inspectionError = new PersistedWriteRejectedError(
+        "provider-inspection" as TxId,
+        code,
+        "Synthetic key provider failure",
+      );
+      creatorOpeningError = inspectionError;
+      await expect(creator.e2ee.explain(target)).rejects.toBe(inspectionError);
+      expect(creatorOpeningError).toBeUndefined();
+    }
     expect(await creator.e2ee.explain(target)).toEqual({ state: "ready" });
     // Both provider failure shapes use the same authorised delivery. Prove each
     // still reaches the provider, including after the preceding successful retry.

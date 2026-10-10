@@ -1495,12 +1495,16 @@ export class Spaces {
 
   private async readMaintenanceSnapshot(address: Address, id: string, device: LocalDevice) {
     for (let attempt = 0; ; attempt++) {
+      let inspecting = false;
+      let deliveryStarted = false;
       try {
         const transaction = await exclusiveE2eeTransaction(this.db, async (tx) => {
           const snapshot = await this.readSnapshot(tx, address, id);
           const prepared = await (async () => {
             if (!snapshot.state.active.has(device.id) || !snapshot.roots.rows.length) return;
+            inspecting = true;
             const state = await this.validate(snapshot, address);
+            inspecting = false;
             // Actual epoch changes and group repair keep their existing accepted boundaries.
             if (state.sealed || state.rotationRequired || !state.groupsReady) return;
             const recipient = state.members.has(this.accountId);
@@ -1515,12 +1519,15 @@ export class Spaces {
               )
             )
               return;
+            inspecting = true;
             const secret = await this.openSnapshotKey(snapshot, state, device);
+            inspecting = false;
             try {
               if (!secret)
                 return {
                   result: { state: "unavailable", reason: "space-key-not-delivered" } as SpaceState,
                 };
+              deliveryStarted = true;
               const deliveredSnapshot = await this.prepareDelivery(
                 tx,
                 snapshot,
@@ -1546,8 +1553,15 @@ export class Spaces {
         this.assertOpen();
         return { ...result, transactionId: await transaction.txId };
       } catch (error) {
+        // Adapter failures during inspection are not transaction rejections,
+        // even when a provider forwards an error with an SDK rejection code.
+        if (inspecting) throw error;
         if (isTransactionConflict(error) && attempt < 2) continue;
-        if (!(error instanceof PersistedWriteRejectedError) || error.code !== "permission_denied")
+        if (
+          !deliveryStarted ||
+          !(error instanceof PersistedWriteRejectedError) ||
+          error.code !== "permission_denied"
+        )
           throw error;
         // Denied delivery must not deny an otherwise usable key. Establish a
         // separately accepted read before the existing policy-denial path runs.
