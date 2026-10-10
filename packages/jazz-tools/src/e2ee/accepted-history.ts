@@ -1,5 +1,5 @@
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
-import type { Db, QueryBuilder } from "../runtime/db.js";
+import type { Db, QueryBuilder, E2eeTransactionScope } from "../runtime/db.js";
 import type { E2eeHistoryReader } from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
 import type { SpaceRoot, SpaceGrant } from "./spaces.js";
@@ -324,6 +324,29 @@ export async function readAcceptedHistory<T>(
   }
   const transaction = await exclusiveE2eeTransaction(db, (tx) => capture(tx, read));
   const bundle = await transaction.wait({ tier: "global" });
+  await retainAcceptedBundle(db, key, bundle);
+  return bundle.result;
+}
+
+/** Run preparation against exactly the read bundle that must accept globally. */
+export async function prepareAcceptedHistory<T, P>(
+  db: Db,
+  key: string,
+  read: (reader: E2eeHistoryReader) => Promise<T>,
+  prepare: (tx: E2eeTransactionScope, snapshot: T) => Promise<P>,
+): Promise<{ snapshot: T; prepared: P; transactionId: string }> {
+  const transaction = await exclusiveE2eeTransaction(db, async (tx) => {
+    const bundle = await capture(tx, read);
+    const prepared = await prepare(tx, bundle.result);
+    return { bundle, prepared };
+  });
+  const { bundle, prepared } = await transaction.wait({ tier: "global" });
+  // Nothing from a rejected transaction becomes accepted offline evidence.
+  await retainAcceptedBundle(db, key, bundle);
+  return { snapshot: bundle.result, prepared, transactionId: await transaction.txId };
+}
+
+async function retainAcceptedBundle(db: Db, key: string, bundle: Retained): Promise<void> {
   try {
     await persist(db, key, bundle.reads);
   } catch {
@@ -331,7 +354,6 @@ export async function readAcceptedHistory<T>(
     // offline reuse still checks the retained bundle against accepted history.
   }
   retain(db, key, bundle);
-  return bundle.result;
 }
 
 async function capture<T>(tx: E2eeHistoryReader, read: (reader: E2eeHistoryReader) => Promise<T>) {
