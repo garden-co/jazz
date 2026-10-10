@@ -62,6 +62,7 @@ async function prepare(runtime: "wasm" | "native") {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   const recipients: { db: Awaited<ReturnType<typeof createDb>>; accountId: string }[] = [];
+  let recipientGroupId: string | undefined;
   let nativeSession: Awaited<ReturnType<typeof createJazzSession>> | undefined;
   try {
     await deploy({
@@ -133,6 +134,12 @@ async function prepare(runtime: "wasm" | "native") {
           await recipient.e2ee.devices.list();
         }
         return recipients[index]!;
+      },
+      // Both mixed-recipient outcomes use the same unchanged group authority;
+      // each still creates its own initial space and grant set.
+      async recipientGroup(): Promise<string> {
+        const recipient = await this.recipient(0);
+        return (recipientGroupId ??= (await recipient.db.e2ee.groups.create().wait()).id);
       },
       cleanup: async () => {
         await Promise.all(recipients.map((recipient) => recipient.db.shutdown()));
@@ -215,8 +222,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
         const initialRecipients = explicit ? recipientIds : undefined;
         const recipientAccounts = recipientIds.slice();
         if (mixed) {
-          const group = await recipients[0]!.e2ee.groups.create().wait();
-          recipientIds[0] = group.id;
+          recipientIds[0] = await current.recipientGroup();
         }
         // The compiler opts in before staging writes; callers do not prefetch history.
         const tx = beginInitialSpaceTransaction(db, initialRecipients);
