@@ -46,7 +46,6 @@ function canonicalId(scopeId: string, identifier: string): string {
 it("isolates malformed recovery roots and propagates verifier failures", async () => {
   const candidates = [
     "wrong-ID same-address",
-    "wrong-ID before canonical",
     "covered-empty strict-before creator",
     "inactive creator",
     "wrong-epoch creator",
@@ -111,12 +110,120 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
     const project = await db
       .insert(app.projects, { title: "Eligible recovery root" })
       .wait({ tier: "global" });
-    await db.e2ee.spaces.grant(app.projects, project.id, accountId).wait();
-    const target = { scope: app.projects, identifier: project.id };
-    const accepted = (await db.one(app.__e2ee_spaces.where({ identifier: project.id }), {
+    const scopeId = await db.tableIdentity(app.projects);
+    expect(scopeId).not.toBeNull();
+    if (!scopeId) throw new Error("Missing accepted project scope");
+    const accountRoot = (await db.one(app.__e2ee_account_roots.where({ accountId }), {
       tier: "global",
     }))!;
-    expect(accepted.id).toBe(canonicalId(accepted.scopeId, project.id));
+    const creatorEpoch = accountRoot.epochId;
+    const insertCandidate = async (
+      writer: typeof db,
+      authorId: string,
+      author: StoredDevice,
+      accountEpochId: string,
+      identifier: string,
+      rootId: string,
+    ) => {
+      const coordinates = {
+        id: rootId,
+        scopeId,
+        identifier,
+        accountId: authorId,
+        deviceId: author.id,
+        accountEpochId,
+        epochId: crypto.randomUUID(),
+        initialGrantId: crypto.randomUUID(),
+        mechanism: native.keyEnvelope.mechanism.id,
+        version: native.keyEnvelope.mechanism.version,
+      };
+      const key = crypto.getRandomValues(new Uint8Array(32));
+      const signingKey = Uint8Array.from(author.signingPrivateKey);
+      secrets.push(key, signingKey);
+      const root = {
+        ...coordinates,
+        verification: await native.keyEnvelope.wrap(
+          key,
+          spaceContext(author.scope, coordinates, "verification"),
+          new Uint8Array(32),
+        ),
+        authorEnvelope: await native.keyEnvelope.seal(
+          Uint8Array.from(author.publicKey),
+          spaceContext(author.scope, coordinates, "author", author.id),
+          key,
+        ),
+      };
+      const grant = {
+        id: root.initialGrantId,
+        spaceId: root.id,
+        epochId: root.epochId,
+        authorAccountId: authorId,
+        authorDeviceId: author.id,
+        authorEpochId: accountEpochId,
+        operation: "add",
+        recipientKind: "account",
+        // Every bad root is reachable even with recipient-scoped discovery.
+        recipientId: accountId,
+        recipientEpochId: creatorEpoch,
+      };
+      const rootBytes = spaceRootBytes(author.scope, root);
+      const grantBytes = spaceGrantBytes(author.scope, root, grant);
+      const rootSignature = await native.deviceSigner.sign(signingKey, rootBytes);
+      const grantSignature = await native.deviceSigner.sign(signingKey, grantBytes);
+      for (const [bytes, signature] of [
+        [rootBytes, rootSignature],
+        [grantBytes, grantSignature],
+      ] as const) {
+        expect(
+          await native.deviceSigner.verify(
+            Uint8Array.from(author.signingPublicKey),
+            bytes,
+            signature,
+          ),
+        ).toBe(true);
+      }
+      const tx = writer.beginTransaction();
+      const { id, ...values } = root;
+      tx.insert(app.__e2ee_spaces, { ...values, signature: rootSignature }, { id });
+      const { id: grantId, ...grantValues } = grant;
+      tx.insert(
+        app.__e2ee_space_grants,
+        { ...grantValues, signature: grantSignature },
+        {
+          id: grantId,
+        },
+      );
+      await tx.commit().wait({ tier: "global" });
+      expect(
+        await db.all(
+          app.__e2ee_space_grants.where({
+            spaceId: root.id,
+            recipientKind: "account",
+            recipientId: accountId,
+          }),
+          { tier: "global" },
+        ),
+      ).toHaveLength(1);
+      return root;
+    };
+
+    // Exercise both orderings at the same address: a wrong-ID root precedes
+    // canonical creation, and another arrives after the genuine root is usable.
+    const preceding = await insertCandidate(
+      db,
+      accountId,
+      device,
+      creatorEpoch,
+      project.id,
+      crypto.randomUUID(),
+    );
+    const canonical = app.__e2ee_spaces.where({ id: canonicalId(scopeId, project.id) });
+    expect(await db.one(canonical, { tier: "global" })).toBeNull();
+    await db.e2ee.spaces.grant(app.projects, project.id, accountId).wait();
+    const target = { scope: app.projects, identifier: project.id };
+    const accepted = (await db.one(canonical, { tier: "global" }))!;
+    expect(accepted).toMatchObject({ scopeId, identifier: project.id });
+    expect(accepted.id).toBe(canonicalId(scopeId, project.id));
     expect(await db.e2ee.explain(target)).toEqual({ state: "ready" });
     const { material } = await db.e2ee.recovery.create().wait();
     let otherRecipient: string | undefined;
@@ -180,88 +287,16 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
                 .insert(app.projects, { title: "Ineligible creator root" })
                 .wait({ tier: "global" })
             ).id;
-      const coordinates = {
-        id:
-          scenario === "wrong-ID same-address" || scenario === "wrong-ID before canonical"
-            ? crypto.randomUUID()
-            : canonicalId(accepted.scopeId, identifier),
-        scopeId: accepted.scopeId,
-        identifier,
-        accountId: authorId,
-        deviceId: author.id,
+      const root = await insertCandidate(
+        writer,
+        authorId,
+        author,
         accountEpochId,
-        epochId: crypto.randomUUID(),
-        initialGrantId: crypto.randomUUID(),
-        mechanism: native.keyEnvelope.mechanism.id,
-        version: native.keyEnvelope.mechanism.version,
-      };
-      const key = crypto.getRandomValues(new Uint8Array(32));
-      const signingKey = Uint8Array.from(author.signingPrivateKey);
-      secrets.push(key, signingKey);
-      const root = {
-        ...coordinates,
-        verification: await native.keyEnvelope.wrap(
-          key,
-          spaceContext(author.scope, coordinates, "verification"),
-          new Uint8Array(32),
-        ),
-        authorEnvelope: await native.keyEnvelope.seal(
-          Uint8Array.from(author.publicKey),
-          spaceContext(author.scope, coordinates, "author", author.id),
-          key,
-        ),
-      };
-      const grant = {
-        id: root.initialGrantId,
-        spaceId: root.id,
-        epochId: root.epochId,
-        authorAccountId: authorId,
-        authorDeviceId: author.id,
-        authorEpochId: accountEpochId,
-        operation: "add",
-        recipientKind: "account",
-        // Every bad root is reachable even with recipient-scoped discovery.
-        recipientId: accountId,
-        recipientEpochId: accepted.accountEpochId,
-      };
-      const rootBytes = spaceRootBytes(author.scope, root);
-      const grantBytes = spaceGrantBytes(author.scope, root, grant);
-      const rootSignature = await native.deviceSigner.sign(signingKey, rootBytes);
-      const grantSignature = await native.deviceSigner.sign(signingKey, grantBytes);
-      for (const [bytes, signature] of [
-        [rootBytes, rootSignature],
-        [grantBytes, grantSignature],
-      ] as const) {
-        expect(
-          await native.deviceSigner.verify(
-            Uint8Array.from(author.signingPublicKey),
-            bytes,
-            signature,
-          ),
-        ).toBe(true);
-      }
-      const tx = writer.beginTransaction();
-      const { id, ...values } = root;
-      tx.insert(app.__e2ee_spaces, { ...values, signature: rootSignature }, { id });
-      const { id: grantId, ...grantValues } = grant;
-      tx.insert(
-        app.__e2ee_space_grants,
-        { ...grantValues, signature: grantSignature },
-        {
-          id: grantId,
-        },
+        identifier,
+        scenario === "wrong-ID same-address"
+          ? crypto.randomUUID()
+          : canonicalId(scopeId, identifier),
       );
-      await tx.commit().wait({ tier: "global" });
-      expect(
-        await db.all(
-          app.__e2ee_space_grants.where({
-            spaceId: root.id,
-            recipientKind: "account",
-            recipientId: accountId,
-          }),
-          { tier: "global" },
-        ),
-      ).toHaveLength(1);
       if (scenario === "covered-empty strict-before creator") {
         await writer.e2ee.devices.list();
         expect(
@@ -270,28 +305,13 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
           }),
         ).toHaveLength(1);
       }
-      if (scenario === "wrong-ID before canonical") {
-        const canonical = app.__e2ee_spaces.where({
-          id: canonicalId(accepted.scopeId, identifier),
-        });
-        expect(await db.one(canonical, { tier: "global" })).toBeNull();
-        await db.e2ee.spaces.grant(app.projects, identifier, accountId).wait();
-        expect(await db.one(canonical, { tier: "global" })).toMatchObject({
-          scopeId: accepted.scopeId,
-          identifier,
-        });
-        const created = { scope: app.projects, identifier };
-        expect(await db.e2ee.explain(created)).toEqual({ state: "ready" });
-        await db.e2ee.spaces.revoke(app.projects, identifier, accountId).wait();
-        expect(await db.e2ee.explain(created)).toMatchObject({
-          state: "refused",
-          reason: "space-sealed",
-        });
-      }
       if (scenario === "wrong-ID same-address") {
-        expect(
-          await db.all(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "global" }),
-        ).toHaveLength(2);
+        const sameAddress = await db.all(app.__e2ee_spaces.where({ identifier: project.id }), {
+          tier: "global",
+        });
+        expect(sameAddress.map((row) => row.id).sort()).toEqual(
+          [preceding.id, accepted.id, root.id].sort(),
+        );
         const recipient = await open(store(), store());
         await recipient.getSnapshot().client!.db.e2ee.devices.list();
         otherRecipient = recipient.getSnapshot().account!.id;
