@@ -103,6 +103,25 @@ Ordinary restoration may skip a membership that has since been removed.
 Creation retains its required group set through final inspection and cannot
 report successful protection after losing required coverage.
 
+Restoration reads up to eight target groups in one authority-settled recovery
+snapshot, sharing the account and related group histories. Each batch rereads
+all dependency predicates and its recovery envelopes, including empty results.
+Membership and recovery-root eligibility for opening these envelopes are
+relative to that batch's accepted snapshot. A concurrent authority change before
+acceptance rejects the batch; no group secret is opened or staged from that
+rejected snapshot. Earlier completed groups remain retryable.
+
+After acceptance, keys are opened, authenticated, staged and cleared one at a
+time. Normal loading and delivery still revalidate current authority for each
+group and wait for ordinary-policy-governed publication. A later membership
+removal can leave a previously authorised old key privately staged, but cannot
+make that key establish current membership or authorise a delivery. Observing
+a revoked recovering device aborts restoration. Recovery completion remains
+synchronous; delivery maintenance is not deferred. Recovery-root retirement
+after acceptance cannot authorise any later publication to that retired root.
+The bound limits target groups per snapshot, not the size of their required
+historical components; existing bounded query operands cover every dependency.
+
 When eligible group delivery candidates are exhausted, the group owner reports
 `recovery-group-delivery-unavailable`. Local-first recovery may then try another
 protector. This candidate classification does not include required-group loss,

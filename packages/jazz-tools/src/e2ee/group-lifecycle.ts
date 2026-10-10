@@ -309,22 +309,33 @@ export class Groups {
       for (const [id, state] of graph) {
         if (!state.sealed && state.members.has(this.accountId)) ids.push(id);
       }
-      for (const id of ids) {
-        const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), {
-          tier: "global",
-        });
-        if (!observed) continue;
-        await this.warmMembership(observed);
+      // Bound the targets sharing one accepted recovery snapshot. Secrets are
+      // still opened, staged and cleared one at a time; publication stays fresh.
+      const batchSize = 8;
+      for (let offset = 0; offset < ids.length; offset += batchSize) {
+        const batchIds = ids.slice(offset, offset + batchSize);
+        const observedRoots = await this.db.all(
+          this.tables.__e2ee_groups.where({ id: { in: batchIds } }),
+          { tier: "global" },
+        );
+        if (!observedRoots.length) continue;
+        await this.warmMembership(null, undefined, batchIds);
         const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
           const own = await this.deviceStates(tx);
-          const group = await this.readMembership(tx, observed, own.publicHistory);
+          const group = await this.readMembership(tx, null, own.publicHistory, undefined, batchIds);
+          // Keep observed creators in the covered read set if a root changes.
+          for (const root of observedRoots)
+            if (!group.histories.has(root.accountId))
+              group.histories.set(
+                root.accountId,
+                await readPublicMembershipHistory(tx, root.accountId, this.tables),
+              );
           return {
             own,
-            roots: group.targetRoots,
             group,
             deliveries: await tx.allSettledForE2ee(
               this.tables.__e2ee_group_recovery_deliveries.where({
-                groupId: id,
+                groupId: { in: batchIds },
                 recipientAccountId: this.accountId,
                 recoveryRootId: material.rootId,
               }),
@@ -336,41 +347,53 @@ export class Groups {
         if (!snapshot.own.active.has(device.id))
           throw new Error("Group recovery requires an active device");
         await this.checkRecoveryAuthority(material, snapshot.own.publicHistory);
-        const membership = (await this.acceptedGraph(snapshot.group)).get(id);
-        if (!membership || membership.sealed || !membership.members.has(this.accountId)) continue;
-        if (snapshot.roots.rows[0]?.accountId !== observed.accountId)
-          throw new Error("E2EE group creator changed");
-        const { root, position } = await this.acceptedRoot(
-          snapshot.roots,
-          snapshot.group.histories.get(observed.accountId)!,
-        );
-        const { keyRoot } = membership;
-        const secret = await this.openRecovery(
-          root,
-          position,
-          keyRoot.epochId,
-          snapshot.group,
-          snapshot.deliveries,
-          material,
-        );
-        if (!secret) throw new RecoveryCandidateError("recovery-group-delivery-unavailable");
-        try {
-          await stageGroupKey(
-            this.store,
-            this.application,
-            id,
-            keyRoot.epochId,
-            secret,
-            this.assertOpen,
-            this.requireDevice().keyLifetime,
+        const accepted = await this.acceptedGraph(snapshot.group);
+        const observedById = new Map(observedRoots.map((root) => [root.id, root]));
+        for (const id of batchIds) {
+          const observed = observedById.get(id);
+          if (!observed) continue;
+          const membership = accepted.get(id);
+          if (!membership || membership.sealed || !membership.members.has(this.accountId)) continue;
+          const roots = {
+            rows: snapshot.group.roots.rows.filter((row) => row.id === id),
+            settlements: snapshot.group.roots.settlements.filter((entry) => entry.rowId === id),
+          };
+          if (roots.rows[0]?.accountId !== observed.accountId)
+            throw new Error("E2EE group creator changed");
+          const { root, position } = await this.acceptedRoot(
+            roots,
+            snapshot.group.histories.get(observed.accountId)!,
           );
-        } finally {
-          secret.fill(0);
+          const { keyRoot } = membership;
+          const secret = await this.openRecovery(
+            root,
+            position,
+            keyRoot.epochId,
+            snapshot.group,
+            snapshot.deliveries,
+            material,
+          );
+          if (!secret) throw new RecoveryCandidateError("recovery-group-delivery-unavailable");
+          try {
+            await stageGroupKey(
+              this.store,
+              this.application,
+              id,
+              keyRoot.epochId,
+              secret,
+              this.assertOpen,
+              this.requireDevice().keyLifetime,
+            );
+          } finally {
+            secret.fill(0);
+          }
+          // Revalidate current membership and ordinary write permissions before delivery.
+          const state = await this.explain(id);
+          if (state.state === "refused" && state.reason === "device-not-active")
+            throw new Error("Group recovery requires an active device");
+          if (state.state !== "ready" && state.state !== "refused")
+            throw new Error("Recovered group requires maintenance");
         }
-        // Revalidate current membership and ordinary write permissions before delivery.
-        const state = await this.explain(id);
-        if (state.state !== "ready" && state.state !== "refused")
-          throw new Error("Recovered group requires maintenance");
       }
     } finally {
       material.recipient.privateKey.fill(0);
@@ -1159,11 +1182,17 @@ export class Groups {
   }
 
   /** Internal key-free discovery shared with scoped-space membership. */
-  async warmMembership(root: Pick<GroupRoot, "id" | "accountId"> | null, relatedGroupId?: string) {
+  async warmMembership(
+    root: Pick<GroupRoot, "id" | "accountId"> | null,
+    relatedGroupId?: string,
+    recoveryGroupIds?: readonly string[],
+  ) {
     const { roots, records, successors } = await collectGroupHistory(
-      root
-        ? { groupIds: relatedGroupId === undefined ? [root.id] : [root.id, relatedGroupId] }
-        : { accountId: this.accountId },
+      recoveryGroupIds !== undefined
+        ? { groupIds: recoveryGroupIds }
+        : root
+          ? { groupIds: relatedGroupId === undefined ? [root.id] : [root.id, relatedGroupId] }
+          : { accountId: this.accountId },
       {
         roots: (selector) =>
           this.db.all(this.tables.__e2ee_groups.where(selector), { tier: "global" }),
@@ -1249,6 +1278,7 @@ export class Groups {
     root: Pick<GroupRoot, "id" | "accountId"> | null,
     ownHistory: PublicMembershipHistory,
     relatedGroupId?: string,
+    recoveryGroupIds?: readonly string[],
   ): Promise<MembershipSnapshot> {
     const rootSettlements = new Map<string, RowSettlement>();
     const memberSettlements = new Map<string, RowSettlement>();
@@ -1262,9 +1292,11 @@ export class Groups {
       return result.rows;
     };
     const rows = await collectGroupHistory(
-      root
-        ? { groupIds: relatedGroupId === undefined ? [root.id] : [root.id, relatedGroupId] }
-        : { accountId: this.accountId },
+      recoveryGroupIds !== undefined
+        ? { groupIds: recoveryGroupIds }
+        : root
+          ? { groupIds: relatedGroupId === undefined ? [root.id] : [root.id, relatedGroupId] }
+          : { accountId: this.accountId },
       {
         roots: (selector) =>
           capture(tx.allSettledForE2ee(this.tables.__e2ee_groups.where(selector)), rootSettlements),
