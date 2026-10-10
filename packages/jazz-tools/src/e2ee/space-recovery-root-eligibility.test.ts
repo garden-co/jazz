@@ -46,16 +46,17 @@ function canonicalId(scopeId: string, identifier: string): string {
 it.each([
   {
     name: "noncanonical roots",
+    checkVerifierFault: false,
     candidates: ["wrong-ID same-address", "wrong-ID before canonical"],
   },
   {
-    name: "ineligible creators",
+    name: "ineligible creators and verifier failures",
+    checkVerifierFault: true,
     candidates: ["covered-empty strict-before creator", "inactive creator", "wrong-epoch creator"],
   },
-  { name: "operational verifier fault", candidates: [] },
 ] as const)(
   "isolates native recovery root eligibility ($name)",
-  async ({ name, candidates }) => {
+  async ({ candidates, checkVerifierFault }) => {
     const app = s.defineApp({
       ...deviceRequestSchema,
       ...spaceSchema,
@@ -334,7 +335,7 @@ it.each([
           return native.deviceSigner.verify(publicKey, record, signature);
         };
       };
-      if (name === "operational verifier fault") {
+      if (checkVerifierFault) {
         armVerifierFault();
         await expect(db.e2ee.recovery.status(material)).rejects.toBe(verifierFailure);
         await expect(db.e2ee.recovery.create().wait()).rejects.toBe(verifierFailure);
@@ -353,7 +354,7 @@ it.each([
       expect(replacement.getSnapshot().account!.id).toBe(accountId);
       const pending = (await recovered.e2ee.devices.list()).find((row) => row.state === "pending");
       expect(pending).toBeDefined();
-      if (name === "operational verifier fault") {
+      if (checkVerifierFault) {
         armVerifierFault();
         await expect(recovered.e2ee.recovery.use(material).wait()).rejects.toBe(verifierFailure);
         adapters.deviceSigner.verify = native.deviceSigner.verify;

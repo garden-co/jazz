@@ -11,8 +11,7 @@ import { spaceRecoveryBytes } from "./space-recovery-format.js";
 import fixture from "./fixtures/local-space-recovery-v1.json";
 
 for (const scenario of [
-  "read-only-recovered-device",
-  "read-only-creator-store",
+  "read-only-creator-and-recovered-device",
   "invalid-recovery-candidates",
 ] as const) {
   it(
@@ -34,7 +33,7 @@ for (const scenario of [
         if (scenario === "invalid-recovery-candidates")
           policy.__e2ee_space_grants.allowDelete.where({ authorAccountId: session.user.account });
         policy.__e2ee_space_deliveries.allowRead.where(authenticated);
-        if (scenario === "read-only-recovered-device") {
+        if (scenario === "read-only-creator-and-recovered-device") {
           policy.__e2ee_space_deliveries.allowInsert.where((row) =>
             allOf([
               { senderAccountId: session.user.account },
@@ -121,7 +120,10 @@ for (const scenario of [
         await first.e2ee.spaces.grant(app.projects, project.id, account.account.id).wait();
         const target = { scope: app.projects, identifier: project.id };
         expect(await first.e2ee.explain(target)).toEqual({ state: "ready" });
-        if (scenario === "read-only-creator-store") creatorStore.freeze();
+        // Creation must protect the existing key without rewriting its store;
+        // the later fresh device must recover even when ordinary delivery is denied.
+        const creatorBeforeRecovery = await creatorStore.read();
+        if (scenario === "read-only-creator-and-recovered-device") creatorStore.freeze();
         const previousRecoveryRoots =
           scenario === "invalid-recovery-candidates"
             ? new Set(
@@ -131,6 +133,8 @@ for (const scenario of [
               )
             : undefined;
         const { material } = await first.e2ee.recovery.create().wait();
+        if (scenario === "read-only-creator-and-recovered-device")
+          expect(await creatorStore.read()).toBe(creatorBeforeRecovery);
         // Both corruption classes coexist with the genuine space and delivery.
         // Share device loss/recovery/reopen, keeping each accepted fixture below.
         if (scenario === "invalid-recovery-candidates") {
@@ -261,7 +265,7 @@ for (const scenario of [
         const retained = JSON.parse((await replacementStore.read())!);
         expect(retained.recoveredSpaceKeysV1).toHaveLength(2);
         expect(retained.recoveredSpaceKeysV1).toContainEqual(fixture.recoveredSpaceKeysV1[0]);
-        if (scenario === "read-only-recovered-device") {
+        if (scenario === "read-only-creator-and-recovered-device") {
           expect(
             await replacement.all(
               app.__e2ee_space_deliveries.where({ recipientDeviceId: pending!.id }),
