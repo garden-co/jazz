@@ -82,6 +82,7 @@ it.each([
       const signer = await createBrowserDeviceSigner();
       let beforeSeal: (() => Promise<void>) | undefined;
       let beforeOpen: (() => Promise<void>) | undefined;
+      let beforeGroupOpen: (() => Promise<void>) | undefined;
       const openCreator = () =>
         createDb({
           ...account,
@@ -94,6 +95,8 @@ it.each([
                 ...keys,
                 async open(device, context, envelope) {
                   await beforeOpen?.();
+                  if (new TextDecoder().decode(context).includes("jazz.e2ee.group.v1"))
+                    await beforeGroupOpen?.();
                   return keys.open(device, context, envelope);
                 },
                 async seal(publicKey, context, key) {
@@ -144,6 +147,7 @@ it.each([
           : variant === "resume-staging"
             ? (["resume", "resume-faults", "resume-signed-malformed"] as const)
             : [variant];
+      let lastGroupId: string | undefined;
       for (const scenario of scenarios) {
         let injected = false;
         if (scenario.endsWith("history-race")) {
@@ -243,6 +247,7 @@ it.each([
           };
         }
         const group = first.e2ee.groups.create();
+        lastGroupId = group.id;
         expect(group).not.toHaveProperty("then");
         expect(group.id).toEqual(expect.any(String));
         if (scenario.startsWith("resume")) {
@@ -414,6 +419,25 @@ it.each([
           await outsider.shutdown();
         }
         first = reopened;
+      }
+      if (variant === "delivery-candidates") {
+        // Reuse the live creator and independent approved device. Revocation
+        // lands after explain's accepted snapshot, while it opens a group key.
+        // That snapshot can deduplicate envelopes, but cannot authorise delivery.
+        const query = app.__e2ee_group_deliveries.where({ groupId: lastGroupId! });
+        const before = await second!.all(query, { tier: "remote" });
+        let revocations = 0;
+        beforeGroupOpen = async () => {
+          beforeGroupOpen = undefined;
+          await second!.e2ee.devices.revoke(creator.id).wait();
+          revocations++;
+        };
+        await expect(first.e2ee.explain({ groupId: lastGroupId! })).rejects.toThrow();
+        expect(revocations).toBe(1);
+        expect(await second!.all(query, { tier: "remote" })).toEqual(before);
+        expect(await first.e2ee.explain({ groupId: lastGroupId! })).toMatchObject({
+          state: "refused",
+        });
       }
     } finally {
       await Promise.all(clients.map((client) => client.shutdown()));

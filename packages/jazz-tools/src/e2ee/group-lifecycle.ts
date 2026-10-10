@@ -591,7 +591,7 @@ export class Groups {
             await this.confirmHistory(root, position, snapshot.group, staged.secret);
             try {
               if (rotationRequired) await this.rotate(keyRoot, staged.secret, device);
-              else await this.deliver(keyRoot, staged.secret, device);
+              else await this.deliver(keyRoot, staged.secret, device, snapshot.deliveries);
             } catch (error) {
               if (
                 !(error instanceof PersistedWriteRejectedError) ||
@@ -626,7 +626,7 @@ export class Groups {
             await this.confirmHistory(root, position, snapshot.group, payload);
             try {
               if (rotationRequired) await this.rotate(keyRoot, payload, device);
-              else await this.deliver(keyRoot, payload, device);
+              else await this.deliver(keyRoot, payload, device, snapshot.deliveries);
             } catch (error) {
               if (
                 !(error instanceof PersistedWriteRejectedError) ||
@@ -679,7 +679,7 @@ export class Groups {
             usable = true;
             try {
               if (rotationRequired) await this.rotate(keyRoot, payload, device);
-              else await this.deliver(keyRoot, payload, device);
+              else await this.deliver(keyRoot, payload, device, snapshot.deliveries);
             } catch (error) {
               // An accepted key remains usable when policy denies this member
               // permission to deliver it to somebody else.
@@ -809,27 +809,37 @@ export class Groups {
     }
   }
 
-  private async deliver(expected: GroupKey, secret: Uint8Array, device: LocalDevice) {
+  private async deliver(
+    expected: GroupKey,
+    secret: Uint8Array,
+    device: LocalDevice,
+    preparedDeliveries?: { rows: GroupDelivery[]; settlements: RowSettlement[] },
+  ) {
     const { id, epochId } = expected;
-    await this.warmMembership(expected);
-    await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
-      tier: "global",
-    });
+    // explain already discovered membership and read ordinary envelopes. This
+    // is deduplication evidence only: the write below still reads fresh authority.
+    // Newly created/rotated roots prepare their own history.
+    if (!preparedDeliveries) {
+      await this.warmMembership(expected);
+      await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
+        tier: "global",
+      });
+    }
     await this.db.all(this.tables.__e2ee_group_repairs.where({ groupId: id }), { tier: "global" });
     await this.db.all(this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }), {
       tier: "global",
     });
     const prior = await exclusiveE2eeTransaction(this.db, async (tx) => ({
-      deliveries: await tx.allSettledForE2ee(
-        this.tables.__e2ee_group_deliveries.where({ groupId: id }),
-      ),
+      deliveries:
+        preparedDeliveries ??
+        (await tx.allSettledForE2ee(this.tables.__e2ee_group_deliveries.where({ groupId: id }))),
       repairs: await tx.allSettledForE2ee(this.tables.__e2ee_group_repairs.where({ groupId: id })),
       recovery: await tx.allSettledForE2ee(
         this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }),
       ),
     }));
     const { deliveries: existing, repairs, recovery } = await prior.wait({ tier: "global" });
-    // This snapshot only avoids redundant envelopes. Concurrent delivery rows
+    // These observations only avoid redundant envelopes. Concurrent delivery rows
     // may cause duplicates, but must not conflict with fresh valid delivery.
     // Membership and device histories are still revalidated by the write below.
     const delivery = await exclusiveE2eeTransaction(this.db, async (tx) => {
