@@ -9,7 +9,7 @@ import { spaceSchema } from "./spaces.js";
 import { createBrowserCrypto } from "./browser.js";
 import { spaceContext, spaceRootBytes, spaceGrantBytes } from "./space-format.js";
 
-it("initialises a scoped space explicitly and delivers its key to approved devices", async () => {
+it("initialises and shares a scoped space, then seals it against signed creator regrants", async () => {
   const app = s.defineApp({
     ...deviceRequestSchema,
     ...spaceSchema,
@@ -22,6 +22,8 @@ it("initialises a scoped space explicitly and delivers its key to approved devic
     policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
     policy.__e2ee_space_grants.allowRead.always();
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
+    policy.__e2ee_space_successors.allowRead.always();
+    policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_space_deliveries.allowRead.always();
     policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
   });
@@ -50,6 +52,7 @@ it("initialises a scoped space explicitly and delivers its key to approved devic
         __e2ee_spaces: policies.__e2ee_spaces!,
         __e2ee_space_grants: policies.__e2ee_space_grants!,
         __e2ee_space_deliveries: policies.__e2ee_space_deliveries!,
+        __e2ee_space_successors: policies.__e2ee_space_successors!,
       },
     });
     const account = await localAccountConfig(server.appId, server.url);
@@ -153,6 +156,84 @@ it("initialises a scoped space explicitly and delivers its key to approved devic
     } finally {
       key.fill(0);
       signingKey.fill(0);
+    }
+
+    // Reuse this first-epoch space to prove that removing its last account
+    // seals it permanently, even for both approved holders of the old key.
+    await creator.e2ee.spaces.revoke(app.projects, project.id, account.account.id).wait();
+    expect(await creator.e2ee.explain(target)).toEqual({
+      state: "refused",
+      reason: "space-sealed",
+    });
+    expect(await second.e2ee.explain(target)).toEqual({ state: "refused", reason: "space-sealed" });
+    await creator.e2ee.spaces.revoke(app.projects, project.id, account.account.id).wait();
+    await expect(
+      creator.e2ee.spaces.grant(app.projects, project.id, account.account.id).wait(),
+    ).rejects.toThrow();
+    expect(
+      await creator.all(app.__e2ee_space_grants.where({ spaceId: accepted!.id }), {
+        tier: "remote",
+      }),
+    ).toHaveLength(2);
+    expect(
+      await creator.all(app.__e2ee_space_successors.where({ spaceId: accepted!.id }), {
+        tier: "remote",
+      }),
+    ).toEqual([]);
+
+    const stored = JSON.parse((await creatorStore.read())!).devices[0];
+    const regrantSigningKey = Uint8Array.from(stored.signingPrivateKey);
+    try {
+      const signer = crypto.deviceSigner;
+      const record = {
+        id: globalThis.crypto.randomUUID(),
+        spaceId: accepted!.id,
+        epochId: accepted!.epochId,
+        authorAccountId: account.account.id,
+        authorDeviceId: accepted!.deviceId,
+        authorEpochId: accepted!.accountEpochId,
+        operation: "add",
+        recipientKind: "account",
+        recipientId: account.account.id,
+        recipientEpochId: accepted!.accountEpochId,
+      };
+      const bytes = spaceGrantBytes(stored.scope, accepted!, record);
+      const signature = await signer.sign(regrantSigningKey, bytes);
+      expect(await signer.verify(Uint8Array.from(stored.signingPublicKey), bytes, signature)).toBe(
+        true,
+      );
+      expect(
+        (await creator.e2ee.devices.list()).find((row) => row.id === accepted!.deviceId),
+      ).toMatchObject({
+        state: "active",
+      });
+      const { id, ...values } = record;
+      await creator
+        .insert(app.__e2ee_space_grants, { ...values, signature }, { id })
+        .wait({ tier: "global" });
+      expect(
+        await creator.all(app.__e2ee_space_grants.where({ spaceId: accepted!.id }), {
+          tier: "remote",
+        }),
+      ).toHaveLength(3);
+      expect(await creator.e2ee.explain(target)).toEqual({
+        state: "refused",
+        reason: "space-sealed",
+      });
+      expect(await second.e2ee.explain(target)).toEqual({
+        state: "refused",
+        reason: "space-sealed",
+      });
+      expect(
+        await creator.all(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "remote" }),
+      ).toHaveLength(1);
+      expect(
+        await creator.all(app.__e2ee_space_successors.where({ spaceId: accepted!.id }), {
+          tier: "remote",
+        }),
+      ).toEqual([]);
+    } finally {
+      regrantSigningKey.fill(0);
     }
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));

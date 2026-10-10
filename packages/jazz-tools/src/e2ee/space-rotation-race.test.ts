@@ -6,6 +6,7 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { spaceSchema } from "./spaces.js";
+import { beginInitialSpaceTransaction, prepareInitialSpaceForTransaction } from "./lifecycle.js";
 import { createBrowserKeyEnvelope } from "./browser.js";
 
 function signal() {
@@ -87,11 +88,20 @@ it("accepts one competing rotation and distributes only its epoch to remaining a
     }
     const owner = clients[0]!;
     const removed = clients[2]!;
-    const project = await owner
-      .insert(app.projects, { title: "Contended rotation" })
-      .wait({ tier: "global" });
-    for (const account of accounts)
-      await owner.e2ee.spaces.grant(app.projects, project.id, account.account.id).wait();
+    // Establish the initial recipients atomically; the removal and successor
+    // checks below exercise subsequent accepted history through the normal APIs.
+    const recipients = accounts.map((account) => account.account.id);
+    const tx = beginInitialSpaceTransaction(owner, recipients);
+    const project = tx.insert(app.projects, { title: "Contended rotation" });
+    await prepareInitialSpaceForTransaction(
+      owner,
+      tx,
+      app.projects,
+      project.id,
+      async () => {},
+      recipients,
+    );
+    await tx.commit().wait({ tier: "global" });
     const target = { scope: app.projects, identifier: project.id };
     for (const client of clients)
       expect(await client.e2ee.explain(target)).toEqual({ state: "ready" });
