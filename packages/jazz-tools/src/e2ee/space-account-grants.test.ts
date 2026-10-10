@@ -59,6 +59,8 @@ it("shares a space only after an authorised account grant, excluding pending dev
     const crypto = await createNativeCrypto();
     let failureMode: "reject" | "throw" | undefined;
     let deliveryFailures = 0;
+    let removeDuringConfirmation: (() => Promise<void>) | undefined;
+    let confirmations = 0;
     const deliveryError = new Error("Space delivery provider unavailable");
     const creator = await createDb({ ...alice, e2ee: { app, store: store(), crypto } });
     const recipient = await createDb({
@@ -70,6 +72,23 @@ it("shares a space only after an authorised account grant, excluding pending dev
           ...crypto,
           keyEnvelope: {
             ...crypto.keyEnvelope,
+            async unwrap(secret, context, envelope) {
+              const opened = await crypto.keyEnvelope.unwrap(secret, context, envelope);
+              if (
+                removeDuringConfirmation &&
+                new TextDecoder().decode(context).includes("jazz.e2ee.space.v1")
+              ) {
+                confirmations++;
+                // First confirmation opens the inspected key; the second is
+                // inside the fresh, otherwise read-only delivery transaction.
+                if (confirmations === 2) {
+                  const remove = removeDuringConfirmation;
+                  removeDuringConfirmation = undefined;
+                  await remove();
+                }
+              }
+              return opened;
+            },
             // Non-async deliberately: exercise invocation throws as well as rejections.
             open(pair, context, envelope) {
               const text = new TextDecoder().decode(context);
@@ -126,6 +145,21 @@ it("shares a space only after an authorised account grant, excluding pending dev
         tier: "remote",
       }),
     ).toEqual([]);
+    const beforeRemoval = await creator.all(app.__e2ee_space_deliveries, { tier: "global" });
+    let removed = false;
+    removeDuringConfirmation = async () => {
+      await creator.e2ee.spaces.revoke(app.projects, project.id, bob.account.id).wait();
+      removed = true;
+    };
+    expect(await recipient.e2ee.explain(target)).toEqual({
+      state: "refused",
+      reason: "not-a-space-recipient",
+    });
+    expect(confirmations).toBe(2);
+    expect(removed).toBe(true);
+    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "global" })).toEqual(
+      beforeRemoval,
+    );
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

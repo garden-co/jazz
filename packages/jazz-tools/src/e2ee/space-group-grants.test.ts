@@ -8,7 +8,7 @@ import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests
 import { groupSchema } from "./groups.js";
 import { spaceSchema } from "./spaces.js";
 
-it("shares a space through a parent group and follows later child-group additions", async () => {
+it("follows nested group additions, independent grants and later recipient removal", async () => {
   const app = s.defineApp({
     ...deviceRequestSchema,
     ...groupSchema,
@@ -24,6 +24,8 @@ it("shares a space through a parent group and follows later child-group addition
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_space_deliveries.allowRead.always();
     policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+    policy.__e2ee_space_successors.allowRead.always();
+    policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_groups.allowRead.always();
     policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
     policy.__e2ee_group_membership.allowRead.always();
@@ -60,6 +62,7 @@ it("shares a space through a parent group and follows later child-group addition
         __e2ee_spaces: policies.__e2ee_spaces!,
         __e2ee_space_grants: policies.__e2ee_space_grants!,
         __e2ee_space_deliveries: policies.__e2ee_space_deliveries!,
+        __e2ee_space_successors: policies.__e2ee_space_successors!,
         __e2ee_groups: policies.__e2ee_groups!,
         __e2ee_group_membership: policies.__e2ee_group_membership!,
         __e2ee_group_successors: policies.__e2ee_group_successors!,
@@ -109,6 +112,56 @@ it("shares a space through a parent group and follows later child-group addition
         { tier: "remote" },
       ),
     ).toHaveLength(1);
+    // A distinct group-only space isolates removal from the independent account
+    // path above, while retaining the same accepted nested-group topology.
+    const removalProject = await creator
+      .insert(app.projects, { title: "Nested removal" })
+      .wait({ tier: "global" });
+    await creator.e2ee.spaces.grant(app.projects, removalProject.id, parent.id).wait();
+    const removalTarget = { scope: app.projects, identifier: removalProject.id };
+    expect(await recipient.e2ee.explain(removalTarget)).toEqual({ state: "ready" });
+    const root = await creator.one(app.__e2ee_spaces.where({ identifier: removalProject.id }), {
+      tier: "remote",
+    });
+
+    // The departing account can record its departure but cannot receive or
+    // author replacement keys. No remaining member has repaired the group yet.
+    await recipient.e2ee.groups.leave(child.id).wait();
+    expect(await recipient.e2ee.explain(removalTarget)).toMatchObject({
+      state: "refused",
+      reason: "not-a-space-recipient",
+    });
+    expect(
+      await creator.all(app.__e2ee_group_successors.where({ groupId: parent.id }), {
+        tier: "remote",
+      }),
+    ).toEqual([]);
+    expect(
+      await creator.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), {
+        tier: "remote",
+      }),
+    ).toEqual([]);
+
+    // No explicit explain({ groupId }) call: loading the space reconciles its
+    // directly granted parent after the nested removal, then rotates the space.
+    // The unrequested child lineage does not have to rotate as a side effect.
+    expect(await creator.e2ee.explain(removalTarget)).toEqual({ state: "ready" });
+    const groups = await creator.all(app.__e2ee_group_successors.where({ groupId: parent.id }), {
+      tier: "remote",
+    });
+    const spaces = await creator.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), {
+      tier: "remote",
+    });
+    expect(groups).toHaveLength(1);
+    expect(spaces).toHaveLength(1);
+    expect(spaces[0]!.predecessor).toBe(root!.epochId);
+    const deliveries = await creator.all(
+      app.__e2ee_space_deliveries.where({ spaceId: root!.id, epochId: spaces[0]!.epochId }),
+      { tier: "remote" },
+    );
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.recipientAccountId).toBe(alice.account.id);
+    expect(await recipient.e2ee.explain(removalTarget)).toMatchObject({ state: "refused" });
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

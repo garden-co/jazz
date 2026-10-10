@@ -276,7 +276,8 @@ export class Spaces {
         throw new E2eeRecoveryError("recovery-state-changed");
       const paths: SpaceRecoveryPath[] = [];
       for (const observed of discovery.roots) {
-        await this.warm(observed);
+        // Recovery opens its own envelopes; ordinary device deliveries are unused.
+        await this.warm(observed, [], false);
         const query = this.tables.__e2ee_space_recovery_deliveries.where({
           spaceId: observed.id,
           recipientAccountId: this.accountId,
@@ -287,7 +288,7 @@ export class Spaces {
           const own = await readPublicMembershipHistory(tx, this.accountId, this.tables);
           return {
             own,
-            snapshot: await this.readRecords(tx, observed, observed.id, own),
+            snapshot: await this.readRecords(tx, observed, observed.id, own, [], false),
             recovery: await tx.allSettledForE2ee(query),
           };
         });
@@ -452,7 +453,8 @@ export class Spaces {
       device = await this.loadDevice();
       const { roots } = await this.discoverRecoveryRoots();
       for (const observed of roots) {
-        await this.warm(observed);
+        // Recovery opens its own envelopes; ordinary device deliveries are unused.
+        await this.warm(observed, [], false);
         const query = this.tables.__e2ee_space_recovery_deliveries.where({
           spaceId: observed.id,
           recipientAccountId: this.accountId,
@@ -460,7 +462,7 @@ export class Spaces {
         });
         await this.db.all(query, { tier: "global" });
         const read = await exclusiveE2eeTransaction(this.db, async (tx) => ({
-          snapshot: await this.readSnapshot(tx, observed, observed.id),
+          snapshot: await this.readSnapshot(tx, observed, observed.id, [], false),
           recovery: await tx.allSettledForE2ee(query),
         }));
         const { snapshot, recovery } = await read.wait({ tier: "global" });
@@ -820,7 +822,11 @@ export class Spaces {
     ];
   }
 
-  private async warm(observed: SpaceRoot, extraAccounts: string[] = []): Promise<void> {
+  private async warm(
+    observed: SpaceRoot,
+    extraAccounts: string[] = [],
+    includeDeliveries = true,
+  ): Promise<void> {
     const [grants, successors] = await Promise.all([
       this.db.all(this.tables.__e2ee_space_grants.where({ spaceId: observed.id }), {
         tier: "global",
@@ -828,9 +834,11 @@ export class Spaces {
       this.db.all(this.tables.__e2ee_space_successors.where({ spaceId: observed.id }), {
         tier: "global",
       }),
-      this.db.all(this.tables.__e2ee_space_deliveries.where({ spaceId: observed.id }), {
-        tier: "global",
-      }),
+      includeDeliveries
+        ? this.db.all(this.tables.__e2ee_space_deliveries.where({ spaceId: observed.id }), {
+            tier: "global",
+          })
+        : undefined,
     ]);
     const groupIds = this.groupHistoryIds(grants, extraAccounts);
     if (groupIds !== undefined) await this.groups?.warmMembership({ groupIds });
@@ -1510,9 +1518,10 @@ export class Spaces {
         // A verified key read need not wait for envelopes for other devices.
         // Explicit maintenance still delivers and revalidates its changed history.
         if (!use) {
-          await this.deliver(address, keyRoot, secret, device);
-          // Key delivery can add records after the snapshot used to open the key.
-          const refreshed = await this.readAcceptedSnapshot(address, observed.id);
+          const delivered = await this.deliver(address, keyRoot, secret, device);
+          // A read-only delivery transaction already accepted fresh authority.
+          // Writes require another snapshot so newly published keys are included.
+          const refreshed = delivered ?? (await this.readAcceptedSnapshot(address, observed.id));
           if (!sameSnapshotValue(snapshot, refreshed)) {
             if (conflicts >= 2) return { state: "unavailable", reason: "history-keeps-changing" };
             return this.explainAddress(address, use, includeHistory, conflicts + 1);
@@ -1780,6 +1789,7 @@ export class Spaces {
     device: LocalDevice,
   ) {
     const delivery = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      let wrote = false;
       const snapshot = await this.readSnapshot(tx, address, expected.id);
       const { root, keyRoot, members, rotationRequired, position } = await this.validate(
         snapshot,
@@ -1880,6 +1890,7 @@ export class Spaces {
             );
             this.assertOpen();
             const { id, ...values } = row;
+            wrote = true;
             tx.insert(
               this.tables.__e2ee_space_recovery_deliveries,
               { ...values, envelope, signature },
@@ -1918,6 +1929,7 @@ export class Spaces {
           );
           this.assertOpen();
           const { id, ...values } = row;
+          wrote = true;
           tx.insert(
             this.tables.__e2ee_space_deliveries,
             { ...values, envelope, signature },
@@ -1925,9 +1937,11 @@ export class Spaces {
           );
         }
       }
+      return wrote ? undefined : snapshot;
     });
-    await delivery.wait({ tier: "global" });
+    const snapshot = await delivery.wait({ tier: "global" });
     this.assertOpen();
+    return snapshot;
   }
 
   private async confirm(

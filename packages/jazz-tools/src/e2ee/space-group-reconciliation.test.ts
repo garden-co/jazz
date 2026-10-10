@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { rel } from "../relationships.js";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -8,14 +9,23 @@ import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests
 import { groupSchema } from "./groups.js";
 import { spaceSchema } from "./spaces.js";
 
-it("reconciles a stale recipient group when a remaining member loads the space", async () => {
+it("keeps denied group repair in maintenance and reconciles after permission is granted", async () => {
   const app = s.defineApp({
     ...deviceRequestSchema,
     ...groupSchema,
     ...spaceSchema,
     projects: s.table({ title: s.string() }, {}),
+    rotations: s.table(
+      { groupId: s.uuid(), accountId: s.uuid() },
+      {
+        group: rel("__e2ee_groups", "groupId"),
+        account: rel("__e2ee_account_identities", "accountId"),
+      },
+    ),
   });
-  const policies = definePermissions(app, ({ policy, session }) => {
+  const policies = definePermissions(app, ({ policy, session, allOf }) => {
+    policy.rotations.allowRead.always();
+    policy.rotations.allowInsert.where({ accountId: session.user.account });
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
     policy.__e2ee_spaces.allowRead.always();
@@ -31,7 +41,12 @@ it("reconciles a stale recipient group when a remaining member loads the space",
     policy.__e2ee_group_membership.allowRead.always();
     policy.__e2ee_group_membership.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_group_successors.allowRead.always();
-    policy.__e2ee_group_successors.allowInsert.where({ authorAccountId: session.user.account });
+    policy.__e2ee_group_successors.allowInsert.where((row) =>
+      allOf([
+        { authorAccountId: session.user.account },
+        policy.rotations.exists.where({ groupId: row.groupId, accountId: session.user.account }),
+      ]),
+    );
     policy.__e2ee_group_deliveries.allowRead.always();
     policy.__e2ee_group_deliveries.allowInsert.where({ senderAccountId: session.user.account });
     policy.__e2ee_group_repairs.allowRead.always();
@@ -59,6 +74,7 @@ it("reconciles a stale recipient group when a remaining member loads the space",
       permissions: {
         ...deviceRequestPermissions,
         projects: policies.projects!,
+        rotations: policies.rotations!,
         __e2ee_spaces: policies.__e2ee_spaces!,
         __e2ee_space_grants: policies.__e2ee_space_grants!,
         __e2ee_space_deliveries: policies.__e2ee_space_deliveries!,
@@ -107,6 +123,25 @@ it("reconciles a stale recipient group when a remaining member loads the space",
         tier: "remote",
       }),
     ).toEqual([]);
+
+    const before = await creator.all(app.__e2ee_space_deliveries, { tier: "remote" });
+    // Loading may attempt maintenance, but denied group rotation cannot publish
+    // a space successor or report that the stale space is ready.
+    expect(await creator.e2ee.explain(target)).toEqual({
+      state: "maintenance-required",
+      reason: "group-epoch-stale",
+    });
+    expect(await creator.all(app.__e2ee_group_successors, { tier: "remote" })).toEqual([]);
+    expect(await creator.all(app.__e2ee_space_successors, { tier: "remote" })).toEqual([]);
+    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual(before);
+    expect(await recipient.e2ee.explain(target)).toEqual({
+      state: "refused",
+      reason: "not-a-space-recipient",
+    });
+    // Grant ordinary Jazz permission, then retry the same stale space.
+    await creator
+      .insert(app.rotations, { groupId: group.id, accountId: alice.account.id })
+      .wait({ tier: "global" });
 
     // No explicit explain({ groupId }) call: loading the space reconciles its
     // stale recipient group before producing the next space epoch.
