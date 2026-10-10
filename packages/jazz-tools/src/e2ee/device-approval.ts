@@ -142,7 +142,7 @@ export class DeviceApproval {
     });
   }
 
-  private async readSnapshot(tx: E2eeTransactionScope) {
+  private async readSnapshot(tx: E2eeTransactionScope, recoveryRootId?: string) {
     const [
       successors,
       identities,
@@ -173,9 +173,14 @@ export class DeviceApproval {
       tx.allSettledForE2ee(
         this.tables.__e2ee_device_deliveries.where({ "$createdBy.account": this.accountId }),
       ),
-      tx.allSettledForE2ee(
-        this.tables.__e2ee_recovery_deliveries.where({ "$createdBy.account": this.accountId }),
-      ),
+      recoveryRootId === undefined
+        ? undefined
+        : tx.allSettledForE2ee(
+            this.tables.__e2ee_recovery_deliveries.where({
+              "$createdBy.account": this.accountId,
+              rootId: recoveryRootId,
+            }),
+          ),
       readPublicMembershipHistory(tx, this.accountId, this.tables),
     ]);
     this.assertOpen();
@@ -184,7 +189,7 @@ export class DeviceApproval {
     return {
       publicHistory,
       identity,
-      recoveryDeliveries: recoveryDeliveries.rows,
+      recoveryDeliveries: recoveryDeliveries?.rows,
       successors: successors.rows,
       challenges: challenges.rows,
       requests: requests.rows,
@@ -210,7 +215,6 @@ export class DeviceApproval {
       this.db.all(this.tables.__e2ee_device_proofs, { tier: "global" }),
       this.db.all(this.tables.__e2ee_device_approvals, { tier: "global" }),
       this.db.all(this.tables.__e2ee_device_deliveries, { tier: "global" }),
-      this.db.all(this.tables.__e2ee_recovery_deliveries, { tier: "global" }),
       this.db.all(this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }), {
         tier: "global",
       }),
@@ -231,8 +235,8 @@ export class DeviceApproval {
     this.snapshotPrefetched = true;
   }
 
-  private async snapshot(transaction?: E2eeTransactionScope) {
-    if (transaction) return this.readSnapshot(transaction);
+  private async snapshot(transaction?: E2eeTransactionScope, recoveryRootId?: string) {
+    if (transaction) return this.readSnapshot(transaction, recoveryRootId);
     // ponytail: scan this account's history; index per-device history if it grows large.
     for (let attempt = 0; ; attempt++) {
       try {
@@ -246,7 +250,19 @@ export class DeviceApproval {
             tier: "global",
           });
         }
-        const read = await exclusiveE2eeTransaction(this.db, (tx) => this.readSnapshot(tx));
+        // Private recovery envelopes are needed only when opening recovery
+        // material. Public recovery roots remain in every authority snapshot.
+        if (recoveryRootId !== undefined)
+          await this.db.all(
+            this.tables.__e2ee_recovery_deliveries.where({
+              "$createdBy.account": this.accountId,
+              rootId: recoveryRootId,
+            }),
+            { tier: "global" },
+          );
+        const read = await exclusiveE2eeTransaction(this.db, (tx) =>
+          this.readSnapshot(tx, recoveryRootId),
+        );
         const snapshot = await read.wait({ tier: "global" });
         this.assertOpen();
         if (!snapshot.identity) throw new Error("Missing accepted E2EE account identity");
@@ -319,8 +335,11 @@ export class DeviceApproval {
     return members;
   }
 
-  private async currentSnapshot(transaction?: E2eeTransactionScope): Promise<EpochSnapshot> {
-    const raw = await this.snapshot(transaction);
+  private async currentSnapshot(
+    transaction?: E2eeTransactionScope,
+    recoveryRootId?: string,
+  ): Promise<EpochSnapshot> {
+    const raw = await this.snapshot(transaction, recoveryRootId);
     const initial = initialAccountAuthority(raw.publicHistory);
     if (
       initial.root.accountId !== raw.identity.id ||
@@ -1062,7 +1081,7 @@ export class DeviceApproval {
     const material = await decodeRecoveryMaterial(value, this.application, this.keys, this.signer);
     let secret: Uint8Array | undefined;
     try {
-      const snapshot = await this.currentSnapshot();
+      const snapshot = await this.recoverySnapshot(material.rootId);
       secret = await this.openRecovery(snapshot, material);
       this.assertOpen();
       return {
@@ -1079,8 +1098,14 @@ export class DeviceApproval {
     }
   }
 
+  private async recoverySnapshot(rootId: string) {
+    const snapshot = await this.currentSnapshot(undefined, rootId);
+    if (!snapshot.recoveryDeliveries) throw new Error("Missing E2EE recovery snapshot");
+    return { ...snapshot, recoveryDeliveries: snapshot.recoveryDeliveries };
+  }
+
   private async openRecovery(
-    snapshot: EpochSnapshot,
+    snapshot: Awaited<ReturnType<DeviceApproval["recoverySnapshot"]>>,
     material: DecodedRecoveryMaterial,
   ): Promise<Uint8Array> {
     const root = snapshot.publicState.recoveryRoots.find((row) => row.id === material.rootId);
@@ -1132,7 +1157,7 @@ export class DeviceApproval {
     try {
       challengeSecret = runtimeRandomBytes(32);
       device = await this.loadDevice();
-      const snapshot = await this.currentSnapshot();
+      const snapshot = await this.recoverySnapshot(material.rootId);
       if (snapshot.revoked.has(this.deviceId))
         throw new Error("Revoked device requires fresh enrolment");
       const same = (a: Uint8Array, b: Uint8Array) =>
