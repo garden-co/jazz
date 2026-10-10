@@ -785,16 +785,30 @@ export class Spaces {
     const pending = seed && initialSeeds.get(seed);
     if (
       seed &&
-      (!pending || pending.owner !== this || pending.used || pending.disposed ||
-       pending.schema !== scope._schema || pending.table !== scope._table ||
-       pending.root.scopeId !== address.scopeId || pending.root.identifier !== identifier)
-    ) throw new E2eeDataError("key-unavailable");
+      (!pending ||
+        pending.owner !== this ||
+        pending.used ||
+        pending.disposed ||
+        pending.schema !== scope._schema ||
+        pending.table !== scope._table ||
+        pending.root.scopeId !== address.scopeId ||
+        pending.root.identifier !== identifier)
+    )
+      throw new E2eeDataError("key-unavailable");
     const device = await this.loadDevice();
     try {
       const secret = pending?.secret ?? runtimeRandomBytes(32);
       try {
-        const root = await this.stageInitial(tx, scope, identifier,
-          recipientIds ?? pending?.recipients ?? [this.accountId], address, device, secret, seed);
+        const root = await this.stageInitial(
+          tx,
+          scope,
+          identifier,
+          recipientIds ?? pending?.recipients ?? [this.accountId],
+          address,
+          device,
+          secret,
+          seed,
+        );
         await prepareData(secret, root, tx);
         this.assertOpen();
       } finally {
@@ -890,7 +904,11 @@ export class Spaces {
     const state = await this.requireDevice().states(tx);
     if (!state.active.has(deviceId)) throw new E2eeDataError("key-unavailable");
     const ids = initialRecipientIds(recipientIds);
-    const groupSnapshot = await this.groups?.readMembership(tx, { groupIds: ids }, state.publicHistory);
+    const groupSnapshot = await this.groups?.readMembership(
+      tx,
+      { groupIds: ids },
+      state.publicHistory,
+    );
     const graph = groupSnapshot && (await this.groups!.acceptedGraph(groupSnapshot));
     const recipients: InitialRecipient[] = [];
     const expectedRecipients: unknown[] = [];
