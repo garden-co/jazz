@@ -1,13 +1,36 @@
 import { expect, it } from "vitest";
 import { app, fixture } from "./fixtures/space-recovery-discovery-scenarios.js";
-it("discovers only recipient spaces through cold status, creation and device-loss recovery", async () => {
+it("discovers, backfills and recovers recipient spaces, then excludes removed membership", async () => {
   const f = await fixture();
   try {
+    // Create recovery before any space exists. A grant authored by the recipient
+    // establishes membership without giving it a key or a recovery envelope.
+    const { material } = await f.recipient.e2ee.recovery.create().wait();
+    const inherited = await f.project("Undelivered inherited access");
+    await f.recipient.e2ee.spaces.grant(app.projects, inherited.identifier, f.parent.id).wait();
+    const missing = await f.recipient.e2ee.recovery.status(material);
+    expect(missing.spaces).toMatchObject({
+      validation: "checked",
+      paths: [
+        {
+          identifier: inherited.identifier,
+          validation: "unavailable",
+          reason: "missing-recovery-delivery",
+        },
+      ],
+    });
+    if (missing.spaces.validation !== "checked") throw new Error("Space recovery was not checked");
+    expect(missing.spaces.paths).toHaveLength(1);
+    await expect(f.recipient.e2ee.recovery.use(material).wait()).rejects.toMatchObject({
+      code: "recovery-space-delivery-unavailable",
+    });
+    await expect(f.recipient.e2ee.recovery.create().wait()).rejects.toThrow(
+      "Space key unavailable while creating recovery",
+    );
+    expect(await f.owner.e2ee.explain(inherited)).toEqual({ state: "ready" });
     const direct = await f.project("Direct noncreator access", f.recipientAccount.account.id);
-    const inherited = await f.project("Nested recipient access", f.parent.id);
     expect(await f.recipient.e2ee.explain(direct)).toEqual({ state: "ready" });
     expect(await f.recipient.e2ee.explain(inherited)).toEqual({ state: "ready" });
-    const { material } = await f.recipient.e2ee.recovery.create().wait();
     const before = await f.recipient.e2ee.recovery.status(material);
     expect(before.spaces).toMatchObject({ validation: "checked" });
     if (before.spaces.validation !== "checked") throw new Error("Space recovery was not checked");
@@ -54,9 +77,8 @@ it("discovers only recipient spaces through cold status, creation and device-los
     expect((await f.recipient.e2ee.recovery.status(created.material)).spaces).toEqual(
       before.spaces,
     );
-    expect((await f.recipient.e2ee.recovery.status(material)).spaces).toEqual(before.spaces);
-    expect(await f.recipient.e2ee.explain(direct)).toEqual({ state: "ready" });
-    expect(await f.recipient.e2ee.explain(inherited)).toEqual({ state: "ready" });
+    // Exact envelope preservation below and the later cold recovery with the
+    // original material cover continued access without repeating warm reads.
     const afterward = await Promise.all([
       f.recipient.all(accountDeliveries, { tier: "global" }),
       f.recipient.all(groupDeliveries, { tier: "global" }),
@@ -82,6 +104,21 @@ it("discovers only recipient spaces through cold status, creation and device-los
     expect(await recovered.e2ee.devices.list()).toContainEqual(
       expect.objectContaining({ id: pending!.id, state: "active", keyReadiness: "verified" }),
     );
+    // The recovered device has both keys. Removing the independent direct grant
+    // leaves only the nested path; leaving its child must remove that path too.
+    await recovered.e2ee.spaces
+      .revoke(app.projects, direct.identifier, f.recipientAccount.account.id)
+      .wait();
+    await recovered.e2ee.groups.leave(f.child.id).wait();
+    expect(await recovered.e2ee.recovery.status(created.material)).toMatchObject({
+      spaces: { validation: "checked", paths: [] },
+    });
+    const removedRecovery = await recovered.e2ee.recovery.create().wait();
+    await recovered.e2ee.recovery.use(removedRecovery.material).wait();
+    expect(await recovered.e2ee.explain(inherited)).toMatchObject({
+      state: "refused",
+      reason: "not-a-space-recipient",
+    });
   } finally {
     await f.cleanup();
   }
