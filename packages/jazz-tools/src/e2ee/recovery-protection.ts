@@ -5,7 +5,9 @@ type Target = { application: string; accountId: string; rootId: string };
 
 /** Separate purpose and account binding; this is not a data-cell context. */
 export function recoveryProtectionContext(target: Target): Uint8Array {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(target.rootId))
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(target.rootId)
+  )
     throw new Error("Invalid E2EE recovery root ID");
   return encodeCryptoContext({
     application: target.application,

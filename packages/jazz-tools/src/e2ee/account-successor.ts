@@ -36,7 +36,7 @@ export function successorTargetId(
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function canonical(value: unknown): Uint8Array {
   return encoder.encode(JSON.stringify(value));
@@ -50,14 +50,14 @@ function parse(bytes: Uint8Array): unknown {
   return value;
 }
 
-function checkIds(value: unknown, requireUuidV4 = true): asserts value is string[] {
+function checkIds(value: unknown, requireUuid = true): asserts value is string[] {
   if (
     !Array.isArray(value) ||
     value.some(
       (id, i) =>
         typeof id !== "string" ||
         !id.length ||
-        (requireUuidV4 && !uuid.test(id)) ||
+        (requireUuid && !uuid.test(id)) ||
         (i > 0 && value[i - 1] >= id),
     )
   )
@@ -76,7 +76,7 @@ export function decodeEpochIds(bytes: Uint8Array): string[] {
   return value;
 }
 
-/** Raw candidate row IDs are not necessarily valid signed-statement UUIDv4 IDs. */
+/** Raw candidate row IDs are not necessarily valid signed-statement UUID IDs. */
 export function encodePublicApprovalRevision(ids: Iterable<string>): Uint8Array {
   const sorted = [...ids].sort();
   checkIds(sorted, false);
