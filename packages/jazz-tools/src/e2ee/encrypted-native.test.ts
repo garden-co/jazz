@@ -135,6 +135,10 @@ it.each(["grant", "initial", "initial-upsert"])(
         title: "Private title",
         bytes: new Uint8Array([1, 2, 255]),
       });
+      if (sharing === "initial") {
+        tx.update(app.notes, note.id, { title: "Intermediate initial value" });
+        tx.update(app.notes, note.id, { title: note.title });
+      }
       const query = app.notes.where({ id: note.id });
       expect(await tx.one(query, { tier: "local" })).toEqual(note);
       expect(await tx.one(query.select("id", "title"), { tier: "local" })).toEqual({
@@ -179,9 +183,6 @@ it.each(["grant", "initial", "initial-upsert"])(
         id: note.id,
         title: "Private title",
       });
-      await reader
-        .update(app.notes, note.id, { title: "Changed", bytes: new Uint8Array([4, 5]) })
-        .wait({ tier: "global" });
       if (sharing === "grant") {
         // Existing-space bursts borrow one key, then recheck authority before
         // publication. Both writer runtimes must preserve every row and byte.
@@ -193,20 +194,30 @@ it.each(["grant", "initial", "initial-upsert"])(
             bytes: new Uint8Array([index, 255]),
           }),
         );
+        // Keep insert/update preparation order and repeated updates to one row.
+        // Inputs must remain captured while a whole update batch is pending.
+        const updatedBytes = new Uint8Array([4, 5]);
+        batch.update(app.notes, note.id, { title: "Intermediate", bytes: updatedBytes });
+        batch.update(app.notes, added[0]!.id, { title: `Updated ${added[0]!.title}` });
+        batch.update(app.notes, note.id, { title: "Changed" });
+        updatedBytes[0] = 99;
         await batch.commit().wait({ tier: "global" });
+        const expected = [
+          { ...added[0]!, title: `Updated ${added[0]!.title}` },
+          ...added.slice(1),
+          { ...note, title: "Changed", bytes: new Uint8Array([4, 5]) },
+        ];
         const batchRows = await writer.all(
-          app.notes.where({ id: { in: added.map((row) => row.id) } }),
+          app.notes.where({ id: { in: expected.map((row) => row.id) } }),
           { tier: "global" },
         );
         expect(batchRows.sort((a, b) => a.id.localeCompare(b.id))).toEqual(
-          added.sort((a, b) => a.id.localeCompare(b.id)),
+          expected.sort((a, b) => a.id.localeCompare(b.id)),
         );
-        expect(await writer.one(query, { tier: "global" })).toEqual({
-          ...note,
-          title: "Changed",
-          bytes: new Uint8Array([4, 5]),
-        });
       } else {
+        await reader
+          .update(app.notes, note.id, { title: "Changed", bytes: new Uint8Array([4, 5]) })
+          .wait({ tier: "global" });
         await expect(writer.one(query, { tier: "global" })).rejects.toMatchObject({
           code: "key-not-shared",
         });

@@ -185,11 +185,25 @@ it("automatically isolates private device records and keeps group, space and row
     expect(await creator.one(app.notes.where({ id: own.value.id }), { tier: "global" })).toEqual(
       own.value,
     );
-    // Authority can change while a crypto provider is awaiting. A bounded
-    // preparation batch must recheck before allowing any of its rows to publish.
-    duringEncryption = async () => {
-      await creator.e2ee.spaces.revoke(app.projects, project.id, bob.account.id).wait();
+    // Pause both preparation kinds, then publish one revocation. Each batch
+    // must independently recheck authority and roll back all of its changes.
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let entered!: () => void;
+    let timeout: ReturnType<typeof setTimeout>;
+    const started = new Promise<void>((resolve, reject) => {
+      entered = resolve;
+      timeout = setTimeout(() => reject(new Error("Encrypted batches did not both start")), 10_000);
+    });
+    let preparations = 0;
+    const pauseBatch = async () => {
+      if (++preparations === 2) entered();
+      else duringEncryption = pauseBatch;
+      await paused;
     };
+    duringEncryption = pauseBatch;
     const revoked = recipient.beginTransaction();
     const rejectedRows = Array.from({ length: 3 }, (_, index) =>
       revoked.insert(app.notes, {
@@ -198,11 +212,29 @@ it("automatically isolates private device records and keeps group, space and row
         title: `Revoked batch ${index}`,
       }),
     );
-    await expect(revoked.commit().wait({ tier: "global" })).rejects.toMatchObject({
-      code: "key-not-shared",
-    });
-    expect(borrowedKeys).toHaveLength(1);
-    expect(borrowedKeys[0]!.every((byte) => byte === 0)).toBe(true);
+    const updates = recipient.beginTransaction();
+    for (let index = 0; index < 3; index++) {
+      updates.update(app.notes, own.value.id, { title: `Revoked update ${index}` });
+    }
+    const rejected = Promise.all([
+      expect(revoked.commit().wait({ tier: "global" })).rejects.toMatchObject({
+        code: "key-not-shared",
+      }),
+      expect(updates.commit().wait({ tier: "global" })).rejects.toMatchObject({
+        code: "key-not-shared",
+      }),
+    ]);
+    rejected.catch(() => {});
+    try {
+      await started;
+      await creator.e2ee.spaces.revoke(app.projects, project.id, bob.account.id).wait();
+    } finally {
+      clearTimeout(timeout!);
+      resume();
+    }
+    await rejected;
+    expect(borrowedKeys).toHaveLength(2);
+    expect(borrowedKeys.every((key) => key.every((byte) => byte === 0))).toBe(true);
     expect(
       await creator.all(app.notes.where({ id: { in: rejectedRows.map((row) => row.id) } }), {
         tier: "global",

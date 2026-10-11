@@ -1315,6 +1315,20 @@ function encryptedRowScopeKey(
   return JSON.stringify([table, id.toLowerCase(), branchCoordinateKey(branch)]);
 }
 
+type PreparedEncryptedUpdate = {
+  identifier: string;
+  initial: boolean;
+  stage: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<void>;
+  withKey: (use: PreparedEncryptedUpdate["stage"]) => Promise<void>;
+};
+
+type EncryptedUpdateBatch = {
+  schema: WasmSchema;
+  table: string;
+  pending: boolean;
+  writes: ((io: TransactionPreparationIO) => Promise<PreparedEncryptedUpdate>)[];
+};
+
 type EncryptedInsertBatch = {
   schema: WasmSchema;
   scope: string;
@@ -1339,6 +1353,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private readonly initialSpaceKeys = new Map<string, { secret: Uint8Array; root: SpaceRoot }>();
   private readonly encryptedScopes = new Map<string, string>();
   private encryptedInsertBatch?: EncryptedInsertBatch;
+  private encryptedUpdateBatch?: EncryptedUpdateBatch;
 
   constructor(
     readonly kind: TKind,
@@ -1363,9 +1378,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   private requireBinding(operation: string): DbTransactionHandleBinding {
-    // Only adjacent synchronous inserts may share preparation. Reads, other
-    // mutations, commit and rollback close admission to the previous batch.
+    // Adjacent inserts or updates can share preparation until it starts.
+    // Other handle operations close admission to both kinds of batch.
     this.encryptedInsertBatch = undefined;
+    this.encryptedUpdateBatch = undefined;
     if (this.failedRead && operation !== "rollback") {
       throw new Error(`DbTransaction.${operation}() cannot run after a pending read failed`);
     }
@@ -1903,6 +1919,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     data: Record<string, unknown>,
     options?: UpdateOptions & { applyDiffs?: object },
   ): void {
+    const previousBatch = this.encryptedUpdateBatch;
+    this.encryptedUpdateBatch = undefined;
     this.bindTable(table);
     // Diffs are staged against this transaction's own view of the row, so
     // they compose with its earlier writes and commit atomically with them.
@@ -1914,7 +1932,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       (Object.hasOwn(transformedData, encrypted.space) ||
         encrypted.columns.some((name) => Object.hasOwn(transformedData, name)))
     ) {
-      return this.updateEncrypted(table, id, transformedData, options);
+      return this.updateEncrypted(table, id, transformedData, options, "update", previousBatch);
     }
     const updates = toWriteRecordForOperation(
       "Update",
@@ -1957,6 +1975,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     data: Record<string, unknown>,
     options?: UpdateOptions,
     operation: "update" | "upsert" = "update",
+    previousBatch?: EncryptedUpdateBatch,
   ): void {
     const metadata = encryptedSchemas.get(table._schema)!;
     const declaration = metadata.tables.get(table._table)!;
@@ -1974,7 +1993,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       .includeDeleted()
       .where({ id })
       .select(declaration.space);
-    ownerClient.prepareTransaction(openTransactionId, async (io) => {
+    const prepare = async (
+      io: TransactionPreparationIO,
+    ): Promise<PreparedEncryptedUpdate | undefined> => {
       const rows = await readTransactionRows<Record<string, unknown>>(
         query,
         {
@@ -2088,9 +2109,66 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           identifier,
         );
       };
-      if (initial) await stage(initial.secret, initial.root);
-      else {
-        await withSpaceKeys(db, scope, identifier, stage, false);
+      return {
+        identifier,
+        initial: !!initial,
+        stage,
+        withKey: (use) =>
+          initial
+            ? use(initial.secret, initial.root)
+            : withSpaceKeys(db, scope, identifier, use, false),
+      };
+    };
+    // Explicit branch writes retain their independent preparation path.
+    if (operation !== "update" || !changed.length || normalized?.branch !== undefined) {
+      ownerClient.prepareTransaction(openTransactionId, async (io) => {
+        const prepared = await prepare(io);
+        await prepared?.withKey(prepared.stage);
+      });
+      return;
+    }
+    // Scope queries stay between their original writes. Resolving all scopes
+    // up front could miss visibility changes caused by an earlier update.
+    const resolve = async (io: TransactionPreparationIO) => (await prepare(io))!;
+    if (
+      previousBatch?.pending &&
+      previousBatch.schema === table._schema &&
+      previousBatch.table === table._table
+    ) {
+      previousBatch.writes.push(resolve);
+      this.encryptedUpdateBatch = previousBatch;
+      return;
+    }
+    const batch: EncryptedUpdateBatch = {
+      schema: table._schema,
+      table: table._table,
+      pending: true,
+      writes: [resolve],
+    };
+    this.encryptedUpdateBatch = batch;
+    ownerClient.prepareTransaction(openTransactionId, async (io) => {
+      batch.pending = false;
+      if (this.encryptedUpdateBatch === batch) this.encryptedUpdateBatch = undefined;
+      let index = 0;
+      let next: PreparedEncryptedUpdate | undefined = await batch.writes[index]!(io);
+      while (next) {
+        const first = next;
+        let count = 0;
+        let epoch: string | undefined;
+        await first.withKey(async (secret, root) => {
+          epoch = root.epochId;
+          do {
+            await next!.stage(secret, root);
+            count++;
+            next = ++index < batch.writes.length ? await batch.writes[index]!(io) : undefined;
+          } while (next?.identifier === first.identifier);
+        });
+        if (count > 1 && !first.initial) {
+          await first.withKey(async (_secret, root) => {
+            if (root.epochId !== epoch)
+              throw new Error("Encryption space changed during transaction preparation");
+          });
+        }
       }
     });
   }
