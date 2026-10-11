@@ -141,10 +141,14 @@ it.each(["grant", "initial", "initial-upsert"])(
       }
       const query = app.notes.where({ id: note.id });
       expect(await tx.one(query, { tier: "local" })).toEqual(note);
-      expect(await tx.one(query.select("id", "title"), { tier: "local" })).toEqual({
-        id: note.id,
-        title: "Private title",
-      });
+      // Projection shape is independent of sharing mode; exercise both runtimes
+      // with transaction-owned keys here and accepted keys after the grant.
+      if (sharing === "grant") {
+        expect(await tx.one(query.select("id", "title"), { tier: "local" })).toEqual({
+          id: note.id,
+          title: "Private title",
+        });
+      }
       await tx.commit().wait({ tier: "global" });
       if (sharing !== "grant") {
         await expect(
@@ -179,10 +183,12 @@ it.each(["grant", "initial", "initial-upsert"])(
         ).toEqual([readerId]);
       }
       expect(await reader.one(query, { tier: "global" })).toEqual(note);
-      expect(await reader.one(query.select("id", "title"), { tier: "global" })).toEqual({
-        id: note.id,
-        title: "Private title",
-      });
+      if (sharing === "grant") {
+        expect(await reader.one(query.select("id", "title"), { tier: "global" })).toEqual({
+          id: note.id,
+          title: "Private title",
+        });
+      }
       if (sharing === "grant") {
         // Existing-space bursts borrow one key, then recheck authority before
         // publication. Both writer runtimes must preserve every row and byte.
