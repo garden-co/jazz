@@ -8,14 +8,9 @@ import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests
 import { spaceSchema } from "./spaces.js";
 import { createBrowserCrypto } from "./browser.js";
 
-it.each([
-  "encrypted-space-revocation",
-  "plaintext-projection-without-e2ee",
-  "superseded-history-failure",
-])(
+it.each(["encrypted-space-revocation", "superseded-history-failure"])(
   "maintains included-result key dependencies (%s)",
   async (scenario) => {
-    const plaintext = scenario === "plaintext-projection-without-e2ee";
     const superseded = scenario === "superseded-history-failure";
     const app = s.defineApp({
       ...deviceRequestSchema,
@@ -82,31 +77,27 @@ it.each([
       const crypto = superseded ? await createBrowserCrypto() : undefined;
       const reader = await createDb({
         ...bob,
-        ...(plaintext
-          ? {}
-          : {
-              e2ee: {
-                app,
-                store: store(),
-                crypto: crypto && {
-                  ...crypto,
-                  deviceSigner: {
-                    ...crypto.deviceSigner,
-                    async verify(...args) {
-                      if (validationGate) {
-                        validationStarted = true;
-                        await validationGate;
-                      }
-                      return crypto.deviceSigner.verify(...args);
-                    },
-                  },
-                },
+        e2ee: {
+          app,
+          store: store(),
+          crypto: crypto && {
+            ...crypto,
+            deviceSigner: {
+              ...crypto.deviceSigner,
+              async verify(...args) {
+                if (validationGate) {
+                  validationStarted = true;
+                  await validationGate;
+                }
+                return crypto.deviceSigner.verify(...args);
               },
-            }),
+            },
+          },
+        },
       });
       clients.push(reader);
       await owner.e2ee.devices.list();
-      if (!plaintext) await reader.e2ee.devices.list();
+      await reader.e2ee.devices.list();
       const tx = owner.beginExclusiveTransaction();
       const project = tx.insert(app.projects, { title: "Private project" });
       const folder = tx.insert(app.folders, { title: "Shared folder" });
@@ -116,12 +107,44 @@ it.each([
         title: "Secret",
       });
       await tx.commit().wait({ tier: "global" });
-      if (!plaintext)
-        await owner.e2ee.spaces.grant(app.projects, project.id, bob.account.id).wait();
+      await owner.e2ee.spaces.grant(app.projects, project.id, bob.account.id).wait();
+      if (!superseded) {
+        // This observer has neither E2EE configuration nor a grant. Plaintext
+        // includes must work independently of the encrypted reader's keys.
+        const plainReader = await createDb(await localAccountConfig(server.appId, server.url));
+        clients.push(plainReader);
+        const plainQuery = app.folders.where({ id: folder.id }).include({
+          notesViaFolder: app.notes.select("id"),
+        });
+        const plainExpected = [{ ...folder, notesViaFolder: [{ id: note.id }] }];
+        expect(await plainReader.all(plainQuery, { tier: "global" })).toEqual(plainExpected);
+        let plainResult: unknown;
+        let plainFailure: Error | undefined;
+        const stop = plainReader.subscribe(
+          plainQuery,
+          {
+            onUpdate: (rows) => {
+              plainResult = rows;
+            },
+            onError: (error) => {
+              plainFailure = error;
+            },
+          },
+          { tier: "global" },
+        );
+        try {
+          await expect
+            .poll(() => plainFailure ?? plainResult, { timeout: 30_000 })
+            .toEqual(plainExpected);
+          expect(plainFailure).toBeUndefined();
+        } finally {
+          stop();
+        }
+      }
       const query = app.folders.where({ id: folder.id }).include({
-        notesViaFolder: plaintext ? app.notes.select("id") : true,
+        notesViaFolder: true,
       });
-      const expected = [{ ...folder, notesViaFolder: [plaintext ? { id: note.id } : note] }];
+      const expected = [{ ...folder, notesViaFolder: [note] }];
       expect(await reader.all(query, { tier: "global" })).toEqual(expected);
       const snapshots: unknown[][] = [];
       let failure: Error | undefined;
@@ -137,7 +160,6 @@ it.each([
       );
       try {
         await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual(expected);
-        if (plaintext) return;
         let visibleIds: unknown[] | undefined;
         if (superseded) {
           stopPlaintext = reader.subscribe(

@@ -20,14 +20,11 @@ export type EncryptedTableScenario =
   | "equality-index"
   | "equality-collision"
   | "equality-owned-bytes"
-  | "equality-membership-invalidation"
   | "equality-device-invalidation"
   | "equality-device-invalidation-recipient"
   | "equality-transaction-initial"
   | "equality-transaction-existing"
   | "equality-uuid-scope"
-  | "equality-subscription"
-  | "equality-subscription-collision"
   | "equality-epoch-race"
   | "transaction-projection"
   | "offline-at-submit"
@@ -110,6 +107,8 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
     let decrypted = 0;
     let failEncryption = false;
     let failDecryption = false;
+    let failHistory = false;
+    let deniedHistory = 0;
     let duringToken: (() => Promise<void>) | undefined;
     let saved: string | null = null;
     db = await createDb({
@@ -126,6 +125,19 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
         },
         crypto: {
           ...crypto,
+          keyEnvelope: {
+            ...crypto.keyEnvelope,
+            async unwrap(key, context, envelope) {
+              if (failHistory) {
+                const text = new TextDecoder().decode(context);
+                if (text.includes('"successor"') && text.includes('"history"')) {
+                  deniedHistory++;
+                  throw new Error("Historical key unavailable");
+                }
+              }
+              return crypto.keyEnvelope.unwrap(key, context, envelope);
+            },
+          },
           equalityIndex: {
             mechanism: crypto.equalityIndex!.mechanism,
             async token(...args) {
@@ -136,7 +148,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
               return token;
             },
           },
-          ...(timing === "equality-collision" || timing === "equality-subscription-collision"
+          ...(timing === "equality-collision"
             ? {
                 equalityIndex: {
                   mechanism: crypto.equalityIndex!.mechanism,
@@ -364,27 +376,35 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
           }),
         ).toEqual([note]);
       }
-      let snapshot: unknown;
-      let failure: Error | undefined;
-      const stop = db.subscribe(
-        app.notes.where({ projectId: project.id.toUpperCase(), title: note.title }),
-        {
-          onUpdate: (rows) => {
-            snapshot = rows;
+      // Canonical and alternate UUID spellings must both track the same
+      // membership dependency, including terminal failure rather than an empty result.
+      const observers = [project.id, project.id.toUpperCase()].map((identifier) => {
+        const state: { snapshots: unknown[][]; failure?: Error } = { snapshots: [] };
+        const stop = db!.subscribe(
+          app.notes.where({ projectId: identifier, title: note.title }),
+          {
+            onUpdate: (rows) => state.snapshots.push(rows),
+            onError: (error) => {
+              state.failure = error;
+            },
           },
-          onError: (error) => {
-            failure = error;
-          },
-        },
-        { tier: "global" },
-      );
+          { tier: "global" },
+        );
+        return { state, stop };
+      });
       try {
-        await expect.poll(() => failure ?? snapshot, { timeout: 10_000 }).toEqual([note]);
+        for (const { state } of observers)
+          await expect
+            .poll(() => state.failure ?? state.snapshots.at(-1), { timeout: 10_000 })
+            .toEqual([note]);
         await db.e2ee.spaces.revoke(app.projects, project.id, account.account.id).wait();
-        await expect.poll(() => failure?.name, { timeout: 10_000 }).toBe("E2eeDataError");
-        expect(snapshot).toEqual([note]);
+        for (const { state } of observers) {
+          await expect.poll(() => state.failure?.name, { timeout: 10_000 }).toBe("E2eeDataError");
+          expect(state.snapshots.at(-1)).toEqual([note]);
+          expect(state.snapshots.some((rows) => rows.length === 0)).toBe(false);
+        }
       } finally {
-        stop();
+        for (const { stop } of observers) stop();
       }
       return;
     }
@@ -420,9 +440,13 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       });
       const database = db;
       const query = app.notes.where({ projectId: project.id, title: "After rotation" });
+      const history = app.notes.where({ projectId: project.id, title: note.title }).orderBy("done");
       const snapshots: unknown[][] = [];
+      const historySnapshots: Array<Array<typeof note>> = [];
       let failure: Error | undefined;
+      let historyFailure: Error | undefined;
       let stop: (() => void) | undefined;
+      let stopHistory: (() => void) | undefined;
       let expected: typeof note | undefined;
       try {
         await recipient.e2ee.devices.list();
@@ -430,9 +454,8 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
           .grant(app.projects, project.id, recipientAccount.account.id)
           .wait();
         duringToken = async () => {
-          // The foreground read has already prepared an old-epoch token. The
-          // one-shot hook clears before this callback, so the subscription
-          // cannot steal the race gate or recursively enter it.
+          // Claim and clear the foreground gate before either live query can
+          // compute its tokens. All three readers must predate rotation.
           stop = database.subscribe(
             query,
             {
@@ -443,17 +466,26 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
             },
             { tier: "global" },
           );
+          stopHistory = database.subscribe(
+            history,
+            {
+              onUpdate: (rows) => historySnapshots.push(rows),
+              onError: (error) => {
+                historyFailure = error;
+              },
+            },
+            { tier: "global" },
+          );
           await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([]);
-          // Both readers predate rotation: the suspended foreground query must
-          // retry, and the live subscription must refresh its epoch tokens.
+          await expect
+            .poll(() => historyFailure ?? historySnapshots.at(-1), { timeout: 30_000 })
+            .toEqual([note]);
           await database.e2ee.spaces
             .revoke(app.projects, project.id, recipientAccount.account.id)
             .wait();
           expect(
             await database.e2ee.explain({ scope: app.projects, identifier: project.id }),
-          ).toEqual({
-            state: "ready",
-          });
+          ).toEqual({ state: "ready" });
           const added = database.insert(app.notes, {
             projectId: project.id,
             title: "After rotation",
@@ -470,8 +502,58 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
           .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
           .toEqual([expected]);
         expect(failure).toBeUndefined();
+
+        // Reuse the accepted rotation for mixed-epoch ordering and pagination.
+        // The history subscription has observed the old row since before rotation.
+        const current = database.insert(app.notes, {
+          projectId: project.id,
+          title: note.title,
+          done: true,
+          payload: new Uint8Array([10]),
+        });
+        await current.wait({ tier: "global" });
+        const expectedHistory = [note, current.value];
+        expect(await database.all(history, { tier: "global" })).toEqual(expectedHistory);
+        expect(await database.all(history.limit(1), { tier: "global" })).toEqual([note]);
+        expect(await database.all(history.offset(1).limit(1), { tier: "global" })).toEqual([
+          current.value,
+        ]);
+        await expect
+          .poll(() => historyFailure ?? historySnapshots.at(-1), { timeout: 30_000 })
+          .toEqual(expectedHistory);
+        expect(historySnapshots.every((rows) => rows.some((row) => row.id === note.id))).toBe(true);
+        expect(historyFailure).toBeUndefined();
+        stop?.();
+        stopHistory?.();
+
+        failHistory = true;
+        await expect(database.all(history, { tier: "global" })).rejects.toMatchObject({
+          name: "E2eeDataError",
+        });
+        expect(deniedHistory).toBeGreaterThan(0);
+        const incomplete: unknown[][] = [];
+        let incompleteFailure: Error | undefined;
+        const stopIncomplete = database.subscribe(
+          history,
+          {
+            onUpdate: (rows) => incomplete.push(rows),
+            onError: (error) => {
+              incompleteFailure = error;
+            },
+          },
+          { tier: "global" },
+        );
+        try {
+          await expect
+            .poll(() => incompleteFailure?.name, { timeout: 30_000 })
+            .toBe("E2eeDataError");
+          expect(incomplete).toEqual([]);
+        } finally {
+          stopIncomplete();
+        }
       } finally {
         stop?.();
+        stopHistory?.();
         await recipient.shutdown();
       }
       return;
@@ -547,29 +629,6 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       }
       return;
     }
-    if (timing === "equality-membership-invalidation") {
-      const snapshots: unknown[][] = [];
-      let failure: Error | undefined;
-      const stop = db.subscribe(
-        app.notes.where({ projectId: project.id, title: note.title }),
-        {
-          onUpdate: (rows) => snapshots.push(rows),
-          onError: (error) => {
-            failure = error;
-          },
-        },
-        { tier: "global" },
-      );
-      try {
-        await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([note]);
-        await db.e2ee.spaces.revoke(app.projects, project.id, account.account.id).wait();
-        await expect.poll(() => failure?.name, { timeout: 10_000 }).toBe("E2eeDataError");
-        expect(snapshots.some((rows) => rows.length === 0)).toBe(false);
-      } finally {
-        stop();
-      }
-      return;
-    }
     if (timing === "equality-owned-bytes") {
       const snapshots: Array<Array<{ id: string; payload: Uint8Array }>> = [];
       let failure: Error | undefined;
@@ -611,7 +670,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       }
       return;
     }
-    if (timing.startsWith("equality-") && !timing.startsWith("equality-subscription")) {
+    if (timing === "equality-index" || timing === "equality-collision") {
       const other = db.insert(app.notes, {
         projectId: project.id,
         title: "Other title",
@@ -626,29 +685,55 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       expect(
         await db.all(query.orderBy("done").limit(1).select("id", "title"), { tier: "global" }),
       ).toEqual([{ id: note.id, title: note.title }]);
-      expect(await db.all(query.offset(1), { tier: "global" })).toEqual([]);
-      expect(
-        await db.all(app.notes.where({ projectId: project.id, title: "Absent" }), {
-          tier: "global",
-        }),
-      ).toEqual([]);
-      await expect(
-        db.all(app.notes.where({ title: "Private title" }), { tier: "global" }),
-      ).rejects.toThrow("space");
-      await db.update(app.notes, note.id, { title: "Changed title" }).wait({ tier: "global" });
-      expect(await db.all(query, { tier: "global" })).toEqual([]);
-      const changed = app.notes.where({ projectId: project.id, title: "Changed title" });
-      expect(await db.all(changed, { tier: "global" })).toEqual([
-        { ...note, title: "Changed title", done: true },
-      ]);
-      failEncryption = true;
-      await expect(
-        db.update(app.notes, note.id, { title: "Failed title" }).wait({ tier: "global" }),
-      ).rejects.toThrow("Could not encrypt the value");
-      failEncryption = false;
-      expect(await db.all(changed, { tier: "global" })).toEqual([
-        { ...note, title: "Changed title", done: true },
-      ]);
+      const snapshots: unknown[][] = [];
+      let failure: Error | undefined;
+      const stop = db.subscribe(
+        query.orderBy("done").select("id", "title").limit(1),
+        {
+          onUpdate: (rows) => snapshots.push(rows),
+          onError: (error) => {
+            failure = error;
+          },
+        },
+        { tier: "global" },
+      );
+      try {
+        await expect
+          .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
+          .toEqual([{ id: note.id, title: note.title }]);
+        expect(await db.all(query.offset(1), { tier: "global" })).toEqual([]);
+        expect(
+          await db.all(app.notes.where({ projectId: project.id, title: "Absent" }), {
+            tier: "global",
+          }),
+        ).toEqual([]);
+        await expect(
+          db.all(app.notes.where({ title: "Private title" }), { tier: "global" }),
+        ).rejects.toThrow("space");
+        await db.update(app.notes, note.id, { title: "Changed title" }).wait({ tier: "global" });
+        expect(await db.all(query, { tier: "global" })).toEqual([]);
+        await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([]);
+        const changed = app.notes.where({ projectId: project.id, title: "Changed title" });
+        expect(await db.all(changed, { tier: "global" })).toEqual([
+          { ...note, title: "Changed title", done: true },
+        ]);
+        failEncryption = true;
+        await expect(
+          db.update(app.notes, note.id, { title: "Failed title" }).wait({ tier: "global" }),
+        ).rejects.toThrow("Could not encrypt the value");
+        failEncryption = false;
+        expect(await db.all(changed, { tier: "global" })).toEqual([
+          { ...note, title: "Changed title", done: true },
+        ]);
+        await db.update(app.notes, note.id, { title: note.title }).wait({ tier: "global" });
+        await expect
+          .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
+          .toEqual([{ id: note.id, title: note.title }]);
+        expect(failure).toBeUndefined();
+      } finally {
+        failEncryption = false;
+        stop();
+      }
       return;
     }
     if (timing === "projections") {
@@ -814,51 +899,6 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
     });
     expect(encrypted).toBeGreaterThan(0);
     expect(decrypted).toBeGreaterThan(0);
-    if (timing.startsWith("equality-subscription")) {
-      if (timing === "equality-subscription-collision") {
-        await db.update(app.notes, note.id, { done: true }).wait({ tier: "global" });
-        await db
-          .insert(app.notes, {
-            projectId: project.id,
-            title: "False candidate",
-            done: false,
-            payload: new Uint8Array([3]),
-          })
-          .wait({ tier: "global" });
-      }
-      const snapshots: unknown[][] = [];
-      let failure: Error | undefined;
-      const stop = db.subscribe(
-        app.notes
-          .where({ projectId: project.id, title: note.title })
-          .orderBy("done")
-          .select("id", "title")
-          .limit(1),
-        {
-          onUpdate: (rows) => snapshots.push(rows),
-          onError: (error) => {
-            failure = error;
-          },
-        },
-        { tier: "global" },
-      );
-      try {
-        await expect
-          .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
-          .toEqual([{ id: note.id, title: note.title }]);
-        await db
-          .update(app.notes, note.id, { title: "No longer matches" })
-          .wait({ tier: "global" });
-        await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([]);
-        await db.update(app.notes, note.id, { title: note.title }).wait({ tier: "global" });
-        await expect
-          .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
-          .toEqual([{ id: note.id, title: note.title }]);
-        expect(failure).toBeUndefined();
-      } finally {
-        stop();
-      }
-    }
     if (timing === "transaction-read") {
       const reader = db.beginTransaction();
       try {
