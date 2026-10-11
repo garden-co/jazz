@@ -98,6 +98,12 @@ it.each(["a second device store", "a missing original founder journal"] as const
         ),
       );
       await existing.commit().wait({ tier: "local" });
+      const updates = founder.beginExclusiveTransaction();
+      for (const row of notes) {
+        updates.update(app.notes, row.id, { body: `${row.body} updated offline` });
+      }
+      await updates.commit().wait({ tier: "local" });
+      for (const row of notes) row.body += " updated offline";
       expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
       const observe = async (db: Db) => ({
         projects: await db.all(app.projects, { tier: "local" }),
