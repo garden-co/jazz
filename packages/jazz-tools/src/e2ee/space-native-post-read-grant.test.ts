@@ -57,25 +57,6 @@ it("grants a native space after reading its encrypted rows", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
   const crypto = await createNativeCrypto();
-  let tokens = 0;
-  let verifications = 0;
-  const measuredCrypto = {
-    ...crypto,
-    equalityIndex: {
-      ...crypto.equalityIndex!,
-      async token(...args: Parameters<NonNullable<typeof crypto.equalityIndex>["token"]>) {
-        tokens++;
-        return crypto.equalityIndex!.token(...args);
-      },
-    },
-    deviceSigner: {
-      ...crypto.deviceSigner!,
-      async verify(...args: Parameters<NonNullable<typeof crypto.deviceSigner>["verify"]>) {
-        verifications++;
-        return crypto.deviceSigner!.verify(...args);
-      },
-    },
-  };
   try {
     await deploy({
       serverUrl: server.url,
@@ -94,7 +75,7 @@ it("grants a native space after reading its encrypted rows", async () => {
           driver: { type: "memory" },
           initial: "local-first",
           store: store(),
-          e2ee: { app, store: store(), crypto: measuredCrypto },
+          e2ee: { app, store: store(), crypto },
         }),
       );
     }
@@ -104,14 +85,12 @@ it("grants a native space after reading its encrypted rows", async () => {
     expect(otherId).not.toBe(sessions[0]!.getSnapshot().account!.id);
     await owner.e2ee.devices.list();
     await other.e2ee.devices.list();
-    console.info("E2EE_SEARCH_PERF", JSON.stringify({ phase: "devices-ready" }));
     const tx = owner.beginExclusiveTransaction();
     const project = tx.insert(app.projects, { title: "History measurement" });
-    const expected = Array.from({ length: 8 }, (_, position) =>
+    const expected = Array.from({ length: 2 }, (_, position) =>
       tx.insert(app.notes, { projectId: project.id, title: "Wanted", position }),
     );
     await tx.commit().wait({ tier: "global" });
-    console.info("E2EE_SEARCH_PERF", JSON.stringify({ phase: "initial-data-accepted" }));
     const target = { scope: app.projects, identifier: project.id };
     const query = app.notes.where({ projectId: project.id, title: "Wanted" }).orderBy("position");
     const root = await owner.one(app.__e2ee_spaces.where({ identifier: project.id }), {
@@ -121,12 +100,13 @@ it("grants a native space after reading its encrypted rows", async () => {
     expect(
       await owner.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), { tier: "global" }),
     ).toEqual([]);
-    for (let sample = 0; sample < 4; sample++)
+    // Two rows retain the batch-decryption boundary; read once, then repeat
+    // before granting to another account. Volume belongs in historical-search.perf.
+    for (let sample = 0; sample < 2; sample++)
       expect(await owner.all(query, { tier: "global" })).toEqual(expected);
     await owner.e2ee.spaces.grant(app.projects, project.id, otherId).wait();
     expect(await other.e2ee.explain(target)).toEqual({ state: "ready" });
     expect(await other.all(query, { tier: "global" })).toEqual(expected);
-    console.info("E2EE_POST_READ_GRANT", JSON.stringify({ tokens, verifications }));
   } finally {
     await Promise.all(sessions.map((session) => session.close()));
     await server.stop();

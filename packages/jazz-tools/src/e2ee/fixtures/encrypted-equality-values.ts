@@ -23,20 +23,13 @@ export async function createEqualityValuesFixture() {
   const app = s.defineApp({
     ...deviceRequestSchema,
     ...spaceSchema,
-    projects: s.table(
-      { title: s.string() },
-      {
-        linkedNotesViaProject: s.reverse("linkedNotes", "projectRelation"),
-        notesViaProject: s.reverse("notes", "project"),
-      },
-    ),
+    projects: s.table({ title: s.string() }, {}),
     counters: s
       .table(
         { projectId: s.uuid(), value: s.bigint() },
         { project: s.rel("projects", "projectId") },
       )
       .encrypted({ space: "projectId", columns: ["value"], indexes: { value: "equality" } }),
-    events: s.table({ message: s.string() }, {}),
     publicDocuments: s.table(
       { projectId: s.uuid(), label: s.string(), body: s.json() },
       { project: s.rel("projects", "projectId") },
@@ -92,32 +85,9 @@ export async function createEqualityValuesFixture() {
     measurements: s
       .table({ projectId: s.uuid(), value: s.float() }, { project: s.rel("projects", "projectId") })
       .encrypted({ space: "projectId", columns: ["value"], indexes: { value: "equality" } }),
-    linkedNotes: s
-      .table(
-        { project: s.uuid(), title: s.string() },
-        { projectRelation: s.rel("projects", "project") },
-      )
-      .encrypted({ space: "project", columns: ["title"] }),
-    notes: s
-      .table(
-        {
-          projectId: s.uuid(),
-          title: s.string(),
-          done: s.boolean(),
-          payload: s.bytes(),
-        },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({
-        space: "projectId",
-        columns: ["title", "payload"],
-        indexes: { title: "equality" as const },
-      }),
   });
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
-    policy.events.allowRead.always();
-    policy.events.allowInsert.always();
     policy.publicDocuments.allowRead.always();
     policy.publicDocuments.allowInsert.always();
     policy.privateDocuments.allowRead.always();
@@ -138,12 +108,6 @@ export async function createEqualityValuesFixture() {
     policy.readings.allowInsert.always();
     policy.readings.allowUpdate.always();
     policy.projects.allowInsert.always();
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
-    policy.notes.allowUpdate.always();
-    policy.notes.allowDelete.always();
-    policy.linkedNotes.allowRead.always();
-    policy.linkedNotes.allowInsert.always();
     policy.__e2ee_spaces.allowRead.always();
     policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
     policy.__e2ee_space_successors.allowRead.always();
@@ -181,30 +145,13 @@ export async function createEqualityValuesFixture() {
         crypto,
       },
     });
-    const active = db;
-    const initialize = async (title: string) => {
-      const db = active;
-      const tx = db.beginExclusiveTransaction();
-      const project = tx.insert(app.projects, { title });
-      const note = tx.insert(app.notes, {
-        projectId: project.id,
-        title: "Private title",
-        done: false,
-        payload: new Uint8Array([1, 2, 255]),
-      });
-      expect(project).not.toBeInstanceOf(Promise);
-      expect(note).not.toBeInstanceOf(Promise);
-      const committed = tx.commit();
-      expect(committed).not.toBeInstanceOf(Promise);
-      await committed.wait({ tier: "global" });
-      return project;
-    };
-    // Value canonicalisation shares one accepted space. The two optional-string
-    // cases retain separate spaces so their null rows cannot contaminate each other.
-    // Cold atomic space creation remains covered by the initialization family.
-    const valuesRoot = await initialize("Equality values");
-    const nullRoot = await initialize("Null values");
-    const omittedRoot = await initialize("Omitted values");
+    // Canonicalisation needs accepted spaces, but no unrelated encrypted seed rows.
+    // The optional-string cases retain separate scopes to isolate their null rows.
+    const tx = db.beginExclusiveTransaction();
+    const valuesRoot = tx.insert(app.projects, { title: "Equality values" });
+    const nullRoot = tx.insert(app.projects, { title: "Null values" });
+    const omittedRoot = tx.insert(app.projects, { title: "Omitted values" });
+    await tx.commit().wait({ tier: "global" });
     return {
       app,
       db,

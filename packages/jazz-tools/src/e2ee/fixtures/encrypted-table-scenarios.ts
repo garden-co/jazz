@@ -22,8 +22,6 @@ export type EncryptedTableScenario =
   | "equality-owned-bytes"
   | "equality-device-invalidation"
   | "equality-device-invalidation-recipient"
-  | "equality-transaction-initial"
-  | "equality-transaction-existing"
   | "equality-uuid-scope"
   | "equality-epoch-race"
   | "transaction-projection"
@@ -327,7 +325,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
         ).toEqual([note]);
       }
     }
-    if (timing === "equality-transaction-initial") {
+    if (timing === "equality-uuid-scope") {
       expect(
         await tx.all(
           app.notes.where({ projectId: project.id, title: "Private title" }).select("id", "title"),
@@ -368,6 +366,20 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       return;
     }
     await committed.wait({ tier: "global" });
+    // Read accepted keys in a fresh transaction before ordinary reads warm the
+    // index fixture, and after the UUID fixture's uncommitted-key projection.
+    if (timing === "equality-uuid-scope" || timing === "equality-index") {
+      const reader = db.beginTransaction();
+      try {
+        expect(
+          await reader.all(app.notes.where({ projectId: project.id, title: "Private title" }), {
+            tier: "local",
+          }),
+        ).toEqual([note]);
+      } finally {
+        await reader.rollback();
+      }
+    }
     if (timing === "equality-uuid-scope") {
       for (const identifier of [project.id.toUpperCase(), project.id.replaceAll("-", "")]) {
         expect(
@@ -408,19 +420,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       }
       return;
     }
-    if (timing === "equality-transaction-initial" || timing === "equality-transaction-existing") {
-      const reader = db.beginTransaction();
-      try {
-        expect(
-          await reader.all(app.notes.where({ projectId: project.id, title: "Private title" }), {
-            tier: "local",
-          }),
-        ).toEqual([note]);
-      } finally {
-        await reader.rollback();
-      }
-      return;
-    }
+
     if (timing === "equality-epoch-race") {
       const recipientAccount = await localAccountConfig(server.appId, server.url);
       let recipientSaved: string | null = null;
