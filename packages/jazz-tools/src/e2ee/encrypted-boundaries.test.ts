@@ -93,6 +93,21 @@ it("automatically isolates private device records and keeps group, space and row
       }),
     ).toHaveLength(1);
 
+    // Exercise automatically installed group policies before any space operation
+    // can warm the group's managed schema or authority.
+    const group = await creator.e2ee.groups.create().wait();
+    expect(
+      await recipient.all(app.__e2ee_groups.where({ id: group.id }), { tier: "global" }),
+    ).toHaveLength(1);
+    await creator.e2ee.groups.add(group.id, { kind: "account", id: bob.account.id }).wait();
+    expect(await creator.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
+    expect(await recipient.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
+    // Bob has the key, but Alice alone has membership administration permission.
+    await expect(
+      recipient.e2ee.groups.remove(group.id, { kind: "account", id: alice.account.id }).wait(),
+    ).rejects.toThrow(/permission/i);
+    expect(await creator.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
+
     const tx = creator.beginExclusiveTransaction();
     const project = tx.insert(app.projects, { title: "Project" });
     const note = tx.insert(app.notes, {
@@ -156,18 +171,6 @@ it("automatically isolates private device records and keeps group, space and row
     expect(await creator.one(app.notes.where({ id: own.value.id }), { tier: "global" })).toEqual(
       own.value,
     );
-    const group = await creator.e2ee.groups.create().wait();
-    expect(
-      await recipient.all(app.__e2ee_groups.where({ id: group.id }), { tier: "global" }),
-    ).toHaveLength(1);
-    await creator.e2ee.groups.add(group.id, { kind: "account", id: bob.account.id }).wait();
-    expect(await creator.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
-    expect(await recipient.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
-    // Bob has the key, but Alice alone has membership administration permission.
-    await expect(
-      recipient.e2ee.groups.remove(group.id, { kind: "account", id: alice.account.id }).wait(),
-    ).rejects.toThrow(/permission/i);
-    expect(await creator.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
