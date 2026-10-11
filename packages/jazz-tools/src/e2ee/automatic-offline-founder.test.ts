@@ -76,13 +76,28 @@ it.each(["a second device store", "a missing original founder journal"] as const
       const founder = client!.db;
       const tx = founder.beginExclusiveTransaction();
       const project = tx.insert(app.projects, { title: "Original offline founder" });
-      const note = tx.insert(app.notes, {
-        projectId: project.id,
-        body: "Only the original device may encrypt",
-      });
+      const notes = Array.from({ length: 3 }, () =>
+        tx.insert(app.notes, {
+          projectId: project.id,
+          body: "Only the original device may encrypt",
+        }),
+      );
+      const note = notes[0]!;
       const commit = tx.commit();
       await commit.wait({ tier: "local" });
       const originalTxId = await commit.txId;
+      // A later transaction borrows the same provisional root without claiming
+      // that it is globally accepted. Exercise its batch recheck while offline.
+      const existing = founder.beginExclusiveTransaction();
+      notes.push(
+        ...Array.from({ length: 2 }, () =>
+          existing.insert(app.notes, {
+            projectId: project.id,
+            body: "Same provisional scope",
+          }),
+        ),
+      );
+      await existing.commit().wait({ tier: "local" });
       expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
       const observe = async (db: Db) => ({
         projects: await db.all(app.projects, { tier: "local" }),
@@ -116,7 +131,9 @@ it.each(["a second device store", "a missing original founder journal"] as const
         expect.objectContaining({ id: proposal.rootId, epochId: proposal.epochId }),
       ]);
       expect(originalRows.projects).toEqual([project]);
-      expect(originalRows.notes).toEqual([note]);
+      expect([...originalRows.notes].sort((a, b) => a.id.localeCompare(b.id))).toEqual(
+        [...notes].sort((a, b) => a.id.localeCompare(b.id)),
+      );
 
       const missingJournal = scenario === "a missing original founder journal";
       if (missingJournal) {
