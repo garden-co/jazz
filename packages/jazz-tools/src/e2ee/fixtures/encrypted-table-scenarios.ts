@@ -41,6 +41,8 @@ export type EncryptedTableScenario =
   | "transaction-scope-upsert";
 
 export async function runEncryptedTableScenario(timing: EncryptedTableScenario) {
+  // Value-type equality tests own their separate schema. These scenarios only
+  // need the lifecycle tables and the relations used by projection checks.
   const app = s.defineApp({
     ...deviceRequestSchema,
     ...spaceSchema,
@@ -51,68 +53,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
         notesViaProject: s.reverse("notes", "project"),
       },
     ),
-    counters: s
-      .table(
-        { projectId: s.uuid(), value: s.bigint() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["value"], indexes: { value: "equality" } }),
     events: s.table({ message: s.string() }, {}),
-    publicDocuments: s.table(
-      { projectId: s.uuid(), label: s.string(), body: s.json() },
-      { project: s.rel("projects", "projectId") },
-    ),
-    privateDocuments: s
-      .table(
-        { projectId: s.uuid(), label: s.string(), body: s.json() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["body"], indexes: { body: "equality" } }),
-    optionalNotes: s
-      .table(
-        { projectId: s.uuid(), title: s.string().optional() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
-    optionalMeasurements: s
-      .table(
-        { projectId: s.uuid(), value: s.float().optional() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["value"], indexes: { value: "equality" } }),
-    observations: s
-      .table(
-        {
-          projectId: s.uuid(),
-          numbers: s.array(s.bigint()),
-          tagged: s.enum({ count: { value: s.bigint() } }),
-          time: s.timestamp(),
-        },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({
-        space: "projectId",
-        columns: ["numbers", "tagged", "time"],
-        indexes: { numbers: "equality", tagged: "equality", time: "equality" },
-      }),
-    readings: s
-      .table(
-        {
-          projectId: s.uuid(),
-          reading: s.enum({ measured: { value: s.float() } }),
-        },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["reading"], indexes: { reading: "equality" } }),
-    samples: s
-      .table(
-        { projectId: s.uuid(), values: s.array(s.float()) },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["values"], indexes: { values: "equality" } }),
-    measurements: s
-      .table({ projectId: s.uuid(), value: s.float() }, { project: s.rel("projects", "projectId") })
-      .encrypted({ space: "projectId", columns: ["value"], indexes: { value: "equality" } }),
     linkedNotes: s
       .table(
         { project: s.uuid(), title: s.string() },
@@ -140,25 +81,6 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
     policy.projects.allowRead.always();
     policy.events.allowRead.always();
     policy.events.allowInsert.always();
-    policy.publicDocuments.allowRead.always();
-    policy.publicDocuments.allowInsert.always();
-    policy.privateDocuments.allowRead.always();
-    policy.privateDocuments.allowInsert.always();
-    policy.optionalNotes.allowRead.always();
-    policy.optionalNotes.allowInsert.always();
-    policy.optionalMeasurements.allowRead.always();
-    policy.optionalMeasurements.allowInsert.always();
-    policy.measurements.allowRead.always();
-    policy.observations.allowRead.always();
-    policy.observations.allowInsert.always();
-    policy.counters.allowRead.always();
-    policy.counters.allowInsert.always();
-    policy.measurements.allowInsert.always();
-    policy.samples.allowRead.always();
-    policy.samples.allowInsert.always();
-    policy.readings.allowRead.always();
-    policy.readings.allowInsert.always();
-    policy.readings.allowUpdate.always();
     policy.projects.allowInsert.always();
     if (timing === "ordinary-scope-upsert") policy.projects.allowUpdate.always();
     policy.notes.allowRead.always();
