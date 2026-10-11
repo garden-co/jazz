@@ -6,7 +6,7 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import type { Db } from "../runtime/db.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
-it("upserts a staged encrypted head using its own scope through a base view", async () => {
+it("upserts and restores encrypted heads using their exact branch scopes", async () => {
   const app = s.defineApp({
     projects: s.table({ title: s.string() }, {}),
     notes: s
@@ -61,14 +61,12 @@ it("upserts a staged encrypted head using its own scope through a base view", as
       },
     });
 
-    const baseProject = await db
-      .insert(app.projects, { title: "Base scope" })
-      .wait({ tier: "global" });
-    const headProject = await db
-      .insert(app.projects, { title: "Staged head scope" })
-      .wait({ tier: "global" });
+    const setup = db.beginExclusiveTransaction();
+    const baseProject = setup.insert(app.projects, { title: "Base scope" });
+    const headProject = setup.insert(app.projects, { title: "Staged head scope" });
+    await setup.commit().wait({ tier: "global" });
     const id = crypto.randomUUID();
-    await db
+    const baseRow = await db
       .insert(
         app.notes,
         { projectId: baseProject.id, body: "Inherited", branch: "base" },
@@ -95,90 +93,15 @@ it("upserts a staged encrypted head using its own scope through a base view", as
       body: "Updated head",
       branch: "draft",
     });
-  } finally {
-    await db?.shutdown();
-    await server.stop();
-  }
-}, 120_000);
-
-it("restores encrypted rows from their exact branch scope, including prepared writes", async () => {
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table(
-        { projectId: s.uuid(), body: s.string(), branch: s.string() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["body"] })
-      .indexOnly(["projectId"])
-      .branchBy("branch"),
-  });
-  const permissions = definePermissions(app, ({ policy, session }) => {
-    policy.projects.allowRead.always();
-    policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.where({ "$createdBy.account": session.user.account });
-    policy.notes.allowUpdate.where({ "$createdBy.account": session.user.account });
-    policy.notes.allowDelete.where({ "$createdBy.account": session.user.account });
-    policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
-    policy.__e2ee_space_grants.allowRead.always();
-    policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
-    policy.__e2ee_space_deliveries.allowRead.always();
-    policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
-    policy.__e2ee_space_successors.allowRead.always();
-    policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
-  });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  let db: Db | undefined;
-  let retained: string | null = null;
-  try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
-    const account = await localAccountConfig(server.appId, server.url);
-    db = await createDb({
-      ...account,
-      e2ee: {
-        app,
-        store: {
-          async read() {
-            return retained;
-          },
-          async update(transform: (current: string | null) => string) {
-            retained = transform(retained);
-          },
-        },
-      },
-    });
-
-    const firstProject = await db
-      .insert(app.projects, { title: "Draft owner" })
-      .wait({ tier: "global" });
-    const otherProject = await db
-      .insert(app.projects, { title: "Other branch owner" })
-      .wait({ tier: "global" });
-    const rowId = crypto.randomUUID();
-    const draftRow = await db
-      .insert(
-        app.notes,
-        { projectId: firstProject.id, body: "Draft original", branch: "draft" },
-        { id: rowId, branch: "draft" },
-      )
-      .wait({ tier: "global" });
-    const otherBranchRow = await db
-      .insert(
-        app.notes,
-        { projectId: otherProject.id, body: "Other branch original", branch: "other" },
-        { id: rowId, branch: "other" },
-      )
-      .wait({ tier: "global" });
+    // Continue with these same heads: restoring draft must not use the base
+    // branch's different encryption scope or alter its inherited row.
+    const firstProject = headProject;
+    const otherProject = baseProject;
+    const rowId = id;
+    const draftRow = { id, projectId: headProject.id, body: "Updated head", branch: "draft" };
+    const otherBranchRow = baseRow;
     expect(
-      await db.one(app.notes.where({ id: rowId }), { branch: "other", tier: "global" }),
+      await db.one(app.notes.where({ id: rowId }), { branch: "base", tier: "global" }),
     ).toEqual(otherBranchRow);
 
     await db.delete(app.notes, rowId, { branch: "draft" }).wait({ tier: "global" });
@@ -196,7 +119,7 @@ it("restores encrypted rows from their exact branch scope, including prepared wr
       await db.one(app.notes.where({ id: rowId }), { branch: "draft", tier: "global" }),
     ).toBeNull();
     expect(
-      await db.one(app.notes.where({ id: rowId }), { branch: "other", tier: "global" }),
+      await db.one(app.notes.where({ id: rowId }), { branch: "base", tier: "global" }),
     ).toEqual(otherBranchRow);
 
     await db
@@ -212,20 +135,20 @@ it("restores encrypted rows from their exact branch scope, including prepared wr
     ).toEqual({ ...draftRow, body: "Draft restored" });
 
     const preparedId = crypto.randomUUID();
-    const transaction = db.beginTransaction();
-    const preparedRow = transaction.insert(
+    const prepared = db.beginTransaction();
+    const preparedRow = prepared.insert(
       app.notes,
       { projectId: firstProject.id, body: "Prepared original", branch: "draft" },
       { id: preparedId, branch: "draft" },
     );
-    transaction.delete(app.notes, preparedId, { branch: "draft" });
-    transaction.restore(
+    prepared.delete(app.notes, preparedId, { branch: "draft" });
+    prepared.restore(
       app.notes,
       preparedId,
       { projectId: firstProject.id, body: "Prepared restored", branch: "draft" },
       { branch: "draft" },
     );
-    await transaction.commit().wait({ tier: "global" });
+    await prepared.commit().wait({ tier: "global" });
     expect(
       await db.one(app.notes.where({ id: preparedId }), { branch: "draft", tier: "global" }),
     ).toEqual({ ...preparedRow, body: "Prepared restored" });

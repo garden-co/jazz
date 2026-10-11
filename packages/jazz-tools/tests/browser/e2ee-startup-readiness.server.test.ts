@@ -32,58 +32,7 @@ function defineEncryptedFixture() {
   return { app, permissions };
 }
 
-it("restores local encrypted readiness at startup after persistent reopen while offline", async () => {
-  const server = await getJazzServerInfo(`e2ee-offline-startup-${crypto.randomUUID()}`);
-  const { app, permissions } = defineEncryptedFixture();
-  const storageKey = `e2ee-device-${crypto.randomUUID()}`;
-  const dbName = `e2ee-offline-startup-${crypto.randomUUID()}`;
-  let db: Awaited<ReturnType<typeof createDb>> | undefined;
-  let stopped = false;
-  try {
-    await deploy({ ...server, schema: app, permissions });
-    const config = {
-      appId: server.appId,
-      serverUrl: server.serverUrl,
-      account: await acquireBrowserTestAccount(server),
-      driver: { type: "persistent" as const, dbName },
-      e2ee: {
-        app,
-        store: {
-          async read() {
-            return localStorage.getItem(storageKey);
-          },
-          async update(transform: (current: string | null) => string) {
-            await navigator.locks.request(storageKey, () =>
-              localStorage.setItem(storageKey, transform(localStorage.getItem(storageKey))),
-            );
-          },
-        },
-      },
-    };
-    db = await createDb(config);
-    const tx = db.beginExclusiveTransaction();
-    const project = tx.insert(app.projects, { title: "Accepted local scope" });
-    const note = tx.insert(app.notes, { projectId: project.id, body: "Retained locally" });
-    await tx.commit().wait({ tier: "global" });
-    await db.shutdown();
-    db = undefined;
-    await stopJazzServer(server.serverUrl);
-    stopped = true;
-
-    db = await createDb(config);
-    await db.disconnect();
-    expect(await db.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
-      state: "ready",
-    });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
-  } finally {
-    await db?.shutdown();
-    localStorage.removeItem(storageKey);
-    if (!stopped) await stopJazzServer(server.serverUrl);
-  }
-}, 60_000);
-
-it("refuses encrypted readiness without retained keys or accepted history after confirmed disconnect", async () => {
+it("restores offline readiness after persistent reopen and refuses missing keys or accepted history", async () => {
   const server = await getJazzServerInfo(`e2ee-offline-evidence-${crypto.randomUUID()}`);
   const { app, permissions } = defineEncryptedFixture();
   const retainedKey = `e2ee-device-${crypto.randomUUID()}`;
@@ -119,7 +68,7 @@ it("refuses encrypted readiness without retained keys or accepted history after 
     db = await createDb(config);
     const tx = db.beginExclusiveTransaction();
     const project = tx.insert(app.projects, { title: "Local evidence" });
-    tx.insert(app.notes, { projectId: project.id, body: "Key required" });
+    const note = tx.insert(app.notes, { projectId: project.id, body: "Key required" });
     await tx.commit().wait({ tier: "global" });
     await db.disconnect();
     emptyHistoryOwner = await createDb({
@@ -129,8 +78,19 @@ it("refuses encrypted readiness without retained keys or accepted history after 
     });
     await emptyHistoryOwner.all(app.projects, { tier: "local" });
     await emptyHistoryOwner.disconnect();
+    // Close the last holder of this persistent database before the offline reopen.
+    // The empty-history owner uses a distinct database and retains no accepted keys.
+    await db.shutdown();
+    db = undefined;
     await stopJazzServer(server.serverUrl);
     stopped = true;
+
+    db = await createDb(config);
+    await db.disconnect();
+    expect(await db.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
+      state: "ready",
+    });
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
 
     // Initialize real followers before testing the startup readiness gate.
     // Constructor enrollment without keys may otherwise wait for online authority.

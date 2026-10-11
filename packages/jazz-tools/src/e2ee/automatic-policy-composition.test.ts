@@ -6,12 +6,13 @@ import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
-it("preserves explicit E2EE administration rules when composing application policies", async () => {
+it("preserves explicit administration rules and encrypted mutations when composing application policies", async () => {
   const app = s.defineApp({
     projects: s.table({ title: s.string() }, {}),
     notes: s
       .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
-      .encrypted({ space: "projectId", columns: ["body"] }),
+      .encrypted({ space: "projectId", columns: ["body"] })
+      .indexOnly(["projectId"]),
   });
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Db | undefined;
@@ -57,6 +58,8 @@ it("preserves explicit E2EE administration rules when composing application poli
       policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
       policy.notes.allowRead.always();
       policy.notes.allowInsert.where({ "$createdBy.account": session.user.account });
+      policy.notes.allowUpdate.where({ "$createdBy.account": session.user.account });
+      policy.notes.allowDelete.where({ "$createdBy.account": session.user.account });
     });
     const permissions = { ...administration, ...application };
     await deploy({
@@ -80,13 +83,43 @@ it("preserves explicit E2EE administration rules when composing application poli
         },
       },
     });
+
     await db.e2ee.devices.list();
 
     const tx = db.beginExclusiveTransaction();
-    const project = tx.insert(app.projects, { title: "Composed policy space" });
+    const project = tx.insert(app.projects, { title: "Automatic space" });
     const note = tx.insert(app.notes, { projectId: project.id, body: "Encrypted content" });
+    expect(await tx.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
     await tx.commit().wait({ tier: "global" });
     expect(await db.all(app.notes, { tier: "global" })).toEqual([note]);
+    await db.update(app.notes, note.id, { body: "Updated content" }).wait({ tier: "global" });
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual({
+      ...note,
+      body: "Updated content",
+    });
+    await db.upsert(app.notes, note.id, { body: "Upserted content" }).wait({ tier: "global" });
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual({
+      ...note,
+      body: "Upserted content",
+    });
+    const newId = crypto.randomUUID();
+    await db
+      .upsert(app.notes, newId, { projectId: project.id, body: "New upsert" })
+      .wait({ tier: "global" });
+    expect(await db.one(app.notes.where({ id: newId }), { tier: "global" })).toEqual({
+      id: newId,
+      projectId: project.id,
+      body: "New upsert",
+    });
+    await db.delete(app.notes, note.id).wait({ tier: "global" });
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toBeNull();
+    await db
+      .restore(app.notes, note.id, { projectId: project.id, body: "Restored content" })
+      .wait({ tier: "global" });
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual({
+      ...note,
+      body: "Restored content",
+    });
 
     const group = await db.e2ee.groups.create().wait();
     await expect(

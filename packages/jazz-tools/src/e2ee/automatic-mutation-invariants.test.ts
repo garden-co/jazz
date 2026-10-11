@@ -101,19 +101,27 @@ async function createFixture() {
   }
 }
 
-it("keeps encrypted row scope stable across pending deletes and upserts", async () => {
+it("preserves encrypted mutation scope, input snapshots and plaintext-only reads", async () => {
   const fixture = await createFixture();
-  const { app, db } = fixture;
+  const { app, db, account } = fixture;
+  let observer: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
     const initial = db.beginExclusiveTransaction();
+    await Promise.resolve();
+    expect(await initial.all(app.events, { tier: "local" })).toEqual([]);
     const project = initial.insert(app.projects, { title: "First scope" });
     const other = initial.insert(app.projects, { title: "Second scope" });
-    const note = initial.insert(app.notes, {
+    const initialBytes = new Uint8Array([1, 2]);
+    const initialPreview = initial.insert(app.notes, {
       projectId: project.id,
       body: "Original content",
-      bytes: new Uint8Array([1, 2]),
+      bytes: initialBytes,
     });
+    const note = { ...initialPreview, bytes: new Uint8Array([1, 2]) };
+    initialBytes[0] = 91;
+    initialPreview.bytes[1] = 92;
     await initial.commit().wait({ tier: "global" });
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
 
     const crossScope = db.beginTransaction();
     crossScope.delete(app.notes, note.id);
@@ -167,27 +175,80 @@ it("keeps encrypted row scope stable across pending deletes and upserts", async 
     expect(
       await db.one(app.notes.where({ id: missingId }).select("$updatedAt"), { tier: "global" }),
     ).toEqual({ id: missingId, $updatedAt: new Date(missingUpdatedAt) });
-  } finally {
-    await fixture.close();
-  }
-}, 120_000);
-
-it("commits an encrypted write when an exclusive transaction resumes after yielding", async () => {
-  const fixture = await createFixture();
-  const { app, db } = fixture;
-  try {
-    const tx = db.beginExclusiveTransaction();
-    await Promise.resolve();
-    expect(await tx.all(app.events, { tier: "local" })).toEqual([]);
-    const project = tx.insert(app.projects, { title: "Resumed scope" });
-    const note = tx.insert(app.notes, {
+    const inputBytes = new Uint8Array([11, 22]);
+    const write = db.insert(app.notes, {
       projectId: project.id,
-      body: "Prepared after yielding",
-      bytes: new Uint8Array([9]),
+      body: "Db insert snapshot",
+      bytes: inputBytes,
     });
-    await tx.commit().wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+    inputBytes[0] = 91;
+    write.value.bytes[1] = 92;
+    await write.wait({ tier: "global" });
+    expect(
+      (await db.one(app.notes.where({ id: write.value.id }), { tier: "global" }))?.bytes,
+    ).toEqual(new Uint8Array([11, 22]));
+
+    // Also exercise transaction input snapshots with an already accepted scope;
+    // the initial transaction above takes the newly prepared space-key path.
+    const existing = db.beginExclusiveTransaction();
+    const existingInput = new Uint8Array([55, 66]);
+    const preview = existing.insert(app.notes, {
+      projectId: project.id,
+      body: "Existing scope transaction snapshot",
+      bytes: existingInput,
+    });
+    existingInput[0] = 95;
+    preview.bytes[1] = 96;
+    await existing.commit().wait({ tier: "global" });
+    expect((await db.one(app.notes.where({ id: preview.id }), { tier: "global" }))?.bytes).toEqual(
+      new Uint8Array([55, 66]),
+    );
+
+    const storeError = new Error("Local key store unavailable");
+    let reads = 0;
+    let updates = 0;
+    let unavailable = false;
+    let retained: string | null = null;
+    observer = await createDb({
+      ...account,
+      e2ee: {
+        app,
+        store: {
+          async read() {
+            reads += 1;
+            if (unavailable) throw storeError;
+            return retained;
+          },
+          async update(transform: (current: string | null) => string) {
+            updates += 1;
+            if (unavailable) throw storeError;
+            retained = transform(retained);
+          },
+        },
+      },
+    });
+    const startupStoreAccesses = { reads, updates };
+    unavailable = true;
+
+    const plain = app.notes.where({ id: write.value.id }).select("id", "projectId");
+    expect(await observer.one(plain, { tier: "global" })).toEqual({
+      id: write.value.id,
+      projectId: project.id,
+    });
+    expect({ reads, updates }).toEqual(startupStoreAccesses);
+
+    const exclusive = observer.beginExclusiveTransaction();
+    try {
+      expect(await exclusive.one(plain, { tier: "global" })).toEqual({
+        id: write.value.id,
+        projectId: project.id,
+      });
+      expect({ reads, updates }).toEqual(startupStoreAccesses);
+    } finally {
+      await exclusive.rollback();
+    }
   } finally {
+    await observer?.shutdown();
     await fixture.close();
   }
 }, 120_000);
@@ -209,46 +270,7 @@ it("anchors encrypted application snapshots at public begin rather than the firs
   }
 }, 120_000);
 
-it("keeps encrypted bytes unchanged when insert input and preview buffers are mutated", async () => {
-  const fixture = await createFixture();
-  const { app, db } = fixture;
-  try {
-    const projectTx = db.beginExclusiveTransaction();
-    const project = projectTx.insert(app.projects, { title: "Byte scope" });
-    await projectTx.commit().wait({ tier: "global" });
-
-    const inputBytes = new Uint8Array([11, 22]);
-    const write = db.insert(app.notes, {
-      projectId: project.id,
-      body: "Db insert snapshot",
-      bytes: inputBytes,
-    });
-    inputBytes[0] = 91;
-    write.value.bytes[1] = 92;
-    await write.wait({ tier: "global" });
-    expect(
-      (await db.one(app.notes.where({ id: write.value.id }), { tier: "global" }))?.bytes,
-    ).toEqual(new Uint8Array([11, 22]));
-
-    const tx = db.beginExclusiveTransaction();
-    const txInputBytes = new Uint8Array([33, 44]);
-    const preview = tx.insert(app.notes, {
-      projectId: project.id,
-      body: "Transaction insert snapshot",
-      bytes: txInputBytes,
-    });
-    txInputBytes[0] = 93;
-    preview.bytes[1] = 94;
-    await tx.commit().wait({ tier: "global" });
-    expect((await db.one(app.notes.where({ id: preview.id }), { tier: "global" }))?.bytes).toEqual(
-      new Uint8Array([33, 44]),
-    );
-  } finally {
-    await fixture.close();
-  }
-}, 120_000);
-
-it("uses the public begin snapshot for cold and late initial recipients", async () => {
+it("uses the public begin snapshot for a cold initial recipient", async () => {
   const fixture = await createFixture();
   const { app, db } = fixture;
   try {
@@ -277,88 +299,9 @@ it("uses the public begin snapshot for cold and late initial recipients", async 
       coldNote,
     );
 
-    const lateTx = db.beginExclusiveTransaction();
-    expect(
-      await lateTx.one(app.projects.where({ id: crypto.randomUUID() }), { tier: "global" }),
-    ).toBeNull();
-    const late = await fixture.openOtherAccount();
-    const lateProject = lateTx.insert(
-      app.projects,
-      { title: "Late recipient scope" },
-      { initialRecipients: [late.account.account.id] },
-    );
-    lateTx.insert(app.notes, {
-      projectId: lateProject.id,
-      body: "Unavailable after begin",
-      bytes: new Uint8Array([2]),
-    });
-    await expect(lateTx.commit().wait({ tier: "global" })).rejects.toThrow(
-      "E2EE initial recipient account is unavailable",
-    );
-    expect(await db.one(app.projects.where({ id: lateProject.id }), { tier: "global" })).toBeNull();
+    // Late enrolment is covered in both writer directions by encrypted-native:
+    // it also checks that the project, encrypted row and space metadata all roll back.
   } finally {
-    await fixture.close();
-  }
-}, 120_000);
-
-it("reads plaintext-only projections in exclusive transactions without the local key store", async () => {
-  const fixture = await createFixture();
-  const { app, db, account } = fixture;
-  let observer: Awaited<ReturnType<typeof createDb>> | undefined;
-  try {
-    const initial = db.beginExclusiveTransaction();
-    const project = initial.insert(app.projects, { title: "Plaintext scope" });
-    const note = initial.insert(app.notes, {
-      projectId: project.id,
-      body: "Encrypted body",
-      bytes: new Uint8Array([55]),
-    });
-    await initial.commit().wait({ tier: "global" });
-    const storeError = new Error("Local key store unavailable");
-    let reads = 0;
-    let updates = 0;
-    let unavailable = false;
-    let retained: string | null = null;
-    observer = await createDb({
-      ...account,
-      e2ee: {
-        app,
-        store: {
-          async read() {
-            reads += 1;
-            if (unavailable) throw storeError;
-            return retained;
-          },
-          async update(transform: (current: string | null) => string) {
-            updates += 1;
-            if (unavailable) throw storeError;
-            retained = transform(retained);
-          },
-        },
-      },
-    });
-    const startupStoreAccesses = { reads, updates };
-    unavailable = true;
-
-    const plain = app.notes.where({ id: note.id }).select("id", "projectId");
-    expect(await observer.one(plain, { tier: "global" })).toEqual({
-      id: note.id,
-      projectId: project.id,
-    });
-    expect({ reads, updates }).toEqual(startupStoreAccesses);
-
-    const exclusive = observer.beginExclusiveTransaction();
-    try {
-      expect(await exclusive.one(plain, { tier: "global" })).toEqual({
-        id: note.id,
-        projectId: project.id,
-      });
-      expect({ reads, updates }).toEqual(startupStoreAccesses);
-    } finally {
-      await exclusive.rollback();
-    }
-  } finally {
-    await observer?.shutdown();
     await fixture.close();
   }
 }, 120_000);

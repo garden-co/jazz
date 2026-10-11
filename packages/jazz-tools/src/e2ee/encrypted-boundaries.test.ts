@@ -4,16 +4,12 @@ import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
-import { spaceSchema } from "./spaces.js";
 
-it("keeps plaintext access, encryption grants and write permissions independent", async () => {
+it("automatically isolates private device records and keeps group, space and row authority independent", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const alice = await localAccountConfig(server.appId, server.url);
   const bob = await localAccountConfig(server.appId, server.url);
   const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
     projects: s.table({ title: s.string() }, {}),
     notes: s
       .table(
@@ -23,6 +19,16 @@ it("keeps plaintext access, encryption grants and write permissions independent"
       .encrypted({ space: "projectId", columns: ["title"] }),
   });
   const policies = definePermissions(app, ({ policy, session, allOf }) => {
+    const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
+    policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_group_membership.allowInsert.where(
+      allOf([{ authorAccountId: session.user.account }, { authorAccountId: alice.account.id }]),
+    );
+    policy.__e2ee_group_deliveries.allowRead.where(authenticated);
+    policy.__e2ee_group_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+    policy.__e2ee_group_repairs.allowRead.where(authenticated);
+    policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_group_successors.allowInsert.where({ authorAccountId: session.user.account });
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
     policy.notes.allowRead.always();
@@ -59,13 +65,34 @@ it("keeps plaintext access, encryption grants and write permissions independent"
       appId: server.appId,
       adminSecret: server.adminSecret,
       schema: app,
-      permissions: { ...deviceRequestPermissions, ...policies },
+      permissions: policies,
     });
     const creator = await createDb({ ...alice, e2ee: { app, store: store() } });
     clients.push(creator);
     const recipient = await createDb({ ...bob, e2ee: { app, store: store() } });
     clients.push(recipient);
+    await creator.e2ee.devices.list();
     await recipient.e2ee.devices.list();
+    const ownerRequests = await creator.all(app.__e2ee_device_requests, { tier: "global" });
+    const recipientRequests = await recipient.all(app.__e2ee_device_requests, { tier: "global" });
+    expect(ownerRequests).toHaveLength(1);
+    expect(recipientRequests).toHaveLength(1);
+    expect(recipientRequests[0]!.id).not.toBe(ownerRequests[0]!.id);
+    expect(
+      await recipient.all(app.__e2ee_device_requests.where({ id: ownerRequests[0]!.id }), {
+        tier: "global",
+      }),
+    ).toEqual([]);
+    await expect(
+      recipient.delete(app.__e2ee_device_requests, ownerRequests[0]!.id).wait({ tier: "global" }),
+    ).rejects.toThrow(/permission/i);
+    // Public keys are intentionally readable; enrolment handshakes are not.
+    expect(
+      await recipient.all(app.__e2ee_device_keys.where({ deviceId: ownerRequests[0]!.id }), {
+        tier: "global",
+      }),
+    ).toHaveLength(1);
+
     const tx = creator.beginExclusiveTransaction();
     const project = tx.insert(app.projects, { title: "Project" });
     const note = tx.insert(app.notes, {
@@ -129,6 +156,18 @@ it("keeps plaintext access, encryption grants and write permissions independent"
     expect(await creator.one(app.notes.where({ id: own.value.id }), { tier: "global" })).toEqual(
       own.value,
     );
+    const group = await creator.e2ee.groups.create().wait();
+    expect(
+      await recipient.all(app.__e2ee_groups.where({ id: group.id }), { tier: "global" }),
+    ).toHaveLength(1);
+    await creator.e2ee.groups.add(group.id, { kind: "account", id: bob.account.id }).wait();
+    expect(await creator.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
+    expect(await recipient.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
+    // Bob has the key, but Alice alone has membership administration permission.
+    await expect(
+      recipient.e2ee.groups.remove(group.id, { kind: "account", id: alice.account.id }).wait(),
+    ).rejects.toThrow(/permission/i);
+    expect(await creator.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

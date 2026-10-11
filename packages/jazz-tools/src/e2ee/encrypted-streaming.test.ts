@@ -68,27 +68,26 @@ it("streams a plaintext-only update without loading encryption keys", async () =
   }
 }, 30_000);
 
-it.each(["scope-insert", "scope-upsert", "encrypted-scalar", "space-change"])(
-  "rejects streaming bypasses before consuming a source (%s)",
-  async (operation) => {
-    const app = s.defineApp({
-      projects: s.table({ title: s.string() }, {}),
-      files: s
-        .table(
-          { projectId: s.uuid(), payload: s.bytes(), notes: s.string() },
-          { project: s.rel("projects", "projectId") },
-        )
-        .encrypted({ space: "projectId", columns: ["payload"] }),
-    });
-    const db = await createDb(
-      await localAccountConfig(`encrypted-stream-bypass-${crypto.randomUUID()}`),
-    );
-    let consumed = 0;
-    const source = (async function* () {
-      consumed++;
-      yield new Uint8Array([1, 2, 3]);
-    })();
-    try {
+it("rejects scope and scalar streaming bypasses before consuming a source", async () => {
+  const app = s.defineApp({
+    projects: s.table({ title: s.string() }, {}),
+    files: s
+      .table(
+        { projectId: s.uuid(), payload: s.bytes(), notes: s.string() },
+        { project: s.rel("projects", "projectId") },
+      )
+      .encrypted({ space: "projectId", columns: ["payload"] }),
+  });
+  const db = await createDb(
+    await localAccountConfig(`encrypted-stream-bypass-${crypto.randomUUID()}`),
+  );
+  try {
+    for (const operation of ["scope-insert", "scope-upsert", "encrypted-scalar", "space-change"]) {
+      let consumed = 0;
+      const source = (async function* () {
+        consumed++;
+        yield new Uint8Array([1, 2, 3]);
+      })();
       const id = crypto.randomUUID();
       const pending =
         operation === "scope-insert"
@@ -101,37 +100,36 @@ it.each(["scope-insert", "scope-upsert", "encrypted-scalar", "space-change"])(
                   notes: source,
                   projectId: crypto.randomUUID(),
                 });
-      await expect(pending).rejects.toThrow(
+      await expect(pending, operation).rejects.toThrow(
         operation.startsWith("scope-")
           ? "Encryption scope streaming creation is not supported"
           : "Encrypted streaming is not supported",
       );
-      expect(consumed).toBe(0);
-    } finally {
-      await db.shutdown();
+      expect(consumed, operation).toBe(0);
     }
-  },
-);
+  } finally {
+    await db.shutdown();
+  }
+});
 
-it.each(["insert", "update", "upsert", "partial"])(
-  "rejects unsupported encrypted %s without consuming plaintext",
-  async (operation) => {
-    const app = s.defineApp({
-      projects: s.table({ title: s.string() }, {}),
-      files: s
-        .table(
-          { projectId: s.uuid(), payload: s.bytes() },
-          { project: s.rel("projects", "projectId") },
-        )
-        .encrypted({ space: "projectId", columns: ["payload"] }),
-    });
-    const db = await createDb(await localAccountConfig(`encrypted-stream-${crypto.randomUUID()}`));
-    let consumed = 0;
-    const source = (async function* () {
-      consumed++;
-      yield new Uint8Array([1, 2, 3]);
-    })();
-    try {
+it("rejects encrypted inserts, updates, upserts and partial writes without consuming plaintext", async () => {
+  const app = s.defineApp({
+    projects: s.table({ title: s.string() }, {}),
+    files: s
+      .table(
+        { projectId: s.uuid(), payload: s.bytes() },
+        { project: s.rel("projects", "projectId") },
+      )
+      .encrypted({ space: "projectId", columns: ["payload"] }),
+  });
+  const db = await createDb(await localAccountConfig(`encrypted-stream-${crypto.randomUUID()}`));
+  try {
+    for (const operation of ["insert", "update", "upsert", "partial"]) {
+      let consumed = 0;
+      const source = (async function* () {
+        consumed++;
+        yield new Uint8Array([1, 2, 3]);
+      })();
       const id = crypto.randomUUID();
       const data = { projectId: crypto.randomUUID(), payload: source };
       if (operation === "partial") {
@@ -157,11 +155,11 @@ it.each(["insert", "update", "upsert", "partial"])(
             : operation === "update"
               ? db.updateStreaming(app.files, id, data)
               : db.upsertStreaming(app.files, id, data);
-        await expect(pending).rejects.toThrow("Encrypted streaming is not supported");
+        await expect(pending, operation).rejects.toThrow("Encrypted streaming is not supported");
       }
-      expect(consumed).toBe(0);
-    } finally {
-      await db.shutdown();
+      expect(consumed, operation).toBe(0);
     }
-  },
-);
+  } finally {
+    await db.shutdown();
+  }
+});
