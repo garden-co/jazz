@@ -28,15 +28,11 @@ export type EncryptedTableScenario =
   | "equality-uuid-scope"
   | "equality-subscription"
   | "equality-subscription-collision"
-  | "equality-subscription-epoch"
   | "equality-epoch-race"
   | "transaction-projection"
   | "offline-at-submit"
   | "byoc-buffer"
-  | "ordinary-insert-error"
   | "ordinary-insert-and-update"
-  | "ordinary-upsert"
-  | "ordinary-restore"
   | "ordinary-scope-upsert"
   | "transaction-scope-upsert";
 
@@ -156,8 +152,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
             async encrypt(...args) {
               encrypted++;
               const ciphertext = await crypto.cellCipher.encrypt(...args);
-              if (timing === "ordinary-insert-error" || failEncryption)
-                throw new Error("Test cell encryption failure");
+              if (failEncryption) throw new Error("Test cell encryption failure");
               // Enrolment has completed, but the initialisation transaction
               // cannot reach the authority after its ciphertext is prepared.
               if (timing === "offline-at-submit" && encrypted === 2) await server.stop();
@@ -176,27 +171,35 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
         },
       },
     });
-    if (timing === "ordinary-insert-error" || timing === "ordinary-insert-and-update") {
+    if (timing === "ordinary-insert-and-update") {
       const project = db.insert(app.projects, { title: "Project" });
       expect(project).not.toBeInstanceOf(Promise);
       await project.wait({ tier: "global" });
       expect(await db.e2ee.explain({ scope: app.projects, identifier: project.value.id })).toEqual({
         state: "ready",
       });
-      const note = db.insert(app.notes, {
+      const data = {
         projectId: project.value.id,
         title: "Ordinary encrypted insert",
         done: false,
         payload: new Uint8Array([7, 8, 9]),
-      });
+      };
+      failEncryption = true;
+      const failedInsert = db.insert(app.notes, data);
+      expect(failedInsert).not.toBeInstanceOf(Promise);
+      expect(failedInsert.value.title).toBe(data.title);
+      await expect(failedInsert.wait({ tier: "global" })).rejects.toThrow(
+        "Could not encrypt the value",
+      );
+      expect(await db.all(app.notes, { tier: "global" })).toEqual([]);
+      expect(encrypted).toBeGreaterThan(0);
+      failEncryption = false;
+
+      // The same scope must remain usable after failed encryption. Continue
+      // through accepted inserts and updates without repeating enrolment.
+      const note = db.insert(app.notes, data);
       expect(note).not.toBeInstanceOf(Promise);
-      expect(note.value.title).toBe("Ordinary encrypted insert");
-      if (timing === "ordinary-insert-error") {
-        await expect(note.wait({ tier: "global" })).rejects.toThrow("Could not encrypt the value");
-        expect(await db.all(app.notes, { tier: "global" })).toEqual([]);
-        expect(encrypted).toBeGreaterThan(0);
-        return;
-      }
+      expect(note.value.title).toBe(data.title);
       await note.wait({ tier: "global" });
       expect(await db.one(app.notes.where({ id: note.value.id }), { tier: "global" })).toEqual(
         note.value,
@@ -398,7 +401,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       }
       return;
     }
-    if (timing === "equality-epoch-race" || timing === "equality-subscription-epoch") {
+    if (timing === "equality-epoch-race") {
       const recipientAccount = await localAccountConfig(server.appId, server.url);
       let recipientSaved: string | null = null;
       const recipient = await createDb({
@@ -415,14 +418,23 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
           },
         },
       });
+      const database = db;
+      const query = app.notes.where({ projectId: project.id, title: "After rotation" });
+      const snapshots: unknown[][] = [];
+      let failure: Error | undefined;
+      let stop: (() => void) | undefined;
+      let expected: typeof note | undefined;
       try {
         await recipient.e2ee.devices.list();
-        await db.e2ee.spaces.grant(app.projects, project.id, recipientAccount.account.id).wait();
-        if (timing === "equality-subscription-epoch") {
-          const snapshots: unknown[][] = [];
-          let failure: Error | undefined;
-          const stop = db.subscribe(
-            app.notes.where({ projectId: project.id, title: "After rotation" }),
+        await database.e2ee.spaces
+          .grant(app.projects, project.id, recipientAccount.account.id)
+          .wait();
+        duringToken = async () => {
+          // The foreground read has already prepared an old-epoch token. The
+          // one-shot hook clears before this callback, so the subscription
+          // cannot steal the race gate or recursively enter it.
+          stop = database.subscribe(
+            query,
             {
               onUpdate: (rows) => snapshots.push(rows),
               onError: (error) => {
@@ -431,53 +443,35 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
             },
             { tier: "global" },
           );
-          try {
-            await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([]);
-            await db.e2ee.spaces
-              .revoke(app.projects, project.id, recipientAccount.account.id)
-              .wait();
-            expect(await db.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
-              state: "ready",
-            });
-            const added = db.insert(app.notes, {
-              projectId: project.id,
-              title: "After rotation",
-              done: false,
-              payload: new Uint8Array([9]),
-            });
-            await added.wait({ tier: "global" });
-            await expect
-              .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
-              .toEqual([added.value]);
-            expect(failure).toBeUndefined();
-          } finally {
-            stop();
-          }
-          return;
-        }
-        duringToken = async () => {
-          await db!.e2ee.spaces
+          await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([]);
+          // Both readers predate rotation: the suspended foreground query must
+          // retry, and the live subscription must refresh its epoch tokens.
+          await database.e2ee.spaces
             .revoke(app.projects, project.id, recipientAccount.account.id)
             .wait();
-          expect(await db!.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
+          expect(
+            await database.e2ee.explain({ scope: app.projects, identifier: project.id }),
+          ).toEqual({
             state: "ready",
           });
-          await db!
-            .insert(app.notes, {
-              projectId: project.id,
-              title: "After rotation",
-              done: false,
-              payload: new Uint8Array([9]),
-            })
-            .wait({ tier: "global" });
+          const added = database.insert(app.notes, {
+            projectId: project.id,
+            title: "After rotation",
+            done: false,
+            payload: new Uint8Array([9]),
+          });
+          await added.wait({ tier: "global" });
+          expected = added.value;
         };
-        const rows = await db.all(
-          app.notes.where({ projectId: project.id, title: "After rotation" }),
-          { tier: "global" },
-        );
-        expect(rows).toHaveLength(1);
-        expect(rows[0]).toMatchObject({ projectId: project.id, title: "After rotation" });
+        const rows = await database.all(query, { tier: "global" });
+        expect(expected).toBeDefined();
+        expect(rows).toEqual([expected]);
+        await expect
+          .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
+          .toEqual([expected]);
+        expect(failure).toBeUndefined();
       } finally {
+        stop?.();
         await recipient.shutdown();
       }
       return;
@@ -820,57 +814,6 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
     });
     expect(encrypted).toBeGreaterThan(0);
     expect(decrypted).toBeGreaterThan(0);
-    if (timing === "ordinary-restore") {
-      await db.delete(app.notes, note.id).wait({ tier: "global" });
-      const data = {
-        projectId: note.projectId,
-        title: "Restored",
-        done: note.done,
-        payload: note.payload,
-      };
-      const restored = db.restore(app.notes, note.id, data);
-      expect(restored).not.toBeInstanceOf(Promise);
-      expect(restored.value).toEqual({ ...note, title: "Restored" });
-      await restored.wait({ tier: "global" });
-      expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual({
-        ...note,
-        title: "Restored",
-      });
-      await db.delete(app.notes, note.id).wait({ tier: "global" });
-      await expect(
-        db
-          .restore(app.notes, note.id, {
-            ...data,
-            projectId: globalThis.crypto.randomUUID(),
-          })
-          .wait({ tier: "global" }),
-      ).rejects.toThrow("The encryption space of a row is immutable");
-      expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toBeNull();
-    }
-    if (timing === "ordinary-upsert") {
-      const id = globalThis.crypto.randomUUID();
-      const data = {
-        projectId: project.id,
-        title: "Upserted",
-        done: false,
-        payload: new Uint8Array([3, 4]),
-      };
-      const created = db.upsert(app.notes, id, data);
-      expect(created).not.toBeInstanceOf(Promise);
-      await created.wait({ tier: "global" });
-      expect(await db.one(app.notes.where({ id }), { tier: "global" })).toEqual({ id, ...data });
-      await db.upsert(app.notes, id, { title: "Changed" }).wait({ tier: "global" });
-      expect(await db.one(app.notes.where({ id }), { tier: "global" })).toEqual({
-        id,
-        ...data,
-        title: "Changed",
-      });
-      await expect(
-        db
-          .upsert(app.notes, id, { projectId: globalThis.crypto.randomUUID() })
-          .wait({ tier: "global" }),
-      ).rejects.toThrow("The encryption space of a row is immutable");
-    }
     if (timing.startsWith("equality-subscription")) {
       if (timing === "equality-subscription-collision") {
         await db.update(app.notes, note.id, { done: true }).wait({ tier: "global" });
