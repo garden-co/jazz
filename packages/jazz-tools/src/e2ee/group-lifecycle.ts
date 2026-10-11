@@ -83,6 +83,19 @@ type MembershipSnapshot = GroupMembershipSnapshot & {
   targetRoots: { rows: GroupRoot[]; settlements: RowSettlement[] };
 };
 
+type GroupState = {
+  state: "ready" | "refused" | "unavailable" | "maintenance-required";
+  reason?: string;
+};
+
+// A failed insertion must abort the authority transaction, not be classified
+// as an unavailable key candidate by the surrounding inspection.
+class GroupInsertionFailure extends Error {
+  constructor(readonly original: unknown) {
+    super("Unable to prepare group delivery");
+  }
+}
+
 class UnavailableGroupKey extends Error {}
 
 function unavailableGroupKey(cause: unknown): never {
@@ -575,10 +588,7 @@ export class Groups {
     }
   }
 
-  async explain(id: string): Promise<{
-    state: "ready" | "refused" | "unavailable" | "maintenance-required";
-    reason?: string;
-  }> {
+  async explain(id: string): Promise<GroupState> {
     this.assertOpen();
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
     const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "global" });
@@ -589,173 +599,273 @@ export class Groups {
       await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
         tier: "global",
       });
-      const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
-        const state = await this.deviceStates(tx);
-        const group = await this.readGroupMembership(tx, observed, state.publicHistory);
-        return {
-          roots: group.targetRoots,
-          deliveries: await tx.allSettledForE2ee(
-            this.tables.__e2ee_group_deliveries.where({ groupId: id }),
-          ),
-          history: state.publicHistory,
-          group,
-          state,
-        };
-      });
-      const snapshot = await read.wait({ tier: "global" });
+      // Observations can suppress duplicate envelopes, but never authorise them.
+      // Keep them outside the publication predicate so concurrent deliveries
+      // do not conflict with a valid independently prepared delivery.
+      const observations = await this.readDeliveryObservations(id);
+      let delivered: GroupKey | undefined;
+      let unavailable: { expected: GroupKey; failed: string[]; error: unknown } | undefined;
+      let accepted: {
+        snapshot: Awaited<ReturnType<Groups["readInspectionSnapshot"]>>;
+        result: GroupState | undefined;
+      };
+      try {
+        const transaction = await exclusiveE2eeTransaction(this.db, async (tx) => {
+          const snapshot = await this.readInspectionSnapshot(tx, observed, observations.deliveries);
+          const result = await this.inspectSnapshot(snapshot, observed, device, {
+            deliver: async (expected, secret) => {
+              await this.prepareDelivery(tx, expected, secret, device, observations, snapshot);
+              delivered = expected;
+            },
+            unavailable: (expected, failed, error) => {
+              unavailable = { expected, failed, error };
+            },
+          });
+          return { snapshot, result };
+        });
+        accepted = await transaction.wait({ tier: "global" });
+      } catch (error) {
+        if (error instanceof GroupInsertionFailure) throw error.original;
+        if (
+          !delivered ||
+          !(error instanceof PersistedWriteRejectedError) ||
+          error.code !== "permission_denied"
+        )
+          throw error;
+        // A denied publication cannot deny a previously usable key. Establish
+        // a fresh accepted snapshot before using the existing denial handling.
+        delivered = undefined;
+        const fallback = await exclusiveE2eeTransaction(this.db, async (tx) => {
+          const snapshot = await this.readInspectionSnapshot(tx, observed);
+          // Delivery was denied, but key confirmation can itself race with
+          // revocation. Keep even this read-only fallback inside fresh authority
+          // coverage and wait for its global acceptance before reporting ready.
+          const result = await this.inspectSnapshot(snapshot, observed, device, {
+            deliver: async () => {},
+            unavailable: (expected, failed, error) => {
+              unavailable = { expected, failed, error };
+            },
+          });
+          return { snapshot, result };
+        });
+        accepted = await fallback.wait({ tier: "global" });
+      }
       this.assertOpen();
-      // Check the device against this accepted snapshot, before opening any group key.
-      const current = snapshot.state;
-      if (!current.active.has(device.id)) return { state: "refused", reason: "device-not-active" };
-      if (snapshot.roots.rows[0]?.accountId !== observed.accountId)
-        throw new Error("E2EE group creator changed");
-      const { root, position } = await this.acceptedRoot(
-        snapshot.roots,
-        snapshot.group.histories.get(observed.accountId)!,
-      );
-      const { members, rotationRequired, successor, keyRoot, sealed } =
-        await this.acceptedMembership(root, position, snapshot.group);
-      if (sealed) return { state: "refused", reason: "group-sealed" };
-      if (!members.has(this.accountId)) return { state: "refused", reason: "not-a-group-member" };
-      const staged = await loadStagedGroupKey(
-        this.store,
-        this.application,
-        id,
-        this.assertOpen,
-        this.requireDevice().keyLifetime,
-      );
-      if (staged) {
-        try {
-          if (staged.epochId !== keyRoot.epochId && !successor)
-            throw new Error("Staged E2EE group epoch does not match");
-          if (staged.epochId === keyRoot.epochId) {
-            // Readiness depends on the authenticated key, not delivery permission.
-            // Confirm it before catching any denial from the maintenance path.
-            await this.confirmHistory(root, position, snapshot.group, staged.secret);
-            try {
-              if (rotationRequired) await this.rotate(keyRoot, staged.secret, device);
-              else await this.deliver(keyRoot, staged.secret, device, snapshot.deliveries);
-            } catch (error) {
-              if (
-                !(error instanceof PersistedWriteRejectedError) ||
-                error.code !== "permission_denied"
-              )
-                throw error;
-              if (rotationRequired)
-                return { state: "maintenance-required", reason: "recipient-removed" };
-            }
-            return { state: "ready" };
-          }
-        } finally {
-          staged.secret.fill(0);
-        }
+      if (unavailable) {
+        if (unavailable.failed.length)
+          await this.requestRepair(unavailable.expected, device, unavailable.failed);
+        throw unavailable.error;
       }
-      let candidateFailure: { error: unknown } | undefined;
-      if (successor?.authorAccountId === this.accountId && successor.authorDeviceId === device.id) {
-        const context = groupSuccessorContext(
-          this.accountContext(root.accountId),
-          successor,
-          "author-envelope",
-          device.id,
-        );
+      if (!accepted.result)
+        return (await this.inspectSnapshot(accepted.snapshot, observed, device))!;
+      if (delivered) {
         try {
-          let payload: Uint8Array;
-          try {
-            payload = await this.keys.open(device, context, successor.authorEnvelope);
-          } catch (error) {
-            unavailableGroupKey(error);
-          }
-          try {
-            await this.confirmHistory(root, position, snapshot.group, payload);
-            try {
-              if (rotationRequired) await this.rotate(keyRoot, payload, device);
-              else await this.deliver(keyRoot, payload, device, snapshot.deliveries);
-            } catch (error) {
-              if (
-                !(error instanceof PersistedWriteRejectedError) ||
-                error.code !== "permission_denied"
-              )
-                throw error;
-              if (rotationRequired)
-                return { state: "maintenance-required", reason: "recipient-removed" };
-            }
-            return { state: "ready" };
-          } finally {
-            payload.fill(0);
-          }
+          await this.clearDeliveredStaging(delivered);
         } catch (error) {
-          this.assertOpen();
-          if (!(error instanceof UnavailableGroupKey)) throw error;
-          candidateFailure = { error };
+          if (!(error instanceof PersistedWriteRejectedError) || error.code !== "permission_denied")
+            throw error;
         }
       }
-      const failedDeliveries: string[] = [];
-      for (const delivery of snapshot.deliveries.rows) {
-        if (
-          delivery.recipientAccountId !== this.accountId ||
-          delivery.recipientDeviceId !== device.id ||
-          delivery.epochId !== keyRoot.epochId
-        )
-          continue;
-        const deliveryPosition = snapshot.deliveries.settlements.find(
-          (entry) => entry.rowId === delivery.id,
-        )?.position;
-        if (
-          !(await this.acceptedDelivery(root, position, snapshot.group, delivery, deliveryPosition))
-        )
-          continue;
-        const context = groupDeliveryContext(
-          this.accountContext(root.accountId),
-          keyRoot,
-          delivery,
-        );
-        let usable = false;
-        try {
-          let payload: Uint8Array;
-          try {
-            payload = await this.keys.open(device, context, delivery.envelope);
-          } catch (error) {
-            unavailableGroupKey(error);
-          }
-          try {
-            await this.confirmHistory(root, position, snapshot.group, payload);
-            usable = true;
-            try {
-              if (rotationRequired) await this.rotate(keyRoot, payload, device);
-              else await this.deliver(keyRoot, payload, device, snapshot.deliveries);
-            } catch (error) {
-              // An accepted key remains usable when policy denies this member
-              // permission to deliver it to somebody else.
-              if (
-                !(error instanceof PersistedWriteRejectedError) ||
-                error.code !== "permission_denied"
-              )
-                throw error;
-              if (rotationRequired)
-                return { state: "maintenance-required", reason: "recipient-removed" };
-            }
-          } finally {
-            payload.fill(0);
-          }
-        } catch (error) {
-          this.assertOpen();
-          if (!(error instanceof UnavailableGroupKey)) throw error;
-          // One unusable candidate must not hide a later authenticated key.
-          candidateFailure ??= { error };
-          if (!usable) failedDeliveries.push(delivery.id);
-          continue;
-        }
-        this.assertOpen();
-        return { state: "ready" };
-      }
-      if (candidateFailure) {
-        if (failedDeliveries.length) await this.requestRepair(keyRoot, device, failedDeliveries);
-        throw candidateFailure.error;
-      }
-      return { state: "unavailable", reason: "group-key-pending" };
+      return accepted.result;
     } finally {
       this.requireDevice().release(device);
     }
+  }
+
+  private async readInspectionSnapshot(
+    tx: E2eeTransactionScope,
+    observed: GroupRoot,
+    deliveries?: { rows: GroupDelivery[]; settlements: RowSettlement[] },
+  ) {
+    const state = await this.deviceStates(tx);
+    const group = await this.readGroupMembership(tx, observed, state.publicHistory);
+    return {
+      roots: group.targetRoots,
+      deliveries:
+        deliveries ??
+        (await tx.allSettledForE2ee(
+          this.tables.__e2ee_group_deliveries.where({ groupId: observed.id }),
+        )),
+      history: state.publicHistory,
+      group,
+      state,
+    };
+  }
+
+  private async inspectSnapshot(
+    snapshot: Awaited<ReturnType<Groups["readInspectionSnapshot"]>>,
+    observed: GroupRoot,
+    device: LocalDevice,
+    maintenance?: {
+      deliver(expected: GroupKey, secret: Uint8Array): Promise<void>;
+      unavailable(expected: GroupKey, failed: string[], error: unknown): void;
+    },
+  ): Promise<GroupState | undefined> {
+    const id = observed.id;
+    this.assertOpen();
+    // Check the device against the covered membership before opening a key.
+    // Fused maintenance returns readiness only after this snapshot accepts.
+    const current = snapshot.state;
+    if (!current.active.has(device.id)) return { state: "refused", reason: "device-not-active" };
+    if (snapshot.roots.rows[0]?.accountId !== observed.accountId)
+      throw new Error("E2EE group creator changed");
+    const { root, position } = await this.acceptedRoot(
+      snapshot.roots,
+      snapshot.group.histories.get(observed.accountId)!,
+    );
+    const { members, rotationRequired, successor, keyRoot, sealed } = await this.acceptedMembership(
+      root,
+      position,
+      snapshot.group,
+    );
+    if (sealed) return { state: "refused", reason: "group-sealed" };
+    if (!members.has(this.accountId)) return { state: "refused", reason: "not-a-group-member" };
+    if (maintenance && rotationRequired) return undefined;
+    const staged = await loadStagedGroupKey(
+      this.store,
+      this.application,
+      id,
+      this.assertOpen,
+      this.requireDevice().keyLifetime,
+    );
+    if (staged) {
+      try {
+        if (staged.epochId !== keyRoot.epochId && !successor)
+          throw new Error("Staged E2EE group epoch does not match");
+        if (staged.epochId === keyRoot.epochId) {
+          // Readiness depends on the authenticated key, not delivery permission.
+          // Confirm it before catching any denial from the maintenance path.
+          await this.confirmHistory(root, position, snapshot.group, staged.secret);
+          try {
+            if (rotationRequired) await this.rotate(keyRoot, staged.secret, device);
+            else
+              await (maintenance
+                ? maintenance.deliver(keyRoot, staged.secret)
+                : this.deliver(keyRoot, staged.secret, device, snapshot.deliveries));
+          } catch (error) {
+            if (
+              !(error instanceof PersistedWriteRejectedError) ||
+              error.code !== "permission_denied"
+            )
+              throw error;
+            if (rotationRequired)
+              return { state: "maintenance-required", reason: "recipient-removed" };
+          }
+          return { state: "ready" };
+        }
+      } finally {
+        staged.secret.fill(0);
+      }
+    }
+    let candidateFailure: { error: unknown } | undefined;
+    if (successor?.authorAccountId === this.accountId && successor.authorDeviceId === device.id) {
+      const context = groupSuccessorContext(
+        this.accountContext(root.accountId),
+        successor,
+        "author-envelope",
+        device.id,
+      );
+      try {
+        let payload: Uint8Array;
+        try {
+          payload = await this.keys.open(device, context, successor.authorEnvelope);
+        } catch (error) {
+          unavailableGroupKey(error);
+        }
+        try {
+          await this.confirmHistory(root, position, snapshot.group, payload);
+          try {
+            if (rotationRequired) await this.rotate(keyRoot, payload, device);
+            else
+              await (maintenance
+                ? maintenance.deliver(keyRoot, payload)
+                : this.deliver(keyRoot, payload, device, snapshot.deliveries));
+          } catch (error) {
+            if (
+              !(error instanceof PersistedWriteRejectedError) ||
+              error.code !== "permission_denied"
+            )
+              throw error;
+            if (rotationRequired)
+              return { state: "maintenance-required", reason: "recipient-removed" };
+          }
+          return { state: "ready" };
+        } finally {
+          payload.fill(0);
+        }
+      } catch (error) {
+        this.assertOpen();
+        if (!(error instanceof UnavailableGroupKey)) throw error;
+        candidateFailure = { error };
+      }
+    }
+    const failedDeliveries: string[] = [];
+    for (const delivery of snapshot.deliveries.rows) {
+      if (
+        delivery.recipientAccountId !== this.accountId ||
+        delivery.recipientDeviceId !== device.id ||
+        delivery.epochId !== keyRoot.epochId
+      )
+        continue;
+      const deliveryPosition = snapshot.deliveries.settlements.find(
+        (entry) => entry.rowId === delivery.id,
+      )?.position;
+      if (
+        !(await this.acceptedDelivery(root, position, snapshot.group, delivery, deliveryPosition))
+      )
+        continue;
+      const context = groupDeliveryContext(this.accountContext(root.accountId), keyRoot, delivery);
+      let usable = false;
+      try {
+        let payload: Uint8Array;
+        try {
+          payload = await this.keys.open(device, context, delivery.envelope);
+        } catch (error) {
+          unavailableGroupKey(error);
+        }
+        try {
+          await this.confirmHistory(root, position, snapshot.group, payload);
+          usable = true;
+          try {
+            if (rotationRequired) await this.rotate(keyRoot, payload, device);
+            else
+              await (maintenance
+                ? maintenance.deliver(keyRoot, payload)
+                : this.deliver(keyRoot, payload, device, snapshot.deliveries));
+          } catch (error) {
+            // An accepted key remains usable when policy denies this member
+            // permission to deliver it to somebody else.
+            if (
+              !(error instanceof PersistedWriteRejectedError) ||
+              error.code !== "permission_denied"
+            )
+              throw error;
+            if (rotationRequired)
+              return { state: "maintenance-required", reason: "recipient-removed" };
+          }
+        } finally {
+          payload.fill(0);
+        }
+      } catch (error) {
+        this.assertOpen();
+        if (!(error instanceof UnavailableGroupKey)) throw error;
+        // One unusable candidate must not hide a later authenticated key.
+        candidateFailure ??= { error };
+        if (!usable) failedDeliveries.push(delivery.id);
+        continue;
+      }
+      this.assertOpen();
+      return { state: "ready" };
+    }
+    if (candidateFailure) {
+      if (maintenance) {
+        maintenance.unavailable(keyRoot, failedDeliveries, candidateFailure.error);
+        return undefined;
+      }
+      if (failedDeliveries.length) await this.requestRepair(keyRoot, device, failedDeliveries);
+      throw candidateFailure.error;
+    }
+    return { state: "unavailable", reason: "group-key-pending" };
   }
 
   private async rotate(expected: GroupKey, previousSecret: Uint8Array, device: LocalDevice) {
@@ -858,16 +968,31 @@ export class Groups {
     device: LocalDevice,
     preparedDeliveries?: { rows: GroupDelivery[]; settlements: RowSettlement[] },
   ) {
-    const { id, epochId } = expected;
-    // explain already discovered membership and read ordinary envelopes. This
-    // is deduplication evidence only: the write below still reads fresh authority.
-    // Newly created/rotated roots prepare their own history.
     if (!preparedDeliveries) {
       await this.warmMembership({ groupIds: [expected.id] });
-      await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
+      await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: expected.id }), {
         tier: "global",
       });
     }
+    const observations = await this.readDeliveryObservations(expected.id, preparedDeliveries);
+    try {
+      const delivery = await exclusiveE2eeTransaction(this.db, async (tx) => {
+        const state = await this.deviceStates(tx);
+        const group = await this.readGroupMembership(tx, expected, state.publicHistory);
+        await this.prepareDelivery(tx, expected, secret, device, observations, { state, group });
+      });
+      await delivery.wait({ tier: "global" });
+    } catch (error) {
+      if (error instanceof GroupInsertionFailure) throw error.original;
+      throw error;
+    }
+    await this.clearDeliveredStaging(expected);
+  }
+
+  private async readDeliveryObservations(
+    id: string,
+    preparedDeliveries?: { rows: GroupDelivery[]; settlements: RowSettlement[] },
+  ) {
     await this.db.all(this.tables.__e2ee_group_repairs.where({ groupId: id }), { tier: "global" });
     await this.db.all(this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }), {
       tier: "global",
@@ -881,174 +1006,192 @@ export class Groups {
         this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }),
       ),
     }));
-    const { deliveries: existing, repairs, recovery } = await prior.wait({ tier: "global" });
-    // These observations only avoid redundant envelopes. Concurrent delivery rows
-    // may cause duplicates, but must not conflict with fresh valid delivery.
-    // Membership and device histories are still revalidated by the write below.
-    const delivery = await exclusiveE2eeTransaction(this.db, async (tx) => {
-      const membership = await this.deviceStates(tx);
-      const group = await this.readGroupMembership(tx, expected, membership.publicHistory);
-      const roots = group.targetRoots;
-      if (roots.rows[0]?.accountId !== expected.accountId)
-        throw new Error("E2EE group creator changed");
-      const { root, position } = await this.acceptedRoot(
-        roots,
-        group.histories.get(expected.accountId)!,
-      );
-      const { members, rotationRequired, keyRoot } = await this.acceptedMembership(
-        root,
-        position,
-        group,
-      );
-      if (rotationRequired) throw new Error("E2EE group requires rotation after removal");
-      if (keyRoot.epochId !== epochId) throw new Error("Staged E2EE group epoch does not match");
-      await this.confirmHistory(root, position, group, secret);
-      if (!membership.active.has(device.id) || membership.epochId !== members.get(this.accountId))
-        throw new Error("E2EE group requires membership reconciliation");
-      const delivered = new Set<string>();
-      const rejected = new Set<string>();
-      for (const request of repairs.rows) {
-        const at = repairs.settlements.find((entry) => entry.rowId === request.id)?.position;
-        if (await this.acceptedRepair(root, position, group, request, at, existing))
-          rejected.add(request.deliveryId);
-      }
-      for (const row of existing.rows) {
-        if (row.epochId !== keyRoot.epochId) continue;
-        if (rejected.has(row.id)) continue;
-        const at = existing.settlements.find((entry) => entry.rowId === row.id)?.position;
-        if (!(await this.acceptedDelivery(root, position, group, row, at))) continue;
-        if (row.recipientAccountId === this.accountId && row.recipientDeviceId === device.id) {
-          const context = groupDeliveryContext(this.accountContext(root.accountId), keyRoot, row);
-          let opened: Uint8Array | undefined;
+    return await prior.wait({ tier: "global" });
+  }
+
+  private async prepareDelivery(
+    tx: E2eeTransactionScope,
+    expected: GroupKey,
+    secret: Uint8Array,
+    device: LocalDevice,
+    observations: Awaited<ReturnType<Groups["readDeliveryObservations"]>>,
+    snapshot: Pick<Awaited<ReturnType<Groups["readInspectionSnapshot"]>>, "state" | "group">,
+  ) {
+    const { id, epochId } = expected;
+    const { state: membership, group } = snapshot;
+    const { deliveries: existing, repairs, recovery } = observations;
+    const writes: (() => void)[] = [];
+    const roots = group.targetRoots;
+    if (roots.rows[0]?.accountId !== expected.accountId)
+      throw new Error("E2EE group creator changed");
+    const { root, position } = await this.acceptedRoot(
+      roots,
+      group.histories.get(expected.accountId)!,
+    );
+    const { members, rotationRequired, keyRoot } = await this.acceptedMembership(
+      root,
+      position,
+      group,
+    );
+    if (rotationRequired) throw new Error("E2EE group requires rotation after removal");
+    if (keyRoot.epochId !== epochId) throw new Error("Staged E2EE group epoch does not match");
+    await this.confirmHistory(root, position, group, secret);
+    if (!membership.active.has(device.id) || membership.epochId !== members.get(this.accountId))
+      throw new Error("E2EE group requires membership reconciliation");
+    const delivered = new Set<string>();
+    const rejected = new Set<string>();
+    for (const request of repairs.rows) {
+      const at = repairs.settlements.find((entry) => entry.rowId === request.id)?.position;
+      if (await this.acceptedRepair(root, position, group, request, at, existing))
+        rejected.add(request.deliveryId);
+    }
+    for (const row of existing.rows) {
+      if (row.epochId !== keyRoot.epochId) continue;
+      if (rejected.has(row.id)) continue;
+      const at = existing.settlements.find((entry) => entry.rowId === row.id)?.position;
+      if (!(await this.acceptedDelivery(root, position, group, row, at))) continue;
+      if (row.recipientAccountId === this.accountId && row.recipientDeviceId === device.id) {
+        const context = groupDeliveryContext(this.accountContext(root.accountId), keyRoot, row);
+        let opened: Uint8Array | undefined;
+        try {
           try {
-            try {
-              opened = await this.keys.open(device, context, row.envelope);
-            } catch (error) {
-              unavailableGroupKey(error);
-            }
-            await this.confirmHistory(root, position, group, opened);
+            opened = await this.keys.open(device, context, row.envelope);
           } catch (error) {
-            this.assertOpen();
-            if (!(error instanceof UnavailableGroupKey)) throw error;
-            // A signature authenticates the sender, not the enclosed key.
-            // Retain the staged key until a usable replacement is accepted.
+            unavailableGroupKey(error);
+          }
+          await this.confirmHistory(root, position, group, opened);
+        } catch (error) {
+          this.assertOpen();
+          if (!(error instanceof UnavailableGroupKey)) throw error;
+          // A signature authenticates the sender, not the enclosed key.
+          // Retain the staged key until a usable replacement is accepted.
+          continue;
+        } finally {
+          opened?.fill(0);
+        }
+      }
+      delivered.add(JSON.stringify([row.recipientAccountId, row.recipientDeviceId]));
+    }
+    for (const [recipientAccountId, accountEpochId] of members) {
+      const history = group.histories.get(recipientAccountId)!;
+      const recipients = await replayAccountMembership(
+        history,
+        this.accountContext(recipientAccountId),
+        this.signer,
+      );
+      if (recipients.epochId !== accountEpochId)
+        throw new Error("E2EE group requires membership reconciliation");
+      for (const recoveryRoot of recipients.recoveryRoots) {
+        if (
+          recoveryRoot.mechanism !== this.keys.mechanism.id ||
+          recoveryRoot.version !== this.keys.mechanism.version
+        )
+          throw new Error("Unsupported E2EE group recovery recipient");
+        let delivered = false;
+        for (const row of recovery.rows) {
+          if (
+            row.epochId !== epochId ||
+            row.recipientAccountId !== recipientAccountId ||
+            row.recoveryRootId !== recoveryRoot.id
+          )
             continue;
-          } finally {
-            opened?.fill(0);
+          const at = recovery.settlements.find((entry) => entry.rowId === row.id)?.position;
+          if (await this.acceptedDelivery(root, position, group, row, at)) {
+            delivered = true;
+            break;
           }
         }
-        delivered.add(JSON.stringify([row.recipientAccountId, row.recipientDeviceId]));
-      }
-      for (const [recipientAccountId, accountEpochId] of members) {
-        const history = group.histories.get(recipientAccountId)!;
-        const recipients = await replayAccountMembership(
-          history,
-          this.accountContext(recipientAccountId),
-          this.signer,
+        if (delivered) continue;
+        const row = {
+          id: crypto.randomUUID(),
+          groupId: id,
+          epochId,
+          senderAccountId: this.accountId,
+          senderDeviceId: device.id,
+          recipientAccountId,
+          recoveryRootId: recoveryRoot.id,
+        };
+        const envelope = await this.keys.seal(
+          recoveryRoot.publicKey,
+          groupRecoveryContext(this.accountContext(root.accountId), row),
+          secret,
         );
-        if (recipients.epochId !== accountEpochId)
-          throw new Error("E2EE group requires membership reconciliation");
-        for (const recoveryRoot of recipients.recoveryRoots) {
-          if (
-            recoveryRoot.mechanism !== this.keys.mechanism.id ||
-            recoveryRoot.version !== this.keys.mechanism.version
-          )
-            throw new Error("Unsupported E2EE group recovery recipient");
-          let delivered = false;
-          for (const row of recovery.rows) {
-            if (
-              row.epochId !== epochId ||
-              row.recipientAccountId !== recipientAccountId ||
-              row.recoveryRootId !== recoveryRoot.id
-            )
-              continue;
-            const at = recovery.settlements.find((entry) => entry.rowId === row.id)?.position;
-            if (await this.acceptedDelivery(root, position, group, row, at)) {
-              delivered = true;
-              break;
-            }
-          }
-          if (delivered) continue;
-          const row = {
-            id: crypto.randomUUID(),
-            groupId: id,
-            epochId,
-            senderAccountId: this.accountId,
-            senderDeviceId: device.id,
-            recipientAccountId,
-            recoveryRootId: recoveryRoot.id,
-          };
-          const envelope = await this.keys.seal(
-            recoveryRoot.publicKey,
-            groupRecoveryContext(this.accountContext(root.accountId), row),
-            secret,
-          );
-          const signature = await this.checkedSignature(
-            device,
-            groupRecoveryBytes(this.accountContext(root.accountId), { ...row, envelope }),
-          );
-          this.assertOpen();
-          const { id: rowId, ...values } = row;
+        const signature = await this.checkedSignature(
+          device,
+          groupRecoveryBytes(this.accountContext(root.accountId), { ...row, envelope }),
+        );
+        this.assertOpen();
+        const { id: rowId, ...values } = row;
+        writes.push(() => {
           tx.insert(
             this.tables.__e2ee_group_recovery_deliveries,
             { ...values, envelope, signature },
             { id: rowId },
           );
-        }
-        for (const recipientId of recipients.active) {
-          if (delivered.has(JSON.stringify([recipientAccountId, recipientId]))) continue;
-          const key = history.keys.rows.find((row) => row.deviceId === recipientId);
-          if (
-            !key ||
-            key.mechanism !== this.keys.mechanism.id ||
-            key.version !== this.keys.mechanism.version
-          )
-            throw new Error("Unsupported E2EE group recipient key");
-          const row = {
-            id: crypto.randomUUID(),
-            groupId: id,
-            epochId,
-            senderAccountId: this.accountId,
-            senderDeviceId: device.id,
-            recipientAccountId,
-            recipientDeviceId: recipientId,
-          };
-          const envelope = await this.keys.seal(
-            key.publicKey,
-            groupDeliveryContext(this.accountContext(root.accountId), keyRoot, row),
-            secret,
-          );
-          if (recipientAccountId === this.accountId && recipientId === device.id) {
-            const opened = await this.keys.open(
-              device,
-              groupDeliveryContext(this.accountContext(root.accountId), keyRoot, row),
-              envelope,
-            );
-            try {
-              if (
-                opened.length !== secret.length ||
-                opened.some((byte, index) => byte !== secret[index])
-              )
-                throw new Error("Invalid generated E2EE group envelope");
-            } finally {
-              opened.fill(0);
-            }
-          }
-          const signature = await this.checkedSignature(
+        });
+      }
+      for (const recipientId of recipients.active) {
+        if (delivered.has(JSON.stringify([recipientAccountId, recipientId]))) continue;
+        const key = history.keys.rows.find((row) => row.deviceId === recipientId);
+        if (
+          !key ||
+          key.mechanism !== this.keys.mechanism.id ||
+          key.version !== this.keys.mechanism.version
+        )
+          throw new Error("Unsupported E2EE group recipient key");
+        const row = {
+          id: crypto.randomUUID(),
+          groupId: id,
+          epochId,
+          senderAccountId: this.accountId,
+          senderDeviceId: device.id,
+          recipientAccountId,
+          recipientDeviceId: recipientId,
+        };
+        const envelope = await this.keys.seal(
+          key.publicKey,
+          groupDeliveryContext(this.accountContext(root.accountId), keyRoot, row),
+          secret,
+        );
+        if (recipientAccountId === this.accountId && recipientId === device.id) {
+          const opened = await this.keys.open(
             device,
-            groupDeliveryBytes(this.accountContext(root.accountId), keyRoot, { ...row, envelope }),
+            groupDeliveryContext(this.accountContext(root.accountId), keyRoot, row),
+            envelope,
           );
-          this.assertOpen();
-          const { id: rowId, ...values } = row;
+          try {
+            if (
+              opened.length !== secret.length ||
+              opened.some((byte, index) => byte !== secret[index])
+            )
+              throw new Error("Invalid generated E2EE group envelope");
+          } finally {
+            opened.fill(0);
+          }
+        }
+        const signature = await this.checkedSignature(
+          device,
+          groupDeliveryBytes(this.accountContext(root.accountId), keyRoot, { ...row, envelope }),
+        );
+        this.assertOpen();
+        const { id: rowId, ...values } = row;
+        writes.push(() => {
           tx.insert(
             this.tables.__e2ee_group_deliveries,
             { ...values, envelope, signature },
             { id: rowId },
           );
-        }
+        });
       }
-    });
-    await delivery.wait({ tier: "global" });
+    }
+    try {
+      for (const write of writes) write();
+    } catch (error) {
+      throw new GroupInsertionFailure(error);
+    }
+  }
+
+  private async clearDeliveredStaging({ id, epochId }: GroupKey) {
     const staged = await loadStagedGroupKey(
       this.store,
       this.application,
