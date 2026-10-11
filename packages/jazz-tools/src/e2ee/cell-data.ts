@@ -120,37 +120,53 @@ export async function decryptCellRows(
   const scope = new TypedTableQueryBuilder(declaration.scope, schema);
   const { cipher, application } = await cellCryptoForDb(db);
   const result: Record<string, unknown>[] = [];
-  for (const row of rows) {
+  const groups = new Map<string, { row: Record<string, unknown>; index: number }[]>();
+  for (const [index, row] of rows.entries()) {
     const identifier = encryptedRowSpaces.get(row) ?? row[declaration.space];
     if (typeof identifier !== "string" || typeof row.id !== "string")
       throw new Error("Encrypted result is missing its row or space identity");
-    const decoded = { ...row };
-    const pending = new Map(
-      declaration.columns
-        .filter((name) => Object.hasOwn(row, name))
-        .map((name) => [name, readStoredCell(row[name])]),
-    );
+    const group = groups.get(identifier);
+    if (group) group.push({ row, index });
+    else groups.set(identifier, [{ row, index }]);
+  }
+  // Keys stay inside withSpaceKeys. Multi-row groups reobserve authority
+  // before returning, including revocation while the cipher was awaiting.
+  const recheck: string[] = [];
+  for (const [identifier, group] of groups) {
+    const entries = group.map(({ row, index }) => ({
+      row,
+      decoded: (result[index] = { ...row }),
+      pending: new Map(
+        declaration.columns
+          .filter((name) => Object.hasOwn(row, name))
+          .map((name) => [name, readStoredCell(row[name])]),
+      ),
+    }));
     const decrypt = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
-      for (const [name, cell] of pending) {
-        if (cell.epoch !== root.epochId) continue;
-        const column = metadata.logical[tableName]!.columns.find((column) => column.name === name)!;
-        const aad = await dataContext(db, table, row.id as string, column, root, application);
-        readEnvelope(cipher.mechanism, cell.ciphertext);
-        let plaintext: Uint8Array | undefined;
-        try {
-          plaintext = await cipher.decrypt(secret, aad, cell.ciphertext);
-          // Buffer.slice() aliases its input. Use a plain view so the codec's
-          // byte-value slices own their memory before temporary plaintext is wiped.
-          const value = decodeNativeRowValues(
-            [{ ...column, name: "value" }],
-            new Uint8Array(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength),
-          )[0]!;
-          decoded[name] = unwrapValue(value, column.column_type, name);
-          pending.delete(name);
-        } catch {
-          throw new E2eeDataError("invalid-ciphertext");
-        } finally {
-          plaintext?.fill(0);
+      for (const { row, decoded, pending } of entries) {
+        for (const [name, cell] of pending) {
+          if (cell.epoch !== root.epochId) continue;
+          const column = metadata.logical[tableName]!.columns.find(
+            (column) => column.name === name,
+          )!;
+          const aad = await dataContext(db, table, row.id as string, column, root, application);
+          readEnvelope(cipher.mechanism, cell.ciphertext);
+          let plaintext: Uint8Array | undefined;
+          try {
+            plaintext = await cipher.decrypt(secret, aad, cell.ciphertext);
+            // Buffer.slice() aliases its input. Use a plain view so the codec's
+            // byte-value slices own their memory before temporary plaintext is wiped.
+            const value = decodeNativeRowValues(
+              [{ ...column, name: "value" }],
+              new Uint8Array(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength),
+            )[0]!;
+            decoded[name] = unwrapValue(value, column.column_type, name);
+            pending.delete(name);
+          } catch {
+            throw new E2eeDataError("invalid-ciphertext");
+          } finally {
+            plaintext?.fill(0);
+          }
         }
       }
     };
@@ -161,9 +177,12 @@ export async function decryptCellRows(
       await decrypt(initial.secret, initial.root);
     } else {
       await withSpaceKeys(db, scope, identifier, decrypt, true);
+      if (group.length > 1) recheck.push(identifier);
     }
-    if (pending.size) throw new E2eeDataError("invalid-ciphertext");
-    result.push(decoded);
+    if (entries.some(({ pending }) => pending.size)) throw new E2eeDataError("invalid-ciphertext");
+  }
+  for (const identifier of recheck) {
+    await withSpaceKeys(db, scope, identifier, async () => {}, false);
   }
   return result;
 }

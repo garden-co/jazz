@@ -183,6 +183,24 @@ it.each(["grant", "initial", "initial-upsert"])(
         .update(app.notes, note.id, { title: "Changed", bytes: new Uint8Array([4, 5]) })
         .wait({ tier: "global" });
       if (sharing === "grant") {
+        // Existing-space bursts borrow one key, then recheck authority before
+        // publication. Both writer runtimes must preserve every row and byte.
+        const batch = reader.beginTransaction();
+        const added = Array.from({ length: 3 }, (_, index) =>
+          batch.insert(app.notes, {
+            projectId: project.id,
+            title: `Batched ${index}`,
+            bytes: new Uint8Array([index, 255]),
+          }),
+        );
+        await batch.commit().wait({ tier: "global" });
+        const batchRows = await writer.all(
+          app.notes.where({ id: { in: added.map((row) => row.id) } }),
+          { tier: "global" },
+        );
+        expect(batchRows.sort((a, b) => a.id.localeCompare(b.id))).toEqual(
+          added.sort((a, b) => a.id.localeCompare(b.id)),
+        );
         expect(await writer.one(query, { tier: "global" })).toEqual({
           ...note,
           title: "Changed",

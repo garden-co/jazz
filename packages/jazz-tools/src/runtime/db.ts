@@ -1315,6 +1315,18 @@ function encryptedRowScopeKey(
   return JSON.stringify([table, id.toLowerCase(), branchCoordinateKey(branch)]);
 }
 
+type EncryptedInsertBatch = {
+  schema: WasmSchema;
+  scope: string;
+  identifier: string;
+  branch: string;
+  pending: boolean;
+  writes: ((
+    io: TransactionPreparationIO,
+    key?: { secret: Uint8Array; root: Readonly<SpaceRoot> },
+  ) => Promise<void>)[];
+};
+
 /**
  * Groups a set of writes as either a mergeable or exclusive transaction (see {@link TransactionKind}).
  */
@@ -1326,6 +1338,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private cancelled = false;
   private readonly initialSpaceKeys = new Map<string, { secret: Uint8Array; root: SpaceRoot }>();
   private readonly encryptedScopes = new Map<string, string>();
+  private encryptedInsertBatch?: EncryptedInsertBatch;
 
   constructor(
     readonly kind: TKind,
@@ -1350,6 +1363,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   private requireBinding(operation: string): DbTransactionHandleBinding {
+    // Only adjacent synchronous inserts may share preparation. Reads, other
+    // mutations, commit and rollback close admission to the previous batch.
+    this.encryptedInsertBatch = undefined;
     if (this.failedRead && operation !== "rollback") {
       throw new Error(`DbTransaction.${operation}() cannot run after a pending read failed`);
     }
@@ -1457,6 +1473,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * once it's committed.
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
+    const previousBatch = this.encryptedInsertBatch;
+    this.encryptedInsertBatch = undefined;
     const recipients = scopeRecipients(table, options);
     const initialisesSpace = encryptedSchemas.get(table._schema)?.scopes.has(table._table);
     if (initialisesSpace) this.prepareScopeCreation();
@@ -1466,7 +1484,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (encryption) {
       if (initialisesSpace)
         throw new Error("Encrypted scope rows require dependent scope preparation");
-      return this.prepareEncryptedRow(table, transformedData, options);
+      return this.prepareEncryptedRow(table, transformedData, options, "insert", previousBatch);
     }
     const values = toWriteRecordForOperation(
       "Insert",
@@ -1519,6 +1537,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     data: Record<string, unknown>,
     options?: InsertOptions,
     operation: "insert" | "restore" = "insert",
+    previousBatch?: EncryptedInsertBatch,
   ): T {
     if (!this.e2ee) throw new Error("Encrypted writes require an authenticated E2EE context");
     const metadata = encryptedSchemas.get(table._schema)!;
@@ -1543,7 +1562,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const preview = ownerClient.previewInsertInternal(table._table, physical, normalized?.id);
     const scope = new TypedTableQueryBuilder(declaration.scope, table._schema);
     const db = this.e2ee.db;
-    ownerClient.prepareTransaction(openTransactionId, async (io) => {
+    const prepare: EncryptedInsertBatch["writes"][number] = async (io, borrowed) => {
       if (operation === "restore") {
         const query = new TypedTableQueryBuilder<
           AnyTableMeta & { row: { id: string } & Record<string, unknown> }
@@ -1578,9 +1597,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           storedScope,
         );
       }
-      const initial = this.initialSpaceKeys.size
-        ? this.initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${identifier.value}`)
-        : undefined;
+      const initial =
+        borrowed ??
+        (this.initialSpaceKeys.size
+          ? this.initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${identifier.value}`)
+          : undefined);
       const stage = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
         for (const name of declaration.columns) {
           physical[name] = {
@@ -1616,7 +1637,62 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       else {
         await withSpaceKeys(db, scope, identifier.value, stage, false);
       }
-    });
+    };
+    if (operation === "restore") {
+      ownerClient.prepareTransaction(openTransactionId, prepare);
+    } else {
+      const branch = branchCoordinateKey(normalized?.branch);
+      if (
+        previousBatch?.pending &&
+        previousBatch.schema === table._schema &&
+        previousBatch.scope === declaration.scope &&
+        previousBatch.identifier === identifier.value &&
+        previousBatch.branch === branch
+      ) {
+        previousBatch.writes.push(prepare);
+        this.encryptedInsertBatch = previousBatch;
+      } else {
+        const batch: EncryptedInsertBatch = {
+          schema: table._schema,
+          scope: declaration.scope,
+          identifier: identifier.value,
+          branch,
+          pending: true,
+          writes: [prepare],
+        };
+        this.encryptedInsertBatch = batch;
+        ownerClient.prepareTransaction(openTransactionId, async (io) => {
+          batch.pending = false;
+          if (this.encryptedInsertBatch === batch) this.encryptedInsertBatch = undefined;
+          if (batch.writes.length === 1) return batch.writes[0]!(io);
+          const initial = this.initialSpaceKeys.size
+            ? this.initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${identifier.value}`)
+            : undefined;
+          let epoch: string | undefined;
+          const stage = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
+            epoch = root.epochId;
+            for (const write of batch.writes) await write(io, { secret, root });
+          };
+          if (initial) {
+            await stage(initial.secret, initial.root);
+          } else {
+            // Borrow a key only while this bounded batch runs. Reobserve accepted
+            // authority after encryption, before preparation can permit commit.
+            await withSpaceKeys(db, scope, identifier.value, stage, false);
+            await withSpaceKeys(
+              db,
+              scope,
+              identifier.value,
+              async (_secret, root) => {
+                if (root.epochId !== epoch)
+                  throw new Error("Encryption space changed during transaction preparation");
+              },
+              false,
+            );
+          }
+        });
+      }
+    }
     const logicalRow = {
       ...preview,
       valuesByColumn: undefined,

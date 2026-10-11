@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { createBrowserCrypto } from "./browser.js";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -69,7 +70,31 @@ it("automatically isolates private device records and keeps group, space and row
     });
     const creator = await createDb({ ...alice, e2ee: { app, store: store() } });
     clients.push(creator);
-    const recipient = await createDb({ ...bob, e2ee: { app, store: store() } });
+    const crypto = await createBrowserCrypto();
+    let duringEncryption: (() => Promise<void>) | undefined;
+    const borrowedKeys: Uint8Array[] = [];
+    const recipient = await createDb({
+      ...bob,
+      e2ee: {
+        app,
+        store: store(),
+        crypto: {
+          ...crypto,
+          cellCipher: {
+            ...crypto.cellCipher,
+            async encrypt(key, aad, plaintext) {
+              if (duringEncryption) {
+                const run = duringEncryption;
+                duringEncryption = undefined;
+                borrowedKeys.push(key);
+                await run();
+              }
+              return crypto.cellCipher.encrypt(key, aad, plaintext);
+            },
+          },
+        },
+      },
+    });
     clients.push(recipient);
     await creator.e2ee.devices.list();
     await recipient.e2ee.devices.list();
@@ -160,16 +185,39 @@ it("automatically isolates private device records and keeps group, space and row
     expect(await creator.one(app.notes.where({ id: own.value.id }), { tier: "global" })).toEqual(
       own.value,
     );
-    await creator.e2ee.spaces.revoke(app.projects, project.id, bob.account.id).wait();
+    // Authority can change while a crypto provider is awaiting. A bounded
+    // preparation batch must recheck before allowing any of its rows to publish.
+    duringEncryption = async () => {
+      await creator.e2ee.spaces.revoke(app.projects, project.id, bob.account.id).wait();
+    };
+    const revoked = recipient.beginTransaction();
+    const rejectedRows = Array.from({ length: 3 }, (_, index) =>
+      revoked.insert(app.notes, {
+        projectId: project.id,
+        ownerId: bob.account.id,
+        title: `Revoked batch ${index}`,
+      }),
+    );
+    await expect(revoked.commit().wait({ tier: "global" })).rejects.toMatchObject({
+      code: "key-not-shared",
+    });
+    expect(borrowedKeys).toHaveLength(1);
+    expect(borrowedKeys[0]!.every((byte) => byte === 0)).toBe(true);
+    expect(
+      await creator.all(app.notes.where({ id: { in: rejectedRows.map((row) => row.id) } }), {
+        tier: "global",
+      }),
+    ).toEqual([]);
     expect(await creator.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
       state: "ready",
     });
     expect(await creator.all(app.__e2ee_space_successors, { tier: "global" })).toHaveLength(1);
     expect(await creator.one(query, { tier: "global" })).toEqual(note);
     await creator.update(app.notes, note.id, { title: "New epoch" }).wait({ tier: "global" });
-    expect(await creator.one(query, { tier: "global" })).toEqual({ ...note, title: "New epoch" });
-    expect(await creator.one(app.notes.where({ id: own.value.id }), { tier: "global" })).toEqual(
-      own.value,
+    // One result spans both the new and historical cell epochs.
+    const epochs = await creator.all(app.notes, { tier: "global" });
+    expect(epochs.sort((a, b) => a.id.localeCompare(b.id))).toEqual(
+      [{ ...note, title: "New epoch" }, own.value].sort((a, b) => a.id.localeCompare(b.id)),
     );
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
