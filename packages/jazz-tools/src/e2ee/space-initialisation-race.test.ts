@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -17,91 +17,140 @@ function signal() {
   return { promise, resolve };
 }
 
-it.each([false, true])(
-  "accepts one competing space initialiser and retries against its accepted epoch (queued: %s)",
-  async (queued) => {
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...spaceSchema,
-      projects: s.table({ title: s.string() }, {}),
-      notes: s.table(
-        { projectId: s.uuid(), epochId: s.uuid(), payload: s.bytes() },
-        { project: s.rel("projects", "projectId") },
-      ),
+function newRows<T extends { id: string }>(rows: T[], before: T[]): T[] {
+  const ids = new Set(before.map((row) => row.id));
+  const ordered = (rows: T[]) => [...rows].sort((a, b) => a.id.localeCompare(b.id));
+  expect(ordered(rows.filter((row) => ids.has(row.id)))).toEqual(ordered(before));
+  return rows.filter((row) => !ids.has(row.id));
+}
+
+async function prepare() {
+  const app = s.defineApp({
+    ...deviceRequestSchema,
+    ...spaceSchema,
+    projects: s.table({ title: s.string() }, {}),
+    notes: s.table(
+      { projectId: s.uuid(), epochId: s.uuid(), payload: s.bytes() },
+      { project: s.rel("projects", "projectId") },
+    ),
+  });
+  const policies = definePermissions(app, ({ policy, session }) => {
+    const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
+    policy.projects.allowRead.where(authenticated);
+    policy.projects.allowInsert.where(authenticated);
+    policy.notes.allowRead.where(authenticated);
+    policy.notes.allowInsert.where(authenticated);
+    policy.__e2ee_spaces.allowRead.where(authenticated);
+    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_space_grants.allowRead.where(authenticated);
+    policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
+    policy.__e2ee_space_deliveries.allowRead.where(authenticated);
+    policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+    policy.__e2ee_space_successors.allowRead.where(authenticated);
+    policy.__e2ee_space_recovery_deliveries.allowRead.where(authenticated);
+  });
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const clients: Awaited<ReturnType<typeof createDb>>[] = [];
+  let gate: { reached: ReturnType<typeof signal>[]; resume: ReturnType<typeof signal> } | undefined;
+  const cleanup = async () => {
+    gate?.resume.resolve();
+    await Promise.all(clients.map((client) => client.shutdown()));
+    await server.stop();
+  };
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
     });
-    const policies = definePermissions(app, ({ policy, session }) => {
-      const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
-      policy.projects.allowRead.where(authenticated);
-      policy.projects.allowInsert.where(authenticated);
-      policy.notes.allowRead.where(authenticated);
-      policy.notes.allowInsert.where(authenticated);
-      policy.__e2ee_spaces.allowRead.where(authenticated);
-      policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
-      policy.__e2ee_space_grants.allowRead.where(authenticated);
-      policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
-      policy.__e2ee_space_deliveries.allowRead.where(authenticated);
-      policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
-      policy.__e2ee_space_successors.allowRead.where(authenticated);
-      policy.__e2ee_space_recovery_deliveries.allowRead.where(authenticated);
-    });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    const clients: Awaited<ReturnType<typeof createDb>>[] = [];
-    const reached = [signal(), signal()];
-    const resume = signal();
-    let armed = false;
-    try {
-      await deploy({
-        serverUrl: server.url,
-        appId: server.appId,
-        adminSecret: server.adminSecret,
-        schema: app,
-        permissions: { ...deviceRequestPermissions, ...policies },
-      });
-      const accounts = await Promise.all([
-        localAccountConfig(server.appId, server.url),
-        localAccountConfig(server.appId, server.url),
-      ]);
-      expect(accounts[0]!.account.id).not.toBe(accounts[1]!.account.id);
-      const keys = await createBrowserKeyEnvelope();
-      const cipher = await createBrowserCellCipher();
-      const proposedEpochs: string[] = [];
-      const provisionalKeys: Uint8Array[] = [];
-      for (const [index, account] of accounts.entries()) {
-        let saved: string | null = null;
-        const db = await createDb({
-          ...account,
-          e2ee: {
-            app,
-            store: {
-              async read() {
-                return saved;
-              },
-              async update(transform) {
-                saved = transform(saved);
-              },
+    const accounts = await Promise.all([
+      localAccountConfig(server.appId, server.url),
+      localAccountConfig(server.appId, server.url),
+    ]);
+    expect(accounts[0]!.account.id).not.toBe(accounts[1]!.account.id);
+    const keys = await createBrowserKeyEnvelope();
+    const cipher = await createBrowserCellCipher();
+    for (const [index, account] of accounts.entries()) {
+      let saved: string | null = null;
+      const db = await createDb({
+        ...account,
+        e2ee: {
+          app,
+          store: {
+            async read() {
+              return saved;
             },
-            crypto: {
-              keyEnvelope: {
-                ...keys,
-                async wrap(secret, context, plaintext) {
-                  if (armed) {
-                    reached[index]!.resolve();
-                    await resume.promise;
-                  }
-                  return keys.wrap(secret, context, plaintext);
-                },
+            async update(transform) {
+              saved = transform(saved);
+            },
+          },
+          crypto: {
+            keyEnvelope: {
+              ...keys,
+              async wrap(secret, context, plaintext) {
+                if (gate) {
+                  const held = gate;
+                  held.reached[index]!.resolve();
+                  await held.resume.promise;
+                }
+                return keys.wrap(secret, context, plaintext);
               },
             },
           },
-        });
-        clients.push(db);
-        await db.e2ee.devices.list();
-      }
+        },
+      });
+      clients.push(db);
+      await db.e2ee.devices.list();
+    }
+    return {
+      app,
+      clients,
+      accounts,
+      cipher,
+      arm(reached: ReturnType<typeof signal>[], resume: ReturnType<typeof signal>) {
+        gate = { reached, resume };
+      },
+      disarm() {
+        gate = undefined;
+      },
+      cleanup,
+    };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+let fixture: Awaited<ReturnType<typeof prepare>>;
+beforeAll(async () => {
+  fixture = await prepare();
+}, 60000);
+afterAll(async () => {
+  await fixture?.cleanup();
+});
+
+it.each([false, true])(
+  "accepts one competing space initialiser and retries against its accepted epoch (queued: %s)",
+  async (queued) => {
+    const { app, clients, accounts, cipher } = fixture;
+    const reached = [signal(), signal()];
+    const resume = signal();
+    const proposedEpochs: string[] = [];
+    const provisionalKeys: Uint8Array[] = [];
+    const [roots, grants, notes, deliveries] = await Promise.all([
+      clients[0]!.all(app.__e2ee_spaces, { tier: "global" }),
+      clients[0]!.all(app.__e2ee_space_grants, { tier: "global" }),
+      clients[0]!.all(app.notes, { tier: "global" }),
+      clients[0]!.all(app.__e2ee_space_deliveries, { tier: "global" }),
+    ]);
+    const before = { roots, grants, notes, deliveries };
+    try {
       const project = await clients[0]!
         .insert(app.projects, { title: "Contended scope" })
         .wait({ tier: "global" });
       await clients[1]!.one(app.projects.where({ id: project.id }), { tier: "remote" });
-      armed = true;
+      fixture.arm(reached, resume);
       const pending = clients.map((db, i) => {
         if (!queued)
           return db.e2ee.spaces.grant(app.projects, project.id, accounts[i]!.account.id).wait();
@@ -135,7 +184,7 @@ it.each([false, true])(
       ]);
       // Initial-key wrapping happens after each transaction has read the absence
       // predicate. Both proposals must therefore compete, not execute sequentially.
-      armed = false;
+      fixture.disarm();
       resume.resolve();
       const outcomes = await settled;
       expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
@@ -150,7 +199,7 @@ it.each([false, true])(
       const winner = clients[winnerIndex]!;
       const loser = clients[loserIndex]!;
       const target = { scope: app.projects, identifier: project.id };
-      const roots = await winner.all(app.__e2ee_spaces, { tier: "remote" });
+      const roots = newRows(await winner.all(app.__e2ee_spaces, { tier: "remote" }), before.roots);
       expect(roots).toHaveLength(1);
       if (queued) {
         expect(new Set(proposedEpochs).size).toBe(2);
@@ -159,14 +208,17 @@ it.each([false, true])(
           expect(key).toHaveLength(32);
           expect(key.every((byte) => byte === 0)).toBe(true);
         }
-        const notes = await winner.all(app.notes, { tier: "global" });
+        const notes = newRows(await winner.all(app.notes, { tier: "global" }), before.notes);
         expect(notes).toHaveLength(1);
         expect(notes[0]).toMatchObject({ projectId: project.id, epochId: roots[0]!.epochId });
         expect(roots[0]!.epochId).toBe(proposedEpochs[winnerIndex]);
         expect(notes[0]!.epochId).not.toBe(proposedEpochs[loserIndex]);
         expect(notes[0]!.payload).not.toEqual(new Uint8Array([winnerIndex + 1]));
       }
-      const grants = await winner.all(app.__e2ee_space_grants, { tier: "remote" });
+      const grants = newRows(
+        await winner.all(app.__e2ee_space_grants, { tier: "remote" }),
+        before.grants,
+      );
       expect(grants).toHaveLength(1);
       expect(grants[0]).toMatchObject({
         id: roots[0]!.initialGrantId,
@@ -177,12 +229,10 @@ it.each([false, true])(
       expect(await winner.e2ee.explain(target)).toEqual({ state: "ready" });
       expect(await loser.e2ee.explain(target)).toMatchObject({ state: "refused" });
       expect(
-        await winner.all(
-          app.__e2ee_space_deliveries.where({
-            recipientAccountId: accounts[loserIndex]!.account.id,
-          }),
-          { tier: "remote" },
-        ),
+        newRows(
+          await winner.all(app.__e2ee_space_deliveries, { tier: "remote" }),
+          before.deliveries,
+        ).filter((row) => row.recipientAccountId === accounts[loserIndex]!.account.id),
       ).toEqual([]);
 
       await loser.e2ee.spaces
@@ -190,13 +240,16 @@ it.each([false, true])(
         .wait();
       expect(await winner.e2ee.explain(target)).toEqual({ state: "ready" });
       expect(await loser.e2ee.explain(target)).toEqual({ state: "ready" });
-      expect(await winner.all(app.__e2ee_spaces, { tier: "remote" })).toEqual(roots);
-      expect(await winner.all(app.__e2ee_space_grants, { tier: "remote" })).toHaveLength(2);
+      expect(
+        newRows(await winner.all(app.__e2ee_spaces, { tier: "remote" }), before.roots),
+      ).toEqual(roots);
+      expect(
+        newRows(await winner.all(app.__e2ee_space_grants, { tier: "remote" }), before.grants),
+      ).toHaveLength(2);
     } finally {
+      fixture.disarm();
       resume.resolve();
-      await Promise.all(clients.map((client) => client.shutdown()));
-      await server.stop();
     }
   },
-  60_000,
+  60000,
 );
