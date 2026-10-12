@@ -166,6 +166,10 @@ it("retires one recovery root with an epoch rotation and preserves other authori
     await expect(owner.e2ee.recovery.status(compromised.material)).rejects.toMatchObject({
       code: "recovery-root-mismatch",
     });
+    // Already active membership cannot make retired recovery material usable.
+    await expect(owner.e2ee.recovery.use(compromised.material).wait()).rejects.toMatchObject({
+      code: "recovery-root-mismatch",
+    });
 
     const recovering = await open();
     const pending = (await recovering.e2ee.devices.list()).find(
