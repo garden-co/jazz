@@ -137,12 +137,12 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
           epochs++;
         }
         const root = await owner.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(root).toBeDefined();
         expect(
           await owner.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), {
-            tier: "global",
+            tier: "remote",
           }),
         ).toHaveLength(size - 1);
         console.info(
@@ -157,7 +157,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
           const beforeTokens = tokens;
           const beforeVerifications = verifications;
           const start = performance.now();
-          const rows = await owner.all(query, { tier: "global" });
+          const rows = await owner.all(query, { tier: "remote" });
           const elapsedMs = performance.now() - start;
           expect(rows).toEqual(expected);
           console.info(

@@ -39,7 +39,7 @@ it("qualifies owner catalogue readiness with the requested schema's local admiss
   expect(queryInternal).not.toHaveBeenCalled();
   expect(tableIdentity).not.toHaveBeenCalled();
   expect(events).toEqual(["owner-publication"]);
-  expect(ensureReady).toHaveBeenCalledWith("local");
+  expect(ensureReady).toHaveBeenCalledWith("runtime");
 
   published = true;
   events.length = 0;
@@ -49,18 +49,14 @@ it("qualifies owner catalogue readiness with the requested schema's local admiss
   expect(ownerReady).toHaveBeenCalledOnce();
   expect(tableIdentity).not.toHaveBeenCalled();
   expect(events).toEqual(["owner-publication", "requested-schema"]);
-  expect(queryInternal).toHaveBeenCalledWith(
-    expect.any(String),
-    { tier: "local", propagation: "local-only" },
-    undefined,
-  );
+  expect(queryInternal).toHaveBeenCalledWith(expect.any(String), { tier: "local-only" }, undefined);
   expect(JSON.parse(queryInternal.mock.calls[0]![0])).toEqual({
     table: "projects",
     conditions: [],
     array_subqueries: [],
     limit: 0,
   });
-  expect(ensureReady).toHaveBeenCalledWith("local");
+  expect(ensureReady).toHaveBeenCalledWith("runtime");
 
   admitted = true;
   events.length = 0;
@@ -69,7 +65,7 @@ it("qualifies owner catalogue readiness with the requested schema's local admiss
   );
   expect(events).toEqual(["owner-publication", "requested-schema", "local-identity"]);
   expect(tableIdentity).toHaveBeenCalledWith(requested.projects, true);
-  expect(ensureReady.mock.calls.every(([tier]) => tier === "local")).toBe(true);
+  expect(ensureReady.mock.calls.every(([tier]) => tier === "runtime")).toBe(true);
   expect(queryInternal.mock.calls).toHaveLength(2);
 });
 
@@ -104,12 +100,12 @@ it("keeps authenticated local lookups separate from fresh general identities", a
   await expect(db.authenticatedTableIdentity(app.projects)).resolves.toBe(identity);
   expect(queryInternal).toHaveBeenCalledOnce();
   expect(coverCatalogue).not.toHaveBeenCalled();
-  expect(ensureReady.mock.calls.every(([tier]) => tier === "local")).toBe(true);
+  expect(ensureReady.mock.calls.every(([tier]) => tier === "runtime")).toBe(true);
 
   await expect(db.tableIdentity(app.projects)).resolves.toBe(identity);
   expect(coverCatalogue).toHaveBeenCalledOnce();
   expect(coverCatalogue).toHaveBeenCalledWith("projects", undefined);
-  expect(ensureReady).toHaveBeenCalledWith("global");
+  expect(ensureReady).toHaveBeenCalledWith("server");
 
   published = false;
   await expect(db.authenticatedTableIdentity(app.projects)).resolves.toBeNull();

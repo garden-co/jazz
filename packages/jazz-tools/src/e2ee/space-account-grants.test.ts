@@ -192,7 +192,7 @@ it("shares a space only after an authorised account grant, excluding pending dev
         tier: "remote",
       }),
     ).toEqual([]);
-    const beforeRemoval = await creator.all(app.__e2ee_space_deliveries, { tier: "global" });
+    const beforeRemoval = await creator.all(app.__e2ee_space_deliveries, { tier: "remote" });
     let removed = false;
     removeDuringConfirmation = async () => {
       await creator.e2ee.spaces.revoke(app.projects, project.id, bob.account.id).wait();
@@ -206,7 +206,7 @@ it("shares a space only after an authorised account grant, excluding pending dev
     expect(removed).toBe(true);
     expect(openedDuringRemoval.length).toBeGreaterThan(0);
     expect(openedDuringRemoval.every((secret) => secret.every((byte) => byte === 0))).toBe(true);
-    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "global" })).toEqual(
+    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual(
       beforeRemoval,
     );
   } finally {

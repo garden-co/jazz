@@ -86,7 +86,7 @@ it("upserts and restores encrypted heads using their exact branch scopes", async
     await transaction.commit().wait({ tier: "global" });
 
     await expect(
-      db.one(app.notes.where({ id }), { branch: "draft", tier: "global" }),
+      db.one(app.notes.where({ id }), { branch: "draft", tier: "remote" }),
     ).resolves.toEqual({
       id,
       projectId: headProject.id,
@@ -101,7 +101,7 @@ it("upserts and restores encrypted heads using their exact branch scopes", async
     const draftRow = { id, projectId: headProject.id, body: "Updated head", branch: "draft" };
     const otherBranchRow = baseRow;
     expect(
-      await db.one(app.notes.where({ id: rowId }), { branch: "base", tier: "global" }),
+      await db.one(app.notes.where({ id: rowId }), { branch: "base", tier: "remote" }),
     ).toEqual(otherBranchRow);
 
     await db.delete(app.notes, rowId, { branch: "draft" }).wait({ tier: "global" });
@@ -116,10 +116,10 @@ it("upserts and restores encrypted heads using their exact branch scopes", async
         .wait({ tier: "global" }),
     ).rejects.toThrow();
     expect(
-      await db.one(app.notes.where({ id: rowId }), { branch: "draft", tier: "global" }),
+      await db.one(app.notes.where({ id: rowId }), { branch: "draft", tier: "remote" }),
     ).toBeNull();
     expect(
-      await db.one(app.notes.where({ id: rowId }), { branch: "base", tier: "global" }),
+      await db.one(app.notes.where({ id: rowId }), { branch: "base", tier: "remote" }),
     ).toEqual(otherBranchRow);
 
     await db
@@ -131,7 +131,7 @@ it("upserts and restores encrypted heads using their exact branch scopes", async
       )
       .wait({ tier: "global" });
     expect(
-      await db.one(app.notes.where({ id: rowId }), { branch: "draft", tier: "global" }),
+      await db.one(app.notes.where({ id: rowId }), { branch: "draft", tier: "remote" }),
     ).toEqual({ ...draftRow, body: "Draft restored" });
 
     const preparedId = crypto.randomUUID();
@@ -150,7 +150,7 @@ it("upserts and restores encrypted heads using their exact branch scopes", async
     );
     await prepared.commit().wait({ tier: "global" });
     expect(
-      await db.one(app.notes.where({ id: preparedId }), { branch: "draft", tier: "global" }),
+      await db.one(app.notes.where({ id: preparedId }), { branch: "draft", tier: "remote" }),
     ).toEqual({ ...preparedRow, body: "Prepared restored" });
   } finally {
     await db?.shutdown();

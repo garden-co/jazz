@@ -1988,7 +1988,7 @@ mod tests {
             .attach_query_with_opts(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..Default::default()
                 },
             )
@@ -2899,7 +2899,7 @@ mod tests {
                 .attach_query_with_opts(
                     &query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2917,7 +2917,7 @@ mod tests {
                 .attach_query_with_opts(
                     &query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2938,7 +2938,7 @@ mod tests {
                 .all(
                     query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2957,7 +2957,7 @@ mod tests {
                 .all(
                     query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -4192,15 +4192,13 @@ mod tests {
             ],
         ));
         let response = reqwest::Client::new()
-            .post(format!(
-                "http://{addr}/apps/{}/admin/permissions",
-                state.app_id
-            ))
+            .post(format!("http://{addr}/apps/{}/admin/deploy", state.app_id))
             .header("X-Jazz-Admin-Secret", "admin-secret")
             .header("Content-Type", "application/json")
             .body(
                 serde_json::json!({
-                    "schemaHash": v2_hash.to_string(),
+                    "targetSchemaHash": v2_hash.to_string(),
+                    "schemas": [], "migrations": [],
                     "permissions": { "todos": policies },
                 })
                 .to_string(),
@@ -4210,7 +4208,7 @@ mod tests {
             .expect("publish permissions through admin route");
         let status = response.status();
         let body = response.text().await.expect("permissions response body");
-        assert_eq!(status, reqwest::StatusCode::CREATED, "{body}");
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
 
         let reader_identity = AuthorSubject::for_test_bytes([0xb2; 16]);
         let (_, visible_title) = issuer_and_subject(reader_identity);

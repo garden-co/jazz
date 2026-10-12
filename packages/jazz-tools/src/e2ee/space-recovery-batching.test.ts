@@ -132,7 +132,7 @@ it("rejects stale space recovery batches before staging and stops delivery after
       JSON.parse((await replacement.store.read())!).recoveredSpaceKeysV1 ?? [];
     const delivered = () =>
       owner.all(app.__e2ee_space_deliveries.where({ recipientDeviceId: pending.id }), {
-        tier: "global",
+        tier: "remote",
       });
 
     readsUntilChange = 2;

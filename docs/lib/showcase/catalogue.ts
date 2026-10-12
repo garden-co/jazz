@@ -1,4 +1,13 @@
 import { formatTime } from "../perf-timeline/model.ts";
+import bandBookWalkthrough from "../../scripts/example-videos/walkthroughs/band-book.storyboard.ts";
+import bandChatWalkthrough from "../../scripts/example-videos/walkthroughs/band-chat.storyboard.ts";
+import bigLabelWalkthrough from "../../scripts/example-videos/walkthroughs/big-label.storyboard.ts";
+import epicDropWalkthrough from "../../scripts/example-videos/walkthroughs/epic-drop.storyboard.ts";
+import jamazonWalkthrough from "../../scripts/example-videos/walkthroughs/jamazon.storyboard.ts";
+import posterShopWalkthrough from "../../scripts/example-videos/walkthroughs/poster-shop.storyboard.ts";
+import stagePlanWalkthrough from "../../scripts/example-videos/walkthroughs/stage-plan.storyboard.ts";
+import wequencerWalkthrough from "../../scripts/example-videos/walkthroughs/wequencer.storyboard.ts";
+import worldTourWalkthrough from "../../scripts/example-videos/walkthroughs/world-tour.storyboard.ts";
 
 /** Looks up another benchmark's headline seconds, for metrics that compare two cases. */
 export type Lookup = (benchmarkName: string) => number | null;
@@ -17,9 +26,13 @@ export type HeroMetric = {
 };
 
 export type HeroVideo = {
-  /** Written by `pnpm --filter docs capture:example-videos`. */
+  /**
+   * An H.264 MP4 under docs/public, at most MAX_BYTES (scripts/example-videos/encode.mjs).
+   * Rendered by `pnpm render:walkthroughs <id>` from scripts/example-videos/walkthroughs/.
+   */
   src: string;
   poster: string;
+  /** The storyboard's `summary`, so it always describes what the video shows. */
   caption: string;
 };
 
@@ -46,62 +59,16 @@ export type HeroExample = {
   plannedMetrics?: string;
 };
 
-// Interpretations get the /5 estimate, so every time and rate they print
-// carries the page's "*" marker. Ratios need none: the divisor cancels out.
-const t = (seconds: number) => `${formatTime(seconds)}*`;
+// Interpretations receive native /5 estimates or measured browser wall time.
+// Ratios need none: the divisor cancels out.
+const t = (seconds: number) => formatTime(seconds);
 const rate = (count: number, seconds: number) =>
-  `${Math.round(count / seconds).toLocaleString("en-US")}*`;
+  Math.round(count / seconds).toLocaleString("en-US");
 const each = (count: number, seconds: number) => t(seconds / count);
 // A 60 Hz frame. Only used to phrase a result that is already below it.
 const frame = 1 / 60;
 
 export const heroExamples: HeroExample[] = [
-  {
-    id: "stage-plan",
-    title: "StagePlan",
-    tagline: "A stage crew's task board: shows, departments, live lists and permissions.",
-    description:
-      "A crew prepares shows together: each show has a board of stage-prep tasks with discussion and an activity log, and every crew member's dashboard mounts dozens of live department lists at once. Every write lands locally first and syncs in the background. Crews only see their own shows, enforced by inherited row-level permissions, and tasks can be archived and restored.",
-    highlights: [
-      "Two crew members add and check off tasks and see each other's changes live",
-      "Moving a card to Done updates every open filtered view",
-      "A dashboard mounts dozens of live department lists at once",
-      "Another crew's shows are invisible, enforced by inherited permissions",
-    ],
-    sources: [
-      { label: "App", path: "examples/stage-plan" },
-      { label: "Benchmarks", path: "examples/stage-plan/benchmarks" },
-    ],
-    benchmarks: "examples/stage-plan/benchmarks",
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: two crew members preparing a show.",
-    metrics: [
-      {
-        benchmark: "stage_plan_add_task_1350",
-        label: "Add a task",
-        per: { count: 1350, unit: "task" },
-        interpret: (s) =>
-          `Each task is its own durable transaction, persisted and delivered back to the live list${s / 1350 < frame ? " well inside one 60 fps frame" : ""}. Averaged over 1,350 additions in a row (${t(s)} total).`,
-      },
-      {
-        benchmark: "stage_plan_open_board",
-        label: "Open a show's board",
-        interpret: (s) => `Filtering and ordering a show's tasks from 3,000 on disk takes ${t(s)}.`,
-      },
-      {
-        benchmark: "stage_plan_move_card_to_done",
-        label: "Move a card to Done",
-        interpret: (s) =>
-          `Changing a task's status so it leaves one live filtered view and enters another, until the view has the change, takes ${t(s)}.`,
-      },
-      {
-        benchmark: "stage_plan_crew_dashboard[(600, 60)]",
-        label: "Crew dashboard with 60 live lists",
-        interpret: (s) =>
-          `Opening one overview plus 60 permissioned department lists until all have settled takes ${t(s)}, about ${each(61, s)} per subscription.`,
-      },
-    ],
-  },
   {
     id: "band-chat",
     title: "BandChat",
@@ -118,8 +85,11 @@ export const heroExamples: HeroExample[] = [
       { label: "Benchmarks", path: "examples/band-chat/benchmarks" },
     ],
     benchmarks: "examples/band-chat/benchmarks",
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: two bandmates in a private room.",
+    video: {
+      src: "/examples/videos/band-chat.mp4",
+      poster: "/examples/videos/band-chat.jpg",
+      caption: bandChatWalkthrough.summary,
+    },
     metrics: [
       {
         benchmark: "band_chat_open_room[10000]",
@@ -152,6 +122,55 @@ export const heroExamples: HeroExample[] = [
     ],
   },
   {
+    id: "stage-plan",
+    title: "StagePlan",
+    tagline: "A stage crew's task board: shows, departments, live lists and permissions.",
+    description:
+      "A crew prepares shows together: each show has a board of stage-prep tasks with discussion and an activity log, and every crew member's dashboard mounts dozens of live department lists at once. Every write lands locally first and syncs in the background. Crews only see their own shows, enforced by inherited row-level permissions, and tasks can be archived and restored.",
+    highlights: [
+      "Two crew members add and check off tasks and see each other's changes live",
+      "Moving a card to Done updates every open filtered view",
+      "A dashboard mounts dozens of live department lists at once",
+      "Another crew's shows are invisible, enforced by inherited permissions",
+    ],
+    sources: [
+      { label: "App", path: "examples/stage-plan" },
+      { label: "Benchmarks", path: "examples/stage-plan/benchmarks" },
+    ],
+    benchmarks: "examples/stage-plan/benchmarks",
+    video: {
+      src: "/examples/videos/stage-plan.mp4",
+      poster: "/examples/videos/stage-plan.jpg",
+      caption: stagePlanWalkthrough.summary,
+    },
+    metrics: [
+      {
+        benchmark: "stage_plan_add_task_1350",
+        label: "Add a task",
+        per: { count: 1350, unit: "task" },
+        interpret: (s) =>
+          `Each task is its own durable transaction, persisted and delivered back to the live list${s / 1350 < frame ? " well inside one 60 fps frame" : ""}. Averaged over 1,350 additions in a row (${t(s)} total).`,
+      },
+      {
+        benchmark: "stage_plan_open_board",
+        label: "Open a show's board",
+        interpret: (s) => `Filtering and ordering a show's tasks from 3,000 on disk takes ${t(s)}.`,
+      },
+      {
+        benchmark: "stage_plan_move_card_to_done",
+        label: "Move a card to Done",
+        interpret: (s) =>
+          `Changing a task's status so it leaves one live filtered view and enters another, until the view has the change, takes ${t(s)}.`,
+      },
+      {
+        benchmark: "stage_plan_crew_dashboard[(600, 60)]",
+        label: "Crew dashboard with 60 live lists",
+        interpret: (s) =>
+          `Opening one overview plus 60 permissioned department lists until all have settled takes ${t(s)}, about ${each(61, s)} per subscription.`,
+      },
+    ],
+  },
+  {
     id: "band-book",
     title: "BandBook",
     tagline: "A Notion-style workspace with pages and issues, scoped by row-level policies.",
@@ -167,8 +186,11 @@ export const heroExamples: HeroExample[] = [
       { label: "Benchmarks", path: "examples/band-book/benchmarks" },
     ],
     benchmarks: "examples/band-book/benchmarks",
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: two bandmates editing a workspace's pages.",
+    video: {
+      src: "/examples/videos/band-book.mp4",
+      poster: "/examples/videos/band-book.jpg",
+      caption: bandBookWalkthrough.summary,
+    },
     metrics: [
       {
         benchmark: "band_book_workspace_pages[100000]",
@@ -201,9 +223,11 @@ export const heroExamples: HeroExample[] = [
     ],
     sources: [{ label: "Vue app and benchmarks", path: "examples/world-tour" }],
     benchmarks: "examples/world-tour/benchmarks",
-    video: null,
-    plannedVideo:
-      "Walkthrough capture is planned: planning a tour stop and checking the public calendar.",
+    video: {
+      src: "/examples/videos/world-tour.mp4",
+      poster: "/examples/videos/world-tour.jpg",
+      caption: worldTourWalkthrough.summary,
+    },
     metrics: [
       {
         benchmark: "world_tour_public_calendar_window[4096]",
@@ -229,8 +253,11 @@ export const heroExamples: HeroExample[] = [
       { label: "Benchmarks", path: "examples/wequencer/benchmarks" },
     ],
     benchmarks: "examples/wequencer/benchmarks",
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: two bandmates editing one pattern.",
+    video: {
+      src: "/examples/videos/wequencer.mp4",
+      poster: "/examples/videos/wequencer.jpg",
+      caption: wequencerWalkthrough.summary,
+    },
     metrics: [
       {
         benchmark: "wequencer_open_pattern",
@@ -253,6 +280,45 @@ export const heroExamples: HeroExample[] = [
     ],
   },
   {
+    id: "text-editor",
+    title: "Collaborative text editor",
+    tagline: "Yjs text editing with incremental updates stored in Jazz.",
+    description:
+      "A minimal React and CodeMirror editor. Each editing session appends Yjs updates to its own binary log in Jazz, so separate offline sessions can merge their changes when they reconnect.",
+    highlights: [
+      "Edit the same document in multiple browsers",
+      "Keep editing offline and merge changes on reconnect",
+      "Restore text and CRDT state from incremental binary logs",
+    ],
+    sources: [
+      { label: "React app", path: "examples/text-editor" },
+      { label: "Browser benchmarks", path: "examples/text-editor/benchmarks" },
+    ],
+    benchmarks: "examples/text-editor/benchmarks",
+    video: null,
+    plannedVideo: "Two browsers edit a shared document, go offline, and merge their changes.",
+    metrics: [
+      {
+        benchmark: "text_editor_open_browser[100000]",
+        label: "Open 100,000 edits",
+        interpret: (s) =>
+          `A fresh browser context opens a document with 100,000 stored Yjs updates and reaches an editable CodeMirror view in ${t(s)}. Includes application startup, Jazz delivery and Yjs replay on a localhost server.`,
+      },
+      {
+        benchmark: "text_editor_reload_browser[100000]",
+        label: "Reload while offline",
+        interpret: (s) =>
+          `Reloading the same history from the browser's local database, with WebSockets blocked, takes ${t(s)}. The Yjs document is reconstructed on every reload.`,
+      },
+      {
+        benchmark: "text_editor_sync_edit_browser[100000]",
+        label: "Sync one new edit",
+        interpret: (s) =>
+          `Inserting one character in a loaded document until a second browser displays it takes ${t(s)}. Both browsers already hold the 100,000-edit history.`,
+      },
+    ],
+  },
+  {
     id: "poster-shop",
     title: "PosterShop",
     tagline: "A collaborative gig-poster canvas with layers, shapes and live cursors.",
@@ -268,8 +334,11 @@ export const heroExamples: HeroExample[] = [
       { label: "Benchmarks", path: "examples/poster-shop/benchmarks" },
     ],
     benchmarks: "examples/poster-shop/benchmarks",
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: two editors designing one poster.",
+    video: {
+      src: "/examples/videos/poster-shop.mp4",
+      poster: "/examples/videos/poster-shop.jpg",
+      caption: posterShopWalkthrough.summary,
+    },
     metrics: [
       {
         benchmark: "poster_shop_open_canvas[4096]",
@@ -342,8 +411,11 @@ export const heroExamples: HeroExample[] = [
     ],
     sources: [{ label: "App and benchmarks", path: "examples/epic-drop" }],
     benchmarks: "examples/epic-drop/benchmarks",
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: uploading and browsing files.",
+    video: {
+      src: "/examples/videos/epic-drop.mp4",
+      poster: "/examples/videos/epic-drop.jpg",
+      caption: epicDropWalkthrough.summary,
+    },
     metrics: [
       {
         benchmark: "epic_drop_upload_64mb",
@@ -377,8 +449,11 @@ export const heroExamples: HeroExample[] = [
       "Check out against live stock levels",
     ],
     sources: [{ label: "App", path: "examples/jamazon" }],
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: browsing the catalogue and checking out.",
+    video: {
+      src: "/examples/videos/jamazon.mp4",
+      poster: "/examples/videos/jamazon.jpg",
+      caption: jamazonWalkthrough.summary,
+    },
     metrics: [],
     plannedMetrics:
       "Storefront benchmarks (catalogue browsing and search, cart sync) will be added here once they measure an area no other example owns. Checkout is measured by Jamazon Warehouse.",
@@ -465,8 +540,11 @@ export const heroExamples: HeroExample[] = [
     ],
     sources: [{ label: "App and benchmarks", path: "examples/big-label" }],
     benchmarks: "examples/big-label/benchmarks",
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: sign-in, team setup and a bulk release import.",
+    video: {
+      src: "/examples/videos/big-label.mp4",
+      poster: "/examples/videos/big-label.jpg",
+      caption: bigLabelWalkthrough.summary,
+    },
     metrics: [
       {
         benchmark: "big_label_label_load[4096]",

@@ -1,3 +1,4 @@
+import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
 import type { ReservedTxId } from "./provisional-initialization.js";
@@ -66,18 +67,15 @@ import {
   type InsertOptions as InternalInsertOptions,
   type RestoreOptions as InternalRestoreOptions,
   type UpdateOptions as InternalUpdateOptions,
-  type DurabilityTier,
-  type QueryExecutionOptions,
-  type InternalQueryExecutionOptions,
   type RowSettlement,
-  type QueryPropagation,
+  type ReadTierOptions,
+  type InternalQueryExecutionOptions,
   type QueryVisibility,
   isPublicQueryReadTier,
   rejectRemovedReadTier,
+  normalizeFirstLoadRemoteWaitMs,
   resolveEffectiveQueryExecutionOptions,
-  resolveReadTier,
-  isLocalFirstUnlessEmptyTier,
-  type RuntimeReadTier,
+  type InternalReadTier,
   type BranchSelector,
   type BranchView,
   type OpenTransactionId,
@@ -107,6 +105,7 @@ import {
 import { TypedTableQueryBuilder, type AnyTableMeta } from "../typed-app.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
+import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
 import {
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
@@ -250,7 +249,7 @@ export type QualifiedBranch = Record<string, BranchValue>;
 export type Branch = BranchValue | QualifiedBranch;
 export type BranchBase = Branch | readonly [branch: Branch, snapshot: unknown];
 
-export type QueryOptions = Omit<QueryExecutionOptions, "branch"> & {
+export type QueryOptions = ReadTierOptions & {
   /** Current branch coordinate. A scalar selects a table with one `branchBy` column. */
   branch?: Branch;
   /** Optional live base, or `[base, snapshotRef]` for a frozen base. */
@@ -259,8 +258,6 @@ export type QueryOptions = Omit<QueryExecutionOptions, "branch"> & {
 
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
   tier?: InternalQueryExecutionOptions["tier"];
-  localUpdates?: InternalQueryExecutionOptions["localUpdates"];
-  propagation?: InternalQueryExecutionOptions["propagation"];
   visibility?: InternalQueryExecutionOptions["visibility"];
 };
 /**
@@ -291,15 +288,6 @@ export interface DbDeltaSubscriptionCallbacks<T extends { id: string }> {
  * must not be able to select local-only propagation or a deferred own-write
  * overlay by adding private fields to an options object.
  */
-/**
- * Readiness to await before a read. The core Db gates a
- * local-first-unless-empty opening itself, so such a read needs only local
- * readiness and never blocks on the server transport.
- */
-function readinessTier(tier: RuntimeReadTier): DurabilityTier {
-  return tier === "local-first-unless-empty" ? "local" : tier;
-}
-
 function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptions | undefined {
   if (!options) return undefined;
   const candidate = options as QueryOptions & {
@@ -310,6 +298,10 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
   rejectRemovedReadTier(candidate.tier);
   const lowered: InternalDbQueryOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) lowered.tier = candidate.tier;
+  const firstLoadRemoteWaitMs = normalizeFirstLoadRemoteWaitMs(
+    (candidate as { firstLoadRemoteWaitMs?: unknown }).firstLoadRemoteWaitMs,
+  );
+  if (firstLoadRemoteWaitMs !== undefined) lowered.firstLoadRemoteWaitMs = firstLoadRemoteWaitMs;
   if (candidate.branch !== undefined) lowered.branch = candidate.branch as Branch;
   if (candidate.base !== undefined) lowered.base = candidate.base as BranchBase;
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
@@ -597,8 +589,7 @@ export interface ActiveQuerySubscriptionTrace {
   query: string;
   table: string;
   branches: string[];
-  tier: RuntimeReadTier;
-  propagation: QueryPropagation;
+  tier: InternalReadTier;
   createdAt: string;
   stack?: string;
 }
@@ -1779,7 +1770,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         const rows = await readTransactionRows<Record<string, unknown>>(
           query,
           {
-            tier: "global",
+            tier: "remote",
             ...(optionsSnapshot?.branch !== undefined && { branch: optionsSnapshot.branch }),
           },
           false,
@@ -1957,7 +1948,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
               .where({ id: root.id })
               .select("id");
             if (
-              !(await readTransactionRows(rootQuery, { tier: "local" }, false, binding, io)).length
+              !(await readTransactionRows(rootQuery, { tier: "local-first" }, false, binding, io))
+                .length
             )
               throw new E2eeDataError("key-unavailable");
           }
@@ -2079,7 +2071,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             .select("id");
           const rows = await readTransactionRows<Record<string, unknown>>(
             query,
-            { tier: "local", ...(options?.branch !== undefined && { branch: options.branch }) },
+            {
+              tier: "local-first",
+              ...(options?.branch !== undefined && { branch: options.branch }),
+            },
             false,
             binding,
             io,
@@ -2302,7 +2297,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         query,
         {
           ...optionsSnapshot,
-          tier: "local",
+          tier: "local-first",
         },
         false,
         binding,
@@ -2537,7 +2532,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const reading = (async () => {
       const { rows, settlements } = await this.readAll(
         query,
-        { tier: "global" },
+        { tier: "remote" },
         "with-rows",
         propagation,
         snapshotAtBegin,
@@ -2754,7 +2749,7 @@ function transactionHistoryQueries(
         query,
         {
           ...options,
-          ...(propagation ? { propagation } : {}),
+          ...(propagation ? { tier: "local-only" } : {}),
           ...(e2eeSnapshotAtBegin ? { e2eeSnapshotAtBegin: true } : {}),
         },
         session,
@@ -2848,7 +2843,6 @@ async function readTransactionRows<T>(
       translateQuery(equality?.json ?? builderJson, planningSchema),
       {
         ...queryOptions,
-        localUpdates: "deferred",
         ...(!global && { openTransactionId }),
       },
       readSession,
@@ -2995,7 +2989,7 @@ function preparedTransactionScope(
       binding.resolveClient(query._schema);
       const { rows, settlements } = await readTransactionRows(
         query,
-        { tier: "global" },
+        { tier: "remote" },
         "with-rows",
         binding,
         transactionHistoryQueries(io, propagation, snapshotAtBegin),
@@ -3043,6 +3037,8 @@ export class Db {
   private readonly authStateStore;
   private connection: ConnectionManager;
   private _localFirstSecret: string | null = null;
+  private localFirstRefreshOwned = false;
+  private readonly localFirstRenewals = new AuthRenewalBackoff();
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private readonly shutdownAbort = new AbortController();
@@ -3145,7 +3141,7 @@ export class Db {
     // Client construction starts the follower's init handshake. Do not decide
     // the read tier from config/MessagePort shape: wait for the worker receipt.
     this.getClient(query._schema);
-    await this.connection.ensureReady("local");
+    await this.connection.ensureReady("runtime");
     const selectedOptions = this.#authenticatedInspectorPhysicalDbName
       ? createInspectorLocalQueryOptions(options)
       : // Drop a source's cache-only marker when the worker did not issue an
@@ -3184,6 +3180,7 @@ export class Db {
   /** @internal Store the seed used for local-first auth and optionally schedule token refresh. */
   initLocalFirstAuth(seed: string, ttlSeconds: number, refresh = true): void {
     this._localFirstSecret = seed;
+    this.localFirstRefreshOwned = refresh;
     if (refresh) {
       this.scheduleLocalFirstRefresh(ttlSeconds);
     }
@@ -3196,6 +3193,8 @@ export class Db {
     // Refresh at 80% of TTL
     const refreshMs = ttlSeconds * 800; // 80% of TTL in ms
     this.localFirstRefreshTimer = setTimeout(() => {
+      // The token lived to its scheduled refresh, so earlier renewals took.
+      this.localFirstRenewals.reset();
       this.refreshLocalFirstToken();
     }, refreshMs);
   }
@@ -3235,6 +3234,19 @@ export class Db {
 
   protected markUnauthenticated(reason: AuthFailureReason): void {
     this.authStateStore.markUnauthenticated(reason);
+    // A self-minted local-first token can always be reminted, so expiry is
+    // recoverable: renew and let the auth update reconnect.
+    if (reason === "expired" && this.localFirstRefreshOwned) this.renewExpiredLocalFirstToken();
+  }
+
+  private renewExpiredLocalFirstToken(): void {
+    const delay = this.localFirstRenewals.next();
+    if (delay === 0) {
+      this.refreshLocalFirstToken();
+      return;
+    }
+    if (this.localFirstRefreshTimer) clearTimeout(this.localFirstRefreshTimer);
+    this.localFirstRefreshTimer = setTimeout(() => this.refreshLocalFirstToken(), delay);
   }
 
   private publishAuthStateWithInternalSession(
@@ -3350,13 +3362,18 @@ export class Db {
     return this.connection.getCurrentClient();
   }
 
-  protected async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
-    await this.connection.ensureReady(tier, signal ?? this.shutdownAbort.signal);
+  protected async ensureReady(
+    requirement: ConnectionRequirement,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.connection.ensureReady(requirement, signal ?? this.shutdownAbort.signal);
     this.assertOpen();
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
-    return setWriteWaitReadiness(handle, (tier) => this.ensureReady(tier));
+    return setWriteWaitReadiness(handle, (tier) =>
+      this.ensureReady(tier === "global" ? "server" : "runtime"),
+    );
   }
 
   protected getAccessContext(): DbAccessContext | null {
@@ -3604,7 +3621,7 @@ export class Db {
     const schema = e2eeSchemaForDb(this);
     if (!schema) throw new Error("Initialization status requires an E2EE schema");
     const client = this.getClient(schema);
-    await this.ensureReady("local");
+    await this.ensureReady("runtime");
     return client.initializationTransactionStatus(ids);
   }
 
@@ -3619,17 +3636,13 @@ export class Db {
     // discard them; only the accepted-only observation below validates history.
     // Keep ordinary propagation so the foreground can reach its durable worker.
     if (this.connection.requiresLocalObservationHydration)
-      await Promise.all(queries.map((query) => this.all(query, { tier: "local" })));
-    else await this.ensureReady("local");
+      await Promise.all(queries.map((query) => this.all(query, { tier: "local-first" })));
+    else await this.ensureReady("runtime");
     const tx = beginDbTransactionAfter(this, async () => {});
     const binding = getDbTxHandleBinding(tx, "query");
     const local: Pick<JazzClient, "queryInternal"> = {
       queryInternal: (query, options, session) =>
-        binding.ownerClient.queryInternal(
-          query,
-          { ...options, propagation: "local-only" },
-          session,
-        ),
+        binding.ownerClient.queryInternal(query, { ...options, tier: "local-only" }, session),
     };
     try {
       // Each paired read restricts the shared snapshot to accepted versions
@@ -3639,7 +3652,7 @@ export class Db {
         queries.map(async (query) => {
           const snapshot = await readTransactionRows(
             query,
-            { tier: "global" },
+            { tier: "remote" },
             "with-rows",
             binding,
             local,
@@ -3659,7 +3672,7 @@ export class Db {
     localOnly = false,
   ): Promise<string | null> {
     const client = this.getClient(table._schema);
-    await this.ensureReady("local");
+    await this.ensureReady("runtime");
     const runtime = client.getRuntime();
     if (!runtime.tableIdentity)
       throw new Error("Runtime does not expose catalogue table identities");
@@ -3667,7 +3680,7 @@ export class Db {
       const initialOfflineState = this.connection.initialExplicitOfflineState();
       if (initialOfflineState) await initialOfflineState;
       const offline = this.connection.isExplicitlyOffline();
-      await this.ensureReady(offline ? "local" : "global");
+      await this.ensureReady(offline ? "runtime" : "server");
       // Every online lookup needs fresh coverage, without returning row bodies
       // or waiting on preparation. Serving-side query and policy work still applies.
       // Offline identities remain local observations, not accepted membership.
@@ -3681,13 +3694,13 @@ export class Db {
   /** @internal Stable cached identity for sealed offline initialization, never fresh membership. */
   async authenticatedTableIdentity<T, Init>(table: TableProxy<T, Init>): Promise<string | null> {
     const client = this.getClient(table._schema);
-    await this.ensureReady("local");
+    await this.ensureReady("runtime");
     if (!(await client.hasAuthenticatedCatalogue())) return null;
     // Owner publication does not admit a schema view. A zero-row local read
     // checks this requested schema without fetching metadata or refreshing authority.
     await client.queryInternal(
       translateQuery(JSON.stringify({ table: table._table, limit: 0 }), table._schema),
-      { tier: "local", propagation: "local-only" },
+      { tier: "local-only" },
       this.getAccessContext()?.readSession,
     );
     return this.tableIdentity(table, true);
@@ -3931,7 +3944,7 @@ export class Db {
               .includeDeleted()
               .where({ id: entry.id })
               .select(encryption?.space ?? "id"),
-            { tier: encryption ? "local" : "global" },
+            { tier: encryption ? "local-first" : "remote" },
           )) as Record<string, unknown> | null;
           entry.existing = row !== null;
           if (row && encryption) {
@@ -4127,7 +4140,7 @@ export class Db {
                   .includeDeleted()
                   .where({ id: entry.id })
                   .select(encryption.space),
-                { tier: "local" },
+                { tier: "local-first" },
               )) as Record<string, unknown> | null;
               if (
                 !!row !== !!entry.existing ||
@@ -4652,8 +4665,9 @@ export class Db {
     const client = this.getClient(query._schema);
     // A newly attached browser-worker follower learns the namespace-wide
     // connection state during its init handshake. The core read gate needs
-    // that state before it decides whether an empty result may wait.
-    const initialOfflineState = isLocalFirstUnlessEmptyTier(options?.tier)
+    // that state before it decides whether the first load may wait.
+    const mayWaitForServer = (options?.firstLoadRemoteWaitMs ?? 0) > 0;
+    const initialOfflineState = mayWaitForServer
       ? this.connection.initialExplicitOfflineState()
       : null;
     if (initialOfflineState) await initialOfflineState;
@@ -4674,7 +4688,7 @@ export class Db {
         { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
         queryOptions,
       ).tier;
-      await this.ensureReady(readinessTier(effectiveTier));
+      await this.ensureReady(effectiveTier === "remote" ? "server" : "runtime");
       const rows =
         context || usesRelationTraversal
           ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
@@ -5210,7 +5224,7 @@ export class Db {
                 });
             },
             (error) => terminalizeSubscription(subscription, error),
-            { tier: options?.tier === "local-only" ? "local" : (options?.tier ?? "global") },
+            { tier: options?.tier === "local-only" ? "local-first" : (options?.tier ?? "remote") },
           );
           await subscription.dependencies.update(equality ? [equality.space] : []);
           installNativeSubscription(subscription, subscriptionOptions);
@@ -5278,19 +5292,13 @@ export class Db {
     // The native maintained stream owns both the opening snapshot and later
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
-    if (
-      this.connection.shouldDeferSubscriptionStart(
-        readinessTier(resolveReadTier(queryOptions.tier ?? "local")),
-      )
-    ) {
+    const requirement = queryOptions.tier === "remote" ? "server" : "runtime";
+    if (this.connection.shouldDeferSubscriptionStart(requirement)) {
       // The worker can only classify the initial authority-tier snapshot as
       // settled after its own server transport is attached. Delay native
       // subscription creation until that topology is ready; the native stream
       // then owns the settled-snapshot gate and remains the sole data source.
-      void this.ensureReady(
-        readinessTier(resolveReadTier(queryOptions.tier ?? "local")),
-        readyAbort.signal,
-      )
+      void this.ensureReady(requirement, readyAbort.signal)
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
           if (unsubscribed || readyAbort.signal.aborted || this.shutdownPromise) return;
@@ -5416,7 +5424,7 @@ export class Db {
     );
     // Inspector-only reads must not recursively appear in the inspector's
     // own subscription list. Public local-first still propagates and is listed.
-    if (resolvedOptions.propagation === "local-only") return null;
+    if (resolvedOptions.tier === "local-only") return null;
     const payload = this.parseRuntimeQueryTracePayload(queryJson);
     const traceId = `sub-${this.nextActiveQuerySubscriptionTraceId++}`;
 
@@ -5426,7 +5434,6 @@ export class Db {
       table: payload.table,
       branches: payload.branches,
       tier: resolvedOptions.tier,
-      propagation: resolvedOptions.propagation,
       createdAt: new Date().toISOString(),
       stack: trimSubscriptionTraceStack(new Error().stack),
       visibility: resolvedOptions.visibility ?? "public",

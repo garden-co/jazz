@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -38,7 +39,7 @@ it.each([
     };
     const oldApp = s.defineApp(before);
     const app = s.defineApp(after);
-    const migration = s.defineMigration({
+    const migration = m.defineMigration({
       from: before,
       to: after,
       createTables: { notes: true, events: true },
@@ -110,19 +111,21 @@ it.each([
       }
       if (mode === "exclusive-nullable-upsert") {
         await writer.e2ee.devices.list();
-        await writer.all(app.projects, { tier: "global" });
+        await writer.all(app.projects, { tier: "remote" });
         await writer.disconnect();
         const id = crypto.randomUUID();
         const tx = writer.beginExclusiveTransaction();
         tx.upsert(app.notes, id, { projectId: project.id });
         await tx.commit().wait({ tier: "local" });
         const expected = { id, projectId: project.id, body: null };
-        expect(await writer.one(app.notes.where({ id }), { tier: "local" })).toEqual(expected);
-        const roots = await writer.all(app.__e2ee_spaces, { tier: "local" });
+        expect(await writer.one(app.notes.where({ id }), { tier: "local-first" })).toEqual(
+          expected,
+        );
+        const roots = await writer.all(app.__e2ee_spaces, { tier: "local-first" });
         expect(roots).toEqual([expect.objectContaining({ identifier: project.id })]);
         await writer.reconnect();
-        expect(await writer.one(app.notes.where({ id }), { tier: "global" })).toEqual(expected);
-        expect(await writer.all(app.__e2ee_spaces, { tier: "global" })).toEqual(roots);
+        expect(await writer.one(app.notes.where({ id }), { tier: "remote" })).toEqual(expected);
+        expect(await writer.all(app.__e2ee_spaces, { tier: "remote" })).toEqual(roots);
         return;
       }
       const data = { projectId: project.id, body: "Original value" };
@@ -155,30 +158,30 @@ it.each([
             message: "The encryption key is currently unavailable",
           });
         else await expect(completed).rejects.toMatchObject({ code: "permission_denied" });
-        expect(await writer.all(app.notes.select("id"), { tier: "global" })).toEqual([]);
-        expect(await writer.all(app.events, { tier: "global" })).toEqual([]);
-        expect(await writer.all(app.__e2ee_spaces, { tier: "global" })).toEqual([]);
-        expect(await writer.all(app.__e2ee_space_grants, { tier: "global" })).toEqual([]);
-        expect(await writer.all(app.__e2ee_space_deliveries, { tier: "global" })).toEqual([]);
+        expect(await writer.all(app.notes.select("id"), { tier: "remote" })).toEqual([]);
+        expect(await writer.all(app.events, { tier: "remote" })).toEqual([]);
+        expect(await writer.all(app.__e2ee_spaces, { tier: "remote" })).toEqual([]);
+        expect(await writer.all(app.__e2ee_space_grants, { tier: "remote" })).toEqual([]);
+        expect(await writer.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual([]);
         return;
       }
       await completed;
       const expected = { id: noteId, projectId: project.id, body: "Original value" };
-      expect(await writer.one(app.notes.where({ id: noteId }), { tier: "global" })).toEqual(
+      expect(await writer.one(app.notes.where({ id: noteId }), { tier: "remote" })).toEqual(
         expected,
       );
-      expect(await writer.all(app.events, { tier: "global" })).toHaveLength(
+      expect(await writer.all(app.events, { tier: "remote" })).toHaveLength(
         mode === "exclusive" ? 1 : 0,
       );
-      expect(await writer.all(app.__e2ee_spaces, { tier: "global" })).toHaveLength(1);
+      expect(await writer.all(app.__e2ee_spaces, { tier: "remote" })).toHaveLength(1);
       if (mode === "insert") {
         const roots = await writer.all(app.__e2ee_spaces.where({ identifier: project.id }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(roots).toHaveLength(1);
         expect(roots[0]).toMatchObject({ accountId: account.account.id });
         const grants = await writer.all(app.__e2ee_space_grants.where({ spaceId: roots[0]!.id }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(grants).toHaveLength(1);
         expect(grants[0]).toMatchObject({ operation: "add", recipientId: account.account.id });
@@ -199,10 +202,10 @@ it.each([
         });
         // Plaintext creation history must not grant the first writer's encryption key.
         await expect(
-          creator.one(app.notes.where({ id: noteId }), { tier: "global" }),
+          creator.one(app.notes.where({ id: noteId }), { tier: "remote" }),
         ).rejects.toMatchObject({ code: "key-not-shared" });
         expect(
-          await creator.one(app.projects.where({ id: project.id }), { tier: "global" }),
+          await creator.one(app.projects.where({ id: project.id }), { tier: "remote" }),
         ).toEqual(project);
       }
       if (mode.startsWith("hidden-existing")) {
@@ -222,18 +225,18 @@ it.each([
           },
         });
         await outsider.e2ee.devices.list();
-        expect(await outsider.all(app.__e2ee_spaces, { tier: "global" })).toEqual([]);
+        expect(await outsider.all(app.__e2ee_spaces, { tier: "remote" })).toEqual([]);
         await expect(
           outsider
             .insert(app.notes, { projectId: project.id, body: "Must not create another space" })
             .wait({ tier: "global" }),
         ).rejects.toThrow();
-        expect(await outsider.all(app.__e2ee_spaces, { tier: "global" })).toEqual([]);
-        expect(await writer.all(app.__e2ee_spaces, { tier: "global" })).toHaveLength(1);
-        expect(await writer.all(app.notes.select("id"), { tier: "global" })).toEqual([
+        expect(await outsider.all(app.__e2ee_spaces, { tier: "remote" })).toEqual([]);
+        expect(await writer.all(app.__e2ee_spaces, { tier: "remote" })).toHaveLength(1);
+        expect(await writer.all(app.notes.select("id"), { tier: "remote" })).toEqual([
           { id: noteId },
         ]);
-        expect(await writer.one(app.notes.where({ id: noteId }), { tier: "global" })).toEqual(
+        expect(await writer.one(app.notes.where({ id: noteId }), { tier: "remote" })).toEqual(
           expected,
         );
         return;
@@ -242,14 +245,14 @@ it.each([
       const existing = writer.beginTransaction();
       const second = existing.insert(app.notes, { projectId: project.id, body: "Existing space" });
       await existing.commit().wait({ tier: "global" });
-      expect(await writer.one(app.notes.where({ id: second.id }), { tier: "global" })).toEqual(
+      expect(await writer.one(app.notes.where({ id: second.id }), { tier: "remote" })).toEqual(
         second,
       );
-      expect(await writer.all(app.__e2ee_spaces, { tier: "global" })).toHaveLength(1);
+      expect(await writer.all(app.__e2ee_spaces, { tier: "remote" })).toHaveLength(1);
       if (mode === "insert") {
         await writer.shutdown();
         writer = await createDb({ ...account, e2ee: { app, store } });
-        expect(await writer.one(app.notes.where({ id: noteId }), { tier: "global" })).toEqual(
+        expect(await writer.one(app.notes.where({ id: noteId }), { tier: "remote" })).toEqual(
           expected,
         );
       }

@@ -108,7 +108,7 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
   try {
     const initial = db.beginExclusiveTransaction();
     await Promise.resolve();
-    expect(await initial.all(app.events, { tier: "local" })).toEqual([]);
+    expect(await initial.all(app.events, { tier: "local-first" })).toEqual([]);
     const project = initial.insert(app.projects, { title: "First scope" });
     const other = initial.insert(app.projects, { title: "Second scope" });
     const initialBytes = new Uint8Array([1, 2]);
@@ -121,7 +121,7 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
     initialBytes[0] = 91;
     initialPreview.bytes[1] = 92;
     await initial.commit().wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(note);
 
     const crossScope = db.beginTransaction();
     crossScope.delete(app.notes, note.id);
@@ -131,9 +131,9 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
       bytes: new Uint8Array([3, 4]),
     });
     await expect(crossScope.commit().wait({ tier: "global" })).rejects.toThrow();
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(note);
     expect(
-      await db.one(app.notes.includeDeleted().where({ id: note.id }), { tier: "global" }),
+      await db.one(app.notes.includeDeleted().where({ id: note.id }), { tier: "remote" }),
     ).toEqual(note);
 
     const sameScope = db.beginTransaction();
@@ -145,7 +145,7 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
     });
     await sameScope.commit().wait({ tier: "global" });
     expect(
-      await db.one(app.notes.includeDeleted().where({ id: note.id }), { tier: "global" }),
+      await db.one(app.notes.includeDeleted().where({ id: note.id }), { tier: "remote" }),
     ).toMatchObject({
       id: note.id,
       projectId: project.id,
@@ -166,14 +166,14 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
       { updatedAt: missingUpdatedAt },
     );
     await missing.commit().wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: missingId }), { tier: "global" })).toEqual({
+    expect(await db.one(app.notes.where({ id: missingId }), { tier: "remote" })).toEqual({
       id: missingId,
       projectId: project.id,
       body: "Created by missing-ID upsert",
       bytes: new Uint8Array([7, 8]),
     });
     expect(
-      await db.one(app.notes.where({ id: missingId }).select("$updatedAt"), { tier: "global" }),
+      await db.one(app.notes.where({ id: missingId }).select("$updatedAt"), { tier: "remote" }),
     ).toEqual({ id: missingId, $updatedAt: new Date(missingUpdatedAt) });
     const inputBytes = new Uint8Array([11, 22]);
     const write = db.insert(app.notes, {
@@ -185,7 +185,7 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
     write.value.bytes[1] = 92;
     await write.wait({ tier: "global" });
     expect(
-      (await db.one(app.notes.where({ id: write.value.id }), { tier: "global" }))?.bytes,
+      (await db.one(app.notes.where({ id: write.value.id }), { tier: "remote" }))?.bytes,
     ).toEqual(new Uint8Array([11, 22]));
 
     // Also exercise transaction input snapshots with an already accepted scope;
@@ -200,7 +200,7 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
     existingInput[0] = 95;
     preview.bytes[1] = 96;
     await existing.commit().wait({ tier: "global" });
-    expect((await db.one(app.notes.where({ id: preview.id }), { tier: "global" }))?.bytes).toEqual(
+    expect((await db.one(app.notes.where({ id: preview.id }), { tier: "remote" }))?.bytes).toEqual(
       new Uint8Array([55, 66]),
     );
 
@@ -228,14 +228,14 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
     unavailable = true;
 
     const plain = app.notes.where({ id: write.value.id }).select("id", "projectId");
-    expect(await observer.one(plain, { tier: "global" })).toEqual({
+    expect(await observer.one(plain, { tier: "remote" })).toEqual({
       id: write.value.id,
       projectId: project.id,
     });
 
     const exclusive = observer.beginExclusiveTransaction();
     try {
-      expect(await exclusive.one(plain, { tier: "global" })).toEqual({
+      expect(await exclusive.one(plain, { tier: "remote" })).toEqual({
         id: write.value.id,
         projectId: project.id,
       });
@@ -256,7 +256,7 @@ it("anchors encrypted application snapshots at public begin rather than the firs
     const tx = db.beginExclusiveTransaction();
     try {
       db.insert(app.events, { message: "After begin" });
-      expect(await tx.all(app.events, { tier: "local" })).toEqual([before]);
+      expect(await tx.all(app.events, { tier: "local-first" })).toEqual([before]);
     } finally {
       await tx.rollback();
     }
@@ -291,7 +291,7 @@ it("uses the public begin snapshot for a cold initial recipient", async () => {
     expect(
       await db.e2ee.explain({ scope: app.projects, identifier: coldProject.id }),
     ).toMatchObject({ state: "refused", reason: "not-a-space-recipient" });
-    expect(await cold.client.one(app.notes.where({ id: coldNote.id }), { tier: "global" })).toEqual(
+    expect(await cold.client.one(app.notes.where({ id: coldNote.id }), { tier: "remote" })).toEqual(
       coldNote,
     );
 

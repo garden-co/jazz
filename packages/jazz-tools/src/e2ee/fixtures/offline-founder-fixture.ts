@@ -115,7 +115,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
     const warm = await createDb({ ...warmAccount, e2ee: { app, store: privateStore() } });
     clients.push(warm);
     // Warm the authenticated catalogue without creating an unused encrypted space.
-    await warm.all(app.projects, { tier: "global" });
+    await warm.all(app.projects, { tier: "remote" });
     await warm.shutdown();
     clients.pop();
     gate.block();
@@ -184,7 +184,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
       expect(
         await founder.all(
           app.__e2ee_account_roots.where({ accountId: founderAccount.account.id }),
-          { tier: "global" },
+          { tier: "remote" },
         ),
       ).toEqual([
         expect.objectContaining({
@@ -198,7 +198,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
     if (scenario === "plaintext-transaction") {
       await expect(
         founder.transaction(async (tx) => {
-          expect(await tx.all(app.plaintext, { tier: "local" })).toEqual([]);
+          expect(await tx.all(app.plaintext, { tier: "local-first" })).toEqual([]);
         }),
       ).rejects.toThrow();
       const onError = vi.fn();
@@ -209,7 +209,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
         tx.insert(app.plaintext, { title: "Must not publish", done: false });
         tx.upsert(app.plaintext, crypto.randomUUID(), { done: true });
         await expect(tx.commit().wait({ tier: "local" })).rejects.toThrow();
-        expect(await founder.all(app.plaintext, { tier: "local" })).toEqual([]);
+        expect(await founder.all(app.plaintext, { tier: "local-first" })).toEqual([]);
       }
       const callbackWrite = await founder.exclusiveTransaction((tx) => {
         const row = tx.insert(app.plaintext, { title: "Mapped callback", done: false });
@@ -219,11 +219,11 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
       await expect(
         callbackWrite.mapValue((row) => row.id).wait({ tier: "local" }),
       ).rejects.toThrow();
-      expect(await founder.all(app.plaintext, { tier: "local" })).toEqual([]);
+      expect(await founder.all(app.plaintext, { tier: "local-first" })).toEqual([]);
       const valid = await founder
         .insert(app.plaintext, { title: "Ordinary local write", done: false })
         .wait({ tier: "local" });
-      expect(await founder.all(app.plaintext, { tier: "local" })).toEqual([valid]);
+      expect(await founder.all(app.plaintext, { tier: "local-first" })).toEqual([valid]);
       expect(onError).not.toHaveBeenCalled();
       const unwaited = founder.beginExclusiveTransaction();
       unwaited.insert(app.plaintext, { title: "Unwaited rejection", done: false });
@@ -231,7 +231,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
       const rejected = unwaited.commit();
       await expect.poll(() => onError.mock.calls.length).toBe(1);
       await expect(rejected.wait({ tier: "local" })).rejects.toThrow();
-      expect(await founder.all(app.plaintext, { tier: "local" })).toEqual([valid]);
+      expect(await founder.all(app.plaintext, { tier: "local-first" })).toEqual([valid]);
       expect(onError).toHaveBeenCalledTimes(1);
       return;
     }
@@ -255,9 +255,9 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
         }),
       ).rejects.toMatchObject({ code: "e2ee_initialization_not_ready", retryable: true });
       expect(pulls).toBe(0);
-      expect(await founder.all(app.projects, { tier: "local" })).toEqual([]);
-      expect(await founder.all(app.uploads, { tier: "local" })).toEqual([]);
-      expect(await founder.all(app.__e2ee_spaces, { tier: "local" })).toEqual([]);
+      expect(await founder.all(app.projects, { tier: "local-first" })).toEqual([]);
+      expect(await founder.all(app.uploads, { tier: "local-first" })).toEqual([]);
+      expect(await founder.all(app.__e2ee_spaces, { tier: "local-first" })).toEqual([]);
       return;
     }
 
@@ -270,9 +270,11 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
     const commit = tx.commit();
     await commit.wait({ tier: "local" });
     const originalTxId = await commit.txId;
-    expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+    expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(
+      note,
+    );
     const root = await founder.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "local",
+      tier: "local-first",
     });
     expect(root?.accountId).toBe(founderAccount.account.id);
 
@@ -280,7 +282,9 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
       await founder
         .update(app.notes, note.id, { body: "Updated without replay" })
         .wait({ tier: "local" });
-      expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toMatchObject({
+      expect(
+        await founder.one(app.notes.where({ id: note.id }), { tier: "local-first" }),
+      ).toMatchObject({
         id: note.id,
         body: "Updated without replay",
       });
@@ -291,7 +295,9 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
         retryable: true,
       });
       await explicit.rollback().catch(() => {});
-      expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toMatchObject({
+      expect(
+        await founder.one(app.notes.where({ id: note.id }), { tier: "local-first" }),
+      ).toMatchObject({
         body: "Updated without replay",
       });
       await expect(
@@ -299,7 +305,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
           .update(app.notes, crypto.randomUUID(), { body: "Never an upsert" })
           .wait({ tier: "local" }),
       ).rejects.toThrow();
-      expect(await founder.all(app.notes, { tier: "local" })).toEqual([
+      expect(await founder.all(app.notes, { tier: "local-first" })).toEqual([
         { ...note, body: "Updated without replay" },
       ]);
       gate.unblock();
@@ -307,7 +313,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
       await commit.wait({ tier: "global" });
       expect(
         await founder.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-          tier: "global",
+          tier: "remote",
         }),
       ).toMatchObject({ id: root!.id, epochId: root!.epochId });
       expect(await commit.txId).toBe(originalTxId);
@@ -328,7 +334,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
       await winner.insert(app.projects, { title: "Winning founder" }).wait({ tier: "global" });
       const acceptedIdentity = await winner.one(
         app.__e2ee_account_identities.where({ id: founderAccount.account.id }),
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(acceptedIdentity).not.toBeNull();
       await founder.reconnect();
@@ -339,7 +345,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
           .wait({ tier: "local" }),
       ).rejects.toMatchObject({ code: "e2ee_initialization_not_ready" });
       expect(await commit.txId).toBe(originalTxId);
-      expect(await founder.all(app.__e2ee_account_identities, { tier: "global" })).toEqual([
+      expect(await founder.all(app.__e2ee_account_identities, { tier: "remote" })).toEqual([
         acceptedIdentity,
       ]);
     }

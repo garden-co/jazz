@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../../src/index.js";
+import { schema as s, migration as m } from "../../src/index.js";
 
 it.each(["encrypt", "decrypt"])("rejects an in-place %s migration", (direction) => {
   const plain = s.table(
@@ -8,7 +8,7 @@ it.each(["encrypt", "decrypt"])("rejects an in-place %s migration", (direction) 
   );
   const encrypted = plain.encrypted({ space: "projectId", columns: ["title"] });
   expect(() =>
-    s.defineMigration({
+    m.defineMigration({
       from: { notes: direction === "encrypt" ? plain : encrypted },
       to: { notes: direction === "encrypt" ? encrypted : plain },
     }),
@@ -44,7 +44,7 @@ it.each(["space column", "scope", "encrypted columns", "equality index", "logica
     );
     expect(() =>
       // @ts-expect-error Deliberately invalid migration must also reject at runtime.
-      s.defineMigration({
+      m.defineMigration({
         from: { notes: original.encrypted({ space: "projectId", columns: ["title"] }) },
         to: {
           notes: next.encrypted({
@@ -63,7 +63,7 @@ it("allows equivalent encryption declarations in a different order", () => {
     { projectId: s.uuid(), title: s.string(), notes: s.string() },
     { project: s.rel("projects", "projectId") },
   );
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: {
       notes: table.encrypted({
         space: "projectId",
@@ -85,7 +85,7 @@ it("allows equivalent encryption declarations in a different order", () => {
 it.each([false, true])(
   "preserves encrypted column identity through a rename (indexed: %s)",
   (indexed) => {
-    const migration = s.defineMigration({
+    const migration = m.defineMigration({
       from: {
         notes: s
           .table(
@@ -110,7 +110,7 @@ it.each([false, true])(
             indexes: indexed ? { body: "equality" } : undefined,
           }),
       },
-      migrate: { notes: { body: s.renameFrom("title") } },
+      migrate: { notes: { body: m.renameFrom("title") } },
     });
     expect(migration.forward).toEqual([
       {
@@ -127,7 +127,7 @@ it.each([false, true])(
 );
 
 it("preserves the space reference identity through a rename", () => {
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: {
       notes: s
         .table(
@@ -144,7 +144,7 @@ it("preserves the space reference identity through a rename", () => {
         )
         .encrypted({ space: "spaceRef", columns: ["title"] }),
     },
-    migrate: { notes: { spaceRef: s.renameFrom("projectId") } },
+    migrate: { notes: { spaceRef: m.renameFrom("projectId") } },
   });
   expect(migration.forward).toEqual([
     {

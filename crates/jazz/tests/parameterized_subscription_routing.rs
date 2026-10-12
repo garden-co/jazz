@@ -4,8 +4,8 @@ mod common;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, PreparedQuery, Propagation, ReadOpts,
-    SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
+    Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, SeededRowIdSource, SubscriptionEvent,
+    SubscriptionStream,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -13,7 +13,6 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, all_of, claim, col, eq, param, provider_claim_key};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -85,9 +84,7 @@ fn insert_document(db: &Db, document: RowUuid, team: RowUuid, updated_at: u64) {
 
 fn local_read_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }

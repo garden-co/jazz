@@ -66,7 +66,7 @@ it("streams a plaintext-only update without loading encryption keys", async () =
     })();
     const update = await db.updateStreaming(app.files, file.value.id, { notes: source });
     await update.wait({ tier: "global" });
-    expect(await db.one(physical.files.where({ id: file.value.id }), { tier: "global" })).toEqual({
+    expect(await db.one(physical.files.where({ id: file.value.id }), { tier: "remote" })).toEqual({
       ...file.value,
       notes: "After",
     });
@@ -306,11 +306,11 @@ it("uploads an encrypted image to an accepted space after a transport-offline pe
       payload: image,
     });
     await tx.commit().wait({ tier: "global" });
-    expect(await before.one(app.files.where({ id: original.id }), { tier: "global" })).toEqual(
+    expect(await before.one(app.files.where({ id: original.id }), { tier: "remote" })).toEqual(
       original,
     );
     const acceptedRoot = await before.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(acceptedRoot).toMatchObject({ accountId });
     const historyFailure = new Error("Accepted-history storage unavailable");
@@ -345,7 +345,7 @@ it("uploads an encrypted image to an accepted space after a transport-offline pe
     expect(owner.getSnapshot().account!.id).toBe(accountId);
     expect(
       await within(
-        reopened.one(app.files.where({ id: original.id }), { tier: "local" }),
+        reopened.one(app.files.where({ id: original.id }), { tier: "local-first" }),
         "Retained encrypted image read",
       ),
     ).toEqual(original);
@@ -373,7 +373,7 @@ it("uploads an encrypted image to an accepted space after a transport-offline pe
     const expected = { id: imageId, projectId: project.id, name: "offline.png", payload: image };
     expect(
       await within(
-        reopened.one(app.files.where({ id: imageId }), { tier: "local" }),
+        reopened.one(app.files.where({ id: imageId }), { tier: "local-first" }),
         "Offline uploaded image read",
       ),
     ).toEqual(expected);
@@ -382,11 +382,11 @@ it("uploads an encrypted image to an accepted space after a transport-offline pe
     gate.unblock();
     await reopened.reconnect();
     await upload.wait({ tier: "global" });
-    expect(await reopened.one(app.files.where({ id: imageId }), { tier: "global" })).toEqual(
+    expect(await reopened.one(app.files.where({ id: imageId }), { tier: "remote" })).toEqual(
       expected,
     );
     expect(
-      await reopened.one(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "global" }),
+      await reopened.one(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "remote" }),
     ).toEqual(acceptedRoot);
     expect({ callbacks, sourceRuns, chunks }).toEqual({ callbacks: 1, sourceRuns: 1, chunks: 2 });
   } catch (error) {
@@ -497,7 +497,7 @@ it.each(["warn", "reject"] as const)(
       expect(
         await owner.all(
           app.__e2ee_space_grants.where({ recipientId: departingId, operation: "remove" }),
-          { tier: "global" },
+          { tier: "remote" },
         ),
       ).toEqual([expect.objectContaining({ recipientId: departingId, operation: "remove" })]);
       expect(await owner.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({

@@ -88,7 +88,7 @@ it("initialises and shares a scoped space, then seals it against signed creator 
       .insert(app.projects, { title: "Noncanonical root" })
       .wait({ tier: "global" });
     const accepted = await creator.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "global",
+      tier: "remote",
     });
     const device = JSON.parse((await creatorStore.read())!).devices[0];
     const key = globalThis.crypto.getRandomValues(new Uint8Array(32));

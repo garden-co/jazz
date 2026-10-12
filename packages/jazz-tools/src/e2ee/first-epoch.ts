@@ -76,7 +76,9 @@ export async function firstAccountEpoch(
     try {
       const proposal = mayCreate
         ? await exclusiveE2eeTransaction(db, async (tx) => {
-            const existing = await tx.one(identities.where({ id: accountId }), { tier: "local" });
+            const existing = await tx.one(identities.where({ id: accountId }), {
+              tier: "local-first",
+            });
             assertOpen();
             if (existing) return existing;
             const epochId = crypto.randomUUID();
@@ -114,7 +116,7 @@ export async function firstAccountEpoch(
       // may still consume the original identity once Global has accepted it.
       const accepted = proposal
         ? await proposal.wait({ tier: "global" })
-        : await db.one(identities.where({ id: accountId }), { tier: "global" });
+        : await db.one(identities.where({ id: accountId }), { tier: "remote" });
       if (!accepted)
         throw new E2eeInitializationNotReady("The original founder has not been accepted");
       assertOpen();
@@ -122,7 +124,7 @@ export async function firstAccountEpoch(
         throw new Error("E2EE account requires public ledger migration");
       // Repair an existing identity whose public root was never published.
       // Its initial authority begins only when this root is accepted.
-      if (!(await db.one(roots.where({ accountId }), { tier: "global" }))) {
+      if (!(await db.one(roots.where({ accountId }), { tier: "remote" }))) {
         assertOpen();
         // Concurrent publications may duplicate the same policy-checked binding.
         await db
@@ -159,7 +161,7 @@ export async function firstAccountEpoch(
           error.code !== "exclusive_conflict")
       )
         throw error;
-      if (!(await db.one(identities.where({ id: accountId }), { tier: "global" }))) throw error;
+      if (!(await db.one(identities.where({ id: accountId }), { tier: "remote" }))) throw error;
       // Re-read the winner after a competing initialiser is accepted. Never
       // replace an existing identity, even if this device cannot open its key.
     }
@@ -200,7 +202,7 @@ export async function provisionalFirstAccountEpoch(
     const identities = app.__e2ee_account_identities;
     if (
       !previous &&
-      (await db.one(identities.includeDeleted().where({ id: accountId }), { tier: "local" }))
+      (await db.one(identities.includeDeleted().where({ id: accountId }), { tier: "local-first" }))
     )
       throw new E2eeInitializationNotReady(
         "An existing account identity cannot become a new founder",

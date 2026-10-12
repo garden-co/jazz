@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installInspectorHost } from "./host-bridge.js";
 
 vi.mock("./host-bridge.js", () => ({
   installInspectorHost: vi.fn(() => vi.fn()),
@@ -33,6 +34,48 @@ describe("inspector overlay detached window", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("loads only on open, unloads on close, and restores the route on reopen", async () => {
+    localStorage.setItem("jazz-inspector-overlay:open", "0");
+    vi.mocked(installInspectorHost).mockClear();
+    const { startInspectorOverlay } = await import("./loader.js");
+    const db = {} as import("../../runtime/db.js").Db;
+    startInspectorOverlay(db);
+    const overlay = document.querySelector("jazz-inspector-overlay")!;
+    const iframe = overlay.shadowRoot!.querySelector<HTMLIFrameElement>("iframe")!;
+    expect(iframe.hasAttribute("src")).toBe(false);
+    expect(installInspectorHost).not.toHaveBeenCalled();
+    // jsdom doesn't create a browsing context for iframes inside shadow roots.
+    const frameWindow = { postMessage: vi.fn() } as unknown as Window;
+    Object.defineProperty(iframe, "contentWindow", { configurable: true, value: frameWindow });
+    const shortcut = () =>
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { altKey: true, shiftKey: true, code: "KeyJ" }),
+      );
+    shortcut();
+    expect(new URL(iframe.src).pathname).toBe("/__jazz/embedded/embedded.html");
+    expect(installInspectorHost).toHaveBeenCalledOnce();
+    const dispose = vi.mocked(installInspectorHost).mock.results[0]!.value;
+    const control = (window as unknown as { __jazzInspectorOverlay: InspectorOverlayControl })
+      .__jazzInspectorOverlay;
+    control.setActiveRoute("/settings");
+    startInspectorOverlay(db);
+    expect(installInspectorHost).toHaveBeenCalledOnce();
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: window.location.origin,
+        source: frameWindow,
+        data: { type: "jazz-inspector-overlay:close" },
+      }),
+    );
+    expect(iframe.hasAttribute("src")).toBe(false);
+    expect(dispose).toHaveBeenCalledOnce();
+    shortcut();
+    expect(new URL(iframe.src).searchParams.get("route")).toBe("/settings");
+    expect(installInspectorHost).toHaveBeenCalledTimes(2);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(iframe.hasAttribute("src")).toBe(false);
   });
 
   it("opens at the dock size and restores the dock when the popup closes", async () => {
@@ -76,6 +119,7 @@ describe("inspector overlay detached window", () => {
     expect(url.searchParams.get("route")).toBe("/settings");
     expect(open.mock.calls[0]?.[2]).toContain("width=1024,height=420");
     expect(dock?.dataset.open).toBe("false");
+    expect(iframe?.hasAttribute("src")).toBe(false);
     expect(localStorage.getItem("jazz-inspector-overlay:open")).toBe("1");
 
     window.dispatchEvent(
@@ -93,10 +137,7 @@ describe("inspector overlay detached window", () => {
     );
 
     expect(dock?.dataset.open).toBe("true");
-    expect(postRoute).toHaveBeenCalledWith(
-      { type: "jazz-inspector-overlay:route", route: "/settings" },
-      window.location.origin,
-    );
+    expect(new URL(iframe!.src).searchParams.get("route")).toBe("/settings");
     expect(localStorage.getItem("jazz-inspector-overlay:open")).toBe("1");
 
     open.mockReturnValueOnce(null);

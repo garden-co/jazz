@@ -70,7 +70,7 @@ it.each(["app", "slice"] as const)(
       ]);
       const message = db.insert(app.messages, { title: "Ordinary permissions" });
       await message.wait({ tier: "global" });
-      expect(await db.all(app.messages, { tier: "global" })).toEqual([message.value]);
+      expect(await db.all(app.messages, { tier: "remote" })).toEqual([message.value]);
       await expect(db.e2ee.groups.create().wait()).rejects.toThrow();
       await expect(
         db

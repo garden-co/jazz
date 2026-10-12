@@ -100,7 +100,7 @@ it("rejects initial delivery if its author is revoked while opening the accepted
       .wait({ tier: "global" });
     beforeOpenReturns = async (envelope) => {
       const accepted = await other.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-        tier: "global",
+        tier: "remote",
       });
       // Initial preparation also opens its envelope to verify the crypto adapter.
       // Target the later handoff, whose original root is already accepted.
@@ -118,14 +118,14 @@ it("rejects initial delivery if its author is revoked while opening the accepted
     // Revocation does not undo the already accepted initial root or grant, but
     // no envelope prepared with the old authority snapshot may be accepted.
     const root = await other.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(root).toMatchObject({ deviceId: author!.id });
     expect(
-      await other.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), { tier: "global" }),
+      await other.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), { tier: "remote" }),
     ).toHaveLength(1);
     expect(
-      await other.all(app.__e2ee_space_deliveries.where({ spaceId: root!.id }), { tier: "global" }),
+      await other.all(app.__e2ee_space_deliveries.where({ spaceId: root!.id }), { tier: "remote" }),
     ).toEqual([]);
     expect(await other.e2ee.devices.list()).toContainEqual(
       expect.objectContaining({ id: author!.id, state: "revoked" }),

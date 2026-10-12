@@ -162,7 +162,7 @@ it.each(["encrypted-space-revocation", "superseded-history-failure"])(
           notesViaFolder: app.notes.select("id"),
         });
         const plainExpected = [{ ...folder, notesViaFolder: [{ id: note.id }] }];
-        expect(await plainReader.all(plainQuery, { tier: "global" })).toEqual(plainExpected);
+        expect(await plainReader.all(plainQuery, { tier: "remote" })).toEqual(plainExpected);
         let plainResult: unknown;
         let plainFailure: Error | undefined;
         const stop = plainReader.subscribe(
@@ -175,7 +175,7 @@ it.each(["encrypted-space-revocation", "superseded-history-failure"])(
               plainFailure = error;
             },
           },
-          { tier: "global" },
+          { tier: "remote" },
         );
         try {
           await expect
@@ -190,7 +190,7 @@ it.each(["encrypted-space-revocation", "superseded-history-failure"])(
         notesViaFolder: true,
       });
       const expected = [{ ...folder, notesViaFolder: [note] }];
-      expect(await reader.all(query, { tier: "global" })).toEqual(expected);
+      expect(await reader.all(query, { tier: "remote" })).toEqual(expected);
       const snapshots: unknown[][] = [];
       let failure: Error | undefined;
       const stop = reader.subscribe(
@@ -201,7 +201,7 @@ it.each(["encrypted-space-revocation", "superseded-history-failure"])(
             failure = error;
           },
         },
-        { tier: "global" },
+        { tier: "remote" },
       );
       try {
         await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual(expected);
@@ -212,7 +212,7 @@ it.each(["encrypted-space-revocation", "superseded-history-failure"])(
             (rows) => {
               visibleIds = rows;
             },
-            { tier: "global" },
+            { tier: "remote" },
           );
           await expect.poll(() => visibleIds, { timeout: 10_000 }).toEqual([{ id: note.id }]);
           fixture.holdValidation();

@@ -33,12 +33,8 @@ async function resolveWrappedConfig(
 function deployed(hash = "abc123def4567890") {
   return {
     schema: { hash, schemaFile: "schema.ts", status: "published" as const },
-    permissions: {
-      schemaHash: hash,
-      permissionsFile: "permissions.ts",
-      previousHead: null,
-      head: null,
-    },
+    changed: true,
+    published: { schemas: [hash], migrations: [] },
     warnings: [],
   };
 }
@@ -196,7 +192,7 @@ describe("withJazz", () => {
           const idHex = rowId.toString("hex");
           const expectedId = [idHex.slice(0,8), idHex.slice(8,12), idHex.slice(12,16), idHex.slice(16,20), idHex.slice(20)].join("-");
           async function rows() {
-            let result = db.all(queryFromTable("files"), { tier: "local", propagation: "local_only" });
+            let result = db.all(queryFromTable("files"), { tier: "local-only" });
             if (!(result instanceof Uint8Array)) {
               const pending = result;
               const deadline = Date.now() + 10000;

@@ -94,6 +94,27 @@ impl JazzSchema {
         schema
     }
 
+    /// Original lineage records may retain defaults, indexes and grants that a
+    /// later deployment refreshed without changing the runtime version.
+    #[doc(hidden)]
+    pub fn has_same_lineage_structure(&self, other: &Self) -> bool {
+        let normalize = |schema: &Self| {
+            let mut runtime = schema.runtime.clone();
+            for table in &mut runtime.tables {
+                table.read_policy = None;
+                table.write_policies = Default::default();
+                table.indexed_columns.clear();
+                for column in &mut table.columns {
+                    if !table.branch_by.contains(&column.name) {
+                        column.default = None;
+                    }
+                }
+            }
+            runtime
+        };
+        normalize(self) == normalize(other)
+    }
+
     /// Refresh non-identity metadata while retaining the selected grants.
     pub fn with_permissions_from(&self, selected: &Self) -> Self {
         assert_eq!(self.version_id(), selected.version_id());
@@ -1676,7 +1697,7 @@ fn rejection_reason_column() -> GrooveColumnType {
 }
 
 fn durability_column() -> GrooveColumnType {
-    storage_enum("jazz_durability", &["none", "local", "edge", "global"])
+    storage_enum("jazz_durability", &["none", "local", "global"])
 }
 
 fn tx_id_column() -> GrooveColumnType {

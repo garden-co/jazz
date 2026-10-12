@@ -3,7 +3,6 @@ import type { WasmSchema } from "../drivers/types.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
 import { encryptedSchemas } from "./encrypted-schema.js";
 import { e2eeAccountForDb, withSpaceKeys } from "./lifecycle.js";
-import { resolveReadTier } from "../runtime/client.js";
 
 export type QuerySpace = { scope: string; identifier: string };
 // Private result metadata must survive public projections and mutable returned values.
@@ -74,10 +73,10 @@ export function queryKeyDependencies(
         // Dependency routing follows the result's read tier. Local plaintext
         // delivery must not wait for a live catalogue round trip; key validation
         // below still authenticates the history used for every result.
-        const tier = resolveReadTier(options.tier ?? "global");
+        const tier = options.tier ?? "remote";
         const scopeId = await db.tableIdentity(
           new TypedTableQueryBuilder(space.scope, schema),
-          tier === "local" || tier === "local-first-unless-empty",
+          tier === "local-first",
         );
         if (stopped) return;
         const entry = { ...space, stop: () => {} };

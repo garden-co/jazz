@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { initialize, assertCompatible } = vi.hoisted(() => ({
+const { initialize, assertCompatible, setJsonSchemaValidator } = vi.hoisted(() => ({
   initialize: vi.fn(),
   assertCompatible: vi.fn(),
+  setJsonSchemaValidator: vi.fn(),
 }));
 
-vi.mock("jazz-wasm", () => ({ default: initialize }));
+vi.mock("jazz-wasm", () => ({ default: initialize, setJsonSchemaValidator }));
 vi.mock("./native-artifact-compatibility.js", () => ({
   assertNativeArtifactCompatibility: assertCompatible,
 }));
@@ -19,6 +20,7 @@ beforeEach(async () => {
   vi.resetModules();
   initialize.mockReset().mockResolvedValue(undefined);
   assertCompatible.mockReset();
+  setJsonSchemaValidator.mockReset();
   ({ loadWasmModule } = await import("./wasm-loader.js"));
   vi.stubGlobal("process", { ...process, versions: {} });
   vi.stubGlobal("location", { href: "https://example.com/app/" });
@@ -39,6 +41,8 @@ describe("browser WASM URL initialization", () => {
     expect(initialize).toHaveBeenCalledTimes(1);
     expect(initialize).toHaveBeenCalledWith({ module_or_path: wasmBinary });
     expect(assertCompatible).toHaveBeenCalledTimes(3);
+    // The browser build has no Rust JSON Schema validator; the loader supplies one.
+    expect(setJsonSchemaValidator).toHaveBeenCalledWith(expect.any(Function));
   });
 
   it("deduplicates equivalent resolved URLs", async () => {
