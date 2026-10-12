@@ -143,23 +143,38 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
     const browser = await createBrowserCrypto();
     const ownerAccount = await account();
     const owner = await open(ownerAccount, browser);
-    const before = new Set(
-      (await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).map((row) => row.id),
-    );
-    const { material } = await owner.e2ee.recovery.create().wait();
-    const added = (await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).filter(
-      (row) => !before.has(row.id),
-    );
-    expect(added).toHaveLength(1);
-    const recoveryRootId = added[0]!.id;
-    // This fixture needs an existing recovery path, not backfill. The adapter
-    // matrix and membership-loss test below cover recovery created after groups.
-    const groupId = await readyGroup(owner);
-    const mallory = await open(await account(), browser);
-    const other = mallory.e2ee.groups.create();
-    await other.wait();
-    const root = await mallory.one(app.__e2ee_groups.where({ id: other.id }), { tier: "remote" });
-    expect(root).toBeDefined();
+    // These accounts have independent enrolment and group histories. Complete
+    // both setups before testing their shared pre-enrolment boundary.
+    const setup = [
+      (async () => {
+        const before = new Set(
+          (await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).map((row) => row.id),
+        );
+        const { material } = await owner.e2ee.recovery.create().wait();
+        const added = (await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).filter(
+          (row) => !before.has(row.id),
+        );
+        expect(added).toHaveLength(1);
+        const recoveryRootId = added[0]!.id;
+        // The adapter matrix and membership-loss case cover recovery backfill.
+        const groupId = await readyGroup(owner);
+        return { material, recoveryRootId, groupId };
+      })(),
+      (async () => {
+        const mallory = await open(await account(), browser);
+        const other = mallory.e2ee.groups.create();
+        await other.wait();
+        const root = await mallory.one(app.__e2ee_groups.where({ id: other.id }), {
+          tier: "remote",
+        });
+        expect(root).toBeDefined();
+        return { mallory, other, root };
+      })(),
+    ] as const;
+    // Drain both operations before fixture cleanup even when one setup fails.
+    await Promise.allSettled(setup);
+    const [{ material, recoveryRootId, groupId }, { mallory, other, root }] =
+      await Promise.all(setup);
 
     phase("legitimate groups and recovery ready");
     const futureAccount = await account();
