@@ -155,10 +155,10 @@ it.each(["wasm", "native"])(
       await tx.commit().wait({ tier: "global" });
       expect(encrypted.map((entry) => entry.plaintext)).toEqual(packed);
       const root = await db.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-        tier: "global",
+        tier: "remote",
       });
       expect(root).not.toBeNull();
-      const stored = await raw.one(physical.notes.where({ id: note.id }), { tier: "global" });
+      const stored = await raw.one(physical.notes.where({ id: note.id }), { tier: "remote" });
       expect(hex(stored!.title)).toBe(
         outer + hex(new TextEncoder().encode(root!.epochId)) + inner + "00",
       );
@@ -194,7 +194,7 @@ it.each(["wasm", "native"])(
         );
       }
       expect(new Set(columnIds).size).toBe(2);
-      expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+      expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(note);
       expect(decrypted).toHaveLength(2);
       for (const entry of decrypted) expect(entry.aad).toEqual(encrypted[entry.index]!.aad);
     } finally {

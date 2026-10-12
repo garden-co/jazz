@@ -37,4 +37,5 @@ export const {
   mintLocalFirstToken,
   verifyLocalFirstIdentityProof,
   nativeArtifactFingerprint,
+  validateSchema,
 } = napi;

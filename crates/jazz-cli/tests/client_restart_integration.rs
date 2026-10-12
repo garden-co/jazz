@@ -358,21 +358,6 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     let app_id = AppId::from_string(APP_ID_STR).expect("parse app id");
 
     let server = ServerProcess::start(0, server_data.path(), &jwks_server.endpoint()).await;
-    let publish_schema_response = Client::new()
-        .post(format!(
-            "{}/apps/{}/admin/schemas",
-            server.base_url(),
-            APP_ID_STR
-        ))
-        .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
-        .json(&json!({ "schema": test_schema(), "permissions": null }))
-        .send()
-        .await
-        .expect("publish schema");
-    assert_eq!(
-        publish_schema_response.status(),
-        reqwest::StatusCode::CREATED
-    );
     publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
 
     let client_dir = TempDir::new().expect("client dir");

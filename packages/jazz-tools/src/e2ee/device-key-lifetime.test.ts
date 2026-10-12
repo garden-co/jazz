@@ -186,7 +186,7 @@ it.each(["recipient-generation", "signing-generation"] as const)(
       const observer = await createDb({ ...account, e2ee: { store, crypto: adapters } });
       clients.push(observer);
       expect(
-        await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "global" }),
+        await observer.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" }),
       ).toEqual([]);
     } finally {
       gate.release();

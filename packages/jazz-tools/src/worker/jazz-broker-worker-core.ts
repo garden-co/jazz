@@ -1597,10 +1597,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         if (handle !== undefined) activeRuntime.unsubscribe(handle);
         return;
       }
-      const options = JSON.stringify({
-        ...JSON.parse(message.options ?? "{}"),
-        propagation: "local-only",
-      });
+      const options = message.options;
       const current = () =>
         peer.context.peers.get(peer.tabId) === peer &&
         peer.context.runtime === activeRuntime &&
@@ -1608,12 +1605,17 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         !peer.context.closing &&
         !!peer.subscriber;
       if (message.type === "inspect-query") {
-        const value = await activeRuntime.query(message.query, undefined, "local", options);
+        const value = await activeRuntime.query(message.query, undefined, "local-only", options);
         if (current()) post(peer.port, { type: "inspector-query-result", id: message.id, value });
       } else {
         if (peer.inspectorSubscriptions.has(message.id))
           throw new Error("Inspector subscription already exists");
-        const handle = activeRuntime.createSubscription(message.query, undefined, "local", options);
+        const handle = activeRuntime.createSubscription(
+          message.query,
+          undefined,
+          "local-only",
+          options,
+        );
         peer.inspectorSubscriptions.set(message.id, handle);
         activeRuntime.executeSubscription(handle, (value) => {
           if (!current() || peer.inspectorSubscriptions.get(message.id) !== handle) return;

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use jazz::db::{LocalUpdates, Propagation, ReadOpts};
+use jazz::db::ReadOpts;
 use jazz::query::{Query, col, eq, lit};
 use jazz::row_input;
 use jazz::tools::sync::ReadTier;
@@ -44,9 +44,7 @@ async fn local_rows(client: &JazzClient, query: Query) -> Vec<(ObjectId, Vec<Val
         .query_with_opts(
             query,
             ReadOpts {
-                tier: jazz::tx::DurabilityTier::Local,
-                local_updates: LocalUpdates::Immediate,
-                propagation: Propagation::LocalOnly,
+                tier: jazz::db::ReadTier::LocalOnly,
                 ..Default::default()
             },
         )
@@ -962,7 +960,6 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                 authority.admin_secret(),
                 &schema,
                 [("tasks".into(), denied)],
-                None,
             )
             .await;
             wait_for_subscription_update(
@@ -990,7 +987,6 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                 authority.admin_secret(),
                 &schema,
                 restored,
-                None,
             )
             .await;
             wait_for_subscription_update(

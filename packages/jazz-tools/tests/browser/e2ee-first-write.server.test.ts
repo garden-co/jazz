@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../../src/schema-namespace.js";
+import { migration as m } from "../../src/migration-namespace.js";
 import { definePermissions } from "../../src/permissions/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { deploy } from "../../src/dev/catalogue.js";
@@ -50,7 +51,7 @@ it("initialises a legacy space in the browser without replacing a hidden existin
       ...server,
       schema: app,
       permissions,
-      migration: s.defineMigration({ from: before, to: after, createTables: { notes: true } }),
+      migration: m.defineMigration({ from: before, to: after, createTables: { notes: true } }),
     });
     for (const key of ["writer", "outsider"]) {
       let saved: string | null = null;
@@ -79,19 +80,19 @@ it("initialises a legacy space in the browser without replacing a hidden existin
     const note = await writer
       .insert(app.notes, { projectId: project.id, body: "First browser write" })
       .wait({ tier: "global" });
-    expect(await writer.all(app.notes, { tier: "global" })).toEqual([note]);
-    const roots = await writer.all(app.__e2ee_spaces, { tier: "global" });
+    expect(await writer.all(app.notes, { tier: "remote" })).toEqual([note]);
+    const roots = await writer.all(app.__e2ee_spaces, { tier: "remote" });
     expect(roots).toHaveLength(1);
     await outsider.e2ee.devices.list();
-    expect(await outsider.all(app.__e2ee_spaces, { tier: "global" })).toEqual([]);
+    expect(await outsider.all(app.__e2ee_spaces, { tier: "remote" })).toEqual([]);
     await expect(
       outsider
         .insert(app.notes, { projectId: project.id, body: "Must be rejected" })
         .wait({ tier: "global" }),
     ).rejects.toThrow();
-    expect(await outsider.all(app.__e2ee_spaces, { tier: "global" })).toEqual([]);
-    expect(await writer.all(app.__e2ee_spaces, { tier: "global" })).toEqual(roots);
-    expect(await writer.all(app.notes, { tier: "global" })).toEqual([note]);
+    expect(await outsider.all(app.__e2ee_spaces, { tier: "remote" })).toEqual([]);
+    expect(await writer.all(app.__e2ee_spaces, { tier: "remote" })).toEqual(roots);
+    expect(await writer.all(app.notes, { tier: "remote" })).toEqual([note]);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await stopJazzServer(server.serverUrl);

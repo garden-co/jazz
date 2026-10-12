@@ -101,12 +101,12 @@ async function fixture() {
     };
     const recovery = async (db: Db): Promise<Recovery> => {
       const before = new Set(
-        (await db.all(app.__e2ee_recovery_roots, { tier: "global" })).map((row) => row.id),
+        (await db.all(app.__e2ee_recovery_roots, { tier: "remote" })).map((row) => row.id),
       );
       const created = await db.e2ee.recovery.create().wait();
       const result = { rootId: "", material: created.material };
       recoveries.push(result);
-      const added = (await db.all(app.__e2ee_recovery_roots, { tier: "global" })).filter(
+      const added = (await db.all(app.__e2ee_recovery_roots, { tier: "remote" })).filter(
         (row) => !before.has(row.id),
       );
       expect(added).toHaveLength(1);
@@ -154,13 +154,13 @@ async function prepareAdapterMatrix() {
     const roots = [early, await f.recovery(owner)];
     const [root] = roots;
     if (!root) throw new Error("Missing recovery root");
-    const protectors = await owner.all(app.__e2ee_recovery_protectors, { tier: "global" });
+    const protectors = await owner.all(app.__e2ee_recovery_protectors, { tier: "remote" });
     expect(protectors).toHaveLength(2);
     for (const entry of roots) {
       expect(protectors.some((row) => row.rootId === entry.rootId)).toBe(true);
       const deliveries = await owner.all(
         app.__e2ee_group_recovery_deliveries.where({ groupId, recoveryRootId: entry.rootId }),
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(deliveries).toHaveLength(1);
     }

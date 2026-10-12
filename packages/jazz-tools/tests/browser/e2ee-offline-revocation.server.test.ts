@@ -90,17 +90,17 @@ it.each(["read", "write"] as const)(
         state: "ready",
       });
       const query = app.notes.where({ id: note.id });
-      expect(await reader.one(query, { tier: "global" })).toEqual(note);
-      expect(await reader.one(app.projects.where({ id: project.id }), { tier: "global" })).toEqual(
+      expect(await reader.one(query, { tier: "remote" })).toEqual(note);
+      expect(await reader.one(app.projects.where({ id: project.id }), { tier: "remote" })).toEqual(
         project,
       );
       const space = await reader.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-        tier: "global",
+        tier: "remote",
       });
       expect(space).not.toBeNull();
       await owner.e2ee.spaces.revoke(app.projects, project.id, bob.id).wait();
       // Observe acceptance through ordinary metadata, without refreshing E2EE state.
-      expect(await reader.all(app.__e2ee_space_grants, { tier: "global" })).toEqual(
+      expect(await reader.all(app.__e2ee_space_grants, { tier: "remote" })).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ operation: "remove", spaceId: space!.id, recipientId: bob.id }),
         ]),
@@ -114,12 +114,12 @@ it.each(["read", "write"] as const)(
       reader = await createDb(readerConfig);
       await reader.disconnect();
       // Prove ordinary persisted data is still readable: this is not a missing database.
-      expect(await reader.one(app.projects.where({ id: project.id }), { tier: "local" })).toEqual(
-        project,
-      );
+      expect(
+        await reader.one(app.projects.where({ id: project.id }), { tier: "local-first" }),
+      ).toEqual(project);
       const operation =
         access === "read"
-          ? reader.one(query, { tier: "local" })
+          ? reader.one(query, { tier: "local-first" })
           : reader
               .update(app.notes, note.id, { title: "Must not be encrypted" })
               .wait({ tier: "local" });

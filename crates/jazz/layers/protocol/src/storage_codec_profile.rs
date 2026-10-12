@@ -24,6 +24,7 @@ pub const JAZZ_EPOCH_1_STORAGE_CODECS: &[&str] = &[
     // Reserved to open old roots and discard their retired subscription caches.
     // No active scope writer or payload decoder uses this family.
     "jazz.subscription-program-fact-key.v1",
+    "jazz.transaction-durability.v2",
 ];
 
 /// Immutable legacy profile, also retained by separately composed auxiliary

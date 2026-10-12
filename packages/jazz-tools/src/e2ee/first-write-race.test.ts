@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -58,7 +59,7 @@ it("accepts only one simultaneous first encrypted writer even when root updates 
       ...target,
       schema: app,
       permissions,
-      migration: s.defineMigration({ from: before, to: after, createTables: { notes: true } }),
+      migration: m.defineMigration({ from: before, to: after, createTables: { notes: true } }),
     });
     const keys = await createBrowserKeyEnvelope();
     const accounts = await Promise.all([
@@ -126,22 +127,22 @@ it("accepts only one simultaneous first encrypted writer even when root updates 
     });
     const winner = writers[winnerIndex]!;
     const loser = writers[loserIndex]!;
-    const roots = await winner.all(app.__e2ee_spaces, { tier: "global" });
+    const roots = await winner.all(app.__e2ee_spaces, { tier: "remote" });
     expect(roots).toHaveLength(1);
     expect(roots[0]).toMatchObject({ accountId: accounts[winnerIndex]!.account.id });
-    expect(await winner.all(app.__e2ee_space_grants, { tier: "global" })).toMatchObject([
+    expect(await winner.all(app.__e2ee_space_grants, { tier: "remote" })).toMatchObject([
       { spaceId: roots[0]!.id, recipientId: accounts[winnerIndex]!.account.id },
     ]);
-    expect(await winner.all(app.notes, { tier: "global" })).toEqual([writes[winnerIndex]!.value]);
+    expect(await winner.all(app.notes, { tier: "remote" })).toEqual([writes[winnerIndex]!.value]);
     await expect(
-      loser.one(app.notes.where({ id: writes[winnerIndex]!.value.id }), { tier: "global" }),
+      loser.one(app.notes.where({ id: writes[winnerIndex]!.value.id }), { tier: "remote" }),
     ).rejects.toMatchObject({ code: "key-not-shared" });
     await expect(
       loser
         .insert(app.notes, { projectId: project.id, body: "No retained provisional key" })
         .wait({ tier: "global" }),
     ).rejects.toMatchObject({ code: "key-not-shared" });
-    expect(await winner.all(app.notes.select("id"), { tier: "global" })).toEqual([
+    expect(await winner.all(app.notes.select("id"), { tier: "remote" })).toEqual([
       { id: writes[winnerIndex]!.value.id },
     ]);
   } finally {

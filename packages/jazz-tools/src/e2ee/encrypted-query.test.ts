@@ -17,22 +17,22 @@ it("rejects unindexed encrypted null predicates through reads, transactions and 
   try {
     for (const boundary of ["read", "transaction", "subscription"]) {
       await expect(
-        db.all(app.notes.where({ done: false }).select("id", "done"), { tier: "local" }),
+        db.all(app.notes.where({ done: false }).select("id", "done"), { tier: "local-first" }),
       ).resolves.toEqual([]);
       const query = app.notes.where({ title: null });
       const message = "Unsupported encrypted query";
       if (boundary === "read") {
-        await expect(db.all(query, { tier: "local" })).rejects.toThrow(message);
+        await expect(db.all(query, { tier: "local-first" })).rejects.toThrow(message);
       } else if (boundary === "transaction") {
         const tx = db.beginExclusiveTransaction();
         try {
-          await expect(tx.all(query, { tier: "local" })).rejects.toThrow(message);
+          await expect(tx.all(query, { tier: "local-first" })).rejects.toThrow(message);
         } finally {
           await tx.rollback();
         }
       } else {
         expect(() => {
-          const stop = db.subscribe(query, () => {}, { tier: "local" });
+          const stop = db.subscribe(query, () => {}, { tier: "local-first" });
           stop();
         }).toThrow(message);
       }
@@ -56,22 +56,22 @@ it("rejects ordering by encrypted values through reads, transactions and subscri
   try {
     for (const boundary of ["read", "transaction", "subscription"]) {
       await expect(
-        db.all(app.notes.orderBy("done").select("id", "done"), { tier: "local" }),
+        db.all(app.notes.orderBy("done").select("id", "done"), { tier: "local-first" }),
       ).resolves.toEqual([]);
       const query = app.notes.orderBy("title");
       const message = /cannot be used in orderBy|Unsupported encrypted query/;
       if (boundary === "read") {
-        await expect(db.all(query, { tier: "local" })).rejects.toThrow(message);
+        await expect(db.all(query, { tier: "local-first" })).rejects.toThrow(message);
       } else if (boundary === "transaction") {
         const tx = db.beginExclusiveTransaction();
         try {
-          await expect(tx.all(query, { tier: "local" })).rejects.toThrow(message);
+          await expect(tx.all(query, { tier: "local-first" })).rejects.toThrow(message);
         } finally {
           await tx.rollback();
         }
       } else {
         expect(() => {
-          const stop = db.subscribe(query, () => {}, { tier: "local" });
+          const stop = db.subscribe(query, () => {}, { tier: "local-first" });
           stop();
         }).toThrow(message);
       }
@@ -107,17 +107,17 @@ it("rejects unsupported encrypted predicates in includes through reads, transact
       // An encrypted declaration must not disable unrelated plaintext queries,
       // including ordinary relations, or require enrolment to run them.
       await expect(
-        db.all(app.projects.include({ commentsViaProject: true }), { tier: "local" }),
+        db.all(app.projects.include({ commentsViaProject: true }), { tier: "local-first" }),
       ).resolves.toEqual([]);
       const query = app.projects.include({ notesViaProject: app.notes.where({ title: "Secret" }) });
       if (boundary === "read") {
-        await expect(db.all(query, { tier: "local" })).rejects.toThrow(
+        await expect(db.all(query, { tier: "local-first" })).rejects.toThrow(
           "Unsupported encrypted query",
         );
       } else if (boundary === "transaction") {
         const tx = db.beginExclusiveTransaction();
         try {
-          await expect(tx.all(query, { tier: "local" })).rejects.toThrow(
+          await expect(tx.all(query, { tier: "local-first" })).rejects.toThrow(
             "Unsupported encrypted query",
           );
         } finally {
@@ -125,7 +125,7 @@ it("rejects unsupported encrypted predicates in includes through reads, transact
         }
       } else {
         expect(() => {
-          const stop = db.subscribe(query, () => {}, { tier: "local" });
+          const stop = db.subscribe(query, () => {}, { tier: "local-first" });
           stop();
         }).toThrow("Unsupported encrypted query");
       }

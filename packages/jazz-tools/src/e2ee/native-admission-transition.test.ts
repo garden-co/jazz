@@ -60,7 +60,7 @@ it.each(["switch", "logout"])(
       const oldDb = original.client!.db;
       const oldDevices = await oldDb.e2ee.devices.list();
       expect(oldDevices).toHaveLength(1);
-      await oldDb.all(app.projects, { tier: "global" });
+      await oldDb.all(app.projects, { tier: "remote" });
       const tx = beginDbTransactionAfter(oldDb, async () => {
         entered();
         await ready;
@@ -85,19 +85,19 @@ it.each(["switch", "logout"])(
       expect(currentDevices).toHaveLength(1);
       expect(currentDevices[0]!.id).not.toBe(oldDevices[0]!.id);
       expect(
-        await currentDb.one(app.projects.where({ id: oldRow.id }), { tier: "global" }),
+        await currentDb.one(app.projects.where({ id: oldRow.id }), { tier: "remote" }),
       ).toBeNull();
       const row = await currentDb
         .insert(app.projects, { title: "Replacement account" })
         .wait({ tier: "global" });
       expect(
         await currentDb.one(app.projects.where({ id: row.id }).select("$createdBy"), {
-          tier: "global",
+          tier: "remote",
         }),
       ).toMatchObject({
         $createdBy: { account: replacement.account!.id },
       });
-      expect(await currentDb.all(app.projects, { tier: "global" })).toEqual([row]);
+      expect(await currentDb.all(app.projects, { tier: "remote" })).toEqual([row]);
     } finally {
       release();
       await owner?.close();

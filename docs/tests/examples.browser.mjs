@@ -11,7 +11,7 @@ import { heroExamples, moreBenchmarkSections } from "../lib/showcase/catalogue.t
 const hero = heroExamples.find((example) => example.metrics.some((metric) => metric.per));
 const metric = hero.metrics.find((candidate) => candidate.per);
 const perCount = metric.per.count;
-const estimate = (seconds) => `${formatTime(seconds / 5)}*`;
+const estimate = (seconds) => formatTime(seconds / 5);
 const perOperation = (seconds) => estimate(seconds / perCount);
 const engine = moreBenchmarkSections.find((section) => section.benchmarks);
 const [engineA, engineB] = engine.benchmarks.filter(
@@ -76,6 +76,11 @@ try {
     releases: [],
     benchmarks: [
       {
+        id: "text-editor-open",
+        name: "text_editor_open_browser[100000]",
+        points: [point("main", 3, 1.5)],
+      },
+      {
         id: "insert",
         name: metric.benchmark,
         points: [
@@ -125,6 +130,18 @@ try {
   assert.match(await card.innerText(), /Released in v2\.0\.0-alpha\.2/);
   assert.match(await card.innerText(), /−50%/);
 
+  // Browser wall time must not inherit the native CPU /5 estimate.
+  const textEditor = page.locator("#text-editor");
+  const browserCard = textEditor.locator(".metric-card").first();
+  assert.equal(await browserCard.locator(".metric-headline").innerText(), formatTime(1.5));
+  assert.match(await browserCard.innerText(), /Measured browser wall time/);
+  await browserCard.hover();
+  const browserHistory = page.getByRole("dialog", { name: "History of Open 100,000 edits" });
+  await browserHistory.waitFor({ state: "visible" });
+  assert.match(await browserHistory.innerText(), /no native CPU conversion/);
+  assert.ok((await browserHistory.innerText()).includes(formatTime(1.5)));
+  await page.mouse.move(0, 0);
+
   // History card: one row per release plus the unreleased main number.
   const tooltip = page.getByRole("dialog", { name: `History of ${metric.label}` });
   assert.equal(await tooltip.isVisible(), false);
@@ -134,7 +151,11 @@ try {
   assert.match(history, /v2\.0\.0-alpha\.1/);
   assert.ok(history.includes(perOperation(4)));
   assert.match(history, /Unreleased main/);
-  assert.ok(history.includes(`Measured on the CodSpeed runner: ${formatTime(2 / perCount)}`));
+  assert.ok(
+    history.includes(
+      `Measurement on the de-noised CodSpeed environment (about 5x slower than a normal CPU): ${formatTime(2 / perCount)}`,
+    ),
+  );
   // Open-PR experiments never feed a card or its history.
   assert.ok(!`${await card.innerText()} ${history}`.includes(formatTime(0.001 / 5 / perCount)));
 

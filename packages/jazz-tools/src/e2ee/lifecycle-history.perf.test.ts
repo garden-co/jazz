@@ -122,7 +122,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
       await owner.e2ee.spaces.grant(app.projects, project.id, otherId).wait();
       const target = { scope: app.projects, identifier: project.id };
       const root = await owner.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-        tier: "global",
+        tier: "remote",
       });
       expect(root).toBeDefined();
       rootSignature = Buffer.from(root!.signature).toString("base64");
@@ -161,7 +161,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
         await measure(size, "ordinary-local-reads-25", async () => {
           for (let sample = 0; sample < 25; sample++)
             expect(
-              await owner.one(app.projects.where({ id: project.id }), { tier: "local" }),
+              await owner.one(app.projects.where({ id: project.id }), { tier: "local-first" }),
             ).toMatchObject({ title: "Lifecycle history measurement" });
         });
         expect(verifications).toBe(beforePlaintext);

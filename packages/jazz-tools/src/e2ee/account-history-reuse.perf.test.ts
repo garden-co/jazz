@@ -64,7 +64,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
       const approval = await owner.one(
         app.__e2ee_public_device_approvals.where({ deviceId: pending.id }),
         {
-          tier: "global",
+          tier: "remote",
         },
       );
       expect(approval).toBeDefined();
