@@ -89,16 +89,16 @@ it("preserves explicit administration rules and encrypted mutations when composi
     const tx = db.beginExclusiveTransaction();
     const project = tx.insert(app.projects, { title: "Automatic space" });
     const note = tx.insert(app.notes, { projectId: project.id, body: "Encrypted content" });
-    expect(await tx.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+    expect(await tx.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(note);
     await tx.commit().wait({ tier: "global" });
-    expect(await db.all(app.notes, { tier: "global" })).toEqual([note]);
+    expect(await db.all(app.notes, { tier: "remote" })).toEqual([note]);
     await db.update(app.notes, note.id, { body: "Updated content" }).wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual({
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual({
       ...note,
       body: "Updated content",
     });
     await db.upsert(app.notes, note.id, { body: "Upserted content" }).wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual({
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual({
       ...note,
       body: "Upserted content",
     });
@@ -106,17 +106,17 @@ it("preserves explicit administration rules and encrypted mutations when composi
     await db
       .upsert(app.notes, newId, { projectId: project.id, body: "New upsert" })
       .wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: newId }), { tier: "global" })).toEqual({
+    expect(await db.one(app.notes.where({ id: newId }), { tier: "remote" })).toEqual({
       id: newId,
       projectId: project.id,
       body: "New upsert",
     });
     await db.delete(app.notes, note.id).wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toBeNull();
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toBeNull();
     await db
       .restore(app.notes, note.id, { projectId: project.id, body: "Restored content" })
       .wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual({
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual({
       ...note,
       body: "Restored content",
     });

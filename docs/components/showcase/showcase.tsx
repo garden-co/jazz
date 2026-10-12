@@ -17,13 +17,14 @@ import {
   TableRow,
 } from "@astryxdesign/core/Table";
 import { Heading, Text } from "@astryxdesign/core/Text";
+import { WalkthroughVideo } from "./walkthrough-video";
 import { fetchTimeline } from "@/lib/perf-timeline/client";
 import type { Benchmark, Timeline } from "@/lib/perf-timeline/model";
 import {
   getBenchmarkMetadata,
   displayedTime,
-  estimatedSeconds,
-  ESTIMATE_DIVISOR,
+  benchmarkSeconds,
+  usesEstimatedTime,
   formatThroughput,
 } from "@/lib/perf-timeline/presentation";
 import {
@@ -112,7 +113,7 @@ function MetricCard({
   const { summary, bench } = entry;
   const previous = summary.history.at(-2);
   const divisor = metric.per?.count ?? 1;
-  const time = displayedTime(summary.headline.median / divisor, true);
+  const time = displayedTime(summary.headline.median / divisor, usesEstimatedTime(bench.name));
   const headline = `${time}${metric.per ? ` per ${metric.per.unit}` : ""}`;
   return (
     <WithHistory
@@ -167,7 +168,9 @@ function MetricCard({
             )}
           </Text>
           <Text as="p" display="block">
-            {metric.interpret(estimatedSeconds(summary.headline.median), lookup)}
+            {metric.interpret(benchmarkSeconds(bench.name, summary.headline.median), lookup)}
+            {!usesEstimatedTime(bench.name) &&
+              " Measured browser wall time on the CodSpeed runner."}
           </Text>
         </VStack>
       </Card>
@@ -189,15 +192,13 @@ function Video({ example }: { example: HeroExample }) {
     );
   return (
     <VStack as="figure" gap={1}>
-      <video
-        className="aspect-video w-full rounded-(--radius-container) border border-(--color-border) bg-(--color-background-inverted) object-contain"
+      <WalkthroughVideo
+        className="h-auto w-full rounded-(--radius-container) border border-(--color-border) bg-black"
         src={example.video.src}
         poster={example.video.poster}
+        width={1280}
+        height={892}
         controls
-        muted
-        loop
-        playsInline
-        preload="metadata"
       />
       <figcaption>
         <Text type="supporting" display="block">
@@ -326,7 +327,7 @@ function BenchmarkTable({ entries }: { entries: Placed<Entry>[] }) {
           const metadata = getBenchmarkMetadata(bench.name);
           const label = scenario ? `${bench.name} (${scenario})` : bench.name;
           const previous = summary.history.at(-2);
-          const time = displayedTime(summary.headline.median, true);
+          const time = displayedTime(summary.headline.median, usesEstimatedTime(bench.name));
           return (
             <TableRow key={bench.id}>
               <TableCell>
@@ -369,7 +370,7 @@ function BenchmarkTable({ entries }: { entries: Placed<Entry>[] }) {
                       </Text>
                       <Text type="supporting" display="block">
                         {metadata
-                          ? `${formatThroughput(summary.headline.median, metadata, true)} · `
+                          ? `${formatThroughput(summary.headline.median, metadata, usesEstimatedTime(bench.name))} · `
                           : ""}
                         {summary.basis === "release" ? summary.label : "main"}
                       </Text>
@@ -427,7 +428,7 @@ export function Showcase() {
   const loading = !data && !error;
   const lookup: Lookup = (name) => {
     const seconds = summaries.get(name)?.summary.headline.median;
-    return seconds === undefined ? null : estimatedSeconds(seconds);
+    return seconds === undefined ? null : benchmarkSeconds(name, seconds);
   };
   const released = [...summaries.values()].some((entry) => entry.summary.basis === "release");
   const groups = useGroups(summaries, byId);
@@ -436,12 +437,11 @@ export function Showcase() {
     <div className="mx-auto w-full max-w-[1120px] px-4 pb-24 pt-10 sm:px-8">
       <VStack gap={10}>
         <VStack as="header" gap={4} className="max-w-3xl">
-          <Heading level={1}>Real apps, measured on every merge</Heading>
+          <Heading level={1}>Jazz examples and real-world benchmarks</Heading>
           <Text as="p" type="large" color="secondary" display="block">
-            Each example lives in the Jazz repository, most of them as working apps. The numbers
-            under it come from benchmarks of that same workload, run on CodSpeed as changes merge to
-            main. We show the latest released numbers; hover any of them for how they changed across
-            releases.
+            We&apos;ve created a variety of example apps that are simple enough to read in code or
+            show your agent for inspiration, but close enough to real apps to demonstrate Jazz
+            performance under real-world load patterns.
           </Text>
           {error && <Banner status="error" title={error} />}
           {data && !released && (
@@ -457,12 +457,6 @@ export function Showcase() {
               description={data.warnings.join(" ")}
             />
           )}
-          <Text as="p" type="supporting" display="block">
-            * Estimated times: CodSpeed wallclock medians divided by {ESTIMATE_DIVISOR}, a rough
-            allowance for a typical modern machine being faster than the shared CI runner. This is
-            illustrative, not a measured prediction for your hardware; every history card also shows
-            the measured runner time.
-          </Text>
         </VStack>
         {heroExamples.map((example) => (
           <VStack key={example.id} gap={10}>

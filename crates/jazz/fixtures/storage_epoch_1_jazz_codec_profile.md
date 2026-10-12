@@ -13,15 +13,16 @@ that root at the epoch-one settlement baseline.
   `jazz.catalogue.activation.v1`, `jazz.catalogue.bootstrap-ready.v1`,
   `jazz.catalogue.lens.v1`, `jazz.catalogue.lineage.v1`, `jazz.catalogue.physical-mapping.v1`,
   `jazz.catalogue.schema.v1`, `jazz.catalogue.write-pointer.v1`,
-  `jazz.subscription-program-fact-key.v1`
+  `jazz.subscription-program-fact-key.v1`,
+  `jazz.transaction-durability.v2`
 - adapter parameter: `key-order=unsigned-lexicographic`
 - SHA-256 of the committed canonical `JSM1` bytes:
-  `a3e89ed15b6b2b243fb15c3eef650d843398cf081ecf3be73f650e741349fe96`
+  `72683cdf9083aa6fd76f3b523d5c541c93b57b4d502411ade0d8baff4a2aad36`
 - receipt: `storage_codec_profile::tests::epoch_one_jazz_profile_has_a_pinned_manifest_receipt`
 
 An omitted, added, duplicate, or substituted ID fails profile admission before
 the adapter decodes or mutates ordinary data. After epoch-one freeze, any incompatible inventory change
-requires a new storage epoch, migration decision, and updated fixture; this is
+requires an explicitly versioned codec profile, migration decision, and updated fixture; this is
 not a per-adapter `Bytes` compatibility exception.
 
 The browser IndexedDB adapter additionally stores `storage-manifest`/
@@ -37,3 +38,6 @@ The pre-freeze #2578 cleanup removes the two dormant result codec IDs. The
 required-family count changes from 14 to 12; source payload codecs remain
 unchanged. Old roots advertising those retired families fail real current
 manifest admission. No compatibility profile is selected to bypass this check.
+
+Durability v2 adds `jazz.transaction-durability.v2` (13 families). Earlier
+profiles are rejected without migration; the physical Groove epoch stays 1.

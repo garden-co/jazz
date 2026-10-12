@@ -67,7 +67,7 @@ export async function firstAccountEpoch(
     assertOpen();
     try {
       const proposal = await exclusiveE2eeTransaction(db, async (tx) => {
-        const existing = await tx.one(identities.where({ id: accountId }), { tier: "local" });
+        const existing = await tx.one(identities.where({ id: accountId }), { tier: "local-first" });
         assertOpen();
         if (existing) return existing;
         const epochId = crypto.randomUUID();
@@ -104,7 +104,7 @@ export async function firstAccountEpoch(
         throw new Error("E2EE account requires public ledger migration");
       // Repair an existing identity whose public root was never published.
       // Its initial authority begins only when this root is accepted.
-      if (!(await db.one(roots.where({ accountId }), { tier: "global" }))) {
+      if (!(await db.one(roots.where({ accountId }), { tier: "remote" }))) {
         assertOpen();
         // Concurrent publications may duplicate the same policy-checked binding.
         await db
@@ -141,7 +141,7 @@ export async function firstAccountEpoch(
           error.code !== "exclusive_conflict")
       )
         throw error;
-      if (!(await db.one(identities.where({ id: accountId }), { tier: "global" }))) throw error;
+      if (!(await db.one(identities.where({ id: accountId }), { tier: "remote" }))) throw error;
       // Re-read the winner after a competing initialiser is accepted. Never
       // replace an existing identity, even if this device cannot open its key.
     }

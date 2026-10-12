@@ -76,7 +76,7 @@ it("restores offline readiness after persistent reopen and refuses missing keys 
       e2ee: undefined,
       driver: { type: "persistent" as const, dbName: emptyDbName },
     });
-    await emptyHistoryOwner.all(app.projects, { tier: "local" });
+    await emptyHistoryOwner.all(app.projects, { tier: "local-first" });
     await emptyHistoryOwner.disconnect();
     // Close the last holder of this persistent database before the offline reopen.
     // The empty-history owner uses a distinct database and retains no accepted keys.
@@ -90,13 +90,13 @@ it("restores offline readiness after persistent reopen and refuses missing keys 
     expect(await db.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
       state: "ready",
     });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(note);
 
     // Initialize real followers before testing the startup readiness gate.
     // Constructor enrollment without keys may otherwise wait for online authority.
     const withoutKeys = await createDb({ ...config, e2ee: undefined });
     foregrounds.push(withoutKeys);
-    await withoutKeys.all(app.projects, { tier: "local" });
+    await withoutKeys.all(app.projects, { tier: "local-first" });
     attachE2ee(
       withoutKeys,
       account,
@@ -123,7 +123,7 @@ it("restores offline readiness after persistent reopen and refuses missing keys 
       driver: { type: "persistent" as const, dbName: emptyDbName },
     });
     foregrounds.push(withoutHistory);
-    await withoutHistory.all(app.projects, { tier: "local" });
+    await withoutHistory.all(app.projects, { tier: "local-first" });
     attachE2ee(withoutHistory, account, config.e2ee, "dev");
     await expect(prepareE2eeStartup(withoutHistory)).rejects.toBeInstanceOf(E2eeHistoryUnavailable);
   } finally {

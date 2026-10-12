@@ -55,7 +55,7 @@ export {
   type FetchStoredWasmSchemaOptions,
   type StoredSchemaHash,
   type StoredPermissionsResponse,
-} from "./schema-fetch.js";
+} from "../dev/catalogue-api.js";
 export {
   fetchServerSubscriptions,
   type FetchServerSubscriptionsOptions,

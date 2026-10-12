@@ -8,6 +8,7 @@ import { onTestFinished } from "vitest";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { testAuthorBytes } from "./account-fixtures.js";
 import { assertNativeArtifactCompatibility } from "../native-artifact-compatibility.js";
+import { installJsonSchemaValidator } from "../json-schema-validator.js";
 import { readCorrectnessArtifactSnapshot } from "../../../../../dev/artifacts/test-artifact-store.mjs";
 
 export type TestRuntime = Runtime & {
@@ -108,7 +109,12 @@ export function loadWasmModuleForTest(): Promise<any> {
 
       const wasmModule: any = await import(pathToFileURL(paths.modulePath).href);
       wasmModule.initSync({ module: readFileSync(paths.wasmPath) });
-      assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
+      assertNativeArtifactCompatibility(wasmModule, "WASM", [
+        "initSync",
+        "WasmDb",
+        "setJsonSchemaValidator",
+      ]);
+      installJsonSchemaValidator(wasmModule);
       return wasmModule;
     })();
   }

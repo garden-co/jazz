@@ -35,7 +35,7 @@ it("observes both accepted rows after persistent reopening without encryption", 
       },
     };
     db = await createDb(config);
-    await db.all(app.__e2ee_snapshot_roots.where({}), { tier: "local" });
+    await db.all(app.__e2ee_snapshot_roots.where({}), { tier: "local-first" });
     const tx = db.beginExclusiveTransaction();
     const root = tx.insert(app.__e2ee_snapshot_roots, { title: "Root" });
     const ref = tx.insert(app.__e2ee_snapshot_refs, { rootId: root.id });
@@ -50,7 +50,7 @@ it("observes both accepted rows after persistent reopening without encryption", 
     const refs = app.__e2ee_snapshot_refs.where({ rootId: root.id });
     const observed = await db.observeE2eeHistory([roots, refs]);
     expect(observed.map(({ rows }) => rows)).toEqual([[root], [ref]]);
-    expect(await db.all(refs, { tier: "local" })).toEqual([ref]);
+    expect(await db.all(refs, { tier: "local-first" })).toEqual([ref]);
   } finally {
     await db?.shutdown();
     if (!stopped) await stopJazzServer(server.serverUrl);

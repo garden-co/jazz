@@ -98,14 +98,14 @@ it("automatically isolates private device records and keeps group, space and row
     clients.push(recipient);
     await creator.e2ee.devices.list();
     await recipient.e2ee.devices.list();
-    const ownerRequests = await creator.all(app.__e2ee_device_requests, { tier: "global" });
-    const recipientRequests = await recipient.all(app.__e2ee_device_requests, { tier: "global" });
+    const ownerRequests = await creator.all(app.__e2ee_device_requests, { tier: "remote" });
+    const recipientRequests = await recipient.all(app.__e2ee_device_requests, { tier: "remote" });
     expect(ownerRequests).toHaveLength(1);
     expect(recipientRequests).toHaveLength(1);
     expect(recipientRequests[0]!.id).not.toBe(ownerRequests[0]!.id);
     expect(
       await recipient.all(app.__e2ee_device_requests.where({ id: ownerRequests[0]!.id }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([]);
     await expect(
@@ -114,7 +114,7 @@ it("automatically isolates private device records and keeps group, space and row
     // Public keys are intentionally readable; enrolment handshakes are not.
     expect(
       await recipient.all(app.__e2ee_device_keys.where({ deviceId: ownerRequests[0]!.id }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toHaveLength(1);
 
@@ -122,7 +122,7 @@ it("automatically isolates private device records and keeps group, space and row
     // can warm the group's managed schema or authority.
     const group = await creator.e2ee.groups.create().wait();
     expect(
-      await recipient.all(app.__e2ee_groups.where({ id: group.id }), { tier: "global" }),
+      await recipient.all(app.__e2ee_groups.where({ id: group.id }), { tier: "remote" }),
     ).toHaveLength(1);
     await creator.e2ee.groups.add(group.id, { kind: "account", id: bob.account.id }).wait();
     expect(await creator.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
@@ -143,7 +143,7 @@ it("automatically isolates private device records and keeps group, space and row
     await tx.commit().wait({ tier: "global" });
     const query = app.notes.where({ id: note.id });
     // The server permits the row, but Bob has not received its encryption key.
-    await expect(recipient.all(query, { tier: "global" })).rejects.toMatchObject({
+    await expect(recipient.all(query, { tier: "remote" })).rejects.toMatchObject({
       name: "E2eeDataError",
       code: "key-not-shared",
     });
@@ -165,24 +165,24 @@ it("automatically isolates private device records and keeps group, space and row
       name: "E2eeDataError",
       code: "key-not-shared",
     });
-    expect(await creator.all(app.notes, { tier: "global" })).toEqual([note]);
-    expect(await recipient.all(query.select("id", "ownerId"), { tier: "global" })).toEqual([
+    expect(await creator.all(app.notes, { tier: "remote" })).toEqual([note]);
+    expect(await recipient.all(query.select("id", "ownerId"), { tier: "remote" })).toEqual([
       { id: note.id, ownerId: alice.account.id },
     ]);
     await creator.e2ee.spaces.grant(app.projects, project.id, bob.account.id).wait();
-    expect(await recipient.one(query, { tier: "global" })).toEqual(note);
+    expect(await recipient.one(query, { tier: "remote" })).toEqual(note);
     // Possessing the key lets Bob prepare ciphertext, not overwrite Alice's row.
     await expect(
       recipient.update(app.notes, note.id, { title: "Unauthorised" }).wait({ tier: "global" }),
     ).rejects.toThrow();
-    expect(await creator.one(query, { tier: "global" })).toEqual(note);
+    expect(await creator.one(query, { tier: "remote" })).toEqual(note);
     const own = recipient.insert(app.notes, {
       projectId: project.id,
       ownerId: bob.account.id,
       title: "Bob's row",
     });
     await own.wait({ tier: "global" });
-    expect(await creator.one(app.notes.where({ id: own.value.id }), { tier: "global" })).toEqual(
+    expect(await creator.one(app.notes.where({ id: own.value.id }), { tier: "remote" })).toEqual(
       own.value,
     );
     // Pause both preparation kinds, then publish one revocation. Each batch
@@ -237,17 +237,17 @@ it("automatically isolates private device records and keeps group, space and row
     expect(borrowedKeys.every((key) => key.every((byte) => byte === 0))).toBe(true);
     expect(
       await creator.all(app.notes.where({ id: { in: rejectedRows.map((row) => row.id) } }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([]);
     expect(await creator.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
       state: "ready",
     });
-    expect(await creator.all(app.__e2ee_space_successors, { tier: "global" })).toHaveLength(1);
-    expect(await creator.one(query, { tier: "global" })).toEqual(note);
+    expect(await creator.all(app.__e2ee_space_successors, { tier: "remote" })).toHaveLength(1);
+    expect(await creator.one(query, { tier: "remote" })).toEqual(note);
     await creator.update(app.notes, note.id, { title: "New epoch" }).wait({ tier: "global" });
     // One result spans both the new and historical cell epochs.
-    const epochs = await creator.all(app.notes, { tier: "global" });
+    const epochs = await creator.all(app.notes, { tier: "remote" });
     expect(epochs.sort((a, b) => a.id.localeCompare(b.id))).toEqual(
       [{ ...note, title: "New epoch" }, own.value].sort((a, b) => a.id.localeCompare(b.id)),
     );

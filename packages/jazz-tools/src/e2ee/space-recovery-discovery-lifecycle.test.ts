@@ -69,9 +69,9 @@ it("discovers, backfills and recovers recipient spaces, then excludes removed me
       recoveryRootId: originalRootId,
     });
     const retained = await Promise.all([
-      f.recipient.all(accountDeliveries, { tier: "global" }),
-      f.recipient.all(groupDeliveries, { tier: "global" }),
-      f.recipient.all(spaceDeliveries, { tier: "global" }),
+      f.recipient.all(accountDeliveries, { tier: "remote" }),
+      f.recipient.all(groupDeliveries, { tier: "remote" }),
+      f.recipient.all(spaceDeliveries, { tier: "remote" }),
     ]);
     const created = await f.recipient.e2ee.recovery.create().wait();
     expect((await f.recipient.e2ee.recovery.status(created.material)).spaces).toEqual(
@@ -80,9 +80,9 @@ it("discovers, backfills and recovers recipient spaces, then excludes removed me
     // Exact envelope preservation below and the later cold recovery with the
     // original material cover continued access without repeating warm reads.
     const afterward = await Promise.all([
-      f.recipient.all(accountDeliveries, { tier: "global" }),
-      f.recipient.all(groupDeliveries, { tier: "global" }),
-      f.recipient.all(spaceDeliveries, { tier: "global" }),
+      f.recipient.all(accountDeliveries, { tier: "remote" }),
+      f.recipient.all(groupDeliveries, { tier: "remote" }),
+      f.recipient.all(spaceDeliveries, { tier: "remote" }),
     ]);
     const ordered = (rows: { id: string }[]) => [...rows].sort((a, b) => a.id.localeCompare(b.id));
     expect(afterward.map(ordered)).toEqual(retained.map(ordered));

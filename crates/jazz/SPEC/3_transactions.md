@@ -53,8 +53,6 @@ following terms:
 - `TxKind` is `Mergeable` or `Exclusive`.
 - `Fate` is `Pending`, `Accepted`, or `Rejected(RejectionReason)`.
 - `DurabilityTier` is `None`, `Local`, or `Global` — separate from fate.
-  Legacy persisted Edge durability decodes as Local (ch. 9); it is not a
-  distinct runtime acknowledgement or authorization outcome.
 - `OpenTransactionId` is a caller-generated UUIDv7 naming runtime-local mutable work. It
   is used unchanged for synchronous, thread-local, and worker-hosted runtimes.
 - `TransactionId` names the immutable commit produced by a successful commit and is the
