@@ -134,11 +134,15 @@ function deferred() {
 }
 
 it("isolates pre-enrolment authors, recipients and recovery deliveries from legitimate groups", async () => {
+  const start = performance.now();
+  const phase = (name: string) =>
+    console.log(`[group-recovery-phase] ${name}: ${Math.round(performance.now() - start)}ms`);
+  phase("fixture start");
   await withFixture(async ({ account, open, native, stored }) => {
+    phase("fixture ready");
     const browser = await createBrowserCrypto();
     const ownerAccount = await account();
     const owner = await open(ownerAccount, browser);
-    const groupId = await readyGroup(owner);
     const before = new Set(
       (await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).map((row) => row.id),
     );
@@ -148,12 +152,16 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
     );
     expect(added).toHaveLength(1);
     const recoveryRootId = added[0]!.id;
+    // This fixture needs an existing recovery path, not backfill. The adapter
+    // matrix and membership-loss test below cover recovery created after groups.
+    const groupId = await readyGroup(owner);
     const mallory = await open(await account(), browser);
     const other = mallory.e2ee.groups.create();
     await other.wait();
     const root = await mallory.one(app.__e2ee_groups.where({ id: other.id }), { tier: "remote" });
     expect(root).toBeDefined();
 
+    phase("legitimate groups and recovery ready");
     const futureAccount = await account();
     const writer = await open(futureAccount, native, false);
     expect(
@@ -212,14 +220,19 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
     } finally {
       privateKey.fill(0);
     }
-    expect(await owner.e2ee.explain({ groupId })).toEqual({ state: "ready" });
-    expect(await mallory.e2ee.explain({ groupId: other.id })).toEqual({ state: "ready" });
+    await Promise.all([
+      expect(owner.e2ee.explain({ groupId })).resolves.toEqual({ state: "ready" }),
+      expect(mallory.e2ee.explain({ groupId: other.id })).resolves.toEqual({ state: "ready" }),
+    ]);
 
+    phase("pre-enrolment checks done");
     // Later real enrolment cannot authorise either the earlier root or add.
     const recipient = await open(futureAccount, browser);
     await recipient.e2ee.devices.list();
-    expect(await owner.e2ee.explain({ groupId })).toEqual({ state: "ready" });
-    expect(await mallory.e2ee.explain({ groupId: other.id })).toEqual({ state: "ready" });
+    await Promise.all([
+      expect(owner.e2ee.explain({ groupId })).resolves.toEqual({ state: "ready" }),
+      expect(mallory.e2ee.explain({ groupId: other.id })).resolves.toEqual({ state: "ready" }),
+    ]);
     expect(await recipient.e2ee.explain({ groupId: other.id })).toMatchObject({ state: "refused" });
     expect(
       await mallory.all(
@@ -231,13 +244,16 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
       ),
     ).toEqual([]);
 
+    phase("post-enrolment checks done");
     // Recovery uses a fresh store, with no original key-holding client online.
     await Promise.all([owner, mallory, recipient].map((db) => db.shutdown()));
     const recovered = await open(ownerAccount);
     await expectRecoveryPath(recovered, material, groupId);
+    phase("recovery status checked");
     await recovered.e2ee.recovery.use(material).wait();
     expect(await recovered.e2ee.explain({ groupId })).toEqual({ state: "ready" });
 
+    phase("initial recovery complete");
     const deliveryId = crypto.randomUUID();
     await writer
       .insert(
@@ -261,6 +277,7 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
       }),
     ).toMatchObject({ groupId: unrelatedId, recoveryRootId });
 
+    phase("forged delivery inserted and read");
     const outcome = await recovered.e2ee.recovery
       .use(material)
       .wait()
@@ -269,8 +286,10 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
         () => "rejected",
       );
     expect(await recovered.e2ee.explain({ groupId })).toEqual({ state: "ready" });
+    phase("second recovery complete");
     expect(outcome).toBe("fulfilled");
   }, true);
+  phase("fixture closed");
 }, 60000);
 
 it("rejects recovery creation when a required ready group loses membership", async () => {
