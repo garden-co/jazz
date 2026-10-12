@@ -4916,7 +4916,7 @@ fn authority_query_delegation_requires_explicit_host_admission() {
 
 // Internal transport fixture: only host admission can mark subscriber trust.
 // Observe raw native delivery/rejection because a client facade cannot express
-// the unsupported remote propagation option or delegated transport scope.
+// delegated transport scope.
 #[derive(Clone, Copy, Debug)]
 enum QueryTestClient {
     Session,
@@ -4924,11 +4924,7 @@ enum QueryTestClient {
     Delegated,
 }
 
-fn remote_query_delivery(
-    propagate_upstream: bool,
-    tier: DurabilityTier,
-    client_scope: QueryTestClient,
-) -> (bool, bool) {
+fn remote_query_delivery(tier: DurabilityTier, client_scope: QueryTestClient) -> (bool, bool) {
     let schema = owner_read_schema();
     let alice = AuthorSubject::for_test_bytes([0x75; 16]);
     let core = open_core(0x76, AuthorSubject::SYSTEM, &schema);
@@ -4954,7 +4950,6 @@ fn remote_query_delivery(
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let opts = RegisterShapeOptions {
         tier,
-        propagate_upstream,
         ..RegisterShapeOptions::default()
     };
     let subscription = SubscriptionKey {
@@ -4999,9 +4994,6 @@ fn remote_query_delivery(
         known_state: None,
         delegated_session,
     });
-    if !propagate_upstream {
-        client.send(request.clone()).unwrap();
-    }
     client.send(request).unwrap();
     let mut emitted = false;
     let mut rejected = false;
@@ -5041,16 +5033,18 @@ fn remote_query_delivery(
     (emitted, rejected)
 }
 
+/// Alice receives her permitted rows through session, system, and delegated links.
+/// Raw transport coverage is needed to exercise topology-admitted trust scopes.
 #[test]
-fn remote_queries_cannot_disable_upstream_propagation() {
+fn remote_queries_deliver_under_admitted_scope() {
     for client in [
         QueryTestClient::Session,
         QueryTestClient::System,
         QueryTestClient::Delegated,
     ] {
         assert_eq!(
-            remote_query_delivery(false, DurabilityTier::Global, client),
-            (false, true),
+            remote_query_delivery(DurabilityTier::Global, client),
+            (true, false),
             "{client:?}"
         );
     }
@@ -5081,8 +5075,7 @@ fn foreground_local_only_reads_never_emit_remote_query_requests() {
     let query = Query::from("todos");
     let prepared = foreground.prepare_query(&query).unwrap();
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     let attachment = foreground
@@ -5125,43 +5118,4 @@ fn foreground_local_only_reads_never_emit_remote_query_requests() {
     foreground.detach_query(attachment);
     foreground.detach_query(second);
     foreground.detach_query(third);
-}
-
-// A worker's local_receiver role is still a node boundary, not an in-process
-// read API. Even a trusted foreground cannot send the local-only wire option.
-#[test]
-fn scope_relay_remote_registration_cannot_disable_propagation() {
-    let schema = owner_read_schema();
-    let alice = AuthorSubject::for_test_bytes([0x7b; 16]);
-    let worker = open_db(0x7c, alice, &schema);
-    worker.set_relay_authority_session_owner_for_test();
-    let shape = Query::from("todos").validate(&schema).unwrap();
-    for (identity, trust) in [
-        (alice, CommitUnitTrust::Session),
-        (AuthorSubject::SYSTEM, CommitUnitTrust::TrustedBackend),
-    ] {
-        let (mut client, transport) = duplex();
-        let subscriber = worker
-            .node
-            .accept_subscriber_with_trust(transport, identity, trust);
-        client
-            .send(SyncMessage::RegisterShape {
-                shape_id: shape.shape_id(),
-                ast: ShapeAst::from_validated(&shape),
-                opts: RegisterShapeOptions {
-                    tier: DurabilityTier::Local,
-                    propagate_upstream: false,
-                    ..RegisterShapeOptions::default()
-                },
-            })
-            .unwrap();
-        let mut rejected = false;
-        for _ in 0..8 {
-            subscriber.borrow_mut().tick().unwrap();
-            while let Some(message) = client.try_recv() {
-                rejected |= matches!(message, SyncMessage::SubscribeRejected { .. });
-            }
-        }
-        assert!(rejected);
-    }
 }

@@ -138,7 +138,7 @@ describe("MusicAgent across synced Jazz clients", () => {
           notify?.();
         }
       },
-      { tier: "global" },
+      { tier: "remote" },
     );
     const until = (expected: string) =>
       new Promise<void>((resolve, reject) => {

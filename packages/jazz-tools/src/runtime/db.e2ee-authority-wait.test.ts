@@ -47,7 +47,7 @@ it.each(["explicit", "callback", "mapped"] as const)(
   async (kind) => {
     const db = await createDb(await localAccountConfig(`e2ee-wait-${crypto.randomUUID()}`));
     try {
-      await db.all(app.epochs, { tier: "local" });
+      await db.all(app.epochs, { tier: "local-first" });
       const handle = await (async () => {
         if (kind === "explicit") {
           const tx = db.beginExclusiveTransaction();
@@ -71,7 +71,7 @@ it.each(["explicit", "callback", "mapped"] as const)(
       // Preserve the existing offline wait behaviour; it must not satisfy the
       // separate global wait used before E2EE releases a new epoch.
       await handle.wait();
-      await expect(db.all(app.epochs, { tier: "local" })).resolves.toHaveLength(1);
+      await expect(db.all(app.epochs, { tier: "local-first" })).resolves.toHaveLength(1);
       expect(outcome).toBe("pending");
     } finally {
       await db.shutdown();

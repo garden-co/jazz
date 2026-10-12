@@ -98,7 +98,7 @@ async function createFixture(runtime: "wasm" | "native") {
     for (const device of devices) signingKeys.push(Uint8Array.from(device.signingPrivateKey));
     const identities = await Promise.all(
       recipientIds.map((id) =>
-        creator.one(app.__e2ee_account_roots.where({ accountId: id }), { tier: "global" }),
+        creator.one(app.__e2ee_account_roots.where({ accountId: id }), { tier: "remote" }),
       ),
     );
     for (const identity of identities) expect(identity).not.toBeNull();
@@ -145,9 +145,9 @@ describe.each(["wasm", "native"] as const)("initial lifecycle rows (%s)", (runti
         signingKeys,
       } = fixture;
       const before = {
-        grants: await creator.all(app.__e2ee_space_grants, { tier: "global" }),
-        deliveries: await creator.all(app.__e2ee_space_deliveries, { tier: "global" }),
-        successors: await creator.all(app.__e2ee_space_successors, { tier: "global" }),
+        grants: await creator.all(app.__e2ee_space_grants, { tier: "remote" }),
+        deliveries: await creator.all(app.__e2ee_space_deliveries, { tier: "remote" }),
+        successors: await creator.all(app.__e2ee_space_successors, { tier: "remote" }),
       };
       const tx = beginInitialSpaceTransaction(creator, recipientIds);
       const project = tx.insert(app.projects, { title: "Adversarial initial grants" });
@@ -207,7 +207,7 @@ describe.each(["wasm", "native"] as const)("initial lifecycle rows (%s)", (runti
                 revision: encodePublicApprovalRevision(
                   (
                     await prepared.all(app.__e2ee_space_grants.where({ spaceId: root.id }), {
-                      tier: "local",
+                      tier: "local-first",
                     })
                   ).map((grant) => "space-grant:" + grant.id),
                 ),
@@ -295,11 +295,11 @@ describe.each(["wasm", "native"] as const)("initial lifecycle rows (%s)", (runti
         },
         recipientIds.slice(0, 2),
       );
-      expect(await creator.all(app.__e2ee_space_deliveries, { tier: "global" })).toEqual(
+      expect(await creator.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual(
         before.deliveries,
       );
       await tx.commit().wait({ tier: "global" });
-      const allGrants = await creator.all(app.__e2ee_space_grants, { tier: "global" });
+      const allGrants = await creator.all(app.__e2ee_space_grants, { tier: "remote" });
       const grants = allGrants.filter((row) => row.spaceId === spaceId);
       expect(grants).toHaveLength(8);
       expect(injectedIds.every((id) => grants.some((row) => row.id === id))).toBe(true);
@@ -310,13 +310,13 @@ describe.each(["wasm", "native"] as const)("initial lifecycle rows (%s)", (runti
         state: "refused",
         reason: "not-a-space-recipient",
       });
-      const allDeliveries = await creator.all(app.__e2ee_space_deliveries, { tier: "global" });
+      const allDeliveries = await creator.all(app.__e2ee_space_deliveries, { tier: "remote" });
       const deliveries = allDeliveries.filter((row) => row.spaceId === spaceId);
       expect([...new Set(deliveries.map((row) => row.recipientAccountId))].sort()).toEqual(
         recipientIds.slice(0, 2).sort(),
       );
       expect(deliveries.every((row) => row.epochId === initialEpoch)).toBe(true);
-      const allSuccessors = await creator.all(app.__e2ee_space_successors, { tier: "global" });
+      const allSuccessors = await creator.all(app.__e2ee_space_successors, { tier: "remote" });
       const successors = allSuccessors.filter((row) => row.spaceId === spaceId);
       if (successor) {
         expect(successors).toHaveLength(1);

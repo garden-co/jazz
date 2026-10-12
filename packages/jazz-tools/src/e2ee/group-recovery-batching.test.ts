@@ -124,7 +124,7 @@ it("rejects stale recovery batches before staging and stops publication after de
       JSON.parse((await replacement.store.read())!).stagedGroupKeysV1 ?? [];
     const delivered = () =>
       owner.all(app.__e2ee_group_deliveries.where({ recipientDeviceId: pending.id }), {
-        tier: "global",
+        tier: "remote",
       });
 
     readsUntilChange = 2;

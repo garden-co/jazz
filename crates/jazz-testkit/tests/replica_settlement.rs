@@ -144,7 +144,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -230,7 +230,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -357,7 +357,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -400,7 +400,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -493,7 +493,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -565,7 +565,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))

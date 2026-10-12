@@ -11,6 +11,7 @@ const auth = (): Authority => {
   return authority;
 };
 const global = { tier: "global" } as const;
+const remote = { tier: "remote" } as const;
 
 beforeEach(async () => {
   authority = await startAuthority();
@@ -33,7 +34,7 @@ describe("concurrent first requests", () => {
     const workspaceId = seedId(account, "workspace");
     expect(results.map((result) => result.workspaceId)).toEqual([workspaceId, workspaceId]);
     expect(results.filter((result) => result.created)).toHaveLength(1);
-    const members = await auth().as("ada", account).all(app.members.where({ workspaceId }), global);
+    const members = await auth().as("ada", account).all(app.members.where({ workspaceId }), remote);
     expect(members.map((member) => [member.account, member.role])).toEqual([[account, "owner"]]);
   });
 
@@ -64,8 +65,8 @@ describe("concurrent first requests", () => {
     ]);
     const guestDb = auth().as("guest", guest);
     expect(
-      await guestDb.all(app.members.where({ workspaceId, account: guest }), global),
+      await guestDb.all(app.members.where({ workspaceId, account: guest }), remote),
     ).toHaveLength(1);
-    expect(await guestDb.all(app.pageGrants.where({ account: guest }), global)).toHaveLength(1);
+    expect(await guestDb.all(app.pageGrants.where({ account: guest }), remote)).toHaveLength(1);
   });
 });

@@ -245,13 +245,13 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
           await expect(preparation).rejects.toThrow("Invalid E2EE space identifier");
           await expect(async () => await tx.commit().wait({ tier: "global" })).rejects.toThrow();
           expect(
-            newRows(await db.all(app.projects, { tier: "global" }), before.projects, (rows) => {
+            newRows(await db.all(app.projects, { tier: "remote" }), before.projects, (rows) => {
               observed.projects = rows;
             }),
           ).toEqual([]);
           expect(
             newRows(
-              await db.all(app.__e2ee_spaces, { tier: "global" }),
+              await db.all(app.__e2ee_spaces, { tier: "remote" }),
               before.__e2ee_spaces,
               (rows) => {
                 observed.__e2ee_spaces = rows;
@@ -260,7 +260,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
           ).toEqual([]);
           expect(
             newRows(
-              await db.all(app.__e2ee_space_grants, { tier: "global" }),
+              await db.all(app.__e2ee_space_grants, { tier: "remote" }),
               before.__e2ee_space_grants,
               (rows) => {
                 observed.__e2ee_space_grants = rows;
@@ -268,7 +268,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
             ),
           ).toEqual([]);
           expect(
-            newRows(await db.all(app.notes, { tier: "global" }), before.notes, (rows) => {
+            newRows(await db.all(app.notes, { tier: "remote" }), before.notes, (rows) => {
               observed.notes = rows;
             }),
           ).toEqual([]);
@@ -303,7 +303,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
             const payload = await crypto.cellCipher.encrypt(key, context, plaintext);
             expect(await crypto.cellCipher.decrypt(key, context, payload)).toEqual(plaintext);
             preparedTx.insert(app.notes, { projectId: project.id, epochId: root.epochId, payload });
-            retainedRead = () => preparedTx.all(app.notes, { tier: "local" });
+            retainedRead = () => preparedTx.all(app.notes, { tier: "local-first" });
             retainedWrite = () =>
               preparedTx.insert(app.notes, {
                 projectId: project.id,
@@ -327,13 +327,13 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
           expect(keyReference!.every((byte) => byte === 0)).toBe(true);
           await expect(async () => await tx.commit().wait({ tier: "global" })).rejects.toThrow();
           expect(
-            newRows(await db.all(app.projects, { tier: "global" }), before.projects, (rows) => {
+            newRows(await db.all(app.projects, { tier: "remote" }), before.projects, (rows) => {
               observed.projects = rows;
             }),
           ).toEqual([]);
           expect(
             newRows(
-              await db.all(app.__e2ee_spaces, { tier: "global" }),
+              await db.all(app.__e2ee_spaces, { tier: "remote" }),
               before.__e2ee_spaces,
               (rows) => {
                 observed.__e2ee_spaces = rows;
@@ -342,7 +342,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
           ).toEqual([]);
           expect(
             newRows(
-              await db.all(app.__e2ee_space_grants, { tier: "global" }),
+              await db.all(app.__e2ee_space_grants, { tier: "remote" }),
               before.__e2ee_space_grants,
               (rows) => {
                 observed.__e2ee_space_grants = rows;
@@ -350,7 +350,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
             ),
           ).toEqual([]);
           expect(
-            newRows(await db.all(app.notes, { tier: "global" }), before.notes, (rows) => {
+            newRows(await db.all(app.notes, { tier: "remote" }), before.notes, (rows) => {
               observed.notes = rows;
             }),
           ).toEqual([]);
@@ -375,7 +375,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
         if (!earlyCommit) {
           expect(
             newRows(
-              await db.all(app.__e2ee_spaces, { tier: "global" }),
+              await db.all(app.__e2ee_spaces, { tier: "remote" }),
               before.__e2ee_spaces,
               (rows) => {
                 observed.__e2ee_spaces = rows;
@@ -384,7 +384,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
           ).toEqual([]);
           expect(
             newRows(
-              await db.all(app.__e2ee_space_deliveries, { tier: "global" }),
+              await db.all(app.__e2ee_space_deliveries, { tier: "remote" }),
               before.__e2ee_space_deliveries,
               (rows) => {
                 observed.__e2ee_space_deliveries = rows;
@@ -399,27 +399,27 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
           });
         else await committed.wait({ tier: "global" });
         const projects = newRows(
-          await db.all(app.projects, { tier: "global" }),
+          await db.all(app.projects, { tier: "remote" }),
           before.projects,
           (rows) => {
             observed.projects = rows;
           },
         );
         const roots = newRows(
-          await db.all(app.__e2ee_spaces, { tier: "global" }),
+          await db.all(app.__e2ee_spaces, { tier: "remote" }),
           before.__e2ee_spaces,
           (rows) => {
             observed.__e2ee_spaces = rows;
           },
         );
         const grants = newRows(
-          await db.all(app.__e2ee_space_grants, { tier: "global" }),
+          await db.all(app.__e2ee_space_grants, { tier: "remote" }),
           before.__e2ee_space_grants,
           (rows) => {
             observed.__e2ee_space_grants = rows;
           },
         );
-        const notes = newRows(await db.all(app.notes, { tier: "global" }), before.notes, (rows) => {
+        const notes = newRows(await db.all(app.notes, { tier: "remote" }), before.notes, (rows) => {
           observed.notes = rows;
         });
         if (denied) {
@@ -454,7 +454,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
             expect(await recipient.e2ee.explain(target)).toEqual({ state: "ready" });
           if (mixed) {
             const deliveries = newRows(
-              await db.all(app.__e2ee_space_deliveries, { tier: "global" }),
+              await db.all(app.__e2ee_space_deliveries, { tier: "remote" }),
               before.__e2ee_space_deliveries,
               (rows) => {
                 observed.__e2ee_space_deliveries = rows;
@@ -467,7 +467,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
           }
         }
         const deliveries = newRows(
-          await db.all(app.__e2ee_space_deliveries, { tier: "global" }),
+          await db.all(app.__e2ee_space_deliveries, { tier: "remote" }),
           before.__e2ee_space_deliveries,
           (rows) => {
             observed.__e2ee_space_deliveries = rows;
@@ -478,7 +478,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
         if (!cold) {
           const final___e2ee_space_deliveries =
             observed.__e2ee_space_deliveries === before.__e2ee_space_deliveries
-              ? await db.all(app.__e2ee_space_deliveries, { tier: "global" })
+              ? await db.all(app.__e2ee_space_deliveries, { tier: "remote" })
               : observed.__e2ee_space_deliveries;
           const added___e2ee_space_deliveries = newRows(
             final___e2ee_space_deliveries,
@@ -489,7 +489,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
           history.__e2ee_space_deliveries = final___e2ee_space_deliveries;
           const final___e2ee_space_grants =
             observed.__e2ee_space_grants === before.__e2ee_space_grants
-              ? await db.all(app.__e2ee_space_grants, { tier: "global" })
+              ? await db.all(app.__e2ee_space_grants, { tier: "remote" })
               : observed.__e2ee_space_grants;
           const added___e2ee_space_grants = newRows(
             final___e2ee_space_grants,
@@ -500,7 +500,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
           history.__e2ee_space_grants = final___e2ee_space_grants;
           const final___e2ee_spaces =
             observed.__e2ee_spaces === before.__e2ee_spaces
-              ? await db.all(app.__e2ee_spaces, { tier: "global" })
+              ? await db.all(app.__e2ee_spaces, { tier: "remote" })
               : observed.__e2ee_spaces;
           const added___e2ee_spaces = newRows(final___e2ee_spaces, before.__e2ee_spaces);
           if (denied || outcome.includes("invalid-identifier") || outcome === "rollback")
@@ -508,7 +508,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
           history.__e2ee_spaces = final___e2ee_spaces;
           const final_notes =
             observed.notes === before.notes
-              ? await db.all(app.notes, { tier: "global" })
+              ? await db.all(app.notes, { tier: "remote" })
               : observed.notes;
           const added_notes = newRows(final_notes, before.notes);
           if (denied || outcome.includes("invalid-identifier") || outcome === "rollback")
@@ -516,7 +516,7 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
           history.notes = final_notes;
           const final_projects =
             observed.projects === before.projects
-              ? await db.all(app.projects, { tier: "global" })
+              ? await db.all(app.projects, { tier: "remote" })
               : observed.projects;
           const added_projects = newRows(final_projects, before.projects);
           if (denied || outcome.includes("invalid-identifier") || outcome === "rollback")
