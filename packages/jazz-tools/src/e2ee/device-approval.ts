@@ -1176,7 +1176,6 @@ export class DeviceApproval {
     let secret: Uint8Array | undefined;
     let challengeSecret: Uint8Array | undefined;
     try {
-      challengeSecret = runtimeRandomBytes(32);
       device = await this.loadDevice();
       const snapshot = await this.recoverySnapshot(material.rootId);
       if (snapshot.revoked.has(this.deviceId))
@@ -1184,6 +1183,17 @@ export class DeviceApproval {
       const same = (a: Uint8Array, b: Uint8Array) =>
         a.length === b.length && a.every((byte, i) => byte === b[i]);
       secret = await this.openRecovery(snapshot, material);
+      // Repeated recovery still authenticates the material and current authority.
+      // An active device with this epoch's verified key needs no new enrolment.
+      if (snapshot.publicState.active.has(this.deviceId)) {
+        const current = await this.accountKey(snapshot);
+        try {
+          if (current && same(current, secret)) return;
+        } finally {
+          current?.fill(0);
+        }
+      }
+      challengeSecret = runtimeRandomBytes(32);
       const challenge = {
         id: crypto.randomUUID(),
         deviceId: this.deviceId,
