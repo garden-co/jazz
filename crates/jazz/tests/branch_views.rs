@@ -2248,3 +2248,87 @@ fn db_contribution_merge_is_an_ordinary_retry_safe_transaction() {
     );
 }
 mod common;
+
+/// alice's branch-view update touches one inherited row, so the storage it
+/// reads must not grow with the number of other rows in the base branch.
+/// Results are checked through the public view read; the test-only storage
+/// read counter is needed because a whole-branch materialization returns the
+/// same rows as a one-row lookup and differs only in what it reads.
+///
+/// ```text
+/// alice ──seed N rows (one tx)──► base
+///   │
+///   └── tx.update(row k via head-over-base) ──► head copy of row k
+///          reads: row k's head + base history, its tx status
+/// ```
+#[test]
+fn branch_view_update_reads_do_not_scale_with_base_branch_size() {
+    fn update_reads(rows: u8) -> jazz::groove::db::StorageReadMetrics {
+        let (db, schema) = open_db();
+        let base = selector(0xd1);
+        let head = selector(0xd2);
+        let row = |index: u8| RowUuid::from_bytes([index; 16]);
+        let seed = db.mergeable_tx().unwrap();
+        for index in 0..rows {
+            seed.insert(
+                "todos",
+                BTreeMap::from([("title".to_owned(), Value::String(format!("base {index}")))]),
+                jazz::db::InsertOptions {
+                    row_id: Some(row(index)),
+                    target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        seed.commit().unwrap();
+
+        let target = jazz::db::WriteTarget::BranchView {
+            head: head.clone(),
+            base: Some(BranchViewBase::Current(base.clone())),
+        };
+        let overlay = db.mergeable_tx().unwrap();
+        let update = |index: u8| {
+            overlay.update(
+                "todos",
+                row(index),
+                BTreeMap::from([("title".to_owned(), Value::String(format!("draft {index}")))]),
+                jazz::db::UpdateOptions {
+                    target: target.clone(),
+                    ..Default::default()
+                },
+            )
+        };
+        // The first write warms per-transaction and per-table caches; the
+        // second is the steady-state cost of one more branch-view write.
+        update(0).unwrap();
+        db.reset_storage_read_metrics_for_test();
+        update(1).unwrap();
+        let reads = db.take_storage_read_metrics_for_test();
+        overlay.commit().unwrap();
+
+        let query = db.prepare_query(&db.table("todos")).unwrap();
+        let view = block_on(db.all(
+            &query,
+            ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base))),
+        ))
+        .unwrap();
+        let table = &schema.tables[0];
+        let titles = view
+            .iter()
+            .map(|view_row| (view_row.row_uuid(), view_row.cell(table, "title").unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(titles.len(), usize::from(rows));
+        assert_eq!(titles[&row(0)], Value::String("draft 0".to_owned()));
+        assert_eq!(titles[&row(1)], Value::String("draft 1".to_owned()));
+        assert_eq!(titles[&row(2)], Value::String("base 2".to_owned()));
+        reads
+    }
+
+    let small = update_reads(8);
+    let large = update_reads(200);
+    assert_eq!(
+        small, large,
+        "one branch-view update must read the same storage at 8 and 200 base rows"
+    );
+}

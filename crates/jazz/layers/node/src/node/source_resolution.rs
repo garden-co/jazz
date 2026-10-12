@@ -57,10 +57,19 @@ where
                 }
             }
         };
+        // One row's history, not the whole head branch: the write touches one
+        // row, so its cost must not grow with unrelated head or base rows.
         let (head_content, head_deletions) = self
-            .branch_winners_for_schema(table, schema_version, DurabilityTier::Local, &head, None)
+            .branch_row_winners_for_schema(
+                table,
+                schema_version,
+                DurabilityTier::Local,
+                &head,
+                None,
+                row_uuid,
+            )
             .await?;
-        if head_content.contains_key(&row_uuid) || head_deletions.contains_key(&row_uuid) {
+        if head_content.is_some() || head_deletions.is_some() {
             return Ok(None);
         }
         let (base_key, snapshot) = match &base {
@@ -68,21 +77,19 @@ where
             BranchViewCopyBase::Snapshot { branch, snapshot } => (branch, Some(snapshot)),
         };
         let (content, deletions) = self
-            .branch_winners_for_schema(
+            .branch_row_winners_for_schema(
                 table,
                 schema_version,
                 DurabilityTier::Local,
                 base_key,
                 snapshot,
+                row_uuid,
             )
             .await?;
-        let Some(source) = content.get(&row_uuid) else {
+        let Some(source) = content else {
             return Ok(None);
         };
-        if deletions
-            .get(&row_uuid)
-            .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
-        {
+        if deletions.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted)) {
             return Ok(None);
         }
         Ok(Some(BranchViewCopyEvidence {
@@ -91,7 +98,7 @@ where
             base,
             table: table.to_owned(),
             row_uuid,
-            source_version: self.version_tx_id(source)?,
+            source_version: self.version_tx_id(&source)?,
         }))
     }
 
@@ -131,19 +138,21 @@ where
         let Some((base_key, snapshot)) = base else {
             return Ok(None);
         };
+        // Admission checks one copied row; resolve that row's head and base
+        // winners from its own history instead of materializing both branches.
         let (head_content, head_deletions) = self
-            .branch_winners_for_schema(
+            .branch_row_winners_for_schema(
                 &evidence.table,
                 authored_schema,
                 DurabilityTier::Local,
                 &head,
                 None,
+                evidence.row_uuid,
             )
             .await?;
         let physical_head_winners = head_content
-            .get(&evidence.row_uuid)
-            .into_iter()
-            .chain(head_deletions.get(&evidence.row_uuid))
+            .iter()
+            .chain(head_deletions.iter())
             .map(|version| self.version_tx_id(version))
             .collect::<Result<Vec<_>, _>>()?;
         if physical_head_winners
@@ -153,25 +162,24 @@ where
             return Ok(None);
         }
         let (content, deletions) = self
-            .branch_winners_for_schema(
+            .branch_row_winners_for_schema(
                 &evidence.table,
                 authored_schema,
                 DurabilityTier::Local,
                 &base_key,
                 snapshot,
+                evidence.row_uuid,
             )
             .await?;
-        let Some(source) = content.get(&evidence.row_uuid) else {
+        let Some(source) = content else {
             return Ok(None);
         };
-        if deletions
-            .get(&evidence.row_uuid)
-            .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
-            || self.version_tx_id(source)? != evidence.source_version
+        if deletions.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
+            || self.version_tx_id(&source)? != evidence.source_version
         {
             return Ok(None);
         }
-        Ok(Some(source.clone()))
+        Ok(Some(source))
     }
 
     /// Return every persisted spelling of a logical branch key that can occur
@@ -335,16 +343,17 @@ where
             .transpose()
             .map_err(Error::InvalidBranchKey)?;
         Ok(self
-            .branch_view_rows_for_schema(
+            .branch_view_rows_in_scope(
                 table,
                 schema_version,
                 DurabilityTier::Local,
                 &head,
                 base.as_ref(),
+                Some(row_uuid),
             )
             .await?
             .into_iter()
-            .find(|row| row.row_uuid() == row_uuid)
+            .next()
             .map(|row| {
                 table_schema
                     .columns
@@ -365,35 +374,91 @@ where
         key: &BranchKey,
         snapshot: Option<&SnapshotRef>,
     ) -> Result<(BTreeMap<RowUuid, VersionRow>, BTreeMap<RowUuid, VersionRow>), Error> {
+        self.branch_winners_in_scope(table, read_schema_version, tier, key, snapshot, None)
+            .await
+    }
+
+    /// One row's content and deletion winners in a physical branch, with the
+    /// same visibility and ordering rules as [`Self::branch_winners_for_schema`].
+    ///
+    /// Reads only the row's own history prefix under every equivalent stored
+    /// branch spelling, so the cost is proportional to that row's versions and
+    /// independent of how many other rows the branch holds.
+    pub(super) async fn branch_row_winners_for_schema(
+        &mut self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        tier: DurabilityTier,
+        key: &BranchKey,
+        snapshot: Option<&SnapshotRef>,
+        row_uuid: RowUuid,
+    ) -> Result<(Option<VersionRow>, Option<VersionRow>), Error> {
+        let (mut content, mut deletions) = self
+            .branch_winners_in_scope(
+                table,
+                read_schema_version,
+                tier,
+                key,
+                snapshot,
+                Some(row_uuid),
+            )
+            .await?;
+        Ok((content.remove(&row_uuid), deletions.remove(&row_uuid)))
+    }
+
+    /// Winner selection over either a whole physical branch (`row: None`) or
+    /// one row of it. Both scopes read the same storage sources and the same
+    /// equivalent branch spellings; the row scope only extends the key prefix
+    /// with the row id, so it selects exactly the winners the whole-branch
+    /// scan would select for that row.
+    async fn branch_winners_in_scope(
+        &mut self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        tier: DurabilityTier,
+        key: &BranchKey,
+        snapshot: Option<&SnapshotRef>,
+        row: Option<RowUuid>,
+    ) -> Result<(BTreeMap<RowUuid, VersionRow>, BTreeMap<RowUuid, VersionRow>), Error> {
         let mut content = BTreeMap::new();
         let mut deletions = BTreeMap::new();
+        let snapshot = snapshot.map(|snapshot| Snapshot {
+            owner: snapshot.owner,
+            global_base: snapshot.global_base,
+            local_base: snapshot.local_base,
+            dots: snapshot.dots.clone(),
+        });
         let stored_keys = self.equivalent_stored_branch_keys(table, read_schema_version, key)?;
         for stored_key in stored_keys {
-            for version in self
-                .query_table_versions_in_branch(table, &stored_key)
-                .await?
-            {
+            let versions = match row {
+                Some(row_uuid) => {
+                    self.query_row_versions_in_branch(table, &stored_key, row_uuid)
+                        .await?
+                }
+                None => {
+                    self.query_table_versions_in_branch(table, &stored_key)
+                        .await?
+                }
+            };
+            for version in versions {
                 let tx_id = self.version_tx_id(&version)?;
-                let Some(tx) = self.query_transaction(tx_id).await? else {
-                    continue;
-                };
-                let visible = if let Some(snapshot) = snapshot {
-                    let snapshot = Snapshot {
-                        owner: snapshot.owner,
-                        global_base: snapshot.global_base,
-                        local_base: snapshot.local_base,
-                        dots: snapshot.dots.clone(),
-                    };
-                    self.snapshot_covers(tx_id, &snapshot).await
+                // Visibility needs only the transaction's status projection.
+                // Decoding the full payload here made every scanned version
+                // pay for its transaction's whole provenance record.
+                let visible = if let Some(snapshot) = &snapshot {
+                    self.snapshot_covers(tx_id, snapshot).await
                 } else {
+                    let Some((fate, _, durability)) = self.query_transaction_state(tx_id).await?
+                    else {
+                        continue;
+                    };
                     match tier {
                         DurabilityTier::Global => {
-                            matches!(tx.fate, Fate::Accepted)
-                                && tx.durability >= DurabilityTier::Global
+                            matches!(fate, Fate::Accepted) && durability >= DurabilityTier::Global
                         }
 
                         DurabilityTier::None | DurabilityTier::Local => {
-                            !matches!(tx.fate, Fate::Rejected(_))
+                            !matches!(fate, Fate::Rejected(_))
                         }
                     }
                 };
@@ -429,8 +494,25 @@ where
         head: &BranchKey,
         base: Option<&BranchViewSourceBase>,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.branch_view_rows_in_scope(table, read_schema_version, tier, head, base, None)
+            .await
+    }
+
+    /// Head-over-base branch-view rows for a whole view (`row: None`) or for
+    /// one row. Both scopes stack the same independent content and deletion
+    /// layers through [`Self::materialize_branch_view_winners`]; the row scope
+    /// only narrows which history each layer is resolved from.
+    async fn branch_view_rows_in_scope(
+        &mut self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        tier: DurabilityTier,
+        head: &BranchKey,
+        base: Option<&BranchViewSourceBase>,
+        row: Option<RowUuid>,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let (head_content, head_deletions) = self
-            .branch_winners_for_schema(table, read_schema_version, tier, head, None)
+            .branch_winners_in_scope(table, read_schema_version, tier, head, None, row)
             .await?;
         let (base_content, base_deletions) = match base {
             None => (BTreeMap::new(), BTreeMap::new()),
@@ -438,19 +520,20 @@ where
                 (BTreeMap::new(), BTreeMap::new())
             }
             Some(BranchViewSourceBase::Current(key)) => {
-                self.branch_winners_for_schema(table, read_schema_version, tier, key, None)
+                self.branch_winners_in_scope(table, read_schema_version, tier, key, None, row)
                     .await?
             }
             Some(BranchViewSourceBase::Snapshot(key, _)) if key == head => {
                 (BTreeMap::new(), BTreeMap::new())
             }
             Some(BranchViewSourceBase::Snapshot(key, snapshot)) => {
-                self.branch_winners_for_schema(
+                self.branch_winners_in_scope(
                     table,
                     read_schema_version,
                     tier,
                     key,
                     Some(snapshot),
+                    row,
                 )
                 .await?
             }
@@ -618,17 +701,15 @@ where
         let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
         for version in self.query_table_versions(table).await? {
             let tx_id = self.version_tx_id(&version)?;
-            let Some(tx) = self.query_transaction(tx_id).await? else {
+            let Some((fate, _, durability)) = self.query_transaction_state(tx_id).await? else {
                 continue;
             };
             let visible_at_tier = match tier {
                 DurabilityTier::Global => {
-                    matches!(tx.fate, Fate::Accepted) && tx.durability >= DurabilityTier::Global
+                    matches!(fate, Fate::Accepted) && durability >= DurabilityTier::Global
                 }
 
-                DurabilityTier::None | DurabilityTier::Local => {
-                    !matches!(tx.fate, Fate::Rejected(_))
-                }
+                DurabilityTier::None | DurabilityTier::Local => !matches!(fate, Fate::Rejected(_)),
             };
             if !visible_at_tier {
                 continue;
@@ -720,14 +801,13 @@ where
         let mut tx_ids = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
         for version in self.query_table_versions(table).await? {
             let tx_id = self.version_tx_id(&version)?;
-            let Some(tx) = self.query_transaction(tx_id).await? else {
+            let Some((fate, global_time, durability)) = self.query_transaction_state(tx_id).await?
+            else {
                 continue;
             };
-            if !matches!(tx.fate, Fate::Accepted)
-                || tx.durability < DurabilityTier::Global
-                || tx
-                    .global_time
-                    .is_none_or(|global_time| global_time > position)
+            if !matches!(fate, Fate::Accepted)
+                || durability < DurabilityTier::Global
+                || global_time.is_none_or(|global_time| global_time > position)
             {
                 continue;
             }
