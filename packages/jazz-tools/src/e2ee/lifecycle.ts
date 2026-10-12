@@ -32,10 +32,27 @@ import { Groups } from "./group-lifecycle.js";
 import type { GroupRecoveryPath } from "./group-lifecycle.js";
 import { groupSchema, type GroupMember, type GroupTables } from "./groups.js";
 import { Spaces, SpaceInitialisationRequired } from "./space-lifecycle.js";
-import type { SpaceDataPreparation, SpaceRecoveryPath, InitialSpaceSeed, StreamingSpacePlan, StreamingSpaceOptions } from "./space-lifecycle.js";
-export type { InitialSpaceSeed, StreamingSpacePlan, StreamingSpaceOptions } from "./space-lifecycle.js";
+import type {
+  SpaceDataPreparation,
+  SpaceRecoveryPath,
+  InitialSpaceSeed,
+  StreamingSpacePlan,
+  StreamingSpaceOptions,
+} from "./space-lifecycle.js";
+export type {
+  InitialSpaceSeed,
+  StreamingSpacePlan,
+  StreamingSpaceOptions,
+} from "./space-lifecycle.js";
 import { spaceSchema, type SpaceTables, type SpaceRoot } from "./spaces.js";
-import type { CellCipher, DeviceSigner, EqualityIndex, JazzCrypto, KeyEnvelope, LargeValueCipher } from "./types.js";
+import type {
+  CellCipher,
+  DeviceSigner,
+  EqualityIndex,
+  JazzCrypto,
+  KeyEnvelope,
+  LargeValueCipher,
+} from "./types.js";
 
 const equalityCrypto = new WeakMap<Db, () => Promise<EqualityIndex>>();
 
