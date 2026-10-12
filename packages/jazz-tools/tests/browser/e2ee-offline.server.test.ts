@@ -78,10 +78,13 @@ it("updates encrypted data immediately offline and accepts it after reconnect in
     ).toBe("stored locally");
     clearTimeout(timer);
     const query = app.notes.where({ id: note.id });
-    expect(await db.one(query, { tier: "local" })).toEqual({ ...note, title: "Written offline" });
+    expect(await db.one(query, { tier: "local-first" })).toEqual({
+      ...note,
+      title: "Written offline",
+    });
     await db.reconnect();
     await write.wait({ tier: "global" });
-    expect(await db.one(query, { tier: "global" })).toEqual({ ...note, title: "Written offline" });
+    expect(await db.one(query, { tier: "remote" })).toEqual({ ...note, title: "Written offline" });
   } finally {
     clearTimeout(timer);
     await db?.shutdown();

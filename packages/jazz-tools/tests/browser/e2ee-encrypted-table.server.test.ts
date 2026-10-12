@@ -86,7 +86,7 @@ it.each([
         payload: new Uint8Array([1, 2, 255]),
       });
       expect(note).not.toBeInstanceOf(Promise);
-      expect(await tx.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+      expect(await tx.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(note);
       const baseQuery = equality
         ? app.notes.where({ projectId: project.id, title: note.title })
         : app.notes.where({ id: note.id });
@@ -96,9 +96,9 @@ it.each([
         : selected;
       const child = projected ? { id: note.id, title: note.title } : note;
       const expected = nested ? { ...project, notesViaProject: [child] } : child;
-      expect(await tx.one(query, { tier: "local" })).toEqual(expected);
+      expect(await tx.one(query, { tier: "local-first" })).toEqual(expected);
       await tx.commit().wait({ tier: "global" });
-      expect(await db.one(query, { tier: "global" })).toEqual(expected);
+      expect(await db.one(query, { tier: "remote" })).toEqual(expected);
       let rows: unknown[] | undefined;
       let error: Error | undefined;
       stop = db.subscribe(
@@ -111,7 +111,7 @@ it.each([
             error = next;
           },
         },
-        { tier: "global" },
+        { tier: "remote" },
       );
       await expect.poll(() => error ?? rows, { timeout: 15_000 }).toEqual([expected]);
       const write = db.update(app.notes, note.id, { title: "Updated title" });
@@ -119,17 +119,17 @@ it.each([
       await write.wait({ tier: "global" });
       if (equality) {
         await expect.poll(() => error ?? rows, { timeout: 15_000 }).toEqual([]);
-        expect(await db.one(query, { tier: "global" })).toBeNull();
+        expect(await db.one(query, { tier: "remote" })).toBeNull();
         await db.update(app.notes, note.id, { title: note.title }).wait({ tier: "global" });
         await expect.poll(() => error ?? rows, { timeout: 15_000 }).toEqual([expected]);
-        expect(await db.one(query, { tier: "global" })).toEqual(expected);
+        expect(await db.one(query, { tier: "remote" })).toEqual(expected);
         return;
       }
       const updated = nested
         ? { ...project, notesViaProject: [{ ...child, title: "Updated title" }] }
         : { ...child, title: "Updated title" };
       await expect.poll(() => error ?? rows, { timeout: 15_000 }).toEqual([updated]);
-      expect(await db.one(query, { tier: "global" })).toEqual(updated);
+      expect(await db.one(query, { tier: "remote" })).toEqual(updated);
     } finally {
       stop?.();
       await db?.shutdown();

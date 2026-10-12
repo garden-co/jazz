@@ -51,10 +51,10 @@ it.each(["all", "one", "settled", "insert", "upsert"] as const)(
       prepareDbTransaction(tx, async (scope) => {
         switch (operation) {
           case "all":
-            await scope.all(renamed.notes, { tier: "local" });
+            await scope.all(renamed.notes, { tier: "local-first" });
             break;
           case "one":
-            await scope.one(renamed.notes, { tier: "local" });
+            await scope.one(renamed.notes, { tier: "local-first" });
             break;
           case "settled":
             await scope.allSettledForE2ee(renamed.notes);
@@ -70,8 +70,8 @@ it.each(["all", "one", "settled", "insert", "upsert"] as const)(
     ).rejects.toThrow();
     await expect(tx.commit().wait({ tier: "global" })).rejects.toThrow();
     await tx.rollback();
-    expect(await db.all(app.markers, { tier: "global" })).toEqual([]);
-    expect(await db.all(app.notes, { tier: "global" })).toEqual([note]);
+    expect(await db.all(app.markers, { tier: "remote" })).toEqual([]);
+    expect(await db.all(app.notes, { tier: "remote" })).toEqual([note]);
   },
 );
 
@@ -90,7 +90,7 @@ it("drains same-schema preparation after commit is requested without losing type
     const marker = scope.insert(app.markers, { title: "Prepared" });
     markerId = marker.id;
     scope.upsert(app.markers, marker.id, { title: "Updated during preparation" });
-    expect(await scope.one(app.markers.where({ id: marker.id }), { tier: "local" })).toEqual({
+    expect(await scope.one(app.markers.where({ id: marker.id }), { tier: "local-first" })).toEqual({
       id: marker.id,
       title: "Updated during preparation",
     });
@@ -98,7 +98,7 @@ it("drains same-schema preparation after commit is requested without losing type
   const committed = tx.commit();
   release();
   await Promise.all([preparation, committed.wait({ tier: "global" })]);
-  expect(await db.all(app.markers, { tier: "global" })).toEqual([
+  expect(await db.all(app.markers, { tier: "remote" })).toEqual([
     { id: markerId, title: "Updated during preparation" },
   ]);
 });

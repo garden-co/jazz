@@ -58,17 +58,17 @@ it("does not let a pending root deletion hide accepted offline encryption histor
     const project = tx.insert(app.projects, { title: "Retained accepted scope" });
     const note = tx.insert(app.notes, { projectId: project.id, body: "Before disconnect" });
     await tx.commit().wait({ tier: "global" });
-    expect(await db.all(app.notes, { tier: "global" })).toEqual([note]);
-    const roots = await db.all(app.__e2ee_spaces, { tier: "global" });
+    expect(await db.all(app.notes, { tier: "remote" })).toEqual([note]);
+    const roots = await db.all(app.__e2ee_spaces, { tier: "remote" });
     expect(roots).toHaveLength(1);
     await db.disconnect();
     const deletion = db.delete(app.__e2ee_spaces, roots[0]!.id);
     await deletion.wait({ tier: "local" });
-    expect(await db.all(app.__e2ee_spaces, { tier: "local" })).toEqual([]);
-    expect(await db.all(app.notes, { tier: "local" })).toEqual([note]);
+    expect(await db.all(app.__e2ee_spaces, { tier: "local-first" })).toEqual([]);
+    expect(await db.all(app.notes, { tier: "local-first" })).toEqual([note]);
     const encryptedWrite = db.update(app.notes, note.id, { body: "Accepted history still works" });
     await encryptedWrite.wait({ tier: "local" });
-    expect(await db.all(app.notes, { tier: "local" })).toEqual([
+    expect(await db.all(app.notes, { tier: "local-first" })).toEqual([
       { ...note, body: "Accepted history still works" },
     ]);
     const rejection = deletion.wait({ tier: "global" }).then(
@@ -78,8 +78,8 @@ it("does not let a pending root deletion hide accepted offline encryption histor
     await db.reconnect();
     expect(await rejection).toBe(true);
     await encryptedWrite.wait({ tier: "global" });
-    expect(await db.all(app.__e2ee_spaces, { tier: "global" })).toEqual(roots);
-    expect(await db.all(app.notes, { tier: "global" })).toEqual([
+    expect(await db.all(app.__e2ee_spaces, { tier: "remote" })).toEqual(roots);
+    expect(await db.all(app.notes, { tier: "remote" })).toEqual([
       { ...note, body: "Accepted history still works" },
     ]);
   } finally {

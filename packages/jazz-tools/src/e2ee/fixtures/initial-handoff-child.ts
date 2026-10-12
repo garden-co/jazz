@@ -93,16 +93,16 @@ async function main() {
         db.e2ee.spaces.grant(app.projects, projectId, config.recipientId).wait(),
         /Interrupted process handoff/,
       );
-      assert.deepEqual(await db.all(app.__e2ee_space_deliveries, { tier: "global" }), []);
+      assert.deepEqual(await db.all(app.__e2ee_space_deliveries, { tier: "remote" }), []);
     } else {
       assert.deepEqual(await db.e2ee.explain({ scope: app.projects, identifier: projectId }), {
         state: "refused",
         reason: "not-a-space-recipient",
       });
     }
-    const roots = await db.all(app.__e2ee_spaces, { tier: "global" });
+    const roots = await db.all(app.__e2ee_spaces, { tier: "remote" });
     assert.equal(roots.length, 1);
-    const grants = await db.all(app.__e2ee_space_grants, { tier: "global" });
+    const grants = await db.all(app.__e2ee_space_grants, { tier: "remote" });
     assert.equal(grants.length, 1);
     assert.equal(grants[0]!.recipientId, config.recipientId);
     process.stdout.write(

@@ -72,20 +72,20 @@ it("includes an accepted key-free approval when rotation precedes its delivery",
     await paused;
     const [challenge] = await second.all(
       app.__e2ee_device_challenges.where({ deviceId: thirdId }),
-      { tier: "global" },
+      { tier: "remote" },
     );
     expect(
       await second.all(app.__e2ee_device_approvals.where({ id: challenge!.id }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toHaveLength(1);
     expect(
       await second.all(app.__e2ee_device_deliveries.where({ id: challenge!.id }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toHaveLength(0);
     await second.e2ee.devices.revoke(creator!.id).wait();
-    const [successor] = await second.all(app.__e2ee_account_successors, { tier: "global" });
+    const [successor] = await second.all(app.__e2ee_account_successors, { tier: "remote" });
     expect(JSON.parse(new TextDecoder().decode(successor!.revision))).toContain(challenge!.id);
     expect(JSON.parse(new TextDecoder().decode(successor!.membership))).toContain(thirdId);
     release();

@@ -185,9 +185,9 @@ it("separates administration from key possession and self-removal, rejects forge
       groupId: id,
       authorDeviceId: request.id,
     });
-    expect(await administrator.all(proposed, { tier: "global" })).toEqual([]);
+    expect(await administrator.all(proposed, { tier: "remote" })).toEqual([]);
     await proposal(admin.account.id);
-    expect(await administrator.all(proposed, { tier: "global" })).toMatchObject([
+    expect(await administrator.all(proposed, { tier: "remote" })).toMatchObject([
       { memberId: admin.account.id },
     ]);
     // Target the administrator itself: accepting the unsigned pending-device

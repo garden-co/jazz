@@ -85,7 +85,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
           memberId: otherId,
           operation: "add",
         }),
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(membership).toBeDefined();
       membershipSignature = Buffer.from(membership!.signature).toString("base64");

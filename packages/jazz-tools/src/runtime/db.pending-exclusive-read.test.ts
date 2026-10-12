@@ -26,11 +26,11 @@ it("keeps local reads available while another transaction waits for remote cover
     db = await createDb(account);
     const initial = db.insert(app.entries, { title: "Available offline" });
     await initial.wait({ tier: "global" });
-    expect(await db.all(app.entries, { tier: "global" })).toEqual([initial.value]);
+    expect(await db.all(app.entries, { tier: "remote" })).toEqual([initial.value]);
     await db.disconnect();
     const tx = db.beginExclusiveTransaction();
     let remoteState = "pending";
-    const remoteRead = tx.all(app.entries.where({ title: "Not cached" }), { tier: "global" }).then(
+    const remoteRead = tx.all(app.entries.where({ title: "Not cached" }), { tier: "remote" }).then(
       () => {
         remoteState = "ready";
       },
@@ -40,7 +40,7 @@ it("keeps local reads available while another transaction waits for remote cover
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
     const rows = await Promise.race([
-      db.all(app.entries, { tier: "local" }),
+      db.all(app.entries, { tier: "local-first" }),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("Local read waited for remote coverage")), 5_000);
       }),

@@ -121,11 +121,11 @@ async function createFixture() {
     await tx.commit().wait({ tier: "global" });
     await owner.e2ee.spaces.grant(app.projects, shared.id, bob.account.id).wait();
     // Both parent ciphertexts are readable; only the excluded child's space is unavailable.
-    expect(await reader.all(app.notes.where({ projectId: shared.id }), { tier: "global" })).toEqual(
+    expect(await reader.all(app.notes.where({ projectId: shared.id }), { tier: "remote" })).toEqual(
       expect.arrayContaining([match, nonmatch]),
     );
     // The transaction reads locally, so first bring its readable child into the replica.
-    expect(await reader.one(app.comments.where({ id: visible.id }), { tier: "global" })).toEqual(
+    expect(await reader.one(app.comments.where({ id: visible.id }), { tier: "remote" })).toEqual(
       visible,
     );
     const query = app.notes
@@ -160,17 +160,17 @@ it.each(["one-shot", "transaction", "subscription"])(
   "rejects nonmatching candidates before decrypting their included children (%s)",
   async (readKind) => {
     const { reader, query, expected } = fixture;
-    await expect(reader.one(fixture.hidden, { tier: "global" })).rejects.toMatchObject({
+    await expect(reader.one(fixture.hidden, { tier: "remote" })).rejects.toMatchObject({
       name: "E2eeDataError",
       code: "key-not-shared",
     });
     const before = fixture.decryptions();
     if (readKind === "one-shot") {
-      expect(await reader.all(query, { tier: "global" })).toEqual(expected);
+      expect(await reader.all(query, { tier: "remote" })).toEqual(expected);
     } else if (readKind === "transaction") {
       const read = reader.beginTransaction();
       try {
-        expect(await read.all(query, { tier: "local" })).toEqual(expected);
+        expect(await read.all(query, { tier: "local-first" })).toEqual(expected);
       } finally {
         await read.rollback();
       }
@@ -187,7 +187,7 @@ it.each(["one-shot", "transaction", "subscription"])(
             failure = error;
           },
         },
-        { tier: "global" },
+        { tier: "remote" },
       );
       try {
         await expect.poll(() => failure ?? result, { timeout: 30_000 }).toEqual(expected);

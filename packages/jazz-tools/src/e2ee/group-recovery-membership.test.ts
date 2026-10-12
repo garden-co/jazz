@@ -140,10 +140,10 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
     const owner = await open(ownerAccount, browser);
     const groupId = await readyGroup(owner);
     const before = new Set(
-      (await owner.all(app.__e2ee_recovery_roots, { tier: "global" })).map((row) => row.id),
+      (await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).map((row) => row.id),
     );
     const { material } = await owner.e2ee.recovery.create().wait();
-    const added = (await owner.all(app.__e2ee_recovery_roots, { tier: "global" })).filter(
+    const added = (await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).filter(
       (row) => !before.has(row.id),
     );
     expect(added).toHaveLength(1);
@@ -151,14 +151,14 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
     const mallory = await open(await account(), browser);
     const other = mallory.e2ee.groups.create();
     await other.wait();
-    const root = await mallory.one(app.__e2ee_groups.where({ id: other.id }), { tier: "global" });
+    const root = await mallory.one(app.__e2ee_groups.where({ id: other.id }), { tier: "remote" });
     expect(root).toBeDefined();
 
     const futureAccount = await account();
     const writer = await open(futureAccount, native, false);
     expect(
       await writer.all(app.__e2ee_account_roots.where({ accountId: futureAccount.account.id }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([]);
     const unrelatedId = crypto.randomUUID();
@@ -227,7 +227,7 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
           groupId: other.id,
           recipientAccountId: futureAccount.account.id,
         }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([]);
 
@@ -257,7 +257,7 @@ it("isolates pre-enrolment authors, recipients and recovery deliveries from legi
       .wait({ tier: "global" });
     expect(
       await recovered.one(app.__e2ee_group_recovery_deliveries.where({ id: deliveryId }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toMatchObject({ groupId: unrelatedId, recoveryRootId });
 
@@ -334,7 +334,7 @@ it("rejects recovery creation when a required ready group loses membership", asy
       // The administrator keeps the group nonempty without needing its key. Admit
       // its signed membership now, after protection, so setup cannot deliver that key.
       const root = (await owner.one(app.__e2ee_groups.where({ id: groupId }), {
-        tier: "global",
+        tier: "remote",
       }))!;
       const device = JSON.parse((await stored(owner))!).devices[0];
       const privateKey = Uint8Array.from(device.signingPrivateKey);

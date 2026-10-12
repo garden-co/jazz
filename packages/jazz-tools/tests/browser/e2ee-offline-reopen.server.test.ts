@@ -75,13 +75,13 @@ it("reopens accepted encrypted data from IndexedDB and updates it offline in Chr
     db = await createDb(config);
     await db.disconnect();
     // Plaintext persistence is a control independent of key restoration.
-    expect(await db.one(app.projects.where({ id: project.id }), { tier: "local" })).toEqual(
+    expect(await db.one(app.projects.where({ id: project.id }), { tier: "local-first" })).toEqual(
       project,
     );
     const write = db.update(app.notes, note.id, { title: "After reopening offline" });
     expect(write).not.toBeInstanceOf(Promise);
     await withTimeout(write.wait({ tier: "local" }), 5_000, "Offline encrypted write stalled");
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual({
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual({
       ...note,
       title: "After reopening offline",
     });

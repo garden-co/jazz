@@ -76,7 +76,7 @@ it("inherits child-group access, preserves an alternate path, and rotates after 
     const signer = await createBrowserDeviceSigner();
     const addAccount = async (groupId: string) => {
       const root = (await owner.one(app.__e2ee_groups.where({ id: groupId }), {
-        tier: "global",
+        tier: "remote",
       }))!;
       const device = JSON.parse(stored()).devices[0];
       const privateKey = Uint8Array.from(device.signingPrivateKey);

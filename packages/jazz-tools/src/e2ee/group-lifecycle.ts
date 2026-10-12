@@ -157,7 +157,7 @@ export class Groups {
       });
       await Promise.all([
         this.warmMembership({ accountId: this.accountId }),
-        this.db.all(query, { tier: "global" }),
+        this.db.all(query, { tier: "remote" }),
       ]);
       const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
         const own = await readPublicMembershipHistory(tx, this.accountId, this.tables);
@@ -343,7 +343,7 @@ export class Groups {
         const batchIds = ids.slice(offset, offset + batchSize);
         const observedRoots = await this.db.all(
           this.tables.__e2ee_groups.where({ id: { in: batchIds } }),
-          { tier: "global" },
+          { tier: "remote" },
         );
         if (!observedRoots.length) continue;
         await this.warmMembership({ groupIds: batchIds });
@@ -446,11 +446,11 @@ export class Groups {
     )
       throw new Error("Invalid E2EE group member selector");
     const { kind: memberKind, id: memberId } = member;
-    const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "global" });
+    const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "remote" });
     if (!observed) throw new Error("E2EE group not found");
     const child =
       memberKind === "group"
-        ? await this.db.one(this.tables.__e2ee_groups.where({ id: memberId }), { tier: "global" })
+        ? await this.db.one(this.tables.__e2ee_groups.where({ id: memberId }), { tier: "remote" })
         : null;
     if (memberKind === "group" && !child) throw new Error("Missing E2EE child group");
     await Promise.all(
@@ -559,7 +559,7 @@ export class Groups {
         const membership = await this.deviceStates(tx);
         if (!membership.active.has(device.id))
           throw new Error("An approved active device must create the group");
-        if (await tx.one(this.tables.__e2ee_groups.where({ id }), { tier: "local" }))
+        if (await tx.one(this.tables.__e2ee_groups.where({ id }), { tier: "local-first" }))
           throw new Error("E2EE group already exists");
         const root = {
           id,
@@ -596,14 +596,14 @@ export class Groups {
     const rootQuery = this.tables.__e2ee_groups.where({ id });
     const observed = offline
       ? (await observeE2eeHistory(this.db, (reader) => reader.allSettledForE2ee(rootQuery))).rows[0]
-      : await this.db.one(rootQuery, { tier: "global" });
+      : await this.db.one(rootQuery, { tier: "remote" });
     if (!observed) return { state: "unavailable", reason: "group-not-found" };
     if (!offline) await this.warmMembership({ groupIds: [observed.id] });
     const device = await this.loadDevice();
     try {
       if (!offline)
         await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
-          tier: "global",
+          tier: "remote",
         });
       if (offline) {
         const snapshot = await observeE2eeHistory(this.db, (tx) =>
@@ -987,7 +987,7 @@ export class Groups {
     if (!preparedDeliveries) {
       await this.warmMembership({ groupIds: [expected.id] });
       await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: expected.id }), {
-        tier: "global",
+        tier: "remote",
       });
     }
     const observations = await this.readDeliveryObservations(expected.id, preparedDeliveries);
@@ -1009,9 +1009,9 @@ export class Groups {
     id: string,
     preparedDeliveries?: { rows: GroupDelivery[]; settlements: RowSettlement[] },
   ) {
-    await this.db.all(this.tables.__e2ee_group_repairs.where({ groupId: id }), { tier: "global" });
+    await this.db.all(this.tables.__e2ee_group_repairs.where({ groupId: id }), { tier: "remote" });
     await this.db.all(this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }), {
-      tier: "global",
+      tier: "remote",
     });
     const prior = await exclusiveE2eeTransaction(this.db, async (tx) => ({
       deliveries:
@@ -1233,7 +1233,7 @@ export class Groups {
   private async requestRepair(expected: GroupKey, device: LocalDevice, failed: string[]) {
     await this.warmMembership({ groupIds: [expected.id] });
     await this.db.all(this.tables.__e2ee_group_repairs.where({ groupId: expected.id }), {
-      tier: "global",
+      tier: "remote",
     });
     const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
       const own = await this.deviceStates(tx);
@@ -1364,12 +1364,12 @@ export class Groups {
   async warmMembership(scope: GroupHistoryScope) {
     const { roots, records, successors } = await collectGroupHistory(scope, {
       roots: (selector) =>
-        this.db.all(this.tables.__e2ee_groups.where(selector), { tier: "global" }),
+        this.db.all(this.tables.__e2ee_groups.where(selector), { tier: "remote" }),
       members: (selector) =>
-        this.db.all(this.tables.__e2ee_group_membership.where(selector), { tier: "global" }),
+        this.db.all(this.tables.__e2ee_group_membership.where(selector), { tier: "remote" }),
       successors: (groupIds) =>
         this.db.all(this.tables.__e2ee_group_successors.where({ groupId: { in: groupIds } }), {
-          tier: "global",
+          tier: "remote",
         }),
     });
     const accounts = new Set([this.accountId]);

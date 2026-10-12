@@ -41,7 +41,7 @@ it("captures non-empty E2EE history with one covered query", async () => {
         },
       ]);
       expect(queries).toHaveBeenCalledTimes(1);
-      expect(queries.mock.calls[0]![2]).toBe("global");
+      expect(queries.mock.calls[0]![2]).toBe("remote");
     } finally {
       queries.mockRestore();
     }

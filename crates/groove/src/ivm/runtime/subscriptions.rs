@@ -4402,7 +4402,7 @@ impl IvmRuntime {
         Some((current.id, *shared, shared_output))
     }
 
-    fn index_subscription_outputs(
+    pub(super) fn index_subscription_outputs(
         &mut self,
         subscription_id: SubscriptionId,
         outputs: &BTreeMap<String, CompiledNode>,
@@ -4415,7 +4415,7 @@ impl IvmRuntime {
         }
     }
 
-    fn unindex_subscription_outputs(
+    pub(super) fn unindex_subscription_outputs(
         &mut self,
         subscription_id: SubscriptionId,
         outputs: &BTreeMap<String, CompiledNode>,
