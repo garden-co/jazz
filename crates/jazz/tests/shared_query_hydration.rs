@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
-    Propagation, ReadOpts, SeededRowIdSource, SubscriptionEvent, SubscriptionStream, block_on,
+    Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, PreparedQuery, ReadOpts,
+    SeededRowIdSource, SubscriptionEvent, SubscriptionStream, block_on,
 };
 use jazz::groove::{records::Value, storage::TestStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -39,8 +39,7 @@ fn cells(input: std::collections::HashMap<String, jazz::tools::Value>) -> BTreeM
 }
 fn opts() -> ReadOpts {
     ReadOpts {
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     }
 }
@@ -246,7 +245,7 @@ fn settled_index_candidates_remain_live_after_promotion_and_newer_ahead_exit() {
         .unwrap();
     assert_state(&db, &query, 2, &mut stream, &mut state, &[20]);
     let global = ReadOpts {
-        tier: jazz::tx::DurabilityTier::Global,
+        tier: jazz::db::ReadTier::Remote,
         ..opts()
     };
     let ids = block_on(db.all_for_identity(&query, global.clone(), user(2)))
@@ -368,7 +367,7 @@ fn first_result_policy_id_read_keeps_bounded_storage_work() {
     let rows = block_on(db.all_for_identity(
         &query,
         ReadOpts {
-            tier: jazz::tx::DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..opts()
         },
         user(2),
@@ -475,7 +474,7 @@ fn first_result_intersects_index_keys_before_loading_rows() {
     let rows = block_on(db.all_for_identity(
         &query,
         ReadOpts {
-            tier: jazz::tx::DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..opts()
         },
         user(2),

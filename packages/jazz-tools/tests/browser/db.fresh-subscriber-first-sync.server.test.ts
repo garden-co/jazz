@@ -62,7 +62,7 @@ describe("fresh subscriber first sync", () => {
             error = next;
           },
         },
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     await waitForCondition(

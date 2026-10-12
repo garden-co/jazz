@@ -113,7 +113,7 @@ it.each(["update", "upsert", "delete"] as const)(
         const tx = db.beginExclusiveTransaction();
         try {
           tx[operation](app.proposals, original.value.id, { value: "provisional content" });
-          expect(await tx.all(app.proposals, { tier: "local" })).toEqual([
+          expect(await tx.all(app.proposals, { tier: "local-first" })).toEqual([
             { id: original.value.id, value: "provisional content" },
           ]);
           await expect(tx.allSettledForE2ee(app.proposals)).rejects.toThrow();

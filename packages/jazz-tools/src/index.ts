@@ -21,7 +21,6 @@ export {
 // DSL for schema definitions
 export {
   table,
-  col,
   getCollectedSchema,
   resetCollectedState,
   allowExternalProvenanceName,
@@ -154,6 +153,7 @@ export type {
 } from "./migrations.js";
 
 export { schema } from "./schema-namespace.js";
+export { migration } from "./migration-namespace.js";
 
 // Storage drivers
 export * from "./drivers/index.js";

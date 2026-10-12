@@ -29,7 +29,7 @@ fn offline_catalogue_remote_read<'a>(
     Box::pin(db.all(
         query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: crate::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -50,7 +50,7 @@ fn offline_catalogue_serialized_read_with_deadline(
         db.all_serialized_query(
             &query,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: crate::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
             None,
@@ -503,7 +503,7 @@ fn assert_snapshot_preserves_offline_enum_rows(descendant: bool) {
         &db,
         &Query::from("items"),
         ReadOpts {
-            tier: DurabilityTier::Local,
+            tier: crate::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         },
     );
@@ -559,7 +559,7 @@ fn assert_snapshot_preserves_offline_enum_rows(descendant: bool) {
         &db,
         &Query::from("items"),
         ReadOpts {
-            tier: DurabilityTier::Local,
+            tier: crate::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         },
     );
@@ -585,7 +585,7 @@ fn assert_snapshot_preserves_offline_enum_rows(descendant: bool) {
         &reopened,
         &Query::from("items"),
         ReadOpts {
-            tier: DurabilityTier::Local,
+            tier: crate::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         },
     );
@@ -715,9 +715,7 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
         &db,
         &query,
         ReadOpts {
-            tier: DurabilityTier::Local,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         },
@@ -841,9 +839,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
         &db,
         &query,
         ReadOpts {
-            tier: DurabilityTier::Local,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         },
@@ -1042,7 +1038,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     let mut subscription = block_on(db.subscribe_for_identity(
         &prepared,
         ReadOpts {
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
         alice,
@@ -1586,7 +1582,7 @@ fn assert_authorization_source_refresh(
     let mut subscription = block_on(db.subscribe_for_identity(
         &prepared,
         ReadOpts {
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
         alice,

@@ -88,7 +88,7 @@ it.each(["before", "same transaction"])(
       const recipient = third.device();
       const identity = (await first.db.one(
         app.__e2ee_account_identities.where({ id: account.account.id }),
-        { tier: "global" },
+        { tier: "remote" },
       ))!;
       const oldKey = await crypto.keyEnvelope.open(
         signer,
@@ -173,7 +173,7 @@ it.each(["before", "same transaction"])(
           { id: challengeId },
         )
         .wait({ tier: "global" });
-      const revision = (await first.db.all(app.__e2ee_device_approvals, { tier: "global" })).map(
+      const revision = (await first.db.all(app.__e2ee_device_approvals, { tier: "remote" })).map(
         (row) => row.id,
       );
       const coordinates = {
@@ -233,7 +233,7 @@ it.each(["before", "same transaction"])(
         removedDeviceId: secondId,
         membership: proposal.membership,
         revision: encodePublicApprovalRevision(
-          (await first.db.all(app.__e2ee_public_device_approvals, { tier: "global" }))
+          (await first.db.all(app.__e2ee_public_device_approvals, { tier: "remote" }))
             .filter((row) => row.epochId === identity.epochId)
             .map((row) => row.id),
         ),

@@ -20,7 +20,9 @@ test("catalogue documents every current wallclock case once", () => {
 });
 
 test("every current Divan function in the owned suites has a metadata entry", () => {
-  const paths = [...new Set(benchmarkMetadata.map((m) => m.source))];
+  const paths = [
+    ...new Set(benchmarkMetadata.filter((m) => m.harness !== "vitest").map((m) => m.source)),
+  ];
   for (const path of paths) {
     const source = readFileSync(new URL(path, root), "utf8");
     const functions = [...source.matchAll(/#\[divan::bench\(([\s\S]*?)\)\]\s*fn\s+(\w+)/g)];

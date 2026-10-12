@@ -1,4 +1,4 @@
-import { col as s } from "../dsl.js";
+import { schemaColumns as s } from "../dsl.js";
 import { defineTable } from "../table-definition.js";
 import { rel, reverse } from "../relationships.js";
 

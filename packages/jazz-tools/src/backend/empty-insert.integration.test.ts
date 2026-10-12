@@ -40,16 +40,16 @@ describe("inserting with every optional column omitted through the native backen
       await inTransaction.wait({ tier: "global" });
 
       const reader = await openSession();
-      const notes = await reader.all(app.notes, { tier: "global" });
+      const notes = await reader.all(app.notes, { tier: "remote" });
       expect(notes).toHaveLength(2);
       expect(notes).toContainEqual({ id: note.id, label: null, rank: null });
-      expect(await reader.all(app.posters, { tier: "global" })).toEqual([
+      expect(await reader.all(app.posters, { tier: "remote" })).toEqual([
         { id: poster.id, title: null, metadata: null },
       ]);
 
       // The created row behaves like any other: a later update applies.
       await writer.update(app.notes, note.id, { label: "set" }).wait({ tier: "global" });
-      expect(await reader.all(app.notes.where({ label: "set" }), { tier: "global" })).toEqual([
+      expect(await reader.all(app.notes.where({ label: "set" }), { tier: "remote" })).toEqual([
         { id: note.id, label: "set", rank: null },
       ]);
     } finally {

@@ -98,7 +98,7 @@ export class DeviceApproval {
           this.backgroundError = error;
         },
       },
-      { tier: "global" },
+      { tier: "remote" },
     );
     db.onShutdown(() => {
       this.lifetime.abort();
@@ -189,28 +189,28 @@ export class DeviceApproval {
 
   private async prefetchSnapshot(): Promise<void> {
     await Promise.all([
-      this.db.all(this.tables.__e2ee_account_successors, { tier: "global" }),
-      this.db.all(this.tables.__e2ee_account_identities, { tier: "global" }),
-      this.db.all(this.tables.__e2ee_device_requests, { tier: "global" }),
-      this.db.all(this.tables.__e2ee_device_challenges, { tier: "global" }),
-      this.db.all(this.tables.__e2ee_device_proofs, { tier: "global" }),
-      this.db.all(this.tables.__e2ee_device_approvals, { tier: "global" }),
-      this.db.all(this.tables.__e2ee_device_deliveries, { tier: "global" }),
+      this.db.all(this.tables.__e2ee_account_successors, { tier: "remote" }),
+      this.db.all(this.tables.__e2ee_account_identities, { tier: "remote" }),
+      this.db.all(this.tables.__e2ee_device_requests, { tier: "remote" }),
+      this.db.all(this.tables.__e2ee_device_challenges, { tier: "remote" }),
+      this.db.all(this.tables.__e2ee_device_proofs, { tier: "remote" }),
+      this.db.all(this.tables.__e2ee_device_approvals, { tier: "remote" }),
+      this.db.all(this.tables.__e2ee_device_deliveries, { tier: "remote" }),
       this.db.all(this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }), {
-        tier: "global",
+        tier: "remote",
       }),
       this.db.all(this.tables.__e2ee_account_roots.where({ accountId: this.accountId }), {
-        tier: "global",
+        tier: "remote",
       }),
       this.db.all(this.tables.__e2ee_device_keys.where({ "$createdBy.account": this.accountId }), {
-        tier: "global",
+        tier: "remote",
       }),
       this.db.all(this.tables.__e2ee_public_device_approvals.where({ accountId: this.accountId }), {
-        tier: "global",
+        tier: "remote",
       }),
       this.db.all(
         this.tables.__e2ee_public_account_successors.where({ accountId: this.accountId }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ]);
     this.snapshotPrefetched = true;
@@ -228,7 +228,7 @@ export class DeviceApproval {
           // exclusive snapshot. Keep that ordering barrier without prefetching
           // all twelve histories; the transaction still covers every history.
           await this.db.one(this.tables.__e2ee_account_identities.where({ id: this.accountId }), {
-            tier: "global",
+            tier: "remote",
           });
         }
         const read = await exclusiveE2eeTransaction(this.db, (tx) => this.readSnapshot(tx));
@@ -824,7 +824,7 @@ export class DeviceApproval {
             },
             onError: finish,
           },
-          { tier: "global" },
+          { tier: "remote" },
         );
         if (finished) stop();
       } catch (error) {
@@ -853,7 +853,7 @@ export class DeviceApproval {
       if (!members.has(this.deviceId) || !members.delete(deviceId))
         throw new Error("Unknown or inactive E2EE device");
       const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
-        const existing = await tx.all(this.tables.__e2ee_account_successors, { tier: "global" });
+        const existing = await tx.all(this.tables.__e2ee_account_successors, { tier: "remote" });
         this.assertOpen();
         if (
           existing.length !== snapshot.successors.length ||
@@ -862,11 +862,11 @@ export class DeviceApproval {
           throw new Error("Stale E2EE predecessor");
         // Predicate reads bind the complete immutable approval revision to acceptance.
         const observed = await Promise.all([
-          tx.all(this.tables.__e2ee_device_requests, { tier: "global" }),
-          tx.all(this.tables.__e2ee_device_challenges, { tier: "global" }),
-          tx.all(this.tables.__e2ee_device_proofs, { tier: "global" }),
-          tx.all(this.tables.__e2ee_device_approvals, { tier: "global" }),
-          tx.all(this.tables.__e2ee_device_deliveries, { tier: "global" }),
+          tx.all(this.tables.__e2ee_device_requests, { tier: "remote" }),
+          tx.all(this.tables.__e2ee_device_challenges, { tier: "remote" }),
+          tx.all(this.tables.__e2ee_device_proofs, { tier: "remote" }),
+          tx.all(this.tables.__e2ee_device_approvals, { tier: "remote" }),
+          tx.all(this.tables.__e2ee_device_deliveries, { tier: "remote" }),
         ]);
         this.assertOpen();
         const expected = [
@@ -881,7 +881,7 @@ export class DeviceApproval {
           throw new Error("Stale E2EE membership revision");
         const recoveryRoots = await tx.all(
           this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }),
-          { tier: "global" },
+          { tier: "remote" },
         );
         this.assertOpen();
         if (ids(recoveryRoots) !== ids(snapshot.publicHistory.recovery.rows))
@@ -891,7 +891,7 @@ export class DeviceApproval {
             accountId: this.accountId,
             epochId: snapshot.identity.epochId,
           }),
-          { tier: "global" },
+          { tier: "remote" },
         );
         this.assertOpen();
         const nextSecret = runtimeRandomBytes(32);

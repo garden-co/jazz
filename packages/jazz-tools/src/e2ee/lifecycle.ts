@@ -59,7 +59,7 @@ export class E2ee {
     list: async (): Promise<DeviceInfo[]> => {
       await this.prepare();
       const { approved, verified, revoked } = await this.approval!.deviceStates();
-      const rows = await this.db.all(this.app.__e2ee_device_requests, { tier: "global" });
+      const rows = await this.db.all(this.app.__e2ee_device_requests, { tier: "remote" });
       this.assertOpen();
       return rows.map((row) => ({
         id: row.id,
@@ -152,7 +152,7 @@ export class E2ee {
       // A later disconnect must not cache skipped enrolment as successful.
       {
         const query = requests.where({ id: device.id });
-        let row = await this.db.one(query, { tier: "global" });
+        let row = await this.db.one(query, { tier: "remote" });
         if (!row) {
           this.assertOpen();
           try {
@@ -173,7 +173,7 @@ export class E2ee {
               .wait({ tier: "global" });
           } catch (error) {
             // Another context may have published this same durable proposal.
-            row = await this.db.one(query, { tier: "global" });
+            row = await this.db.one(query, { tier: "remote" });
             if (!row) throw error;
           }
         }
@@ -190,7 +190,7 @@ export class E2ee {
           throw new Error("E2EE device request does not match the locally retained key");
         const publicKeys = this.app.__e2ee_device_keys;
         const publicQuery = publicKeys.where({ deviceId: device.id });
-        if (!(await this.db.one(publicQuery, { tier: "global" }))) {
+        if (!(await this.db.one(publicQuery, { tier: "remote" }))) {
           this.assertOpen();
           try {
             await this.db
@@ -206,7 +206,7 @@ export class E2ee {
               .wait({ tier: "global" });
           } catch (error) {
             // Concurrent contexts may publish the same immutable, policy-checked keys.
-            if (!(await this.db.one(publicQuery, { tier: "global" }))) throw error;
+            if (!(await this.db.one(publicQuery, { tier: "remote" }))) throw error;
           }
         }
         this.assertOpen();
