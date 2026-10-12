@@ -37,14 +37,9 @@ const policies = definePermissions(app, ({ policy, session }) => {
 });
 const permissions = { ...deviceRequestPermissions, ...policies };
 
-it.each([
-  ["warn", "explicit disconnect"],
-  ["reject", "explicit disconnect"],
-  ["warn", "unexpected transport loss"],
-  ["reject", "unexpected transport loss"],
-] as const)(
-  "applies the configured %s policy to a remaining member's known-stale offline write (%s)",
-  async (staleWrites, offlineCause) => {
+it.each(["explicit disconnect", "unexpected transport loss"] as const)(
+  "applies default warning and explicit rejection to known-stale offline writes (%s)",
+  async (offlineCause) => {
     const rotationPolicy = definePermissions(app, ({ policy }) => {
       policy.__e2ee_space_successors.allowRead.always();
       policy.__e2ee_space_successors.allowInsert.never();
@@ -52,8 +47,8 @@ it.each([
     const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const store = () => {
-      let saved: string | null = null;
+    const store = (initial: string | null = null) => {
+      let saved = initial;
       return {
         async read() {
           return saved;
@@ -73,15 +68,21 @@ it.each([
       });
       const alice = await localAccountConfig(server.appId, server.url);
       const bob = await localAccountConfig(server.appId, server.url);
-      const owner = await createDb({
-        ...alice,
-        e2ee: { app, store: store(), ...(staleWrites === "reject" ? { staleWrites } : {}) },
-      });
+      const ownerStore = store();
+      const owner = await createDb({ ...alice, e2ee: { app, store: ownerStore } });
       clients.push(owner);
       const departing = await createDb({ ...bob, e2ee: { app, store: store() } });
       clients.push(departing);
       await owner.e2ee.devices.list();
       await departing.e2ee.devices.list();
+      // Reopen the enrolled owner on an independent replica with the other policy.
+      // Copy opaque store bytes; each replica validates history independently.
+      const rejecting = await createDb({
+        ...alice,
+        e2ee: { app, store: store(await ownerStore.read()), staleWrites: "reject" },
+      });
+      clients.push(rejecting);
+      const owners = [owner, rejecting];
       const tx = owner.beginExclusiveTransaction();
       const project = tx.insert(
         app.projects,
@@ -92,36 +93,39 @@ it.each([
       );
       const note = tx.insert(app.notes, { projectId: project.id, title: "Before removal" });
       await tx.commit().wait({ tier: "global" });
-      expect(await owner.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+      for (const client of owners)
+        expect(await client.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(
+          note,
+        );
       // The departing member can record removal but cannot rotate for those left behind.
       await departing.e2ee.spaces.revoke(app.projects, project.id, bob.account.id).wait();
-      expect(await owner.all(app.__e2ee_space_grants, { tier: "global" })).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ operation: "remove", recipientId: bob.account.id }),
-        ]),
-      );
-      // Capture complete accepted membership while online. This policy does not
-      // allow rotation; a changed sibling-query snapshot alone cannot authorise reuse.
-      expect(await owner.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
-        state: "maintenance-required",
-        reason: "recipient-removed",
-      });
-      if (offlineCause === "explicit disconnect") await owner.disconnect();
-      else await server.stop();
-      warning.mockClear();
-      const write = owner.update(app.notes, note.id, { title: "Written with the retained epoch" });
-      if (staleWrites === "reject") {
-        await expect(write.wait({ tier: "local" })).rejects.toMatchObject({
-          name: "E2eeDataError",
-          code: "maintenance-required",
-        });
-        expect(warning).not.toHaveBeenCalled();
-      } else {
-        await write.wait({ tier: "local" });
-        expect(warning).toHaveBeenCalledWith(
-          "E2EE: writing offline with a known-stale encryption epoch; removed recipients may still decrypt this write.",
+      for (const client of owners) {
+        expect(await client.all(app.__e2ee_space_grants, { tier: "global" })).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ operation: "remove", recipientId: bob.account.id }),
+          ]),
         );
+        // Capture complete accepted membership on each replica before going offline.
+        // Rotation is forbidden; a changed sibling snapshot alone cannot authorise reuse.
+        expect(await client.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
+          state: "maintenance-required",
+          reason: "recipient-removed",
+        });
       }
+      if (offlineCause === "explicit disconnect") {
+        for (const client of owners) await client.disconnect();
+      } else await server.stop();
+      warning.mockClear();
+      await expect(
+        rejecting.update(app.notes, note.id, { title: "Must be rejected" }).wait({ tier: "local" }),
+      ).rejects.toMatchObject({ name: "E2eeDataError", code: "maintenance-required" });
+      expect(warning).not.toHaveBeenCalled();
+      await owner
+        .update(app.notes, note.id, { title: "Written with the retained epoch" })
+        .wait({ tier: "local" });
+      expect(warning).toHaveBeenCalledWith(
+        "E2EE: writing offline with a known-stale encryption epoch; removed recipients may still decrypt this write.",
+      );
     } finally {
       warning.mockRestore();
       await Promise.all(clients.map((client) => client.shutdown()));
@@ -390,7 +394,7 @@ it("updates an existing encrypted space offline and accepts the write after reco
 }, 60_000);
 
 it.each([false, true])(
-  "can write offline immediately after atomic creation without warming an encrypted read (cache failure: %s)",
+  "writes offline after cold creation and verifies online cache failures (cache failure: %s)",
   async (failHistoryPersistence) => {
     const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
@@ -405,7 +409,7 @@ it.each([false, true])(
         schema: app,
         permissions,
       });
-      db = await createDb({
+      const config = {
         ...(await localAccountConfig(server.appId, server.url)),
         e2ee: {
           app,
@@ -413,7 +417,7 @@ it.each([false, true])(
             async read() {
               return stored;
             },
-            async update(transform) {
+            async update(transform: (current: string | null) => string) {
               const next = transform(stored);
               if (failHistoryPersistence && JSON.parse(next).acceptedHistoryV1) {
                 cacheFailures++;
@@ -423,7 +427,8 @@ it.each([false, true])(
             },
           },
         },
-      });
+      };
+      db = await createDb(config);
       const tx = db.beginExclusiveTransaction();
       const project = tx.insert(app.projects, { title: "Immediate offline project" });
       const note = tx.insert(app.notes, { projectId: project.id, title: "Initial value" });
@@ -449,6 +454,20 @@ it.each([false, true])(
       });
       await db.reconnect();
       await write.wait({ tier: "global" });
+      if (failHistoryPersistence) {
+        await db.shutdown();
+        db = undefined;
+        // Drop the initial in-memory bundle, forcing a verified online history read.
+        cacheFailures = 0;
+        db = await createDb(config);
+        await expect(db.one(app.notes.where({ id: note.id }), { tier: "global" })).resolves.toEqual(
+          {
+            ...note,
+            title: "Immediate offline update",
+          },
+        );
+        expect(cacheFailures).toBeGreaterThan(0);
+      }
     } finally {
       clearTimeout(timer);
       if (db) {
@@ -460,58 +479,6 @@ it.each([false, true])(
   },
   60_000,
 );
-
-it("returns a verified online read when its optional history cache cannot be saved", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  let db: Awaited<ReturnType<typeof createDb>> | undefined;
-  let stored: string | null = null;
-  let cacheFailures = 0;
-  try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
-    const config = {
-      ...(await localAccountConfig(server.appId, server.url)),
-      e2ee: {
-        app,
-        store: {
-          async read() {
-            return stored;
-          },
-          async update(transform: (current: string | null) => string) {
-            const next = transform(stored);
-            if (JSON.parse(next).acceptedHistoryV1) {
-              cacheFailures++;
-              throw new Error("Offline cache storage unavailable");
-            }
-            stored = next;
-          },
-        },
-      },
-    };
-    db = await createDb(config);
-    const tx = db.beginExclusiveTransaction();
-    const project = tx.insert(app.projects, { title: "Optional history cache" });
-    const note = tx.insert(app.notes, { projectId: project.id, title: "Verified online" });
-    await tx.commit().wait({ tier: "global" });
-    await db.shutdown();
-    db = undefined;
-    // Reopening drops the initial in-memory bundle, forcing an online history read.
-    cacheFailures = 0;
-    db = await createDb(config);
-    await expect(db.one(app.notes.where({ id: note.id }), { tier: "global" })).resolves.toEqual(
-      note,
-    );
-    expect(cacheFailures).toBeGreaterThan(0);
-  } finally {
-    await db?.shutdown();
-    await server.stop();
-  }
-}, 60_000);
 
 it("stores an encrypted update locally after unexpected transport loss", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
@@ -569,7 +536,6 @@ it("stores an encrypted update locally after unexpected transport loss", async (
     await server.stop();
   }
 }, 60_000);
-
 it.each(["ordinary owner read", "owner reconnect"])(
   "%s delivers a newly created space key to another recipient",
   async (trigger) => {
