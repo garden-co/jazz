@@ -873,6 +873,7 @@ where
                         tier,
                         &head_keys,
                         &BranchLayerAccess::Full,
+                        None,
                     )
                     .await?;
                 let head_content_layer = layer_stack::Layer::new(head_content.clone());
@@ -3011,12 +3012,23 @@ where
     ///
     /// Under an index access path every content layer reads only its index
     /// prefix: the local delta masks origin through the shadow, and the head
-    /// masks the base by its presence, which costs the head's row count
-    /// rather than the base's. The deletion registers stay whole: a head row
-    /// inside the prefix can still be deleted by its base image anywhere in
-    /// the base key (`INV-BVIEW-10`), and finding that image by row id needs
-    /// a keyed lookup the graph has no operator for (#4005). A primary-key path
-    /// bounds every layer, deletion registers included.
+    /// masks the base by its presence. Everything else is read by the
+    /// content candidates' row ids (a keyed lookup, #4005), so it costs the
+    /// candidates rather than the branches:
+    ///
+    /// - the head's presence is looked up by the base candidates' row ids:
+    ///   anti-joining the base candidates only needs the head rows that
+    ///   share one of their ids;
+    /// - every deletion-register layer, head and base, is looked up by the
+    ///   row ids of either branch's candidates. A head row inside the prefix
+    ///   can still be deleted by its base image anywhere in the base key
+    ///   (`INV-BVIEW-10`); that image has the head row's id. Every consumer
+    ///   of the register reads it only for a content row's id, and stacking
+    ///   is per row id, so narrowing each layer to the candidates' ids is
+    ///   exact.
+    ///
+    /// A primary-key path bounds every layer, deletion registers included,
+    /// by the same prefix.
     async fn live_branch_view_registers(
         &mut self,
         request: &SourceRequest,
@@ -3035,31 +3047,62 @@ where
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))
         };
+        let indexed = matches!(access, BranchLayerAccess::Index { .. });
         let head_keys = stored_keys(self, head)?;
         let head_content = self
             .projected_branch_content_source_graph(request, table, tier, &head_keys, &access)
             .await?;
-        let head_deletions = self
-            .projected_branch_deletion_source_graph(request, tier, &head_keys, &access)
-            .await?;
         let Some(base) = base else {
+            let candidates = indexed.then(|| head_content.clone().project(["row_uuid"]));
+            let head_deletions = self
+                .projected_branch_deletion_source_graph(
+                    request,
+                    tier,
+                    &head_keys,
+                    &access,
+                    candidates.as_ref(),
+                )
+                .await?;
             return Ok((head_content, head_deletions));
         };
         let base_keys = stored_keys(self, base)?;
         let base_content = self
             .projected_branch_content_source_graph(request, table, tier, &base_keys, &access)
             .await?;
-        let base_deletions = self
-            .projected_branch_deletion_source_graph(request, tier, &base_keys, &access)
+        let candidates = indexed.then(|| {
+            GraphBuilder::union([
+                head_content.clone().project(["row_uuid"]),
+                base_content.clone().project(["row_uuid"]),
+            ])
+        });
+        let head_deletions = self
+            .projected_branch_deletion_source_graph(
+                request,
+                tier,
+                &head_keys,
+                &access,
+                candidates.as_ref(),
+            )
             .await?;
-        let head_content = match access {
-            BranchLayerAccess::Index { .. } => layer_stack::Layer::masked_by(
-                head_content,
-                layer_stack::Mask::Presence(self.branch_presence(request, tier, &head_keys)?),
-            ),
-            BranchLayerAccess::Full | BranchLayerAccess::PrimaryKey(_) => {
-                layer_stack::Layer::new(head_content)
-            }
+        let base_deletions = self
+            .projected_branch_deletion_source_graph(
+                request,
+                tier,
+                &base_keys,
+                &access,
+                candidates.as_ref(),
+            )
+            .await?;
+        let head_content = if indexed {
+            let presence = self.branch_presence(
+                request,
+                tier,
+                &head_keys,
+                base_content.clone().project(["row_uuid"]),
+            )?;
+            layer_stack::Layer::masked_by(head_content, layer_stack::Mask::Presence(presence))
+        } else {
+            layer_stack::Layer::new(head_content)
         };
         Ok((
             layer_stack::compose([head_content, layer_stack::Layer::new(base_content)]),
@@ -3070,27 +3113,31 @@ where
         ))
     }
 
-    /// Every `row_uuid` a branch key holds at `tier`, whatever its values:
-    /// the union of its refs' rows, read through the system-field winner
-    /// projection.
+    /// The `row_uuid`s a branch key holds at `tier` among `row_ids`,
+    /// whatever their values: the union of its refs' rows, each looked up by
+    /// those ids and read through the system-field winner projection.
     fn branch_presence(
         &mut self,
         request: &SourceRequest,
         tier: DurabilityTier,
         stored_keys: &BTreeSet<BranchKey>,
+        row_ids: GraphBuilder,
     ) -> Result<GraphBuilder, SourceResolutionError> {
         let mut rows = Vec::new();
         for r in Ref::stack(tier) {
             for branch_key in stored_keys {
+                let marker = self
+                    .node
+                    .physical_current_marker_source_graph(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        r.physical_class(),
+                        branch_key,
+                        None,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
                 rows.push(
-                    self.node
-                        .physical_current_marker_source_graph(
-                            self.read_view.read_schema,
-                            &request.source.table,
-                            r.physical_class(),
-                            branch_key,
-                            None,
-                        )
+                    lookup_by_row_id(marker, row_ids.clone())
                         .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
                         .project(["row_uuid"]),
                 );
@@ -3221,14 +3268,16 @@ where
 
     /// Build the maintained deletion-register winner relation for one logical
     /// branch key: its `[local, origin]` ref stack, normalizing historical
-    /// short key spellings before winner selection. Only a primary-key
-    /// `access` narrows it.
+    /// short key spellings before winner selection. A primary-key `access`
+    /// narrows every layer by its prefix; `row_ids` (a relation with a
+    /// `row_uuid` field) narrows every layer to those rows by a keyed lookup.
     pub async fn projected_branch_deletion_source_graph(
         &mut self,
         request: &SourceRequest,
         tier: DurabilityTier,
         stored_keys: &BTreeSet<BranchKey>,
         access: &BranchLayerAccess,
+        row_ids: Option<&GraphBuilder>,
     ) -> Result<GraphBuilder, SourceResolutionError> {
         let fields = std::iter::once("branch_key".to_owned())
             .chain(register_storage_field_names())
@@ -3244,13 +3293,17 @@ where
             stored_keys
                 .iter()
                 .map(|branch_key| {
-                    self.node.physical_current_marker_source_graph(
+                    let rows = self.node.physical_current_marker_source_graph(
                         self.read_view.read_schema,
                         &request.source.table,
                         r.physical_class(),
                         branch_key,
                         scan.clone(),
-                    )
+                    )?;
+                    match row_ids {
+                        Some(row_ids) => lookup_by_row_id(rows, row_ids.clone()),
+                        None => Ok(rows),
+                    }
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map(|rows| {
@@ -3793,6 +3846,15 @@ pub(super) enum BranchLayerAccess {
         intersections: Vec<(String, Vec<Value>)>,
         maintained: bool,
     },
+}
+
+/// The rows of a physical current table source, keyed `(branch_key,
+/// row_uuid, ..)`, whose `row_uuid` is one of `row_ids`' (a keyed lookup:
+/// one storage probe per distinct id, maintained as the ids change).
+fn lookup_by_row_id(rows: GraphBuilder, row_ids: GraphBuilder) -> Result<GraphBuilder, Error> {
+    GraphBuilder::lookup(rows, row_ids, ["row_uuid"]).ok_or(Error::InvalidStoredValue(
+        "a keyed lookup needs a physical current table source",
+    ))
 }
 
 /// A scan of every key under a row-id prefix, whatever the table's key

@@ -114,9 +114,10 @@ fn indexed_branch_todos_schema() -> JazzSchema {
 /// index). An unindexed read of the same view is the control: it scans both
 /// branch keys.
 ///
-/// The deletion registers are not index-bounded (a draft row can be deleted
-/// by its main image anywhere in main), so this asserts the content-source
-/// counters, which is what `query_engine_read_metrics` attributes.
+/// This asserts the content-source counters, which is what
+/// `query_engine_read_metrics` attributes; the deletion registers and the
+/// draft's presence are read by the candidates' row ids
+/// (`indexed_branch_view_registers_are_read_by_candidate_row_ids`).
 ///
 /// White-box because the read path's source counters are not public.
 ///
@@ -303,6 +304,122 @@ fn by_id_branch_view_read_is_bounded_by_the_row_key() {
     assert!(
         storage.global_current_rows.reads <= 4,
         "a by-id branch-view read must not read main's other rows: {storage:?}"
+    );
+}
+
+/// Alice reads `title = needle` on her draft over main, where main also
+/// holds settled rows outside the prefix, half of them deleted. Content reads
+/// only the index prefix, and every deletion-register layer of both branches,
+/// like the draft's presence that masks main, is read by the row ids of the
+/// content candidates (a keyed lookup), so the read's storage work is the
+/// same with 20 or 60 such rows (read whole, the registers cost one read per
+/// row of main: 28 against 68 reads). White-box because storage-read
+/// attribution is not public.
+///
+/// ```text
+/// main (settled): a=needle  b=needle  hay x n  (every other hay row deleted)
+/// draft (pending): a deleted
+/// alice ──title = needle, draft over main──► {b}   (reads independent of n)
+/// ```
+#[test]
+fn indexed_branch_view_registers_are_read_by_candidate_row_ids() {
+    let read = |hay: u8| {
+        let schema = indexed_branch_todos_schema();
+        let db = block_on(Db::open_history_complete(DbConfig {
+            schema: schema.clone(),
+            storage: rocks_storage(&schema),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xd9; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
+        }))
+        .expect("open history-complete authority");
+        let main = BranchSelector::new([("branch_id", Value::Uuid(row(0xe0).0))]);
+        let draft = BranchSelector::new([("branch_id", Value::Uuid(row(0xe1).0))]);
+        let on_main = || crate::db::WriteTarget::BranchView {
+            head: main.clone(),
+            base: None,
+        };
+        let (a, b) = (row(1), row(2));
+        let rows = [(a, "needle"), (b, "needle")]
+            .into_iter()
+            .chain((0..hay).map(|n| (row(0x10 + n), "hay")));
+        for (row_id, value) in rows {
+            let write = block_on(db.insert(
+                "todos",
+                BTreeMap::from([("title".to_owned(), Value::String(value.to_owned()))]),
+                crate::db::InsertOptions {
+                    row_id: Some(row_id),
+                    target: crate::db::ExactWriteTarget::Branch(main.clone()),
+                    ..Default::default()
+                },
+            ))
+            .expect("seed main row");
+            db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+                .expect("settle main row");
+        }
+        for n in (0..hay).step_by(2) {
+            let write = block_on(db.delete(
+                "todos",
+                row(0x10 + n),
+                crate::db::DeleteOptions {
+                    target: on_main(),
+                    ..Default::default()
+                },
+            ))
+            .expect("delete main row");
+            db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+                .expect("settle main delete");
+        }
+        block_on(db.delete(
+            "todos",
+            a,
+            crate::db::DeleteOptions {
+                target: crate::db::WriteTarget::BranchView {
+                    head: draft.clone(),
+                    base: Some(BranchViewBase::current(main.clone())),
+                },
+                ..Default::default()
+            },
+        ))
+        .expect("pending draft delete");
+        let view = ReadOpts {
+            tier: crate::db::ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        }
+        .branch_view(draft, Some(BranchViewBase::current(main)));
+        let needle = db
+            .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
+            .expect("prepare indexed query");
+        // Warm the plan so the measured read is the row read alone.
+        assert_eq!(
+            row_ids(&block_on(db.all(&needle, view.clone())).expect("warm read")),
+            vec![b]
+        );
+        db.reset_storage_read_metrics_for_test();
+        assert_eq!(
+            row_ids(&block_on(db.all(&needle, view)).expect("indexed read")),
+            vec![b]
+        );
+        db.take_storage_read_metrics_for_test()
+    };
+    let small = read(20);
+    let large = read(60);
+    assert_eq!(
+        (
+            small.global_current_rows.reads,
+            small.ahead_current_rows.reads
+        ),
+        (
+            large.global_current_rows.reads,
+            large.ahead_current_rows.reads
+        ),
+        "main's rows outside the prefix must not be read: {small:?} vs {large:?}"
+    );
+    assert!(
+        small.global_current_rows.reads <= 8,
+        "only the candidates' rows are read: {small:?}"
     );
 }
 

@@ -28,7 +28,7 @@ Invariant digest:
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
 - `INV-REF-1`: A read MUST compose its layers by one rule: the top layer holding a row supplies it whatever its stamp, each layer masks the layers below it before any predicate or relational operator, and content and deletion registers are each stacked by that rule independently.
 - `INV-REF-2`: A read's refs MUST follow its tier: `Global` reads origin alone; `Local` and `None` read the local delta over origin.
-- `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; origin's shadow for the local delta under an index; a branch's whole presence for a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix.
+- `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; origin's shadow for the local delta under an index; the head's presence, read by the base candidates' row ids, for a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix and each deletion-register layer only for the content candidates' row ids.
 - `INV-REF-4`: The rule that a pending predecessor is the writer's own node MUST be decided only in validation and in the conflict walk, never encoded in stored or sent bytes.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
 
@@ -558,18 +558,25 @@ by a relation that stays exact under that narrowing (`INV-REF-3`):
 - _Shadow._ The local delta masks origin by the shadow read under the same
   index prefix. A pending edit that moved a row out of the prefix still masks
   its origin image, because the shadow holds that image.
-- _Presence._ A branch's every row id, read without the index. A branch view
-  masks its base by the head's presence. That costs the head's row count, not
-  the base's, so a head edit that left the predicate still hides its base
-  row.
+- _Presence._ The head's row ids, read without the index. A branch view
+  masks its base by the head's presence, so a head edit that left the
+  predicate still hides its base row. Only the head rows that share a base
+  candidate's id can hide one, so the presence is read by those ids: a keyed
+  lookup of the head's refs by the base candidates' row ids
+  ([#4005](https://github.com/garden-co/jazz/issues/4005)). It costs the base
+  candidates, not the head.
 
 Under an index prefix each content layer of a branch view therefore reads
 only that prefix, and the base's content costs its index matches. The
-deletion registers of the branch layers stay whole: a head row inside the
-prefix can still be deleted by its base image anywhere in the base key, and
-finding that image by row id needs a keyed lookup that Groove graphs do not
-have ([#4005](https://github.com/garden-co/jazz/issues/4005)). A row-id read
-bounds every layer, the deletion registers included.
+deletion registers are read by row id, not whole: every layer of both
+branches is a keyed lookup by the row ids of the content candidates of
+either branch. A head row inside the prefix can still be deleted by its base
+image anywhere in the base key, and that image has the head row's id. Every
+reader of a register reads it only for a content row's id, and stacking is
+per row id, so narrowing each layer to the candidates' ids before stacking is
+exact (`INV-BVIEW-10`). A lookup stays live: a key entering or leaving the
+candidates, and any write to a looked-up row, updates it. A row-id read
+bounds every layer by its row-id prefix instead.
 
 **Peers (out of scope).** A peer remote would be one more sparse delta, read
 as `[local, peer, origin]`. Merging all peers into one delta keeps the stack

@@ -1223,6 +1223,22 @@ pub(crate) fn graph_builders_equal_with(
                 GraphBuilder::RecursiveStepWitness { recursive: b },
             ) => pending.push((a.as_ref(), b.as_ref())),
             (
+                GraphBuilder::Lookup {
+                    keys: a,
+                    keys_on: b,
+                    table: c,
+                    scan: d,
+                    variant_projection: e,
+                },
+                GraphBuilder::Lookup {
+                    keys: x,
+                    keys_on: y,
+                    table: z,
+                    scan: w,
+                    variant_projection: v,
+                },
+            ) if b == y && c == z && d == w && e == v => pending.push((a.as_ref(), x.as_ref())),
+            (
                 GraphBuilder::Filter {
                     input: a,
                     predicate: b,
