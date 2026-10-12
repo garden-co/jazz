@@ -599,11 +599,11 @@ it.each(["ordinary owner read", "owner reconnect"])(
   60_000,
 );
 
-it("does not hide an observed accepted revocation behind pending offline deletions", async () => {
+it("keeps independent offline readers revoked after ordinary-query and device-list observations", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
-  const store = () => {
-    let value: string | null = null;
+  const store = (initial: string | null = null) => {
+    let value = initial;
     return {
       async read() {
         return value;
@@ -622,7 +622,8 @@ it("does not hide an observed accepted revocation behind pending offline deletio
       permissions,
     });
     const account = await localAccountConfig(server.appId, server.url);
-    const first = await createDb({ ...account, e2ee: { app, store: store() } });
+    const firstStore = store();
+    const first = await createDb({ ...account, e2ee: { app, store: firstStore } });
     clients.push(first);
     const [firstDevice] = await first.e2ee.devices.list();
     const second = await createDb({ ...account, e2ee: { app, store: store() } });
@@ -638,6 +639,15 @@ it("does not hide an observed accepted revocation behind pending offline deletio
     await initial.commit().wait({ tier: "global" });
     const target = { scope: app.projects, identifier: project.id };
     expect(await first.e2ee.explain(target)).toEqual({ state: "ready" });
+
+    // An independent store/runtime observes the same revocation via devices.list().
+    // Its known-revoked flag cannot satisfy the first reader's ordinary-query check.
+    const knownRevoked = await createDb({
+      ...account,
+      e2ee: { app, store: store(await firstStore.read()) },
+    });
+    clients.push(knownRevoked);
+    expect(await knownRevoked.e2ee.explain(target)).toEqual({ state: "ready" });
 
     await second.e2ee.devices.revoke(firstDevice!.id).wait();
     // Observe through ordinary queries, not devices.list(), so the E2EE reader
@@ -655,6 +665,16 @@ it("does not hide an observed accepted revocation behind pending offline deletio
     expect(await first.all(app.__e2ee_public_account_successors, { tier: "local" })).toEqual([]);
     const state = await first.e2ee.explain(target).catch(() => ({ state: "unavailable" }));
     expect(["refused", "unavailable"]).toContain(state.state);
+
+    expect(
+      (await knownRevoked.e2ee.devices.list()).find((device) => device.id === firstDevice!.id)
+        ?.state,
+    ).toBe("revoked");
+    await knownRevoked.disconnect();
+    expect(await knownRevoked.e2ee.explain(target)).toMatchObject({
+      state: "refused",
+      reason: "device-not-active",
+    });
   } finally {
     for (const client of clients) {
       await client.reconnect();
@@ -1005,64 +1025,6 @@ it("does not grant access while an addition is pending or after Jazz rejects it"
   } finally {
     release();
     for (const client of clients) await client.shutdown();
-    await server.stop();
-  }
-}, 60_000);
-
-it("does not revive a known-revoked device through an offline space snapshot", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  const clients: Awaited<ReturnType<typeof createDb>>[] = [];
-  const store = () => {
-    let value: string | null = null;
-    return {
-      async read() {
-        return value;
-      },
-      async update(transform: (current: string | null) => string) {
-        value = transform(value);
-      },
-    };
-  };
-  try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
-    const account = await localAccountConfig(server.appId, server.url);
-    const first = await createDb({ ...account, e2ee: { app, store: store() } });
-    clients.push(first);
-    const [firstDevice] = await first.e2ee.devices.list();
-    const second = await createDb({ ...account, e2ee: { app, store: store() } });
-    clients.push(second);
-    const request = (await second.e2ee.devices.list()).find(
-      (device) => device.state === "pending",
-    )!;
-    await first.e2ee.devices.approve(request.id).wait();
-    await second.e2ee.devices.list();
-    const tx = first.beginExclusiveTransaction();
-    const project = tx.insert(app.projects, { title: "Revoked device scope" });
-    tx.insert(app.notes, { projectId: project.id, title: "Private note" });
-    await tx.commit().wait({ tier: "global" });
-    const target = { scope: app.projects, identifier: project.id };
-    expect(await first.e2ee.explain(target)).toEqual({ state: "ready" });
-
-    await second.e2ee.devices.revoke(firstDevice!.id).wait();
-    expect(
-      (await first.e2ee.devices.list()).find((device) => device.id === firstDevice!.id)?.state,
-    ).toBe("revoked");
-    await first.disconnect();
-    expect(await first.e2ee.explain(target)).toMatchObject({
-      state: "refused",
-      reason: "device-not-active",
-    });
-  } finally {
-    for (const client of clients) {
-      await client.reconnect();
-      await client.shutdown();
-    }
     await server.stop();
   }
 }, 60_000);
