@@ -528,7 +528,7 @@
         },
         {
           "path": "packages/jazz-tools/tests/browser/indexeddb-jazz-compat.test.ts",
-          "anchor": "opens the pinned catalogue/history/branch/large-value corpus through public WasmDb"
+          "anchor": "rejects the pinned previous-durability corpus without rewriting it"
         }
       ]
     },
