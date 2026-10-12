@@ -326,6 +326,7 @@ mod eviction;
 mod exclusive_read_evidence;
 mod global_state;
 mod ingest;
+mod layer_stack;
 mod node_aliases;
 pub use node_aliases::NodeAliases;
 #[doc(hidden)]
@@ -345,6 +346,7 @@ mod policy;
 pub use jazz_engine::query_engine;
 mod query_eval;
 mod recovery;
+mod refs;
 pub mod relay_scope;
 mod row_availability;
 mod source_resolution;
@@ -372,6 +374,7 @@ use codec::*;
 use database_slot::DatabaseSlot;
 use open_tx::*;
 use physical::*;
+use refs::{Ref, Remote};
 
 pub use eviction::{ClientCacheBudget, ClientCacheBudgetReport, ClientCacheClass, EvictColdReport};
 

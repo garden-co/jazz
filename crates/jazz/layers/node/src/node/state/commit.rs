@@ -1417,21 +1417,23 @@ where
         schema_version: SchemaVersionId,
     ) -> Result<Option<(CurrentRow, (TxTime, NodeUuid), bool)>, Error> {
         let prefix = vec![groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0))];
-        let global = self.physical_current_source_scan_graph(
-            schema_version,
-            &table.name,
-            PhysicalCurrentClass::Global,
-            groove::ivm::StaticScanSpec::Point(prefix.clone()),
-        )?;
-        let ahead = self.physical_current_source_scan_graph(
-            schema_version,
-            &table.name,
-            PhysicalCurrentClass::Ahead,
-            groove::ivm::StaticScanSpec::Prefix(prefix),
-        )?;
+        // The row's `[local, origin]` stack, both refs read at the row's key.
+        let layers = layer_stack::try_ref_layers(DurabilityTier::Local, |r| {
+            let scan = match r {
+                Ref::Local => groove::ivm::StaticScanSpec::Prefix(prefix.clone()),
+                Ref::Remote(Remote::Origin) => groove::ivm::StaticScanSpec::Point(prefix.clone()),
+            };
+            self.physical_current_source_scan_graph(
+                schema_version,
+                &table.name,
+                r.physical_class(),
+                scan,
+            )
+            .map(layer_stack::Layer::new)
+        })?;
         let result = self
             .database
-            .query_graph(crate::node::codec::pending_overlay_over(global, ahead))
+            .query_graph(layer_stack::compose(layers))
             .await
             .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
         let Some(delta) = result.deltas.into_iter().find(|delta| delta.weight > 0) else {

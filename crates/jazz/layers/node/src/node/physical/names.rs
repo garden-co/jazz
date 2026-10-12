@@ -33,13 +33,22 @@ fn physical_current_projection_target_for_enum_columns(
     format!("{base}_enum_fields_{suffix}")
 }
 
+/// The physical current tables of one table, named by the refs they store
+/// (`refs.rs`, SPEC 4 §4.7). Table names and bytes are durable and do not
+/// follow the vocabulary.
 #[derive(Clone, Copy)]
 pub(super) enum PhysicalCurrentClass {
+    /// Origin (`Ref::Remote(Remote::Origin)`): Core's settled image of every
+    /// row this node holds, stored in full.
     Global,
+    /// The local delta (`Ref::Local` over origin): the newest pending image
+    /// of each row this node holds a pending write for, already folded over
+    /// origin's image.
     Ahead,
-    /// The synced image of each row that has a pending overlay, indexed like
-    /// global current, so a Local index read can drop overlaid settled rows
-    /// without scanning the whole overlay.
+    /// Origin's shadow of the local delta: origin's image of each row the
+    /// delta overrides, indexed like origin, so an index read of the local
+    /// stack can mask origin under the same prefix without scanning the
+    /// whole delta.
     AheadShadow,
 }
 

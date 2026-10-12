@@ -94,15 +94,17 @@ where
     }
 
     /// Read raw row images of one branch through the physical winner
-    /// projection. Deletion markers need only system fields, so they must not
-    /// pass through the read schema's enum lens: an old schema cannot name a
-    /// newer case, but it can still observe that the row was deleted.
+    /// projection, optionally under a `scan` below the branch key. Deletion
+    /// markers need only system fields, so they must not pass through the
+    /// read schema's enum lens: an old schema cannot name a newer case, but
+    /// it can still observe that the row was deleted.
     pub(super) fn physical_current_marker_source_graph(
         &self,
         schema_version: SchemaVersionId,
         logical_table: &str,
         class: PhysicalCurrentClass,
         branch_key: &BranchKey,
+        scan: Option<groove::ivm::StaticScanSpec>,
     ) -> Result<GraphBuilder, Error> {
         let mapping = self
             .catalogue
@@ -133,7 +135,7 @@ where
         Ok(GraphBuilder::variant_source_scan(
             storage_table,
             physical_current_winner_projection_target(mapping.table_id, &physical_fields),
-            branch_scan(branch_key, None),
+            branch_scan(branch_key, scan),
         ))
     }
 
@@ -216,6 +218,8 @@ where
         ))
     }
 
+    /// Read one physical current class of one branch key, optionally under a
+    /// `scan` below the branch key.
     pub(super) fn physical_current_branch_source_graph_with_projection_target(
         &self,
         schema_version: SchemaVersionId,
@@ -223,6 +227,7 @@ where
         class: PhysicalCurrentClass,
         projection_target: impl Into<String>,
         branch_key: &BranchKey,
+        scan: Option<groove::ivm::StaticScanSpec>,
     ) -> Result<GraphBuilder, Error> {
         let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
@@ -234,7 +239,7 @@ where
         Ok(GraphBuilder::variant_source_scan(
             storage_table,
             projection_target,
-            branch_scan(branch_key, None),
+            branch_scan(branch_key, scan),
         ))
     }
 
