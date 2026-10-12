@@ -1,6 +1,6 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
-import type { Db, TableProxy, E2eeTransactionScope } from "../runtime/db.js";
+import type { Db, TableProxy, E2eeTransactionScope, QueryBuilder } from "../runtime/db.js";
 import type { RowSettlement } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
@@ -63,6 +63,7 @@ function unavailableSpaceKey(cause: unknown): never {
 }
 
 const recoveryIdBatchSize = 128;
+const recoverySnapshotBatchSize = 8;
 
 function isTransactionConflict(error: unknown): boolean {
   return (
@@ -209,14 +210,18 @@ export class Spaces {
     return address;
   }
 
-  private async discoverRecoveryRoots(): Promise<{
+  private async discoverRecoveryRoots(requireActiveDevice = false): Promise<{
     own: PublicMembershipHistory;
     roots: SpaceRoot[];
+    device?: DeviceState;
   }> {
     await prefetchPublicMembershipHistory(this.db, this.accountId, this.tables);
     await this.groups?.warmMembership({ accountId: this.accountId });
     const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
-      const own = await readPublicMembershipHistory(tx, this.accountId, this.tables);
+      const device = requireActiveDevice ? await this.requireDevice().states(tx) : undefined;
+      const own =
+        device?.publicHistory ??
+        (await readPublicMembershipHistory(tx, this.accountId, this.tables));
       // Deleted grants seed discovery only; live replay still proves membership.
       const direct = await tx.allSettledForE2ee(
         this.tables.__e2ee_space_grants.includeDeleted().where({
@@ -254,12 +259,107 @@ export class Spaces {
         );
         roots.push(...found.rows);
       }
-      return { own, roots };
+      return { own, roots, device };
     });
-    const { own, roots } = await read.wait({ tier: "global" });
+    const { own, roots, device } = await read.wait({ tier: "global" });
     this.assertOpen();
+    if (requireActiveDevice && !device?.active.has(this.requireDevice().id))
+      throw new Error("Space recovery requires an active device");
     // Discovery is a candidate superset. Fresh per-path replay establishes entitlement.
-    return { own, roots: roots.filter((root) => root.id === spaceRootId(root)) };
+    return { own, device, roots: roots.filter((root) => root.id === spaceRootId(root)) };
+  }
+
+  // At most eight targets share an accepted read-only authority transaction.
+  // Exact predicates retain their coverage, including empty results. No keys
+  // are opened before acceptance; secrets are handled one at a time afterward.
+  // Maintenance/publication still uses fresh authority. No read plan survives
+  // the batch, and no cached observation authorises a later write.
+  private async *recoverySnapshots(roots: SpaceRoot[], recoveryRootId?: string, restore = false) {
+    for (let offset = 0; offset < roots.length; offset += recoverySnapshotBatchSize) {
+      const observed = roots.slice(offset, offset + recoverySnapshotBatchSize);
+      const ids = observed.map((root) => root.id);
+      const selector = ids.length === 1 ? { spaceId: ids[0]! } : { spaceId: { in: ids } };
+      const [grants, successors] = await Promise.all([
+        this.db.all(this.tables.__e2ee_space_grants.where(selector), { tier: "global" }),
+        this.db.all(this.tables.__e2ee_space_successors.where(selector), { tier: "global" }),
+      ]);
+      this.assertOpen();
+      const groupIds = this.groupHistoryIds(grants, []);
+      if (groupIds !== undefined) await this.groups?.warmMembership({ groupIds });
+      await Promise.all(
+        [
+          ...this.accounts(
+            observed,
+            grants,
+            successors.map((row) => row.authorAccountId),
+          ),
+        ].map((id) => prefetchPublicMembershipHistory(this.db, id, this.tables)),
+      );
+      const query =
+        recoveryRootId === undefined
+          ? undefined
+          : this.tables.__e2ee_space_recovery_deliveries.where({
+              ...selector,
+              recipientAccountId: this.accountId,
+              recoveryRootId,
+            });
+      if (query) await this.db.all(query, { tier: "global" });
+      const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
+        const device = restore ? await this.requireDevice().states(tx) : undefined;
+        const own =
+          device?.publicHistory ??
+          (await readPublicMembershipHistory(tx, this.accountId, this.tables));
+        const reads = new Map<string, Promise<Settled<{ id: string }>>>();
+        const reader: E2eeTransactionScope = {
+          kind: tx.kind,
+          all: tx.all.bind(tx),
+          one: tx.one.bind(tx),
+          insert: tx.insert.bind(tx),
+          upsert: tx.upsert.bind(tx),
+          allSettledForE2ee<T extends { id: string }>(query: QueryBuilder<T>): Promise<Settled<T>> {
+            const key = query._build();
+            let result = reads.get(key);
+            if (!result) {
+              result = tx.allSettledForE2ee(query);
+              reads.set(key, result);
+            }
+            return result as Promise<Settled<T>>;
+          },
+        };
+        const [roots, grants, successors] = await Promise.all([
+          tx.allSettledForE2ee(this.tables.__e2ee_spaces.where({ id: { in: ids } })),
+          tx.allSettledForE2ee(this.tables.__e2ee_space_grants.where(selector)),
+          tx.allSettledForE2ee(this.tables.__e2ee_space_successors.where(selector)),
+        ]);
+        const select = <T extends { id: string }>(
+          records: Settled<T>,
+          matches: (row: T) => boolean,
+        ): Settled<T> => {
+          const rows = records.rows.filter(matches);
+          const ids = new Set(rows.map((row) => row.id));
+          return { rows, settlements: records.settlements.filter((row) => ids.has(row.rowId)) };
+        };
+        const spaces: { observed: SpaceRoot; snapshot: Snapshot }[] = [];
+        for (const root of observed) {
+          const records = {
+            roots: select(roots, (row) => row.id === root.id),
+            grants: select(grants, (row) => row.spaceId === root.id),
+            successors: select(successors, (row) => row.spaceId === root.id),
+          };
+          spaces.push({
+            observed: root,
+            snapshot: await this.readRecords(reader, root, root.id, own, [], false, records),
+          });
+        }
+        const recovery: Settled<SpaceRecoveryDelivery> = query
+          ? await tx.allSettledForE2ee(query)
+          : { rows: [], settlements: [] };
+        return { own, device, spaces, recovery };
+      });
+      const accepted = await read.wait({ tier: "global" });
+      this.assertOpen();
+      yield accepted;
+    }
   }
 
   /** Read-only coverage: no device state, private store, delivery or maintenance writes. */
@@ -275,57 +375,46 @@ export class Spaces {
       if ((await this.checkRecoveryAuthority(material, discovery.own)).epochId !== accountEpochId)
         throw new E2eeRecoveryError("recovery-state-changed");
       const paths: SpaceRecoveryPath[] = [];
-      for (const observed of discovery.roots) {
-        // Recovery opens its own envelopes; ordinary device deliveries are unused.
-        await this.warm(observed, [], false);
-        const query = this.tables.__e2ee_space_recovery_deliveries.where({
-          spaceId: observed.id,
-          recipientAccountId: this.accountId,
-          recoveryRootId: material.rootId,
-        });
-        await this.db.all(query, { tier: "global" });
-        const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
-          const own = await readPublicMembershipHistory(tx, this.accountId, this.tables);
-          return {
-            own,
-            snapshot: await this.readRecords(tx, observed, observed.id, own, [], false),
-            recovery: await tx.allSettledForE2ee(query),
-          };
-        });
-        const { own, snapshot, recovery } = await read.wait({ tier: "global" });
-        this.assertOpen();
-        if ((await this.checkRecoveryAuthority(material, own)).epochId !== accountEpochId)
+      for await (const batch of this.recoverySnapshots(discovery.roots, material.rootId)) {
+        if ((await this.checkRecoveryAuthority(material, batch.own)).epochId !== accountEpochId)
           throw new E2eeRecoveryError("recovery-state-changed");
-        const state = await this.recoveryState(snapshot, observed);
-        if (!state || state.sealed || !state.members.has(this.accountId)) continue;
-        const path = {
-          scopeId: state.root.scopeId,
-          identifier: state.root.identifier,
-          spaceId: state.root.id,
-          epochId: state.keyRoot.epochId,
-        };
-        if (state.rotationRequired || !state.groupsReady) {
-          paths.push({ ...path, validation: "unavailable", reason: "maintenance-required" });
-          continue;
-        }
-        const secret = await this.openRecovery(
-          snapshot,
-          state.root,
-          state.position,
-          state.keyRoot.epochId,
-          recovery,
-          material,
-        );
-        if (secret) {
-          secret.fill(0);
-          paths.push({ ...path, validation: "validated" });
-        } else {
-          const present = recovery.rows.some((row) => row.epochId === path.epochId);
-          paths.push({
-            ...path,
-            validation: "unavailable",
-            reason: present ? "unusable-recovery-delivery" : "missing-recovery-delivery",
-          });
+        for (const { observed, snapshot } of batch.spaces) {
+          this.assertOpen();
+          const recovery = {
+            rows: batch.recovery.rows.filter((row) => row.spaceId === observed.id),
+            settlements: batch.recovery.settlements,
+          };
+          const state = await this.recoveryState(snapshot, observed);
+          if (!state || state.sealed || !state.members.has(this.accountId)) continue;
+          const path = {
+            scopeId: state.root.scopeId,
+            identifier: state.root.identifier,
+            spaceId: state.root.id,
+            epochId: state.keyRoot.epochId,
+          };
+          if (state.rotationRequired || !state.groupsReady) {
+            paths.push({ ...path, validation: "unavailable", reason: "maintenance-required" });
+            continue;
+          }
+          const secret = await this.openRecovery(
+            snapshot,
+            state.root,
+            state.position,
+            state.keyRoot.epochId,
+            recovery,
+            material,
+          );
+          if (secret) {
+            secret.fill(0);
+            paths.push({ ...path, validation: "validated" });
+          } else {
+            const present = recovery.rows.some((row) => row.epochId === path.epochId);
+            paths.push({
+              ...path,
+              validation: "unavailable",
+              reason: present ? "unusable-recovery-delivery" : "missing-recovery-delivery",
+            });
+          }
         }
       }
       this.assertOpen();
@@ -401,30 +490,27 @@ export class Spaces {
 
   /** Backfill existing memberships before reporting recovery material as usable. */
   async protectRecovery(material: string): Promise<void> {
-    const provider = this.requireDevice();
-    await prefetchPublicMembershipHistory(this.db, this.accountId, this.tables);
-    const initial = await exclusiveE2eeTransaction(this.db, (tx) => provider.states(tx));
-    const own = await initial.wait({ tier: "global" });
-    this.assertOpen();
-    if (!own.active.has(provider.id)) throw new Error("Space recovery requires an active device");
-    const { roots } = await this.discoverRecoveryRoots();
+    const { roots, device } = await this.discoverRecoveryRoots(true);
+    if (!device) throw new Error("Space recovery requires an active device");
     const required = new Set<string>();
-    for (const observed of roots) {
-      await this.warm(observed);
-      const read = await exclusiveE2eeTransaction(this.db, (tx) =>
-        this.readSnapshot(tx, observed, observed.id),
-      );
-      const snapshot = await read.wait({ tier: "global" });
-      this.assertOpen();
-      const state = await this.recoveryState(snapshot, observed);
-      if (!state || state.sealed || !state.members.has(this.accountId)) continue;
-      if ((await this.explainAddress(observed)).state !== "ready")
-        throw new Error("Space key unavailable while creating recovery");
-      required.add(observed.id);
+    for await (const batch of this.recoverySnapshots(roots)) {
+      // Record every required path before running maintenance. A later removal
+      // cannot silently shrink creation's required coverage.
+      const eligible: SpaceRoot[] = [];
+      for (const { observed, snapshot } of batch.spaces) {
+        const state = await this.recoveryState(snapshot, observed);
+        if (!state || state.sealed || !state.members.has(this.accountId)) continue;
+        required.add(observed.id);
+        eligible.push(observed);
+      }
+      for (const observed of eligible) {
+        if ((await this.explainAddress(observed)).state !== "ready")
+          throw new Error("Space key unavailable while creating recovery");
+      }
     }
     // Ready creators need proof of recovery coverage, not local recovery-key
     // restaging or another delivery/maintenance pass.
-    const paths = await this.inspectRecovery(material, own.epochId);
+    const paths = await this.inspectRecovery(material, device.epochId);
     let maintenance = false;
     let unavailableDelivery = false;
     for (const path of paths) {
@@ -452,52 +538,47 @@ export class Spaces {
     try {
       device = await this.loadDevice();
       const { roots } = await this.discoverRecoveryRoots();
-      for (const observed of roots) {
-        // Recovery opens its own envelopes; ordinary device deliveries are unused.
-        await this.warm(observed, [], false);
-        const query = this.tables.__e2ee_space_recovery_deliveries.where({
-          spaceId: observed.id,
-          recipientAccountId: this.accountId,
-          recoveryRootId: material.rootId,
-        });
-        await this.db.all(query, { tier: "global" });
-        const read = await exclusiveE2eeTransaction(this.db, async (tx) => ({
-          snapshot: await this.readSnapshot(tx, observed, observed.id, [], false),
-          recovery: await tx.allSettledForE2ee(query),
-        }));
-        const { snapshot, recovery } = await read.wait({ tier: "global" });
-        this.assertOpen();
-        if (!snapshot.state.active.has(device.id))
+      for await (const batch of this.recoverySnapshots(roots, material.rootId, true)) {
+        if (!batch.device?.active.has(device.id))
           throw new Error("Space recovery requires an active device");
-        await this.checkRecoveryAuthority(material, snapshot.state.publicHistory);
-        const state = await this.recoveryState(snapshot, observed);
-        if (!state || state.sealed || !state.members.has(this.accountId)) continue;
-        const secret = await this.openRecovery(
-          snapshot,
-          state.root,
-          state.position,
-          state.keyRoot.epochId,
-          recovery,
-          material,
-        );
-        try {
-          if (!secret) throw new RecoveryCandidateError("recovery-space-delivery-unavailable");
-          await retainRecoveredSpaceKey(
-            this.requireDevice().store,
-            this.accountContext(this.accountId),
-            state.root.id,
+        await this.checkRecoveryAuthority(material, batch.own);
+        for (const { observed, snapshot } of batch.spaces) {
+          this.assertOpen();
+          const recovery = {
+            rows: batch.recovery.rows.filter((row) => row.spaceId === observed.id),
+            settlements: batch.recovery.settlements,
+          };
+          const state = await this.recoveryState(snapshot, observed);
+          if (!state || state.sealed || !state.members.has(this.accountId)) continue;
+          const secret = await this.openRecovery(
+            snapshot,
+            state.root,
+            state.position,
             state.keyRoot.epochId,
-            secret,
-            this.assertOpen,
-            this.requireDevice().keyLifetime,
+            recovery,
+            material,
           );
-        } finally {
-          secret?.fill(0);
+          try {
+            if (!secret) throw new RecoveryCandidateError("recovery-space-delivery-unavailable");
+            await retainRecoveredSpaceKey(
+              this.requireDevice().store,
+              this.accountContext(this.accountId),
+              state.root.id,
+              state.keyRoot.epochId,
+              secret,
+              this.assertOpen,
+              this.requireDevice().keyLifetime,
+            );
+          } finally {
+            secret?.fill(0);
+          }
+          // Re-read current eligibility before delivering or rotating from the recovered key.
+          const result = await this.explainAddress(observed);
+          if (result.state === "refused" && result.reason === "device-not-active")
+            throw new Error("Space recovery requires an active device");
+          if (result.state !== "ready" && result.state !== "refused")
+            throw new Error("Recovered space requires maintenance");
         }
-        // Re-read current eligibility before delivering or rotating from the recovered key.
-        const result = await this.explainAddress(observed);
-        if (result.state !== "ready" && result.state !== "refused")
-          throw new Error("Recovered space requires maintenance");
       }
     } finally {
       material.recipient.privateKey.fill(0);
@@ -766,14 +847,20 @@ export class Spaces {
     ownHistory: PublicMembershipHistory,
     extraAccounts: string[] = [],
     includeDeliveries = true,
+    // Only supplied from the same recovery transaction. Its bounded
+    // set predicates cover these per-space rows and absent-row evidence.
+    prepared?: Pick<Snapshot, "roots" | "grants" | "successors">,
   ): Promise<Snapshot> {
     const [roots, grants, deliveries, successors] = await Promise.all([
-      tx.allSettledForE2ee(this.tables.__e2ee_spaces.where({ id: spaceRootId(address) })),
-      tx.allSettledForE2ee(this.tables.__e2ee_space_grants.where({ spaceId: id })),
+      prepared?.roots ??
+        tx.allSettledForE2ee(this.tables.__e2ee_spaces.where({ id: spaceRootId(address) })),
+      prepared?.grants ??
+        tx.allSettledForE2ee(this.tables.__e2ee_space_grants.where({ spaceId: id })),
       includeDeliveries
         ? tx.allSettledForE2ee(this.tables.__e2ee_space_deliveries.where({ spaceId: id }))
         : { rows: [], settlements: [] },
-      tx.allSettledForE2ee(this.tables.__e2ee_space_successors.where({ spaceId: id })),
+      prepared?.successors ??
+        tx.allSettledForE2ee(this.tables.__e2ee_space_successors.where({ spaceId: id })),
     ]);
     const histories = new Map([[this.accountId, ownHistory]]);
     const groupIds = this.groupHistoryIds(grants.rows, extraAccounts);
