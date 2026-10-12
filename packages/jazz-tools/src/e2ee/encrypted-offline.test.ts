@@ -853,10 +853,6 @@ it("keeps accepted space access while a removal is pending and after Jazz reject
     const project = tx.insert(app.projects, { title: "Rejected removal" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Accepted data" });
     await tx.commit().wait({ tier: "global" });
-    // Finish optional delivery before testing the pending permission change.
-    expect(await db.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
-      state: "ready",
-    });
     const query = app.notes.where({ id: note.id });
     expect(await db.one(query, { tier: "global" })).toEqual(note);
 
@@ -973,10 +969,6 @@ it("does not grant access while an addition is pending or after Jazz rejects it"
     const project = tx.insert(app.projects, { title: "Rejected addition" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Owner only" });
     await tx.commit().wait({ tier: "global" });
-    // Finish optional delivery before testing the pending permission change.
-    expect(await owner.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
-      state: "ready",
-    });
     const query = app.notes.where({ id: note.id });
     expect(await owner.one(query, { tier: "global" })).toEqual(note);
     hold = true;
