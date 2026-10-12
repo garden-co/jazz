@@ -1,3 +1,9 @@
+// Mount the same styles as the app layout: the empty composer needs its CSS height.
+import "@astryxdesign/core/astryx.css";
+import "@garden-co/design/jazz/theme.css";
+import "@garden-co/design/jazz/components.css";
+import "@garden-co/design/jazz/fonts.css";
+import "../../app/globals.css";
 import { afterEach, it } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { act } from "react";
