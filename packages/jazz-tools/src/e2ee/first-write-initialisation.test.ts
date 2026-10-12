@@ -7,93 +7,6 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createBrowserKeyEnvelope } from "./browser.js";
 import type { KeyEnvelope } from "./types.js";
 
-it("grants the first encrypted writer, not the pre-existing project's creator", async () => {
-  const before = { projects: s.table({ title: s.string() }, {}) };
-  const after = {
-    ...before,
-    notes: s
-      .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
-      .encrypted({ space: "projectId", columns: ["body"] }),
-  };
-  const oldApp = s.defineApp(before);
-  const app = s.defineApp(after);
-  const migration = s.defineMigration({ from: before, to: after, createTables: { notes: true } });
-  const oldPermissions = definePermissions(oldApp, ({ policy }) => {
-    policy.projects.allowRead.always();
-    policy.projects.allowInsert.always();
-  });
-  const permissions = definePermissions(app, ({ policy, session }) => {
-    policy.projects.allowRead.always();
-    policy.projects.allowInsert.always();
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
-    policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
-    policy.__e2ee_space_grants.allowRead.always();
-    policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
-    policy.__e2ee_space_deliveries.allowRead.always();
-    policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
-  });
-  const store = () => {
-    let value: string | null = null;
-    return {
-      async read() {
-        return value;
-      },
-      async update(transform: (current: string | null) => string) {
-        value = transform(value);
-      },
-    };
-  };
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  let creator: Awaited<ReturnType<typeof createDb>> | undefined;
-  let writer: Awaited<ReturnType<typeof createDb>> | undefined;
-  try {
-    const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
-    await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
-    const alice = await localAccountConfig(server.appId, server.url);
-    creator = await createDb(alice);
-    const project = await creator
-      .insert(oldApp.projects, { title: "Created before encryption" })
-      .wait({ tier: "global" });
-    await creator.shutdown();
-    creator = undefined;
-
-    await deploy({ ...target, schema: app, permissions, migration });
-    creator = await createDb({ ...alice, e2ee: { app, store: store() } });
-    const bob = await localAccountConfig(server.appId, server.url);
-    writer = await createDb({ ...bob, e2ee: { app, store: store() } });
-    const note = await writer
-      .insert(app.notes, { projectId: project.id, body: "Bob's first encrypted note" })
-      .wait({ tier: "global" });
-
-    expect(await writer.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
-    const roots = await writer.all(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "global",
-    });
-    expect(roots).toHaveLength(1);
-    expect(roots[0]).toMatchObject({ accountId: bob.account.id });
-    const grants = await writer.all(app.__e2ee_space_grants.where({ spaceId: roots[0]!.id }), {
-      tier: "global",
-    });
-    expect(grants).toHaveLength(1);
-    expect(grants[0]).toMatchObject({ operation: "add", recipientId: bob.account.id });
-    // Jazz allows Alice to read the row; creation history must not supply its key.
-    await expect(
-      creator.one(app.notes.where({ id: note.id }), { tier: "global" }),
-    ).rejects.toMatchObject({
-      code: "key-not-shared",
-    });
-    expect(await creator.one(app.projects.where({ id: project.id }), { tier: "global" })).toEqual(
-      project,
-    );
-  } finally {
-    await writer?.shutdown();
-    await creator?.shutdown();
-    await server.stop();
-  }
-}, 60_000);
-
 it.each([
   "insert",
   "upsert",
@@ -168,7 +81,8 @@ it.each([
         adminSecret: server.adminSecret,
       };
       await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
-      creator = await createDb(await localAccountConfig(server.appId, server.url));
+      const creatorAccount = await localAccountConfig(server.appId, server.url);
+      creator = await createDb(creatorAccount);
       const project = await creator
         .insert(oldApp.projects, { title: "Legacy project" })
         .wait({ tier: "global" });
@@ -234,6 +148,40 @@ it.each([
         mode === "exclusive" ? 1 : 0,
       );
       expect(await writer.all(app.__e2ee_spaces, { tier: "global" })).toHaveLength(1);
+      if (mode === "insert") {
+        const roots = await writer.all(app.__e2ee_spaces.where({ identifier: project.id }), {
+          tier: "global",
+        });
+        expect(roots).toHaveLength(1);
+        expect(roots[0]).toMatchObject({ accountId: account.account.id });
+        const grants = await writer.all(app.__e2ee_space_grants.where({ spaceId: roots[0]!.id }), {
+          tier: "global",
+        });
+        expect(grants).toHaveLength(1);
+        expect(grants[0]).toMatchObject({ operation: "add", recipientId: account.account.id });
+        let creatorSaved: string | null = null;
+        creator = await createDb({
+          ...creatorAccount,
+          e2ee: {
+            app,
+            store: {
+              async read() {
+                return creatorSaved;
+              },
+              async update(transform) {
+                creatorSaved = transform(creatorSaved);
+              },
+            },
+          },
+        });
+        // Plaintext creation history must not grant the first writer's encryption key.
+        await expect(
+          creator.one(app.notes.where({ id: noteId }), { tier: "global" }),
+        ).rejects.toMatchObject({ code: "key-not-shared" });
+        expect(
+          await creator.one(app.projects.where({ id: project.id }), { tier: "global" }),
+        ).toEqual(project);
+      }
       if (mode.startsWith("hidden-existing")) {
         let outsiderSaved: string | null = null;
         outsider = await createDb({
