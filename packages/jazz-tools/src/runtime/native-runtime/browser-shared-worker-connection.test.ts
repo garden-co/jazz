@@ -1015,14 +1015,22 @@ describe("broker SharedWorker construction", () => {
     const constructionSite = /new\s+(?:Shared)?Worker\s*\(\s*new\s+URL\s*\(\s*["'`]([^"'`]+)["'`]/g;
 
     const sites: string[] = [];
-    const entries = await readdir(srcRoot, { recursive: true, withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !/\.(?:ts|tsx|js|mjs)$/.test(entry.name)) continue;
-      if (/\.test\.|\.spec\./.test(entry.name)) continue;
-      const path = join(entry.parentPath, entry.name);
-      const source = await readFile(path, "utf8");
-      for (const match of source.matchAll(constructionSite)) {
-        if (match[1]!.includes("jazz-broker-worker")) sites.push(path);
+    const directories = [srcRoot];
+    for (const directory of directories) {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          // Other test workers create and remove fixtures here concurrently.
+          // They are not bundled application source; do not descend into them.
+          if (entry.name !== ".test-tmp") directories.push(path);
+          continue;
+        }
+        if (!entry.isFile() || !/\.(?:ts|tsx|js|mjs)$/.test(entry.name)) continue;
+        if (/\.test\.|\.spec\./.test(entry.name)) continue;
+        const source = await readFile(path, "utf8");
+        for (const match of source.matchAll(constructionSite)) {
+          if (match[1]!.includes("jazz-broker-worker")) sites.push(path);
+        }
       }
     }
 
