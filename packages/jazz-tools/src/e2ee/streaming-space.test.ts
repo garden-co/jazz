@@ -11,67 +11,66 @@ import { prepareStreamingSpace, prepareInitialSpaceRows } from "./lifecycle.js";
 import { createBrowserKeyEnvelope, createBrowserDeviceSigner } from "./browser.js";
 import { E2eeDataError } from "./data-error.js";
 
-it.each([false, true])(
-  "hands the exact unpublished seed to one transaction (exclude creator: %s)",
-  async (excludeCreator) => {
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...spaceSchema,
-      projects: s.table({ title: s.string() }, {}),
+it("hands each unpublished seed to one transaction and enforces creator inclusion and exclusion", async () => {
+  const app = s.defineApp({
+    ...deviceRequestSchema,
+    ...spaceSchema,
+    projects: s.table({ title: s.string() }, {}),
+  });
+  const permissions = definePermissions(app, ({ policy, session }) => {
+    policy.projects.allowRead.always();
+    policy.projects.allowInsert.always();
+    policy.__e2ee_spaces.allowRead.always();
+    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_space_grants.allowRead.always();
+    policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
+    policy.__e2ee_space_deliveries.allowRead.always();
+    policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+    policy.__e2ee_space_successors.allowRead.always();
+    policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
+  });
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let db: Db | undefined;
+  let recipient: Db | undefined;
+  let saved: string | null = null;
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...permissions },
     });
-    const permissions = definePermissions(app, ({ policy, session }) => {
-      policy.projects.allowRead.always();
-      policy.projects.allowInsert.always();
-      policy.__e2ee_spaces.allowRead.always();
-      policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
-      policy.__e2ee_space_grants.allowRead.always();
-      policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
-      policy.__e2ee_space_deliveries.allowRead.always();
-      policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
-      policy.__e2ee_space_successors.allowRead.always();
-      policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
-    });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    let db: Db | undefined;
-    let recipient: Db | undefined;
-    let saved: string | null = null;
-    try {
-      await deploy({
-        serverUrl: server.url,
-        appId: server.appId,
-        adminSecret: server.adminSecret,
-        schema: app,
-        permissions: { ...deviceRequestPermissions, ...permissions },
-      });
-      const keys = await createBrowserKeyEnvelope();
-      const signer = await createBrowserDeviceSigner();
-      let failWrap = false;
-      const adapterFailure = new Error("private-key-sentinel-must-not-escape");
-      db = await createDb({
-        ...(await localAccountConfig(server.appId, server.url)),
-        e2ee: {
-          app,
-          crypto: {
-            deviceSigner: signer,
-            keyEnvelope: {
-              ...keys,
-              async wrap(...args) {
-                if (failWrap) throw adapterFailure;
-                return keys.wrap(...args);
-              },
-            },
-          },
-          store: {
-            async read() {
-              return saved;
-            },
-            async update(transform) {
-              saved = transform(saved);
+    const keys = await createBrowserKeyEnvelope();
+    const signer = await createBrowserDeviceSigner();
+    let failWrap = false;
+    const adapterFailure = new Error("private-key-sentinel-must-not-escape");
+    db = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      e2ee: {
+        app,
+        crypto: {
+          deviceSigner: signer,
+          keyEnvelope: {
+            ...keys,
+            async wrap(...args) {
+              if (failWrap) throw adapterFailure;
+              return keys.wrap(...args);
             },
           },
         },
-      });
-      await db.e2ee.devices.list();
+        store: {
+          async read() {
+            return saved;
+          },
+          async update(transform) {
+            saved = transform(saved);
+          },
+        },
+      },
+    });
+    await db.e2ee.devices.list();
+    for (const excludeCreator of [false, true]) {
       let recipientId: string | undefined;
       if (excludeCreator) {
         const config = await localAccountConfig(server.appId, server.url);
@@ -94,17 +93,20 @@ it.each([false, true])(
         await recipient.e2ee.devices.list();
       }
       const project = await db.insert(app.projects, { title: "Seed" }).wait({ tier: "global" });
-      failWrap = true;
-      await expect(
-        prepareStreamingSpace(db, app.projects, project.id, {}, async () => {}),
-      ).rejects.toEqual(new E2eeDataError("key-unavailable"));
-      failWrap = false;
-      const stageFailure = new Error("caller source unavailable");
-      await expect(
-        prepareStreamingSpace(db, app.projects, project.id, {}, async () => {
-          throw stageFailure;
-        }),
-      ).rejects.toBe(stageFailure);
+      const priorRoots = await db.all(app.__e2ee_spaces, { tier: "global" });
+      if (!excludeCreator) {
+        failWrap = true;
+        await expect(
+          prepareStreamingSpace(db, app.projects, project.id, {}, async () => {}),
+        ).rejects.toEqual(new E2eeDataError("key-unavailable"));
+        failWrap = false;
+        const stageFailure = new Error("caller source unavailable");
+        await expect(
+          prepareStreamingSpace(db, app.projects, project.id, {}, async () => {
+            throw stageFailure;
+          }),
+        ).rejects.toBe(stageFailure);
+      }
       const prepared = await prepareStreamingSpace(
         db,
         app.projects,
@@ -113,7 +115,7 @@ it.each([false, true])(
         async (key, root) => ({ key: key.slice(), epoch: root.epochId }),
       );
       try {
-        expect(await db.all(app.__e2ee_spaces, { tier: "global" })).toEqual([]);
+        expect(await db.all(app.__e2ee_spaces, { tier: "global" })).toEqual(priorRoots);
         const owner = db;
         const write = await exclusiveE2eeTransaction(db, async (tx) => {
           await prepared.plan.validate(tx);
@@ -199,11 +201,10 @@ it.each([false, true])(
         prepared.value.key.fill(0);
         prepared.plan.dispose();
       }
-    } finally {
-      await recipient?.shutdown();
-      await db?.shutdown();
-      await server.stop();
     }
-  },
-  60_000,
-);
+  } finally {
+    await recipient?.shutdown();
+    await db?.shutdown();
+    await server.stop();
+  }
+}, 60_000);
