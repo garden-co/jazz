@@ -48,6 +48,7 @@ it("refuses second-device and missing-journal founders without changing the dura
     });
     // Authenticate each durable root's catalogue before cutting TCP. Warm-up
     // accounts are separate from the one whose first-device claim is tested.
+    // An authenticated read warms the catalogue without creating an unused space.
     for (const driver of [founderDriver, secondDriver, missingJournalDriver]) {
       const warm = await createJazzSession({
         ...config,
@@ -57,10 +58,7 @@ it("refuses second-device and missing-journal founders without changing the dura
         e2ee: { app, store: privateStore() },
       });
       sessions.push(warm);
-      await warm
-        .getSnapshot()
-        .client!.db.insert(app.projects, { title: "Authenticated catalogue warm-up" })
-        .wait({ tier: "global" });
+      await warm.getSnapshot().client!.db.all(app.projects, { tier: "global" });
       await warm.close();
       sessions.pop();
     }
@@ -235,10 +233,7 @@ it("resumes the exact pending founder journal after importing into the same dura
       store: privateStore(),
       e2ee: { app, store: privateStore() },
     });
-    await owner
-      .getSnapshot()
-      .client!.db.insert(app.projects, { title: "Authenticated catalogue warm-up" })
-      .wait({ tier: "global" });
+    await owner.getSnapshot().client!.db.all(app.projects, { tier: "global" });
     await owner.close();
     owner = undefined;
     gate.block();
