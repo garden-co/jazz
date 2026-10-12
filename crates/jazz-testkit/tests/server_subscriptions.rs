@@ -963,20 +963,6 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
         .run_until(async {
             let server = JazzServer::start().await.expect("start test server");
             let schema = policy_graph_policy_schema();
-            let app_id = server.app_id();
-            let response = reqwest::Client::new()
-                .post(format!("{}/apps/{app_id}/admin/schemas", server.base_url()))
-                .header("X-Jazz-Admin-Secret", server.admin_secret())
-                .json(&json!({ "schema": schema }))
-                .send()
-                .await
-                .expect("publish policy graph-shaped schema");
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.expect("schema publish error body");
-                panic!("policy graph-shaped schema publish failed: {status} {body}");
-            }
-
             publish_permissions(
                 &server.base_url(),
                 server.app_id(),
@@ -986,7 +972,6 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
                     .iter()
                     .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
                     .collect::<Vec<_>>(),
-                None,
             )
             .await;
 

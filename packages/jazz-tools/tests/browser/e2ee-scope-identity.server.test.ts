@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../../src/schema-namespace.js";
+import { migration as m } from "../../src/migration-namespace.js";
 import { definePermissions } from "../../src/permissions/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { deploy } from "../../src/dev/catalogue.js";
@@ -106,10 +107,10 @@ it.each(["memory", "persistent"] as const)(
         permissions: definePermissions(columnApp, ({ policy }) =>
           policy.projects.allowRead.always(),
         ),
-        migration: s.defineMigration({
+        migration: m.defineMigration({
           from: before,
           to: afterColumn,
-          migrate: { projects: { body: s.renameFrom("title") } },
+          migrate: { projects: { body: m.renameFrom("title") } },
         }),
       });
       await db.reconnect();
@@ -124,10 +125,10 @@ it.each(["memory", "persistent"] as const)(
         permissions: definePermissions(tableApp, ({ policy }) =>
           policy.initiatives.allowRead.always(),
         ),
-        migration: s.defineMigration({
+        migration: m.defineMigration({
           from: afterColumn,
           to: afterTable,
-          renameTables: { initiatives: s.renameTableFrom("projects") },
+          renameTables: { initiatives: m.renameTableFrom("projects") },
         }),
       });
       await db.reconnect();

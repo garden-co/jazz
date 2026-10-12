@@ -58,7 +58,7 @@ describe("Better Auth storage boundary", () => {
       initial: "local-first",
     });
     const client = ordinarySession.getSnapshot().client!.db;
-    await expect(client.all(app.better_auth_user, { tier: "global" })).resolves.toEqual([]);
+    await expect(client.all(app.better_auth_user, { tier: "remote" })).resolves.toEqual([]);
     await expect(
       client
         .insert(app.better_auth_user, {
@@ -77,7 +77,7 @@ describe("Better Auth storage boundary", () => {
       .poll(
         async () =>
           (
-            await session!.getSnapshot().client!.db.all(app.better_auth_user, { tier: "global" })
+            await session!.getSnapshot().client!.db.all(app.better_auth_user, { tier: "remote" })
           ).find((row) => row.id === stored.id),
         { timeout: 10_000 },
       )
