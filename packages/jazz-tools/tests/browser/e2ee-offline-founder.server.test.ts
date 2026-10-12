@@ -87,7 +87,7 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
     });
     // Learn the authority's catalogue through ordinary authenticated sync under
     // another account, not a fabricated cache or copied account database.
-    await db.insert(app.projects, { title: "Online catalogue witness" }).wait({ tier: "global" });
+    await db.all(app.projects, { tier: "global" });
     await db.shutdown();
     db = undefined;
     await blockJazzServerNetwork(server.serverUrl);
