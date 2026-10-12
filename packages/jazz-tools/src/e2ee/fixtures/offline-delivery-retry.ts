@@ -85,10 +85,13 @@ export async function runOfflineDeliveryRetry(
     await owner.e2ee.devices.list();
     await reader.e2ee.devices.list();
     const tx = owner.beginExclusiveTransaction();
-    const project = tx.insert(app.projects, { title: "Resumed shared project" });
+    const project = tx.insert(
+      app.projects,
+      { title: "Resumed shared project" },
+      { initialRecipients: [alice.account.id, bob.account.id] },
+    );
     const note = tx.insert(app.notes, { projectId: project.id, title: "Still shared" });
     await tx.commit().wait({ tier: "global" });
-    await owner.e2ee.spaces.grant(app.projects, project.id, bob.account.id).wait();
     expect(await reader.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
     await reader.e2ee.explain({ scope: app.projects, identifier: project.id });
     // Leave the original owner offline while another authorised holder retries.

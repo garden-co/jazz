@@ -147,25 +147,9 @@ it("retries enrollment and keeps immutable administration isolated", async () =>
     ).toContainEqual(expect.objectContaining({ text: "A recipient can send" }));
     const outsider = await createDb(configs[2]!);
     clients.push(outsider);
-    await recipient.e2ee.devices.list();
     await outsider.e2ee.devices.list();
-    await shareChat(owner, chat.id, configs[1]!.account.id);
-    // Establish usable recipient key state before testing administration denials.
-    await recipient
-      .insert(app.messages, {
-        chatId: chat.id,
-        senderId: configs[1]!.account.id,
-        text: "An enrolled member can send but cannot administer",
-        filename: null,
-        mimeType: null,
-        payload: null,
-      })
-      .wait({ tier: "global" });
-    expect(
-      await owner.all(app.messages.where({ chatId: chat.id }), { tier: "global" }),
-    ).toContainEqual(
-      expect.objectContaining({ text: "An enrolled member can send but cannot administer" }),
-    );
+    // The recipient's successful send above already established usable keys
+    // before the administration denials below.
     // An unauthorized candidate must not authorize descendants or partially
     // publish an otherwise legitimate room in the same exclusive transaction.
     const forged = outsider.beginExclusiveTransaction();
