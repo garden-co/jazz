@@ -4357,6 +4357,9 @@ export class Db {
                     frontier !== encryptedFrontier
                   )
                     return;
+                  // The initial native snapshot validates its own current authority.
+                  // Before it arrives there is no result for a dependency to refresh.
+                  if (!subscription.hasSnapshot) return;
                   const materialized = await materializeEncryptedResult(subscription);
                   if (equality && !(await equality.isCurrent())) {
                     restartEncryptedSubscription(subscription);
