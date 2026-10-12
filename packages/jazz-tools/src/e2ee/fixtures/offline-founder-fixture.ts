@@ -114,9 +114,8 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
     });
     const warm = await createDb({ ...warmAccount, e2ee: { app, store: privateStore() } });
     clients.push(warm);
-    await warm
-      .insert(app.projects, { title: "Authenticated catalogue warm-up" })
-      .wait({ tier: "global" });
+    // Warm the authenticated catalogue without creating an unused encrypted space.
+    await warm.all(app.projects, { tier: "global" });
     await warm.shutdown();
     clients.pop();
     gate.block();
