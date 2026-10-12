@@ -20,7 +20,7 @@ import { setBrowserFollowerProbeTimingForTest } from "../../src/runtime/native-r
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
 import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
 import { closeRemoteBrowserDb, waitForRemoteBrowserDbTitle } from "./remote-browser-db.js";
-import { CompiledPermissions, schema as s } from "../../src/";
+import { CompiledPermissions, schema as s, migration as m } from "../../src/";
 import { computeSchemaHash, deploy } from "../../src/dev/catalogue.js";
 import {
   deserializeBrowserRelayError,
@@ -411,7 +411,7 @@ export async function waitForTodos(
   predicate: (rows: Todo[]) => boolean,
   label: string,
   timeoutMs = 15000,
-  tier?: "local" | "global",
+  tier?: "local-first" | "remote",
 ): Promise<Todo[]> {
   return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
 }
@@ -421,7 +421,7 @@ export async function waitForCatalogueTodos(
   predicate: (rows: CatalogueTodo[]) => boolean,
   label: string,
   timeoutMs = 15_000,
-  tier?: "local" | "global",
+  tier?: "local-first" | "remote",
 ): Promise<CatalogueTodo[]> {
   return waitForQuery(db, allCatalogueTodos, predicate, label, timeoutMs, tier);
 }
@@ -438,14 +438,14 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
     permissions: cataloguePermissionsV1,
   });
 
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     fromHash: v1.schema.hash,
     toHash: await computeSchemaHash(catalogueAppV2.wasmSchema),
     from: catalogueSchemaV1,
     to: catalogueSchemaV2,
     migrate: {
       todos: {
-        description: s.add.string({ default: null }),
+        description: m.add.string({ default: null }),
       },
     },
   });
@@ -574,7 +574,7 @@ export function useSharedWorkerBridgeHarness() {
     title: string,
     label: string,
     timeoutMs: number,
-    tier?: "local" | "global",
+    tier?: "local-first" | "remote",
   ): Promise<Record<string, unknown>[]> {
     try {
       return await waitForRemoteBrowserDbTitle({ id, title, timeoutMs, tier });

@@ -1,16 +1,12 @@
-import { jazzServerBrowserCommands } from "./browser-commands.js";
+import {
+  jazzServerBrowserCommands,
+  jazzServerTransportControlBrowserCommands,
+} from "./browser-commands.js";
 
 export interface JazzServerInfo {
   appId: string;
   serverUrl: string;
   adminSecret: string;
-}
-
-export interface JazzServerNetworkDebugState {
-  contextId: number;
-  pattern: string;
-  blocked: boolean;
-  activePatterns: string[];
 }
 
 export function getJazzServerInfo(appId?: string): Promise<JazzServerInfo> {
@@ -19,14 +15,6 @@ export function getJazzServerInfo(appId?: string): Promise<JazzServerInfo> {
 
 export function stopJazzServer(serverUrl: string): Promise<void> {
   return jazzServerBrowserCommands().jazzServerStop(serverUrl);
-}
-
-export function blockJazzServerNetwork(serverUrl: string): Promise<void> {
-  return jazzServerBrowserCommands().jazzServerBlockNetwork(serverUrl);
-}
-
-export function unblockJazzServerNetwork(serverUrl: string): Promise<void> {
-  return jazzServerBrowserCommands().jazzServerUnblockNetwork(serverUrl);
 }
 
 export async function getJazzServerJwtForUser(
@@ -43,4 +31,30 @@ export async function getJazzServerJwtForUser(
     claims ?? { role: "user" },
     appId,
   );
+}
+
+/**
+ * Browser bridge to the shared TransportControl: buffer delivery without
+ * disconnecting, using the same block/blockInbound/unblock operations as Rust.
+ */
+export interface JazzServerTransportControl {
+  url: string;
+  block(): Promise<void>;
+  blockInbound(): Promise<void>;
+  unblock(): Promise<void>;
+  stop(): Promise<void>;
+}
+
+export async function createJazzServerTransportControl(
+  serverUrl: string,
+): Promise<JazzServerTransportControl> {
+  const commands = jazzServerTransportControlBrowserCommands();
+  const url = await commands.jazzServerTransportControlCreate(serverUrl);
+  return {
+    url,
+    block: () => commands.jazzServerTransportControlBlock(url, "both"),
+    blockInbound: () => commands.jazzServerTransportControlBlock(url, "inbound"),
+    unblock: () => commands.jazzServerTransportControlUnblock(url),
+    stop: () => commands.jazzServerTransportControlStop(url),
+  };
 }

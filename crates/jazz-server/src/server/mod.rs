@@ -15,6 +15,7 @@ mod catalogue_entry;
 mod catalogue_payload_codec;
 mod catalogue_storage;
 pub use jazz::serving::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
+pub(crate) mod deployment;
 pub mod routes;
 pub(crate) mod runtime_catalogue;
 mod shutdown;
@@ -44,6 +45,7 @@ pub async fn push_catalogue_in_memory(
     schemas: &[jazz::tools::Schema],
     lenses: &[jazz::tools::Lens],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _publication = state.runtime_catalogue_publication.lock().await;
     for schema in schemas {
         state
             .catalogue
@@ -56,7 +58,7 @@ pub async fn push_catalogue_in_memory(
             .publish_lens(&state.catalogue_store, lens)
             .map_err(|error| format!("publish lens to server catalogue: {error}"))?;
     }
-    runtime_catalogue::publish_runtime_catalogue(&state, schemas, lenses)
+    runtime_catalogue::publish_runtime_catalogue_locked(&state, schemas, lenses)
         .await
         .map_err(|error| format!("bridge catalogue into server runtime: {error}"))?;
     state
@@ -365,6 +367,13 @@ mod tests {
             Ok(())
         }
 
+        fn upsert_catalogue_entries(
+            &mut self,
+            _entries: &[crate::server::catalogue_entry::CatalogueEntry],
+        ) -> CatalogueStorageResult<()> {
+            Ok(())
+        }
+
         fn flush(&self) -> CatalogueStorageResult<()> {
             Ok(())
         }
@@ -389,6 +398,13 @@ mod tests {
         fn upsert_catalogue_entry(
             &mut self,
             _entry: &crate::server::catalogue_entry::CatalogueEntry,
+        ) -> CatalogueStorageResult<()> {
+            Ok(())
+        }
+
+        fn upsert_catalogue_entries(
+            &mut self,
+            _entries: &[crate::server::catalogue_entry::CatalogueEntry],
         ) -> CatalogueStorageResult<()> {
             Ok(())
         }

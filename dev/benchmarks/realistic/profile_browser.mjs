@@ -704,7 +704,7 @@ function buildW4Setup(config, dbName) {
       const state = await h.seedDataset(db, cfg);
       await db.all(
         h.query("tasks", [{ column: "project_id", op: "eq", value: state.projects[0] }], [["updated_at", "desc"]], 200),
-        { tier: "local" }
+        { tier: "local-first" }
       );
       await db.shutdown();
       globalThis.__w4Profile = { dbName, hotProjectId: state.projects[0] };
@@ -722,7 +722,7 @@ function buildW4Run() {
       const db = await h.createDb({ appId: "profile-w4-app", dbName, logLevel: "warn" });
       const rows = await db.all(
         h.query("tasks", [{ column: "project_id", op: "eq", value: hotProjectId }], [["updated_at", "desc"]], 200),
-        { tier: "local" }
+        { tier: "local-first" }
       );
       globalThis.__w4Profile.db = db;
       return { rows: rows.length, elapsedMs: performance.now() - t0 };

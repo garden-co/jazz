@@ -1,10 +1,13 @@
-import type { BrowserContext, Route, WebSocketRoute } from "playwright";
 import {
   startLocalJazzServer,
   startTestJwtIssuer,
   type LocalJazzServerHandle,
   type TestJwtIssuerHandle,
 } from "../../src/testing/index.js";
+import {
+  createTransportControl,
+  type TransportControl,
+} from "../../src/runtime/testing/transport-control.js";
 
 interface StartedJazzServer {
   server: LocalJazzServerHandle;
@@ -16,18 +19,6 @@ interface StartedJazzServer {
 
 const DEFAULT_JAZZ_SERVER_KEY = "__default__";
 const jazzServerPromises = new Map<string, Promise<StartedJazzServer>>();
-interface JazzServerRouteBlock {
-  blocked: boolean;
-  httpHandler: (route: Route) => void;
-  webSocketHandler: (route: WebSocketRoute) => void | Promise<void>;
-  webSocketPattern: string;
-  webSocketRouted: boolean;
-}
-
-const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, JazzServerRouteBlock>>();
-const browserContextIds = new WeakMap<BrowserContext, number>();
-let nextBrowserContextId = 1;
-
 async function startJazzServer(appId?: string): Promise<StartedJazzServer> {
   const jwtIssuer = await startTestJwtIssuer();
   const adminSecret = "jazz-browser-test-admin";
@@ -100,6 +91,7 @@ export async function stopJazzServerByUrl(serverUrl: string): Promise<void> {
 }
 
 export async function stopJazzServer(): Promise<void> {
+  for (const url of transportControls.keys()) await stopJazzServerTransportControl(url);
   const runningServers = [...jazzServerPromises.values()];
   jazzServerPromises.clear();
 
@@ -119,124 +111,32 @@ export async function stopJazzServer(): Promise<void> {
   }
 }
 
-function jazzServerUrlPattern(serverUrl: string): string {
-  return `${serverUrl.replace(/\/+$/, "")}/**`;
+const transportControls = new Map<string, TransportControl>();
+
+function transportControl(url: string): TransportControl {
+  const control = transportControls.get(url);
+  if (!control) throw new Error(`No transport control is running at ${url}`);
+  return control;
 }
 
-function jazzServerWebSocketUrlPattern(serverUrl: string): string {
-  const url = new URL(serverUrl);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return `${url.toString().replace(/\/+$/, "")}/**`;
+export async function createJazzServerTransportControl(serverUrl: string): Promise<string> {
+  const control = await createTransportControl(serverUrl);
+  transportControls.set(control.url, control);
+  return control.url;
 }
 
-function getBrowserContextId(context: BrowserContext): number {
-  let id = browserContextIds.get(context);
-  if (!id) {
-    id = nextBrowserContextId++;
-    browserContextIds.set(context, id);
-  }
-  return id;
+export function blockJazzServerTransport(url: string, direction: "both" | "inbound"): void {
+  const control = transportControl(url);
+  if (direction === "inbound") control.blockInbound();
+  else control.block();
 }
 
-function activeBlockedPatterns(
-  contextRoutes: Map<string, JazzServerRouteBlock> | undefined,
-): string[] {
-  if (!contextRoutes) return [];
-  return [...contextRoutes.entries()]
-    .filter(([, routeBlock]) => routeBlock.blocked)
-    .map(([pattern]) => pattern);
+export function unblockJazzServerTransport(url: string): void {
+  transportControl(url).unblock();
 }
 
-export interface JazzServerNetworkDebugState {
-  contextId: number;
-  pattern: string;
-  blocked: boolean;
-  activePatterns: string[];
-}
-
-export async function blockJazzServerNetwork(
-  context: BrowserContext,
-  serverUrl: string,
-): Promise<void> {
-  const pattern = jazzServerUrlPattern(serverUrl);
-  const contextId = getBrowserContextId(context);
-  let contextRoutes = blockedServerRoutes.get(context);
-  if (!contextRoutes) {
-    contextRoutes = new Map();
-    blockedServerRoutes.set(context, contextRoutes);
-  }
-  let routeBlock = contextRoutes.get(pattern);
-  if (routeBlock?.blocked) {
-    console.info("[jazz-server-network]", {
-      action: "block-skip",
-      contextId,
-      pattern,
-      activePatterns: activeBlockedPatterns(contextRoutes),
-    });
-    return;
-  }
-
-  if (!routeBlock) {
-    const webSocketPattern = jazzServerWebSocketUrlPattern(serverUrl);
-    routeBlock = {
-      blocked: false,
-      httpHandler: (route) => {
-        void route.abort("internetdisconnected");
-      },
-      webSocketHandler: async (webSocketRoute) => {
-        const currentRouteBlock = contextRoutes?.get(pattern);
-        if (!currentRouteBlock?.blocked) {
-          webSocketRoute.connectToServer();
-          return;
-        }
-        await webSocketRoute.close().catch(() => undefined);
-      },
-      webSocketPattern,
-      webSocketRouted: false,
-    };
-    contextRoutes.set(pattern, routeBlock);
-  }
-
-  routeBlock.blocked = true;
-  if (!routeBlock.webSocketRouted) {
-    await context.routeWebSocket(routeBlock.webSocketPattern, routeBlock.webSocketHandler);
-    routeBlock.webSocketRouted = true;
-  }
-  await context.route(pattern, routeBlock.httpHandler);
-  console.info("[jazz-server-network]", {
-    action: "block",
-    contextId,
-    pattern,
-    webSocketPattern: routeBlock.webSocketPattern,
-    activePatterns: activeBlockedPatterns(contextRoutes),
-  });
-}
-
-export async function unblockJazzServerNetwork(
-  context: BrowserContext,
-  serverUrl: string,
-): Promise<void> {
-  const pattern = jazzServerUrlPattern(serverUrl);
-  const contextId = getBrowserContextId(context);
-  const contextRoutes = blockedServerRoutes.get(context);
-  const routeBlock = contextRoutes?.get(pattern);
-  if (!routeBlock?.blocked) {
-    console.info("[jazz-server-network]", {
-      action: "unblock-skip",
-      contextId,
-      pattern,
-      activePatterns: activeBlockedPatterns(contextRoutes),
-    });
-    return;
-  }
-
-  await context.unroute(pattern, routeBlock.httpHandler);
-  routeBlock.blocked = false;
-  console.info("[jazz-server-network]", {
-    action: "unblock",
-    contextId,
-    pattern,
-    webSocketPattern: routeBlock.webSocketPattern,
-    activePatterns: activeBlockedPatterns(contextRoutes),
-  });
+export async function stopJazzServerTransportControl(url: string): Promise<void> {
+  const control = transportControl(url);
+  transportControls.delete(url);
+  await control.stop();
 }

@@ -340,7 +340,7 @@ type ValidateAddedColumnOperation<
       ? {
           readonly table: TTable;
           readonly column: TColumn;
-          readonly problem: "Added columns must use col.add.*(...) or col.renameFrom(...)";
+          readonly problem: "Added columns must use m.add.*(...) or m.renameFrom(...)";
         }
       : TOperation extends AddOperationForBuilder<BuilderForTargetColumn<TTo, TTable, TColumn>>
         ? never
@@ -355,18 +355,18 @@ type ValidateAddedColumnOperation<
                   readonly table: TTable;
                   readonly column: TColumn;
                   readonly renameFrom: TOldName;
-                  readonly problem: "col.renameFrom(...) must point at a removed column with the same type";
+                  readonly problem: "m.renameFrom(...) must point at a removed column with the same type";
                 }
             : {
                 readonly table: TTable;
                 readonly column: TColumn;
                 readonly renameFrom: TOldName;
-                readonly problem: "col.renameFrom(...) must point at a removed column in the same table";
+                readonly problem: "m.renameFrom(...) must point at a removed column in the same table";
               }
           : {
               readonly table: TTable;
               readonly column: TColumn;
-              readonly problem: "Added columns must use col.add.*(...) or col.renameFrom(...)";
+              readonly problem: "Added columns must use m.add.*(...) or m.renameFrom(...)";
             }
     : never;
 
@@ -408,7 +408,7 @@ type ValidateRemovedColumnOperation<
       ? {
           readonly table: TTable;
           readonly column: TColumn;
-          readonly problem: "Removed columns must use col.drop.*(...) or be referenced by col.renameFrom(...)";
+          readonly problem: "Removed columns must use m.drop.*(...) or be referenced by m.renameFrom(...)";
         }
       : [TableOpFor<TMigrate, TTable, TColumn>] extends [
             DropOperationForBuilder<
@@ -419,7 +419,7 @@ type ValidateRemovedColumnOperation<
         : {
             readonly table: TTable;
             readonly column: TColumn;
-            readonly problem: "Removed columns must use col.drop.*(...) or be referenced by col.renameFrom(...)";
+            readonly problem: "Removed columns must use m.drop.*(...) or be referenced by m.renameFrom(...)";
           };
 
 type RemovedColumnOperationErrors<
@@ -1050,10 +1050,12 @@ export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<a
  *
  * @example
  * ```typescript
- * export default s.defineMigration({
+ * import { schema as s, migration as m } from "jazz-tools";
+ *
+ * export default m.defineMigration({
  *   migrate: {
  *     todos: {
- *       priority: s.add.enum("low", "medium", "high", { default: "medium" }),
+ *       priority: m.add.enum("low", "medium", "high", { default: "medium" }),
  *     },
  *   },
  *   fromHash: "aaaaaaaaaaaa",

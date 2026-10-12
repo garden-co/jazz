@@ -110,11 +110,11 @@ export async function prefetchPublicMembershipHistory(
   const successorsQuery = tables.__e2ee_public_account_successors.where({ accountId });
   const recoveryQuery = tables.__e2ee_recovery_roots.where({ accountId });
   await Promise.all([
-    db.all(rootsQuery, { tier: "global" }),
-    db.all(keysQuery, { tier: "global" }),
-    db.all(approvalsQuery, { tier: "global" }),
-    db.all(successorsQuery, { tier: "global" }),
-    db.all(recoveryQuery, { tier: "global" }),
+    db.all(rootsQuery, { tier: "remote" }),
+    db.all(keysQuery, { tier: "remote" }),
+    db.all(approvalsQuery, { tier: "remote" }),
+    db.all(successorsQuery, { tier: "remote" }),
+    db.all(recoveryQuery, { tier: "remote" }),
   ]);
 }
 

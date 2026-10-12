@@ -29,7 +29,7 @@ it("rejects suspended admission after browser storage reset without crossing acc
       await ready;
     });
     tx.insert(app.documents, { title: "Must never appear" });
-    const reading = tx.all(app.documents, { tier: "local" });
+    const reading = tx.all(app.documents, { tier: "local-first" });
     reading.catch(() => {});
     const wait = tx.commit().wait({ tier: "local" });
     wait.catch(() => {});
@@ -39,12 +39,12 @@ it("rejects suspended admission after browser storage reset without crossing acc
     await expect(wait).rejects.toThrow();
     await expect(reading).rejects.toThrow();
     reopened = await createBrowserTestDb({ appId, account });
-    expect(await reopened.all(app.documents, { tier: "local" })).toEqual([]);
+    expect(await reopened.all(app.documents, { tier: "local-first" })).toEqual([]);
     const replacement = await reopened
       .insert(app.documents, { title: "After reset" })
       .wait({ tier: "local" });
-    expect(await reopened.all(app.documents, { tier: "local" })).toEqual([replacement]);
-    expect(await other.all(app.documents, { tier: "local" })).toEqual([untouched]);
+    expect(await reopened.all(app.documents, { tier: "local-first" })).toEqual([replacement]);
+    expect(await other.all(app.documents, { tier: "local-first" })).toEqual([untouched]);
   } finally {
     release();
     await Promise.all([db.shutdown(), other.shutdown(), reopened?.shutdown()]);
