@@ -115,12 +115,8 @@ async function fixture() {
       return db;
     };
     const owner = await open();
-    const project = await owner.insert(app.projects, { title: "Protected space" }).wait({
-      tier: "global",
-    });
-    await owner.e2ee.spaces.grant(app.projects, project.id, account.id).wait();
-    const target = { scope: app.projects, identifier: project.id };
-    expect(await owner.e2ee.explain(target)).toEqual({ state: "ready" });
+    // These cases need two independently protected paths. Register them before
+    // the space; space-recovery.test.ts covers recovery creation's backfill.
     for (let index = 0; index < 2; index++) {
       const before = new Set(
         (await owner.all(app.__e2ee_recovery_roots, { tier: "global" })).map((row) => row.id),
@@ -133,6 +129,14 @@ async function fixture() {
       );
       expect(added).toHaveLength(1);
       root.rootId = added[0]!.id;
+    }
+    const project = await owner.insert(app.projects, { title: "Protected space" }).wait({
+      tier: "global",
+    });
+    await owner.e2ee.spaces.grant(app.projects, project.id, account.id).wait();
+    const target = { scope: app.projects, identifier: project.id };
+    expect(await owner.e2ee.explain(target)).toEqual({ state: "ready" });
+    for (const root of roots) {
       const deliveries = await owner.all(
         app.__e2ee_space_recovery_deliveries.where({ recoveryRootId: root.rootId }),
         { tier: "global" },
