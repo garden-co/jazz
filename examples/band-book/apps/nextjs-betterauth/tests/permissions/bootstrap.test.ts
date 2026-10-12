@@ -14,6 +14,7 @@ const auth = (): Authority => {
   return authority;
 };
 const global = { tier: "global" } as const;
+const remote = { tier: "remote" } as const;
 
 beforeEach(async () => {
   authority = await startAuthority();
@@ -39,9 +40,9 @@ describe("first-open bootstrap", () => {
     expect(racing).toEqual({ workspaceId: first.workspaceId, created: false });
 
     const ada = auth().as("ada", account);
-    const workspaces = await ada.all(app.workspaces, global);
+    const workspaces = await ada.all(app.workspaces, remote);
     expect(workspaces.map((workspace) => workspace.id)).toEqual([first.workspaceId]);
-    const members = await ada.all(app.members.where({ workspaceId: first.workspaceId }), global);
+    const members = await ada.all(app.members.where({ workspaceId: first.workspaceId }), remote);
     expect(members.map((member) => [member.account, member.role])).toEqual([[account, "owner"]]);
 
     const pages = await ada.all(
@@ -49,7 +50,7 @@ describe("first-open bootstrap", () => {
         .where({ workspaceId: first.workspaceId })
         .select("title", "parentId", "$createdAt")
         .orderBy("$createdAt", "asc"),
-      global,
+      remote,
     );
     const seeded = flattenSeedPages(DEMO_PAGES);
     expect(pages.map((page) => page.title)).toEqual(seeded.map((page) => page.title));
@@ -61,7 +62,7 @@ describe("first-open bootstrap", () => {
       DEMO_PAGES.map((page) => page.title),
     );
 
-    const issues = await ada.all(app.issues.where({ workspaceId: first.workspaceId }), global);
+    const issues = await ada.all(app.issues.where({ workspaceId: first.workspaceId }), remote);
     expect(issues).toHaveLength(4);
   });
 
@@ -73,7 +74,7 @@ describe("first-open bootstrap", () => {
     expect(adaBand.workspaceId).not.toBe(boBand.workspaceId);
     const seenByBo = await auth()
       .as("bo", bo)
-      .all(app.pages.where({ workspaceId: adaBand.workspaceId }), global);
+      .all(app.pages.where({ workspaceId: adaBand.workspaceId }), remote);
     expect(seenByBo).toEqual([]);
   });
 });
@@ -103,13 +104,13 @@ describe("invite links", () => {
     await redeemInvite(auth().backend, invite.token, guest, "Guest");
 
     const guestDb = auth().as("guest", guest);
-    const titles = (await guestDb.all(app.pages.where({ workspaceId }), global)).map(
+    const titles = (await guestDb.all(app.pages.where({ workspaceId }), remote)).map(
       (page) => page.title,
     );
     expect(titles.sort()).toEqual(["Arrangement notes", "Harbour lights"]);
-    const grants = await guestDb.all(app.pageGrants.where({ account: guest }), global);
+    const grants = await guestDb.all(app.pageGrants.where({ account: guest }), remote);
     expect(grants.map((grant) => [grant.pageId, grant.role])).toEqual([[song, "editor"]]);
-    const members = await guestDb.all(app.members.where({ workspaceId, account: guest }), global);
+    const members = await guestDb.all(app.members.where({ workspaceId, account: guest }), remote);
     expect(members.map((member) => member.role)).toEqual(["guest"]);
 
     // A later view-only link never lowers access someone already has.
@@ -123,7 +124,7 @@ describe("invite links", () => {
       })
       .wait(global);
     await redeemInvite(auth().backend, viewLink.token, guest, "Guest");
-    const after = await guestDb.all(app.pageGrants.where({ account: guest }), global);
+    const after = await guestDb.all(app.pageGrants.where({ account: guest }), remote);
     expect(after.map((grant) => grant.role)).toEqual(["editor"]);
 
     await ownerDb.delete(app.invites, invite.id).wait(global);
@@ -149,16 +150,16 @@ describe("invite links", () => {
       .wait(global);
     await redeemInvite(auth().backend, invite.token, guest, "Guest");
 
-    const pages = await ownerDb.all(app.pages.where({ workspaceId }), global);
+    const pages = await ownerDb.all(app.pages.where({ workspaceId }), remote);
     await deletePageTree(ownerDb, buildPageTree(pages), song, global);
 
     expect(
       await redeemInvite(auth().backend, invite.token, crypto.randomUUID(), "Late"),
     ).toBeNull();
     const inSubtree = { pageId: song };
-    expect(await auth().backend.all(app.invites.where(inSubtree), global)).toEqual([]);
-    expect(await auth().backend.all(app.pageGrants.where(inSubtree), global)).toEqual([]);
-    expect(await auth().backend.all(app.pages.where({ id: song }), global)).toEqual([]);
+    expect(await auth().backend.all(app.invites.where(inSubtree), remote)).toEqual([]);
+    expect(await auth().backend.all(app.pageGrants.where(inSubtree), remote)).toEqual([]);
+    expect(await auth().backend.all(app.pages.where({ id: song }), remote)).toEqual([]);
   });
 
   it("promote a guest to a band role with a band invite", async () => {
@@ -177,7 +178,7 @@ describe("invite links", () => {
       .wait(global);
     await redeemInvite(auth().backend, invite.token, drummer, "Drummer");
     const drummerDb = auth().as("drummer", drummer);
-    const pages = await drummerDb.all(app.pages.where({ workspaceId }), global);
+    const pages = await drummerDb.all(app.pages.where({ workspaceId }), remote);
     expect(pages.length).toBe(flattenSeedPages(DEMO_PAGES).length);
     await drummerDb
       .update(app.pages, seedId(owner, "page:setlist"), { title: "Setlist: summer tour" })

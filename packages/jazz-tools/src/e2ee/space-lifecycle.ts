@@ -281,8 +281,8 @@ export class Spaces {
       const ids = observed.map((root) => root.id);
       const selector = ids.length === 1 ? { spaceId: ids[0]! } : { spaceId: { in: ids } };
       const [grants, successors] = await Promise.all([
-        this.db.all(this.tables.__e2ee_space_grants.where(selector), { tier: "global" }),
-        this.db.all(this.tables.__e2ee_space_successors.where(selector), { tier: "global" }),
+        this.db.all(this.tables.__e2ee_space_grants.where(selector), { tier: "remote" }),
+        this.db.all(this.tables.__e2ee_space_successors.where(selector), { tier: "remote" }),
       ]);
       this.assertOpen();
       const groupIds = this.groupHistoryIds(grants, []);
@@ -304,7 +304,7 @@ export class Spaces {
               recipientAccountId: this.accountId,
               recoveryRootId,
             });
-      if (query) await this.db.all(query, { tier: "global" });
+      if (query) await this.db.all(query, { tier: "remote" });
       const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
         const device = restore ? await this.requireDevice().states(tx) : undefined;
         const own =
@@ -597,7 +597,7 @@ export class Spaces {
       throw new Error("Invalid E2EE space recipient");
     const address = await this.address(scope, identifier);
     const roots = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
-    const observed = await this.db.one(roots, { tier: "global" });
+    const observed = await this.db.one(roots, { tier: "remote" });
     if (observed) {
       await this.changeRecipient(address, observed, recipientId, "add");
       await this.explain(scope, identifier);
@@ -608,7 +608,7 @@ export class Spaces {
       new TypedTableQueryBuilder(scope._table, scope._schema)
         .where({ id: identifier })
         .select("id"),
-      { tier: "global" },
+      { tier: "remote" },
     );
     await this.warmInitialRecipients([recipientId]);
     const device = await this.loadDevice();
@@ -685,7 +685,7 @@ export class Spaces {
     const roots = this.tables.__e2ee_spaces.where({ id: rootId });
     if (
       await tx.one(this.tables.__e2ee_spaces.includeDeleted().where({ id: rootId }), {
-        tier: "global",
+        tier: "remote",
       })
     )
       throw new Error("E2EE space already exists");
@@ -734,9 +734,9 @@ export class Spaces {
     const scopeRow = new TypedTableQueryBuilder(scope._table, scope._schema)
       .where({ id: identifier })
       .select("id");
-    if (!(await tx.one(scopeRow, { tier: "local" })))
+    if (!(await tx.one(scopeRow, { tier: "local-first" })))
       throw new Error("Explicit space initialisation requires an existing scope row");
-    if (await tx.one(roots, { tier: "local" })) throw new Error("E2EE space already exists");
+    if (await tx.one(roots, { tier: "local-first" })) throw new Error("E2EE space already exists");
     const root = {
       id: rootId,
       ...address,
@@ -804,7 +804,7 @@ export class Spaces {
       throw new Error("Invalid E2EE space recipient");
     const address = await this.address(scope, identifier);
     const root = await this.db.one(this.tables.__e2ee_spaces.where({ id: spaceRootId(address) }), {
-      tier: "global",
+      tier: "remote",
     });
     if (!root) throw new Error("E2EE space not found");
     await this.changeRecipient(address, root, recipientId, "remove");
@@ -917,14 +917,14 @@ export class Spaces {
   ): Promise<void> {
     const [grants, successors] = await Promise.all([
       this.db.all(this.tables.__e2ee_space_grants.where({ spaceId: observed.id }), {
-        tier: "global",
+        tier: "remote",
       }),
       this.db.all(this.tables.__e2ee_space_successors.where({ spaceId: observed.id }), {
-        tier: "global",
+        tier: "remote",
       }),
       includeDeliveries
         ? this.db.all(this.tables.__e2ee_space_deliveries.where({ spaceId: observed.id }), {
-            tier: "global",
+            tier: "remote",
           })
         : undefined,
     ]);
@@ -1500,7 +1500,7 @@ export class Spaces {
     const rootQuery = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
     const observed = offline
       ? (await observeE2eeHistory(this.db, (reader) => reader.allSettledForE2ee(rootQuery))).rows[0]
-      : await this.db.one(rootQuery, { tier: "global" });
+      : await this.db.one(rootQuery, { tier: "remote" });
     if (!observed) return { state: "unavailable", reason: "space-not-found" };
     if (!offline) await this.warm(observed);
     const device = await this.loadDevice();

@@ -8,11 +8,11 @@
 //! sibling [`super::catalogue_ingest`] module.
 
 use super::*;
-use crate::protocol::{CatalogueAck, LensOp, SchemaLineagePublication, VersionBundleRef};
+use crate::protocol::{CatalogueAck, SchemaLineagePublication, VersionBundleRef};
 use crate::protocol_limits::{
     commit_unit_limit_violation, validate_known_state_declaration, validate_shape_registration_size,
 };
-use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE};
+use crate::schema::MERGE_HEADS_TABLE;
 use groove::records::ValueType;
 
 pub(super) const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;
@@ -74,14 +74,6 @@ pub(super) fn validate_received_view_bundle_global_time_durability(
             "global timestamp requires Global durability",
         ));
     }
-    Ok(())
-}
-
-fn validate_transform_column(column: Option<&ColumnSchema>, transform: &str) -> Result<(), Error> {
-    validate_registered_transform(transform)?;
-    let Some(_) = column else {
-        return Err(Error::InvalidCatalogueUpdate("transform column is unknown"));
-    };
     Ok(())
 }
 

@@ -145,6 +145,10 @@ pub(super) struct IncrementalEvaluation<'a> {
     relevant_nodes: Arc<HashSet<NodeId>>,
     published_subscriptions: HashSet<SubscriptionId>,
     affected_subscriptions: HashSet<SubscriptionId>,
+    /// Subscriptions whose hydration this write set aside (#3901). They
+    /// restart from a snapshot that already includes this write, so no frame
+    /// of it may publish to them, even after they are indexed again.
+    restarted_subscriptions: HashSet<SubscriptionId>,
     affected_nodes: Arc<HashSet<NodeId>>,
     /// Relational output retained while logical terminal materialization waits
     /// for immutable chunks. Re-evaluating after operator state advances can
@@ -324,6 +328,9 @@ struct PendingSubscriptionHydration {
     initial: Arc<Mutex<Option<MultisinkDeltas>>>,
     session: EvaluationSession<'static>,
     binding_snapshots: Arc<BindingSnapshots>,
+    /// The prepared shape whose binding frontier this hydration advanced, so
+    /// a restart (#3901) can advance it the same way.
+    binding_frontier_advance: Option<String>,
     hydrate_arrangements: bool,
     lifetime: SubscriptionLifetime,
     metrics: TickMetrics,
@@ -922,6 +929,7 @@ impl<'a> IncrementalEvaluation<'a> {
                 .get(node)
                 .into_iter()
                 .flatten()
+                .filter(|subscription| !self.restarted_subscriptions.contains(subscription))
             {
                 if self.affected_subscriptions.insert(*subscription) {
                     self.metrics.subscriptions_considered += 1;
@@ -2293,7 +2301,7 @@ impl IvmRuntime {
         lifetime: SubscriptionLifetime,
         root_indirect_values: RootIndirectValues,
         borrowed: HashSet<NodeId>,
-    ) -> Result<(), IvmRuntimeError> {
+    ) -> Result<u64, IvmRuntimeError> {
         let mut seen_roots = HashSet::new();
         let roots = outputs
             .values()
@@ -2350,6 +2358,7 @@ impl IvmRuntime {
             initial,
             session,
             binding_snapshots: binding_snapshots.unwrap_or_else(|| self.binding_snapshot_deltas()),
+            binding_frontier_advance: binding_frontier_advance.map(str::to_owned),
             hydrate_arrangements,
             lifetime,
             metrics: TickMetrics::default(),
@@ -2366,7 +2375,7 @@ impl IvmRuntime {
         }
         pending.evaluations.insert(evaluation_id, evaluation);
         pending.order.push_back(evaluation_id);
-        Ok(())
+        Ok(evaluation_id)
     }
 
     fn fail_evaluation_nodes(&mut self, failure: &EvaluationFailure) {
@@ -2603,7 +2612,16 @@ impl IvmRuntime {
         // slice: beginning mutates durable evaluator state and input
         // generations before the work queue can attach temporal blockers, so
         // a later hydration install would otherwise roll those mutations back.
-        std::future::poll_fn(|cx| {
+        //
+        // The exception is a hydration parked on a large-value chunk fetch.
+        // That fetch may wait on a remote peer indefinitely, for example
+        // while offline, so a write never waits on it. A table-only write
+        // sets such a hydration aside instead and restarts it once the write
+        // has begun (see `restart_abandoned_hydrations`). A binding tick
+        // keeps waiting: the hydration's binding snapshot would be stale.
+        let abandon_parked_hydrations = binding_deltas.is_empty();
+        let mut abandoned = Vec::new();
+        let admitted = std::future::poll_fn(|cx| {
             let mut resident_only = false;
             loop {
                 let selected = self
@@ -2630,7 +2648,31 @@ impl IvmRuntime {
                         .get(id)
                         .is_some_and(PendingEvaluation::has_resident_continuation)
                 }) {
-                    return Poll::Pending;
+                    if !abandon_parked_hydrations {
+                        return Poll::Pending;
+                    }
+                    let parked = remaining
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            matches!(
+                                pending.evaluations.get(id),
+                                Some(PendingEvaluation::SubscriptionHydration(hydration))
+                                    if hydration.session.requests.has_pending_chunk()
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    drop(pending);
+                    if parked.is_empty() {
+                        return Poll::Pending;
+                    }
+                    // Local writes never wait on chunk fetches (#3901).
+                    // Set these hydrations aside and let the write begin;
+                    // they restart from its snapshot below. Any other
+                    // overlapping hydration waits on local storage alone.
+                    abandoned.extend(self.abandon_pending_hydrations(&parked));
+                    resident_only = false;
+                    continue;
                 }
                 // The direct write owns CPU-only continuations needed to
                 // finish an overlapping hydration. A host waker must not
@@ -2639,8 +2681,46 @@ impl IvmRuntime {
                 resident_only = true;
             }
         })
-        .await?;
+        .await;
+        let restart_storage = storage.clone();
+        let restarted_subscriptions = abandoned
+            .iter()
+            .map(|hydration| hydration.subscription_id)
+            .collect::<HashSet<_>>();
+        let ticked = match admitted {
+            Ok(()) => {
+                self.tick_admitted(
+                    table_deltas,
+                    binding_deltas,
+                    storage,
+                    defer_notifications_until_durable,
+                    publication,
+                    detach_on,
+                    restarted_subscriptions,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        // Restart on every outcome: an abandoned subscription still awaits
+        // its first result. Each restart re-runs that hydration from scratch,
+        // so every overlapping write repeats its work up to the chunk wait.
+        self.restart_abandoned_hydrations(abandoned, restart_storage);
+        ticked
+    }
 
+    /// The part of [`Self::tick_detaching_cold`] after hydration admission.
+    #[allow(clippy::too_many_arguments)]
+    async fn tick_admitted(
+        &mut self,
+        table_deltas: Vec<TableDelta>,
+        binding_deltas: Vec<BindingDelta>,
+        storage: OwnedStorage<'static>,
+        defer_notifications_until_durable: bool,
+        publication: Option<PendingResidentPublication>,
+        detach_on: DetachOn,
+        restarted_subscriptions: HashSet<SubscriptionId>,
+    ) -> Result<(TickMetrics, Rc<RefCell<StagedWriteState>>), IvmRuntimeError> {
         let temporal_blockers = {
             let pending = self.pending_incremental.0.borrow();
             pending
@@ -2662,6 +2742,7 @@ impl IvmRuntime {
         evaluation
             .work_queue
             .add_temporal_blockers(&temporal_blockers);
+        evaluation.restarted_subscriptions = restarted_subscriptions;
         let progress = std::future::poll_fn(|cx| {
             loop {
                 let progress = evaluation.poll(self, cx);
@@ -3231,34 +3312,47 @@ impl IvmRuntime {
         &mut self,
         subscription_id: SubscriptionId,
     ) {
+        let cancelled =
+            self.pending_incremental
+                .0
+                .borrow()
+                .evaluations
+                .iter()
+                .filter_map(|(evaluation_id, evaluation)| match evaluation {
+                    PendingEvaluation::SubscriptionHydration(hydration)
+                        if hydration.subscription_id == subscription_id =>
+                    {
+                        Some(*evaluation_id)
+                    }
+                    PendingEvaluation::Incremental(_)
+                    | PendingEvaluation::SubscriptionHydration(_) => None,
+                })
+                .collect::<Vec<_>>();
+        self.remove_pending_hydrations(&cancelled);
+    }
+
+    /// Remove the uninstalled hydrations `evaluation_ids` from the queue.
+    /// Any successor waiting behind one is released exactly as a completed
+    /// predecessor would release it, but the hydration's state is never
+    /// installed.
+    fn remove_pending_hydrations(
+        &mut self,
+        evaluation_ids: &[u64],
+    ) -> Vec<PendingSubscriptionHydration> {
         let slot = Rc::clone(&self.pending_incremental.0);
         let mut state = std::mem::take(&mut *slot.borrow_mut());
-        let cancelled = state
-            .evaluations
-            .iter()
-            .filter_map(|(evaluation_id, evaluation)| match evaluation {
-                PendingEvaluation::SubscriptionHydration(hydration)
-                    if hydration.subscription_id == subscription_id =>
-                {
-                    Some(*evaluation_id)
-                }
-                PendingEvaluation::Incremental(_) | PendingEvaluation::SubscriptionHydration(_) => {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        for evaluation_id in cancelled {
-            let Some(evaluation) = state.evaluations.remove(&evaluation_id) else {
+        let mut removed = Vec::new();
+        for evaluation_id in evaluation_ids {
+            let Some(evaluation) = state.evaluations.remove(evaluation_id) else {
                 continue;
             };
-            state.order.retain(|candidate| *candidate != evaluation_id);
+            state.order.retain(|candidate| candidate != evaluation_id);
             for node in evaluation.work_queue().registered_nodes() {
                 let Some(waiters) = state.waiters_by_node.get_mut(&node) else {
                     continue;
                 };
-                let was_front = waiters.front() == Some(&evaluation_id);
-                waiters.retain(|waiter| *waiter != evaluation_id);
+                let was_front = waiters.front() == Some(evaluation_id);
+                waiters.retain(|waiter| waiter != evaluation_id);
                 let successor = waiters.front().copied();
                 if waiters.is_empty() {
                     state.waiters_by_node.remove(&node);
@@ -3270,8 +3364,105 @@ impl IvmRuntime {
                     later.temporal_ready(self, node);
                 }
             }
+            if let PendingEvaluation::SubscriptionHydration(hydration) = evaluation {
+                removed.push(hydration);
+            }
         }
         *slot.borrow_mut() = state;
+        removed
+    }
+
+    /// Set aside hydrations parked on a large-value chunk fetch so that an
+    /// overlapping local write can begin (#3901).
+    ///
+    /// Invariant: local writes never wait on large-value chunk fetches. A
+    /// chunk may have to arrive from a peer, which can be unreachable for as
+    /// long as the device is offline, while a write needs local storage
+    /// alone. Any pending chunk request counts, including a chunk read from
+    /// async local storage (IndexedDB or OPFS): the request does not say
+    /// which it is.
+    ///
+    /// Until [`Self::restart_abandoned_hydrations`] restarts it, the
+    /// subscription is also removed from the output index: the write must not
+    /// publish to it, because the restarted hydration's first result already
+    /// includes the write.
+    fn abandon_pending_hydrations(
+        &mut self,
+        evaluation_ids: &[u64],
+    ) -> Vec<PendingSubscriptionHydration> {
+        let abandoned = self.remove_pending_hydrations(evaluation_ids);
+        for hydration in &abandoned {
+            if hydration.lifetime == SubscriptionLifetime::Retained {
+                self.unindex_subscription_outputs(hydration.subscription_id, &hydration.outputs);
+            }
+        }
+        abandoned
+    }
+
+    /// Restart each hydration abandoned by a local write from the snapshot
+    /// after that write, read through the write's own `storage`.
+    ///
+    /// The new session takes over the old one's chunk fetches. A fetch still
+    /// in flight keeps its demand with the chunk provider, which retains it
+    /// across upstream disconnects, so no fetch is lost or repeated. Only the
+    /// outputs that need those chunks stay pending.
+    ///
+    /// A subscription whose restart fails is failed and removed, like one
+    /// whose hydration fails, so it never waits for a first result that
+    /// cannot come. The other subscriptions still restart.
+    fn restart_abandoned_hydrations(
+        &mut self,
+        abandoned: Vec<PendingSubscriptionHydration>,
+        storage: OwnedStorage<'static>,
+    ) {
+        for mut hydration in abandoned {
+            if !self
+                .multisink_subscriptions
+                .contains_key(&hydration.subscription_id)
+            {
+                continue;
+            }
+            if hydration.lifetime == SubscriptionLifetime::Retained {
+                self.index_subscription_outputs(hydration.subscription_id, &hydration.outputs);
+            }
+            let subscription_id = hydration.subscription_id;
+            let evaluation_id = match self.enqueue_subscription_hydration(
+                subscription_id,
+                hydration.outputs,
+                storage.clone(),
+                Some(hydration.binding_snapshots),
+                hydration.binding_frontier_advance.as_deref(),
+                hydration.initial,
+                hydration.lifetime,
+                std::mem::take(&mut hydration.session.root_indirect_values),
+                std::mem::take(&mut hydration.session.borrowed),
+            ) {
+                Ok(evaluation_id) => evaluation_id,
+                Err(error) => {
+                    if let Some(subscription) = self.multisink_subscriptions.get(&subscription_id) {
+                        subscription
+                            .sender
+                            .fail(SubscriptionError::new(Arc::new(error)));
+                    }
+                    self.unsubscribe(subscription_id);
+                    continue;
+                }
+            };
+            let mut pending = self.pending_incremental.0.borrow_mut();
+            let Some(PendingEvaluation::SubscriptionHydration(restarted)) =
+                pending.evaluations.get_mut(&evaluation_id)
+            else {
+                unreachable!("a restarted hydration is queued under its id");
+            };
+            hydration
+                .session
+                .requests
+                .hand_off_chunks(&mut restarted.session.requests);
+            hydration
+                .session
+                .evaluation_inputs
+                .hand_off_chunks(&mut restarted.session.evaluation_inputs);
+        }
     }
 
     pub(crate) async fn drive_pending_incremental(&mut self) -> Result<(), IvmRuntimeError> {
@@ -3537,6 +3728,7 @@ impl IvmRuntime {
             evaluation_inputs,
             work_queue,
             published_subscriptions: HashSet::default(),
+            restarted_subscriptions: HashSet::default(),
             relevant_nodes,
             affected_nodes,
             affected_subscriptions,

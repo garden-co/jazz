@@ -94,12 +94,12 @@ it("completes uninterrupted and resumed recipient handoffs without implicit crea
       if (interrupted) {
         await expect(grant.wait()).rejects.toThrow("Interrupted initial delivery");
         const accepted = await creator.all(app.__e2ee_spaces.where({ identifier: project.id }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(accepted).toHaveLength(1);
         expect(
           await creator.all(app.__e2ee_space_deliveries.where({ spaceId: accepted[0]!.id }), {
-            tier: "global",
+            tier: "remote",
           }),
         ).toEqual([]);
         expect(await recipient.e2ee.explain(target)).toEqual({

@@ -131,7 +131,7 @@ async function leasedManagerFixture(admissionError?: Error, inspectorAttachment 
   const manager = new BrowserConnectionManager(host as unknown as DbForConnection);
   await manager.start();
   manager.getClient({});
-  if (!admissionError) await manager.ensureReady("local");
+  if (!admissionError) await manager.ensureReady("runtime");
   return {
     manager,
     host,
@@ -208,7 +208,7 @@ describe("BrowserConnectionManager acknowledged storage reset", () => {
       acquire.resolve();
       await reset;
       fixture.manager.getClient({});
-      await fixture.manager.ensureReady("local");
+      await fixture.manager.ensureReady("runtime");
       const discards = vi.mocked(fixture.client.discard).mock.calls.length;
       fixture.contexts[0]!.onStorageReset?.(2);
       await vi.advanceTimersByTimeAsync(0);
@@ -274,7 +274,7 @@ describe("BrowserConnectionManager acknowledged storage reset", () => {
       resetError = error;
     }
     expect(resetError).toBeInstanceOf(Error);
-    await expect(fixture.manager.ensureReady("local")).rejects.toBe(resetError);
+    await expect(fixture.manager.ensureReady("runtime")).rejects.toBe(resetError);
     expect(fixture.host.runtimeSource.acquireBrowserForegroundNodeLease).toHaveBeenCalledOnce();
     expect(fixture.port.close).toHaveBeenCalledOnce();
     fixture.host.isShuttingDown = true;
@@ -326,36 +326,36 @@ function admissionManager(retryable = true) {
 describe("Browser configuration admission retries", () => {
   it("rejects each attempt visibly and only reattaches on a later explicit call", async () => {
     const { manager, connections, error, unpin } = admissionManager();
-    const first = manager.ensureReady("local");
-    const concurrent = manager.ensureReady("local");
+    const first = manager.ensureReady("runtime");
+    const concurrent = manager.ensureReady("runtime");
     await expect(first).rejects.toBe(error);
     await expect(concurrent).rejects.toBe(error);
     expect(connections).toHaveLength(1);
-    await expect(manager.ensureReady("local")).rejects.toBe(error);
+    await expect(manager.ensureReady("runtime")).rejects.toBe(error);
     expect(connections).toHaveLength(2);
     expect(connections[0]!.shutdown).toHaveBeenCalledOnce();
     unpin();
     await Promise.resolve();
     expect(connections).toHaveLength(2);
-    await expect(manager.ensureReady("local")).resolves.toBeUndefined();
+    await expect(manager.ensureReady("runtime")).resolves.toBeUndefined();
     expect(connections).toHaveLength(3);
     expect(connections[1]!.shutdown).toHaveBeenCalledOnce();
   });
 
   it("does not retry other initial failures even with matching error text", async () => {
     const { manager, connections, error } = admissionManager(false);
-    await expect(manager.ensureReady("local")).rejects.toBe(error);
-    await expect(manager.ensureReady("local")).rejects.toBe(error);
+    await expect(manager.ensureReady("runtime")).rejects.toBe(error);
+    await expect(manager.ensureReady("runtime")).rejects.toBe(error);
     expect(connections).toHaveLength(1);
   });
 
   it("shares one candidate and cannot reopen while shutdown begins during retirement", async () => {
     const { manager, host, connections, error } = admissionManager();
-    await expect(manager.ensureReady("local")).rejects.toBe(error);
+    await expect(manager.ensureReady("runtime")).rejects.toBe(error);
     const retirement = deferred();
     connections[0]!.shutdown.mockImplementation(() => retirement.promise);
-    const retry = manager.ensureReady("local");
-    const concurrent = manager.ensureReady("local");
+    const retry = manager.ensureReady("runtime");
+    const concurrent = manager.ensureReady("runtime");
     await Promise.resolve();
     expect(connections[0]!.shutdown).toHaveBeenCalledOnce();
     host.isShuttingDown = true;
@@ -396,7 +396,7 @@ describe("BrowserConnectionManager.shutdown", () => {
       const error = new BrowserWorkerUnresponsiveError("worker stopped responding");
       const fixture = await leasedManagerFixture(phase === "initialization" ? error : undefined);
       if (phase === "established follower") fixture.fail(error);
-      await expect(fixture.manager.ensureReady("local")).rejects.toBe(error);
+      await expect(fixture.manager.ensureReady("runtime")).rejects.toBe(error);
       expect(fixture.client.discard).not.toHaveBeenCalled();
       expect(fixture.messages).not.toContain("retire-foreground-node-lease");
       fixture.host.isShuttingDown = true;
@@ -488,7 +488,7 @@ describe("BrowserConnectionManager.shutdown", () => {
     const error = new Error("incompatible persistent browser configuration");
     error.name = "BrowserWorkerUnresponsiveError";
     const fixture = await leasedManagerFixture(error);
-    await expect(fixture.manager.ensureReady("local")).rejects.toBe(error);
+    await expect(fixture.manager.ensureReady("runtime")).rejects.toBe(error);
     fixture.allowFinish();
     fixture.host.isShuttingDown = true;
     await fixture.manager.shutdown();
@@ -671,7 +671,7 @@ describe("BrowserConnectionManager.shutdown", () => {
     const manager = new BrowserConnectionManager(host as unknown as DbForConnection);
     await manager.start();
     manager.getClient({});
-    await manager.ensureReady("local");
+    await manager.ensureReady("runtime");
     expect(leasePort.close).not.toHaveBeenCalled();
     expect(leaseMessages).not.toContain("return-foreground-node-lease");
     expect(leaseMessages).not.toContain("retire-foreground-node-lease");
@@ -800,13 +800,13 @@ describe("BrowserConnectionManager auth update failures", () => {
       expect(unhandledRejections).toEqual([]);
       expect(host.markUnauthenticated).not.toHaveBeenCalled();
       expect(host.clearAuthError).not.toHaveBeenCalled();
-      await expect(manager.ensureReady("local")).rejects.toBe(failure);
+      await expect(manager.ensureReady("runtime")).rejects.toBe(failure);
 
       await expect(manager.reconnect()).resolves.toBeUndefined();
       expect(createConnection).toHaveBeenCalledTimes(2);
       expect(first.reconnect).not.toHaveBeenCalled();
       expect(second.reconnect).toHaveBeenCalledOnce();
-      await expect(manager.ensureReady("local")).resolves.toBeUndefined();
+      await expect(manager.ensureReady("runtime")).resolves.toBeUndefined();
     } finally {
       process.off("unhandledRejection", onUnhandledRejection);
     }
@@ -842,7 +842,7 @@ describe("BrowserConnectionManager auth update failures", () => {
       first,
       second,
     ]);
-    await manager.ensureReady("local");
+    await manager.ensureReady("runtime");
     const unhandledRejections: unknown[] = [];
     const onUnhandledRejection = (reason: unknown) => unhandledRejections.push(reason);
     process.on("unhandledRejection", onUnhandledRejection);
@@ -861,7 +861,7 @@ describe("BrowserConnectionManager auth update failures", () => {
       expect(unhandledRejections).toEqual([]);
       expect(host.markUnauthenticated).not.toHaveBeenCalled();
       expect(host.clearAuthError).not.toHaveBeenCalled();
-      await expect(manager.ensureReady("local")).resolves.toBeUndefined();
+      await expect(manager.ensureReady("runtime")).resolves.toBeUndefined();
     } finally {
       process.off("unhandledRejection", onUnhandledRejection);
     }
@@ -1035,7 +1035,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     );
 
     const disconnect = manager.disconnect();
-    const ready = manager.ensureReady("global");
+    const ready = manager.ensureReady("server");
     const reconnect = manager.reconnect();
     await Promise.resolve();
     expect(connection.reconnect).not.toHaveBeenCalled();
@@ -1122,7 +1122,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     expect(host.runtimeSource.createBrowserWorkerConnection).toHaveBeenCalledTimes(2);
     expect(first.reconnect).not.toHaveBeenCalled();
     expect(second.reconnect).toHaveBeenCalledOnce();
-    await expect(manager.ensureReady("global")).resolves.toBeUndefined();
+    await expect(manager.ensureReady("server")).resolves.toBeUndefined();
   });
 
   it("rejects remote readiness on terminal failure while explicitly offline", async () => {
@@ -1139,7 +1139,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     expect(fixture.manager.isExplicitlyOffline()).toBe(true);
 
     let remoteResult: unknown;
-    const remoteReady = fixture.manager.ensureReady("global").then(
+    const remoteReady = fixture.manager.ensureReady("server").then(
       () => {
         remoteResult = "resolved";
       },
@@ -1158,7 +1158,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
 
     await expect(fixture.manager.reconnect()).resolves.toBeUndefined();
     expect(fixture.manager.isExplicitlyOffline()).toBe(false);
-    await expect(fixture.manager.ensureReady("global")).resolves.toBeUndefined();
+    await expect(fixture.manager.ensureReady("server")).resolves.toBeUndefined();
   });
 
   it("disconnects a worker created while offline before an immediate reconnect", async () => {

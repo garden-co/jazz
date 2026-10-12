@@ -119,12 +119,12 @@ async function fixture() {
     // the space; space-recovery.test.ts covers recovery creation's backfill.
     for (let index = 0; index < 2; index++) {
       const before = new Set(
-        (await owner.all(app.__e2ee_recovery_roots, { tier: "global" })).map((row) => row.id),
+        (await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).map((row) => row.id),
       );
       const created = await owner.e2ee.recovery.create().wait();
       const root = { rootId: "", material: created.material };
       roots.push(root);
-      const added = (await owner.all(app.__e2ee_recovery_roots, { tier: "global" })).filter(
+      const added = (await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).filter(
         (row) => !before.has(row.id),
       );
       expect(added).toHaveLength(1);
@@ -139,11 +139,11 @@ async function fixture() {
     for (const root of roots) {
       const deliveries = await owner.all(
         app.__e2ee_space_recovery_deliveries.where({ recoveryRootId: root.rootId }),
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(deliveries).toHaveLength(1);
     }
-    const protectors = await owner.all(app.__e2ee_recovery_protectors, { tier: "global" });
+    const protectors = await owner.all(app.__e2ee_recovery_protectors, { tier: "remote" });
     expect(new Set(protectors.map((row) => row.rootId))).toEqual(
       new Set(roots.map((root) => root.rootId)),
     );

@@ -94,19 +94,19 @@ it("grants a native space after reading its encrypted rows", async () => {
     const target = { scope: app.projects, identifier: project.id };
     const query = app.notes.where({ projectId: project.id, title: "Wanted" }).orderBy("position");
     const root = await owner.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(root).toBeDefined();
     expect(
-      await owner.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), { tier: "global" }),
+      await owner.all(app.__e2ee_space_successors.where({ spaceId: root!.id }), { tier: "remote" }),
     ).toEqual([]);
     // Two rows retain the batch-decryption boundary; read once, then repeat
     // before granting to another account. Volume belongs in historical-search.perf.
     for (let sample = 0; sample < 2; sample++)
-      expect(await owner.all(query, { tier: "global" })).toEqual(expected);
+      expect(await owner.all(query, { tier: "remote" })).toEqual(expected);
     await owner.e2ee.spaces.grant(app.projects, project.id, otherId).wait();
     expect(await other.e2ee.explain(target)).toEqual({ state: "ready" });
-    expect(await other.all(query, { tier: "global" })).toEqual(expected);
+    expect(await other.all(query, { tier: "remote" })).toEqual(expected);
   } finally {
     await Promise.all(sessions.map((session) => session.close()));
     await server.stop();

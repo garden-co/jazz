@@ -1,11 +1,11 @@
-import { schema as s } from "jazz-tools";
+import { schema as s, migration as m } from "jazz-tools";
 
 // Example: dropping a column with a backwards default.
 // Clients still on the older schema continue seeing legacy_priority.
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     todos: {
-      legacy_priority: s.drop.int({ backwardsDefault: 0 }),
+      legacy_priority: m.drop.int({ backwardsDefault: 0 }),
     },
   },
   fromHash: "311995e9a178",

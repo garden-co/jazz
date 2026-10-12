@@ -114,7 +114,7 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
     expect(scopeId).not.toBeNull();
     if (!scopeId) throw new Error("Missing accepted project scope");
     const accountRoot = (await db.one(app.__e2ee_account_roots.where({ accountId }), {
-      tier: "global",
+      tier: "remote",
     }))!;
     const creatorEpoch = accountRoot.epochId;
     const insertCandidate = async (
@@ -201,7 +201,7 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
             recipientKind: "account",
             recipientId: accountId,
           }),
-          { tier: "global" },
+          { tier: "remote" },
         ),
       ).toHaveLength(1);
       return root;
@@ -218,10 +218,10 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
       crypto.randomUUID(),
     );
     const canonical = app.__e2ee_spaces.where({ id: canonicalId(scopeId, project.id) });
-    expect(await db.one(canonical, { tier: "global" })).toBeNull();
+    expect(await db.one(canonical, { tier: "remote" })).toBeNull();
     await db.e2ee.spaces.grant(app.projects, project.id, accountId).wait();
     const target = { scope: app.projects, identifier: project.id };
-    const accepted = (await db.one(canonical, { tier: "global" }))!;
+    const accepted = (await db.one(canonical, { tier: "remote" }))!;
     expect(accepted).toMatchObject({ scopeId, identifier: project.id });
     expect(accepted.id).toBe(canonicalId(scopeId, project.id));
     expect(await db.e2ee.explain(target)).toEqual({ state: "ready" });
@@ -245,7 +245,7 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
         authorId = lateCreator.getSnapshot().account!.id;
         expect(
           await writer.all(app.__e2ee_account_roots.where({ accountId: authorId }), {
-            tier: "global",
+            tier: "remote",
           }),
         ).toEqual([]);
         const signing = await native.deviceSigner.createKeyPair();
@@ -273,7 +273,7 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
         // Genuine published device keys, but never approved in this account.
         expect(
           await db.one(app.__e2ee_device_keys.where({ deviceId: author.id }), {
-            tier: "global",
+            tier: "remote",
           }),
         ).not.toBeNull();
       } else if (scenario === "wrong-epoch creator") {
@@ -301,13 +301,13 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
         await writer.e2ee.devices.list();
         expect(
           await db.all(app.__e2ee_account_roots.where({ accountId: authorId }), {
-            tier: "global",
+            tier: "remote",
           }),
         ).toHaveLength(1);
       }
       if (scenario === "wrong-ID same-address") {
         const sameAddress = await db.all(app.__e2ee_spaces.where({ identifier: project.id }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(sameAddress.map((row) => row.id).sort()).toEqual(
           [preceding.id, accepted.id, root.id].sort(),
@@ -377,7 +377,7 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
     if (otherRecipient) {
       expect(
         await recovered.all(app.__e2ee_space_grants.where({ recipientId: otherRecipient }), {
-          tier: "global",
+          tier: "remote",
         }),
       ).toEqual(
         expect.arrayContaining([

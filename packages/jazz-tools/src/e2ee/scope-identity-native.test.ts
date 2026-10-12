@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { createJazzSession } from "../backend/create-jazz-session.js";
@@ -76,10 +77,10 @@ it("preserves accepted scope identities across a server-published table rename",
   const after = { initiatives: s.table({ title: s.string() }, {}) };
   const oldApp = s.defineApp(before);
   const newApp = s.defineApp(after);
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: before,
     to: after,
-    renameTables: { initiatives: s.renameTableFrom("projects") },
+    renameTables: { initiatives: m.renameTableFrom("projects") },
   });
   const oldPermissions = definePermissions(oldApp, ({ policy }) => {
     policy.projects.allowRead.always();
@@ -186,10 +187,10 @@ it("refreshes a column identity immediately after reconnecting to a renamed colu
   const after = { projects: s.table({ body: s.string() }, {}) };
   const oldApp = s.defineApp(before);
   const newApp = s.defineApp(after);
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: before,
     to: after,
-    migrate: { projects: { body: s.renameFrom("title") } },
+    migrate: { projects: { body: m.renameFrom("title") } },
   });
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Db | undefined;

@@ -117,7 +117,7 @@ it("delivers a cold encrypted subscription while optional device delivery is pen
           failure = error;
         },
       },
-      { tier: "global" },
+      { tier: "remote" },
     );
     await expect.poll(() => waiting, { timeout: 10_000 }).toBe(true);
     // Delivery is deliberately still pending when the verified result arrives.

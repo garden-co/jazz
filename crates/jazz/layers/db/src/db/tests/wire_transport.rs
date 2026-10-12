@@ -48,7 +48,7 @@ fn row_settlement_is_opt_in_and_follows_authority_acceptance() {
     assert_eq!(local.len(), 1);
     let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
     let observation_opts = ReadOpts {
-        propagation: Propagation::LocalOnly,
+        tier: ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     let pending_read = OpenTransactionId::new();
