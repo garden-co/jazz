@@ -7,6 +7,7 @@ import { createNativeCrypto } from "./native.js";
 import { encodeCryptoContext } from "./context.js";
 import { confirmAccountEpoch } from "./first-epoch.js";
 import { readAccountMembership } from "./public-membership.js";
+import { recoveryRecords } from "./fixtures/recovery-verifier-fixture.js";
 
 it("creates independent recovery material, recovers offline and reopens the recovered device", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
@@ -123,6 +124,15 @@ it("creates independent recovery material, recovers offline and reopens the reco
         expect.objectContaining({ id: refused.id, state: "pending" }),
       ]),
     );
+    // A retry authenticates the material but must not append another enrolment
+    // when this device already holds the verified current account key.
+    const enrolled = await recoveryRecords(recovering);
+    await recovering.e2ee.recovery.use(material).wait();
+    expect(await recoveryRecords(recovering)).toEqual(enrolled);
+    await expect(recovering.e2ee.recovery.use("{}").wait()).rejects.toMatchObject({
+      code: "recovery-material-unusable",
+    });
+    expect(await recoveryRecords(recovering)).toEqual(enrolled);
     await recovering.shutdown();
     const reopened = await createDb({ ...account, e2ee: { store: recoveredStore } });
     clients.push(reopened);

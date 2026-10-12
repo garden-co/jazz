@@ -119,6 +119,9 @@ it.each(["device-envelope", "delivery-verification"])(
       expect(
         await second.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "remote" }),
       ).toEqual(deliveries);
+      expect(await second.e2ee.devices.list()).toContainEqual(
+        expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "not-verified" }),
+      );
       corrupt = false;
       await second.e2ee.recovery.use(material).wait();
       const accepted = await second.e2ee.devices.list();
