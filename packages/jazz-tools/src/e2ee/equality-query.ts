@@ -153,7 +153,10 @@ export async function prepareEqualityQuery(
         ...Object.keys(built.includes),
       ])
     : undefined;
+  const matchesEpochs = (current: ReadonlySet<string>) =>
+    current.size === epochs.size && [...current].every((epoch) => epochs.has(epoch));
   return {
+    matchesEpochs,
     json: JSON.stringify(physical),
     space: { scope: declaration.scope, identifier: scopeIdentifier },
     async isCurrent() {
@@ -171,7 +174,7 @@ export async function prepareEqualityQuery(
         },
         true,
       );
-      return current.size === epochs.size && [...current].every((epoch) => epochs.has(epoch));
+      return matchesEpochs(current);
     },
     dispose() {
       for (const bytes of wanted) bytes.fill(0);

@@ -3841,14 +3841,10 @@ export class Db {
         context || usesRelationTraversal
           ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
           : await client.queryInternal(wasmQuery, queryOptions);
-      if (equality && !(await equality.isCurrent())) {
-        // Bound work under continuous rotation; never present incomplete history as exhaustion.
-        if (equalityRetries >= 2) throw new E2eeDataError("key-unavailable");
-        return this.allInternal(query, options, equalityRetries + 1);
-      }
       const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
       const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
       const outputRelationNames = Object.keys(outputIncludes);
+      let candidateEpochs: ReadonlySet<string> | undefined;
       let transformedRows = await decryptQueryRows(
         query._schema,
         outputTable,
@@ -3863,8 +3859,30 @@ export class Db {
         ),
         equality ? {} : outputIncludes,
         query._columnTransformsByTable,
-        (table, rows) => decryptCellRows(this, query._schema, table, rows),
+        (table, rows) =>
+          decryptCellRows(
+            this,
+            query._schema,
+            table,
+            rows,
+            undefined,
+            equality
+              ? (identifier, epochs) => {
+                  if (table === builtQuery.table && identifier === equality.space.identifier)
+                    candidateEpochs = epochs;
+                }
+              : undefined,
+          ),
       );
+      if (
+        equality &&
+        !(candidateEpochs ? equality.matchesEpochs(candidateEpochs) : await equality.isCurrent())
+      ) {
+        // Decryption already observed accepted history after the candidate read.
+        // Empty results still need their own check; neither path may miss a new epoch.
+        if (equalityRetries >= 2) throw new E2eeDataError("key-unavailable");
+        return this.allInternal(query, options, equalityRetries + 1);
+      }
       if (equality)
         transformedRows = await decryptEqualityMatches(
           query._schema,

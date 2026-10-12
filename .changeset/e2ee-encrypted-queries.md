@@ -27,3 +27,8 @@ resolve the separately tracked heap-exhaustion mechanism.
 Multi-step permission and space-revocation fixtures use the same two-minute
 correctness budget as their peers. Malformed membership proposals are checked
 for rejection and absence from accepted membership, not backend error wording.
+
+Encrypted equality reads reuse the fresh accepted epoch history observed while
+decrypting candidates. Empty results still validate history independently, and
+batch reads retain their final authority recheck. Epoch changes rebuild the
+query tokens and retry, preserving the existing key lifetime and validation.

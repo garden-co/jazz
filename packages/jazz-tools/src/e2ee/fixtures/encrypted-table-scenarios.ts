@@ -448,14 +448,28 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       let stop: (() => void) | undefined;
       let stopHistory: (() => void) | undefined;
       let expected: typeof note | undefined;
+      let expectedHistory: Array<typeof note> | undefined;
+      let pendingHistory: Promise<Array<typeof note>> | undefined;
+      let historyReadStarted = false;
+      let releaseHistoryRead = () => {};
+      const historyReadGate = new Promise<void>((resolve) => {
+        releaseHistoryRead = resolve;
+      });
       try {
         await recipient.e2ee.devices.list();
         await database.e2ee.spaces
           .grant(app.projects, project.id, recipientAccount.account.id)
           .wait();
         duringToken = async () => {
-          // Claim and clear the foreground gate before either live query can
-          // compute its tokens. All three readers must predate rotation.
+          // Hold both an empty and a nonempty candidate query at their old
+          // tokens. Claim the second gate before any subscription can use it.
+          duringToken = async () => {
+            historyReadStarted = true;
+            await historyReadGate;
+          };
+          pendingHistory = database.all(history, { tier: "global" });
+          void pendingHistory.catch(() => {});
+          await expect.poll(() => historyReadStarted, { timeout: 30_000 }).toBe(true);
           stop = database.subscribe(
             query,
             {
@@ -494,29 +508,33 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
           });
           await added.wait({ tier: "global" });
           expected = added.value;
+          const current = database.insert(app.notes, {
+            projectId: project.id,
+            title: note.title,
+            done: true,
+            payload: new Uint8Array([10]),
+          });
+          await current.wait({ tier: "global" });
+          expectedHistory = [note, current.value];
+          releaseHistoryRead();
         };
         const rows = await database.all(query, { tier: "global" });
         expect(expected).toBeDefined();
         expect(rows).toEqual([expected]);
+        expect(expectedHistory).toBeDefined();
+        expect(await pendingHistory).toEqual(expectedHistory);
         await expect
           .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
           .toEqual([expected]);
         expect(failure).toBeUndefined();
 
-        // Reuse the accepted rotation for mixed-epoch ordering and pagination.
-        // The history subscription has observed the old row since before rotation.
-        const current = database.insert(app.notes, {
-          projectId: project.id,
-          title: note.title,
-          done: true,
-          payload: new Uint8Array([10]),
-        });
-        await current.wait({ tier: "global" });
-        const expectedHistory = [note, current.value];
+        // Both foreground reads and both subscriptions predate this rotation.
+        // Reuse its mixed-epoch dataset for ordering and pagination.
+
         expect(await database.all(history, { tier: "global" })).toEqual(expectedHistory);
         expect(await database.all(history.limit(1), { tier: "global" })).toEqual([note]);
         expect(await database.all(history.offset(1).limit(1), { tier: "global" })).toEqual([
-          current.value,
+          expectedHistory![1],
         ]);
         await expect
           .poll(() => historyFailure ?? historySnapshots.at(-1), { timeout: 30_000 })
@@ -552,8 +570,11 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
           stopIncomplete();
         }
       } finally {
+        duringToken = undefined;
+        releaseHistoryRead();
         stop?.();
         stopHistory?.();
+        await pendingHistory?.catch(() => {});
         await recipient.shutdown();
       }
       return;
