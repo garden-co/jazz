@@ -6,10 +6,13 @@ import react from "@vitejs/plugin-react";
 import topLevelAwait from "vite-plugin-top-level-await";
 import wasm from "vite-plugin-wasm";
 import {
-  blockJazzServerNetwork,
   jazzServerInfo,
+  stopJazzServerByUrl,
+  createJazzServerTransportControl,
+  blockJazzServerTransport,
+  unblockJazzServerTransport,
+  stopJazzServerTransportControl,
   jazzServerJwtForUser,
-  unblockJazzServerNetwork,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
 interface ConnectedPeerInput {
@@ -66,7 +69,7 @@ async function openConnectedPeer(
 async function queryConnectedPeer(id: string): Promise<Record<string, unknown>[]> {
   const peer = connectedPeers.get(id);
   if (!peer) throw new Error(`PosterShop connected peer ${id} is not open`);
-  return callRemotePeer(peer.page, "queryRemoteBrowserDbRows", { id, tier: "global" });
+  return callRemotePeer(peer.page, "queryRemoteBrowserDbRows", { id, tier: "remote" });
 }
 
 async function insertConnectedPeer(
@@ -108,10 +111,14 @@ export default defineConfig({
       instances: [{ browser: "chromium", headless: true }],
       commands: {
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
-        jazzServerBlockNetwork: async ({ context }, serverUrl) =>
-          blockJazzServerNetwork(context, serverUrl),
-        jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
-          unblockJazzServerNetwork(context, serverUrl),
+        jazzServerStop: async (_context, url) => stopJazzServerByUrl(url),
+        jazzServerTransportControlCreate: async (_context, url) =>
+          createJazzServerTransportControl(url),
+        jazzServerTransportControlBlock: async (_context, url, direction: "both" | "inbound") =>
+          blockJazzServerTransport(url, direction),
+        jazzServerTransportControlUnblock: async (_context, url) => unblockJazzServerTransport(url),
+        jazzServerTransportControlStop: async (_context, url) =>
+          stopJazzServerTransportControl(url),
         posterShopOpenConnectedPeer: async ({ context, page }, input) =>
           openConnectedPeer(context, page, input),
         posterShopQueryConnectedPeer: async (_context, id) => queryConnectedPeer(id),

@@ -1,10 +1,7 @@
 use std::collections::BTreeMap;
 
 use jazz::block_on;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent,
-};
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -21,7 +18,6 @@ use jazz::tools::{
     ColumnType as PublicColumnType, Schema as PublicSchema, SchemaBuilder, TablePolicies,
     TableSchemaBuilder,
 };
-use jazz::tx::DurabilityTier;
 
 const DOCUMENTS: &str = "documents";
 const MEMBERSHIPS: &str = "memberships";
@@ -420,9 +416,7 @@ fn row_ids_for_identity(
 
 fn opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }
