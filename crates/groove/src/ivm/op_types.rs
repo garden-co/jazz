@@ -34,6 +34,19 @@ pub struct TableSourceOp {
     pub variant_projection: Option<VariantProjectionTarget>,
 }
 
+/// A table source probed by the keys of the operator's only input.
+///
+/// `source.scan` is the static primary-key prefix (absent, `Prefix` or
+/// `Point` over leading key columns); the input's `key_fields` continue that
+/// prefix positionally over the following primary-key columns. Each live key
+/// is one storage prefix read.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LookupOp {
+    pub source: TableSourceOp,
+    pub key_descriptor: RecordDescriptor,
+    pub key_fields: Vec<usize>,
+}
+
 /// Runtime registry namespace selected by a heterogeneous table source.
 ///
 /// Named projections are caller-defined query boundaries. Schema-index

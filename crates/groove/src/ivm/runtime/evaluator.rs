@@ -2,6 +2,8 @@
 
 use super::*;
 mod kernels;
+mod lookup;
+pub(super) use lookup::LookupState;
 
 // Test-only work receipt: output equivalence alone cannot detect accidental
 // reintroduction of a full ancestor traversal for each ready queue slot.
@@ -99,6 +101,7 @@ pub(super) enum OperatorState {
     Recursive(AsOf<RecursiveState, Tick>),
     CollectBy(CollectByIncrementalState),
     StreamingChecksum(Box<StreamingChecksumOperatorState>),
+    Lookup(AsOf<LookupState, SubTick>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -733,6 +736,7 @@ pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
         OpType::TopBy(_) => OperatorState::TopBy(AsOf::new(TopByIncrementalState::default())),
         OpType::CollectBy(_) => OperatorState::CollectBy(CollectByIncrementalState::default()),
         OpType::StreamingChecksum(_) => OperatorState::StreamingChecksum(Box::default()),
+        OpType::Lookup(_) => OperatorState::Lookup(AsOf::default()),
         _ => OperatorState::Stateless,
     }
 }
@@ -1891,6 +1895,18 @@ impl TickEvaluator<'_> {
                 input: node,
             };
             !self.arrangement_states.contains_key(&key)
+        } else if matches!(
+            self.graph.node(node).map(|node| &node.descriptor.operator),
+            Some(OpType::Lookup(_))
+        ) && self.context.eval_mode == EvalMode::Hydrate
+        {
+            // A lookup's records are reusable only with the key set and
+            // matched rows that maintain them.
+            let key = self.operator_key(node);
+            !matches!(
+                self.operator_states.get(&key),
+                Some(OperatorState::Lookup(state)) if state.as_of().is_some()
+            )
         } else {
             false
         };
@@ -2356,6 +2372,9 @@ impl TickEvaluator<'_> {
             }
             OpType::IndexSource(input) => {
                 tables.insert(input.table);
+            }
+            OpType::Lookup(input) => {
+                tables.insert(input.source.table);
             }
             OpType::BindingSource(input) => {
                 bindings.insert(input.key);

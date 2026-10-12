@@ -1218,7 +1218,8 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
             | GraphBuilder::ArgMinBy { input, .. }
             | GraphBuilder::TopBy { input, .. }
             | GraphBuilder::CollectBy { input, .. }
-            | GraphBuilder::Aggregate { input, .. } => {
+            | GraphBuilder::Aggregate { input, .. }
+            | GraphBuilder::Lookup { keys: input, .. } => {
                 contains([input.as_ref() as *const GraphBuilder], &contains_collect)
             }
             GraphBuilder::Union { inputs } => contains(

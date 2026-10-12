@@ -62,6 +62,9 @@ impl ActivationPlan {
                 OpType::TableSource(source) => {
                     tables.insert(source.table.clone());
                 }
+                OpType::Lookup(lookup) => {
+                    tables.insert(lookup.source.table.clone());
+                }
                 OpType::BindingSource(source) => {
                     bindings.insert(source.key.clone());
                 }
