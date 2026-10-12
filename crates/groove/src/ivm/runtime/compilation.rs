@@ -394,9 +394,99 @@ impl IvmRuntime {
             | GraphBuilder::AntiJoin { .. } => {
                 self.add_dedup_join_graph(graph, inferred_output, output_memo, compiled_memo)
             }
+            GraphBuilder::Lookup { .. } => {
+                self.add_dedup_lookup_graph(graph, inferred_output, output_memo, compiled_memo)
+            }
         }?;
         compiled_memo.insert(key, compiled.clone());
         Ok(compiled)
+    }
+
+    /// Compile a keyed lookup: one node over its key relation that probes
+    /// the table by each live key ([`GraphBuilder::lookup`]).
+    #[inline(never)]
+    fn add_dedup_lookup_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+        compiled_memo: &mut HashMap<usize, CompiledNode>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        let GraphBuilder::Lookup {
+            keys,
+            keys_on,
+            table,
+            scan,
+            variant_projection,
+        } = graph
+        else {
+            return Err(IvmRuntimeError::UnsupportedOperator);
+        };
+        let prefix_len = match scan {
+            None => 0,
+            Some(StaticScanSpec::Prefix(values) | StaticScanSpec::Point(values)) => values.len(),
+            Some(_) => {
+                return Err(IvmRuntimeError::UnsupportedLookup(
+                    "a lookup's static scan must be a point or prefix",
+                ));
+            }
+        };
+        if keys_on.is_empty() {
+            return Err(IvmRuntimeError::UnsupportedLookup(
+                "a lookup needs at least one key field",
+            ));
+        }
+        let compiled_keys = self.add_dedup_graph_cached(keys, output_memo, compiled_memo)?;
+        let key_descriptor = compiled_keys.output;
+        let key_fields = keys_on
+            .iter()
+            .map(|field| resolve_field_ref(&key_descriptor, field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let table_schema = self
+            .schema
+            .table(table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
+        let primary_key = primary_key_field_indices(table_schema, &inferred_output)?;
+        if primary_key.len() < prefix_len + key_fields.len() {
+            return Err(IvmRuntimeError::UnsupportedLookup(
+                "a lookup's prefix and keys exceed the table's primary key",
+            ));
+        }
+        // The probe is the storage key encoding of the key values, so each
+        // key field must have the type of the primary-key column it names.
+        for (key, column) in key_fields.iter().zip(&primary_key[prefix_len..]) {
+            if key_descriptor.fields()[*key].value_type
+                != inferred_output.fields()[*column].value_type
+            {
+                return Err(IvmRuntimeError::UnsupportedLookup(
+                    "a lookup key field must have its primary-key column's type",
+                ));
+            }
+        }
+        let node = self.graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::Lookup(LookupOp {
+                    source: TableSourceOp {
+                        table: table.clone(),
+                        scan: scan.clone(),
+                        variant_projection: variant_projection
+                            .clone()
+                            .map(VariantProjectionTarget::Named),
+                    },
+                    key_descriptor,
+                    key_fields,
+                }),
+                [compiled_keys.node],
+                inferred_output,
+            ),
+            NodeDurability::Ephemeral,
+        );
+        self.initialize_node_runtime(node);
+        Ok(CompiledNode {
+            output: inferred_output,
+            node,
+            root_ordering_node: None,
+        })
     }
 
     #[inline(never)]
