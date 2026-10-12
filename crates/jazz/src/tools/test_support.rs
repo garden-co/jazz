@@ -106,7 +106,7 @@ where
                 last_error = None;
             }
             Ok(Err(e)) => {
-                if crate::debug_env::covered_input_trace() {
+                if jazz_types::debug_env::covered_input_trace() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=wait_for_query_error description={description} error={e}"
                     );

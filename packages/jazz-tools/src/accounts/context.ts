@@ -15,6 +15,7 @@ import {
   parseJwtPayload,
 } from "../runtime/client-session.js";
 import { setTrustedReservedSession } from "../runtime/db-internal-session.js";
+import { AuthRenewalBackoff, authRetryDelay } from "../runtime/auth-renewal-backoff.js";
 
 /** Public clients always select an enrolled account, never an unverified principal. */
 export type AccountDbConfig = Omit<
@@ -114,32 +115,49 @@ export async function createAccountDbWithRuntimeSource(
     let timer: ReturnType<typeof setTimeout> | undefined;
     let refreshing = false;
     let stopped = false;
-    const schedule = (token: string) => {
+    let failedRefreshes = 0;
+    const renewals = new AuthRenewalBackoff();
+    const scheduleIn = (delay: number, beforeRefresh?: () => void) => {
       if (timer) clearTimeout(timer);
-      const expires = parseJwtPayload(token)?.exp;
-      if (typeof expires !== "number" || !Number.isFinite(expires) || expires * 1000 <= Date.now())
-        return;
-      const delay = Math.max(1000, Math.min(2_147_483_647, (expires * 1000 - Date.now()) * 0.8));
       timer = setTimeout(() => {
+        beforeRefresh?.();
         void refresh();
       }, delay);
       (timer as unknown as { unref?: () => void }).unref?.();
+    };
+    const schedule = (token: string) => {
+      const expires = parseJwtPayload(token)?.exp;
+      if (typeof expires !== "number" || !Number.isFinite(expires) || expires * 1000 <= Date.now())
+        return;
+      // A token that lives to its scheduled refresh ends any renewal streak.
+      scheduleIn(Math.max(1000, Math.min(2_147_483_647, (expires * 1000 - Date.now()) * 0.8)), () =>
+        renewals.reset(),
+      );
+    };
+    const renew = () => {
+      const delay = renewals.next();
+      if (delay === 0) void refresh();
+      else scheduleIn(delay);
     };
     const refresh = async () => {
       if (refreshing || stopped) return;
       refreshing = true;
       try {
         const token = await opened.refreshAccountAuth(account);
+        failedRefreshes = 0;
         if (!stopped) schedule(token);
-      } catch {
-        // Db publishes the failure to its auth state; retry on the next
-        // explicit reconnect/auth failure rather than spinning on bad tokens.
+      } catch (error) {
+        if (stopped) return;
+        // A failed refresh must not end the refresh cycle: the current token
+        // still expires, and nothing else would renew it before then.
+        console.error("Account auth refresh failed", error);
+        scheduleIn(authRetryDelay(failedRefreshes++));
       } finally {
         refreshing = false;
       }
     };
     const stopAuth = opened.onAuthChanged((state) => {
-      if (state.error === "expired" || state.error === "missing") void refresh();
+      if (state.error === "expired" || state.error === "missing") renew();
     });
     opened.onShutdown(() => {
       stopped = true;

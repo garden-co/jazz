@@ -18,17 +18,17 @@ it("matches reference filters inside a transaction as it does outside", async ()
     const project = projectWrite.value;
     const note = db.insert(app.notes, { projectId: project.id, projectUuid: project.id });
     await note.wait({ tier: "local" });
-    expect(await db.all(app.notes.where({ projectId: project.id }), { tier: "local" })).toEqual([
-      note.value,
-    ]);
+    expect(
+      await db.all(app.notes.where({ projectId: project.id }), { tier: "local-first" }),
+    ).toEqual([note.value]);
     const tx = db.beginExclusiveTransaction();
     try {
-      expect(await tx.all(app.notes.where({ projectUuid: project.id }), { tier: "local" })).toEqual(
-        [note.value],
-      );
-      expect(await tx.all(app.notes.where({ projectId: project.id }), { tier: "local" })).toEqual([
-        note.value,
-      ]);
+      expect(
+        await tx.all(app.notes.where({ projectUuid: project.id }), { tier: "local-first" }),
+      ).toEqual([note.value]);
+      expect(
+        await tx.all(app.notes.where({ projectId: project.id }), { tier: "local-first" }),
+      ).toEqual([note.value]);
     } finally {
       await tx.rollback();
     }

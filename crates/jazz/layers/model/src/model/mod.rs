@@ -8,6 +8,7 @@
 #[doc(hidden)]
 pub mod admin_catalogue_row_format;
 pub mod branch;
+pub mod json_schema;
 pub mod metadata;
 pub mod policy_claims;
 #[doc(hidden)]
