@@ -8,9 +8,11 @@ import { Table, TableBody, TableCell, TableRow } from "@astryxdesign/core/Table"
 import { Text } from "@astryxdesign/core/Text";
 import { formatTime, plotGeometry } from "@/lib/perf-timeline/model";
 import {
+  ESTIMATE_DIVISOR,
   getBenchmarkMetadata,
   displayedTime,
   formatThroughput,
+  usesEstimatedTime,
 } from "@/lib/perf-timeline/presentation";
 import { change, type MetricSummary } from "@/lib/showcase/summary";
 
@@ -75,6 +77,7 @@ function History({
   divisor: number;
 }) {
   const metadata = getBenchmarkMetadata(name);
+  const estimated = usesEstimatedTime(name);
   const rows = [...summary.history].reverse();
   return (
     <VStack gap={2} className="w-80 max-w-[calc(100vw-2rem)]">
@@ -94,7 +97,9 @@ function History({
                   <Text type="code">{entry.label}</Text>
                 </TableCell>
                 <TableCell>
-                  <Text hasTabularNumbers>{displayedTime(entry.point.median / divisor, true)}</Text>
+                  <Text hasTabularNumbers>
+                    {displayedTime(entry.point.median / divisor, estimated)}
+                  </Text>
                 </TableCell>
                 <TableCell>
                   {previous && (
@@ -111,12 +116,15 @@ function History({
       {summary.unreleased && (
         <Text type="supporting" display="block">
           Unreleased main ({summary.unreleased.date.slice(0, 10)}):{" "}
-          {displayedTime(summary.unreleased.median / divisor, true)}{" "}
+          {displayedTime(summary.unreleased.median / divisor, estimated)}{" "}
           <Change previous={summary.headline.median} current={summary.unreleased.median} />
         </Text>
       )}
       <Text type="supporting" display="block">
-        Measured on the CodSpeed runner: {formatTime(summary.headline.median / divisor)}
+        {estimated
+          ? `Measurement on the de-noised CodSpeed environment (about ${ESTIMATE_DIVISOR}x slower than a normal CPU): `
+          : "Measured browser wall time on the CodSpeed runner (no native CPU conversion): "}
+        {formatTime(summary.headline.median / divisor)}
       </Text>
       {metadata && (
         <Text type="supporting" display="block">
@@ -125,7 +133,7 @@ function History({
       )}
       {metadata && (
         <Text type="supporting" display="block">
-          Workload rate: {formatThroughput(summary.headline.median, metadata, true)}
+          Workload rate: {formatThroughput(summary.headline.median, metadata, estimated)}
         </Text>
       )}
       <Link href={`${codspeed}/benchmarks/${benchmarkId}`} isExternalLink>

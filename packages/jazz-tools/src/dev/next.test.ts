@@ -31,12 +31,8 @@ async function resolveWrappedConfig(
 function deployed(hash = "abc123def4567890") {
   return {
     schema: { hash, schemaFile: "schema.ts", status: "published" as const },
-    permissions: {
-      schemaHash: hash,
-      permissionsFile: "permissions.ts",
-      previousHead: null,
-      head: null,
-    },
+    changed: true,
+    published: { schemas: [hash], migrations: [] },
     warnings: [],
   };
 }

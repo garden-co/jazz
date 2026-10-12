@@ -139,10 +139,10 @@ it.each([false, true])(
     const proposedEpochs: string[] = [];
     const provisionalKeys: Uint8Array[] = [];
     const [roots, grants, notes, deliveries] = await Promise.all([
-      clients[0]!.all(app.__e2ee_spaces, { tier: "global" }),
-      clients[0]!.all(app.__e2ee_space_grants, { tier: "global" }),
-      clients[0]!.all(app.notes, { tier: "global" }),
-      clients[0]!.all(app.__e2ee_space_deliveries, { tier: "global" }),
+      clients[0]!.all(app.__e2ee_spaces, { tier: "remote" }),
+      clients[0]!.all(app.__e2ee_space_grants, { tier: "remote" }),
+      clients[0]!.all(app.notes, { tier: "remote" }),
+      clients[0]!.all(app.__e2ee_space_deliveries, { tier: "remote" }),
     ]);
     const before = { roots, grants, notes, deliveries };
     try {
@@ -208,7 +208,7 @@ it.each([false, true])(
           expect(key).toHaveLength(32);
           expect(key.every((byte) => byte === 0)).toBe(true);
         }
-        const notes = newRows(await winner.all(app.notes, { tier: "global" }), before.notes);
+        const notes = newRows(await winner.all(app.notes, { tier: "remote" }), before.notes);
         expect(notes).toHaveLength(1);
         expect(notes[0]).toMatchObject({ projectId: project.id, epochId: roots[0]!.epochId });
         expect(roots[0]!.epochId).toBe(proposedEpochs[winnerIndex]);

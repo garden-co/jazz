@@ -45,7 +45,7 @@ export const TrackLane = memo(function TrackLane({
   // first result waits for the server instead of reporting an empty lane.
   const { data: steps = [], isLoading: isLoadingSteps } = useAll(
     app.steps.where({ track_id: track.id, pattern_id: patternId }).orderBy("position", "asc"),
-    { tier: "local-first-unless-empty" },
+    { tier: "local-first", firstLoadRemoteWaitMs: 5_000 },
   );
   const canToggle = canEdit && !isLoadingSteps;
 

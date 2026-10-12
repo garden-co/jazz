@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -30,7 +31,7 @@ it.each(["insert", "upsert"] as const)(
     };
     const oldApp = s.defineApp(before);
     const app = s.defineApp(after);
-    const migration = s.defineMigration({
+    const migration = m.defineMigration({
       from: before,
       to: after,
       createTables: { notes: true, rootNotes: true },
@@ -125,18 +126,18 @@ it.each(["insert", "upsert"] as const)(
       expect.soft(failure).toBeInstanceOf(Error);
       // Rollback alone cannot prove this: provisional envelopes must never be prepared.
       expect.soft(preparedEnvelopes).toBe(0);
-      expect(await writer.one(app.projects.where({ id: project.id }), { tier: "global" })).toEqual(
+      expect(await writer.one(app.projects.where({ id: project.id }), { tier: "remote" })).toEqual(
         project,
       );
-      expect(await writer.all(app.__e2ee_spaces, { tier: "global" })).toEqual([]);
-      expect(await writer.all(app.__e2ee_space_grants, { tier: "global" })).toEqual([]);
-      expect(await writer.all(app.__e2ee_space_deliveries, { tier: "global" })).toEqual([]);
-      expect(await writer.all(app.notes.select("id"), { tier: "global" })).toEqual([]);
-      expect(await writer.all(app.rootNotes.select("id"), { tier: "global" })).toEqual([]);
-      expect(await writer.all(app.notes.select("id"), { branch, tier: "global" })).toEqual([]);
+      expect(await writer.all(app.__e2ee_spaces, { tier: "remote" })).toEqual([]);
+      expect(await writer.all(app.__e2ee_space_grants, { tier: "remote" })).toEqual([]);
+      expect(await writer.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual([]);
+      expect(await writer.all(app.notes.select("id"), { tier: "remote" })).toEqual([]);
+      expect(await writer.all(app.rootNotes.select("id"), { tier: "remote" })).toEqual([]);
+      expect(await writer.all(app.notes.select("id"), { branch, tier: "remote" })).toEqual([]);
       if (operation === "insert")
         expect(
-          await writer.all(app.notes.select("id"), { branch: "changed", tier: "global" }),
+          await writer.all(app.notes.select("id"), { branch: "changed", tier: "remote" }),
         ).toEqual([]);
 
       // Reuse this client and scope: a rejected branch must not retain a provisional key.
@@ -145,16 +146,16 @@ it.each(["insert", "upsert"] as const)(
         .insert(app.rootNotes, { projectId: project.id, body: "Root recovery" })
         .wait({ tier: "global" });
       expect(
-        await writer.one(app.rootNotes.where({ id: recovered.id }), { tier: "global" }),
+        await writer.one(app.rootNotes.where({ id: recovered.id }), { tier: "remote" }),
       ).toEqual({
         id: recovered.id,
         projectId: project.id,
         body: "Root recovery",
       });
-      const roots = await writer.all(app.__e2ee_spaces, { tier: "global" });
+      const roots = await writer.all(app.__e2ee_spaces, { tier: "remote" });
       expect(roots).toHaveLength(1);
       expect(roots[0]).toMatchObject({ identifier: project.id, accountId: account.account.id });
-      const grants = await writer.all(app.__e2ee_space_grants, { tier: "global" });
+      const grants = await writer.all(app.__e2ee_space_grants, { tier: "remote" });
       expect(grants).toHaveLength(1);
       expect(grants[0]).toMatchObject({
         spaceId: roots[0]!.id,
@@ -164,7 +165,7 @@ it.each(["insert", "upsert"] as const)(
       expect(
         await writer.all(app.notes.where({ id: rejectedId }).select("id"), {
           branch,
-          tier: "global",
+          tier: "remote",
         }),
       ).toEqual([]);
     } finally {

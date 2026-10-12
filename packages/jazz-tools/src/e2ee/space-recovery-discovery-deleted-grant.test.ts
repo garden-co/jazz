@@ -7,11 +7,11 @@ it("fails closed when the only initial group-recipient grant is deleted", async 
     expect(await f.owner.e2ee.explain(target)).toEqual({ state: "ready" });
     const { material } = await f.owner.e2ee.recovery.create().wait();
     const root = await f.owner.one(app.__e2ee_spaces.where({ identifier: target.identifier }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(root).not.toBeNull();
     const grants = await f.owner.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(grants).toEqual([
       expect.objectContaining({
@@ -24,7 +24,7 @@ it("fails closed when the only initial group-recipient grant is deleted", async 
     // Inspect from the deleting client, with no cross-client propagation race.
     expect(
       await f.owner.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([]);
     await expect

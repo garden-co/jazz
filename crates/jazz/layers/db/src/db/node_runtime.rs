@@ -270,7 +270,7 @@ where
     /// operation. The next tick detaches them once those owners are released.
     pending_detaches: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
-    /// Remote reachability for `EmptyOpening::AwaitRemote` reads.
+    /// Remote reachability for `FirstLoad::WaitForRemote` reads.
     pub(super) remote_link: Rc<RemoteLinkTracker>,
     query_runtime_wake_pending: Arc<AtomicBool>,
     query_runtime_waker: Rc<RefCell<Option<Waker>>>,
@@ -2398,9 +2398,7 @@ where
                                     connection.connection_epoch,
                                     coverage.opts.read_view_key(),
                                 ))?;
-                                (group.upstream_opts.propagate_upstream
-                                    && owner.downstream_connection_epoch
-                                        == connection.connection_epoch
+                                (owner.downstream_connection_epoch == connection.connection_epoch
                                     && owner.coverage == *coverage)
                                     .then(|| PendingUpstreamSubscription {
                                         subscription: group.upstream_subscription,
@@ -3211,7 +3209,7 @@ where
         drop(connections);
         let detached = true;
         if upstream_epoch.is_some() {
-            // Releases empty openings that were waiting on this link.
+            // Releases openings that were waiting on this link.
             self.remote_link.upstream_detached();
             // Commits that link sent are resent by the next one; until then a
             // Global read must not treat them as ahead of its open.
@@ -3463,7 +3461,7 @@ where
         Ok(stats)
     }
 
-    /// Settle local-first-unless-empty authority witnesses after this turn's
+    /// Settle first-load authority witnesses after this turn's
     /// inputs were folded into every stream, and retire the witness coverage
     /// of every gate that has released.
     async fn resolve_authority_witnesses(&self) {
@@ -3590,8 +3588,7 @@ where
         state: &mut ScalarReconciliation,
         local_owner: Option<&Rc<RefCell<SubscriptionState>>>,
     ) -> Result<(), Error> {
-        if !request.opts.propagate_upstream
-            || !request.opts.read_view.is_default()
+        if !request.opts.read_view.is_default()
             || !crate::node::simple_scalar_exit_query(request.shape.query())
         {
             return Ok(());
@@ -4060,7 +4057,6 @@ where
             pending_overlay,
             remote_read_tier,
             requires_authority_receipt,
-            remote_propagate_upstream,
             read_view,
             previous_source,
             previous_settled,
@@ -4075,7 +4071,6 @@ where
                 state.pending_overlay,
                 state.remote_read_tier,
                 state.requires_authority_receipt,
-                state.remote_propagate_upstream,
                 state.read_view.clone(),
                 state.snapshot_source,
                 state.settled,
@@ -4253,7 +4248,6 @@ where
                 read_view: RegisterShapeOptions {
                     tier: settled_tier,
                     read_view: read_view.clone(),
-                    propagate_upstream: remote_propagate_upstream,
                     ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
@@ -4370,7 +4364,6 @@ where
                 &binding,
                 settled_tier,
                 read_view.clone(),
-                remote_propagate_upstream,
                 requires_authority_receipt,
                 settled_authority_result.as_ref(),
             );
@@ -4463,7 +4456,6 @@ where
                 read_view: RegisterShapeOptions {
                     tier: settled_tier,
                     read_view: read_view.clone(),
-                    propagate_upstream: remote_propagate_upstream,
                     ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
@@ -4602,7 +4594,6 @@ where
                     &binding,
                     settled_tier,
                     read_view,
-                    remote_propagate_upstream,
                     requires_authority_receipt,
                     settled_authority_result.as_ref(),
                 );
@@ -4759,7 +4750,6 @@ where
                         &binding,
                         settled_tier,
                         read_view,
-                        remote_propagate_upstream,
                         requires_authority_receipt,
                         settled_authority_result.as_ref(),
                     );
@@ -4825,7 +4815,6 @@ where
                                     &binding,
                                     settled_tier,
                                     read_view,
-                                    remote_propagate_upstream,
                                     requires_authority_receipt,
                                     settled_authority_result.as_ref(),
                                 );
@@ -4957,7 +4946,6 @@ where
                                 &binding,
                                 settled_tier,
                                 read_view,
-                                remote_propagate_upstream,
                                 requires_authority_receipt,
                                 settled_authority_result.as_ref(),
                             ) && node
@@ -5065,7 +5053,6 @@ where
                         &binding,
                         settled_tier,
                         read_view,
-                        remote_propagate_upstream,
                         requires_authority_receipt,
                         settled_authority_result.as_ref(),
                     );
@@ -5173,7 +5160,6 @@ where
                     &binding,
                     settled_tier,
                     read_view,
-                    remote_propagate_upstream,
                     requires_authority_receipt,
                     settled_authority_result.as_ref(),
                 );
@@ -5433,7 +5419,7 @@ pub(super) fn route_upstream_subscription_rejection(
             let event = SubscriptionEvent::Rejected {
                 reason: reason.clone(),
             };
-            if state.borrow().sender.unbounded_send(event).is_ok() {
+            if state.borrow().send_rejection(event).is_ok() {
                 delivered += 1;
             }
         }
@@ -5451,7 +5437,6 @@ pub(super) fn route_upstream_subscription_rejection(
         let opts = RegisterShapeOptions {
             tier: state_ref.remote_read_tier.unwrap_or(state_ref.read_tier),
             read_view: state_ref.read_view.clone(),
-            propagate_upstream: state_ref.remote_propagate_upstream,
             ..RegisterShapeOptions::default()
         };
         if !register_shape_rejection_matches(subscription, shape, &opts) {
@@ -5465,7 +5450,7 @@ pub(super) fn route_upstream_subscription_rejection(
         let event = SubscriptionEvent::Rejected {
             reason: reason.clone(),
         };
-        if state_ref.sender.unbounded_send(event).is_ok() {
+        if state_ref.send_rejection(event).is_ok() {
             delivered += 1;
         }
     }

@@ -87,14 +87,14 @@ it("resumes an excluded author's initial handoff in a fresh Node process", async
     expect(
       await recipient.e2ee.explain({ scope: app.projects, identifier: before.projectId }),
     ).toEqual({ state: "ready" });
-    const deliveries = await recipient.all(app.__e2ee_space_deliveries, { tier: "global" });
+    const deliveries = await recipient.all(app.__e2ee_space_deliveries, { tier: "remote" });
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]).toMatchObject({
       epochId: before.epochId,
       senderDeviceId: before.deviceId,
       recipientAccountId: account.account.id,
     });
-    expect(await recipient.all(app.__e2ee_space_successors, { tier: "global" })).toEqual([]);
+    expect(await recipient.all(app.__e2ee_space_successors, { tier: "remote" })).toEqual([]);
   } finally {
     await recipient?.shutdown();
     await server.stop();

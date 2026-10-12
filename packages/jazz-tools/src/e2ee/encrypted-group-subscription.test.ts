@@ -85,7 +85,7 @@ it("invalidates encrypted equality when membership is removed from a child group
     await owner.e2ee.spaces.grant(app.projects, project.id, parent.id).wait();
     expect(
       await reader.all(app.notes.where({ projectId: project.id, title: note.title }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([note]);
     const snapshots: unknown[][] = [];
@@ -98,7 +98,7 @@ it("invalidates encrypted equality when membership is removed from a child group
           failure = error;
         },
       },
-      { tier: "global" },
+      { tier: "remote" },
     );
     try {
       await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([note]);

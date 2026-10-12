@@ -19,7 +19,7 @@ it("returns rows and settlement evidence together from one native read", async (
     db.beginTransaction(transaction, "exclusive");
     const reading = db.allSettlementMetadata(
       queryFromTable("notes"),
-      { tier: "global", propagation: "local_only" },
+      { tier: "local-only" },
       transaction,
       undefined,
       undefined,

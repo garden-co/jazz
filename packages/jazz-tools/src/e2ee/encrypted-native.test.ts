@@ -140,11 +140,11 @@ it.each(["grant", "initial", "initial-upsert"])(
         tx.update(app.notes, note.id, { title: note.title });
       }
       const query = app.notes.where({ id: note.id });
-      expect(await tx.one(query, { tier: "local" })).toEqual(note);
+      expect(await tx.one(query, { tier: "local-first" })).toEqual(note);
       // Projection shape is independent of sharing mode; exercise both runtimes
       // with transaction-owned keys here and accepted keys after the grant.
       if (sharing === "grant") {
-        expect(await tx.one(query.select("id", "title"), { tier: "local" })).toEqual({
+        expect(await tx.one(query.select("id", "title"), { tier: "local-first" })).toEqual({
           id: note.id,
           title: "Private title",
         });
@@ -162,7 +162,7 @@ it.each(["grant", "initial", "initial-upsert"])(
             .wait({ tier: "global" }),
         ).rejects.toThrow("initialRecipients cannot change an existing encryption scope");
         expect(
-          await writer.one(app.projects.where({ id: project.id }), { tier: "global" }),
+          await writer.one(app.projects.where({ id: project.id }), { tier: "remote" }),
         ).toEqual(project);
       }
       if (sharing === "grant") {
@@ -172,19 +172,19 @@ it.each(["grant", "initial", "initial-upsert"])(
           await writer.e2ee.explain({ scope: app.projects, identifier: project.id }),
         ).toMatchObject({ state: "refused" });
         const root = await writer.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(
           (
             await writer.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), {
-              tier: "global",
+              tier: "remote",
             })
           ).map((grant) => grant.recipientId),
         ).toEqual([readerId]);
       }
-      expect(await reader.one(query, { tier: "global" })).toEqual(note);
+      expect(await reader.one(query, { tier: "remote" })).toEqual(note);
       if (sharing === "grant") {
-        expect(await reader.one(query.select("id", "title"), { tier: "global" })).toEqual({
+        expect(await reader.one(query.select("id", "title"), { tier: "remote" })).toEqual({
           id: note.id,
           title: "Private title",
         });
@@ -215,7 +215,7 @@ it.each(["grant", "initial", "initial-upsert"])(
         ];
         const batchRows = await writer.all(
           app.notes.where({ id: { in: expected.map((row) => row.id) } }),
-          { tier: "global" },
+          { tier: "remote" },
         );
         expect(batchRows.sort((a, b) => a.id.localeCompare(b.id))).toEqual(
           expected.sort((a, b) => a.id.localeCompare(b.id)),
@@ -224,7 +224,7 @@ it.each(["grant", "initial", "initial-upsert"])(
         await reader
           .update(app.notes, note.id, { title: "Changed", bytes: new Uint8Array([4, 5]) })
           .wait({ tier: "global" });
-        await expect(writer.one(query, { tier: "global" })).rejects.toMatchObject({
+        await expect(writer.one(query, { tier: "remote" })).rejects.toMatchObject({
           code: "key-not-shared",
         });
       }
@@ -244,7 +244,7 @@ it("rejects a late initial recipient on native and WASM without publishing any r
   try {
     for (const tx of transactions) {
       expect(
-        await tx.one(app.projects.where({ id: crypto.randomUUID() }), { tier: "global" }),
+        await tx.one(app.projects.where({ id: crypto.randomUUID() }), { tier: "remote" }),
       ).toBeNull();
     }
     const account = await localAccountConfig(server.appId, server.url);
@@ -270,11 +270,11 @@ it("rejects a late initial recipient on native and WASM without publishing any r
         "E2EE initial recipient account is unavailable",
       );
       expect(
-        await writer.one(app.projects.where({ id: project.id }), { tier: "global" }),
+        await writer.one(app.projects.where({ id: project.id }), { tier: "remote" }),
       ).toBeNull();
-      expect(await writer.one(app.notes.where({ id: note.id }), { tier: "global" })).toBeNull();
+      expect(await writer.one(app.notes.where({ id: note.id }), { tier: "remote" })).toBeNull();
       expect(
-        await writer.all(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "global" }),
+        await writer.all(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "remote" }),
       ).toEqual([]);
     }
   } finally {

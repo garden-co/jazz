@@ -180,7 +180,7 @@ it("protects every inherited path and restores both groups without ordinary deli
     // The non-member administrator removes access while denied-delivery
     // fallback is confirming the recovered key. Readiness still needs current authority.
     const query = app.__e2ee_group_deliveries.where({ groupId: child.id });
-    const before = await admin.all(query, { tier: "global" });
+    const before = await admin.all(query, { tier: "remote" });
     let removals = 0;
     afterDeniedDelivery = async () => {
       await admin.e2ee.groups
@@ -196,7 +196,7 @@ it("protects every inherited path and restores both groups without ordinary deli
     expect(afterDeniedDelivery).toBeUndefined();
     expect(openedDuringRemoval).toHaveLength(1);
     expect(openedDuringRemoval[0]!.every((byte) => byte === 0)).toBe(true);
-    expect(await admin.all(query, { tier: "global" })).toEqual(before);
+    expect(await admin.all(query, { tier: "remote" })).toEqual(before);
     expect(await recovered.e2ee.explain({ groupId: child.id })).toMatchObject({ state: "refused" });
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));

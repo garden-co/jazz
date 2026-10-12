@@ -138,7 +138,7 @@ describe("browser persistent join next to a large value", () => {
         expect(listed).toEqual(["big.bin", "later.txt", "small.txt"]);
         // A settled names-only read is a barrier for the actual remote result.
         await withTimeout(
-          bob.all(app.files.select("id", "name"), { tier: "global" }),
+          bob.all(app.files.select("id", "name"), { tier: "remote" }),
           10_000,
           "Bob's names-only read did not settle",
         );
@@ -150,7 +150,7 @@ describe("browser persistent join next to a large value", () => {
       // Positive control: explicitly selecting contents must exercise the same
       // recorder. This prevents disabled/missing tracing from passing vacuously.
       const full = await withTimeout(
-        bob.one(app.files.where({ id: big.value.id }), { tier: "global" }),
+        bob.one(app.files.where({ id: big.value.id }), { tier: "remote" }),
         20_000,
         "Bob's explicit contents read did not finish",
       );

@@ -32,9 +32,9 @@ it("opens a persistent transaction before its first read, without E2EE", async (
       initial: "local-first",
     });
     const db = owner.getSnapshot().client!.db;
-    expect(await db.all(app.notes, { tier: "global" })).toEqual([]);
+    expect(await db.all(app.notes, { tier: "remote" })).toEqual([]);
     const tx = db.beginExclusiveTransaction();
-    expect(await tx.all(app.notes, { tier: "local" })).toEqual([]);
+    expect(await tx.all(app.notes, { tier: "local-first" })).toEqual([]);
     await tx.commit().wait({ tier: "global" });
   } finally {
     await owner?.close();

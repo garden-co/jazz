@@ -315,7 +315,7 @@ it("repairs a missing initial root without granting authority to pre-root succes
         { id },
       )
       .wait({ tier: "global" });
-    expect(await db.all(deviceRequestApp.__e2ee_account_roots, { tier: "global" })).toEqual([]);
+    expect(await db.all(deviceRequestApp.__e2ee_account_roots, { tier: "remote" })).toEqual([]);
     expect(
       await firstAccountEpoch(
         db,
@@ -328,7 +328,7 @@ it("repairs a missing initial root without granting authority to pre-root succes
     ).toBe(device.id);
     expect(
       await db.one(deviceRequestApp.__e2ee_account_identities.where({ id: config.account.id }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual(identity);
     const state = await readAccountMembership(
@@ -349,7 +349,7 @@ it("repairs a missing initial root without granting authority to pre-root succes
       adapters.keyEnvelope,
       () => {},
     );
-    expect(await db.all(deviceRequestApp.__e2ee_account_roots, { tier: "global" })).toHaveLength(1);
+    expect(await db.all(deviceRequestApp.__e2ee_account_roots, { tier: "remote" })).toHaveLength(1);
   } finally {
     for (const secret of secrets) secret.fill(0);
     await db?.shutdown();

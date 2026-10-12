@@ -15,7 +15,7 @@
   // #endregion filtering-svelte
 
   // #region reading-tier-svelte
-  const todosAtGlobalDurability = new QuerySubscription(app.todos, { tier: 'global' });
+  const remoteTodos = new QuerySubscription(app.todos, { tier: 'remote' });
   // #endregion reading-tier-svelte
 
   let title = $state('');

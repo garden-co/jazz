@@ -241,9 +241,9 @@ export function buildTodoLineageQuery() {
 
 // #region reading-seeding-ts
 export async function seedDefaultProject(db: Db) {
-  // Wait for the global core before reading — prevents duplicate seeding
+  // Read from the server before seeding — prevents duplicate seeding
   // from concurrent fresh clients on first visit.
-  const existing = await db.all(app.projects, { tier: "global" });
+  const existing = await db.all(app.projects, { tier: "remote" });
 
   if (existing.length === 0) {
     db.insert(app.projects, { name: "Default" });
