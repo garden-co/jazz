@@ -265,34 +265,31 @@ it.each([false, true])(
           tier: "global",
         }),
       ).toHaveLength(1);
+      if (!native) {
+        // A new declared scope also checks insert-then-upsert order within one plan.
+        const result = await fixture.owner.streamingTransaction((plan) => {
+          const scope = plan.insert(uploadApp.projects, { title: "Ordered plan" });
+          const file = plan.insertStreaming(uploadApp.files, {
+            projectId: scope.id,
+            name: "superseded",
+            payload: uploadBytes(new Uint8Array([1])),
+          });
+          plan.upsertStreaming(uploadApp.files, file.id, {
+            name: "final",
+            payload: uploadBytes(new Uint8Array([2, 3])),
+          });
+          return { id: file.id, projectId: scope.id };
+        });
+        const row = await result.wait({ tier: "global" });
+        expect(
+          await fixture.owner.all(uploadApp.files.where({ projectId: row.projectId }), {
+            tier: "global",
+          }),
+        ).toEqual([{ ...row, name: "final", payload: new Uint8Array([2, 3]) }]);
+      }
     } finally {
       await fixture.close();
     }
   },
   60_000,
 );
-
-it("applies declaration order when a later stream replaces an earlier staged file", async () => {
-  const fixture = await uploadFixture();
-  try {
-    const result = await fixture.owner.streamingTransaction((plan) => {
-      const scope = plan.insert(uploadApp.projects, { title: "Ordered plan" });
-      const file = plan.insertStreaming(uploadApp.files, {
-        projectId: scope.id,
-        name: "superseded",
-        payload: uploadBytes(new Uint8Array([1])),
-      });
-      plan.upsertStreaming(uploadApp.files, file.id, {
-        name: "final",
-        payload: uploadBytes(new Uint8Array([2, 3])),
-      });
-      return { id: file.id, projectId: scope.id };
-    });
-    const row = await result.wait({ tier: "global" });
-    expect(await fixture.owner.all(uploadApp.files, { tier: "global" })).toEqual([
-      { ...row, name: "final", payload: new Uint8Array([2, 3]) },
-    ]);
-  } finally {
-    await fixture.close();
-  }
-}, 60_000);

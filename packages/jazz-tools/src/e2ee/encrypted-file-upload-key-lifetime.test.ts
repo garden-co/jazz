@@ -5,14 +5,12 @@ it("keeps both existing-space keys borrowed until their staged files reach the g
   const fixture = await uploadFixture(false, false, true);
   try {
     const recipient = await fixture.getRecipient();
-    const first = await fixture.owner
-      .insert(uploadApp.projects, { title: "First space" })
-      .wait({ tier: "global" });
-    const second = await fixture.owner
-      .insert(uploadApp.projects, { title: "Second space" })
-      .wait({ tier: "global" });
-    await fixture.owner.e2ee.spaces.grant(uploadApp.projects, first.id, recipient.id).wait();
-    await fixture.owner.e2ee.spaces.grant(uploadApp.projects, second.id, recipient.id).wait();
+    const preparation = fixture.owner.beginExclusiveTransaction();
+    const recipients = { initialRecipients: [fixture.ownerId, recipient.id] };
+    const first = preparation.insert(uploadApp.projects, { title: "First space" }, recipients);
+    const second = preparation.insert(uploadApp.projects, { title: "Second space" }, recipients);
+    // Both scopes are accepted before streaming starts; their keys are borrowed independently.
+    await preparation.commit().wait({ tier: "global" });
     const firstBytes = Uint8Array.from({ length: 131_091 }, (_, index) => index % 251);
     const secondBytes = Uint8Array.from({ length: 131_093 }, (_, index) => 255 - (index % 251));
     const result = await fixture.owner.streamingTransaction((plan) => {

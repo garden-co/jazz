@@ -1,37 +1,36 @@
 import { expect, it } from "vitest";
 import { uploadApp, uploadFixture } from "./fixtures/encrypted-upload-fixture.js";
 
-it.each(["rotation", "removal"] as const)(
-  "rejects %s during a blocked source without replay or an accepted file",
-  async (change) => {
-    const fixture = await uploadFixture(false, false, true);
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let entered!: () => void;
-    const started = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    try {
-      const recipient = await fixture.getRecipient();
-      const scope = await fixture.owner
-        .insert(
-          uploadApp.projects,
-          { title: "Shared" },
-          {
-            initialRecipients: [fixture.ownerId, recipient.id],
-          },
-        )
-        .wait({ tier: "global" });
-      let pulls = 0;
-      const writer = change === "rotation" ? fixture.owner : recipient.db;
-      const pending = writer
+it("rejects both blocked uploads after rotation and recipient removal without replay", async () => {
+  const fixture = await uploadFixture(false, false, true);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const pending: Promise<unknown>[] = [];
+  try {
+    const recipient = await fixture.getRecipient();
+    const scope = await fixture.owner
+      .insert(
+        uploadApp.projects,
+        { title: "Shared" },
+        {
+          initialRecipients: [fixture.ownerId, recipient.id],
+        },
+      )
+      .wait({ tier: "global" });
+    const pulls = [0, 0];
+    for (const [index, writer] of [fixture.owner, recipient.db].entries()) {
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const upload = writer
         .insertStreaming(uploadApp.files, {
           projectId: scope.id,
           name: "stale epoch",
           payload: (async function* () {
-            pulls++;
+            pulls[index] = pulls[index]! + 1;
             entered();
             yield new Uint8Array([1]);
             await gate;
@@ -39,17 +38,20 @@ it.each(["rotation", "removal"] as const)(
           })(),
         })
         .then((write) => write.wait({ tier: "global" }));
-      const rejected = expect(pending).rejects.toThrow();
+      // Observe errors immediately while retaining each independent transaction.
+      upload.catch(() => {});
+      pending.push(upload);
+      // Both writers must be eligible and pulling before the one accepted revocation.
       await started;
-      await fixture.owner.e2ee.spaces.revoke(uploadApp.projects, scope.id, recipient.id).wait();
-      release();
-      await rejected;
-      expect(pulls).toBe(1);
-      expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "global" })).toEqual([]);
-    } finally {
-      release();
-      await fixture.close();
     }
-  },
-  60_000,
-);
+    await fixture.owner.e2ee.spaces.revoke(uploadApp.projects, scope.id, recipient.id).wait();
+    release();
+    await Promise.all(pending.map((upload) => expect(upload).rejects.toThrow()));
+    expect(pulls).toEqual([1, 1]);
+    expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "global" })).toEqual([]);
+  } finally {
+    release();
+    await Promise.allSettled(pending);
+    await fixture.close();
+  }
+}, 60_000);
