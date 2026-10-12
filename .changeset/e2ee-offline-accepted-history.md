@@ -12,3 +12,9 @@ Validate retained membership snapshots independently of background online device
 responder failures, including persisted equality-query reopening without an
 explicit disconnect. Keep responder errors pending for explicit device
 operations; accepted-history, membership and known-revocation checks still apply.
+
+Directly hosted runtimes load accepted-history observations from their own
+storage without a preceding ordinary query for each metadata table. Browser
+foregrounds still hydrate from their durable worker before freezing the shared
+snapshot. Schema validation, accepted-only rows and paired settlement checks
+remain in place, including cold persistent reopening and pending local writes.

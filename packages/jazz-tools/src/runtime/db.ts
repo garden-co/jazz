@@ -3266,12 +3266,14 @@ export class Db {
     this.assertOpen();
     if (!queries.length || queries.some((query) => !query._table.startsWith("__e2ee_")))
       throw new Error("E2EE observations require metadata queries");
-    this.getClient(queries[0]!._schema);
+    for (const query of queries) this.getClient(query._schema);
     // A browser foreground must load the durable owner's local query inputs
     // before freezing its snapshot. These results may include pending writes:
     // discard them; only the accepted-only observation below validates history.
     // Keep ordinary propagation so the foreground can reach its durable worker.
-    await Promise.all(queries.map((query) => this.all(query, { tier: "local" })));
+    if (this.connection.requiresLocalObservationHydration)
+      await Promise.all(queries.map((query) => this.all(query, { tier: "local" })));
+    else await this.ensureReady("local");
     const tx = beginDbTransactionAfter(this, async () => {});
     const binding = getDbTxHandleBinding(tx, "query");
     const local: Pick<JazzClient, "queryInternal"> = {

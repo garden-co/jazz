@@ -78,6 +78,11 @@ export abstract class ConnectionManager {
 
   protected constructor(protected readonly host: DbForConnection) {}
 
+  // A separate durable owner must hydrate the foreground before it can
+  // freeze an accepted-only local history snapshot. Unknown topologies keep
+  // this conservative default; directly hosted runtimes own their storage.
+  readonly requiresLocalObservationHydration: boolean = true;
+
   abstract start(): Promise<void>;
 
   getClient(schema: WasmSchema): JazzClient {

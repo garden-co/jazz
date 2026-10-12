@@ -8,6 +8,7 @@ import {
 
 /** Manages a Db whose runtime connects directly to the configured server. */
 export class DirectConnectionManager extends ConnectionManager {
+  override readonly requiresLocalObservationHydration: boolean = false;
   private isDisconnected = false;
   private reconnectWaiters = new Set<() => void>();
   private transportTransition: Promise<void> = Promise.resolve();
