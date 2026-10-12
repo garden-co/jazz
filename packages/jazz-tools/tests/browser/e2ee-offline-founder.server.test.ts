@@ -87,7 +87,7 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
     });
     // Learn the authority's catalogue through ordinary authenticated sync under
     // another account, not a fabricated cache or copied account database.
-    await db.all(app.projects, { tier: "global" });
+    await db.all(app.projects, { tier: "remote" });
     await db.shutdown();
     db = undefined;
     await blockJazzServerNetwork(server.serverUrl);
@@ -130,14 +130,16 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
       10_000,
       "Fresh founder encrypted text did not become locally durable without authority",
     );
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(note);
     const updatedNote = { ...note, body: "Updated before the founder reached authority" };
     await withTimeout(
       db.update(app.notes, note.id, { body: updatedNote.body }).wait({ tier: "local" }),
       10_000,
       "Ordinary provisional encrypted update required manual transaction setup",
     );
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(updatedNote);
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(
+      updatedNote,
+    );
 
     // A real one-pixel PNG, delivered in chunks through the public upload seam.
     const imageBytes = Uint8Array.from(
@@ -176,11 +178,11 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
       name: "offline.png",
       payload: imageBytes,
     };
-    expect(await db.one(app.images.where({ id: image.id }), { tier: "local" })).toEqual(
+    expect(await db.one(app.images.where({ id: image.id }), { tier: "local-first" })).toEqual(
       expectedImage,
     );
-    const roots = await db.all(app.__e2ee_spaces, { tier: "local" });
-    const grants = await db.all(app.__e2ee_space_grants, { tier: "local" });
+    const roots = await db.all(app.__e2ee_spaces, { tier: "local-first" });
+    const grants = await db.all(app.__e2ee_space_grants, { tier: "local-first" });
     expect(roots).toEqual([
       expect.objectContaining({ accountId: founder.id, identifier: project.id }),
     ]);
@@ -203,22 +205,22 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
       "Offline founder reopening requires the network",
     );
     // Exact scope/grant records must survive, rather than a replacement epoch.
-    expect(await db.all(app.projects, { tier: "local" })).toEqual([project]);
-    expect(await db.all(app.notes, { tier: "local" })).toEqual([updatedNote]);
-    expect(await db.all(app.images, { tier: "local" })).toEqual([expectedImage]);
-    expect(await db.all(app.__e2ee_spaces, { tier: "local" })).toEqual(roots);
-    expect(await db.all(app.__e2ee_space_grants, { tier: "local" })).toEqual(grants);
+    expect(await db.all(app.projects, { tier: "local-first" })).toEqual([project]);
+    expect(await db.all(app.notes, { tier: "local-first" })).toEqual([updatedNote]);
+    expect(await db.all(app.images, { tier: "local-first" })).toEqual([expectedImage]);
+    expect(await db.all(app.__e2ee_spaces, { tier: "local-first" })).toEqual(roots);
+    expect(await db.all(app.__e2ee_space_grants, { tier: "local-first" })).toEqual(grants);
     expect({ planCalls, sourceReads }).toEqual({ planCalls: 1, sourceReads: 1 });
 
     await unblockJazzServerNetwork(server.serverUrl);
     blocked = false;
     await withTimeout(db.reconnect(), 10_000, "Founder reconnect stalled");
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(updatedNote);
-    expect(await db.one(app.images.where({ id: image.id }), { tier: "global" })).toEqual(
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(updatedNote);
+    expect(await db.one(app.images.where({ id: image.id }), { tier: "remote" })).toEqual(
       expectedImage,
     );
     expect(
-      await db.all(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "global" }),
+      await db.all(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "remote" }),
     ).toEqual(roots);
     recipient = await createDb({
       appId: server.appId,
@@ -234,7 +236,7 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
     );
     expect(
       await withTimeout(
-        recipient.one(app.images.where({ id: image.id }), { tier: "global" }),
+        recipient.one(app.images.where({ id: image.id }), { tier: "remote" }),
         30_000,
         "Recipient encrypted image unavailable",
       ),

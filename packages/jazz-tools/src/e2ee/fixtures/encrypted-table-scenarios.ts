@@ -201,7 +201,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       await expect(failedInsert.wait({ tier: "global" })).rejects.toThrow(
         "Could not encrypt the value",
       );
-      expect(await db.all(app.notes, { tier: "global" })).toEqual([]);
+      expect(await db.all(app.notes, { tier: "remote" })).toEqual([]);
       expect(encrypted).toBeGreaterThan(0);
       failEncryption = false;
 
@@ -211,7 +211,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       expect(note).not.toBeInstanceOf(Promise);
       expect(note.value.title).toBe(data.title);
       await note.wait({ tier: "global" });
-      expect(await db.one(app.notes.where({ id: note.value.id }), { tier: "global" })).toEqual(
+      expect(await db.one(app.notes.where({ id: note.value.id }), { tier: "remote" })).toEqual(
         note.value,
       );
       expect(encrypted).toBeGreaterThan(0);
@@ -228,7 +228,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       expect(update).not.toBeInstanceOf(Promise);
       await update.wait({ tier: "global" });
       expect(
-        await db.one(app.notes.where({ id: note.value.id }), { tier: "global" }),
+        await db.one(app.notes.where({ id: note.value.id }), { tier: "remote" }),
       ).toMatchObject({
         title: "Changed encrypted title",
         payload: new Uint8Array([10, 11]),
@@ -238,7 +238,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       expect(tx.update(app.notes, note.value.id, { title: "Transaction update" })).toBeUndefined();
       await tx.commit().wait({ tier: "global" });
       expect(
-        await db.one(app.notes.where({ id: note.value.id }), { tier: "global" }),
+        await db.one(app.notes.where({ id: note.value.id }), { tier: "remote" }),
       ).toMatchObject({
         title: "Transaction update",
         payload: new Uint8Array([10, 11]),
@@ -262,7 +262,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       await expect(failed.wait({ tier: "global" })).rejects.toThrow("Could not encrypt the value");
       failEncryption = false;
       expect(
-        await db.one(app.notes.where({ id: note.value.id }), { tier: "global" }),
+        await db.one(app.notes.where({ id: note.value.id }), { tier: "remote" }),
       ).toMatchObject({
         projectId: project.value.id,
         title: "Transaction update",
@@ -277,7 +277,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       data.title = "Changed after upsert returned";
       expect(first).not.toBeInstanceOf(Promise);
       await first.wait({ tier: "global" });
-      expect(await db.one(app.projects.where({ id: scopeId }), { tier: "global" })).toEqual({
+      expect(await db.one(app.projects.where({ id: scopeId }), { tier: "remote" })).toEqual({
         id: scopeId,
         title: "Project",
       });
@@ -285,8 +285,8 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
         state: "ready",
       });
       await db.upsert(app.projects, scopeId, { title: "Project" }).wait({ tier: "global" });
-      expect(await db.all(app.__e2ee_spaces, { tier: "global" })).toHaveLength(1);
-      expect(await db.all(app.__e2ee_space_grants, { tier: "global" })).toHaveLength(1);
+      expect(await db.all(app.__e2ee_spaces, { tier: "remote" })).toHaveLength(1);
+      expect(await db.all(app.__e2ee_space_grants, { tier: "remote" })).toHaveLength(1);
     }
     const tx = db.beginExclusiveTransaction();
     const event =
@@ -320,7 +320,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       for (const identifier of [project.id.toUpperCase(), project.id.replaceAll("-", "")]) {
         expect(
           await tx.all(app.notes.where({ projectId: identifier, title: note.title }), {
-            tier: "local",
+            tier: "local-first",
           }),
         ).toEqual([note]);
       }
@@ -329,24 +329,28 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       expect(
         await tx.all(
           app.notes.where({ projectId: project.id, title: "Private title" }).select("id", "title"),
-          { tier: "local" },
+          { tier: "local-first" },
         ),
       ).toEqual([{ id: note.id, title: note.title }]);
     }
     if (timing === "transaction-read") {
-      expect(await tx.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+      expect(await tx.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(note);
     }
     if (timing === "transaction-projection") {
       expect(
-        await tx.one(app.notes.where({ id: note.id }).select("id", "title"), { tier: "local" }),
+        await tx.one(app.notes.where({ id: note.id }).select("id", "title"), {
+          tier: "local-first",
+        }),
       ).toEqual({ id: note.id, title: "Private title" });
     }
     const committed = tx.commit();
     expect(committed).not.toBeInstanceOf(Promise);
     if (timing === "offline-at-submit") {
       await committed.wait({ tier: "local" });
-      expect(await db!.all(app.projects, { tier: "local" })).toEqual([project]);
-      expect(await db!.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+      expect(await db!.all(app.projects, { tier: "local-first" })).toEqual([project]);
+      expect(await db!.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(
+        note,
+      );
       const globalWait = committed.wait({ tier: "global" });
       globalWait.catch(() => {});
       // Durable local ciphertext is not authority acceptance or completed
@@ -370,7 +374,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       try {
         expect(
           await reader.all(app.notes.where({ projectId: project.id, title: "Private title" }), {
-            tier: "local",
+            tier: "local-first",
           }),
         ).toEqual([note]);
       } finally {
@@ -381,7 +385,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       for (const identifier of [project.id.toUpperCase(), project.id.replaceAll("-", "")]) {
         expect(
           await db.all(app.notes.where({ projectId: identifier, title: note.title }), {
-            tier: "global",
+            tier: "remote",
           }),
         ).toEqual([note]);
       }
@@ -397,7 +401,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
               state.failure = error;
             },
           },
-          { tier: "global" },
+          { tier: "remote" },
         );
         return { state, stop };
       });
@@ -464,7 +468,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
             historyReadStarted = true;
             await historyReadGate;
           };
-          pendingHistory = database.all(history, { tier: "global" });
+          pendingHistory = database.all(history, { tier: "remote" });
           void pendingHistory.catch(() => {});
           await expect.poll(() => historyReadStarted, { timeout: 30_000 }).toBe(true);
           stop = database.subscribe(
@@ -475,7 +479,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
                 failure = error;
               },
             },
-            { tier: "global" },
+            { tier: "remote" },
           );
           stopHistory = database.subscribe(
             history,
@@ -485,7 +489,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
                 historyFailure = error;
               },
             },
-            { tier: "global" },
+            { tier: "remote" },
           );
           await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([]);
           await expect
@@ -515,7 +519,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
           expectedHistory = [note, current.value];
           releaseHistoryRead();
         };
-        const rows = await database.all(query, { tier: "global" });
+        const rows = await database.all(query, { tier: "remote" });
         expect(expected).toBeDefined();
         expect(rows).toEqual([expected]);
         expect(expectedHistory).toBeDefined();
@@ -528,9 +532,9 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
         // Both foreground reads and both subscriptions predate this rotation.
         // Reuse its mixed-epoch dataset for ordering and pagination.
 
-        expect(await database.all(history, { tier: "global" })).toEqual(expectedHistory);
-        expect(await database.all(history.limit(1), { tier: "global" })).toEqual([note]);
-        expect(await database.all(history.offset(1).limit(1), { tier: "global" })).toEqual([
+        expect(await database.all(history, { tier: "remote" })).toEqual(expectedHistory);
+        expect(await database.all(history.limit(1), { tier: "remote" })).toEqual([note]);
+        expect(await database.all(history.offset(1).limit(1), { tier: "remote" })).toEqual([
           expectedHistory![1],
         ]);
         await expect
@@ -542,7 +546,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
         stopHistory?.();
 
         failHistory = true;
-        await expect(database.all(history, { tier: "global" })).rejects.toMatchObject({
+        await expect(database.all(history, { tier: "remote" })).rejects.toMatchObject({
           name: "E2eeDataError",
         });
         expect(deniedHistory).toBeGreaterThan(0);
@@ -556,7 +560,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
               incompleteFailure = error;
             },
           },
-          { tier: "global" },
+          { tier: "remote" },
         );
         try {
           await expect
@@ -631,7 +635,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
               failure = error;
             },
           },
-          { tier: "global" },
+          { tier: "remote" },
         );
         try {
           await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([note]);
@@ -658,7 +662,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
             failure = error;
           },
         },
-        { tier: "global" },
+        { tier: "remote" },
       );
       try {
         await expect
@@ -697,11 +701,11 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       });
       await other.wait({ tier: "global" });
       const query = app.notes.where({ projectId: project.id, title: "Private title" });
-      expect(await db.all(query, { tier: "global" })).toEqual([note]);
+      expect(await db.all(query, { tier: "remote" })).toEqual([note]);
       await db.update(app.notes, note.id, { done: true }).wait({ tier: "global" });
       // The false-positive candidate sorts first, but cannot consume the logical limit.
       expect(
-        await db.all(query.orderBy("done").limit(1).select("id", "title"), { tier: "global" }),
+        await db.all(query.orderBy("done").limit(1).select("id", "title"), { tier: "remote" }),
       ).toEqual([{ id: note.id, title: note.title }]);
       const snapshots: unknown[][] = [];
       let failure: Error | undefined;
@@ -713,26 +717,26 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
             failure = error;
           },
         },
-        { tier: "global" },
+        { tier: "remote" },
       );
       try {
         await expect
           .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
           .toEqual([{ id: note.id, title: note.title }]);
-        expect(await db.all(query.offset(1), { tier: "global" })).toEqual([]);
+        expect(await db.all(query.offset(1), { tier: "remote" })).toEqual([]);
         expect(
           await db.all(app.notes.where({ projectId: project.id, title: "Absent" }), {
-            tier: "global",
+            tier: "remote",
           }),
         ).toEqual([]);
         await expect(
-          db.all(app.notes.where({ title: "Private title" }), { tier: "global" }),
+          db.all(app.notes.where({ title: "Private title" }), { tier: "remote" }),
         ).rejects.toThrow("space");
         await db.update(app.notes, note.id, { title: "Changed title" }).wait({ tier: "global" });
-        expect(await db.all(query, { tier: "global" })).toEqual([]);
+        expect(await db.all(query, { tier: "remote" })).toEqual([]);
         await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual([]);
         const changed = app.notes.where({ projectId: project.id, title: "Changed title" });
-        expect(await db.all(changed, { tier: "global" })).toEqual([
+        expect(await db.all(changed, { tier: "remote" })).toEqual([
           { ...note, title: "Changed title", done: true },
         ]);
         failEncryption = true;
@@ -740,7 +744,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
           db.update(app.notes, note.id, { title: "Failed title" }).wait({ tier: "global" }),
         ).rejects.toThrow("Could not encrypt the value");
         failEncryption = false;
-        expect(await db.all(changed, { tier: "global" })).toEqual([
+        expect(await db.all(changed, { tier: "remote" })).toEqual([
           { ...note, title: "Changed title", done: true },
         ]);
         await db.update(app.notes, note.id, { title: note.title }).wait({ tier: "global" });
@@ -760,7 +764,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       // and live results, including a separate terminal-error subscription.
       const database = db;
       const query = app.notes.where({ id: note.id });
-      expect(await database.one(query.select("id", "title"), { tier: "global" })).toEqual({
+      expect(await database.one(query.select("id", "title"), { tier: "remote" })).toEqual({
         id: note.id,
         title: note.title,
       });
@@ -772,7 +776,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
         { status: "fulfilled", value: { state: "ready" } },
         { status: "fulfilled", value: { state: "ready" } },
       ]);
-      expect(await database.one(query, { tier: "global" })).toEqual(note);
+      expect(await database.one(query, { tier: "remote" })).toEqual(note);
       expect(encrypted).toBeGreaterThan(0);
       expect(decrypted).toBeGreaterThan(0);
 
@@ -788,10 +792,12 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
         ...project,
         linkedNotesViaProject: [{ ...linked.value, projectRelation: project }],
       };
-      expect(await database.one(reference, { tier: "global" })).toEqual(expectedReference);
+      expect(await database.one(reference, { tier: "remote" })).toEqual(expectedReference);
       const referenceReader = database.beginTransaction();
       try {
-        expect(await referenceReader.one(reference, { tier: "local" })).toEqual(expectedReference);
+        expect(await referenceReader.one(reference, { tier: "local-first" })).toEqual(
+          expectedReference,
+        );
       } finally {
         await referenceReader.rollback();
       }
@@ -816,7 +822,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
                 failure = error;
               },
             },
-            { tier: "global" },
+            { tier: "remote" },
           ),
         );
         await expect
@@ -837,10 +843,10 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
           });
           const child = projected ? { id: note.id, title: note.title } : note;
           const expected = { ...project, notesViaProject: [child] };
-          expect(await database.one(nested, { tier: "global" })).toEqual(expected);
+          expect(await database.one(nested, { tier: "remote" })).toEqual(expected);
           const reader = database.beginTransaction();
           try {
-            expect(await reader.one(nested, { tier: "local" })).toEqual(expected);
+            expect(await reader.one(nested, { tier: "local-first" })).toEqual(expected);
           } finally {
             await reader.rollback();
           }
@@ -880,7 +886,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
             failure = error;
           },
         },
-        { tier: "global" },
+        { tier: "remote" },
       );
       try {
         await expect
@@ -897,10 +903,10 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       return;
     }
     if (event) {
-      expect(await db.one(app.events.where({ id: event.id }), { tier: "global" })).toEqual(event);
+      expect(await db.one(app.events.where({ id: event.id }), { tier: "remote" })).toEqual(event);
     }
     if (timing === "transaction-scope-upsert") {
-      expect(await db.one(app.projects.where({ id: scopeId }), { tier: "global" })).toEqual({
+      expect(await db.one(app.projects.where({ id: scopeId }), { tier: "remote" })).toEqual({
         id: scopeId,
         title: "Project",
       });
@@ -908,7 +914,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
     expect(await db.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
       state: "ready",
     });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toMatchObject({
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toMatchObject({
       id: note.id,
       projectId: project.id,
       title: "Private title",
@@ -920,7 +926,9 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
     if (timing === "transaction-read") {
       const reader = db.beginTransaction();
       try {
-        expect(await reader.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+        expect(await reader.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(
+          note,
+        );
       } finally {
         await reader.rollback();
       }

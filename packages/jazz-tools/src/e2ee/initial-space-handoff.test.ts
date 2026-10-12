@@ -92,23 +92,23 @@ it("preserves accepted scope and data when later initial recipient delivery is d
     await expect(tx.commit().wait({ tier: "global" })).rejects.toMatchObject({
       code: "permission_denied",
     });
-    expect(await creator.one(app.projects.where({ id: project.id }), { tier: "global" })).toEqual(
+    expect(await creator.one(app.projects.where({ id: project.id }), { tier: "remote" })).toEqual(
       project,
     );
-    expect(await recipient.all(app.notes.select("id"), { tier: "global" })).toEqual([
+    expect(await recipient.all(app.notes.select("id"), { tier: "remote" })).toEqual([
       { id: note.id },
     ]);
     const root = await creator.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(
       (
-        await creator.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), { tier: "global" })
+        await creator.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), { tier: "remote" })
       ).map((grant) => grant.recipientId),
     ).toEqual([bob.account.id]);
-    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "global" })).toEqual([]);
+    expect(await creator.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual([]);
     await expect(
-      recipient.one(app.notes.where({ id: note.id }), { tier: "global" }),
+      recipient.one(app.notes.where({ id: note.id }), { tier: "remote" }),
     ).rejects.toEqual(new E2eeDataError("key-unavailable"));
     expect(
       await creator.e2ee.explain({ scope: app.projects, identifier: project.id }),

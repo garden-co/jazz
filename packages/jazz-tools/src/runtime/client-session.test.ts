@@ -15,6 +15,7 @@ import {
   internalSessionFromVerifiedReservedJwtPayload,
   sessionFromVerifiedReservedJwtPayload,
 } from "./client-session.js";
+import { setTrustedReservedSession } from "./db-internal-session.js";
 
 function toBase64Url(value: string): string {
   return Buffer.from(value, "utf8")
@@ -49,6 +50,26 @@ describe("client session resolution", () => {
         token,
       ),
     ).toBe(false);
+  });
+
+  it("resolves a trusted reserved session stored beside a config", () => {
+    const trusted = internalSessionFromVerifiedReservedJwtPayload(
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "local-key-subject" },
+      "local-first",
+    )!;
+    const config = {
+      appId: "side-table-app",
+      jwtToken: makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "local-key-subject" }),
+    };
+    setTrustedReservedSession(config, trusted);
+
+    expect(resolveClientSessionStateSync(config)).toMatchObject({
+      transport: "bearer",
+      internalSession: { issuer: LOCAL_FIRST_JWT_ISSUER, user_id: "local-key-subject" },
+    });
+    // A copy does not inherit the side-table entry, so it cannot claim the
+    // reserved identity from the token alone.
+    expect(resolveClientSessionStateSync({ ...config }).internalSession).toBeNull();
   });
 
   it("uses a mirrored cookie session when provided", () => {

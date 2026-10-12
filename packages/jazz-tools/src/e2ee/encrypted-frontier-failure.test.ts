@@ -111,7 +111,7 @@ it.each(["removed", "retained"] as const)(
         { ...folder, notes: [note] },
         { ...other, notes: [] },
       ];
-      expect(await db.all(query, { tier: "global" })).toEqual(expected);
+      expect(await db.all(query, { tier: "remote" })).toEqual(expected);
       const snapshots: unknown[][] = [];
       let failure: Error | undefined;
       stop = db.subscribe(
@@ -122,7 +122,7 @@ it.each(["removed", "retained"] as const)(
             failure = error;
           },
         },
-        { tier: "global" },
+        { tier: "remote" },
       );
       await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual(expected);
       let physical: unknown;
@@ -131,7 +131,7 @@ it.each(["removed", "retained"] as const)(
         (rows) => {
           physical = rows;
         },
-        { tier: "global" },
+        { tier: "remote" },
       );
       await expect
         .poll(() => physical, { timeout: 30_000 })

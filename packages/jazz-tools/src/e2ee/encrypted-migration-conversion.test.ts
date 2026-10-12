@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -26,7 +27,7 @@ it("converts encrypted data to a new table and space with an equality index", as
   };
   const oldApp = s.defineApp(before);
   const newApp = s.defineApp(after);
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: before,
     to: after,
     createTables: { indexedNotes: true },
@@ -81,7 +82,7 @@ it("converts encrypted data to a new table and space with an equality index", as
       migration,
     });
     db = await createDb({ ...account, e2ee: { app: newApp, store } });
-    const rows = await db.all(newApp.notes.where({ projectId: project.id }), { tier: "global" });
+    const rows = await db.all(newApp.notes.where({ projectId: project.id }), { tier: "remote" });
     expect(rows).toEqual([{ id: source.id, projectId: project.id, title: "Re-encrypt this note" }]);
     const tx = db.beginExclusiveTransaction();
     const destination = tx.insert(newApp.projects, { title: "Destination space" });
@@ -96,7 +97,7 @@ it("converts encrypted data to a new table and space with an equality index", as
     expect(
       await db.all(
         newApp.indexedNotes.where({ projectId: destination.id, title: "Re-encrypt this note" }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([
       { id: expect.any(String), projectId: destination.id, title: "Re-encrypt this note" },
@@ -104,10 +105,10 @@ it("converts encrypted data to a new table and space with an equality index", as
     expect(
       await db.all(
         newApp.indexedNotes.where({ projectId: project.id, title: "Re-encrypt this note" }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([]);
-    expect(await db.all(newApp.notes.where({ projectId: project.id }), { tier: "global" })).toEqual(
+    expect(await db.all(newApp.notes.where({ projectId: project.id }), { tier: "remote" })).toEqual(
       rows,
     );
   } finally {
@@ -141,7 +142,7 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
     ),
   };
   const exportApp = s.defineApp(exported);
-  const exportMigration = s.defineMigration({
+  const exportMigration = m.defineMigration({
     from: after,
     to: exported,
     createTables: { exportedNotes: true },
@@ -152,7 +153,7 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
   });
   const oldApp = s.defineApp(before);
   const newApp = s.defineApp(after);
-  const migration = s.defineMigration({ from: before, to: after, createTables: { notes: true } });
+  const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
   const oldPermissions = definePermissions(oldApp, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
@@ -205,7 +206,7 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
     // This project predates encryption: its verified creator explicitly grants access.
     await db.e2ee.spaces.grant(newApp.projects, project.id, account.account.id).wait();
     const rows = await db.all(newApp.legacyNotes.where({ projectId: project.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(rows).toEqual([{ id: source.id, projectId: project.id, title: "Convert this note" }]);
     const tx = db.beginExclusiveTransaction();
@@ -219,13 +220,13 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
     db = await createDb({ ...account, e2ee: { app: newApp, store } });
     const converted = await db.all(
       newApp.notes.where({ projectId: project.id, title: "Convert this note" }),
-      { tier: "global" },
+      { tier: "remote" },
     );
     expect(converted).toEqual([
       { id: expect.any(String), projectId: project.id, title: "Convert this note" },
     ]);
     expect(
-      await db.all(newApp.legacyNotes.where({ projectId: project.id }), { tier: "global" }),
+      await db.all(newApp.legacyNotes.where({ projectId: project.id }), { tier: "remote" }),
     ).toEqual(rows);
 
     await db.shutdown();
@@ -238,7 +239,7 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
     });
     db = await createDb({ ...account, e2ee: { app: exportApp, store } });
     const encryptedRows = await db.all(exportApp.notes.where({ projectId: project.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(encryptedRows).toEqual(converted);
     const exportTx = db.beginExclusiveTransaction();
@@ -248,7 +249,7 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
     await exportTx.commit().wait({ tier: "global" });
     expect(
       await db.all(exportApp.notes.where({ projectId: project.id, title: "Convert this note" }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual(encryptedRows);
     await db.shutdown();
@@ -259,7 +260,7 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
     expect(
       await db.all(
         exportApp.exportedNotes.where({ projectId: project.id, title: "Convert this note" }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([{ id: expect.any(String), projectId: project.id, title: "Convert this note" }]);
   } finally {

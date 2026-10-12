@@ -2428,12 +2428,12 @@ fn include_deleted_branch_compatibility_omission_is_not_content_absence() {
     let whole = old.prepare_query(&old.table("todos")).unwrap();
     let exact = ReadOpts {
         include_deleted: true,
-        propagation: jazz::db::Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default().branch_view(head.clone(), None)
     };
     let composed = ReadOpts {
         include_deleted: true,
-        propagation: jazz::db::Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default().branch_view(head.clone(), Some(BranchViewBase::Current(base)))
     };
     let states = |rows: Vec<jazz::node::CurrentRow>| {
@@ -2577,7 +2577,7 @@ fn include_deleted_branch_preserves_enum_nullable_and_json_cells() {
     let query = db.prepare_query(&db.table("todos")).unwrap();
     let exact = ReadOpts {
         include_deleted: true,
-        propagation: jazz::db::Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default().branch_view(head.clone(), None)
     };
     let composed = exact

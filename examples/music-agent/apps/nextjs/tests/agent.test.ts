@@ -65,7 +65,7 @@ describe("MusicAgent server execution", () => {
 
     await runTurn(firstReply);
 
-    const turn = await db.one(app.turns.where({ id: firstReply }), { tier: "global" });
+    const turn = await db.one(app.turns.where({ id: firstReply }), { tier: "remote" });
     expect(turn).toMatchObject({ status: "complete", provider: "Scripted agent" });
     expect(turn!.body).toContain("night-shift-single-rough-mix.wav");
     expect(turn!.body).toContain("The Green Room");
@@ -83,7 +83,7 @@ describe("MusicAgent server execution", () => {
 
   test("a reply whose server died is marked interrupted and resumes to the same answer", async () => {
     const { queueAssistantTurn, sweepStaleTurns, runTurn, db, STALE_AFTER_MS } = await load();
-    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
 
     // A regenerated sibling whose server stopped partway: streaming, a stale
     // heartbeat and half a reply.
@@ -103,12 +103,12 @@ describe("MusicAgent server execution", () => {
       .wait({ tier: "global" });
 
     expect(await sweepStaleTurns()).toBe(1);
-    expect((await db.one(app.turns.where({ id: sibling }), { tier: "global" }))!.status).toBe(
+    expect((await db.one(app.turns.where({ id: sibling }), { tier: "remote" }))!.status).toBe(
       "interrupted",
     );
 
     await runTurn(sibling);
-    const resumed = (await db.one(app.turns.where({ id: sibling }), { tier: "global" }))!;
+    const resumed = (await db.one(app.turns.where({ id: sibling }), { tier: "remote" }))!;
     expect(resumed.status).toBe("complete");
     expect(resumed.body).toBe(original.body);
 
@@ -118,15 +118,15 @@ describe("MusicAgent server execution", () => {
 
   test("a turn that is already running is not claimed twice", async () => {
     const { runTurn, db } = await load();
-    const before = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const before = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
     await runTurn(firstReply); // complete, so nothing to claim
-    const after = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const after = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
     expect(after.body).toBe(before.body);
   });
 
   test("two runners racing to claim one reply write it once", async () => {
     const { queueAssistantTurn, runTurn, db } = await load();
-    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
 
     // Two runners in one process: they collide on the local runtime.
     const { turnId: local } = await queueAssistantTurn(
@@ -144,14 +144,14 @@ describe("MusicAgent server execution", () => {
       original.conversationId,
       original.parentId!,
     );
-    await other.one(app.turns.where({ id: remote }), { tier: "global" });
+    await other.one(app.turns.where({ id: remote }), { tier: "remote" });
     await Promise.all([runTurn(remote), runTurn(remote, other)]);
 
     for (const turnId of [local, remote]) {
-      const reply = (await db.one(app.turns.where({ id: turnId }), { tier: "global" }))!;
+      const reply = (await db.one(app.turns.where({ id: turnId }), { tier: "remote" }))!;
       expect(reply.status).toBe("complete");
       expect(reply.body).toBe(original.body);
-      const calls = await db.all(app.toolCalls.where({ turnId }), { tier: "global" });
+      const calls = await db.all(app.toolCalls.where({ turnId }), { tier: "remote" });
       expect(calls.map((call) => call.name).sort()).toEqual(["check_calendar", "find_venues"]);
     }
   });
@@ -160,8 +160,8 @@ describe("MusicAgent server execution", () => {
     const { db } = await load();
     const { isExclusiveConflict } = await import("../src/lib/write-errors");
     const other = await secondBackend();
-    const turn = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
-    await other.one(app.turns.where({ id: turn.id }), { tier: "global" });
+    const turn = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
+    await other.one(app.turns.where({ id: turn.id }), { tier: "remote" });
 
     // Both read the turn, then both write it: only one of them can commit.
     let read = 0;
@@ -187,9 +187,9 @@ describe("MusicAgent server execution", () => {
 
   test("a runner that loses its lease stops writing and never finishes the turn", async () => {
     const { queueAssistantTurn, runTurn, db, HEARTBEAT_MS } = await load();
-    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
     const { turnId } = await queueAssistantTurn(db, original.conversationId, original.parentId!);
-    const read = async () => (await db.one(app.turns.where({ id: turnId }), { tier: "global" }))!;
+    const read = async () => (await db.one(app.turns.where({ id: turnId }), { tier: "remote" }))!;
 
     // Slow enough that the reply is still streaming well after the takeover.
     process.env.SCRIPTED_AGENT_TOKEN_DELAY_MS = "60";

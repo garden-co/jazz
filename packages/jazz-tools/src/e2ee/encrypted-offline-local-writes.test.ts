@@ -35,7 +35,7 @@ it("updates an existing encrypted space offline and accepts the write after reco
     const note = tx.insert(app.notes, { projectId: project.id, title: "Before disconnect" });
     await tx.commit().wait({ tier: "global" });
     const query = app.notes.where({ id: note.id });
-    expect(await db.one(query, { tier: "global" })).toEqual(note);
+    expect(await db.one(query, { tier: "remote" })).toEqual(note);
 
     await db.disconnect();
     const write = db.update(app.notes, note.id, { title: "Written offline" });
@@ -55,11 +55,14 @@ it("updates an existing encrypted space offline and accepts the write after reco
     } finally {
       clearTimeout(timer);
     }
-    expect(await db.one(query, { tier: "local" })).toEqual({ ...note, title: "Written offline" });
+    expect(await db.one(query, { tier: "local-first" })).toEqual({
+      ...note,
+      title: "Written offline",
+    });
 
     await db.reconnect();
     await write.wait({ tier: "global" });
-    expect(await db.one(query, { tier: "global" })).toEqual({ ...note, title: "Written offline" });
+    expect(await db.one(query, { tier: "remote" })).toEqual({ ...note, title: "Written offline" });
   } finally {
     if (db) {
       await db.reconnect();
@@ -124,7 +127,7 @@ it.each([false, true])(
           }),
         ]),
       ).toBe("stored locally");
-      expect(await db.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual({
+      expect(await db.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual({
         ...note,
         title: "Immediate offline update",
       });
@@ -136,7 +139,7 @@ it.each([false, true])(
         // Drop the initial in-memory bundle, forcing a verified online history read.
         cacheFailures = 0;
         db = await createDb(config);
-        await expect(db.one(app.notes.where({ id: note.id }), { tier: "global" })).resolves.toEqual(
+        await expect(db.one(app.notes.where({ id: note.id }), { tier: "remote" })).resolves.toEqual(
           {
             ...note,
             title: "Immediate offline update",
@@ -187,7 +190,7 @@ it("stores an encrypted update locally after unexpected transport loss", async (
     const project = tx.insert(app.projects, { title: "Transport loss project" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Before transport loss" });
     await tx.commit().wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(note);
     await server.stop();
     // Deliberately do not call disconnect(): the network, not the caller, went away.
     const write = db.update(app.notes, note.id, { title: "After transport loss" });
@@ -202,7 +205,7 @@ it("stores an encrypted update locally after unexpected transport loss", async (
         }),
       ]),
     ).toBe("stored locally");
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual({
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual({
       ...note,
       title: "After transport loss",
     });

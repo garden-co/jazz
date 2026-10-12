@@ -48,7 +48,7 @@ fn row_settlement_is_opt_in_and_follows_authority_acceptance() {
     assert_eq!(local.len(), 1);
     let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
     let observation_opts = ReadOpts {
-        propagation: Propagation::LocalOnly,
+        tier: ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     let pending_read = OpenTransactionId::new();
@@ -2666,8 +2666,7 @@ fn local_publishing_settlement_read(
     block_on(db.all_e2ee_settled_serialized_query_for_binding(
         &bytes,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            propagation: Propagation::LocalOnly,
+            tier: ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
         open,
@@ -3047,8 +3046,7 @@ fn cancelled_publishing_local_settlement_read_queues_child_cleanup() {
     let mut reading = Box::pin(db.all_e2ee_settled_serialized_query_for_binding(
         &bytes,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            propagation: Propagation::LocalOnly,
+            tier: ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
         parent,
@@ -3154,8 +3152,7 @@ fn accepted_observation_mode_still_rejects_a_mutating_transaction() {
     let error = block_on(db.all_e2ee_settled_serialized_query_for_binding(
         &bytes,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            propagation: Propagation::LocalOnly,
+            tier: ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
         open,
@@ -3262,8 +3259,7 @@ fn online_publishing_settlement_refuses_foreign_pending_dot_accepted_after_begin
         let mut reading = Box::pin(db.all_e2ee_settled_serialized_query_for_binding(
             &bytes,
             ReadOpts {
-                tier: DurabilityTier::Global,
-                propagation: Propagation::Full,
+                tier: ReadTier::Remote,
                 ..ReadOpts::default()
             },
             parent,

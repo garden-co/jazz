@@ -282,6 +282,7 @@ mod tests {
                 "jazz.catalogue.schema.v1",
                 "jazz.catalogue.write-pointer.v1",
                 "jazz.subscription-program-fact-key.v1",
+                "jazz.transaction-durability.v2",
             ]
         );
     }
@@ -299,7 +300,7 @@ mod tests {
         let manifest = legacy
             .with_open_spec(&node_storage_open_specs().unwrap().1)
             .unwrap();
-        let expected = b"JSM1\0\x02\0\x01\x06memory\x0d\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x1fjazz.exclusive-read-evidence.v1\x25jazz.subscription-program-fact-key.v1\x01\x09key-order\0\x16unsigned-lexicographic";
+        let expected = b"JSM1\0\x02\0\x01\x06memory\x0e\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x1fjazz.exclusive-read-evidence.v1\x25jazz.subscription-program-fact-key.v1\x1ejazz.transaction-durability.v2\x01\x09key-order\0\x16unsigned-lexicographic";
         assert_eq!(manifest.encode().unwrap(), expected);
         assert_eq!(
             crate::groove::storage::StorageEpochManifest::decode(expected).unwrap(),
@@ -322,7 +323,7 @@ mod tests {
             &epoch_1_storage_codec_profile().expect("valid fixed profile"),
         )
         .expect("valid manifest");
-        let expected = b"JSM1\0\x01\0\x01\x06memory\x0c\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x25jazz.subscription-program-fact-key.v1\x01\x09key-order\0\x16unsigned-lexicographic";
+        let expected = b"JSM1\0\x01\0\x01\x06memory\x0d\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x25jazz.subscription-program-fact-key.v1\x1ejazz.transaction-durability.v2\x01\x09key-order\0\x16unsigned-lexicographic";
         assert_eq!(manifest.encode().expect("canonical manifest"), expected);
         assert_eq!(
             crate::groove::storage::StorageEpochManifest::decode(expected)

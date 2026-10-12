@@ -46,7 +46,7 @@ afterAll(async () => {
 });
 
 const membershipsOf = (memberAuthor: string) =>
-  db.all(app.canvasMembers.where({ memberAuthor }), { tier: "global" });
+  db.all(app.canvasMembers.where({ memberAuthor }), { tier: "remote" });
 
 describe("ensurePersonalCanvas", () => {
   it("seeds one demo poster and is idempotent", async () => {
@@ -56,12 +56,12 @@ describe("ensurePersonalCanvas", () => {
     expect(again).toBe(first);
     const memberships = await membershipsOf(account);
     expect(memberships.map((row) => [row.canvasId, row.role])).toEqual([[first, "admin"]]);
-    const canvas = await db.one(app.canvases.where({ id: first }), { tier: "global" });
+    const canvas = await db.one(app.canvases.where({ id: first }), { tier: "remote" });
     expect(canvas?.title).toBe("Ada's poster");
-    const layers = await db.all(app.layers.where({ canvasId: first }), { tier: "global" });
+    const layers = await db.all(app.layers.where({ canvasId: first }), { tier: "remote" });
     expect(layers.map((layer) => layer.name).sort()).toEqual(["Artwork", "Background", "Type"]);
     const checkpoints = await db.all(app.checkpoints.where({ canvasId: first }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(checkpoints).toHaveLength(1);
   });
@@ -104,7 +104,7 @@ describe("redeemInvite", () => {
     expect(await redeemInvite(db, guest, { canvasId, token })).toBe("joined");
     expect(await redeemInvite(db, guest, { canvasId, token })).toBe("already-member");
     const rows = await db.all(app.canvasMembers.where({ canvasId, memberAuthor: guest }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(rows.map((row) => row.role)).toEqual(["editor"]);
     // A multi-use link keeps working for the next person.
@@ -115,7 +115,7 @@ describe("redeemInvite", () => {
     const { admin, canvasId, token } = await adminWithInvite("viewer", false);
     expect(await redeemInvite(db, admin, { canvasId, token })).toBe("already-member");
     const rows = await db.all(app.canvasMembers.where({ canvasId, memberAuthor: admin }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(rows.map((row) => row.role)).toEqual(["admin"]);
   });
@@ -127,7 +127,7 @@ describe("redeemInvite", () => {
       redeemInvite(db, crypto.randomUUID(), { canvasId, token }).catch(() => "rejected"),
     ]);
     expect(results.filter((result) => result === "joined")).toHaveLength(1);
-    expect(await db.all(app.canvasInvites.where({ canvasId }), { tier: "global" })).toEqual([]);
+    expect(await db.all(app.canvasInvites.where({ canvasId }), { tier: "remote" })).toEqual([]);
   });
 
   it("rejects unknown tokens and tokens for another canvas", async () => {

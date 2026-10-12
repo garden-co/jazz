@@ -77,14 +77,14 @@ it.each([
       const note = tx.insert(app.notes, { projectId: project.id, body: "Before disconnect" });
       await tx.commit().wait({ tier: "global" });
       if (failCache) expect(failedCacheWrite).toBe(true);
-      expect(await db.all(app.notes, { tier: "global" })).toEqual([note]);
-      const roots = await db.all(app.__e2ee_spaces, { tier: "global" });
+      expect(await db.all(app.notes, { tier: "remote" })).toEqual([note]);
+      const roots = await db.all(app.__e2ee_spaces, { tier: "remote" });
       expect(roots).toHaveLength(1);
       await db.disconnect();
       const deletion = db.delete(app.__e2ee_spaces, roots[0]!.id);
       await deletion.wait({ tier: "local" });
-      expect(await db.all(app.__e2ee_spaces, { tier: "local" })).toEqual([]);
-      expect(await db.all(app.notes, { tier: "local" })).toEqual([note]);
+      expect(await db.all(app.__e2ee_spaces, { tier: "local-first" })).toEqual([]);
+      expect(await db.all(app.notes, { tier: "local-first" })).toEqual([note]);
       const encryptedWrite = db.update(app.notes, note.id, {
         body: "Accepted history still works",
       });
@@ -95,7 +95,9 @@ it.each([
       });
       const inserted = await encryptedInsert.wait({ tier: "local" });
       expect(
-        (await db.all(app.notes, { tier: "local" })).sort((a, b) => a.body.localeCompare(b.body)),
+        (await db.all(app.notes, { tier: "local-first" })).sort((a, b) =>
+          a.body.localeCompare(b.body),
+        ),
       ).toEqual([{ ...note, body: "Accepted history still works" }, inserted]);
       const rejection = deletion.wait({ tier: "global" }).then(
         () => false,
@@ -105,9 +107,9 @@ it.each([
       expect(await rejection).toBe(true);
       await encryptedWrite.wait({ tier: "global" });
       await encryptedInsert.wait({ tier: "global" });
-      expect(await db.all(app.__e2ee_spaces, { tier: "global" })).toEqual(roots);
+      expect(await db.all(app.__e2ee_spaces, { tier: "remote" })).toEqual(roots);
       expect(
-        (await db.all(app.notes, { tier: "global" })).sort((a, b) => a.body.localeCompare(b.body)),
+        (await db.all(app.notes, { tier: "remote" })).sort((a, b) => a.body.localeCompare(b.body)),
       ).toEqual([{ ...note, body: "Accepted history still works" }, inserted]);
     } finally {
       await db?.shutdown();

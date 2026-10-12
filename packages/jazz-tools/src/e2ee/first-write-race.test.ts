@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -58,7 +59,7 @@ async function firstWriterRace(grantLoser: boolean) {
       ...target,
       schema: app,
       permissions,
-      migration: s.defineMigration({ from: before, to: after, createTables: { notes: true } }),
+      migration: m.defineMigration({ from: before, to: after, createTables: { notes: true } }),
     });
     const keys = await createBrowserKeyEnvelope();
     const accounts = await Promise.all([
@@ -126,37 +127,37 @@ async function firstWriterRace(grantLoser: boolean) {
     });
     const winner = writers[winnerIndex]!;
     const loser = writers[loserIndex]!;
-    const roots = await winner.all(app.__e2ee_spaces, { tier: "global" });
+    const roots = await winner.all(app.__e2ee_spaces, { tier: "remote" });
     expect(roots).toHaveLength(1);
     expect(roots[0]).toMatchObject({ accountId: accounts[winnerIndex]!.account.id });
-    expect(await winner.all(app.__e2ee_space_grants, { tier: "global" })).toMatchObject([
+    expect(await winner.all(app.__e2ee_space_grants, { tier: "remote" })).toMatchObject([
       { spaceId: roots[0]!.id, recipientId: accounts[winnerIndex]!.account.id },
     ]);
-    expect(await winner.all(app.notes, { tier: "global" })).toEqual([writes[winnerIndex]!.value]);
+    expect(await winner.all(app.notes, { tier: "remote" })).toEqual([writes[winnerIndex]!.value]);
     if (grantLoser) {
       await winner.e2ee.spaces
         .grant(app.projects, project.id, accounts[loserIndex]!.account.id)
         .wait();
-      expect(await loser.all(app.notes, { tier: "global" })).toEqual([writes[winnerIndex]!.value]);
+      expect(await loser.all(app.notes, { tier: "remote" })).toEqual([writes[winnerIndex]!.value]);
       const allowed = loser.insert(app.notes, {
         projectId: project.id,
         body: "Allowed after winner grant",
       });
       await allowed.wait({ tier: "global" });
-      expect(new Set(await winner.all(app.notes, { tier: "global" }))).toEqual(
+      expect(new Set(await winner.all(app.notes, { tier: "remote" }))).toEqual(
         new Set([allowed.value, writes[winnerIndex]!.value]),
       );
-      expect(await winner.all(app.__e2ee_spaces, { tier: "global" })).toEqual(roots);
+      expect(await winner.all(app.__e2ee_spaces, { tier: "remote" })).toEqual(roots);
     } else {
       await expect(
-        loser.one(app.notes.where({ id: writes[winnerIndex]!.value.id }), { tier: "global" }),
+        loser.one(app.notes.where({ id: writes[winnerIndex]!.value.id }), { tier: "remote" }),
       ).rejects.toMatchObject({ code: "key-not-shared" });
       await expect(
         loser
           .insert(app.notes, { projectId: project.id, body: "No retained provisional key" })
           .wait({ tier: "global" }),
       ).rejects.toMatchObject({ code: "key-not-shared" });
-      expect(await winner.all(app.notes.select("id"), { tier: "global" })).toEqual([
+      expect(await winner.all(app.notes.select("id"), { tier: "remote" })).toEqual([
         { id: writes[winnerIndex]!.value.id },
       ]);
     }

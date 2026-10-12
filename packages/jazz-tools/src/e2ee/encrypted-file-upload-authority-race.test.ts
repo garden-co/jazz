@@ -48,7 +48,7 @@ it("rejects both blocked uploads after rotation and recipient removal without re
     release();
     await Promise.all(pending.map((upload) => expect(upload).rejects.toThrow()));
     expect(pulls).toEqual([1, 1]);
-    expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "global" })).toEqual([]);
+    expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "remote" })).toEqual([]);
   } finally {
     release();
     await Promise.allSettled(pending);

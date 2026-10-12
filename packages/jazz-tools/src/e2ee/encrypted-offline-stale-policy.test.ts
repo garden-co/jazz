@@ -62,13 +62,13 @@ it.each(["explicit disconnect", "unexpected transport loss"] as const)(
       const note = tx.insert(app.notes, { projectId: project.id, title: "Before removal" });
       await tx.commit().wait({ tier: "global" });
       for (const client of owners)
-        expect(await client.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(
+        expect(await client.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(
           note,
         );
       // The departing member can record removal but cannot rotate for those left behind.
       await departing.e2ee.spaces.revoke(app.projects, project.id, bob.account.id).wait();
       for (const client of owners) {
-        expect(await client.all(app.__e2ee_space_grants, { tier: "global" })).toEqual(
+        expect(await client.all(app.__e2ee_space_grants, { tier: "remote" })).toEqual(
           expect.arrayContaining([
             expect.objectContaining({ operation: "remove", recipientId: bob.account.id }),
           ]),

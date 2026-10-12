@@ -101,20 +101,20 @@ it("publishes an encrypted file and metadata that a granted recipient can read",
       })(),
     });
     await inserted.wait({ tier: "global" });
-    expect(await bob!.one(app.files.where({ id: inserted.value.id }), { tier: "global" })).toEqual({
+    expect(await bob!.one(app.files.where({ id: inserted.value.id }), { tier: "remote" })).toEqual({
       id: inserted.value.id,
       projectId: project.value.id,
       name: "private-photo.png",
       payload,
     });
     const stored = await observer!.one(physical.files.where({ id: inserted.value.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(stored).not.toBeNull();
     expect(stored!.payload).not.toEqual(payload);
     expect(new TextDecoder().decode(stored!.name)).not.toContain("private-photo.png");
     await expect(
-      observer!.one(app.files.where({ id: inserted.value.id }), { tier: "global" }),
+      observer!.one(app.files.where({ id: inserted.value.id }), { tier: "remote" }),
     ).rejects.toThrow();
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
@@ -151,7 +151,7 @@ it.each([false, true])(
       });
       const ids = await result.wait({ tier: "global" });
       expect(
-        await recipient.db.one(uploadApp.files.where({ id: ids.image }), { tier: "global" }),
+        await recipient.db.one(uploadApp.files.where({ id: ids.image }), { tier: "remote" }),
       ).toEqual({
         id: ids.image,
         projectId: ids.scope,
@@ -159,7 +159,7 @@ it.each([false, true])(
         payload,
       });
       expect(
-        await recipient.db.one(uploadApp.files.where({ id: ids.empty }), { tier: "global" }),
+        await recipient.db.one(uploadApp.files.where({ id: ids.empty }), { tier: "remote" }),
       ).toEqual({
         id: ids.empty,
         projectId: ids.scope,
@@ -168,16 +168,16 @@ it.each([false, true])(
       });
       const roots = await fixture.owner.all(
         uploadApp.__e2ee_spaces.where({ identifier: ids.scope }),
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(roots).toHaveLength(1);
       const grants = await fixture.owner.all(
         uploadApp.__e2ee_space_grants.where({ spaceId: roots[0]!.id }),
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(grants.map((grant) => grant.recipientId)).toEqual([recipient.id]);
       await expect(
-        fixture.owner.one(uploadApp.files.where({ id: ids.image }), { tier: "global" }),
+        fixture.owner.one(uploadApp.files.where({ id: ids.image }), { tier: "remote" }),
       ).rejects.toThrow();
     } finally {
       await fixture.close();
@@ -195,7 +195,7 @@ it.each([false, true])(
       const scope = await legacy
         .insert(legacyUploadApp.projects, { title: "Legacy" })
         .wait({ tier: "global" });
-      expect(await fixture.owner.all(uploadApp.__e2ee_spaces, { tier: "global" })).toEqual([]);
+      expect(await fixture.owner.all(uploadApp.__e2ee_spaces, { tier: "remote" })).toEqual([]);
       const uploaded = await fixture.owner.insertStreaming(uploadApp.files, {
         projectId: scope.id,
         name: "first",
@@ -204,7 +204,7 @@ it.each([false, true])(
       await uploaded.wait({ tier: "global" });
       expect(
         await fixture.owner.one(uploadApp.files.where({ id: uploaded.value.id }), {
-          tier: "global",
+          tier: "remote",
         }),
       ).toEqual({
         id: uploaded.value.id,
@@ -226,7 +226,7 @@ it.each([false, true])(
         })
       ).wait({ tier: "global" });
       expect(
-        await fixture.owner.one(uploadApp.files.where({ id: ordinary.id }), { tier: "global" }),
+        await fixture.owner.one(uploadApp.files.where({ id: ordinary.id }), { tier: "remote" }),
       ).toEqual({
         id: ordinary.id,
         projectId: scope.id,
@@ -243,7 +243,7 @@ it.each([false, true])(
         })
       ).wait({ tier: "global" });
       expect(
-        await fixture.owner.one(uploadApp.files.where({ id: ordinary.id }), { tier: "global" }),
+        await fixture.owner.one(uploadApp.files.where({ id: ordinary.id }), { tier: "remote" }),
       ).toEqual({
         id: ordinary.id,
         projectId: scope.id,
@@ -252,7 +252,7 @@ it.each([false, true])(
       });
       expect(
         await fixture.owner.one(uploadApp.files.where({ id: uploaded.value.id }), {
-          tier: "global",
+          tier: "remote",
         }),
       ).toEqual({
         id: uploaded.value.id,
@@ -262,7 +262,7 @@ it.each([false, true])(
       });
       expect(
         await fixture.owner.all(uploadApp.__e2ee_spaces.where({ identifier: scope.id }), {
-          tier: "global",
+          tier: "remote",
         }),
       ).toHaveLength(1);
       if (!native) {
@@ -283,7 +283,7 @@ it.each([false, true])(
         const row = await result.wait({ tier: "global" });
         expect(
           await fixture.owner.all(uploadApp.files.where({ projectId: row.projectId }), {
-            tier: "global",
+            tier: "remote",
           }),
         ).toEqual([{ ...row, name: "final", payload: new Uint8Array([2, 3]) }]);
       }

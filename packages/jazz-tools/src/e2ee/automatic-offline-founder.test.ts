@@ -58,7 +58,7 @@ it("refuses second-device and missing-journal founders without changing the dura
         e2ee: { app, store: privateStore() },
       });
       sessions.push(warm);
-      await warm.getSnapshot().client!.db.all(app.projects, { tier: "global" });
+      await warm.getSnapshot().client!.db.all(app.projects, { tier: "remote" });
       await warm.close();
       sessions.pop();
     }
@@ -104,15 +104,17 @@ it("refuses second-device and missing-journal founders without changing the dura
     }
     await updates.commit().wait({ tier: "local" });
     for (const row of notes) row.body += " updated offline";
-    expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+    expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(
+      note,
+    );
     const observe = async (db: Db) => ({
-      projects: await db.all(app.projects, { tier: "local" }),
-      notes: await db.all(app.notes, { tier: "local" }),
-      identities: await db.all(app.__e2ee_account_identities, { tier: "local" }),
-      roots: await db.all(app.__e2ee_account_roots, { tier: "local" }),
-      spaces: await db.all(app.__e2ee_spaces, { tier: "local" }),
-      grants: await db.all(app.__e2ee_space_grants, { tier: "local" }),
-      deliveries: await db.all(app.__e2ee_space_deliveries, { tier: "local" }),
+      projects: await db.all(app.projects, { tier: "local-first" }),
+      notes: await db.all(app.notes, { tier: "local-first" }),
+      identities: await db.all(app.__e2ee_account_identities, { tier: "local-first" }),
+      roots: await db.all(app.__e2ee_account_roots, { tier: "local-first" }),
+      spaces: await db.all(app.__e2ee_spaces, { tier: "local-first" }),
+      grants: await db.all(app.__e2ee_space_grants, { tier: "local-first" }),
+      deliveries: await db.all(app.__e2ee_space_deliveries, { tier: "local-first" }),
     });
     const originalRows = await observe(founder);
     const originalState = (await founderStore.read())!;
@@ -233,7 +235,7 @@ it("resumes the exact pending founder journal after importing into the same dura
       store: privateStore(),
       e2ee: { app, store: privateStore() },
     });
-    await owner.getSnapshot().client!.db.all(app.projects, { tier: "global" });
+    await owner.getSnapshot().client!.db.all(app.projects, { tier: "remote" });
     await owner.close();
     owner = undefined;
     gate.block();
@@ -253,9 +255,11 @@ it("resumes the exact pending founder journal after importing into the same dura
       body: "Original offline message",
     });
     await tx.commit().wait({ tier: "local" });
-    expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+    expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(
+      note,
+    );
     const root = await founder.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "local",
+      tier: "local-first",
     });
     expect(root?.accountId).toBe(account!.id);
     const journal = JSON.parse((await store.read())!).initializationJournalV1;
@@ -275,12 +279,16 @@ it("resumes the exact pending founder journal after importing into the same dura
     expect(restored.account!.id).toBe(account!.id);
     expect(await accountGeneratedHere(restored.account!)).toBe(false);
     const reopened = restored.client!.db;
-    expect(await reopened.one(app.projects.where({ id: project.id }), { tier: "local" })).toEqual(
-      project,
-    );
-    expect(await reopened.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
     expect(
-      await reopened.one(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "local" }),
+      await reopened.one(app.projects.where({ id: project.id }), { tier: "local-first" }),
+    ).toEqual(project);
+    expect(await reopened.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(
+      note,
+    );
+    expect(
+      await reopened.one(app.__e2ee_spaces.where({ identifier: project.id }), {
+        tier: "local-first",
+      }),
     ).toEqual(root);
     expect(JSON.parse((await store.read())!).initializationJournalV1).toEqual(journal);
   } finally {
@@ -345,7 +353,7 @@ it("never turns a provisional author's sealed envelope into recipient membership
     const pending = tx.commit();
     await pending.wait({ tier: "local" });
     await expect(
-      owner.one(app.notes.where({ id: note.id }), { tier: "local" }),
+      owner.one(app.notes.where({ id: note.id }), { tier: "local-first" }),
     ).rejects.toMatchObject({ code: "key-not-shared" });
     await expect(
       owner
@@ -353,17 +361,17 @@ it("never turns a provisional author's sealed envelope into recipient membership
         .wait({ tier: "local" }),
     ).rejects.toMatchObject({ code: "key-not-shared" });
     const root = await owner.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "local",
+      tier: "local-first",
     });
     const grants = await owner.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), {
-      tier: "local",
+      tier: "local-first",
     });
     expect(grants.map((grant) => grant.recipientId)).toEqual([recipientAccount.account.id]);
     await owner.reconnect();
     await pending.wait({ tier: "global" });
-    expect(await recipient.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+    expect(await recipient.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(note);
     await expect(
-      owner.one(app.notes.where({ id: note.id }), { tier: "global" }),
+      owner.one(app.notes.where({ id: note.id }), { tier: "remote" }),
     ).rejects.toMatchObject({ code: "key-not-shared" });
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));

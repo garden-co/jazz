@@ -6,6 +6,10 @@ import {
   type LocalJazzServerHandle,
   type TestJwtIssuerHandle,
 } from "../../src/testing/index.js";
+import {
+  createTransportControl,
+  type TransportControl,
+} from "../../src/runtime/testing/transport-control.js";
 
 interface StartedJazzServer {
   server: LocalJazzServerHandle;
@@ -190,6 +194,7 @@ export async function stopJazzServerByUrl(serverUrl: string): Promise<void> {
 }
 
 export async function stopJazzServer(): Promise<void> {
+  for (const url of transportControls.keys()) await stopJazzServerTransportControl(url);
   const runningServers = [...jazzServerPromises.values()];
   jazzServerPromises.clear();
 
@@ -205,6 +210,30 @@ export async function stopJazzServer(): Promise<void> {
       // or stop() itself failed (nothing recoverable during teardown).
     }
   }
+}
+
+const transportControls = new Map<string, TransportControl>();
+
+function transportControl(url: string): TransportControl {
+  const control = transportControls.get(url);
+  if (!control) throw new Error(`No transport control is running at ${url}`);
+  return control;
+}
+
+export async function createJazzServerTransportControl(serverUrl: string): Promise<string> {
+  const control = await createTransportControl(serverUrl);
+  transportControls.set(control.url, control);
+  return control.url;
+}
+
+export function blockJazzServerTransport(url: string, direction: "both" | "inbound"): void {
+  const control = transportControl(url);
+  if (direction === "inbound") control.blockInbound();
+  else control.block();
+}
+
+export function unblockJazzServerTransport(url: string): void {
+  transportControl(url).unblock();
 }
 
 function jazzServerUrlPattern(serverUrl: string): string {
@@ -330,4 +359,10 @@ export async function unblockJazzServerNetwork(
     webSocketPattern: routeBlock.webSocketPattern,
     activePatterns: activeBlockedPatterns(contextRoutes),
   });
+}
+
+export async function stopJazzServerTransportControl(url: string): Promise<void> {
+  const control = transportControl(url);
+  transportControls.delete(url);
+  await control.stop();
 }

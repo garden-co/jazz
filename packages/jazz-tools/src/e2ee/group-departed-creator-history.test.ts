@@ -79,9 +79,9 @@ it("retains full current history checks for departed parent and child creators",
     await bob.e2ee.groups.remove(c.id, { kind: "account", id: bobAccount.account.id }).wait();
     expect(await alice.e2ee.explain({ groupId: c.id })).toEqual({ state: "ready" });
     expect(await bob.e2ee.explain({ groupId: c.id })).toMatchObject({ state: "refused" });
-    const priorRoots = await bob.all(app.__e2ee_recovery_roots, { tier: "global" });
+    const priorRoots = await bob.all(app.__e2ee_recovery_roots, { tier: "remote" });
     await bob.e2ee.recovery.create().wait();
-    const roots = await bob.all(app.__e2ee_recovery_roots, { tier: "global" });
+    const roots = await bob.all(app.__e2ee_recovery_roots, { tier: "remote" });
     const oldIds = new Set(priorRoots.map((row) => row.id));
     const added = roots.filter((row) => !oldIds.has(row.id));
     expect(added).toHaveLength(1);
@@ -104,13 +104,13 @@ it("retains full current history checks for departed parent and child creators",
       [c.id, b.id],
     ] as const) {
       const query = app.__e2ee_group_membership.where({ groupId: parent });
-      const before = await alice.all(query, { tier: "global" });
+      const before = await alice.all(query, { tier: "remote" });
       const previousHits = hits;
       await expect(alice.e2ee.groups.add(parent, { kind: "group", id: child }).wait()).rejects.toBe(
         sentinel,
       );
       expect(hits).toBeGreaterThan(previousHits);
-      expect(await alice.all(query, { tier: "global" })).toEqual(before);
+      expect(await alice.all(query, { tier: "remote" })).toEqual(before);
     }
     // New function identity invalidates completed proof caches after restoration.
     aliceCrypto.deviceSigner.verify = (key, bytes, signature) =>

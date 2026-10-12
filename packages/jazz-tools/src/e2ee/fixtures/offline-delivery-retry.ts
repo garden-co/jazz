@@ -92,7 +92,7 @@ export async function runOfflineDeliveryRetry(
     );
     const note = tx.insert(app.notes, { projectId: project.id, title: "Still shared" });
     await tx.commit().wait({ tier: "global" });
-    expect(await reader.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+    expect(await reader.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(note);
     await reader.e2ee.explain({ scope: app.projects, identifier: project.id });
     // Leave the original owner offline while another authorised holder retries.
     await owner.shutdown();
@@ -103,7 +103,7 @@ export async function runOfflineDeliveryRetry(
     )!;
     await reader.e2ee.devices.approve(pending.id).wait();
     if (overlap === "interrupted background read") {
-      expect(await reader.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+      expect(await reader.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(note);
       armed = true;
       await expect.poll(() => waiting, { timeout: 10_000 }).toBe(true);
     } else {
@@ -117,7 +117,9 @@ export async function runOfflineDeliveryRetry(
     );
     if (overlap === "suppressed background read") {
       await expect.poll(() => waiting, { timeout: 10_000 }).toBe(true);
-      expect(await reader.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+      expect(await reader.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(
+        note,
+      );
       release();
     }
     await rejected;
@@ -140,20 +142,20 @@ export async function runOfflineDeliveryRetry(
     expect(
       await secondDevice.all(
         app.__e2ee_space_deliveries.where({ recipientDeviceId: eligible.id }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([]);
     // Failed administration is observable; it must not poison later automatic
     // delivery. Neither retry trigger explicitly calls e2ee.explain().
     if (trigger === "ordinary owner read") {
-      expect(await reader.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+      expect(await reader.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(note);
     } else {
       await reader.disconnect();
       await reader.reconnect();
     }
     await expect
       .poll(
-        () => recipient.one(app.notes.where({ id: note.id }), { tier: "global" }).catch(() => null),
+        () => recipient.one(app.notes.where({ id: note.id }), { tier: "remote" }).catch(() => null),
         { timeout: 10_000 },
       )
       .toEqual(note);

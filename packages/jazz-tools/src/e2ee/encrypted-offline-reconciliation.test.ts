@@ -50,14 +50,14 @@ it.each(["ordinary owner read", "owner reconnect"])(
       await tx.commit().wait({ tier: "global" });
       // Neither client calls explain(); normal activity must resume delivery.
       if (trigger === "ordinary owner read") {
-        expect(await owner.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(note);
+        expect(await owner.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(note);
       } else {
         await owner.disconnect();
         await owner.reconnect();
       }
       await expect
         .poll(
-          () => reader.one(app.notes.where({ id: note.id }), { tier: "global" }).catch(() => null),
+          () => reader.one(app.notes.where({ id: note.id }), { tier: "remote" }).catch(() => null),
           { timeout: 10_000 },
         )
         .toEqual(note);
@@ -132,7 +132,7 @@ it("keeps accepted space access while a removal is pending and after Jazz reject
     const note = tx.insert(app.notes, { projectId: project.id, title: "Accepted data" });
     await tx.commit().wait({ tier: "global" });
     const query = app.notes.where({ id: note.id });
-    expect(await db.one(query, { tier: "global" })).toEqual(note);
+    expect(await db.one(query, { tier: "remote" })).toEqual(note);
 
     hold = true;
     const removal = db.e2ee.spaces.revoke(app.projects, project.id, account.account.id);
@@ -155,21 +155,26 @@ it("keeps accepted space access while a removal is pending and after Jazz reject
       recipientId: account.account.id,
     });
     await expect
-      .poll(async () => (await db!.all(removals, { tier: "local" })).length, { timeout: 5_000 })
+      .poll(async () => (await db!.all(removals, { tier: "local-first" })).length, {
+        timeout: 5_000,
+      })
       .toBe(1);
     expect(outcome).toBeUndefined();
-    expect(await db.one(query, { tier: "local" })).toEqual(note);
+    expect(await db.one(query, { tier: "local-first" })).toEqual(note);
     const write = db.update(app.notes, note.id, { title: "Still authorised" });
     await write.wait({ tier: "local" });
-    expect(await db.one(query, { tier: "local" })).toEqual({ ...note, title: "Still authorised" });
+    expect(await db.one(query, { tier: "local-first" })).toEqual({
+      ...note,
+      title: "Still authorised",
+    });
 
     await db.reconnect();
     await settled;
     expect(outcome).toBe("rejected");
     expect(rejection).toMatchObject({ code: "permission_denied" });
     await write.wait({ tier: "global" });
-    expect(await db.all(removals, { tier: "global" })).toEqual([]);
-    expect(await db.one(query, { tier: "global" })).toEqual({ ...note, title: "Still authorised" });
+    expect(await db.all(removals, { tier: "remote" })).toEqual([]);
+    expect(await db.one(query, { tier: "remote" })).toEqual({ ...note, title: "Still authorised" });
   } finally {
     release();
     await db?.shutdown();
@@ -248,13 +253,13 @@ it("does not grant access while an addition is pending or after Jazz rejects it"
     const note = tx.insert(app.notes, { projectId: project.id, title: "Owner only" });
     await tx.commit().wait({ tier: "global" });
     const query = app.notes.where({ id: note.id });
-    expect(await owner.one(query, { tier: "global" })).toEqual(note);
+    expect(await owner.one(query, { tier: "remote" })).toEqual(note);
     hold = true;
     const additions = app.__e2ee_space_grants.where({
       operation: "add",
       recipientId: bob.account.id,
     });
-    expect(await owner.all(additions, { tier: "global" })).toEqual([]);
+    expect(await owner.all(additions, { tier: "remote" })).toEqual([]);
     const grant = owner.e2ee.spaces.grant(app.projects, project.id, bob.account.id);
     let outcome: string | undefined;
     let rejection: unknown;
@@ -273,20 +278,20 @@ it("does not grant access while an addition is pending or after Jazz rejects it"
     await expect
       .poll(
         async () => {
-          const rows = await owner.all(additions, { tier: "local" });
+          const rows = await owner.all(additions, { tier: "local-first" });
           return rows.length;
         },
         { timeout: 5_000 },
       )
       .toBe(1);
     expect(outcome).toBeUndefined();
-    expect(await owner.one(query, { tier: "local" })).toEqual(note);
-    await expect(reader.one(query, { tier: "global" })).rejects.toMatchObject({
+    expect(await owner.one(query, { tier: "local-first" })).toEqual(note);
+    await expect(reader.one(query, { tier: "remote" })).rejects.toMatchObject({
       code: "key-not-shared",
     });
     const write = owner.update(app.notes, note.id, { title: "Still owner only" });
     await write.wait({ tier: "local" });
-    expect(await owner.one(query, { tier: "local" })).toEqual({
+    expect(await owner.one(query, { tier: "local-first" })).toEqual({
       ...note,
       title: "Still owner only",
     });
@@ -295,11 +300,11 @@ it("does not grant access while an addition is pending or after Jazz rejects it"
     expect(outcome).toBe("rejected");
     expect(rejection).toMatchObject({ code: "permission_denied" });
     await write.wait({ tier: "global" });
-    expect(await reader.all(additions, { tier: "global" })).toEqual([]);
-    await expect(reader.one(query, { tier: "global" })).rejects.toMatchObject({
+    expect(await reader.all(additions, { tier: "remote" })).toEqual([]);
+    await expect(reader.one(query, { tier: "remote" })).rejects.toMatchObject({
       code: "key-not-shared",
     });
-    expect(await owner.one(query, { tier: "global" })).toEqual({
+    expect(await owner.one(query, { tier: "remote" })).toEqual({
       ...note,
       title: "Still owner only",
     });

@@ -95,7 +95,7 @@ it.each([
         expect(await before.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
           state: "ready",
         });
-        expect(await before.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual(
+        expect(await before.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual(
           note,
         );
       }
@@ -125,9 +125,9 @@ it.each([
       )
         await reopened.disconnect();
       // The ordinary persisted row is a control for reopening without the server.
-      expect(await reopened.one(app.projects.where({ id: project.id }), { tier: "local" })).toEqual(
-        project,
-      );
+      expect(
+        await reopened.one(app.projects.where({ id: project.id }), { tier: "local-first" }),
+      ).toEqual(project);
       if (stalledServer) {
         reopened.e2ee.devices.list().then(
           () => {
@@ -144,7 +144,7 @@ it.each([
         expect(
           await reopened.all(
             app.notes.where({ projectId: project.id, title: "Before reopening" }),
-            { tier: "local" },
+            { tier: "local-first" },
           ),
         ).toEqual([note]);
       }
@@ -157,10 +157,12 @@ it.each([
           }),
         ]),
       ).toBe("stored locally");
-      expect(await reopened.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual({
-        ...note,
-        title: "After reopening offline",
-      });
+      expect(await reopened.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(
+        {
+          ...note,
+          title: "After reopening offline",
+        },
+      );
       if (stalledServer) expect(listingFinished).toBe(false);
     } finally {
       clearTimeout(timer);

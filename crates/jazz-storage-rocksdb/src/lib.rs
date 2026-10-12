@@ -12,7 +12,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle, DBCompressionType,
@@ -44,6 +44,10 @@ impl<T> RocksResultExt<T> for Result<T, rocksdb::Error> {
         })
     }
 }
+
+mod memory;
+
+pub use memory::{RocksDbMemoryUsage, process_memory_usage};
 
 const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 // Keep desktop reopen recovery debt bounded by allowing RocksDB to flush
@@ -91,7 +95,12 @@ pub enum Durability {
 /// RocksDB implementation of the ordered KV storage trait.
 pub struct RocksDbStorage {
     column_families: BTreeSet<String>,
-    db: DB,
+    /// Reports this store's memory to [`process_memory_usage`] while open.
+    /// Declared before `db` so that it drops first: once it has left the
+    /// registry, `db` holds the only reference and the database closes with
+    /// the store.
+    _memory_registration: memory::Registration,
+    db: Arc<DB>,
     write_options: WriteOptions,
     mutation_gate: Mutex<()>,
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
@@ -350,7 +359,9 @@ impl RocksDbStorage {
         let db = DB::open_cf_descriptors(&options, &path, descriptors).storage()?;
         let mut write_options = WriteOptions::default();
         write_options.set_sync(matches!(durability, Durability::FullSync));
+        let db = Arc::new(db);
         let storage = Self {
+            _memory_registration: memory::Registration::new(&db, &cache),
             column_families: families
                 .into_iter()
                 .filter(|cf| cf != ROCKSDB_INTERNAL_CF)
@@ -569,11 +580,13 @@ impl RocksDbStorage {
             );
             db.write_opt(&batch, &write_options).storage()?;
         }
+        let db = Arc::new(db);
         Ok(Self {
             column_families: opened_column_families
                 .into_iter()
                 .filter(|name| name != ROCKSDB_INTERNAL_CF)
                 .collect(),
+            _memory_registration: memory::Registration::new(&db, &block_cache),
             db,
             write_options,
             mutation_gate: Mutex::new(()),
@@ -961,24 +974,26 @@ impl ReopenableStorage for RocksDbStorage {
             }
             // Expand the admitted handle without re-entering the epoch-one
             // opener or resetting its durability policy and pending WAL debt.
-            let cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
             let buffers = WriteBufferManager::new_write_buffer_manager(
                 ROCKSDB_WRITE_BUFFER_MANAGER_BYTES,
                 false,
             );
-            for name in column_families {
-                if name == ROCKSDB_INTERNAL_CF {
-                    return Err(Error::InvalidStorageLayout(
-                        "reserved RocksDB internal family".into(),
-                    ));
-                }
-                if !self.column_families.contains(&name) {
-                    self.db
-                        .create_cf(&name, &rocksdb_options_for_cf(&name, &cache, &buffers))
-                        .storage()?;
-                    self.column_families.insert(name);
-                }
-            }
+            self._memory_registration
+                .with_db_mut(&mut self.db, |db, cache| {
+                    for name in column_families {
+                        if name == ROCKSDB_INTERNAL_CF {
+                            return Err(Error::InvalidStorageLayout(
+                                "reserved RocksDB internal family".into(),
+                            ));
+                        }
+                        if !self.column_families.contains(&name) {
+                            db.create_cf(&name, &rocksdb_options_for_cf(&name, cache, &buffers))
+                                .storage()?;
+                            self.column_families.insert(name);
+                        }
+                    }
+                    Ok(())
+                })?;
             Ok(self)
         })
     }

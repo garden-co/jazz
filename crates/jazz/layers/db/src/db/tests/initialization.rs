@@ -412,7 +412,7 @@ fn initialization_catalogue_readiness_requires_requested_schema_admission() {
     let global_error = block_on(Box::pin(pending.all_serialized_query(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: ReadTier::Remote,
             ..ReadOpts::default()
         },
         None,
@@ -756,16 +756,18 @@ fn initialization_cache_replacement_preserves_immutable_lineage_receipts() {
 
     let mut changed_lens = snapshot.clone();
     let publication = &mut changed_lens.lineages[0].1;
-    publication.lens.table_lenses[0].ops[0] = LensOp::AddColumn {
+    publication.predecessors[0].lens.table_lenses[0].ops[0] = LensOp::AddColumn {
         column: "body".to_owned(),
         default: Value::String("changed".to_owned()),
     };
-    publication.lens.id = publication.lens.content_id();
+    publication.predecessors[0].lens.id = publication.predecessors[0].lens.content_id();
     publication.id = publication.content_id();
 
     let mut changed_partition = snapshot.clone();
     let publication = &mut changed_partition.lineages[0].1;
-    publication.new_tables.push("todos".to_owned());
+    publication.predecessors[0]
+        .new_tables
+        .push("todos".to_owned());
     publication.id = publication.content_id();
     let mut changed_sequence = snapshot;
     changed_sequence.lineages[0].0 = 2;

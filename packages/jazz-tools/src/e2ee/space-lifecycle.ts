@@ -369,8 +369,8 @@ export class Spaces {
       const ids = observed.map((root) => root.id);
       const selector = ids.length === 1 ? { spaceId: ids[0]! } : { spaceId: { in: ids } };
       const [grants, successors] = await Promise.all([
-        this.db.all(this.tables.__e2ee_space_grants.where(selector), { tier: "global" }),
-        this.db.all(this.tables.__e2ee_space_successors.where(selector), { tier: "global" }),
+        this.db.all(this.tables.__e2ee_space_grants.where(selector), { tier: "remote" }),
+        this.db.all(this.tables.__e2ee_space_successors.where(selector), { tier: "remote" }),
       ]);
       this.assertOpen();
       const groupIds = this.groupHistoryIds(grants, []);
@@ -392,7 +392,7 @@ export class Spaces {
               recipientAccountId: this.accountId,
               recoveryRootId,
             });
-      if (query) await this.db.all(query, { tier: "global" });
+      if (query) await this.db.all(query, { tier: "remote" });
       const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
         const device = restore ? await this.requireDevice().states(tx) : undefined;
         const own =
@@ -686,7 +686,7 @@ export class Spaces {
     const address = await this.address(scope, identifier);
     return this.foregroundMaintenance(address, async () => {
       const roots = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
-      const observed = await this.db.one(roots, { tier: "global" });
+      const observed = await this.db.one(roots, { tier: "remote" });
       if (observed) {
         await this.changeRecipient(address, observed, recipientId, "add");
         await this.explain(scope, identifier);
@@ -697,7 +697,7 @@ export class Spaces {
         new TypedTableQueryBuilder(scope._table, scope._schema)
           .where({ id: identifier })
           .select("id"),
-        { tier: "global" },
+        { tier: "remote" },
       );
       await this.warmInitialRecipients([recipientId]);
       const device = await this.loadDevice();
@@ -870,20 +870,20 @@ export class Spaces {
     const address = await this.address(scope, identifier, retainedScopeId !== null);
     const roots = this.tables.__e2ee_spaces.where(address);
     if (tx) {
-      if (await tx.one(roots.includeDeleted(), { tier: "local" })) return false;
+      if (await tx.one(roots.includeDeleted(), { tier: "local-first" })) return false;
       // Hydrate a pre-existing scope row in this transaction, not in a later snapshot.
       const scopeRow = new TypedTableQueryBuilder(scope._table, scope._schema)
         .where({ id: identifier })
         .select("id");
       if (
-        !(await tx.one(scopeRow, { tier: "local" })) &&
+        !(await tx.one(scopeRow, { tier: "local-first" })) &&
         !(await this.db.e2eeIsExplicitlyOffline())
       )
-        await tx.one(scopeRow, { tier: "global" });
+        await tx.one(scopeRow, { tier: "remote" });
       await this.prepareInitial(tx, scope, identifier, prepareData, undefined, seed);
       return true;
     }
-    if (await this.db.one(roots.includeDeleted(), { tier: "local" })) return false;
+    if (await this.db.one(roots.includeDeleted(), { tier: "local-first" })) return false;
     // This read only chooses a retry. The fresh exclusive transaction must
     // independently validate absence and accept root, grant and data together.
     throw new SpaceInitialisationRequired();
@@ -954,7 +954,7 @@ export class Spaces {
     const roots = this.tables.__e2ee_spaces.where({ id: rootId });
     if (
       await tx.one(this.tables.__e2ee_spaces.includeDeleted().where({ id: rootId }), {
-        tier: "local",
+        tier: "local-first",
       })
     )
       throw new Error("E2EE space already exists");
@@ -980,9 +980,9 @@ export class Spaces {
     const scopeRow = new TypedTableQueryBuilder(scope._table, scope._schema)
       .where({ id: identifier })
       .select("id");
-    if (!(await tx.one(scopeRow, { tier: "local" })))
+    if (!(await tx.one(scopeRow, { tier: "local-first" })))
       throw new Error("Explicit space initialisation requires an existing scope row");
-    if (await tx.one(roots, { tier: "local" })) throw new Error("E2EE space already exists");
+    if (await tx.one(roots, { tier: "local-first" })) throw new Error("E2EE space already exists");
     const { root: signedRoot, grants: initialGrants } =
       pending ??
       (await this.initialRecords(
@@ -1017,13 +1017,13 @@ export class Spaces {
       if (founder.deviceId !== deviceId) throw new E2eeDataError("key-unavailable");
       const identity = await tx.one(
         this.tables.__e2ee_account_identities.where({ id: this.accountId }),
-        { tier: "local" },
+        { tier: "local-first" },
       );
       const root = await tx.one(this.tables.__e2ee_account_roots.where({ id: founder.rootId }), {
-        tier: "local",
+        tier: "local-first",
       });
       const keys = await tx.one(this.tables.__e2ee_device_keys.where({ id: founder.publicKeyId }), {
-        tier: "local",
+        tier: "local-first",
       });
       if (
         identity?.deviceId !== deviceId ||
@@ -1199,19 +1199,19 @@ export class Spaces {
     const recipients = initialRecipientIds(options.initialRecipients ?? [this.accountId]);
     await this.warmInitialRecipients(recipients);
     const roots = this.tables.__e2ee_spaces.where(address);
-    let observed = await this.db.one(roots.includeDeleted(), { tier: "local" });
+    let observed = await this.db.one(roots.includeDeleted(), { tier: "local-first" });
     const scopeRow = new TypedTableQueryBuilder(scope._table, scope._schema)
       .where({ id: identifier })
       .select("id");
     if (!newScope) {
-      const localScope = await this.db.one(scopeRow, { tier: "local" });
+      const localScope = await this.db.one(scopeRow, { tier: "local-first" });
       if (!observed || !localScope) {
         if (await this.db.e2eeIsExplicitlyOffline())
           throw new E2eeInitializationNotReady("Space history is not locally available");
         // A missing local root is not proof that a legacy scope is unencrypted.
         // Resolve missing facts before choosing keys or consuming source bytes.
-        if (!observed) observed = await this.db.one(roots.includeDeleted(), { tier: "global" });
-        if (!localScope) await this.db.one(scopeRow, { tier: "global" });
+        if (!observed) observed = await this.db.one(roots.includeDeleted(), { tier: "remote" });
+        if (!localScope) await this.db.one(scopeRow, { tier: "remote" });
       }
     }
     const pendingSpace = await this.device?.journal?.space(rootId);
@@ -1236,7 +1236,7 @@ export class Spaces {
           validate: async (tx) => {
             if (disposed) throw new E2eeDataError("key-unavailable");
             const root = await tx.one(this.tables.__e2ee_spaces.where({ id: rootId }), {
-              tier: "local",
+              tier: "local-first",
             });
             if (root?.epochId !== pendingSpace.root.epochId)
               throw new E2eeDataError("key-unavailable");
@@ -1365,12 +1365,12 @@ export class Spaces {
         this.assertOpen();
         if (
           (await tx.one(this.tables.__e2ee_spaces.includeDeleted().where({ id: rootId }), {
-            tier: "local",
+            tier: "local-first",
           })) ||
-          (await tx.one(roots.includeDeleted(), { tier: "local" }))
+          (await tx.one(roots.includeDeleted(), { tier: "local-first" }))
         )
           throw new E2eeDataError("key-unavailable");
-        if (!newScope && !(await tx.one(scopeRow, { tier: "local" })))
+        if (!newScope && !(await tx.one(scopeRow, { tier: "local-first" })))
           throw new E2eeDataError("key-unavailable");
         return this.initialEligibility(tx, device.id, recipients);
       };
@@ -1434,7 +1434,7 @@ export class Spaces {
     return this.foregroundMaintenance(address, async () => {
       const root = await this.db.one(
         this.tables.__e2ee_spaces.where({ id: spaceRootId(address) }),
-        { tier: "global" },
+        { tier: "remote" },
       );
       if (!root) throw new Error("E2EE space not found");
       await this.changeRecipient(address, root, recipientId, "remove");
@@ -1445,11 +1445,7 @@ export class Spaces {
         } catch (error) {
           // The removal is already accepted. Another reader may win follow-up
           // maintenance; revalidate its result without publishing removal again.
-          const conflict =
-            (error instanceof PersistedWriteRejectedError &&
-              (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
-            (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
-          if (!conflict || attempt >= 2) throw error;
+          if (!isTransactionConflict(error) || attempt >= 2) throw error;
         }
       }
     });
@@ -1554,14 +1550,14 @@ export class Spaces {
     this.assertCurrentReconciliation(reconciliation);
     const [grants, successors] = await Promise.all([
       this.db.all(this.tables.__e2ee_space_grants.where({ spaceId: observed.id }), {
-        tier: "global",
+        tier: "remote",
       }),
       this.db.all(this.tables.__e2ee_space_successors.where({ spaceId: observed.id }), {
-        tier: "global",
+        tier: "remote",
       }),
       includeDeliveries
         ? this.db.all(this.tables.__e2ee_space_deliveries.where({ spaceId: observed.id }), {
-            tier: "global",
+            tier: "remote",
           })
         : undefined,
     ]);
@@ -2273,7 +2269,7 @@ export class Spaces {
     const rootQuery = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
     const observed = offline
       ? (await observeE2eeHistory(this.db, (reader) => reader.allSettledForE2ee(rootQuery))).rows[0]
-      : await this.db.one(rootQuery, { tier: "global" });
+      : await this.db.one(rootQuery, { tier: "remote" });
     this.assertCurrentReconciliation(reconciliation);
     if (!observed) return { state: "unavailable", reason: "space-not-found" };
     if (!offline) await this.warm(observed, undefined, reconciliation);

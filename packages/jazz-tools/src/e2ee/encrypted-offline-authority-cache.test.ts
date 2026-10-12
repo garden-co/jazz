@@ -62,8 +62,8 @@ it("keeps independent offline readers revoked after ordinary-query and device-li
     await second.e2ee.devices.revoke(firstDevice!.id).wait();
     // Observe through ordinary queries, not devices.list(), so the E2EE reader
     // must notice accepted history even when another caller fetched it.
-    const privateHistory = await first.all(app.__e2ee_account_successors, { tier: "global" });
-    const publicHistory = await first.all(app.__e2ee_public_account_successors, { tier: "global" });
+    const privateHistory = await first.all(app.__e2ee_account_successors, { tier: "remote" });
+    const publicHistory = await first.all(app.__e2ee_public_account_successors, { tier: "remote" });
     expect(privateHistory.length).toBeGreaterThan(0);
     expect(publicHistory.length).toBeGreaterThan(0);
     await first.disconnect();
@@ -71,8 +71,10 @@ it("keeps independent offline readers revoked after ordinary-query and device-li
     for (const row of privateHistory) deletion.delete(app.__e2ee_account_successors, row.id);
     for (const row of publicHistory) deletion.delete(app.__e2ee_public_account_successors, row.id);
     await deletion.commit().wait({ tier: "local" });
-    expect(await first.all(app.__e2ee_account_successors, { tier: "local" })).toEqual([]);
-    expect(await first.all(app.__e2ee_public_account_successors, { tier: "local" })).toEqual([]);
+    expect(await first.all(app.__e2ee_account_successors, { tier: "local-first" })).toEqual([]);
+    expect(await first.all(app.__e2ee_public_account_successors, { tier: "local-first" })).toEqual(
+      [],
+    );
     const state = await first.e2ee.explain(target).catch(() => ({ state: "unavailable" }));
     expect(["refused", "unavailable"]).toContain(state.state);
 
@@ -198,18 +200,18 @@ it.each(["group", "space grant"] as const)(
       await tx.commit().wait({ tier: "global" });
       await owner.e2ee.explain({ scope: groupApp.projects, identifier: project.id });
       const space = await owner.one(groupApp.__e2ee_spaces.where({ identifier: project.id }), {
-        tier: "global",
+        tier: "remote",
       });
       expect(space).not.toBeNull();
       const query = groupApp.notes.where({ id: note.id });
       const caches = [];
       for (const client of [readClient, writeClient]) {
         // Each branch warms its own cache before the same accepted removal.
-        expect(await client.one(query, { tier: "global" })).toEqual(note);
+        expect(await client.one(query, { tier: "remote" })).toEqual(note);
         const before =
           removal === "group"
-            ? await client.all(groupApp.__e2ee_group_membership, { tier: "global" })
-            : await client.all(groupApp.__e2ee_space_grants, { tier: "global" });
+            ? await client.all(groupApp.__e2ee_group_membership, { tier: "remote" })
+            : await client.all(groupApp.__e2ee_space_grants, { tier: "remote" });
         caches.push({ client, before });
       }
 
@@ -221,8 +223,8 @@ it.each(["group", "space grant"] as const)(
         // ordinary sibling query, without explicitly refreshing the space.
         const after =
           removal === "group"
-            ? await client.all(groupApp.__e2ee_group_membership, { tier: "global" })
-            : await client.all(groupApp.__e2ee_space_grants, { tier: "global" });
+            ? await client.all(groupApp.__e2ee_group_membership, { tier: "remote" })
+            : await client.all(groupApp.__e2ee_space_grants, { tier: "remote" });
         expect(after.length).toBeGreaterThan(before.length);
         expect(after).toEqual(
           expect.arrayContaining([
@@ -238,7 +240,7 @@ it.each(["group", "space grant"] as const)(
       // Launch both operations only after both runtimes are disconnected. The
       // writer never observes a read failure through its own cache or store.
       await Promise.all([
-        expect(readClient.one(query, { tier: "local" })).rejects.toMatchObject({
+        expect(readClient.one(query, { tier: "local-first" })).rejects.toMatchObject({
           name: "E2eeDataError",
           code: expect.stringMatching(/^(key-unavailable|key-not-shared)$/),
         }),

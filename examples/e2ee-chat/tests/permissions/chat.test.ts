@@ -106,7 +106,7 @@ it("retries enrollment and keeps immutable administration isolated", async () =>
     expect(
       await owner.all(
         app.chatMembers.where({ chatId: chat.id, accountId: configs[1]!.account.id }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([
       {
@@ -123,7 +123,7 @@ it("retries enrollment and keeps immutable administration isolated", async () =>
     expect(
       await owner.all(
         app.chatMembers.where({ chatId: chat.id, accountId: configs[1]!.account.id }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([
       {
@@ -143,7 +143,7 @@ it("retries enrollment and keeps immutable administration isolated", async () =>
       })
       .wait({ tier: "global" });
     expect(
-      await owner.all(app.messages.where({ chatId: chat.id }), { tier: "global" }),
+      await owner.all(app.messages.where({ chatId: chat.id }), { tier: "remote" }),
     ).toContainEqual(expect.objectContaining({ text: "A recipient can send" }));
     const outsider = await createDb(configs[2]!);
     clients.push(outsider);
@@ -165,17 +165,17 @@ it("retries enrollment and keeps immutable administration isolated", async () =>
       accountId: configs[2]!.account.id,
     });
     await expect(forged.commit().wait({ tier: "global" })).rejects.toThrow();
-    expect(await outsider.all(app.chats.where({ id: forgedChat.id }), { tier: "global" })).toEqual(
+    expect(await outsider.all(app.chats.where({ id: forgedChat.id }), { tier: "remote" })).toEqual(
       [],
     );
     expect(
-      await owner.all(app.chatOwners.where({ id: forgedBindingId }), { tier: "global" }),
+      await owner.all(app.chatOwners.where({ id: forgedBindingId }), { tier: "remote" }),
     ).toEqual([]);
     expect(
-      await outsider.all(app.chatMembers.where({ id: forgedMembershipId }), { tier: "global" }),
+      await outsider.all(app.chatMembers.where({ id: forgedMembershipId }), { tier: "remote" }),
     ).toEqual([]);
     expect(
-      await owner.all(app.__e2ee_spaces.where({ identifier: forgedChat.id }), { tier: "global" }),
+      await owner.all(app.__e2ee_spaces.where({ identifier: forgedChat.id }), { tier: "remote" }),
     ).toEqual([]);
     await expect(
       recipient.e2ee.spaces.grant(app.chats, chat.id, configs[2]!.account.id).wait(),
@@ -184,7 +184,7 @@ it("retries enrollment and keeps immutable administration isolated", async () =>
       recipient.e2ee.spaces.revoke(app.chats, chat.id, configs[0]!.account.id).wait(),
     ).rejects.toThrow();
     const root = await owner.one(app.__e2ee_spaces.where({ identifier: chat.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(root).not.toBeNull();
     await expect(
@@ -210,7 +210,7 @@ it("retries enrollment and keeps immutable administration isolated", async () =>
         .wait({ tier: "global" }),
     ).rejects.toThrow();
     expect(
-      await owner.all(app.__e2ee_spaces.where({ identifier: chat.id }), { tier: "global" }),
+      await owner.all(app.__e2ee_spaces.where({ identifier: chat.id }), { tier: "remote" }),
     ).toEqual([{ id: canonicalRootId, ...rootValues }]);
     // Exercise the ordinary successor write policy directly: revoke() above can
     // fail at its earlier grant-removal step before it attempts a successor.
@@ -240,10 +240,10 @@ it("retries enrollment and keeps immutable administration isolated", async () =>
     await expect(
       outsider.insert(app.chats, { ownerId: configs[0]!.account.id }).wait({ tier: "global" }),
     ).rejects.toThrow();
-    expect(await owner.all(app.__e2ee_space_successors, { tier: "global" })).toEqual([]);
+    expect(await owner.all(app.__e2ee_space_successors, { tier: "remote" })).toEqual([]);
     expect(
       await owner.all(app.__e2ee_space_grants.where({ recipientId: configs[2]!.account.id }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([]);
   });
@@ -265,10 +265,10 @@ it("keeps image ciphertext separate from ordinary membership and decryption auth
     });
     await image.wait({ tier: "global" });
     // The accepted image exists before these pre-membership isolation checks.
-    expect(await outsider.all(app.messages.where({ chatId: chat.id }), { tier: "global" })).toEqual(
+    expect(await outsider.all(app.messages.where({ chatId: chat.id }), { tier: "remote" })).toEqual(
       [],
     );
-    expect(await outsider.all(app.chats.where({ id: chat.id }), { tier: "global" })).toEqual([]);
+    expect(await outsider.all(app.chats.where({ id: chat.id }), { tier: "remote" })).toEqual([]);
     // Grant only ordinary row visibility to the observer, not an encryption key.
     await owner
       .upsert(app.chatMembers, membershipId(chat.id, configs[2]!.account.id), {
@@ -285,7 +285,7 @@ it("keeps image ciphertext separate from ordinary membership and decryption auth
     });
     clients.push(observer);
     const stored = await observer.one(physical.messages.where({ id: image.value.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(stored).not.toBeNull();
     expect(stored!.payload).not.toEqual(imageBytes);
@@ -293,7 +293,7 @@ it("keeps image ciphertext separate from ordinary membership and decryption auth
     expect(new TextDecoder().decode(stored!.filename!)).not.toContain("secret-image.png");
     expect(new TextDecoder().decode(stored!.mimeType!)).not.toContain("image/png");
     await expect(
-      outsider.one(app.messages.where({ id: image.value.id }), { tier: "global" }),
+      outsider.one(app.messages.where({ id: image.value.id }), { tier: "remote" }),
     ).rejects.toThrow();
   });
 }, 60_000);

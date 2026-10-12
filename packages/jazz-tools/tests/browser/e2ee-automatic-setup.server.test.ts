@@ -55,7 +55,7 @@ it("automatically configures an encrypted browser app for atomic creation and re
     const project = tx.insert(app.projects, { title: "Browser project" });
     const note = tx.insert(app.notes, { projectId: project.id, body: "Encrypted in the browser" });
     await tx.commit().wait({ tier: "global" });
-    expect(await db.all(app.notes, { tier: "global" })).toEqual([note]);
+    expect(await db.all(app.notes, { tier: "remote" })).toEqual([note]);
     await expect(db.delete(app.notes, note.id).wait({ tier: "global" })).rejects.toThrow(
       /permission/i,
     );

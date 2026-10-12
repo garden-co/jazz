@@ -45,10 +45,10 @@ it("drains preparation, seals without publication, then publishes the exact rese
   });
   const sealing = owner.sealInitializationTransaction(id);
   await entered.promise;
-  expect(await owner.queryInternal(query, { tier: "local" })).toEqual([]);
+  expect(await owner.queryInternal(query, { tier: "local-first" })).toEqual([]);
   release.resolve();
   const seal = await sealing;
-  expect(await owner.queryInternal(query, { tier: "local" })).toEqual([]);
+  expect(await owner.queryInternal(query, { tier: "local-first" })).toEqual([]);
   expect(await owner.initializationTransactionStatus([seal.reservedTxId])).toEqual([
     { kind: "not-observed", reservedTxId: seal.reservedTxId },
   ]);
@@ -63,7 +63,7 @@ it("drains preparation, seals without publication, then publishes the exact rese
       durability: "local",
     },
   ]);
-  expect(await owner.queryInternal(query, { tier: "local" })).toEqual([
+  expect(await owner.queryInternal(query, { tier: "local-first" })).toEqual([
     expect.objectContaining({ id: rowId, values: [{ type: "Text", value: "prepared once" }] }),
   ]);
   await expect(owner.publishInitializationTransaction(seal)).rejects.toThrow(/consumed/);
@@ -90,7 +90,7 @@ it.each(["cancel", "rollback"])(
     if (action === "cancel") await owner.cancelInitializationTransaction(seal);
     else await owner.rollbackTransaction(id);
     await expect(owner.publishInitializationTransaction(seal)).rejects.toThrow(/consumed/);
-    expect(await owner.queryInternal(query, { tier: "local" })).toEqual([]);
+    expect(await owner.queryInternal(query, { tier: "local-first" })).toEqual([]);
     const second = await owner.sealInitializationTransaction(owner.beginTransaction("exclusive"));
     expect(second.reservedTxId).not.toBe(seal.reservedTxId);
     await owner.cancelInitializationTransaction(second);
@@ -107,7 +107,7 @@ it("failed preparation cannot publish a partial initialization unit", async () =
   await expect(owner.sealInitializationTransaction(id)).rejects.toThrow(
     "durable preparation failed",
   );
-  expect(await owner.queryInternal(query, { tier: "local" })).toEqual([]);
+  expect(await owner.queryInternal(query, { tier: "local-first" })).toEqual([]);
 });
 
 it("refuses corrupt recovery status instead of treating it as missing or durable", () => {
