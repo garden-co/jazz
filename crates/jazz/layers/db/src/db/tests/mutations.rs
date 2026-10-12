@@ -254,7 +254,7 @@ fn session_branch_updates_require_read_visibility_before_staging() {
 
     let prepared = db.prepare_query(&db.table("todos")).expect("prepare query");
     let read_opts = ReadOpts {
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     }
     .branch_view(branch.clone(), None);
@@ -714,7 +714,7 @@ fn branch_view_upserts_reject_tombstones_and_preserve_other_insertability_cases(
         &db,
         &query,
         ReadOpts {
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         }
         .branch_view(head.clone(), Some(BranchViewBase::current(base.clone()))),

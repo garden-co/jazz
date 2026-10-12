@@ -1,0 +1,28 @@
+body {
+  margin: 3rem auto;
+  padding: 0 1rem;
+  max-width: 48rem;
+  font-family: system-ui, sans-serif;
+  color: #222;
+}
+h1 {
+  font-size: 1.5rem;
+}
+p {
+  color: #666;
+}
+button {
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+}
+.cm-editor {
+  border: 1px solid #ccc;
+  min-height: 24rem;
+}
+.cm-content {
+  font-size: 1rem;
+  padding: 1rem;
+}
+[role="alert"] {
+  color: #b22;
+}

@@ -97,16 +97,16 @@ it("preserves explicit administration rules and encrypted mutations when composi
       done: false,
       bytes: new Uint8Array([1, 2, 255]),
     });
-    expect(await tx.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(note);
+    expect(await tx.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(note);
     await tx.commit().wait({ tier: "global" });
-    expect(await db.all(app.notes, { tier: "global" })).toEqual([note]);
+    expect(await db.all(app.notes, { tier: "remote" })).toEqual([note]);
     await db.update(app.notes, note.id, { body: "Updated content" }).wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual({
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual({
       ...note,
       body: "Updated content",
     });
     await db.upsert(app.notes, note.id, { body: "Upserted content" }).wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual({
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual({
       ...note,
       body: "Upserted content",
     });
@@ -122,12 +122,12 @@ it("preserves explicit administration rules and encrypted mutations when composi
     const created = db.upsert(app.notes, newId, data);
     expect(created).not.toBeInstanceOf(Promise);
     await created.wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: newId }), { tier: "global" })).toEqual({
+    expect(await db.one(app.notes.where({ id: newId }), { tier: "remote" })).toEqual({
       id: newId,
       ...data,
     });
     await db.upsert(app.notes, newId, { body: "Changed" }).wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: newId }), { tier: "global" })).toEqual({
+    expect(await db.one(app.notes.where({ id: newId }), { tier: "remote" })).toEqual({
       id: newId,
       ...data,
       body: "Changed",
@@ -135,14 +135,14 @@ it("preserves explicit administration rules and encrypted mutations when composi
     await expect(
       db.upsert(app.notes, newId, { projectId: crypto.randomUUID() }).wait({ tier: "global" }),
     ).rejects.toThrow("The encryption space of a row is immutable");
-    expect(await db.one(app.notes.where({ id: newId }), { tier: "global" })).toEqual({
+    expect(await db.one(app.notes.where({ id: newId }), { tier: "remote" })).toEqual({
       id: newId,
       ...data,
       body: "Changed",
     });
 
     await db.delete(app.notes, note.id).wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toBeNull();
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toBeNull();
     const restoredData = {
       projectId: project.id,
       body: "Restored content",
@@ -154,12 +154,12 @@ it("preserves explicit administration rules and encrypted mutations when composi
         .restore(app.notes, note.id, { ...restoredData, projectId: crypto.randomUUID() })
         .wait({ tier: "global" }),
     ).rejects.toThrow("The encryption space of a row is immutable");
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toBeNull();
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toBeNull();
     const restored = db.restore(app.notes, note.id, restoredData);
     expect(restored).not.toBeInstanceOf(Promise);
     expect(restored.value).toEqual({ ...note, body: "Restored content" });
     await restored.wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual({
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual({
       ...note,
       body: "Restored content",
     });

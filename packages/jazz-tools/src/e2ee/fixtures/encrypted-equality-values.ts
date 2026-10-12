@@ -198,12 +198,12 @@ export async function runEqualityValueScenario(
     for (const { body, label } of documents) {
       const ordinary = await db.all(
         app.publicDocuments.where({ projectId: project.id, body: { eq: body } }),
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(ordinary.map((row) => row.label)).toEqual([label]);
       const encrypted = await db.all(
         app.privateDocuments.where({ projectId: project.id, body: { eq: body } }),
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(encrypted.map((row) => row.label)).toEqual([label]);
     }
@@ -213,7 +213,7 @@ export async function runEqualityValueScenario(
     });
     const reader = db.beginTransaction();
     try {
-      expect((await reader.all(query, { tier: "local" })).map((row) => row.label)).toEqual([
+      expect((await reader.all(query, { tier: "local-first" })).map((row) => row.label)).toEqual([
         "spaced",
       ]);
     } finally {
@@ -229,7 +229,7 @@ export async function runEqualityValueScenario(
           failure = error;
         },
       },
-      { tier: "global" },
+      { tier: "remote" },
     );
     try {
       await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 }).toEqual(["spaced"]);
@@ -256,7 +256,7 @@ export async function runEqualityValueScenario(
     for (const value of [NaN, Infinity, -Infinity]) {
       await expect(async () =>
         reader.all(app.optionalMeasurements.where({ projectId: project.id, value }), {
-          tier: "global",
+          tier: "remote",
         }),
       ).rejects.toThrow("Non-finite numbers are not supported in encrypted query predicates");
     }
@@ -269,7 +269,7 @@ export async function runEqualityValueScenario(
     await Promise.all([omitted, explicit, empty].map((row) => row.wait({ tier: "global" })));
     const rows = await db.all(
       app.optionalNotes.where({ projectId: project.id, title: { eq: null } }),
-      { tier: "global" },
+      { tier: "remote" },
     );
     expect(rows.map((row) => row.id).sort()).toEqual([omitted.value.id, explicit.value.id].sort());
     expect(rows.every((row) => row.title === null)).toBe(true);
@@ -284,7 +284,7 @@ export async function runEqualityValueScenario(
       expect(
         await db.all(
           app.optionalNotes.where({ projectId: project.id, title: { eq: row.value.title } }),
-          { tier: "global" },
+          { tier: "remote" },
         ),
       ).toEqual([row.value]);
     }
@@ -302,7 +302,7 @@ export async function runEqualityValueScenario(
     expect(
       await db.all(
         app.observations.where({ projectId: project.id, numbers: [9007199254740993n] }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([row.value]);
     expect(
@@ -311,12 +311,12 @@ export async function runEqualityValueScenario(
           projectId: project.id,
           tagged: { match: { type: "count", where: { value: 9007199254740993n } } },
         }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([row.value]);
     expect(
       await db.all(app.observations.where({ projectId: project.id, time: instant }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([row.value]);
     expect(
@@ -325,7 +325,7 @@ export async function runEqualityValueScenario(
           projectId: project.id,
           time: new Date(instant.getTime() + 1),
         }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([]);
     return;
@@ -338,12 +338,12 @@ export async function runEqualityValueScenario(
     await counter.wait({ tier: "global" });
     expect(
       await db.all(app.counters.where({ projectId: project.id, value: 9007199254740993n }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([counter.value]);
     expect(
       await db.all(app.counters.where({ projectId: project.id, value: 9007199254740992n }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([]);
     return;
@@ -360,7 +360,7 @@ export async function runEqualityValueScenario(
           projectId: project.id,
           reading: { match: { type: "measured", where: { value: 0 } } },
         }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([reading.value]);
     expect(
@@ -369,7 +369,7 @@ export async function runEqualityValueScenario(
           projectId: project.id,
           reading: { match: { type: "measured", where: { value: 1 } } },
         }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).toEqual([]);
     await expect(
@@ -378,7 +378,7 @@ export async function runEqualityValueScenario(
           projectId: project.id,
           reading: { match: { type: "measured" } },
         }),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     ).rejects.toThrow("Unsupported encrypted query");
     let snapshot: unknown;
@@ -396,7 +396,7 @@ export async function runEqualityValueScenario(
           failure = error;
         },
       },
-      { tier: "global" },
+      { tier: "remote" },
     );
     try {
       await expect.poll(() => failure ?? snapshot, { timeout: 10_000 }).toEqual([reading.value]);
@@ -421,7 +421,7 @@ export async function runEqualityValueScenario(
           partialError = error;
         },
       },
-      { tier: "global" },
+      { tier: "remote" },
     );
     try {
       await expect
@@ -440,12 +440,12 @@ export async function runEqualityValueScenario(
       [-0, 2],
     ]) {
       expect(
-        await db.all(app.samples.where({ projectId: project.id, values }), { tier: "global" }),
+        await db.all(app.samples.where({ projectId: project.id, values }), { tier: "remote" }),
       ).toEqual([sample.value]);
     }
     expect(
       await db.all(app.samples.where({ projectId: project.id, values: [0, 3] }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([]);
     return;
@@ -456,7 +456,7 @@ export async function runEqualityValueScenario(
     for (const value of [0, -0]) {
       expect(
         await db.all(app.measurements.where({ projectId: project.id, value }), {
-          tier: "global",
+          tier: "remote",
         }),
       ).toEqual([measurement.value]);
     }

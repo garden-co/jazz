@@ -35,10 +35,10 @@ it.each(["source-failure", "denied"] as const)(
         failure === "source-failure" ? "fixture source failed" : undefined,
       );
       expect(pulls).toBe(1);
-      expect(await fixture.owner.all(uploadApp.projects, { tier: "global" })).toEqual([]);
-      expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "global" })).toEqual([]);
-      expect(await fixture.owner.all(uploadApp.__e2ee_spaces, { tier: "global" })).toEqual([]);
-      expect(await fixture.owner.all(uploadApp.__e2ee_space_grants, { tier: "global" })).toEqual(
+      expect(await fixture.owner.all(uploadApp.projects, { tier: "remote" })).toEqual([]);
+      expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "remote" })).toEqual([]);
+      expect(await fixture.owner.all(uploadApp.__e2ee_spaces, { tier: "remote" })).toEqual([]);
+      expect(await fixture.owner.all(uploadApp.__e2ee_space_grants, { tier: "remote" })).toEqual(
         [],
       );
       if (failure === "denied") {
@@ -56,12 +56,12 @@ it.each(["source-failure", "denied"] as const)(
           })
           .then((write) => write.wait({ tier: "global" }));
         await expect(pending).rejects.toThrow();
-        expect(await fixture.owner.all(uploadApp.projects, { tier: "global" })).toEqual([scope]);
-        expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "global" })).toEqual(
+        expect(await fixture.owner.all(uploadApp.projects, { tier: "remote" })).toEqual([scope]);
+        expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "remote" })).toEqual(
           [],
         );
-        expect(await fixture.owner.all(uploadApp.__e2ee_spaces, { tier: "global" })).toEqual([]);
-        expect(await fixture.owner.all(uploadApp.__e2ee_space_grants, { tier: "global" })).toEqual(
+        expect(await fixture.owner.all(uploadApp.__e2ee_spaces, { tier: "remote" })).toEqual([]);
+        expect(await fixture.owner.all(uploadApp.__e2ee_space_grants, { tier: "remote" })).toEqual(
           [],
         );
       }
@@ -113,7 +113,7 @@ it("rejects keyless writers and invalid plans before pulling any source", async 
       ),
     ).rejects.toThrow("root-view");
     expect(pulls).toBe(0);
-    expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "global" })).toEqual([]);
+    expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "remote" })).toEqual([]);
     // Keep the later private space cold: an earlier refused key lookup must
     // not mask whether every declaration is checked before consuming streams.
     const shared = await fixture.owner
@@ -143,7 +143,7 @@ it("rejects keyless writers and invalid plans before pulling any source", async 
       }),
     ).rejects.toThrow();
     expect(pulls).toBe(0);
-    expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "global" })).toEqual([]);
+    expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "remote" })).toEqual([]);
   } finally {
     await fixture.close();
   }
@@ -185,7 +185,7 @@ it("rejects invalid byte sources without awaiting cancellation or publishing sta
         }),
       ).rejects.toThrow();
       expect(cancelled).toBe(true);
-      expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "global" })).toEqual(
+      expect(await fixture.owner.all(uploadApp.files.select("id"), { tier: "remote" })).toEqual(
         published,
       );
       const replacement = await fixture.owner.insertStreaming(uploadApp.files, {
@@ -196,7 +196,7 @@ it("rejects invalid byte sources without awaiting cancellation or publishing sta
       await replacement.wait({ tier: "global" });
       expect(
         await fixture.owner.one(uploadApp.files.where({ id: replacement.value.id }), {
-          tier: "global",
+          tier: "remote",
         }),
       ).toEqual({
         id: replacement.value.id,
@@ -206,7 +206,7 @@ it("rejects invalid byte sources without awaiting cancellation or publishing sta
       });
       published.push({ id: replacement.value.id });
       expect(
-        (await fixture.owner.all(uploadApp.files.select("id"), { tier: "global" }))
+        (await fixture.owner.all(uploadApp.files.select("id"), { tier: "remote" }))
           .map((row) => row.id)
           .sort(),
       ).toEqual(published.map((row) => row.id).sort());

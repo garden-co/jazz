@@ -98,7 +98,6 @@ async fn scope_revocation_removes_global_results_without_redacting_local_copy() 
                     .iter()
                     .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
                     .collect::<Vec<_>>(),
-                None,
             )
             .await;
 

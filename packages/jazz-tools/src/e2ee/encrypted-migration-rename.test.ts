@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import type { Db } from "../runtime/db.js";
@@ -25,10 +26,10 @@ it("reads and searches existing ciphertext after renaming its column", async () 
   };
   const oldApp = s.defineApp(before);
   const newApp = s.defineApp(after);
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: before,
     to: after,
-    migrate: { notes: { body: s.renameFrom("title") } },
+    migrate: { notes: { body: m.renameFrom("title") } },
   });
   const permissions = (app: typeof oldApp | typeof newApp) =>
     definePermissions(app, ({ policy, session }) => {
@@ -66,7 +67,7 @@ it("reads and searches existing ciphertext after renaming its column", async () 
     const note = tx.insert(oldApp.notes, { projectId: project.id, title: "Private title" });
     await tx.commit().wait({ tier: "global" });
     const root = await db.one(oldApp.__e2ee_spaces.where({ identifier: project.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(root).not.toBeNull();
     await db.shutdown();
@@ -74,35 +75,37 @@ it("reads and searches existing ciphertext after renaming its column", async () 
     await deploy({ ...target, schema: newApp, permissions: permissions(newApp), migration });
     db = await createDb({ ...account, e2ee: { app: newApp, store } });
     expect(
-      await db.one(newApp.__e2ee_spaces.where({ identifier: project.id }), { tier: "global" }),
+      await db.one(newApp.__e2ee_spaces.where({ identifier: project.id }), { tier: "remote" }),
     ).toEqual(root);
-    expect(await db.all(newApp.notes.where({ projectId: project.id }), { tier: "global" })).toEqual(
+    expect(await db.all(newApp.notes.where({ projectId: project.id }), { tier: "remote" })).toEqual(
       [{ id: note.id, projectId: project.id, body: "Private title" }],
     );
     expect(
       await db.all(newApp.notes.where({ projectId: project.id, body: "Private title" }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([{ id: note.id, projectId: project.id, body: "Private title" }]);
     const next = await db
       .insert(newApp.notes, { projectId: project.id, body: "New private body" })
       .wait({ tier: "global" });
-    expect(await db.one(newApp.notes.where({ id: next.id }), { tier: "global" })).toEqual(next);
+    expect(await db.one(newApp.notes.where({ id: next.id }), { tier: "remote" })).toEqual(next);
     expect(
       await db.all(newApp.notes.where({ projectId: project.id, body: "Private title" }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([{ id: note.id, projectId: project.id, body: "Private title" }]);
     expect(
-      await db.one(newApp.__e2ee_spaces.where({ identifier: project.id }), { tier: "global" }),
+      await db.one(newApp.__e2ee_spaces.where({ identifier: project.id }), { tier: "remote" }),
     ).toEqual(root);
     await db.disconnect();
-    expect(await db.one(newApp.notes.where({ id: note.id }), { tier: "local" })).toEqual({
+    expect(await db.one(newApp.notes.where({ id: note.id }), { tier: "local-first" })).toEqual({
       id: note.id,
       projectId: project.id,
       body: "Private title",
     });
-    expect(await db.one(newApp.notes.where({ id: next.id }), { tier: "local" })).toEqual(next);
+    expect(await db.one(newApp.notes.where({ id: next.id }), { tier: "local-first" })).toEqual(
+      next,
+    );
   } finally {
     await db?.shutdown();
     await server.stop();
@@ -125,12 +128,12 @@ it.each(["partial", "full"] as const)(
     const newApp = s.defineApp(after);
     const migration =
       witness === "partial"
-        ? s.defineMigration({
+        ? m.defineMigration({
             from: { projects },
             to: { projects, messages: encrypted },
             createTables: { messages: true },
           })
-        : s.defineMigration({
+        : m.defineMigration({
             from: before,
             to: after,
             createTables: { messages: true },
@@ -183,18 +186,18 @@ it.each(["partial", "full"] as const)(
       await deploy({ ...target, schema: newApp, permissions: permissions(newApp), migration });
       db = await createDb({ ...account, e2ee: { app: newApp, store } });
       expect(
-        await db.all(newApp.notes.where({ projectId: project.id }), { tier: "global" }),
+        await db.all(newApp.notes.where({ projectId: project.id }), { tier: "remote" }),
       ).toEqual([{ id: note.id, projectId: project.id, title: "Historical secret" }]);
       expect(
         await db.all(newApp.notes.where({ projectId: project.id, title: "Historical secret" }), {
-          tier: "global",
+          tier: "remote",
         }),
       ).toEqual([{ id: note.id, projectId: project.id, title: "Historical secret" }]);
       const next = db.beginExclusiveTransaction();
       const message = next.insert(newApp.messages, { projectId: project.id, title: "New secret" });
       await next.commit().wait({ tier: "global" });
       expect(
-        await db.all(newApp.messages.where({ projectId: project.id }), { tier: "global" }),
+        await db.all(newApp.messages.where({ projectId: project.id }), { tier: "remote" }),
       ).toEqual([{ id: message.id, projectId: project.id, title: "New secret" }]);
     } finally {
       await db?.shutdown();
@@ -211,7 +214,7 @@ it("rejects an explicit added table already present outside the partial source w
     .encrypted({ space: "projectId", columns: ["title"] });
   const oldApp = s.defineApp({ projects, notes });
   const newApp = s.defineApp({ projects, notes, messages: notes });
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: { projects },
     to: { projects, notes, messages: notes },
     createTables: { notes: true, messages: true },
@@ -234,7 +237,7 @@ it("rejects an explicit added table already present outside the partial source w
       permissions: definePermissions(oldApp, () => {}),
     });
     expect(unchanged.schema.status).toBe("already-stored");
-    expect(unchanged.migration).toBeUndefined();
+    expect(unchanged.published.migrations).toHaveLength(0);
   } finally {
     await server.stop();
   }
@@ -262,12 +265,12 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
   };
   const oldApp = s.defineApp(before);
   const newApp = s.defineApp(after);
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: before,
     to: after,
     renameTables: {
-      workspaces: s.renameTableFrom("projects"),
-      records: s.renameTableFrom("notes"),
+      workspaces: m.renameTableFrom("projects"),
+      records: m.renameTableFrom("notes"),
     },
   });
   const oldPermissions = definePermissions(oldApp, ({ policy, session }) => {
@@ -322,15 +325,15 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
     db = undefined;
     await deploy({ ...target, schema: newApp, permissions: newPermissions, migration });
     db = await createDb({ ...account, e2ee: { app: newApp, store } });
-    expect(await db.all(newApp.workspaces, { tier: "global" })).toEqual([
+    expect(await db.all(newApp.workspaces, { tier: "remote" })).toEqual([
       { id: project.id, title: "Project" },
     ]);
     expect(
-      await db.all(newApp.records.where({ projectId: project.id }), { tier: "global" }),
+      await db.all(newApp.records.where({ projectId: project.id }), { tier: "remote" }),
     ).toEqual([{ id: note.id, projectId: project.id, title: "Historical secret" }]);
     expect(
       await db.all(newApp.records.where({ projectId: project.id, title: "Historical secret" }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual([{ id: note.id, projectId: project.id, title: "Historical secret" }]);
   } finally {
@@ -343,7 +346,7 @@ it("rejects retargeting encrypted rows to an unrelated scope alongside table ren
   const scope = s.table({ title: s.string() }, {});
   expect(() =>
     // @ts-expect-error Deliberately invalid scope retarget must also reject at runtime.
-    s.defineMigration({
+    m.defineMigration({
       from: {
         projects: scope,
         teams: scope,
@@ -365,8 +368,8 @@ it("rejects retargeting encrypted rows to an unrelated scope alongside table ren
           .encrypted({ space: "projectId", columns: ["title"] }),
       },
       renameTables: {
-        workspaces: s.renameTableFrom("projects"),
-        records: s.renameTableFrom("notes"),
+        workspaces: m.renameTableFrom("projects"),
+        records: m.renameTableFrom("notes"),
       },
     }),
   ).toThrow(/encryption.*authorised client/i);
@@ -390,14 +393,14 @@ it("requires a user migration when adding the first encrypted table", async () =
     await deploy({ ...target, schema: oldApp, permissions: definePermissions(oldApp, () => {}) });
     await expect(
       deploy({ ...target, schema: newApp, permissions: definePermissions(newApp, () => {}) }),
-    ).rejects.toThrow(/requires a migration/i);
+    ).rejects.toMatchObject({ code: "unreachable_deployment_target" });
     const unchanged = await deploy({
       ...target,
       schema: oldApp,
       permissions: definePermissions(oldApp, () => {}),
     });
     expect(unchanged.schema.status).toBe("already-stored");
-    expect(unchanged.migration).toBeUndefined();
+    expect(unchanged.published.migrations).toHaveLength(0);
   } finally {
     await server.stop();
   }

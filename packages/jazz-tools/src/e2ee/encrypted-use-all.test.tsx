@@ -118,7 +118,7 @@ it.each(["ready", "error", "update", "history"])(
             : app.notes.where({ id: note.id });
       const states: ReturnType<typeof useAll<typeof note>>[] = [];
       function Observer() {
-        const state = useAll(query, { tier: "global" });
+        const state = useAll(query, { tier: "remote" });
         states.push(state);
         return (
           <div>
@@ -172,7 +172,7 @@ it.each(["ready", "error", "update", "history"])(
         ),
       ).toBe(true);
       if (scenario === "history") {
-        const root = await client.db.one(app.__e2ee_spaces, { tier: "global" });
+        const root = await client.db.one(app.__e2ee_spaces, { tier: "remote" });
         expect(root).not.toBeNull();
         historyGate = new Promise<void>((resolve) => {
           releaseHistory = resolve;

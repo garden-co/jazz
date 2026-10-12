@@ -58,7 +58,7 @@ it("streams a plaintext-only update without loading encryption keys", async () =
     })();
     const update = await db.updateStreaming(app.files, file.value.id, { notes: source });
     await update.wait({ tier: "global" });
-    expect(await db.one(physical.files.where({ id: file.value.id }), { tier: "global" })).toEqual({
+    expect(await db.one(physical.files.where({ id: file.value.id }), { tier: "remote" })).toEqual({
       ...file.value,
       notes: "After",
     });

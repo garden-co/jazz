@@ -93,7 +93,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
         await recipient.e2ee.devices.list();
       }
       const project = await db.insert(app.projects, { title: "Seed" }).wait({ tier: "global" });
-      const priorRoots = await db.all(app.__e2ee_spaces, { tier: "global" });
+      const priorRoots = await db.all(app.__e2ee_spaces, { tier: "remote" });
       if (!excludeCreator) {
         failWrap = true;
         await expect(
@@ -115,7 +115,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
         async (key, root) => ({ key: key.slice(), epoch: root.epochId }),
       );
       try {
-        expect(await db.all(app.__e2ee_spaces, { tier: "global" })).toEqual(priorRoots);
+        expect(await db.all(app.__e2ee_spaces, { tier: "remote" })).toEqual(priorRoots);
         const owner = db;
         const write = await exclusiveE2eeTransaction(db, async (tx) => {
           await prepared.plan.validate(tx);
@@ -134,7 +134,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
         });
         await write.wait({ tier: "global" });
         expect(
-          (await db.one(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "global" }))
+          (await db.one(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "remote" }))
             ?.epochId,
         ).toBe(prepared.value.epoch);
         await expect(
@@ -152,11 +152,11 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
         ).rejects.toThrow();
         if (recipientId) {
           const root = await db.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-            tier: "global",
+            tier: "remote",
           });
           expect(
             (
-              await db.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), { tier: "global" })
+              await db.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), { tier: "remote" })
             ).map((grant) => grant.recipientId),
           ).toEqual([recipientId]);
           let used = false;
@@ -187,7 +187,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
               signer.verify = verify;
             }
             const root = await db.one(app.__e2ee_spaces.where({ identifier: project.id }), {
-              tier: "global",
+              tier: "remote",
             });
             await db.e2ee.spaces.revoke(app.projects, project.id, root!.accountId).wait();
             await expect(

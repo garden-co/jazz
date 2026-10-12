@@ -256,10 +256,10 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       title: "Native note",
     });
     await expect(inserted.txId).resolves.toBe("04".repeat(16));
-    await expect(client.db.all(app.notes, { tier: "global" })).resolves.toMatchObject([
+    await expect(client.db.all(app.notes, { tier: "remote" })).resolves.toMatchObject([
       { title: "Native note" },
     ]);
-    expect(readOptions).toContainEqual({ tier: "global" });
+    expect(readOptions).toContainEqual(expect.objectContaining({ tier: "remote" }));
     expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 17, 21, 22, 24, 31]));
     // #3273: reads and subscriptions no longer tick (pump) the native relay
     // before their command; unsubscribe still drives its cleanup turn.

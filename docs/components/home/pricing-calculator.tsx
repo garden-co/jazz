@@ -149,7 +149,7 @@ export function PricingCalculator() {
 
   return (
     <div className="">
-      <div className="space-y-12">
+      <div className="space-y-8">
         <div className="grid gap-6 sm:grid-cols-2">
           <TickSlider
             label="Monthly active users"
@@ -195,6 +195,30 @@ export function PricingCalculator() {
             </div>
           </label>
         </div>
+        {/* The result sits right under the sliders, so on phones both stay in
+            view together. */}
+        <div className="grid grid-cols-2 items-start gap-6 border-t pt-8 sm:flex sm:gap-12">
+          <div>
+            <p className="text-sm text-fd-muted-foreground">Cost per user / mo</p>
+            <p className="font-display mt-2 text-3xl font-black tracking-[-0.03em]">
+              {formatCurrency(monthlyCostPerUser)}
+            </p>
+            <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
+              Based on {formatCount(mau)} monthly active users
+            </p>
+          </div>
+          <div>
+            <p className="text-sm text-fd-muted-foreground">Estimated monthly bill</p>
+            <p className="font-display mt-2 text-3xl font-black tracking-[-0.03em]">
+              {formatCurrency(estimate.totalMonthlyCost)}
+            </p>
+            {estimate.isWithinFreeTier ? (
+              <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
+                Includes the free monthly allowance.
+              </p>
+            ) : null}
+          </div>
+        </div>
         <div className="grid gap-4 text-sm leading-relaxed text-fd-muted-foreground sm:grid-cols-2">
           <p>
             {selectedFrequency.label} estimates about {selectedFrequency.visitsPerUserPerMonth}{" "}
@@ -206,34 +230,10 @@ export function PricingCalculator() {
             shutdown grace period.
           </p>
         </div>
-        <div className="space-y-8 border-t pt-8">
-          <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,0.7fr)] md:items-start">
-            <div>
-              <p className="text-sm text-fd-muted-foreground">Cost per user / mo</p>
-              <p className="font-display mt-2 text-3xl font-black tracking-[-0.05em]">
-                {formatCurrency(monthlyCostPerUser)}
-              </p>
-              <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-                Based on {formatCount(mau)} monthly active users
-              </p>
-            </div>
-            <div className="space-y-2">
-              <p className="text-sm text-fd-muted-foreground">Estimated monthly bill</p>
-              <p className="font-display text-5xl font-black tracking-[-0.06em]">
-                {formatCurrency(estimate.totalMonthlyCost)}
-              </p>
-              {estimate.isWithinFreeTier ? (
-                <p className="mt-2 text-sm leading-relaxed text-fd-muted-foreground">
-                  Includes the free monthly allowance.
-                </p>
-              ) : null}
-            </div>
-          </div>
-          <p className="max-w-[24rem] text-sm leading-relaxed text-fd-muted-foreground">
-            Rough self-serve estimate based on the draft public meters on this page. Enterprise
-            contracts can still diverge.
-          </p>
-        </div>
+        <p className="max-w-[24rem] text-sm leading-relaxed text-fd-muted-foreground">
+          Rough self-serve estimate based on the draft public meters on this page. Enterprise
+          contracts can still diverge.
+        </p>
       </div>
     </div>
   );

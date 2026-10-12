@@ -99,7 +99,7 @@ it("uploads and replaces encrypted files through the public package in Chromium"
       return { project: project.id, file: file.id };
     });
     const ids = await result.wait({ tier: "global" });
-    expect(await writer!.one(app.files.where({ id: ids.file }), { tier: "global" })).toEqual({
+    expect(await writer!.one(app.files.where({ id: ids.file }), { tier: "remote" })).toEqual({
       id: ids.file,
       projectId: ids.project,
       name: "browser.png",
@@ -108,7 +108,7 @@ it("uploads and replaces encrypted files through the public package in Chromium"
     const readerAccount = accounts[1]!;
     await reader!.e2ee.devices.list();
     await writer!.e2ee.spaces.grant(app.projects, ids.project, readerAccount.id).wait();
-    expect(await reader!.one(app.files.where({ id: ids.file }), { tier: "global" })).toEqual({
+    expect(await reader!.one(app.files.where({ id: ids.file }), { tier: "remote" })).toEqual({
       id: ids.file,
       projectId: ids.project,
       name: "browser.png",
@@ -125,7 +125,7 @@ it("uploads and replaces encrypted files through the public package in Chromium"
       e2ee: { app, store: stores[1]! },
     });
     clients.push(reader);
-    expect(await reader.one(app.files.where({ id: ids.file }), { tier: "global" })).toEqual({
+    expect(await reader.one(app.files.where({ id: ids.file }), { tier: "remote" })).toEqual({
       id: ids.file,
       projectId: ids.project,
       name: "browser.png",
@@ -138,7 +138,7 @@ it("uploads and replaces encrypted files through the public package in Chromium"
       })(),
     });
     await replacement.wait({ tier: "global" });
-    expect(await reader!.one(app.files.where({ id: ids.file }), { tier: "global" })).toEqual({
+    expect(await reader!.one(app.files.where({ id: ids.file }), { tier: "remote" })).toEqual({
       id: ids.file,
       projectId: ids.project,
       name: "empty",

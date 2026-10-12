@@ -28,7 +28,7 @@ it("keeps both existing-space keys borrowed until their staged files reach the g
     });
     const ids = await result.wait({ tier: "global" });
     expect(
-      await recipient.db.one(uploadApp.files.where({ id: ids.first }), { tier: "global" }),
+      await recipient.db.one(uploadApp.files.where({ id: ids.first }), { tier: "remote" }),
     ).toEqual({
       id: ids.first,
       projectId: first.id,
@@ -36,7 +36,7 @@ it("keeps both existing-space keys borrowed until their staged files reach the g
       payload: firstBytes,
     });
     expect(
-      await recipient.db.one(uploadApp.files.where({ id: ids.second }), { tier: "global" }),
+      await recipient.db.one(uploadApp.files.where({ id: ids.second }), { tier: "remote" }),
     ).toEqual({
       id: ids.second,
       projectId: second.id,

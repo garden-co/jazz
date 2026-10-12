@@ -39,7 +39,7 @@ describe("native core error codes", () => {
   it("NAPI throws a core error as an Error with its message and stable code", async () => {
     const db = NapiDb.openMemoryAsBackend(encodeSchema(app.wasmSchema), config("napi-error-code"));
     try {
-      const error = await missingTableReadError((query) => db.all(query, { tier: "local" }));
+      const error = await missingTableReadError((query) => db.all(query, { tier: "local-first" }));
 
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toBe("Query: unknown table missing");
@@ -71,7 +71,7 @@ describe("native core error codes", () => {
       const db = wasm.WasmDb.openMemory(encodeSchema(app.wasmSchema), config("wasm-error-code"));
       try {
         const error = await missingTableReadError((query) =>
-          db.all(query, { tier: "local" }, undefined, undefined, undefined),
+          db.all(query, { tier: "local-first" }, undefined, undefined, undefined),
         );
 
         expect(error).toBeInstanceOf(Error);

@@ -164,17 +164,17 @@ fn renamed_snapshot_serialized_read_preserves_authored_witness_and_conflicts() {
         original,
         Some(Value::String("existing".to_owned())),
     )];
-    assert_eq!(run(None, DurabilityTier::Global, true), expected);
+    assert_eq!(run(None, ReadTier::Remote, true), expected);
     let stable = OpenTransactionId::new();
     alice.begin_exclusive(stable).unwrap();
-    assert_eq!(run(Some(stable), DurabilityTier::Local, false), expected);
+    assert_eq!(run(Some(stable), ReadTier::LocalFirst, false), expected);
     let accepted = alice.commit_exclusive_handle(stable).unwrap();
     pump();
     assert_eq!(alice.write_state(accepted).unwrap().fate, Fate::Accepted);
 
     let changed = OpenTransactionId::new();
     alice.begin_exclusive(changed).unwrap();
-    assert_eq!(run(Some(changed), DurabilityTier::Local, false), expected);
+    assert_eq!(run(Some(changed), ReadTier::LocalFirst, false), expected);
     let concurrent = row(0x9a);
     let inserted = bob
         .insert_with_id(
@@ -185,7 +185,7 @@ fn renamed_snapshot_serialized_read_preserves_authored_witness_and_conflicts() {
         .unwrap();
     block_on(inserted.wait(DurabilityTier::Global)).unwrap();
     pump();
-    assert_eq!(run(Some(changed), DurabilityTier::Local, false), expected);
+    assert_eq!(run(Some(changed), ReadTier::LocalFirst, false), expected);
     let rejected = alice.commit_exclusive_handle(changed).unwrap();
     pump();
     assert_eq!(
@@ -193,7 +193,7 @@ fn renamed_snapshot_serialized_read_preserves_authored_witness_and_conflicts() {
         Fate::Rejected(RejectionReason::ExclusiveConflict)
     );
     assert_eq!(
-        run(None, DurabilityTier::Global, true),
+        run(None, ReadTier::Remote, true),
         vec![
             (
                 "tasks".to_owned(),

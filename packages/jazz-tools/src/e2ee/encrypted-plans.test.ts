@@ -41,13 +41,13 @@ it.each(cases)(
     const db = await createDb(await localAccountConfig(`encrypted-plan-${crypto.randomUUID()}`));
     try {
       if (boundary === "read") {
-        await expect(db.all(query, { tier: "local" })).rejects.toThrow(
+        await expect(db.all(query, { tier: "local-first" })).rejects.toThrow(
           "Unsupported encrypted query",
         );
       } else if (boundary === "transaction") {
         const tx = db.beginTransaction();
         try {
-          await expect(tx.all(query, { tier: "local" })).rejects.toThrow(
+          await expect(tx.all(query, { tier: "local-first" })).rejects.toThrow(
             "Unsupported encrypted query",
           );
         } finally {
@@ -69,7 +69,7 @@ it.each(cases)(
                   failure = error;
                 },
               },
-              { tier: "local" },
+              { tier: "local-first" },
             );
           } catch (error) {
             failure = error;

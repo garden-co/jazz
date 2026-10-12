@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -11,10 +12,10 @@ it("accepts an exclusive read of an unchanged table after migration", async () =
   const after = { projects, notes: s.table({ body: s.string() }, {}) };
   const oldApp = s.defineApp(before);
   const newApp = s.defineApp(after);
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: before,
     to: after,
-    migrate: { notes: { body: s.renameFrom("title") } },
+    migrate: { notes: { body: m.renameFrom("title") } },
   });
   const permissions = (app: typeof oldApp | typeof newApp) =>
     definePermissions(app, ({ policy }) => {
@@ -35,9 +36,9 @@ it("accepts an exclusive read of an unchanged table after migration", async () =
     await deploy({ ...target, schema: newApp, permissions: permissions(newApp), migration });
     db = await createDb(account);
     const query = newApp.projects.where({ id: project.id });
-    expect(await db.one(query, { tier: "global" })).toEqual(project);
+    expect(await db.one(query, { tier: "remote" })).toEqual(project);
     const tx = db.beginExclusiveTransaction();
-    expect(await tx.one(query, { tier: "local" })).toEqual(project);
+    expect(await tx.one(query, { tier: "local-first" })).toEqual(project);
     await tx.commit().wait();
   } finally {
     await db?.shutdown();
@@ -50,10 +51,10 @@ it("preserves exclusive conflict detection after renaming the queried table", as
   const after = { initiatives: s.table({ title: s.string() }, {}) };
   const oldApp = s.defineApp(before);
   const newApp = s.defineApp(after);
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     from: before,
     to: after,
-    renameTables: { initiatives: s.renameTableFrom("projects") },
+    renameTables: { initiatives: m.renameTableFrom("projects") },
   });
   const oldPermissions = definePermissions(oldApp, ({ policy }) => {
     policy.projects.allowRead.always();
@@ -77,14 +78,14 @@ it("preserves exclusive conflict detection after renaming the queried table", as
     await deploy({ ...target, schema: newApp, permissions: newPermissions, migration });
     db = await createDb(account);
     writer = await createDb(await localAccountConfig(server.appId, server.url));
-    expect(await db.all(newApp.initiatives, { tier: "global" })).toEqual([project]);
+    expect(await db.all(newApp.initiatives, { tier: "remote" })).toEqual([project]);
     const stable = db.beginExclusiveTransaction();
-    expect(await stable.all(newApp.initiatives, { tier: "local" })).toEqual([project]);
+    expect(await stable.all(newApp.initiatives, { tier: "local-first" })).toEqual([project]);
     await stable.commit().wait();
     const changed = db.beginExclusiveTransaction();
-    expect(await changed.all(newApp.initiatives, { tier: "local" })).toEqual([project]);
+    expect(await changed.all(newApp.initiatives, { tier: "local-first" })).toEqual([project]);
     // Admit the fresh writer's B schema without changing the existing reader cut.
-    expect(await writer.all(newApp.initiatives, { tier: "global" })).toEqual([project]);
+    expect(await writer.all(newApp.initiatives, { tier: "remote" })).toEqual([project]);
     await writer
       .insert(newApp.initiatives, { title: "Concurrent project" })
       .wait({ tier: "global" });

@@ -108,11 +108,11 @@ async function fixture() {
     // Each reader must leave the shared accepted authority and deliveries intact.
     const acceptedRows = async (db: Db) => {
       const rows = await Promise.all([
-        db.all(app.__e2ee_group_successors, { tier: "global" }),
-        db.all(app.__e2ee_group_repairs, { tier: "global" }),
-        db.all(app.__e2ee_group_deliveries, { tier: "global" }),
-        db.all(app.__e2ee_space_successors, { tier: "global" }),
-        db.all(app.__e2ee_space_deliveries, { tier: "global" }),
+        db.all(app.__e2ee_group_successors, { tier: "remote" }),
+        db.all(app.__e2ee_group_repairs, { tier: "remote" }),
+        db.all(app.__e2ee_group_deliveries, { tier: "remote" }),
+        db.all(app.__e2ee_space_successors, { tier: "remote" }),
+        db.all(app.__e2ee_space_deliveries, { tier: "remote" }),
       ]);
       return rows.map((entries) => entries.sort((a, b) => a.id.localeCompare(b.id)));
     };

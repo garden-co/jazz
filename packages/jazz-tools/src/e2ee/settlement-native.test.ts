@@ -118,7 +118,7 @@ it.each(["update", "upsert", "delete"] as const)(
           if (operation === "update")
             tx.update(app.proposals, original.value.id, { value: "provisional content" });
           else tx.upsert(app.proposals, original.value.id, { value: "provisional content" });
-          expect(await tx.all(app.proposals, { tier: "local" })).toEqual([
+          expect(await tx.all(app.proposals, { tier: "local-first" })).toEqual([
             { id: original.value.id, value: "provisional content" },
           ]);
           await expect(tx.allSettledForE2ee(app.proposals)).rejects.toThrow();
@@ -184,7 +184,7 @@ it("observes cold accepted native metadata before any ordinary read", async () =
     });
     owner = await createJazzSession(config);
     const before = owner.getSnapshot().client!.db;
-    await before.all(app.__e2ee_snapshot_roots, { tier: "local" });
+    await before.all(app.__e2ee_snapshot_roots, { tier: "local-first" });
     const tx = before.beginExclusiveTransaction();
     const root = tx.insert(app.__e2ee_snapshot_roots, { title: "Accepted" });
     const ref = tx.insert(app.__e2ee_snapshot_refs, { rootId: root.id });
@@ -218,10 +218,10 @@ it("observes cold accepted native metadata before any ordinary read", async () =
     const added = pending.insert(app.__e2ee_snapshot_roots, { title: "Not accepted" });
     pending.delete(app.__e2ee_snapshot_refs, ref.id);
     await pending.commit().wait({ tier: "local" });
-    expect(await reopened.all(roots, { tier: "local" })).toEqual(
+    expect(await reopened.all(roots, { tier: "local-first" })).toEqual(
       expect.arrayContaining([{ ...root, title: "Pending" }, added]),
     );
-    expect(await reopened.all(refs, { tier: "local" })).toEqual([]);
+    expect(await reopened.all(refs, { tier: "local-first" })).toEqual([]);
     expect(await reopened.observeE2eeHistory([roots, refs])).toEqual(observed);
   } finally {
     await owner?.close();

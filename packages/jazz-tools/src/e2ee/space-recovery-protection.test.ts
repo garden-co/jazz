@@ -123,11 +123,11 @@ it("rechecks native space recovery creation coverage after root retirement and r
           state: "ready",
         });
       } else {
-        expect(await db.all(app.__e2ee_spaces, { tier: "global" })).toEqual([]);
+        expect(await db.all(app.__e2ee_spaces, { tier: "remote" })).toEqual([]);
       }
       beforeImport = async (rootId) => {
         expect(
-          await peer.one(app.__e2ee_recovery_roots.where({ id: rootId }), { tier: "global" }),
+          await peer.one(app.__e2ee_recovery_roots.where({ id: rootId }), { tier: "remote" }),
         ).not.toBeNull();
         // Observe the accepted change on the creating client before import resumes.
         if (change === "retired-empty-root") {
@@ -161,7 +161,7 @@ it("rechecks native space recovery creation coverage after root retirement and r
       else expect(outcome.error).toMatchObject({ message: "Recovery space is unavailable" });
       expect(
         await db.all(app.__e2ee_recovery_protectors.where({ rootId: changedRoot! }), {
-          tier: "global",
+          tier: "remote",
         }),
       ).toEqual([]);
       const good = await db.e2ee.recovery.create().wait();

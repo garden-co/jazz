@@ -93,10 +93,10 @@ it.each([
         notesViaProject: app.notes.include({ projectRelation: true }),
       });
       const expected = { ...project, notesViaProject: [{ ...note, projectRelation: project }] };
-      expect(await db.one(query, { tier: "global" })).toEqual(expected);
+      expect(await db.one(query, { tier: "remote" })).toEqual(expected);
       const read = db.beginTransaction();
       try {
-        expect(await read.one(query, { tier: "local" })).toEqual(expected);
+        expect(await read.one(query, { tier: "local-first" })).toEqual(expected);
       } finally {
         await read.rollback();
       }
