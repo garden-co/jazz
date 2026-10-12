@@ -109,9 +109,11 @@ it("rejects stale recovery batches before staging and stops publication after de
       return { db, store };
     };
     const { db: owner } = await open();
+    // Prepare protection before the groups; these assertions exercise stale
+    // recovery batches, while group-recovery.test.ts covers creation backfill.
+    const retired = await owner.e2ee.recovery.create().wait();
     const first = await owner.e2ee.groups.create().wait();
     const second = await owner.e2ee.groups.create().wait();
-    const retired = await owner.e2ee.recovery.create().wait();
     const replacement = await open(true);
     recovering = replacement.db;
     const pending = (await recovering.e2ee.devices.list()).find(
