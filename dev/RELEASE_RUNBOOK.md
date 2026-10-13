@@ -117,6 +117,15 @@ this document or public receipts.
   a controlled fleet rollout. Have infra confirm the exact version and image digest
   in the status API and both regions. Never include legacy or preview tenants in a
   stable fleet rollout.
+- The release go-ahead names each activation it covers: the npm publish, the
+  catalog default for new apps, the fleet rollout of existing tenants and the
+  GitHub Release. If the owner defers one, record that in the release checklist
+  with who will do it next.
+- Right after npm verification, the release coordinator opens the catalog PR that
+  makes the release the default for new apps and asks infra to start the fleet
+  rollout. The coordinator owns both until infra reports the tenant counts per
+  version; the release is not finished while eligible stable tenants remain on an
+  older version without a recorded reason.
 - Create a new ordinary tenant with the real npm release; validate/deploy schema
   and permissions and run authenticated write/read/update/delete plus
   reconnect/reopen. Delete test tenants. Check existing sync probes and rollout
