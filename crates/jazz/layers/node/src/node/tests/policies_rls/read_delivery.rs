@@ -1824,3 +1824,170 @@ fn serving_subscribers_of_claims_only_query_share_one_prepared_program() {
     assert_eq!(released.active_prepared_shapes, baseline.active_prepared_shapes);
     assert_eq!(released.graph_nodes, baseline.graph_nodes);
 }
+
+/// Contract: trusted-serving subscribers whose read policy inherits a parent's
+/// claim-scoped access share one prepared program, and each binding's proof
+/// keeps its own claim route through the inherited parent check (#4017).
+///
+/// Actors: every reader is granted one private container, readers 0 and 1
+/// also share a container, and everyone subscribes to `entries` with no
+/// query parameters. The container policy compares `containerAccess.reader`
+/// with the subscriber's `sub` claim; entries inherit it through `container`.
+#[test]
+fn serving_subscribers_of_inherited_claim_policy_share_one_prepared_program() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("containers")
+                    .column("name", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(public_outer_exists(
+                        "containerAccess",
+                        "container",
+                        "id",
+                        [public_claim_eq("reader", "sub")],
+                    ))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("entries")
+                    .fk_column("container", "containers")
+                    .column("title", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new().with_select(PublicPolicyExpr::Inherits {
+                            operation: PublicOperation::Select,
+                            via_column: "container".to_owned(),
+                            max_depth: None,
+                        }),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("containerAccess")
+                    .fk_column("container", "containers")
+                    .column("reader", PublicColumnType::Uuid),
+            ),
+    );
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let readers = (0..4u8).map(|i| user(0xa0 + i)).collect::<Vec<_>>();
+    let containers = (0..4u8).map(|i| row(0x10 + i)).collect::<Vec<_>>();
+    let entries = (0..4u8).map(|i| row(0x30 + i)).collect::<Vec<_>>();
+    let shared_container = row(0x1f);
+    let shared_entry = row(0x3f);
+    for container in containers.iter().chain([&shared_container]) {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("containers", *container, 10)
+                .cells(BTreeMap::from([("name".to_owned(), v("container"))])),
+        );
+    }
+    for (entry, container) in entries
+        .iter()
+        .zip(&containers)
+        .chain([(&shared_entry, &shared_container)])
+    {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("entries", *entry, 11).cells(BTreeMap::from([
+                ("container".to_owned(), Value::Uuid(container.0)),
+                ("title".to_owned(), v("entry")),
+            ])),
+        );
+    }
+    for (i, reader) in readers.iter().enumerate() {
+        install_test_uuid_sub_claim(&mut core, *reader);
+        let i = i as u8;
+        accept_global(
+            &mut core,
+            MergeableCommit::new("containerAccess", row(0x50 + i), 12).cells(BTreeMap::from([
+                ("container".to_owned(), Value::Uuid(containers[usize::from(i)].0)),
+                ("reader".to_owned(), Value::Uuid(reader.test_uuid())),
+            ])),
+        );
+    }
+    for (i, reader) in readers.iter().take(2).enumerate() {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("containerAccess", row(0x58 + i as u8), 12).cells(
+                BTreeMap::from([
+                    ("container".to_owned(), Value::Uuid(shared_container.0)),
+                    ("reader".to_owned(), Value::Uuid(reader.test_uuid())),
+                ]),
+            ),
+        );
+    }
+    let expected = |i: usize| {
+        let mut rows = BTreeSet::from([entries[i]]);
+        if i < 2 {
+            rows.insert(shared_entry);
+        }
+        rows
+    };
+    let entry_rows = |update: &SyncMessage| {
+        canonical_view_update_rows_for_table(update, "entries")
+            .into_iter()
+            .map(|(_table, row_uuid, _tx_id)| row_uuid)
+            .collect::<BTreeSet<_>>()
+    };
+
+    let shape = Query::from("entries")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        ..RegisterShapeOptions::default()
+    };
+    core.drive_query_runtime().unwrap();
+    let baseline = core.runtime_stats_for_test();
+    let mut peers = Vec::new();
+    let mut after_first = None;
+    for (i, reader) in readers.iter().enumerate() {
+        let mut peer = PeerState::client_link(*reader);
+        let update = peer
+            .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
+            .unwrap();
+        assert_eq!(
+            entry_rows(&update),
+            expected(i),
+            "subscriber {i} reads the entries its own grants admit",
+        );
+        peers.push(peer);
+        after_first.get_or_insert_with(|| core.runtime_stats_for_test());
+    }
+    let after_first = after_first.unwrap();
+    let after_all = core.runtime_stats_for_test();
+    assert!(after_first.active_prepared_shapes > baseline.active_prepared_shapes);
+    assert_eq!(
+        after_all.active_prepared_shapes, after_first.active_prepared_shapes,
+        "later subscribers bind the first subscriber's prepared program",
+    );
+
+    // A grant reaches only its reader, through the inherited parent check.
+    accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", row(0x5f), 20).cells(BTreeMap::from([
+            ("container".to_owned(), Value::Uuid(containers[0].0)),
+            ("reader".to_owned(), Value::Uuid(readers[3].test_uuid())),
+        ])),
+    );
+    for (i, peer) in peers.iter_mut().enumerate() {
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        let adds = entry_rows(&update);
+        if i == 3 {
+            assert_eq!(adds, BTreeSet::from([entries[0]]));
+        } else {
+            assert!(adds.is_empty(), "subscriber {i} gained {adds:?} from reader 3's grant");
+        }
+    }
+    for (i, reader) in readers.iter().enumerate() {
+        let mut rows = expected(i);
+        if i == 3 {
+            rows.insert(entries[0]);
+        }
+        let one_shot = core
+            .query_rows_for_link(&shape, &binding, DurabilityTier::Global, *reader)
+            .unwrap()
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(one_shot, rows, "one-shot read for reader {i}");
+    }
+}
