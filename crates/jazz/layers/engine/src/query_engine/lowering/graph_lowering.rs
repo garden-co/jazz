@@ -1547,6 +1547,23 @@ fn lower_linear_plan_steps_cached(
                         semi_join_if_needed(graph, right, semi_left_keys, semi_right_keys, request);
                     last_join_right = None;
                 } else {
+                    // One prepared graph serves every binding of its source.
+                    // When both sides carry the same binding route, a left
+                    // row must only meet right rows derived for its own
+                    // binding; joining on the relation keys alone would pair
+                    // one binding's row with another binding's proof (#4017).
+                    let (mut left_keys, mut right_keys) = (left_keys, right_keys);
+                    for field in &available_route_fields {
+                        let binding_route = route_param_from_field(field).is_some()
+                            || claim_path_from_param_field(field).is_some();
+                        if binding_route
+                            && lowered_right.fields.contains(field)
+                            && !right_keys.contains(field)
+                        {
+                            left_keys.push(field.clone());
+                            right_keys.push(field.clone());
+                        }
+                    }
                     graph =
                         policy_join_if_needed(graph, right_graph, left_keys, right_keys, request);
                     let right_fields = lowered_right.fields.clone();
@@ -3110,11 +3127,10 @@ fn equality_param_join(
 /// The binding slot an equality operand reads, when it has one.
 ///
 /// A claim operand is a binding slot too when the program carries that claim
-/// as a prepared parameter. Joining it against the binding source keeps the
-/// claim value out of the graph, so every session with the same query shares
-/// one graph instead of compiling its own literal copy (#4017). A claim the
-/// domain does not carry, or carries under several typed slots, stays a
-/// literal predicate.
+/// as a prepared routing parameter (see `claim_binding_slot`). Joining it
+/// against the binding source keeps the claim value out of the graph, so
+/// every session with the same query shares one graph instead of compiling
+/// its own literal copy (#4017). Any other claim stays a literal predicate.
 fn equality_binding_param(
     value: &NormalizedValueRef,
     request: &LoweringContext<'_>,
@@ -3123,15 +3139,8 @@ fn equality_binding_param(
         NormalizedValueRef::Param(param) => Ok(Some(param.clone())),
         NormalizedValueRef::Claim(path) if request.input.binding.source_shape.is_some() => {
             let domain = request.parameter_domain()?;
-            let mut slots = domain
-                .claim_params
-                .iter()
-                .filter(|(_, claim)| claim.path == *path)
-                .map(|(name, _)| name);
-            match (slots.next(), slots.next()) {
-                (Some(slot), None) => Ok(Some(slot.clone())),
-                _ => Ok(None),
-            }
+            Ok(super::claim_binding_slot(domain, path)
+                .filter(|slot| domain.routing_params.contains(slot)))
         }
         _ => Ok(None),
     }
