@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::protocol::SyncMessage;
-use crate::tx::TxId;
+use crate::tx::{DurabilityTier, Fate, TxId};
 use crate::wire::channel_credit::BufferLease;
 
 use super::channel_endpoint::message_class;
@@ -71,6 +71,13 @@ pub(super) struct ReadBarrierReceiver {
     /// resends a write after `RetryLater`, so one transaction can arrive
     /// more than once on a link.
     unanswered_by_tx: BTreeMap<TxId, VecDeque<u64>>,
+    /// Writes this link has answered as stored here and not yet settled.
+    /// A copy of one that arrives later is already answered: a recovering
+    /// relay acknowledges a write it restored from its own storage before
+    /// the writer's resent copy reaches it, and does not acknowledge the
+    /// copy again. A terminal fate or `RetryLater` removes the entry, so it
+    /// holds at most the writes still in flight on this link.
+    answered: BTreeSet<TxId>,
     /// Requests from the first unsatisfied barrier on, in arrival order. The
     /// front is always a `ReadBarrier`.
     held: VecDeque<HeldRequest>,
@@ -82,6 +89,9 @@ impl ReadBarrierReceiver {
     /// Number a commit unit as it arrives on this link.
     pub(super) fn commit_unit_received(&mut self, tx_id: TxId) {
         self.received += 1;
+        if self.answered.contains(&tx_id) {
+            return;
+        }
         self.unanswered.insert(self.received);
         self.unanswered_by_tx
             .entry(tx_id)
@@ -104,6 +114,26 @@ impl ReadBarrierReceiver {
             return false;
         };
         let tx_id = *tx_id;
+        // A terminal fate or `RetryLater` ends this answer's standing: after
+        // `RetryLater` a resent copy is stored anew, and a copy arriving after
+        // a terminal fate gets that fate again.
+        let settled = matches!(
+            message,
+            SyncMessage::RetryLater { .. }
+                | SyncMessage::FateUpdate {
+                    fate: Fate::Rejected(_),
+                    ..
+                }
+                | SyncMessage::FateUpdate {
+                    durability: Some(DurabilityTier::Global),
+                    ..
+                }
+        );
+        if settled {
+            self.answered.remove(&tx_id);
+        } else {
+            self.answered.insert(tx_id);
+        }
         let Some(ordinals) = self.unanswered_by_tx.get_mut(&tx_id) else {
             return false;
         };
@@ -197,7 +227,7 @@ mod tests {
     use crate::ids::NodeUuid;
     use crate::protocol::PermissionAdviceRequestId;
     use crate::time::{GlobalTime, TxTime};
-    use crate::tx::{DurabilityTier, Fate, RejectionReason};
+    use crate::tx::RejectionReason;
 
     fn tx(n: u64) -> TxId {
         TxId::new(TxTime(n), NodeUuid::from_bytes([1; 16]))
@@ -275,6 +305,49 @@ mod tests {
         assert!(relay.answer_sent(&local_ack));
         assert_eq!(opened_ids(&mut relay), [1]);
         assert!(!relay.answer_sent(&accepted(tx(1), DurabilityTier::Global)));
+    }
+
+    /// A worker that restarts restores its writer's write from storage and
+    /// acknowledges it before the writer's resent copy arrives. The copy is
+    /// answered already, and the reads behind it are served.
+    #[test]
+    fn a_write_acknowledged_before_its_copy_arrives_is_answered() {
+        let local_ack = SyncMessage::FateUpdate {
+            tx_id: tx(1),
+            fate: Fate::Pending,
+            global_time: None,
+            durability: Some(DurabilityTier::Local),
+        };
+        let mut worker = ReadBarrierReceiver::default();
+        assert!(!worker.answer_sent(&local_ack));
+        worker.commit_unit_received(tx(1));
+        assert!(worker.admit(request(barrier(1))).is_none());
+        assert!(worker.admit(request(open(1))).is_some());
+
+        // A terminal fate settles the write: a later copy gets that fate
+        // again, so it waits for it.
+        assert!(!worker.answer_sent(&accepted(tx(1), DurabilityTier::Global)));
+        worker.commit_unit_received(tx(1));
+        worker.admit(request(barrier(2)));
+        worker.admit(request(open(2)));
+        assert!(worker.pop_released().is_none());
+        assert!(worker.answer_sent(&accepted(tx(1), DurabilityTier::Global)));
+        assert_eq!(opened_ids(&mut worker), [2]);
+
+        // After `RetryLater` the write was not stored, so a resent copy
+        // waits for its own answer.
+        let mut core = ReadBarrierReceiver::default();
+        core.commit_unit_received(tx(2));
+        assert!(!core.answer_sent(&SyncMessage::RetryLater {
+            tx_id: tx(2),
+            awaiting: tx(1),
+        }));
+        core.commit_unit_received(tx(2));
+        core.admit(request(barrier(2)));
+        core.admit(request(open(3)));
+        assert!(core.pop_released().is_none());
+        assert!(core.answer_sent(&accepted(tx(2), DurabilityTier::Global)));
+        assert_eq!(opened_ids(&mut core), [3]);
     }
 
     #[test]
