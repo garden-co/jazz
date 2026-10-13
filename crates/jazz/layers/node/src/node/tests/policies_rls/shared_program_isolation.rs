@@ -74,9 +74,8 @@ fn shared_program_sub(
     params: &BTreeMap<String, Value>,
 ) -> SyncMessage {
     let binding = shape.bind(params.clone()).unwrap();
-    let up = peer.rehydrate_query_with_opts(core, shape, &binding, shared_program_opts())
-        .unwrap();
-    up
+    peer.rehydrate_query_with_opts(core, shape, &binding, shared_program_opts())
+        .unwrap()
 }
 
 fn shared_program_upd(
@@ -86,14 +85,7 @@ fn shared_program_upd(
     params: &BTreeMap<String, Value>,
 ) -> SyncMessage {
     let binding = shape.bind(params.clone()).unwrap();
-    let up = peer.query_update(core, shape, &binding).unwrap();
-    if let SyncMessage::ViewUpdate(payload) = &up {
-        let kind = match &payload.supporting_rows {
-            crate::protocol::SupportingRowsUpdate::Snapshot { .. } => "snapshot",
-            _ => "delta",
-        };
-    }
-    up
+    peer.query_update(core, shape, &binding).unwrap()
 }
 
 fn shared_program_forget(
@@ -194,10 +186,6 @@ fn shared_program_seed_chats(core: &mut NodeState, chats: &[RowUuid]) {
     }
 }
 
-fn shared_program_shapes(core: &NodeState) -> usize {
-    core.runtime_stats_for_test().active_prepared_shapes
-}
-
 /// Public table (policy admits everything), so only the param routing can
 /// keep subscribers apart. Same user with two params on one peer, two users
 /// with the same param, unsubscribe of one of two same-key subscribers, key
@@ -222,13 +210,10 @@ fn shared_program_param_window_is_per_binding() {
             .validate(&core.catalogue.schema)
             .unwrap();
         core.drive_query_runtime().unwrap();
-        let base = shared_program_shapes(&core);
         let mut u0 = PeerState::client_link(user(0xa0));
         let mut u1 = PeerState::client_link(user(0xa1));
         let up0 = shared_program_sub(&mut core, &mut u0, &shape, &p(c1));
-        let first = shared_program_shapes(&core) - base;
         let up1 = shared_program_sub(&mut core, &mut u1, &shape, &p(c2));
-        let total = shared_program_shapes(&core) - base;
         assert_eq!(shared_program_added(&up0, "messages"), BTreeSet::from([want1]));
         assert_eq!(shared_program_added(&up1, "messages"), BTreeSet::from([want2]));
         shared_program_forget(&mut core, &mut u0, &shape, &p(c1));
@@ -274,13 +259,10 @@ fn shared_program_param_count_supporting_rows_per_binding() {
         .unwrap();
     let p = |c: RowUuid| shared_program_params(&[("chat", Value::Uuid(c.0))]);
     core.drive_query_runtime().unwrap();
-    let base = shared_program_shapes(&core);
     let mut u0 = PeerState::client_link(user(0xa0));
     let mut u1 = PeerState::client_link(user(0xa1));
     let up0 = shared_program_sub(&mut core, &mut u0, &shape, &p(c1));
-    let first = shared_program_shapes(&core) - base;
     let up1 = shared_program_sub(&mut core, &mut u1, &shape, &p(c2));
-    let total = shared_program_shapes(&core) - base;
     assert_eq!(shared_program_added(&up0, "messages"), BTreeSet::from([a]));
     assert_eq!(shared_program_added(&up1, "messages"), BTreeSet::from([b, b2]));
     let (mut s0, mut s1) = (SharedProgramState::new(), SharedProgramState::new());
@@ -315,7 +297,6 @@ fn shared_program_two_params_and_id_include() {
         shared_program_params(&[("chat", Value::Uuid(c.0)), ("author", Value::String(a.to_owned()))])
     };
     core.drive_query_runtime().unwrap();
-    let base = shared_program_shapes(&core);
     let mut peers: Vec<_> = (0..4).map(|i| PeerState::client_link(user(0xa0 + i))).collect();
     let cases = [(c1, "x", c1x), (c1, "y", c1y), (c2, "x", c2x), (c2, "y", c2y)];
     let mut states: Vec<SharedProgramState> = Vec::new();
@@ -339,11 +320,9 @@ fn shared_program_two_params_and_id_include() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let pid = |r: RowUuid| shared_program_params(&[("id", Value::Uuid(r.0))]);
-    let base = shared_program_shapes(&core);
     let mut a = PeerState::client_link(user(0xb0));
     let mut b = PeerState::client_link(user(0xb1));
     let upa = shared_program_sub(&mut core, &mut a, &id_shape, &pid(c1y));
-    let first = shared_program_shapes(&core) - base;
     let upb = shared_program_sub(&mut core, &mut b, &id_shape, &pid(c2x));
     let (mut sa, mut sb) = (SharedProgramState::new(), SharedProgramState::new());
     shared_program_apply(&mut sa, &upa);
@@ -389,12 +368,10 @@ fn shared_program_param_naming_other_users_claim_reads_nothing() {
         .unwrap();
     let p = |s: &str| shared_program_params(&[("owner", Value::String(s.to_owned()))]);
     core.drive_query_runtime().unwrap();
-    let base = shared_program_shapes(&core);
     let mut own0 = PeerState::client_link(users[0]);
     let mut own1 = PeerState::client_link(users[1]);
     let mut spy = PeerState::client_link(users[2]);
     assert_eq!(shared_program_added(&shared_program_sub(&mut core, &mut own0, &shape, &p(&ids[0])), "notes"), BTreeSet::from([notes[0]]));
-    let first = shared_program_shapes(&core) - base;
     assert_eq!(shared_program_added(&shared_program_sub(&mut core, &mut own1, &shape, &p(&ids[1])), "notes"), BTreeSet::from([notes[1]]));
     // users[2] asks for users[0]'s notes: params match a live key, claim does not.
     assert!(shared_program_added(&shared_program_sub(&mut core, &mut spy, &shape, &p(&ids[0])), "notes").is_empty());
@@ -499,10 +476,8 @@ fn shared_program_member_of_all_chats_two_param_subs() {
         .unwrap();
     let p = |c: RowUuid| shared_program_params(&[("chat", Value::Uuid(c.0))]);
     core.drive_query_runtime().unwrap();
-    let base = shared_program_shapes(&core);
     let mut peer = PeerState::client_link(reader);
     let up0 = shared_program_sub(&mut core, &mut peer, &shape, &p(chats[0]));
-    let first = shared_program_shapes(&core) - base;
     let up1 = shared_program_sub(&mut core, &mut peer, &shape, &p(chats[1]));
     let mut other = PeerState::client_link(reader);
     let up2 = shared_program_sub(&mut core, &mut other, &shape, &p(chats[2]));
@@ -614,7 +589,6 @@ fn shared_program_reference_closure_chat_rows_stay_per_binding() {
         .unwrap();
     let p = |c: RowUuid| shared_program_params(&[("chat", Value::Uuid(c.0))]);
     core.drive_query_runtime().unwrap();
-    let base = shared_program_shapes(&core);
     let mut peers = Vec::new();
     let mut leaks = Vec::new();
     for (i, reader) in readers.iter().enumerate() {
@@ -668,7 +642,6 @@ fn shared_program_reference_closure_chat_rows_no_params() {
         .unwrap();
     let p = shared_program_params(&[]);
     core.drive_query_runtime().unwrap();
-    let base = shared_program_shapes(&core);
     let mut peers = Vec::new();
     let mut leaks = Vec::new();
     for (i, reader) in readers.iter().enumerate() {
@@ -747,7 +720,6 @@ fn shared_program_closure_leak_check(with_param: bool) {
         }
     };
     core.drive_query_runtime().unwrap();
-    let base = shared_program_shapes(&core);
     let mut leaks = Vec::new();
     let mut peers = Vec::new();
     for (i, reader) in readers.iter().enumerate() {
@@ -802,7 +774,6 @@ fn shared_program_private_count(with_param: bool) {
     .validate(&core.catalogue.schema)
     .unwrap();
     let p = |c: RowUuid| if with_param { shared_program_params(&[("chat", Value::Uuid(c.0))]) } else { shared_program_params(&[]) };
-    let base = shared_program_shapes(&core);
     let mut peers: Vec<_> = readers.iter().map(|r| PeerState::client_link(*r)).collect();
     let mut states = Vec::new();
     for (i, peer) in peers.iter_mut().enumerate() {
@@ -856,22 +827,20 @@ fn shared_claims_set_claim(core: &mut NodeState, reader: AuthorSubject) {
 }
 
 /// Subscribes every reader to `shape` and returns, per reader, the rows by
-/// table and the number of prepared shapes added after the first reader.
+/// table, along with the readers' peers.
 fn shared_claims_subscribe_all(
     core: &mut NodeState,
     readers: &[AuthorSubject],
     shape: &ValidatedQuery,
-) -> (Vec<BTreeMap<String, BTreeSet<RowUuid>>>, usize, usize, Vec<PeerState>) {
+) -> (Vec<BTreeMap<String, BTreeSet<RowUuid>>>, Vec<PeerState>) {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let opts = RegisterShapeOptions {
         tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
     core.drive_query_runtime().unwrap();
-    let baseline = core.runtime_stats_for_test();
     let mut out = Vec::new();
     let mut peers = Vec::new();
-    let mut after_first = None;
     for reader in readers {
         let mut peer = PeerState::client_link(*reader);
         let update = peer
@@ -883,16 +852,8 @@ fn shared_claims_subscribe_all(
         }
         out.push(by_table);
         peers.push(peer);
-        after_first.get_or_insert_with(|| core.runtime_stats_for_test());
     }
-    let after_first = after_first.unwrap();
-    let after_all = core.runtime_stats_for_test();
-    (
-        out,
-        after_first.active_prepared_shapes - baseline.active_prepared_shapes,
-        after_all.active_prepared_shapes - after_first.active_prepared_shapes,
-        peers,
-    )
+    (out, peers)
 }
 
 /// Direct claim equality under an ordered LIMIT 1 window: the window must be
@@ -932,7 +893,7 @@ fn shared_claims_claim_eq_policy_under_limit_window_is_per_binding() {
         .limit(1)
         .validate(&core.catalogue.schema)
         .unwrap();
-    let (rows, first, later, _peers) = shared_claims_subscribe_all(&mut core, &readers, &shape);
+    let (rows, _peers) = shared_claims_subscribe_all(&mut core, &readers, &shape);
     for (i, by_table) in rows.iter().enumerate() {
         assert_eq!(
             by_table.get("notes").cloned().unwrap_or_default(),
@@ -982,7 +943,7 @@ fn shared_claims_or_policy_with_one_claim_branch_under_window() {
         .limit(2)
         .validate(&core.catalogue.schema)
         .unwrap();
-    let (rows, first, later, _peers) = shared_claims_subscribe_all(&mut core, &readers, &shape);
+    let (rows, _peers) = shared_claims_subscribe_all(&mut core, &readers, &shape);
     assert_eq!(rows[0].get("notes").cloned().unwrap_or_default(), BTreeSet::from([row(0x41), row(0x43)]));
     assert_eq!(rows[1].get("notes").cloned().unwrap_or_default(), BTreeSet::from([row(0x42), row(0x43)]));
 }
@@ -1032,7 +993,7 @@ fn shared_claims_inner_include_of_claim_routed_target_stays_per_binding() {
         .include("project")
         .validate(&core.catalogue.schema)
         .unwrap();
-    let (rows, first, later, _peers) = shared_claims_subscribe_all(&mut core, &readers, &shape);
+    let (rows, _peers) = shared_claims_subscribe_all(&mut core, &readers, &shape);
     for (i, by_table) in rows.iter().enumerate() {
         let (project, todo) = todos[i];
         assert_eq!(by_table.get("todos").cloned().unwrap_or_default(), BTreeSet::from([todo]), "reader {i} todos");
@@ -1102,7 +1063,7 @@ fn shared_claims_two_level_exists_with_claims_at_each_level() {
     ])));
     // Subscribe B first so B's binding exists when A's graph is shared.
     let shape = Query::from("messages").validate(&core.catalogue.schema).unwrap();
-    let (rows, first, later, _peers) =
+    let (rows, _peers) =
         shared_claims_subscribe_all(&mut core, &[readers[1], readers[0]], &shape);
     assert!(rows[0].get("messages").is_none_or(|m| m.is_empty()), "B is a member but did not create the chat");
     assert_eq!(rows[1].get("messages").cloned().unwrap_or_default(), BTreeSet::from([msg]));
@@ -1167,7 +1128,7 @@ fn shared_claims_two_hop_inherits_shared_and_reparent() {
     }
     let shape = Query::from("parts").validate(&core.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let (rows, first, later, mut peers) = shared_claims_subscribe_all(&mut core, &readers, &shape);
+    let (rows, mut peers) = shared_claims_subscribe_all(&mut core, &readers, &shape);
     for (i, by_table) in rows.iter().enumerate() {
         assert_eq!(by_table.get("parts").cloned().unwrap_or_default(), BTreeSet::from([fixture[i].2]), "reader {i}");
     }
@@ -1210,13 +1171,13 @@ fn shared_claims_claim_eq_window_live_insert_stays_per_binding() {
     let shape = Query::from("notes").order_by("createdAt", OrderDirection::Asc).limit(1)
         .validate(&core.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let (_rows, first, later, mut peers) = shared_claims_subscribe_all(&mut core, &readers, &shape);
+    let (_rows, mut peers) = shared_claims_subscribe_all(&mut core, &readers, &shape);
     accept_global(&mut core, MergeableCommit::new("notes", row(0x4f), 30).cells(BTreeMap::from([
         ("ownerId".to_owned(), Value::String(readers[1].test_uuid().to_string())),
         ("createdAt".to_owned(), Value::U64(1)),
     ])));
     let u0 = peers[0].query_update(&mut core, &shape, &binding).unwrap();
-    let u1 = peers[1].query_update(&mut core, &shape, &binding).unwrap();
+    peers[1].query_update(&mut core, &shape, &binding).unwrap();
     assert!(shared_claims_rows(&u0, "notes").is_empty(), "reader 0's page must not change");
     assert!(!format!("{u0:?}").contains(&format!("{:?}", row(0x4f))));
 }
@@ -1281,7 +1242,7 @@ fn shared_claims_two_level_exists_creator_not_member() {
     ])));
     let shape = Query::from("messages").validate(&core.catalogue.schema).unwrap();
     for order in [[readers[1], readers[0]], [readers[0], readers[1]]] {
-        let (rows, first, later, _peers) = shared_claims_subscribe_all(&mut core, &order, &shape);
+        let (rows, _peers) = shared_claims_subscribe_all(&mut core, &order, &shape);
         for (i, r) in rows.iter().enumerate() {
             assert!(r.get("messages").is_none_or(|m| m.is_empty()), "subscriber {i} saw {r:?}");
         }
