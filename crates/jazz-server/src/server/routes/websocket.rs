@@ -683,18 +683,13 @@ async fn handle_ws_connection(
         return;
     };
 
-    let Some(WireFrame::Hello(remote_hello)) = decode_single_ws_frame(&first).ok() else {
-        send_ws_error(
-            &mut socket,
-            WireError::new(
-                WireErrorCode::MalformedFrame,
-                WireRetry::Never,
-                "websocket expects first wire frame to be WireFrame::Hello",
-            ),
-        )
-        .await;
-        let _ = socket.close().await;
-        return;
+    let remote_hello = match decode_ws_hello(&first) {
+        Ok(hello) => hello,
+        Err(error) => {
+            send_ws_error(&mut socket, error).await;
+            let _ = socket.close().await;
+            return;
+        }
     };
 
     let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
@@ -1021,14 +1016,29 @@ fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
     }
 }
 
-fn decode_single_ws_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
-    match decode_ws_frame_batch(bytes) {
-        Ok(mut frames) if frames.len() == 1 => Ok(frames.remove(0)),
-        Ok(_) => Err(postcard::Error::DeserializeBadEncoding),
-        Err(_) => jazz::wire::decode_frame(bytes),
-    }
+/// Decode the opening `Hello`, which arrives as a one-frame batch or a bare
+/// frame. A peer on another wire version gets `UnsupportedProtocolVersion`
+/// even when the rest of its `Hello` uses that version's layout.
+fn decode_ws_hello(bytes: &[u8]) -> Result<WireHello, WireError> {
+    let not_hello = || {
+        WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            "websocket expects first wire frame to be WireFrame::Hello",
+        )
+    };
+    let frame = match decode_ws_encoded_frame_batch(bytes) {
+        Ok(mut frames) if frames.len() == 1 => frames.remove(0),
+        Ok(_) => return Err(not_hello()),
+        Err(_) => bytes.to_vec(),
+    };
+    jazz::wire::decode_hello_frame(&frame).map_err(|error| match error.code {
+        WireErrorCode::UnsupportedProtocolVersion => error,
+        _ => not_hello(),
+    })
 }
 
+#[cfg(test)]
 fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error> {
     let encoded_frames = decode_ws_encoded_frame_batch(bytes)?;
     encoded_frames
@@ -1174,15 +1184,38 @@ mod tests {
             WirePeerRole::Client,
             current_wire_features(),
         ));
+        let WireFrame::Hello(hello) = &frame else {
+            unreachable!()
+        };
         let raw = encode_frame(&frame).expect("encode raw handshake frame");
-        assert_eq!(decode_single_ws_frame(&raw).unwrap(), frame);
+        assert_eq!(&decode_ws_hello(&raw).unwrap(), hello);
 
         let mut suffixed = raw;
         suffixed.push(0);
-        assert!(
-            decode_single_ws_frame(&suffixed).is_err(),
+        assert_eq!(
+            decode_ws_hello(&suffixed).unwrap_err().code,
+            WireErrorCode::MalformedFrame,
             "a raw frame plus a suffix must not acquire a second handshake interpretation"
         );
+    }
+
+    /// Bob runs a later wire version whose `Hello` body has a different
+    /// layout. Alice's server reads only the shared version prefix and answers
+    /// with the frozen `UnsupportedProtocolVersion` error Bob can decode,
+    /// rather than `MalformedFrame` (SPEC 8 §8.1.1, #2468).
+    #[test]
+    fn later_wire_version_hello_gets_unsupported_version_not_malformed() {
+        let next = WIRE_PROTOCOL_VERSION + 1;
+        let mut later_hello = postcard::to_allocvec(&(0u32, next, next)).unwrap();
+        // A body this version cannot parse: an unknown role and extra fields.
+        later_hello.extend_from_slice(&[0x7f, 0xff, 0xff, 0x03, 0x2a]);
+        let batch = postcard::to_allocvec(&vec![later_hello.clone()]).unwrap();
+
+        for bytes in [later_hello, batch] {
+            let error = decode_ws_hello(&bytes).unwrap_err();
+            assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+            assert_eq!(error.retry, WireRetry::Never);
+        }
     }
 
     #[test]

@@ -334,6 +334,64 @@ through a migration path. A new optional semantic variant additionally needs a
 new negotiated feature bit. Wire-protocol v6 intentionally provides neither
 old-version decoding nor migration.
 
+#### Forward compatibility of tagged unions (#2468, `INV-WIRE-2`)
+
+Every tagged union on the wire is **closed and strictly decoded**: an unknown
+discriminant, at any depth, is `MalformedFrame`, exactly as #2435 fixed for
+`WireErrorCode` and `WireRetry`. There is no opaque or skippable "unknown
+variant". Jazz receivers must interpret every message exactly; a variant an
+older peer silently skipped could carry a fate, a revocation or a coverage
+claim whose absence changes results. Growth instead comes in three layers:
+
+1. **Cross-version bytes (permanent in every wire version).** A `Hello`
+   starts with the `WireFrame::Hello` tag (`0`) and then the
+   `min_protocol_version`, `max_protocol_version` pair. A `WireFrame::Error`
+   (tag `2`) is `{ code, retry, message }` with the codes and retries in the
+   table above. Nothing else is shared across versions. A receiver reads a
+   Hello's version range **before** the rest of its body and answers a
+   foreign range with `UnsupportedProtocolVersion`/`Never`, never with
+   `MalformedFrame`, even when the remaining bytes do not parse with this
+   version's layout. Before negotiation completes, a peer sends only these
+   baseline error codes and retries.
+2. **Additive change within a version: capability bits.** A new variant of
+   any union (`WireFrame`, `SyncMessage`, or a union nested inside one, such
+   as `SubscribeRejectReason` or `LensOp`), a new message carrying extra
+   fields, or a new `WireErrorCode` or `WireRetry` is assigned a new feature
+   bit. A sender emits it only when that bit is in the negotiated
+   intersection and otherwise uses the baseline form; for a new error code,
+   that is a baseline code with the same retry meaning. The receiver rejects
+   it with `UnsupportedFeature` when the bit was not negotiated.
+   `SyncMessage::required_wire_features` MUST account for nested variants,
+   not only the top-level tag. Postcard has no optional trailing fields, so a
+   new field on an existing struct is never additive: it needs a new variant
+   behind a bit, or layer 3.
+3. **Everything else: a version bump.** Reordering, removing, or
+   re-meaning a variant or field, or changing the Hello body after the
+   version range, needs a new `WIRE_PROTOCOL_VERSION`. Negotiation stays
+   exact-version (no ranges), so peers on different versions refuse each
+   other cleanly through layer 1.
+
+Worked examples, with Alice on version `N` and Bob on `N` plus a new bit `B`
+for a new `SyncMessage` variant `X`:
+
+- _Newer sender, older receiver._ Alice does not advertise `B`, so the
+  intersection lacks it and Bob never sends `X` to Alice. If he did, Alice
+  rejects it as malformed (unknown tag) and closes the link.
+- _Older sender, newer receiver._ Alice sends only baseline messages, which
+  Bob decodes unchanged. Bob also rejects `X` from any peer that did not
+  negotiate `B`.
+- _New error code._ Bob adds `WireErrorCode::Y` behind bit `C`. To Alice he
+  sends the baseline code with the same retry meaning; to a peer that
+  negotiated `C` he sends `Y`.
+- _Different versions._ Bob on `N+1` changes the Hello body. Alice reads
+  `(N+1, N+1)` from the prefix and replies with the frozen
+  `UnsupportedProtocolVersion`/`Never` error frame, which Bob decodes with
+  his own layer-1 decoder. The reverse direction is symmetric.
+
+Canonical encoding and resource bounds are unchanged: capability bits add no
+alternate spellings, and the version probe reads two bounded varints before
+the existing exact decode.
+
 Tag 30 (`AuthorityPublication`) is retired. Its former edge-admission
 shortcut MUST NOT authorize a transaction, including on privileged links.
 Its uninhabited reserved slot rejects even a complete legacy carrier during

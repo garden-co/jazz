@@ -675,6 +675,12 @@ pub fn validate_frame_for_artifact_corpus(
     bytes: &[u8],
     negotiated_features: WireFeatures,
 ) -> Result<(), String> {
+    if wire_hello_version_range(bytes).is_some() {
+        return decode_hello_frame(bytes)
+            .and_then(|hello| negotiate_wire(&hello, negotiated_features))
+            .map(|_| ())
+            .map_err(|error| format!("hello negotiation rejected: {}", error.message));
+    }
     let frame = decode_frame(bytes).map_err(|error| format!("malformed wire frame: {error}"))?;
     match frame {
         WireFrame::Hello(hello) => negotiate_wire(&hello, negotiated_features)
@@ -1132,26 +1138,69 @@ pub enum TransportError {
     Failed(String),
 }
 
+fn check_wire_protocol_range(min: u16, max: u16) -> Result<(), WireError> {
+    if min == WIRE_PROTOCOL_VERSION && max == WIRE_PROTOCOL_VERSION {
+        return Ok(());
+    }
+    Err(WireError::new(
+        WireErrorCode::UnsupportedProtocolVersion,
+        WireRetry::Never,
+        format!(
+            "unsupported wire protocol advertisement: remote {min}..={max}, expected {}..={}",
+            WIRE_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION
+        ),
+    ))
+}
+
+/// The cross-version prefix of a `Hello` frame: the `WireFrame::Hello` tag and
+/// the advertised `min_protocol_version..=max_protocol_version` range.
+///
+/// This prefix, and the complete `WireFrame::Error` layout with its baseline
+/// codes, are the only bytes every wire version shares. Everything after the
+/// range is scoped to the advertised version, so a receiver reads the range
+/// before it decodes the rest (SPEC 8 §8.1.1, "Forward compatibility of tagged
+/// unions"). Returns `None` when the bytes do not start with that prefix.
+pub fn wire_hello_version_range(bytes: &[u8]) -> Option<(u16, u16)> {
+    let (tag, rest) = take_from_bytes::<u32>(bytes).ok()?;
+    if tag != 0 {
+        return None;
+    }
+    let ((min, max), _) = take_from_bytes::<(u16, u16)>(rest).ok()?;
+    Some((min, max))
+}
+
+/// Decode a peer's handshake frame, reporting a foreign wire version as
+/// `UnsupportedProtocolVersion` before decoding the version-scoped body.
+///
+/// A peer on another wire version may lay out the rest of its `Hello`
+/// differently. Decoding that body with this version's layout would turn a
+/// version mismatch into `MalformedFrame` and hide the actionable error from
+/// both sides.
+pub fn decode_hello_frame(bytes: &[u8]) -> Result<WireHello, WireError> {
+    if let Some((min, max)) = wire_hello_version_range(bytes) {
+        check_wire_protocol_range(min, max)?;
+    }
+    match decode_frame(bytes) {
+        Ok(WireFrame::Hello(hello)) => Ok(hello),
+        Ok(_) => Err(WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            "expected the first wire frame to be WireFrame::Hello",
+        )),
+        Err(error) => Err(WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            format!("malformed WireFrame::Hello: {error}"),
+        )),
+    }
+}
+
 /// Negotiate the sole wire version and optional feature intersection.
 pub fn negotiate_wire(
     remote: &WireHello,
     local_features: WireFeatures,
 ) -> Result<WireNegotiated, WireError> {
-    if remote.min_protocol_version != WIRE_PROTOCOL_VERSION
-        || remote.max_protocol_version != WIRE_PROTOCOL_VERSION
-    {
-        return Err(WireError::new(
-            WireErrorCode::UnsupportedProtocolVersion,
-            WireRetry::Never,
-            format!(
-                "unsupported wire protocol advertisement: remote {}..={}, expected {}..={}",
-                remote.min_protocol_version,
-                remote.max_protocol_version,
-                WIRE_PROTOCOL_VERSION,
-                WIRE_PROTOCOL_VERSION
-            ),
-        ));
-    }
+    check_wire_protocol_range(remote.min_protocol_version, remote.max_protocol_version)?;
     let features = remote.features & local_features;
     Ok(WireNegotiated {
         protocol_version: WIRE_PROTOCOL_VERSION,
@@ -2617,6 +2666,117 @@ mod tests {
         assert_eq!(WIRE_PROTOCOL_VERSION, 6);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    /// Bob's later wire version keeps the cross-version `Hello` prefix but may
+    /// lay out the rest differently. Alice reads only the prefix and reports a
+    /// version mismatch instead of a malformed frame (#2468).
+    #[test]
+    fn hello_version_range_is_read_before_the_version_scoped_body() {
+        let current = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Core,
+            current_wire_features(),
+        )))
+        .unwrap();
+        assert_eq!(
+            wire_hello_version_range(&current),
+            Some((WIRE_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION))
+        );
+        assert_eq!(
+            decode_hello_frame(&current).unwrap().role,
+            WirePeerRole::Core
+        );
+
+        let next = WIRE_PROTOCOL_VERSION + 1;
+        for (min, max) in [(next, next), (WIRE_PROTOCOL_VERSION, next), (1, 1)] {
+            let mut foreign = postcard::to_allocvec(&(0u32, min, max)).unwrap();
+            foreign.extend_from_slice(&[0x7f, 0xff, 0xff, 0x03, 0x2a]);
+            assert!(
+                decode_frame(&foreign).is_err(),
+                "body is not this version's layout"
+            );
+            assert_eq!(wire_hello_version_range(&foreign), Some((min, max)));
+            let error = decode_hello_frame(&foreign).unwrap_err();
+            assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+            assert_eq!(error.retry, WireRetry::Never);
+            assert!(
+                validate_frame_for_artifact_corpus(&foreign, FEATURE_NONE)
+                    .unwrap_err()
+                    .contains("unsupported wire protocol advertisement")
+            );
+        }
+    }
+
+    #[test]
+    fn hello_decoder_keeps_exact_decoding_for_this_version() {
+        let mut suffixed = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            FEATURE_NONE,
+        )))
+        .unwrap();
+        suffixed.push(0);
+        assert_eq!(
+            decode_hello_frame(&suffixed).unwrap_err().code,
+            WireErrorCode::MalformedFrame
+        );
+
+        let error_frame = encode_frame(&WireFrame::Error(WireError::new(
+            WireErrorCode::Internal,
+            WireRetry::Never,
+            "",
+        )))
+        .unwrap();
+        assert_eq!(wire_hello_version_range(&error_frame), None);
+        assert_eq!(
+            decode_hello_frame(&error_frame).unwrap_err().code,
+            WireErrorCode::MalformedFrame
+        );
+        assert_eq!(wire_hello_version_range(&[]), None);
+        assert_eq!(wire_hello_version_range(&[0, 6]), None);
+    }
+
+    /// The bytes every wire version shares: the `Hello` version prefix and the
+    /// complete `Error` frame with its baseline codes and retries. A peer that
+    /// rejects a foreign version answers with these, so they can never change
+    /// in any later version (SPEC 8 §8.1.1, #2468).
+    #[test]
+    fn cross_version_handshake_bytes_are_frozen() {
+        let hello = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            FEATURE_NONE,
+        )))
+        .unwrap();
+        assert_eq!(
+            &hello[..3],
+            &[0, WIRE_PROTOCOL_VERSION as u8, WIRE_PROTOCOL_VERSION as u8]
+        );
+
+        let codes = [
+            (WireErrorCode::UnsupportedProtocolVersion, 0u8),
+            (WireErrorCode::UnsupportedFeature, 1),
+            (WireErrorCode::MalformedFrame, 2),
+            (WireErrorCode::AuthFailed, 3),
+            (WireErrorCode::Backpressure, 4),
+            (WireErrorCode::Internal, 5),
+            (WireErrorCode::NotReady, 6),
+        ];
+        let retries = [
+            (WireRetry::Never, 0u8),
+            (WireRetry::AfterAuth, 1),
+            (WireRetry::AfterResume, 2),
+            (WireRetry::Later, 3),
+        ];
+        for (code, code_tag) in codes {
+            for (retry, retry_tag) in retries {
+                let frame = WireFrame::Error(WireError::new(code, retry, "v"));
+                let bytes = encode_frame(&frame).unwrap();
+                assert_eq!(bytes, [2, code_tag, retry_tag, 1, b'v']);
+                assert_eq!(decode_frame(&bytes).unwrap(), frame);
+            }
+        }
+        for unassigned in [[2, 7, 0, 0], [2, 0, 4, 0]] {
+            assert!(decode_frame(&unassigned).is_err());
+        }
     }
 
     #[test]

@@ -723,13 +723,17 @@ async fn receive_server_hello(
     if encoded.len() != 1 {
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     }
-    let frame = decode_frame(&encoded[0]).map_err(WebSocketClientError::DecodeFrame)?;
-    let WireFrame::Hello(hello) = frame else {
+    if jazz::wire::wire_hello_version_range(&encoded[0]).is_none() {
+        let frame = decode_frame(&encoded[0]).map_err(WebSocketClientError::DecodeFrame)?;
         if let WireFrame::Error(error) = frame {
             return Err(WebSocketClientError::ServerWireError(error));
         }
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
-    };
+    }
+    // Read the version range before the version-scoped body, so a server on
+    // another wire version is reported as a version mismatch.
+    let hello =
+        jazz::wire::decode_hello_frame(&encoded[0]).map_err(WebSocketClientError::Negotiation)?;
     if hello.role != WirePeerRole::Core {
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     }
