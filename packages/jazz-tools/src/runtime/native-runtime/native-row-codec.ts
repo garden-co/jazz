@@ -1,13 +1,6 @@
 import { Utf8Decoder } from "../utf8.js";
 import { bytesToHex, formatUuidAt } from "../hex.js";
-import type {
-  ColumnDescriptor,
-  ColumnType,
-  NativeTerminalRootLayout,
-  Value,
-  WasmRow,
-} from "../../drivers/types.js";
-import { isProvenanceMagicColumn } from "../../magic-columns.js";
+import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers/types.js";
 import { validateStructuredAuthorValue } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
 
@@ -572,119 +565,6 @@ export function decodeNativeTerminalRowWithDescriptor(
     configurable: true,
   });
   return row;
-}
-
-/**
- * Compile the hot terminal-root decoder from an immutable producer-owned
- * layout. The descriptor's field identities and slots are checked once; each
- * operation thereafter carries only the layout ID and packed edit bytes.
- */
-export function compileNativeTerminalRootDecoder(
-  layout: NativeTerminalRootLayout,
-  descriptor: DescriptorField[],
-  columns: readonly ColumnDescriptor[],
-): (id: string, raw: Uint8Array) => WasmRow {
-  assertTerminalRootLayoutCompatible(descriptor, columns, layout);
-  const fieldsByName = new Map(layout.publicFields.map((field) => [field.name, field]));
-  const slots = columns.map((column) => fieldsByName.get(column.name)!.slot);
-  const decodeField = createRecordValueDecoder(descriptor);
-  return (id, raw) => {
-    assertRecordLayoutIsComplete(descriptor, raw);
-    const key = decodeField(raw, layout.rootKeySlot);
-    if (key == null || formatUuid(key) !== id) {
-      throw new Error("terminal record key does not match addressed key");
-    }
-    const values = columns.map((column, index) => {
-      const slot = slots[index]!;
-      const bytes = decodeField(raw, slot);
-      return bytes == null
-        ? ({ type: "Null" } satisfies Value)
-        : decodeTerminalColumnBytes(column, bytes, descriptor[slot]?.valueType);
-    });
-    const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
-    const row = { id, values };
-    Object.defineProperty(row, "valuesByColumn", {
-      value: valuesByColumn,
-      enumerable: false,
-      configurable: true,
-    });
-    return row;
-  };
-}
-
-function assertTerminalRootLayoutCompatible(
-  descriptor: readonly DescriptorField[],
-  columns: readonly ColumnDescriptor[],
-  layout: NativeTerminalRootLayout,
-): void {
-  if (layout.carrier !== "CurrentRow" && layout.carrier !== "Logical") {
-    throw new Error(`unsupported terminal root carrier ${String(layout.carrier)}`);
-  }
-  const root = descriptor[layout.rootKeySlot];
-  if (
-    !Number.isSafeInteger(layout.rootKeySlot) ||
-    root?.name !== layout.rootKeyFieldName ||
-    root.valueType.tag !== 11 ||
-    !isKnownValueType(root.valueType)
-  ) {
-    throw new Error("terminal root layout key slot does not match its descriptor");
-  }
-  if (layout.publicFields.length !== columns.length) {
-    throw new Error("terminal root layout does not match the public projection");
-  }
-  const columnsByName = new Map(columns.map((column) => [column.name, column]));
-  const seenNames = new Set<string>();
-  const seenSlots = new Set<number>([layout.rootKeySlot]);
-  for (let index = 0; index < layout.publicFields.length; index++) {
-    const field = layout.publicFields[index]!;
-    const column = columnsByName.get(field.name);
-    const descriptorField = descriptor[field.slot];
-    if (
-      !column ||
-      seenNames.has(field.name) ||
-      !Number.isSafeInteger(field.slot) ||
-      seenSlots.has(field.slot) ||
-      descriptorField?.name !== field.descriptorFieldName ||
-      !terminalLayoutValueTypeMatchesColumn(
-        descriptorField?.valueType,
-        column,
-        field.carrier ?? layout.carrier,
-      )
-    ) {
-      throw new Error(
-        `terminal root layout does not match the public projection at ${index}: ` +
-          `${field.name}/${field.descriptorFieldName}@${field.slot} vs ${column?.name ?? "<missing>"}/` +
-          `${descriptorField?.name ?? "<missing>"} (descriptor tag ${descriptorField?.valueType.tag ?? "?"}, ` +
-          `nullable ${String(column?.nullable)}, sparse ${String(column?.sparse)})`,
-      );
-    }
-    seenNames.add(field.name);
-    seenSlots.add(field.slot);
-  }
-}
-
-function terminalLayoutValueTypeMatchesColumn(
-  valueType: ValueType | undefined,
-  column: ColumnDescriptor,
-  carrier: NativeTerminalRootLayout["carrier"],
-): boolean {
-  // `sparse` describes the TS wildcard/storage carrier, not the declared
-  // public value. Rust collector descriptors have already removed it.
-  const logicalColumn = logicalStorageColumns([column])[0]!;
-  // Provenance lives in fixed CurrentRow system fields, not nullable _app_
-  // carriers. Authors are structured native records; timestamps retain their
-  // native scalar storage type.
-  if (isProvenanceMagicColumn(column.name)) {
-    return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
-  }
-  if (carrier === "Logical") {
-    return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
-  }
-  return (
-    valueType?.tag === 15 &&
-    valueType.inner !== undefined &&
-    terminalValueTypeMatchesColumn(valueType.inner, logicalColumn, false)
-  );
 }
 
 /**

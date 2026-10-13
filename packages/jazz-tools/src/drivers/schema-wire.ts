@@ -20,15 +20,6 @@ interface SerializeRuntimeSchemaOptions {
 
 const runtimeSchemaCacheKeys = new WeakMap<WasmSchema, Map<boolean, string>>();
 
-function isRuntimeSchemaEnvelope(value: unknown): value is RuntimeSchemaEnvelope {
-  return (
-    isRecord(value) &&
-    value.__jazzRuntimeSchema === 1 &&
-    isWasmSchema(value.schema) &&
-    typeof value.loadedPolicyBundle === "boolean"
-  );
-}
-
 export function normalizeRuntimeSchema(schema: unknown): WasmSchema {
   if (schema instanceof Map) {
     return Object.fromEntries(schema.entries()) as WasmSchema;
@@ -107,15 +98,4 @@ export function getRuntimeSchemaCacheKey(
   const key = serializeRuntimeSchema(schema, options);
   keysByPolicyBundle.set(loadedPolicyBundle, key);
   return key;
-}
-
-export function normalizeRuntimeSchemaJson(schemaJson: string): string {
-  const parsed = JSON.parse(schemaJson) as unknown;
-  if (isRuntimeSchemaEnvelope(parsed)) {
-    return JSON.stringify(parsed);
-  }
-  if (!isWasmSchema(parsed)) {
-    throw new Error("Invalid schema JSON payload.");
-  }
-  return serializeRuntimeSchema(parsed);
 }
