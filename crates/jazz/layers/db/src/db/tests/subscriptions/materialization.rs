@@ -59,9 +59,7 @@ fn local_combined_aggregate_publishes_changes_when_first_value_is_unchanged() {
         Aggregate::avg("rank"),
     ]);
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         ..Default::default()
     };
     let prepared = db.prepare_query(&query).expect("prepare combined total");
@@ -214,9 +212,7 @@ fn local_combined_aggregate_delivers_large_summary_and_subsequent_update() {
         Query::from("items").aggregate(names.iter().map(|name| Aggregate::min(name).alias(name)));
     let prepared = db.prepare_query(&query).expect("prepare large total");
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         ..Default::default()
     };
     let mut stream = block_on(db.subscribe(&prepared, opts.clone())).expect("subscribe");
