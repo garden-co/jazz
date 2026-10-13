@@ -1314,6 +1314,53 @@ pub(super) struct CollectLayout {
     pub(super) slots: Vec<CollectSlotLayout>,
 }
 
+impl CollectLayout {
+    /// Root fields published as application columns; the row id stays internal.
+    fn public_root_fields(&self) -> impl Iterator<Item = &CollectFlatField> {
+        self.root_fields
+            .iter()
+            .filter(|field| field.is_output && !field.is_row_id)
+    }
+
+    /// Public root columns keep their CurrentRow cell wrapper unless the
+    /// projection declared an unwrapped logical type.
+    fn root_field_carriers(&self) -> BTreeMap<String, AppRowCarrier> {
+        self.public_root_fields()
+            .map(|field| {
+                let carrier = if field.value_type == field.output_value_type {
+                    AppRowCarrier::CurrentRow
+                } else {
+                    AppRowCarrier::Logical
+                };
+                (field.output.clone(), carrier)
+            })
+            .collect()
+    }
+
+    fn root_public_field_names(&self) -> BTreeMap<String, String> {
+        self.public_root_fields()
+            .map(|field| (field.output.clone(), public_root_field_name(field)))
+            .collect()
+    }
+}
+
+/// Collector output columns for the root row, unwrapping nullable cells whose
+/// declared output type is logical.
+fn collect_root_output_fields(
+    root_fields: &[CollectFlatField],
+) -> impl Iterator<Item = CollectByField> + '_ {
+    root_fields
+        .iter()
+        .filter(|field| field.is_output)
+        .map(|field| {
+            if field.is_row_id || field.value_type == field.output_value_type {
+                CollectByField::renamed(&field.input, &field.output)
+            } else {
+                CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
+            }
+        })
+}
+
 #[derive(Clone, Debug)]
 struct LoweredAppRows {
     pub(super) publication_fields: BTreeMap<String, CurrentRowPublicationField>,
@@ -1361,36 +1408,15 @@ fn lower_collect_by_app_rows(
         // output types are authoritative; consumers must never infer it from
         // the eventual descriptor's field names.
         let carrier = if layout
-            .root_fields
-            .iter()
-            .filter(|field| field.is_output && !field.is_row_id)
+            .public_root_fields()
             .all(|field| field.value_type == field.output_value_type)
         {
             AppRowCarrier::CurrentRow
         } else {
             AppRowCarrier::Logical
         };
-        let field_carriers = layout
-            .root_fields
-            .iter()
-            .filter(|field| field.is_output && !field.is_row_id)
-            .map(|field| {
-                (
-                    field.output.clone(),
-                    if field.value_type == field.output_value_type {
-                        AppRowCarrier::CurrentRow
-                    } else {
-                        AppRowCarrier::Logical
-                    },
-                )
-            })
-            .collect();
-        let public_field_names = layout
-            .root_fields
-            .iter()
-            .filter(|field| field.is_output && !field.is_row_id)
-            .map(|field| (field.output.clone(), public_root_field_name(field)))
-            .collect();
+        let field_carriers = layout.root_field_carriers();
+        let public_field_names = layout.root_public_field_names();
         let anchor = collect_anchor_graph(
             visible_root,
             root_source,
@@ -1426,17 +1452,7 @@ fn lower_collect_by_app_rows(
             root_collect_group_fields(root_group, &layout.root_occurrence_inputs)
                 .into_iter()
                 .chain(route_fields.iter().cloned()),
-            layout
-                .root_fields
-                .iter()
-                .filter(|field| field.is_output)
-                .map(|field| {
-                    if field.is_row_id || field.value_type == field.output_value_type {
-                        CollectByField::renamed(&field.input, &field.output)
-                    } else {
-                        CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
-                    }
-                }),
+            collect_root_output_fields(&layout.root_fields),
             layout.root_order_cols.clone(),
             layout.root_tie_cols.clone(),
             layout.root_offset,
@@ -1464,33 +1480,14 @@ fn lower_collect_by_app_rows(
         &layout,
         !matches!(plan, AnalyzedQueryPlan::Union(_)),
     )?;
-    let mut field_carriers = layout
-        .root_fields
-        .iter()
-        .filter(|field| field.is_output && !field.is_row_id)
-        .map(|field| {
-            (
-                field.output.clone(),
-                if field.value_type == field.output_value_type {
-                    AppRowCarrier::CurrentRow
-                } else {
-                    AppRowCarrier::Logical
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let mut field_carriers = layout.root_field_carriers();
     field_carriers.extend(
         layout
             .slots
             .iter()
             .map(|slot| (slot.collection_field.clone(), AppRowCarrier::Logical)),
     );
-    let mut public_field_names = layout
-        .root_fields
-        .iter()
-        .filter(|field| field.is_output && !field.is_row_id)
-        .map(|field| (field.output.clone(), public_root_field_name(field)))
-        .collect::<BTreeMap<_, _>>();
+    let mut public_field_names = layout.root_public_field_names();
     public_field_names.extend(layout.slots.iter().map(|slot| {
         // Collection field names are public query-path identities. They are
         // carried verbatim into the terminal descriptor, so no prefix-based
@@ -1541,17 +1538,7 @@ fn lower_collect_by_app_rows(
         root_collect_group_fields(root_group.clone(), &layout.root_occurrence_inputs)
             .into_iter()
             .chain(route_fields.iter().cloned()),
-        layout
-            .root_fields
-            .iter()
-            .filter(|field| field.is_output)
-            .map(|field| {
-                if field.is_row_id || field.value_type == field.output_value_type {
-                    CollectByField::renamed(&field.input, &field.output)
-                } else {
-                    CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
-                }
-            }),
+        collect_root_output_fields(&layout.root_fields),
         layout
             .slots
             .iter()
