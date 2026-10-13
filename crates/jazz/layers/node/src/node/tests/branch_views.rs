@@ -2998,3 +2998,104 @@ fn completed_parents_without_waiting_children_do_not_reload_history() {
     assert_eq!(node.storage_read_metrics().history_indexes.reads, 0);
     assert_eq!(node.transaction_record(unrelated_child).unwrap().fate, Fate::Pending);
 }
+
+// Internal: the work a branch-view write does is not observable from its
+// result, only from storage reads and payload decodes. These are the client
+// lookups behind a branch-view update (head-over-base row resolution and copy
+// evidence capture) and the authority's copy-evidence admission check, so the
+// test drives them directly and counts what each one reads. Fixtures still use
+// the ordinary public schema and commit builders.
+/// One branch-view write touches one row, so its reads must not grow with the
+/// number of other rows in the base branch, and transaction visibility must
+/// come from the status projection rather than full payload decodes. alice
+/// seeds the base; the authority admits her copy evidence.
+///
+/// ```text
+/// alice ──seed N rows──► base
+///   │
+///   ├── resolve row 1 through head-over-base  ─┐
+///   ├── capture copy evidence for row 1        ├─ row 1's history only
+///   └── authority re-resolves that evidence   ─┘
+/// ```
+#[test]
+fn branch_view_row_resolution_and_copy_admission_do_not_scale_with_base_branch() {
+    fn work(width: u128) -> (usize, usize, groove::db::StorageReadMetrics) {
+        let schema = branch_view_schema();
+        let (_dir, mut node) = open_history_complete_node_with_schema(
+            NodeUuid::from_bytes([0x81; 16]),
+            schema.clone(),
+        );
+        let alice = AuthorSubject::for_test_bytes([0x82; 16]);
+        let base = branch_selector(0x83);
+        let head = branch_selector(0x84);
+        let target = RowUuid(uuid::Uuid::from_u128(1));
+        // One wide transaction, as when a base branch is seeded in bulk: its
+        // provenance record grows with every row it wrote.
+        let source_tx = node
+            .commit_mergeable_many_settled(
+                (1..=width)
+                    .map(|index| {
+                        MergeableCommit::new("todos", RowUuid(uuid::Uuid::from_u128(index)), 10)
+                            .branch(base.clone())
+                            .cells(BTreeMap::from([
+                                ("title".to_owned(), v("base")),
+                                ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
+                            ]))
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let view_base = crate::protocol::BranchViewBase::Current(base.clone());
+
+        super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.set(0));
+        super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(0));
+        node.reset_storage_read_metrics();
+        let cells = crate::local_executor::block_on(node.visible_current_cells_in_branch_view(
+            "todos",
+            &head,
+            Some(&view_base),
+            target,
+        ))
+        .unwrap()
+        .expect("base row is inherited through the view");
+        assert_eq!(cells.get("title"), Some(&v("base")));
+        let evidence = crate::local_executor::block_on(node.inherited_branch_view_copy_evidence(
+            "todos",
+            &head,
+            Some(&view_base),
+            target,
+        ))
+        .unwrap()
+        .expect("an inherited row without a head overlay yields copy evidence");
+        assert_eq!(evidence.source_version, source_tx);
+        let admitted = crate::local_executor::block_on(node.resolve_branch_view_copy_evidence(
+            &evidence,
+            schema.version_id(),
+            None,
+        ))
+        .unwrap()
+        .expect("the declared base still selects the exact source version");
+        assert_eq!(node.version_tx_id(&admitted).unwrap(), source_tx);
+        (
+            super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.get()),
+            super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.get()),
+            node.take_storage_read_metrics(),
+        )
+    }
+
+    let (small_history, small_payloads, small_reads) = work(4);
+    let (large_history, large_payloads, large_reads) = work(512);
+    assert_eq!(
+        small_history, large_history,
+        "a branch-view write must decode only the touched row's history"
+    );
+    assert_eq!(
+        (small_payloads, large_payloads),
+        (0, 0),
+        "winner visibility reads the status projection, not the transaction payload"
+    );
+    assert_eq!(
+        small_reads, large_reads,
+        "storage reads for one branch-view row must not depend on base branch size"
+    );
+}
