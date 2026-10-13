@@ -2509,8 +2509,6 @@ where
                     deferred_uploads: BTreeMap::new(),
                     retry_later_attempts: BTreeMap::new(),
                     missing_body_resends: BTreeSet::new(),
-                    scope_view_cuts: BTreeMap::new(),
-                    scope_receipts: BTreeMap::new(),
                     expected_scope_authority,
                     scope_lease_manager: AuthorizationScopeLeaseManager::default(),
                 }),
@@ -2903,8 +2901,6 @@ where
                 shape_registrations: BTreeMap::new(),
                 deferred_subscribe_rejections: VecDeque::new(),
                 pending_catalogue_subscriptions: BTreeMap::new(),
-                scope_purposes: BTreeMap::new(),
-                scope_aggregates: BTreeMap::new(),
                 authority_scope_hydrations: BTreeMap::new(),
                 authority_scope_hydration_count: 0,
                 serve_dirty: true,
@@ -3181,8 +3177,6 @@ where
                     served,
                     coverage_groups,
                     shape_registrations,
-                    scope_purposes,
-                    scope_aggregates,
                     authority_scope_hydrations,
                     ..
                 }) => {
@@ -3199,7 +3193,6 @@ where
                         for subscription in group.subscribers {
                             node.apply_unsubscribe(subscription);
                             served.remove(&subscription);
-                            scope_purposes.remove(&subscription);
                         }
                         peer.forget_subscription_with_node(
                             &mut node,
@@ -3208,7 +3201,6 @@ where
                     }
                     node.release_shapes_for_peer(connection_epoch);
                     shape_registrations.clear();
-                    scope_aggregates.clear();
                     authority_scope_hydrations.clear();
                     (None, None, None, retired)
                 }

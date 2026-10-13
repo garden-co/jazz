@@ -2,6 +2,110 @@
 
 use super::*;
 
+/// Alice and Bob's retained serving views own their private prepared shapes.
+/// Closing Alice must leave Bob live; closing both must release every plan.
+///
+/// alice + bob -> retained views -> close alice -> update bob -> close bob
+///
+/// This resource oracle is internal because correct rows alone cannot expose
+/// orphan prepared shapes that make later binding cleanup grow without bound.
+#[test]
+fn retained_serving_views_release_private_prepared_shapes() {
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    let bob = author(2);
+    commit_global_issue(&mut node, 0, "open", alice, 1);
+    commit_global_issue(&mut node, 1, "open", bob, 2);
+    let shape = Query::from("issues")
+        .filter(eq(col("assignee"), param("user")))
+        .filter(eq(col("state"), lit(Value::String("open".to_owned()))))
+        .validate(&schema())
+        .unwrap();
+    let [alice_binding, bob_binding] = [alice, bob].map(|reader| {
+        shape
+            .bind(BTreeMap::from([(
+                "user".to_owned(),
+                Value::Uuid(reader.test_uuid()),
+            )]))
+            .unwrap()
+    });
+    let baseline = node.database.runtime_stats();
+
+    for cycle in 0..3 {
+        if cycle != 0 {
+            commit_global_issue(&mut node, 1, "open", bob, 2 + cycle * 2);
+        }
+        let (alice_view, alice_rows) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &alice_binding,
+                AuthorSubject::SYSTEM,
+                DurabilityTier::Global,
+                &ReadViewSpec::default(),
+                None,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        let (mut bob_view, bob_rows) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &bob_binding,
+                AuthorSubject::SYSTEM,
+                DurabilityTier::Global,
+                &ReadViewSpec::default(),
+                None,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        assert_eq!(
+            alice_rows
+                .rows
+                .iter()
+                .map(CurrentRow::row_uuid)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([row(0)])
+        );
+        assert_eq!(
+            bob_rows
+                .rows
+                .iter()
+                .map(CurrentRow::row_uuid)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([row(1)])
+        );
+
+        assert!(node.unsubscribe_groove_subscription(alice_view.subscription_id()));
+        drop(alice_view);
+        commit_global_issue(&mut node, 1, "closed", bob, 3 + cycle * 2);
+        node.drain_local_maintained_view_subscription(&mut bob_view, None)
+            .unwrap()
+            .expect("Bob's existing view receives its row's retraction");
+        let bob_rows = node
+            .materialize_local_maintained_relation_snapshot_with_occurrences(&bob_view)
+            .unwrap()
+            .snapshot
+            .rows;
+        assert_eq!(
+            bob_rows
+                .iter()
+                .map(CurrentRow::row_uuid)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::new()
+        );
+        assert!(node.unsubscribe_groove_subscription(bob_view.subscription_id()));
+        drop(bob_view);
+        node.drive_query_runtime().unwrap();
+
+        let after = node.database.runtime_stats();
+        assert_eq!(after.active_subscriptions, baseline.active_subscriptions);
+        assert_eq!(after.active_shape_params, baseline.active_shape_params);
+        assert_eq!(
+            after.active_prepared_shapes, baseline.active_prepared_shapes,
+            "closed serving views must not leave private prepared shapes registered"
+        );
+    }
+}
+
 #[test]
 fn reachable_query_hydration_preserves_results_and_releases_ownership() {
     let (_dir, mut node) = open_recursive_node();

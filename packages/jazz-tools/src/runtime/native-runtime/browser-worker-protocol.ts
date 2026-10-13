@@ -312,6 +312,8 @@ export interface BrowserSharedWorkerBootstrapCancelRequest {
 export interface BrowserForegroundNodeLeaseProbeRequest {
   type: "probe-foreground-node-lease-worker";
   attemptId: string;
+  /** Start loading this realm's WASM now; the later runtime connect reuses it. */
+  wasmPrefetch?: { runtimeSources?: RuntimeSourcesConfig };
 }
 
 /** Lease-only bootstrap that runs before the foreground schema is known. */
@@ -347,6 +349,7 @@ export type BrowserForegroundNodeLeaseAcquireResponse =
   | { type: "foreground-node-lease-busy"; message: string }
   | {
       type: "foreground-node-lease-ready";
+      workerRealmId?: string;
       leaseId: string;
       node: Uint8Array;
       /** Canonical decimal u64: never a lossy JS number. */
@@ -567,6 +570,8 @@ export type BrowserFollowerPortEvent =
       /** Present only on an init reply for a worker-authenticated Inspector peer. */
       inspectorAttachmentPhysicalDbName?: string;
       peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
+      /** Present on init replies; identifies the worker owning the durable root. */
+      workerRealmId?: string;
     }
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }
