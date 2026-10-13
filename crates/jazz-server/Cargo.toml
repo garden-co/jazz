@@ -66,3 +66,7 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = [
   "rustls-tls-webpki-roots",
 ] }
 tower = { version = "0.5", features = ["util"] }
+
+[[test]]
+name = "jwks_retry"
+required-features = ["test"]

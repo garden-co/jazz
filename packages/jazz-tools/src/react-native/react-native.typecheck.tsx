@@ -4,7 +4,6 @@ import type { ReactNode } from "react";
 import {
   Db,
   JazzProvider,
-  UnimplementedSqliteStorageDriver,
   createDb,
   createJazzClient,
   schema,
@@ -18,8 +17,6 @@ import {
   type DbConfig,
   type JazzClient,
   type JazzClientConfig,
-  type ReactNativeSqliteConnection,
-  type ReactNativeSqliteStorageDriver,
 } from "./index.js";
 
 const app = schema.defineApp({
@@ -32,8 +29,6 @@ const app = schema.defineApp({
   ),
 });
 
-const sqliteStorage: ReactNativeSqliteStorageDriver = new UnimplementedSqliteStorageDriver();
-
 declare const authSecretStore: AuthSecretStore;
 declare const account: AccountHandle;
 
@@ -41,7 +36,6 @@ const config: DbConfig = {
   appId: "rn-typecheck",
   account,
   serverUrl: "https://sync.example.test",
-  sqliteStorage,
 };
 
 // Persistent RN admission is intentionally a field on the ordinary public
@@ -96,15 +90,6 @@ function Hooks({ children }: { children: ReactNode }) {
   );
 }
 
-async function storageDriverShape(connection: ReactNativeSqliteConnection) {
-  await connection.execute("create table if not exists jazz_kv (key text primary key, value blob)");
-  const rows = await connection.query<{ key: string }>("select key from jazz_kv");
-  await connection.transaction((tx) => tx.execute("delete from jazz_kv where key = ?", ["k"]));
-  await connection.close();
-  rows satisfies readonly { key: string }[];
-}
-
 void clientFactory;
 void Hooks;
-void storageDriverShape;
 void admittedConfig;
