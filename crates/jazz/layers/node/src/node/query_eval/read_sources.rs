@@ -3079,6 +3079,8 @@ where
         tier: DurabilityTier,
         stored_keys: &BTreeSet<BranchKey>,
     ) -> Result<GraphBuilder, SourceResolutionError> {
+        // The mask reads the whole branch key, not just the index prefix.
+        self.record_branch_layer_read(|metrics| metrics.source_branch_register_full_scans += 1);
         let mut rows = Vec::new();
         for r in Ref::stack(tier) {
             for branch_key in stored_keys {
@@ -3097,6 +3099,17 @@ where
             }
         }
         Ok(GraphBuilder::union(rows))
+    }
+
+    /// Record one branch-layer read in the query-engine read metrics. Like
+    /// every access-path receipt, it belongs to the fragment that owns the
+    /// deduplicated physical source, so a policy proof specialized from its
+    /// outer source records nothing (`count_access_path_metrics`), whatever
+    /// the access.
+    fn record_branch_layer_read(&mut self, record: impl FnOnce(&mut QueryEngineReadMetrics)) {
+        if self.count_access_path_metrics {
+            record(&mut self.node.query_engine_read_metrics);
+        }
     }
 
     /// Build the maintained content-winner relation for one logical branch
@@ -3130,13 +3143,9 @@ where
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let refs = Ref::stack(tier).len() as u64;
         let keys = stored_keys.len() as u64;
-        match access {
-            BranchLayerAccess::Full => self.node.query_engine_read_metrics.source_full_scans += 1,
-            BranchLayerAccess::PrimaryKey(_) => {
-                if self.count_access_path_metrics {
-                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
-                }
-            }
+        self.record_branch_layer_read(|metrics| match access {
+            BranchLayerAccess::Full => metrics.source_full_scans += 1,
+            BranchLayerAccess::PrimaryKey(_) => metrics.source_primary_key_scans += 1,
             BranchLayerAccess::Index { intersections, .. } => {
                 // Each ref, plus the shadow under the local delta.
                 let scans = if tier == DurabilityTier::Global {
@@ -3144,10 +3153,9 @@ where
                 } else {
                     refs + 1
                 };
-                self.node.query_engine_read_metrics.source_index_probes +=
-                    scans * keys * (1 + intersections.len() as u64);
+                metrics.source_index_probes += scans * keys * (1 + intersections.len() as u64);
             }
-        }
+        });
         // One class's rows under every stored spelling of the key.
         let class_rows = |this: &Self, class| {
             stored_keys
@@ -3235,7 +3243,13 @@ where
             .collect::<Vec<_>>();
         let scan = match access {
             BranchLayerAccess::PrimaryKey(prefix) => Some(row_prefix_scan(prefix)),
-            BranchLayerAccess::Full | BranchLayerAccess::Index { .. } => None,
+            BranchLayerAccess::Full | BranchLayerAccess::Index { .. } => {
+                // The register reads the whole branch key even under an index.
+                self.record_branch_layer_read(|metrics| {
+                    metrics.source_branch_register_full_scans += 1
+                });
+                None
+            }
         };
         // Physical current tables are schema-variant; read them through the
         // current projection. Deletion is a cell of the winning row image:
