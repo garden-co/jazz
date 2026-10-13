@@ -78,6 +78,30 @@ Automatic `createJazzSession({ initial: "local-first" })` startup performs its
 first-root ensure inside that transaction, then adopts the durable winner before
 opening a client. Explicit `createLocalFirst`, recovery, and logout operations
 keep their existing selection semantics.
+Browser managers (`createAccountManager` with its default browser store) also
+retain the selected external account's non-secret assignment,
+`{ account, issuer, subject }`, never a token. Managers given an `AccountStore`
+(Node, SSR, React Native) do not, and keep the ordinary teardown-and-reopen
+login. On the next browser start `getLoggedIn()` returns that account at once,
+and a context opens its local data before the provider answers. Until a
+provider JWT arrives the context does not connect upstream (the server would
+reject a connection without a credential and end its subscriptions), and local
+policies see an empty `session.claims`: rules that depend on provider claims
+deny until revalidation. The app must still log in: nothing else gives the
+retained account a credential. In a shared browser worker, another tab's credential
+for the same account may sync this tab's writes sooner. Logging in again as the
+same identity (`loginJWT`, `loginOrRegisterJWT`, or the auth provider
+connection) revalidates that account in place, without closing the context:
+`AccountManager.loginJWT` then resolves to the very handle already open, and
+the first credential starts the context's sync connection. A
+different provider subject is detected before any registry call and switches
+accounts as before, reusing the provider token already fetched; a provider that
+hydrates signed out logs the retained account out. If the registry rejects the
+revalidation, the context stays open with the error, and `session.retry()`
+revalidates again rather than reopening the unconfirmed account. A logout that
+starts while a revalidation is in flight wins: the account is never confirmed.
+Writes made before revalidation stay in that account's local store and sync
+once that identity is admitted again.
 The shared helper merges retained roots inside that transaction, so a stale
 manager cannot erase another manager's offline key. Selection follows the
 last successful operation; external provider credentials are never persisted.
