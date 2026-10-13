@@ -654,8 +654,9 @@ fn nullable_reference_index_matches_present_uuid_and_excludes_nulls() {
         let (optional_rows, optional_metrics) =
             query_rows_by_uuid(&mut core, optional.clone(), tier);
         assert_eq!(optional_rows, vec![matching_optional]);
-        // A Local read also probes the overlay and its shadow of settled rows.
-        let probes = if tier == DurabilityTier::Local { 3 } else { 1 };
+        // A Local read also probes the local delta; its mask over origin is
+        // a keyed lookup by origin's candidates, not an index probe.
+        let probes = if tier == DurabilityTier::Local { 2 } else { 1 };
         assert_eq!(optional_metrics.source_index_probes, probes);
         let (required_rows, _) = query_rows_by_uuid(&mut core, required.clone(), tier);
         assert_eq!(required_rows, vec![matching_required]);
@@ -744,9 +745,10 @@ fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
     assert_eq!(selected_metrics.source_primary_key_scans, 0);
     assert_eq!(selected_metrics.source_index_probes, 1);
     assert_eq!(selected_metrics.source_full_scans, 0);
-    // Settled, overlay and shadow index probes; a newer pending winner that
-    // changed owner is shadowed without scanning the overlay.
-    assert_eq!(local_metrics.source_index_probes, 3);
+    // Origin and local-delta index probes; a newer pending winner that
+    // changed owner masks its origin image through a keyed lookup by the
+    // origin candidates' row ids, without scanning the delta.
+    assert_eq!(local_metrics.source_index_probes, 2);
     assert_eq!(local_metrics.source_full_scans, 0);
 }
 
@@ -816,7 +818,8 @@ fn local_indexed_read_includes_ahead_winners_outside_the_settled_prefix() {
         local.into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([moved_in, duplicate])
     );
-    assert_eq!(metrics.source_index_probes, 3);
+    // Origin and the local delta each probe the index once.
+    assert_eq!(metrics.source_index_probes, 2);
     assert_eq!(metrics.source_full_scans, 0);
 }
 
@@ -1057,7 +1060,8 @@ fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
     assert_eq!(selected, vec![first]);
     assert_eq!(selected_metrics.source_index_probes, 2);
     assert_eq!(selected_metrics.source_full_scans, 0);
-    assert_eq!(local_metrics.source_index_probes, 6);
+    // Origin and the local delta each probe both indexes.
+    assert_eq!(local_metrics.source_index_probes, 4);
     assert_eq!(local_metrics.source_full_scans, 0);
 }
 
@@ -3145,6 +3149,134 @@ fn include_deleted_one_shot_read_reachable_matches_deleted_roots_through_visible
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), doc);
     assert!(rows[0].is_deleted());
+}
+
+/// A trusted include-deleted read of the documents team `t1` reaches
+/// through `kind = unit` edges selects the edge table's `kind` index inside
+/// the recursive step. At `Local` the step must still see alice's pending
+/// edit that changed a settled edge's kind: the local delta masks that
+/// edge's origin image inside the recursion, so the walk stops at `t2`.
+/// Internal because only the node's trusted include-deleted read hands an
+/// index access path to a recursive step source.
+///
+/// ```text
+/// origin: t1 -unit-> t2 -unit-> t3 ; d1@t1 d2@t2 d3@t3
+/// local:  edge t2->t3 kind -> other
+/// read reachable from t1 via unit edges ──Global──► {d1, d2, d3}
+///                                        ──Local───► {d1, d2}
+/// ```
+#[test]
+fn include_deleted_reachable_indexed_step_masks_origin_by_pending_edges() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("team_access")
+                    .fk_column("doc", "docs")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_edges")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams")
+                    .column("kind", PublicColumnType::Text)
+                    .index_only(["kind"]),
+            ),
+    );
+    let (_temp_dir, mut node) = open_node_with_schema(node(9), schema.clone());
+    let mut tx_time = 10;
+    let mut settle = |node: &mut NodeState, table: &str, row_uuid: RowUuid, cells| {
+        tx_time += 1;
+        let tx_id = node
+            .commit_mergeable_settled(MergeableCommit::new(table, row_uuid, tx_time).cells(cells))
+            .unwrap();
+        let global_time = node.allocate_global_time_for_test();
+        node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(global_time),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+    };
+    let text = |value: &str| Value::String(value.to_owned());
+    let (t1, t2, t3) = (row(0x71), row(0x72), row(0x73));
+    let (d1, d2, d3) = (row(0x81), row(0x82), row(0x83));
+    let edge_23 = row(0x92);
+    for team in [t1, t2, t3] {
+        settle(&mut node, "teams", team, BTreeMap::from([("name".to_owned(), text("team"))]));
+    }
+    for (doc, team, access) in [(d1, t1, row(0xa1)), (d2, t2, row(0xa2)), (d3, t3, row(0xa3))] {
+        settle(&mut node, "docs", doc, BTreeMap::from([("title".to_owned(), text("doc"))]));
+        settle(
+            &mut node,
+            "team_access",
+            access,
+            BTreeMap::from([
+                ("doc".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ]),
+        );
+    }
+    for (edge, member, parent) in [(row(0x91), t1, t2), (edge_23, t2, t3)] {
+        settle(
+            &mut node,
+            "team_edges",
+            edge,
+            BTreeMap::from([
+                ("member".to_owned(), Value::Uuid(member.0)),
+                ("parent".to_owned(), Value::Uuid(parent.0)),
+                ("kind".to_owned(), text("unit")),
+            ]),
+        );
+    }
+    node.commit_mergeable_settled(
+        MergeableCommit::new("team_edges", edge_23, 100)
+            .cells(BTreeMap::from([("kind".to_owned(), text("other"))])),
+    )
+    .unwrap();
+    let shape = Query::from("docs")
+        .reachable_via(
+            "team_access",
+            "doc",
+            "team",
+            lit(Value::Uuid(t1.0)),
+            "team_edges",
+            "member",
+            "parent",
+            [eq(col("kind"), lit("unit"))],
+        )
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut read = |tier| {
+        node.reset_query_engine_read_metrics();
+        let rows = node
+            .query_rows_including_deleted_in_authorization_mode(
+                &shape,
+                &binding,
+                tier,
+                None,
+                AuthorSubject::SYSTEM,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        let probes = node.query_engine_read_metrics().source_index_probes;
+        let rows = rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        (rows, probes)
+    };
+    assert_eq!(
+        read(DurabilityTier::Global),
+        (BTreeSet::from([d1, d2, d3]), 1)
+    );
+    // Origin and the local delta are each read under the step's `kind`
+    // prefix; inside the recursion the delta masks origin by its whole
+    // presence, since a keyed lookup cannot run in a recursive step.
+    assert_eq!(read(DurabilityTier::Local), (BTreeSet::from([d1, d2]), 2));
 }
 
 #[test]

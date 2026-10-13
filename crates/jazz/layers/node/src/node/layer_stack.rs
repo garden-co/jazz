@@ -31,18 +31,15 @@ pub(in crate::node) enum Mask {
     /// unbounded layer, or one bounded by the same row-closed access path
     /// (a primary-key prefix) as the layers below it.
     OwnRows,
-    /// Origin's images of the rows the local delta overrides
-    /// (`ahead_shadow`), read under the same access path as the origin
-    /// layer. Exact for the fixed pair "local over origin" only: a pending
-    /// edit that moved a row out of an index prefix still masks its origin
-    /// image, because the shadow holds that image.
-    Shadow(GraphBuilder),
     /// The layer's `row_uuid`s, read without the access path that bounds its
-    /// rows. A branch view masks its base by the head's presence this way,
-    /// so a head edit that left the predicate still hides the base row (SPEC
-    /// 11 "Masking precedes predicates"). Only ids the layers below hold can
-    /// hide anything, so the presence is read just for those ids: a keyed
-    /// lookup by the base candidates' row ids.
+    /// rows, so a layer edit that left the predicate still hides the row
+    /// below (SPEC 11 "Masking precedes predicates"). Only ids the layers
+    /// below hold can hide anything, so the presence is read just for those
+    /// ids: a keyed lookup of the layer's stored rows by the lower
+    /// candidates' row ids. The local delta masks origin this way under an
+    /// index (a pending edit that moved a row out of the prefix still hides
+    /// its origin image), and a branch view masks its base by the head's
+    /// presence.
     Presence(GraphBuilder),
 }
 
@@ -71,7 +68,7 @@ impl Layer {
     fn hidden_below(&self) -> GraphBuilder {
         match &self.mask {
             Mask::OwnRows => self.rows.clone(),
-            Mask::Shadow(rows) | Mask::Presence(rows) => rows.clone(),
+            Mask::Presence(rows) => rows.clone(),
         }
         .project(["row_uuid"])
     }

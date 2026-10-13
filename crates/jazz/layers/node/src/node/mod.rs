@@ -603,11 +603,6 @@ pub struct NodeState<S = BoxedStorage> {
     /// needs ordering, so use the low-overhead deterministic hasher here.
     /// Overlay row key -> the pending transaction whose image it holds.
     ahead_current_keys: FxHashMap<(PhysicalTableId, Vec<u8>), TxId>,
-    /// Rows whose overlay or synced image changed in the open batch; their
-    /// shadow copies are brought in line by `flush_ahead_shadows`. The flag
-    /// says whether the row may already hold a shadow (it had an overlay
-    /// before this batch touched it).
-    ahead_shadow_dirty: Vec<(SchemaVersionId, String, BranchKey, RowUuid, bool)>,
     /// History rows written since the last applied node batch, per
     /// transaction `(tx_time, tx_node_alias)`; `apply_node_batch` adds them to
     /// the transaction's `jazz_tx_touched_rows` list.

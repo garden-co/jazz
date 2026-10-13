@@ -17,9 +17,10 @@
 //! | `Remote(Origin)`| `Global` (`..._global_current`)   |
 //! | `Local`         | `Ahead` (`..._ahead_current`) over `Global` |
 //!
-//! `AheadShadow` holds origin's images of the rows the local delta
-//! overrides, so a read bounded by an index can mask the origin layer
-//! without visiting the whole delta.
+//! A read bounded by an index masks the origin layer by the local delta's
+//! presence among origin's candidates: a keyed lookup of the delta by those
+//! candidates' row ids, so it never visits the whole delta and needs no
+//! stored copy of the overridden origin images.
 
 use super::*;
 

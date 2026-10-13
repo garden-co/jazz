@@ -897,7 +897,6 @@ impl NodeState {
             node_aliases: NodeAliases::default(),
             absent_node_alias: None,
             ahead_current_keys: FxHashMap::default(),
-            ahead_shadow_dirty: Vec::new(),
             tx_touched_dirty: BTreeMap::new(),
             history_tx_authors: BTreeMap::new(),
             history_tx_seqs: RefCell::new(FxHashMap::default()),

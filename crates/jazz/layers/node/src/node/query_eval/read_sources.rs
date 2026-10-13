@@ -3011,11 +3011,12 @@ where
     /// (`INV-BVIEW-9`).
     ///
     /// Under an index access path every content layer reads only its index
-    /// prefix: the local delta masks origin through the shadow, and the head
-    /// masks the base by its presence. Everything else is read by the
-    /// content candidates' row ids (a keyed lookup, #4005), so it costs the
-    /// candidates rather than the branches:
+    /// prefix, and everything else is read by the content candidates' row
+    /// ids (a keyed lookup, #4005), so it costs the candidates rather than
+    /// the branches:
     ///
+    /// - within each branch, the local delta masks origin by its presence
+    ///   looked up by origin's candidates' row ids;
     /// - the head's presence is looked up by the base candidates' row ids:
     ///   anti-joining the base candidates only needs the head rows that
     ///   share one of their ids;
@@ -3094,9 +3095,9 @@ where
             )
             .await?;
         let head_content = if indexed {
-            let presence = self.branch_presence(
+            let presence = self.presence(
                 request,
-                tier,
+                Ref::stack(tier),
                 &head_keys,
                 base_content.clone().project(["row_uuid"]),
             )?;
@@ -3113,18 +3114,35 @@ where
         ))
     }
 
-    /// The `row_uuid`s a branch key holds at `tier` among `row_ids`,
-    /// whatever their values: the union of its refs' rows, each looked up by
-    /// those ids and read through the system-field winner projection.
-    fn branch_presence(
-        &mut self,
+    /// The `row_uuid`s a branch key holds in `refs` among `row_ids`,
+    /// whatever their values: the union of those refs' rows, each looked up
+    /// by those ids and read through the system-field winner projection.
+    /// This is a [`layer_stack::Mask::Presence`]: the head's presence over a
+    /// base (`refs` = the head's ref stack), or the local delta's over origin
+    /// (`refs` = `[Local]`).
+    ///
+    /// A source inside a recursive step cannot look rows up: Groove
+    /// evaluates the step without storage reads, so a lookup there is a
+    /// typed `UnsupportedLookup`. There the presence is the refs' rows read
+    /// whole. That is exact (the extra ids match no candidate, so they hide
+    /// nothing) and costs the masking layer's rows, never the layers below:
+    /// the local delta (this node's pending rows, which an unindexed `Local`
+    /// read reads whole anyway) or a branch view's head.
+    fn presence(
+        &self,
         request: &SourceRequest,
-        tier: DurabilityTier,
+        refs: &[Ref],
         stored_keys: &BTreeSet<BranchKey>,
         row_ids: GraphBuilder,
     ) -> Result<GraphBuilder, SourceResolutionError> {
+        let in_recursive_step = request.source.path.components.iter().any(|role| {
+            matches!(
+                role,
+                crate::node::query_engine::SourceRole::RecursiveStep(_)
+            )
+        });
         let mut rows = Vec::new();
-        for r in Ref::stack(tier) {
+        for r in refs {
             for branch_key in stored_keys {
                 let marker = self
                     .node
@@ -3136,11 +3154,14 @@ where
                         None,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-                rows.push(
-                    lookup_by_row_id(marker, row_ids.clone())
-                        .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
-                        .project(["row_uuid"]),
-                );
+                let present = if in_recursive_step {
+                    marker
+                } else {
+                    lookup_by_row_id(marker, row_ids.clone()).map_err(|_| {
+                        source_resolution_error(request, SourceGap::SchemaProjection)
+                    })?
+                };
+                rows.push(present.project(["row_uuid"]));
             }
         }
         Ok(GraphBuilder::union(rows))
@@ -3185,14 +3206,10 @@ where
                 }
             }
             BranchLayerAccess::Index { intersections, .. } => {
-                // Each ref, plus the shadow under the local delta.
-                let scans = if tier == DurabilityTier::Global {
-                    refs
-                } else {
-                    refs + 1
-                };
+                // Each ref under the prefix; the local delta's mask over
+                // origin is a keyed lookup, not an index probe.
                 self.node.query_engine_read_metrics.source_index_probes +=
-                    scans * keys * (1 + intersections.len() as u64);
+                    refs * keys * (1 + intersections.len() as u64);
             }
         }
         // One class's rows under every stored spelling of the key.
@@ -3246,16 +3263,29 @@ where
                 .map(GraphBuilder::union)
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
         };
+        let origin = class_rows(self, Ref::Remote(Remote::Origin).physical_class())?
+            .project(physical_fields.clone());
         let layers = layer_stack::try_ref_layers(tier, |r| {
+            if r == Ref::Remote(Remote::Origin) {
+                return Ok(layer_stack::Layer::new(origin.clone()));
+            }
             let rows = class_rows(self, r.physical_class())?.project(physical_fields.clone());
-            Ok(match (r, access) {
-                // Under an index prefix the local delta masks origin through
-                // the shadow, read under that same prefix.
-                (Ref::Local, BranchLayerAccess::Index { .. }) => layer_stack::Layer::masked_by(
+            Ok(match access {
+                // Under an index prefix the local delta masks origin by its
+                // presence among origin's candidates: a pending edit that
+                // moved a row out of the prefix still hides its origin image.
+                BranchLayerAccess::Index { .. } => layer_stack::Layer::masked_by(
                     rows,
-                    layer_stack::Mask::Shadow(class_rows(self, PhysicalCurrentClass::AheadShadow)?),
+                    layer_stack::Mask::Presence(self.presence(
+                        request,
+                        &[r],
+                        stored_keys,
+                        origin.clone().project(["row_uuid"]),
+                    )?),
                 ),
-                _ => layer_stack::Layer::new(rows),
+                BranchLayerAccess::Full | BranchLayerAccess::PrimaryKey(_) => {
+                    layer_stack::Layer::new(rows)
+                }
             })
         })?;
         let content = if tier == DurabilityTier::Global {
@@ -3533,12 +3563,13 @@ where
                 global
             } else {
                 let global = global.project(physical_fields.clone());
-                // An unlimited index read stays index-bounded on the overlay
-                // too: overlay rows under the prefix join the result, and the
-                // shadow (synced copies of overlaid rows, same indexes) names
-                // the settled candidates they replace. A pending edit that
-                // moved a row out of the prefix still shadows its settled
-                // copy, because the shadow holds the settled image.
+                // An unlimited index read stays index-bounded on the local
+                // delta too: delta rows under the prefix join the result, and
+                // the delta's presence among the settled candidates' row ids
+                // (a keyed lookup) names the candidates they replace. A
+                // pending edit that moved a row out of the prefix still hides
+                // its settled image: the lookup reads the delta by row id,
+                // whatever its indexed value.
                 if let Some(CurrentAccessPath::Index {
                     column,
                     order_column,
@@ -3572,17 +3603,20 @@ where
                         )
                     };
                     self.node.query_engine_read_metrics.source_index_probes +=
-                        2 * (1 + intersections.len() as u64);
+                        1 + intersections.len() as u64;
                     let ahead = scan(self, PhysicalCurrentClass::Ahead).map_err(|_| {
                         source_resolution_error(request, SourceGap::SchemaProjection)
                     })?;
-                    let shadow = scan(self, PhysicalCurrentClass::AheadShadow).map_err(|_| {
-                        source_resolution_error(request, SourceGap::SchemaProjection)
-                    })?;
+                    let presence = self.presence(
+                        request,
+                        &[Ref::Local],
+                        &BTreeSet::from([BranchKey::default()]),
+                        global.clone().project(["row_uuid"]),
+                    )?;
                     let ahead = self.exclude_settled_arm(request, ahead, true).await?;
                     let ahead = ahead.project(physical_fields.clone());
                     let content = layer_stack::compose([
-                        layer_stack::Layer::masked_by(ahead, layer_stack::Mask::Shadow(shadow)),
+                        layer_stack::Layer::masked_by(ahead, layer_stack::Mask::Presence(presence)),
                         layer_stack::Layer::new(global),
                     ])
                     .project(physical_fields)
