@@ -548,7 +548,19 @@ pub(super) fn lowered_terminals(
     // cannot retain any routed binding fields yet.
     if let Some(app_rows) = &request.output.app_rows {
         let projected_output = projected_multisource_terminal(plan, source);
-        let (
+        let collect_app_rows = |projection: &AppProjectionTree| {
+            lower_collect_by_app_rows(
+                closure.visible_root.clone(),
+                projection,
+                plan,
+                source,
+                resolved_sources,
+                request,
+                &root_route_fields,
+                available_fields,
+            )
+        };
+        let LoweredAppRows {
             graph,
             descriptor,
             mut hidden_fields,
@@ -557,7 +569,7 @@ pub(super) fn lowered_terminals(
             public_field_names,
             publication_fields,
             terminal,
-        ) = match app_rows.projection.clone() {
+        } = match app_rows.projection.clone() {
             _ if !app_rows.public_terminal => {
                 // Authorization consumes existence, not candidate payloads.
                 // Project only after all predicates/relations have run, and
@@ -575,14 +587,14 @@ pub(super) fn lowered_terminals(
                         .filter(|field| field.name.as_ref() == Some(row_id))
                         .cloned(),
                 );
-                (
-                visible_root_with_routes.clone().project(fields),
+                LoweredAppRows {
+                graph: visible_root_with_routes.clone().project(fields),
                 descriptor,
-                BTreeSet::new(),
-                AppRowCarrier::CurrentRow,
-                BTreeMap::new(),
-                BTreeMap::new(),
-                source
+                hidden_fields: BTreeSet::new(),
+                carrier: AppRowCarrier::CurrentRow,
+                field_carriers: BTreeMap::new(),
+                public_field_names: BTreeMap::new(),
+                publication_fields: source
                     .row_shape
                     .descriptor
                     .fields()
@@ -604,8 +616,8 @@ pub(super) fn lowered_terminals(
                         Some((carrier, binding))
                     })
                     .collect(),
-                AppRowTerminal::Direct,
-                )
+                terminal: AppRowTerminal::Direct,
+                }
             }
             PayloadProjection::Relation(requested) => {
                 let columns = match root_linear_steps(plan).and_then(|steps| match steps.last() {
@@ -727,39 +739,18 @@ pub(super) fn lowered_terminals(
                         (requested.alias.clone(), binding)
                     })
                     .collect::<BTreeMap<_, _>>();
-                (
+                LoweredAppRows {
                     graph,
                     descriptor,
                     hidden_fields,
-                    AppRowCarrier::Logical,
-                    BTreeMap::new(),
+                    carrier: AppRowCarrier::Logical,
+                    field_carriers: BTreeMap::new(),
                     public_field_names,
                     publication_fields,
-                    AppRowTerminal::Direct,
-                )
+                    terminal: AppRowTerminal::Direct,
+                }
             }
-            PayloadProjection::Tree(tree) => {
-                let collected = lower_collect_by_app_rows(
-                    closure.visible_root.clone(),
-                    &tree,
-                    plan,
-                    source,
-                    resolved_sources,
-                    request,
-                    &root_route_fields,
-                    available_fields,
-                )?;
-                (
-                    collected.graph,
-                    collected.descriptor,
-                    collected.hidden_fields,
-                    collected.carrier,
-                    collected.field_carriers,
-                    collected.public_field_names,
-                    collected.publication_fields,
-                    collected.terminal,
-                )
-            }
+            PayloadProjection::Tree(tree) => collect_app_rows(&tree)?,
             _ if projected_output.is_some() => {
                 let (output_source_id, output_fields, _is_flat) = projected_output
                     .as_ref()
@@ -820,42 +811,21 @@ pub(super) fn lowered_terminals(
                         )
                     })
                     .collect();
-                (
+                LoweredAppRows {
                     graph,
                     descriptor,
-                    BTreeSet::<String>::new(),
-                    AppRowCarrier::Logical,
-                    BTreeMap::new(),
+                    hidden_fields: BTreeSet::new(),
+                    carrier: AppRowCarrier::Logical,
+                    field_carriers: BTreeMap::new(),
                     public_field_names,
                     publication_fields,
-                    AppRowTerminal::Direct,
-                )
+                    terminal: AppRowTerminal::Direct,
+                }
             }
-            _ => {
-                let collected = lower_collect_by_app_rows(
-                    closure.visible_root.clone(),
-                    &AppProjectionTree {
-                        fields: FieldProjection::All,
-                        paths: Vec::new(),
-                    },
-                    plan,
-                    source,
-                    resolved_sources,
-                    request,
-                    &root_route_fields,
-                    available_fields,
-                )?;
-                (
-                    collected.graph,
-                    collected.descriptor,
-                    collected.hidden_fields,
-                    collected.carrier,
-                    collected.field_carriers,
-                    collected.public_field_names,
-                    collected.publication_fields,
-                    collected.terminal,
-                )
-            }
+            _ => collect_app_rows(&AppProjectionTree {
+                fields: FieldProjection::All,
+                paths: Vec::new(),
+            })?,
         };
         // Prepared multisinks bind route parameters at every terminal. Keep
         // the same compiler-owned route carriers in the app-row schema as in
@@ -1345,7 +1315,7 @@ pub(super) struct CollectLayout {
 }
 
 #[derive(Clone, Debug)]
-struct LoweredCollectByAppRows {
+struct LoweredAppRows {
     pub(super) publication_fields: BTreeMap<String, CurrentRowPublicationField>,
     pub(super) graph: GraphBuilder,
     pub(super) descriptor: RecordDescriptor,
@@ -1365,7 +1335,7 @@ fn lower_collect_by_app_rows(
     request: &LoweringContext<'_>,
     route_fields: &BTreeSet<String>,
     available_fields: &BTreeSet<String>,
-) -> CapabilityResult<LoweredCollectByAppRows> {
+) -> CapabilityResult<LoweredAppRows> {
     let mut parameter_domain = request
         .parameter_domain()
         .map_err(single_gap_report)?
@@ -1473,7 +1443,7 @@ fn lower_collect_by_app_rows(
             layout.root_limit,
         );
         let descriptor = collect_output_descriptor(&layout)?;
-        return Ok(LoweredCollectByAppRows {
+        return Ok(LoweredAppRows {
             publication_fields,
             graph,
             descriptor,
@@ -1593,7 +1563,7 @@ fn lower_collect_by_app_rows(
     );
     let mut hidden_fields = hidden_source_fields(&root_source.row_shape);
     hidden_fields.extend(route_fields.iter().cloned());
-    Ok(LoweredCollectByAppRows {
+    Ok(LoweredAppRows {
         publication_fields,
         graph,
         descriptor,
