@@ -176,6 +176,56 @@ it("quiesces foreground mutation admission before capturing its final HLC", asyn
   await runtime.close();
 });
 
+it("keeps core ticks running while a foreground handoff drains started native work", async () => {
+  let scheduleTick: ((urgency: "immediate" | "deferred") => void) | undefined;
+  let releaseNode!: () => void;
+  const nodeReleased = new Promise<void>((resolve) => {
+    releaseNode = resolve;
+  });
+  let ticks = 0;
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+            scheduleTick = callback;
+          },
+          // A started native future holds the node lock until a core tick
+          // completes its host continuation; the HLC readout waits for that lock.
+          foregroundTxTimeHighWater: async () => {
+            scheduleTick?.("immediate");
+            await nodeReleased;
+            return 9n;
+          },
+          tick: () => {
+            ticks += 1;
+            releaseNode();
+          },
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
+  const stalled = new Promise<never>((_resolve, reject) => {
+    setTimeout(() => reject(new Error("the handoff waited for a core tick that never ran")), 1_000);
+  });
+  await expect(Promise.race([handoff, stalled])).resolves.toBe(9n);
+  expect(ticks).toBeGreaterThan(0);
+  // Once the drain has finished, the closed runtime schedules no further ticks.
+  ticks = 0;
+  scheduleTick?.("immediate");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(ticks).toBe(0);
+  await runtime.close();
+});
+
 it("drains an already admitted streaming mutation before returning its foreground HLC", async () => {
   let highWater = 7n;
   let releaseSource!: () => void;
@@ -726,7 +776,7 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
         user_id: "00000000-0000-0000-0000-0000000000b2",
         claims: { team: "later-team" },
       }),
-      "local",
+      "local-first",
       JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([
@@ -1385,7 +1435,7 @@ it("keeps session-scoped transaction reads on the client-local native method", a
         issuer: "https://issuer.example",
         user_id: "00000000-0000-0000-0000-0000000000b2",
       }),
-      "local",
+      "local-first",
       JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([
@@ -1402,7 +1452,7 @@ it("keeps session-scoped transaction reads on the client-local native method", a
         issuer: "https://issuer.example",
         user_id: "00000000-0000-0000-0000-0000000000a1",
       }),
-      "local",
+      "local-first",
       JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([

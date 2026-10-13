@@ -2,18 +2,19 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { schema as s, migration as m } from "../index.js";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { type Db } from "./db.js";
 import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
 
-import { computeSchemaHash, pushPermissions, pushSchema } from "../dev/catalogue.js";
-import { pushMigration } from "../dev/catalogue-project.js";
+import { computeSchemaHash } from "../dev/catalogue.js";
+import { loadDefinedMigration } from "../dev/catalogue-project.js";
+import { fetchMigrationGraph } from "../dev/migration-graph.js";
 import { renderMigrationStub } from "../dev/migrations.js";
 import { wasmSchemasEqual } from "../dev/schema-utils.js";
-import { fetchSchemaConnectivity, fetchStoredWasmSchema } from "./schema-fetch.js";
+import { fetchStoredWasmSchema } from "../dev/catalogue-api.js";
 
 const oldSchema = {
   todos: s.table(
@@ -56,12 +57,12 @@ const newPermissions = s.definePermissions(newApp, ({ policy }) => [
   policy.todos.allowDelete.always(),
 ]);
 
-const migration = s.defineMigration({
+const migration = m.defineMigration({
   from: oldSchema,
   to: newSchema,
   migrate: {
     todos: {
-      tags: s.add.array({ of: s.string(), default: [] }),
+      tags: m.add.array({ of: s.string(), default: [] }),
     },
   },
 });
@@ -207,7 +208,7 @@ it("publishes UUID reference identity lenses and relates rows written before pub
         reviewerId: null,
       })
       .wait({ tier: "global" });
-    const migration = s.defineMigration({ from: before, to: after });
+    const migration = m.defineMigration({ from: before, to: after });
     expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
     await deploy({
       appId,
@@ -313,7 +314,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
       })
       .wait({ tier: "global" });
     const fromHash = deployed.schema.hash;
-    const { hash: toHash } = await pushSchema({ ...catalogue, schema: afterApp });
+    const toHash = await computeSchemaHash(afterApp.wasmSchema);
     expect(toHash).not.toBe(fromHash);
     expect(await computeSchemaHash(beforeApp.wasmSchema)).toBe(fromHash);
     expect(await computeSchemaHash(afterApp.wasmSchema)).toBe(toHash);
@@ -328,22 +329,34 @@ it("publishes generated default-bearing relation migrations and preserves them a
       `references-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`,
     );
     await writeFile(join(root, "package.json"), '{"type":"module"}');
-    const options = { ...catalogue, fromHash, toHash, migrationsDir: root };
     expect(source).toContain('.default("draft")');
     for (const invalid of [
       source.replaceAll('.default("draft")', ""),
       source.replaceAll('.default("draft")', '.default("tampered")'),
     ]) {
       await writeFile(migrationFile, invalid);
-      await expect(pushMigration(options)).rejects.toThrow(
-        /schema witness for table records does not match canonical schema/,
-      );
-      expect(await fetchSchemaConnectivity(server.url, options)).toEqual({ connected: false });
+      await expect(
+        deploy({
+          ...catalogue,
+          schema: afterApp,
+          permissions: permissionsAfter,
+          migration: await loadDefinedMigration(migrationFile),
+        }),
+      ).rejects.toThrow(/schema witness for table records does not match canonical schema/);
+      expect((await fetchMigrationGraph(catalogue)).migrations).toEqual([]);
     }
     await writeFile(migrationFile, source);
-    expect(await pushMigration(options)).toMatchObject({ status: "published", fromHash, toHash });
-    expect(await fetchSchemaConnectivity(server.url, options)).toEqual({ connected: true });
-    await pushPermissions({ ...catalogue, schemaHash: toHash, permissions: permissionsAfter });
+    expect(
+      await deploy({
+        ...catalogue,
+        schema: afterApp,
+        permissions: permissionsAfter,
+        migration: await loadDefinedMigration(migrationFile),
+      }),
+    ).toMatchObject({ changed: true, published: { migrations: [{ fromHash, toHash }] } });
+    expect((await fetchMigrationGraph(catalogue)).migrations).toContainEqual(
+      expect.objectContaining({ fromHash, toHash }),
+    );
 
     await oldDb.shutdown();
     oldDb = undefined;
