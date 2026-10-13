@@ -17,7 +17,6 @@ import {
 import { renderMigrationGraph } from "./dev/migration-graph.js";
 
 export interface BuildOptions {
-  jazzBin?: string;
   schemaDir: string;
   strictProvenance?: boolean;
 }
@@ -33,10 +32,9 @@ const PERMISSIONS_LIFECYCLE_NOTE =
 function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   const command = args[0] || "";
   const schemaDir = getFlagValue(args, "--schema-dir", "last") ?? process.cwd();
-  const jazzBin = getFlagValue(args, "--jazz-bin", "last");
   const strictProvenance = args.includes("--strict-provenance");
 
-  return { command, options: { jazzBin, schemaDir, strictProvenance } };
+  return { command, options: { schemaDir, strictProvenance } };
 }
 
 export async function validate(options: BuildOptions): Promise<void> {

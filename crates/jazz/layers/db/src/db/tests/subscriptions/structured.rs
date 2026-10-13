@@ -189,7 +189,7 @@ fn structured_live_snapshot_keeps_child_edits_across_parent_reordering() {
     let mut subscription = block_on(db.subscribe(
         &prepared_query,
         ReadOpts {
-            tier: DurabilityTier::Local,
+            tier: crate::db::ReadTier::LocalFirst,
             ..Default::default()
         },
     ))

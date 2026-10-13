@@ -24,8 +24,6 @@ export async function largeValueRewriteBackendOpen(info: JazzServerInfo): Promis
     app,
     permissions: largeValueRewritePermissions,
     driver: { type: "memory" },
-    tier: "global",
-    defaultDurabilityTier: "global",
   });
   sessions.set(info.appId, session);
 }
@@ -72,7 +70,7 @@ export async function largeValueRewriteBackendAppend(
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   const turn = await db.one(app.turns.where({ id: turnId }), {
-    tier: "global",
+    tier: "remote",
   });
   return turn?.body ?? "";
 }

@@ -76,6 +76,11 @@ try {
     releases: [],
     benchmarks: [
       {
+        id: "text-editor-open",
+        name: "text_editor_open_browser[100000]",
+        points: [point("main", 3, 1.5)],
+      },
+      {
         id: "insert",
         name: metric.benchmark,
         points: [
@@ -124,6 +129,18 @@ try {
   assert.ok((await card.innerText()).includes(`per ${metric.per.unit}`));
   assert.match(await card.innerText(), /Released in v2\.0\.0-alpha\.2/);
   assert.match(await card.innerText(), /−50%/);
+
+  // Browser wall time must not inherit the native CPU /5 estimate.
+  const textEditor = page.locator("#text-editor");
+  const browserCard = textEditor.locator(".metric-card").first();
+  assert.equal(await browserCard.locator(".metric-headline").innerText(), formatTime(1.5));
+  assert.match(await browserCard.innerText(), /Measured browser wall time/);
+  await browserCard.hover();
+  const browserHistory = page.getByRole("dialog", { name: "History of Open 100,000 edits" });
+  await browserHistory.waitFor({ state: "visible" });
+  assert.match(await browserHistory.innerText(), /no native CPU conversion/);
+  assert.ok((await browserHistory.innerText()).includes(formatTime(1.5)));
+  await page.mouse.move(0, 0);
 
   // History card: one row per release plus the unreleased main number.
   const tooltip = page.getByRole("dialog", { name: `History of ${metric.label}` });

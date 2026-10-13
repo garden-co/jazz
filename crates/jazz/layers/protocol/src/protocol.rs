@@ -26,11 +26,6 @@ use crate::time::GlobalTime;
 use crate::time::TxTime;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId};
 
-/// Uninhabited payload preserving retired postcard discriminants.
-#[doc(hidden)]
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub enum ReservedWireMessage {}
-
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
@@ -111,9 +106,6 @@ pub enum SyncMessage {
         /// Lens payload.
         lens: MigrationLens,
     },
-    /// Retired wire tag. Uninhabited so it cannot be sent or received.
-    #[doc(hidden)]
-    Reserved12(ReservedWireMessage),
     /// Catalogue-lane acknowledgement.
     CatalogueAck(CatalogueAck),
     /// Downstream current-row view update.
@@ -134,40 +126,6 @@ pub enum SyncMessage {
     /// Trusted upstream catalogue metadata required to decode immutable
     /// authored-version payloads before their view update arrives.
     CatalogueSnapshot(Box<CatalogueSnapshot>),
-    /// One-shot permission preflight. The authenticated link identity is the
-    /// subject; identity and claims are intentionally absent from the payload.
-    PermissionAdviceRequest {
-        /// Client-generated opaque id, unique among requests on this live link.
-        request_id: PermissionAdviceRequestId,
-        /// Hypothetical operation to evaluate without mutation.
-        action: PermissionAdviceAction,
-    },
-    /// One-shot permission preflight result. No supporting rows or denial
-    /// reason are carried across this boundary.
-    PermissionAdviceResponse {
-        /// Opaque id copied from the request.
-        request_id: PermissionAdviceRequestId,
-        /// Final serving-authority result, or `Unknown` when unavailable.
-        advice: PermissionAdvice,
-    },
-    /// Register and hydrate a support view for one authorization scope.
-    ///
-    /// Appended to preserve every pre-existing postcard enum discriminant.
-    /// This wraps the existing subscription pipeline rather than creating a
-    /// second query transport, and is feature-gated for old peers.
-    AuthorizationScopeSubscribe {
-        /// Ordinary shape/binding subscription carrying the support view.
-        subscribe: Subscribe,
-        /// Scope and non-secret operation purpose of that support view.
-        purpose: AuthorizationScopePurpose,
-    },
-    /// Authority proof emitted after the matching support `ViewUpdate`.
-    AuthorizationScopeReceipt {
-        /// Support view that the receiver must apply before accepting proof.
-        subscription: SubscriptionKey,
-        /// Bound authority receipt.
-        receipt: AuthorizationScopeReceipt,
-    },
     /// Minimal request for an authority-owned authorization support scope.
     ///
     /// The caller supplies only an opaque correlation id and the hypothetical
@@ -229,8 +187,6 @@ pub enum SyncMessage {
     ChunkUploadNodes(ChunkUploadNodes),
     /// Receiver acknowledgement for a pushed upload.
     ChunkUploadResult(ChunkUploadResult),
-    /// Retired edge-publication tag. No current message may use this slot.
-    Reserved30(ReservedWireMessage),
     /// Bounded known-row revalidation in the current default view.
     CurrentRowsRequest(CurrentRowsRequest),
     /// Core-backed current-row evidence, scoped to one admitted request.
@@ -640,15 +596,6 @@ pub struct AuthorizationOperationKey {
     pub candidate_digest: [u8; 32],
 }
 
-/// Minimal caller intent for a regular subscription opened as authorization
-/// support. The authority derives the scope key and operation itself from this
-/// intent, its authenticated link identity, and the registered shape/binding.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct AuthorizationScopePurpose {
-    /// Candidate operation whose policy support is being hydrated.
-    pub action: PermissionAdviceAction,
-}
-
 /// Authority-issued receipt proving one scope was hydrated through its stated cut.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct AuthorizationScopeReceipt {
@@ -714,9 +661,6 @@ impl SyncMessage {
     /// to an older peer.
     pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
         match self {
-            Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
-                crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-            }
             Self::AuthorizationScopeIntent { .. }
             | Self::AuthorizationScopeView { .. }
             | Self::AuthorizationScopeAggregateReceipt { .. }
@@ -2729,11 +2673,6 @@ pub struct RegisterShapeOptions {
     /// Semantic read-view request for this shape registration.
     #[serde(default)]
     pub read_view: ReadViewSpec,
-    /// Whether the serving node may register matching coverage with its own upstream.
-    /// Retained for wire compatibility; remote registrations require true.
-    /// LocalOnly is a caller-local setting and never crosses a node boundary.
-    #[serde(default = "default_propagate_upstream")]
-    pub propagate_upstream: bool,
     /// Internal ownership of the binding whose ViewUpdates a local relay may
     /// consume as its authority.  Callers always use [`BindingSource::Ordinary`];
     /// relay code creates `RelayAuthoritySession` only for its own upstream
@@ -2748,7 +2687,6 @@ impl Default for RegisterShapeOptions {
         Self {
             tier: default_register_shape_tier(),
             read_view: ReadViewSpec::default(),
-            propagate_upstream: default_propagate_upstream(),
             binding_source: BindingSource::Ordinary,
         }
     }
@@ -2793,10 +2731,6 @@ impl RegisterShapeOptions {
 
 fn default_register_shape_tier() -> DurabilityTier {
     DurabilityTier::Global
-}
-
-fn default_propagate_upstream() -> bool {
-    true
 }
 
 /// Semantic read-view request carried over the wire before local resolution.
@@ -2862,7 +2796,7 @@ impl ReadViewKey {
         if canonical == RegisterShapeOptions::default() {
             return Self::default();
         }
-        let bytes = canonical_register_shape_options_v1_bytes(&canonical);
+        let bytes = canonical_register_shape_options_v2_bytes(&canonical);
         Self {
             id: uuid::Uuid::new_v5(&READ_VIEW_NAMESPACE, &bytes),
         }
@@ -2873,18 +2807,17 @@ impl ReadViewKey {
 // enter durable settled-result rows, so they cannot inherit Rust/postcard enum
 // discriminants or field layout.
 const READ_VIEW_KEY_CODEC_MAGIC: &[u8; 4] = b"JRVK";
-const READ_VIEW_KEY_CODEC_VERSION: u8 = 1;
+const READ_VIEW_KEY_CODEC_VERSION: u8 = 2;
 
-fn canonical_register_shape_options_v1_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
+fn canonical_register_shape_options_v2_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(READ_VIEW_KEY_CODEC_MAGIC);
     bytes.push(READ_VIEW_KEY_CODEC_VERSION);
     bytes.push(match options.tier {
         DurabilityTier::None => 0,
         DurabilityTier::Local => 1,
-        DurabilityTier::Global => 3,
+        DurabilityTier::Global => 2,
     });
-    bytes.push(u8::from(options.propagate_upstream));
     bytes.push(match options.binding_source {
         BindingSource::Ordinary => 0,
         BindingSource::RelayAuthoritySession => 1,
@@ -3189,7 +3122,6 @@ pub enum ResultMemberEntry {
         revision: Vec<u8>,
     },
     /// Real row whose occurrence needs typed derivation discriminators.
-    /// Appended after every legacy variant so their postcard tags stay exact.
     TypedRow {
         /// Compatibility row payload and legacy ordered source-row identity.
         row: RealRowMemberEntry,
@@ -7337,16 +7269,28 @@ mod tests {
         let options = RegisterShapeOptions {
             tier: DurabilityTier::Global,
             read_view: ReadViewSpec::branch_view(selector(1), None),
-            propagate_upstream: false,
             binding_source: BindingSource::RelayAuthoritySession,
         };
         assert_eq!(
-            hex::encode(canonical_register_shape_options_v1_bytes(&options)),
-            "4a52564b010300010101000000060000006272616e63681200000001070101010101010101010101010101010100"
+            hex::encode(canonical_register_shape_options_v2_bytes(&options)),
+            "4a52564b0202010101000000060000006272616e63681200000001070101010101010101010101010101010100"
         );
         assert_eq!(
             options.read_view_key().id,
-            uuid::uuid!("7922a41b-d6d5-5918-a7c0-d0ba05062ea4")
+            uuid::uuid!("c42e5064-19cf-5246-be41-4385a11d305e")
+        );
+    }
+
+    /// Alice's v5 registration encodes tier, source, and binding ownership only.
+    /// This low-level byte fixture pins the wire layout independently of serde round trips.
+    #[test]
+    fn wire_v5_registration_options_bytes() {
+        let options = RegisterShapeOptions::default();
+        let bytes = postcard::to_allocvec(&options).unwrap();
+        assert_eq!(hex::encode(&bytes), "020000");
+        assert_eq!(
+            postcard::from_bytes::<RegisterShapeOptions>(&bytes).unwrap(),
+            options
         );
     }
 
@@ -7369,13 +7313,13 @@ mod tests {
 
         let ordered = options(snapshot(vec![dot_a, dot_b]));
         let permuted_and_duplicated = options(snapshot(vec![dot_b, dot_a, dot_b, dot_a]));
-        let ordered_bytes = canonical_register_shape_options_v1_bytes(&ordered);
-        let equivalent_bytes = canonical_register_shape_options_v1_bytes(&permuted_and_duplicated);
+        let ordered_bytes = canonical_register_shape_options_v2_bytes(&ordered);
+        let equivalent_bytes = canonical_register_shape_options_v2_bytes(&permuted_and_duplicated);
 
         assert_eq!(ordered_bytes, equivalent_bytes);
         assert_eq!(
             hex::encode(ordered_bytes),
-            "4a52564b0103010002707070707070707070707070707070700500000000000000060000000000000002000000070000000000000071717171717171717171717171717171090000000000000072727272727272727272727272727272"
+            "4a52564b02020002707070707070707070707070707070700500000000000000060000000000000002000000070000000000000071717171717171717171717171717171090000000000000072727272727272727272727272727272"
         );
         assert_eq!(
             ordered.read_view_key(),
@@ -7383,7 +7327,7 @@ mod tests {
         );
         assert_eq!(
             ordered.read_view_key().id,
-            uuid::uuid!("0227f6f4-5ca2-5778-9e6d-78f33a70d750")
+            uuid::uuid!("9496f8c9-194c-5a93-a3bd-43dbc82016f6")
         );
     }
 
