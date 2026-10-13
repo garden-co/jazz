@@ -26,11 +26,6 @@ use crate::time::GlobalTime;
 use crate::time::TxTime;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId};
 
-/// Uninhabited payload preserving retired postcard discriminants.
-#[doc(hidden)]
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub enum ReservedWireMessage {}
-
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
@@ -95,7 +90,7 @@ pub enum SyncMessage {
         /// Schema payload.
         schema: Box<SchemaVersion>,
     },
-    /// Atomically publish a non-genesis schema with its lineage-defining lens.
+    /// Atomically publish a non-genesis schema with all its incoming migrations.
     PublishSchemaWithLens {
         /// Authenticated catalogue admin.
         author: AuthorSubject,
@@ -111,9 +106,6 @@ pub enum SyncMessage {
         /// Lens payload.
         lens: MigrationLens,
     },
-    /// Retired wire tag. Uninhabited so it cannot be sent or received.
-    #[doc(hidden)]
-    Reserved12(ReservedWireMessage),
     /// Catalogue-lane acknowledgement.
     CatalogueAck(CatalogueAck),
     /// Downstream current-row view update.
@@ -134,40 +126,6 @@ pub enum SyncMessage {
     /// Trusted upstream catalogue metadata required to decode immutable
     /// authored-version payloads before their view update arrives.
     CatalogueSnapshot(Box<CatalogueSnapshot>),
-    /// One-shot permission preflight. The authenticated link identity is the
-    /// subject; identity and claims are intentionally absent from the payload.
-    PermissionAdviceRequest {
-        /// Client-generated opaque id, unique among requests on this live link.
-        request_id: PermissionAdviceRequestId,
-        /// Hypothetical operation to evaluate without mutation.
-        action: PermissionAdviceAction,
-    },
-    /// One-shot permission preflight result. No supporting rows or denial
-    /// reason are carried across this boundary.
-    PermissionAdviceResponse {
-        /// Opaque id copied from the request.
-        request_id: PermissionAdviceRequestId,
-        /// Final serving-authority result, or `Unknown` when unavailable.
-        advice: PermissionAdvice,
-    },
-    /// Register and hydrate a support view for one authorization scope.
-    ///
-    /// Appended to preserve every pre-existing postcard enum discriminant.
-    /// This wraps the existing subscription pipeline rather than creating a
-    /// second query transport, and is feature-gated for old peers.
-    AuthorizationScopeSubscribe {
-        /// Ordinary shape/binding subscription carrying the support view.
-        subscribe: Subscribe,
-        /// Scope and non-secret operation purpose of that support view.
-        purpose: AuthorizationScopePurpose,
-    },
-    /// Authority proof emitted after the matching support `ViewUpdate`.
-    AuthorizationScopeReceipt {
-        /// Support view that the receiver must apply before accepting proof.
-        subscription: SubscriptionKey,
-        /// Bound authority receipt.
-        receipt: AuthorizationScopeReceipt,
-    },
     /// Minimal request for an authority-owned authorization support scope.
     ///
     /// The caller supplies only an opaque correlation id and the hypothetical
@@ -229,8 +187,6 @@ pub enum SyncMessage {
     ChunkUploadNodes(ChunkUploadNodes),
     /// Receiver acknowledgement for a pushed upload.
     ChunkUploadResult(ChunkUploadResult),
-    /// Retired edge-publication tag. No current message may use this slot.
-    Reserved30(ReservedWireMessage),
     /// Bounded known-row revalidation in the current default view.
     CurrentRowsRequest(CurrentRowsRequest),
     /// Core-backed current-row evidence, scoped to one admitted request.
@@ -640,15 +596,6 @@ pub struct AuthorizationOperationKey {
     pub candidate_digest: [u8; 32],
 }
 
-/// Minimal caller intent for a regular subscription opened as authorization
-/// support. The authority derives the scope key and operation itself from this
-/// intent, its authenticated link identity, and the registered shape/binding.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct AuthorizationScopePurpose {
-    /// Candidate operation whose policy support is being hydrated.
-    pub action: PermissionAdviceAction,
-}
-
 /// Authority-issued receipt proving one scope was hydrated through its stated cut.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct AuthorizationScopeReceipt {
@@ -714,9 +661,6 @@ impl SyncMessage {
     /// to an older peer.
     pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
         match self {
-            Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
-                crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-            }
             Self::AuthorizationScopeIntent { .. }
             | Self::AuthorizationScopeView { .. }
             | Self::AuthorizationScopeAggregateReceipt { .. }
@@ -729,13 +673,6 @@ impl SyncMessage {
             | Self::ChunkUploadStart(_)
             | Self::ChunkUploadNodes(_)
             | Self::ChunkUploadResult(_) => crate::wire::FEATURE_AUXILIARY_CHUNKS,
-            Self::SubscribeRejected {
-                reason:
-                    SubscribeRejectReason::ServerFailure {
-                        code: SubscribeServerFailureCode::QueryResultProtocol,
-                    },
-                ..
-            } => crate::wire::FEATURE_QUERY_RESULT_PROTOCOL,
             _ => crate::wire::FEATURE_NONE,
         }
     }
@@ -2736,11 +2673,6 @@ pub struct RegisterShapeOptions {
     /// Semantic read-view request for this shape registration.
     #[serde(default)]
     pub read_view: ReadViewSpec,
-    /// Whether the serving node may register matching coverage with its own upstream.
-    /// Retained for wire compatibility; remote registrations require true.
-    /// LocalOnly is a caller-local setting and never crosses a node boundary.
-    #[serde(default = "default_propagate_upstream")]
-    pub propagate_upstream: bool,
     /// Internal ownership of the binding whose ViewUpdates a local relay may
     /// consume as its authority.  Callers always use [`BindingSource::Ordinary`];
     /// relay code creates `RelayAuthoritySession` only for its own upstream
@@ -2755,7 +2687,6 @@ impl Default for RegisterShapeOptions {
         Self {
             tier: default_register_shape_tier(),
             read_view: ReadViewSpec::default(),
-            propagate_upstream: default_propagate_upstream(),
             binding_source: BindingSource::Ordinary,
         }
     }
@@ -2800,10 +2731,6 @@ impl RegisterShapeOptions {
 
 fn default_register_shape_tier() -> DurabilityTier {
     DurabilityTier::Global
-}
-
-fn default_propagate_upstream() -> bool {
-    true
 }
 
 /// Semantic read-view request carried over the wire before local resolution.
@@ -2869,7 +2796,7 @@ impl ReadViewKey {
         if canonical == RegisterShapeOptions::default() {
             return Self::default();
         }
-        let bytes = canonical_register_shape_options_v1_bytes(&canonical);
+        let bytes = canonical_register_shape_options_v2_bytes(&canonical);
         Self {
             id: uuid::Uuid::new_v5(&READ_VIEW_NAMESPACE, &bytes),
         }
@@ -2880,18 +2807,17 @@ impl ReadViewKey {
 // enter durable settled-result rows, so they cannot inherit Rust/postcard enum
 // discriminants or field layout.
 const READ_VIEW_KEY_CODEC_MAGIC: &[u8; 4] = b"JRVK";
-const READ_VIEW_KEY_CODEC_VERSION: u8 = 1;
+const READ_VIEW_KEY_CODEC_VERSION: u8 = 2;
 
-fn canonical_register_shape_options_v1_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
+fn canonical_register_shape_options_v2_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(READ_VIEW_KEY_CODEC_MAGIC);
     bytes.push(READ_VIEW_KEY_CODEC_VERSION);
     bytes.push(match options.tier {
         DurabilityTier::None => 0,
         DurabilityTier::Local => 1,
-        DurabilityTier::Global => 3,
+        DurabilityTier::Global => 2,
     });
-    bytes.push(u8::from(options.propagate_upstream));
     bytes.push(match options.binding_source {
         BindingSource::Ordinary => 0,
         BindingSource::RelayAuthoritySession => 1,
@@ -3198,7 +3124,6 @@ pub enum ResultMemberEntry {
         revision: Vec<u8>,
     },
     /// Real row whose occurrence needs typed derivation discriminators.
-    /// Appended after every legacy variant so their postcard tags stay exact.
     TypedRow {
         /// Compatibility row payload and legacy ordered source-row identity.
         row: RealRowMemberEntry,
@@ -4157,42 +4082,49 @@ pub struct SchemaLineagePublication {
     pub id: SchemaLineagePublicationId,
     /// New immutable schema payload.
     pub schema: SchemaVersion,
-    /// Lineage-defining lens from one already-admitted schema.
-    pub lens: MigrationLens,
-    /// Target tables that begin fresh physical lineages.
-    pub new_tables: Vec<String>,
-    /// Source tables intentionally absent from the target schema.
-    pub dropped_tables: Vec<String>,
+    /// Every incoming migration from an already-admitted schema.
+    pub predecessors: Vec<SchemaPredecessor>,
     /// Authority-authored permanent physical identities. Names and structural
     /// paths only locate the entity in this immutable descriptor; they are not
     /// inputs to the UUID allocation.
     pub physical_identities: PhysicalIdentityManifest,
 }
 
-// Declaration order is immaterial to the v1 content ID and durable encoding.
-// Equality preserves multiplicity; validation still rejects duplicate declarations.
-// Compare the full payload, never just its claimed (or recomputed) digest.
+/// One incoming migration and its source-relative table declarations.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct SchemaPredecessor {
+    /// Migration from this predecessor into the published schema.
+    pub lens: MigrationLens,
+    /// Target tables absent from this predecessor.
+    pub new_tables: Vec<String>,
+    /// Predecessor tables absent from the target.
+    pub dropped_tables: Vec<String>,
+}
+
+impl PartialEq for SchemaPredecessor {
+    fn eq(&self, other: &Self) -> bool {
+        fn sorted(values: &[String]) -> Vec<&String> {
+            let mut values = values.iter().collect::<Vec<_>>();
+            values.sort();
+            values
+        }
+        self.lens == other.lens
+            && sorted(&self.new_tables) == sorted(&other.new_tables)
+            && sorted(&self.dropped_tables) == sorted(&other.dropped_tables)
+    }
+}
+
 impl PartialEq for SchemaLineagePublication {
     fn eq(&self, other: &Self) -> bool {
-        fn same_declarations(left: &[String], right: &[String]) -> bool {
-            if left == right {
-                return true;
-            }
-            if left.len() != right.len() {
-                return false;
-            }
-            let mut left = left.iter().collect::<Vec<_>>();
-            let mut right = right.iter().collect::<Vec<_>>();
-            left.sort_unstable();
-            right.sort_unstable();
-            left == right
-        }
+        let ordered = |publication: &Self| {
+            let mut predecessors = publication.predecessors.clone();
+            predecessors.sort_by_key(|predecessor| predecessor.lens.source);
+            predecessors
+        };
         self.id == other.id
             && self.schema == other.schema
-            && self.lens == other.lens
             && self.physical_identities == other.physical_identities
-            && same_declarations(&self.new_tables, &other.new_tables)
-            && same_declarations(&self.dropped_tables, &other.dropped_tables)
+            && ordered(self) == ordered(other)
     }
 }
 
@@ -4643,6 +4575,66 @@ impl PhysicalIdentityManifest {
         Ok(inherited_uuids)
     }
 
+    // Coordinates are used only to combine predecessor constraints, never to
+    // derive permanent IDs. Separate tuple components avoid delimiter aliases.
+    fn identity_slots(
+        &self,
+    ) -> BTreeMap<(String, Option<String>, Option<(String, usize)>), uuid::Uuid> {
+        let mut slots = BTreeMap::new();
+        for (table_name, table) in &self.tables {
+            slots.insert((table_name.clone(), None, None), table.id.0);
+            for (column_name, column) in &table.columns {
+                slots.insert(
+                    (table_name.clone(), Some(column_name.clone()), None),
+                    column.id.0,
+                );
+                for (path, variants) in &column.enum_variants {
+                    for (index, variant) in variants.iter().enumerate() {
+                        slots.insert(
+                            (
+                                table_name.clone(),
+                                Some(column_name.clone()),
+                                Some((path.clone(), index)),
+                            ),
+                            variant.0,
+                        );
+                    }
+                }
+            }
+        }
+        slots
+    }
+
+    fn replace_identity_slots(
+        &mut self,
+        slots: &BTreeMap<(String, Option<String>, Option<(String, usize)>), uuid::Uuid>,
+    ) {
+        for ((table_name, column_name, variant), uuid) in slots {
+            let table = self
+                .tables
+                .get_mut(table_name)
+                .expect("validated identity table");
+            let Some(column_name) = column_name else {
+                table.id.0 = *uuid;
+                continue;
+            };
+            let column = table
+                .columns
+                .get_mut(column_name)
+                .expect("validated identity column");
+            match variant {
+                None => column.id.0 = *uuid,
+                Some((path, index)) => {
+                    column
+                        .enum_variants
+                        .get_mut(path)
+                        .expect("validated enum occurrence")[*index]
+                        .0 = *uuid
+                }
+            }
+        }
+    }
+
     fn remint_fresh_collisions(
         &mut self,
         inherited: &BTreeSet<uuid::Uuid>,
@@ -4848,6 +4840,115 @@ fn collect_enum_variant_counts(
 // rather than the local descriptor lowering.  Keep this definition aligned
 // with `node::physical::physical_column_epoch_is_compatible`.
 impl SchemaLineagePublication {
+    /// Author one schema from all its predecessors. Only coordinates actually
+    /// preserved by an incoming lens may inherit identities from that source.
+    pub fn author_from_predecessors(
+        schema: SchemaVersion,
+        predecessors: Vec<SchemaPredecessor>,
+        sources: &BTreeMap<SchemaVersionId, (JazzSchema, PhysicalIdentityManifest)>,
+        history: impl IntoIterator<Item = PhysicalIdentityManifest>,
+    ) -> Result<Self, &'static str> {
+        if predecessors.is_empty() {
+            return Err("schema requires a predecessor");
+        }
+        let mut predecessors = predecessors;
+        for predecessor in &mut predecessors {
+            predecessor.new_tables.sort();
+            predecessor.dropped_tables.sort();
+        }
+        predecessors.sort_by_key(|predecessor| predecessor.lens.source);
+        if predecessors
+            .windows(2)
+            .any(|pair| pair[0].lens.source == pair[1].lens.source)
+        {
+            return Err("duplicate schema predecessor");
+        }
+        let history = history.into_iter().collect::<Vec<_>>();
+        let mut identities = PhysicalIdentityManifest::allocate(&schema.schema);
+        // Each target UUID slot has at most one inherited value. Fresh slots
+        // are filled only after all incoming migrations have been considered.
+        let mut inherited_slots = BTreeMap::new();
+        for predecessor in &predecessors {
+            if predecessor.lens.target != schema.id || predecessor.lens.source == schema.id {
+                return Err("invalid schema predecessor endpoint");
+            }
+            let (source, manifest) = sources
+                .get(&predecessor.lens.source)
+                .ok_or("schema predecessor is missing")?;
+            let candidate = manifest.evolve(
+                source,
+                &schema.schema,
+                &predecessor.lens,
+                &predecessor.new_tables.iter().cloned().collect(),
+            )?;
+            let inherited =
+                manifest.inherited_uuids(source, &candidate, &schema.schema, &predecessor.lens)?;
+            for (slot, uuid) in candidate.identity_slots() {
+                if inherited.contains(&uuid) {
+                    if let Some(previous) = inherited_slots.insert(slot, uuid) {
+                        if previous != uuid {
+                            return Err("schema predecessors disagree on physical identity");
+                        }
+                    }
+                }
+            }
+        }
+        identities.replace_identity_slots(&inherited_slots);
+        let inherited = inherited_slots.values().copied().collect();
+        let mut reserved = BTreeSet::new();
+        for manifest in history
+            .iter()
+            .chain(sources.values().map(|(_, manifest)| manifest))
+        {
+            reserved.extend(manifest.all_identity_uuids());
+        }
+        identities.remint_fresh_collisions(&inherited, &mut reserved);
+        let mut publication = Self {
+            id: SchemaLineagePublicationId(uuid::Uuid::nil()),
+            schema,
+            predecessors,
+            physical_identities: identities,
+        };
+        publication.validate_predecessor_identities(sources, history)?;
+        publication.id = publication.content_id();
+        Ok(publication)
+    }
+
+    #[doc(hidden)]
+    pub fn validate_predecessor_identities(
+        &self,
+        sources: &BTreeMap<SchemaVersionId, (JazzSchema, PhysicalIdentityManifest)>,
+        history: impl IntoIterator<Item = PhysicalIdentityManifest>,
+    ) -> Result<(), &'static str> {
+        self.physical_identities
+            .validate_for_schema(&self.schema.schema)?;
+        let mut inherited = BTreeSet::new();
+        let mut reserved = BTreeSet::new();
+        for predecessor in &self.predecessors {
+            let (source, manifest) = sources
+                .get(&predecessor.lens.source)
+                .ok_or("schema predecessor is missing")?;
+            manifest.validate_for_schema(source)?;
+            inherited.extend(manifest.inherited_uuids(
+                source,
+                &self.physical_identities,
+                &self.schema.schema,
+                &predecessor.lens,
+            )?);
+            reserved.extend(manifest.all_identity_uuids());
+        }
+        for manifest in history {
+            reserved.extend(manifest.all_identity_uuids());
+        }
+        if reserved
+            .intersection(&self.physical_identities.all_identity_uuids())
+            .any(|uuid| !inherited.contains(uuid))
+        {
+            return Err("physical retired identity reused across lineage");
+        }
+        Ok(())
+    }
+
     /// Construct an immutable publication at the catalogue authority. Mapped
     /// entities inherit UUIDs from the source manifest; genuinely new table,
     /// column, and enum identities are minted exactly once here.
@@ -4898,20 +4999,22 @@ impl SchemaLineagePublication {
         let mut publication = Self {
             id: SchemaLineagePublicationId(uuid::Uuid::nil()),
             schema,
-            lens,
-            new_tables,
-            dropped_tables,
+            predecessors: vec![SchemaPredecessor {
+                lens,
+                new_tables,
+                dropped_tables,
+            }],
             physical_identities,
         };
-        publication.new_tables.sort();
-        publication.dropped_tables.sort();
+        publication.predecessors[0].new_tables.sort();
+        publication.predecessors[0].dropped_tables.sort();
         publication.id = publication.content_id();
         Ok(publication)
     }
 
     /// Construct the sole genesis-style publication fixture.  A real
-    /// non-genesis schema must be authored by [`Self::author_from_prior`], so
-    /// its identities inherit from the authority's exact source manifest.
+    /// non-genesis schema must be authored from its predecessors, so its
+    /// identities inherit from the authority's exact source manifests.
     ///
     /// This constructor exists only for isolated protocol fixtures that have
     /// no preceding catalogue; catalogue/runtime code must never use it.
@@ -4925,13 +5028,15 @@ impl SchemaLineagePublication {
         let mut publication = Self {
             id: SchemaLineagePublicationId(uuid::Uuid::nil()),
             schema,
-            lens,
-            new_tables: new_tables.into_iter().map(Into::into).collect(),
-            dropped_tables: dropped_tables.into_iter().map(Into::into).collect(),
+            predecessors: vec![SchemaPredecessor {
+                lens,
+                new_tables: new_tables.into_iter().map(Into::into).collect(),
+                dropped_tables: dropped_tables.into_iter().map(Into::into).collect(),
+            }],
             physical_identities,
         };
-        publication.new_tables.sort();
-        publication.dropped_tables.sort();
+        publication.predecessors[0].new_tables.sort();
+        publication.predecessors[0].dropped_tables.sort();
         publication.id = publication.content_id();
         publication
     }
@@ -4939,24 +5044,38 @@ impl SchemaLineagePublication {
     /// Return the content-addressed id implied by this payload.
     pub fn content_id(&self) -> SchemaLineagePublicationId {
         let mut bytes = Vec::new();
-        put_str(&mut bytes, "jazz-schema-lineage-publication-v1");
+        put_str(
+            &mut bytes,
+            if self.predecessors.len() == 1 {
+                "jazz-schema-lineage-publication-v1"
+            } else {
+                "jazz-schema-lineage-publication-v2"
+            },
+        );
         put_bytes(
             &mut bytes,
             &canonical_catalogue_schema_bytes(&self.schema)
                 .expect("schema publication has a canonical CATS v1 payload"),
         );
-        put_bytes(&mut bytes, &canonical_lens_bytes(&self.lens));
-        let mut new_tables = self.new_tables.clone();
-        new_tables.sort();
-        put_len(&mut bytes, new_tables.len());
-        for table in new_tables {
-            put_str(&mut bytes, &table);
+        let mut predecessors = self.predecessors.iter().collect::<Vec<_>>();
+        predecessors.sort_by_key(|predecessor| predecessor.lens.source);
+        if predecessors.len() != 1 {
+            put_len(&mut bytes, predecessors.len());
         }
-        let mut dropped_tables = self.dropped_tables.clone();
-        dropped_tables.sort();
-        put_len(&mut bytes, dropped_tables.len());
-        for table in dropped_tables {
-            put_str(&mut bytes, &table);
+        for predecessor in predecessors {
+            put_bytes(&mut bytes, &canonical_lens_bytes(&predecessor.lens));
+            let mut new_tables = predecessor.new_tables.clone();
+            new_tables.sort();
+            put_len(&mut bytes, new_tables.len());
+            for table in new_tables {
+                put_str(&mut bytes, &table);
+            }
+            let mut dropped_tables = predecessor.dropped_tables.clone();
+            dropped_tables.sort();
+            put_len(&mut bytes, dropped_tables.len());
+            for table in dropped_tables {
+                put_str(&mut bytes, &table);
+            }
         }
         put_bytes(&mut bytes, &self.physical_identities.canonical_bytes());
         SchemaLineagePublicationId(uuid::Uuid::new_v5(
@@ -7152,16 +7271,28 @@ mod tests {
         let options = RegisterShapeOptions {
             tier: DurabilityTier::Global,
             read_view: ReadViewSpec::branch_view(selector(1), None),
-            propagate_upstream: false,
             binding_source: BindingSource::RelayAuthoritySession,
         };
         assert_eq!(
-            hex::encode(canonical_register_shape_options_v1_bytes(&options)),
-            "4a52564b010300010101000000060000006272616e63681200000001070101010101010101010101010101010100"
+            hex::encode(canonical_register_shape_options_v2_bytes(&options)),
+            "4a52564b0202010101000000060000006272616e63681200000001070101010101010101010101010101010100"
         );
         assert_eq!(
             options.read_view_key().id,
-            uuid::uuid!("7922a41b-d6d5-5918-a7c0-d0ba05062ea4")
+            uuid::uuid!("c42e5064-19cf-5246-be41-4385a11d305e")
+        );
+    }
+
+    /// Alice's v5 registration encodes tier, source, and binding ownership only.
+    /// This low-level byte fixture pins the wire layout independently of serde round trips.
+    #[test]
+    fn wire_v5_registration_options_bytes() {
+        let options = RegisterShapeOptions::default();
+        let bytes = postcard::to_allocvec(&options).unwrap();
+        assert_eq!(hex::encode(&bytes), "020000");
+        assert_eq!(
+            postcard::from_bytes::<RegisterShapeOptions>(&bytes).unwrap(),
+            options
         );
     }
 
@@ -7184,13 +7315,13 @@ mod tests {
 
         let ordered = options(snapshot(vec![dot_a, dot_b]));
         let permuted_and_duplicated = options(snapshot(vec![dot_b, dot_a, dot_b, dot_a]));
-        let ordered_bytes = canonical_register_shape_options_v1_bytes(&ordered);
-        let equivalent_bytes = canonical_register_shape_options_v1_bytes(&permuted_and_duplicated);
+        let ordered_bytes = canonical_register_shape_options_v2_bytes(&ordered);
+        let equivalent_bytes = canonical_register_shape_options_v2_bytes(&permuted_and_duplicated);
 
         assert_eq!(ordered_bytes, equivalent_bytes);
         assert_eq!(
             hex::encode(ordered_bytes),
-            "4a52564b0103010002707070707070707070707070707070700500000000000000060000000000000002000000070000000000000071717171717171717171717171717171090000000000000072727272727272727272727272727272"
+            "4a52564b02020002707070707070707070707070707070700500000000000000060000000000000002000000070000000000000071717171717171717171717171717171090000000000000072727272727272727272727272727272"
         );
         assert_eq!(
             ordered.read_view_key(),
@@ -7198,7 +7329,7 @@ mod tests {
         );
         assert_eq!(
             ordered.read_view_key().id,
-            uuid::uuid!("0227f6f4-5ca2-5778-9e6d-78f33a70d750")
+            uuid::uuid!("9496f8c9-194c-5a93-a3bd-43dbc82016f6")
         );
     }
 

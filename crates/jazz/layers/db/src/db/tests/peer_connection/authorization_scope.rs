@@ -81,7 +81,7 @@ fn assert_foreground_initial_owner_snapshot(seed_owner: bool) {
     let mut local = block_on(foreground.subscribe(
         &query,
         ReadOpts {
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     ))
@@ -486,8 +486,7 @@ fn cold_owner_local_delivery_progresses_only_on_host_wakes() {
         );
         let query = prepared(&foreground, &Query::from("todos"));
         let opts = ReadOpts {
-            tier: DurabilityTier::Local,
-            propagation: Propagation::Full,
+            tier: crate::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         };
         eviction.evict_all();
@@ -690,8 +689,7 @@ fn assert_initial_opening_backpressure(
     );
     let query = prepared(&foreground, &Query::from("todos"));
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let attachment = foreground
@@ -844,8 +842,7 @@ fn incremental_local_update_retries_after_transport_backpressure() {
     );
     let query = prepared(&foreground, &Query::from("todos"));
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let attachment = foreground
@@ -1112,8 +1109,7 @@ fn foreground_local_attachment_waits_for_owner_delivery_not_authority() {
         let _subscriber = relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
         let query = prepared(&foreground, &Query::from("todos"));
         let local = ReadOpts {
-            tier: DurabilityTier::Local,
-            propagation: Propagation::Full,
+            tier: crate::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         };
         let attachment = foreground
@@ -1183,8 +1179,7 @@ fn scope_relays_forward_new_rows_after_empty_subscription_settlement() {
         relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
     }
     let local = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let query = Query::from("todos");
@@ -1377,8 +1372,7 @@ fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
     }
     let query = Query::from("rooms").order_by("name", OrderDirection::Asc);
     let local = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let mut bob_rooms = prepared_subscribe(&bob_fg, &query, local.clone()).unwrap();
@@ -1476,8 +1470,7 @@ fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader(
                 &foreground,
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Local,
-                    propagation: Propagation::Full,
+                    tier: crate::db::ReadTier::LocalFirst,
                     ..ReadOpts::default()
                 },
             )
@@ -1489,8 +1482,7 @@ fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader(
             &foreground,
             &query.clone().filter(eq(col("title"), lit("healthy"))),
             ReadOpts {
-                tier: DurabilityTier::Local,
-                propagation: Propagation::Full,
+                tier: crate::db::ReadTier::LocalFirst,
                 ..ReadOpts::default()
             },
         )
@@ -1845,268 +1837,6 @@ fn late_detached_view_update_does_not_cover_equal_shape_reattachment() {
 }
 
 #[test]
-fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
-    let schema = schema_with_explicit_public_read();
-    let identity = AuthorSubject::for_test_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
-    let shape = Query::from("todos").validate(&schema).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    let subscription = SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    };
-    let (mut client_transport, server_transport) = duplex();
-    let subscriber = server.accept_subscriber(server_transport, identity);
-    client_transport
-        .send(SyncMessage::RegisterShape {
-            shape_id: shape.shape_id(),
-            ast: ShapeAst::from_validated(&shape),
-            opts: RegisterShapeOptions::default(),
-        })
-        .unwrap();
-    client_transport
-        .send(SyncMessage::AuthorizationScopeSubscribe {
-            subscribe: Subscribe {
-                shape_id: shape.shape_id(),
-                subscription,
-                values: Vec::new(),
-                known_state: None,
-                delegated_session: None,
-            },
-            purpose: AuthorizationScopePurpose {
-                action: PermissionAdviceAction::Read {
-                    table: "todos".to_owned(),
-                    row: row(1),
-                },
-            },
-        })
-        .unwrap();
-
-    subscriber.borrow_mut().tick().unwrap();
-    let mut received_view = false;
-    let mut received_receipt = false;
-    while let Some(message) = client_transport.try_recv() {
-        match message {
-            SyncMessage::CatalogueSnapshot(_) => {}
-            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                subscription: received,
-                ..
-            }) => {
-                assert_eq!(received, subscription);
-                received_view = true;
-            }
-            SyncMessage::AuthorizationScopeReceipt {
-                subscription: received,
-                receipt,
-            } => {
-                assert!(received_view, "receipt must follow its support view");
-                assert_eq!(received, subscription);
-                assert_eq!(receipt.link, identity);
-                assert_eq!(receipt.key.subject, identity);
-                received_receipt = true;
-            }
-            other => panic!("unexpected authorization-scope response: {other:?}"),
-        }
-    }
-    assert!(!received_view);
-    assert!(!received_receipt);
-}
-
-/* Retired with the caller-authored scope protocol.  Authority-owned intent
- * coverage lives with the permission advice tests above.
-fn legacy_authorization_scope_subscribe_refreshes_claims() {
-    server.node().borrow_mut().set_test_provider_claims(
-        identity,
-        BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
-    );
-    subscriber.borrow_mut().tick().unwrap();
-    let mut refreshed_view = false;
-    let mut refreshed_receipt = None;
-    while let Some(message) = client_transport.try_recv() {
-        match message {
-            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => refreshed_view = true,
-            SyncMessage::AuthorizationScopeReceipt { receipt, .. } => {
-                assert!(
-                    refreshed_view,
-                    "replacement receipt follows replacement view"
-                );
-                refreshed_receipt = Some(receipt);
-            }
-            other => panic!("unexpected claims-refresh response: {other:?}"),
-        }
-    }
-    let refreshed_receipt = refreshed_receipt.expect("claims change must reissue receipt");
-    assert_eq!(refreshed_receipt.claims_revision, 1);
-}
-*/
-
-#[test]
-fn authorization_scope_rejects_unrelated_caller_intent() {
-    let schema = schema_with_explicit_public_read();
-    let identity = AuthorSubject::for_test_bytes([0xc2; 16]);
-    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
-    let shape = Query::from("todos").validate(&schema).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    let subscription = SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    };
-    let (mut client_transport, server_transport) = duplex();
-    let subscriber = server.accept_subscriber(server_transport, identity);
-    // Finish authenticated startup before exercising the control under test.
-    subscriber.borrow_mut().tick().unwrap();
-    assert!(matches!(
-        client_transport.try_recv(),
-        Some(SyncMessage::CatalogueSnapshot(_))
-    ));
-    assert!(client_transport.try_recv().is_none());
-    client_transport
-        .send(SyncMessage::RegisterShape {
-            shape_id: shape.shape_id(),
-            ast: ShapeAst::from_validated(&shape),
-            opts: RegisterShapeOptions::default(),
-        })
-        .unwrap();
-    client_transport
-        .send(SyncMessage::AuthorizationScopeSubscribe {
-            subscribe: Subscribe {
-                shape_id: shape.shape_id(),
-                subscription,
-                values: Vec::new(),
-                known_state: None,
-                delegated_session: None,
-            },
-            purpose: AuthorizationScopePurpose {
-                action: PermissionAdviceAction::Read {
-                    table: "not_todos".to_owned(),
-                    row: row(1),
-                },
-            },
-        })
-        .unwrap();
-
-    subscriber.borrow_mut().tick().unwrap();
-    assert!(
-        client_transport.try_recv().is_none(),
-        "an unrelated action must not produce a support view or receipt"
-    );
-}
-
-#[test]
-fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
-    let schema = build_public_db_test_schema(
-        PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("todos")
-                    .column("title", PublicColumnType::Text)
-                    .column("done", PublicColumnType::Boolean)
-                    .column("owner", PublicColumnType::Uuid),
-            )
-            .table(PublicTableSchemaBuilder::new("support_using"))
-            .table(PublicTableSchemaBuilder::new("support_check")),
-    );
-    let identity = AuthorSubject::for_test_bytes([0xc3; 16]);
-    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
-    server
-        .node()
-        .borrow_mut()
-        .mutate_current_schema_for_testing(|compiled| {
-            compiled
-                .tables
-                .iter_mut()
-                .find(|table| table.name == "todos")
-                .expect("todos table")
-                .write_policies = WritePolicies {
-                update_using: Some(Query::from("support_using")),
-                update_check: Some(Query::from("support_check")),
-                ..WritePolicies::default()
-            };
-        });
-    let action = PermissionAdviceAction::Update {
-        table: "todos".to_owned(),
-        row: row(1),
-        patch: BTreeMap::new(),
-    };
-    let expected = server
-        .node()
-        .borrow()
-        .authorization_support_scope(identity, &action)
-        .unwrap();
-    assert_eq!(expected.subscriptions.len(), 2);
-    let entries = expected
-        .subscriptions
-        .iter()
-        .map(|(shape, binding)| {
-            let subscription = SubscriptionKey {
-                shape_id: shape.shape_id(),
-                binding_id: binding.binding_id(),
-                read_view: RegisterShapeOptions::default().read_view_key(),
-            };
-            (shape.clone(), subscription)
-        })
-        .collect::<Vec<_>>();
-    let (mut client_transport, server_transport) = duplex();
-    let subscriber = server.accept_subscriber(server_transport, identity);
-    for (shape, _) in &entries {
-        client_transport
-            .send(SyncMessage::RegisterShape {
-                shape_id: shape.shape_id(),
-                ast: ShapeAst::from_validated(shape),
-                opts: RegisterShapeOptions::default(),
-            })
-            .unwrap();
-    }
-    let send_scope = |client: &mut Box<dyn Transport>, shape: &ValidatedQuery, subscription| {
-        client
-            .send(SyncMessage::AuthorizationScopeSubscribe {
-                subscribe: Subscribe {
-                    shape_id: shape.shape_id(),
-                    subscription,
-                    values: Vec::new(),
-                    known_state: None,
-                    delegated_session: None,
-                },
-                purpose: AuthorizationScopePurpose {
-                    action: action.clone(),
-                },
-            })
-            .unwrap();
-    };
-    send_scope(&mut client_transport, &entries[1].0, entries[1].1);
-    subscriber.borrow_mut().tick().unwrap();
-    while let Some(message) = client_transport.try_recv() {
-        assert!(
-            !matches!(message, SyncMessage::AuthorizationScopeReceipt { .. }),
-            "one update clause must never prove the full update scope"
-        );
-    }
-    send_scope(&mut client_transport, &entries[0].0, entries[0].1);
-    subscriber.borrow_mut().tick().unwrap();
-    let mut saw_second_view = false;
-    let mut saw_receipt = false;
-    while let Some(message) = client_transport.try_recv() {
-        match message {
-            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => {
-                saw_second_view = true
-            }
-            SyncMessage::AuthorizationScopeReceipt { receipt, .. } => {
-                assert!(
-                    saw_second_view,
-                    "aggregate receipt follows final clause view"
-                );
-                assert_eq!(receipt.key, expected.key);
-                saw_receipt = true;
-            }
-            SyncMessage::CatalogueSnapshot(_) => {}
-            other => panic!("unexpected aggregate-scope response: {other:?}"),
-        }
-    }
-    assert!(!saw_receipt);
-}
-
-#[test]
 fn authorization_scope_aggregate_bounds_cuts_and_progress_independently() {
     let subscription = |seed| SubscriptionKey {
         shape_id: ShapeId(uuid::Uuid::from_bytes([seed; 16])),
@@ -2126,99 +1856,6 @@ fn authorization_scope_aggregate_bounds_cuts_and_progress_independently() {
 
 // The server-only generation stamp and scope receipt are wire details that the
 // public query API intentionally hides, so this stays a narrow internal test.
-#[test]
-fn sibling_scope_receipt_uses_the_view_stamped_canonical_generation() {
-    let canonical_generation = PeerPayloadInventory {
-        authorization_progress: Some(7),
-        ..PeerPayloadInventory::default()
-    };
-    assert_eq!(
-        authorization_progress_for_view_receipt(&canonical_generation, 0),
-        7,
-        "a sibling receipt must use the canonical generation already stamped on its view"
-    );
-    assert_eq!(
-        authorization_progress_for_view_receipt(&PeerPayloadInventory::default(), 3),
-        3,
-        "an ordinary unstamped view keeps its usage-site generation"
-    );
-}
-
-#[test]
-fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_clause() {
-    let subscription = |seed| SubscriptionKey {
-        shape_id: ShapeId(uuid::Uuid::from_bytes([seed; 16])),
-        binding_id: BindingId(uuid::Uuid::from_bytes([seed.wrapping_add(1); 16])),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    };
-    let first = subscription(0x21);
-    let second = subscription(0x31);
-    let expected_support = BTreeSet::from([
-        (first.shape_id, first.binding_id),
-        (second.shape_id, second.binding_id),
-    ]);
-    let key = AuthorizationSupportScopeKey {
-        support_shape_digest: [0x41; 32],
-        subject: AuthorSubject::for_test_bytes([0x42; 16]),
-        claims_digest: [0x43; 32],
-        policy_digest: [0x44; 32],
-    };
-    let mut aggregates = BTreeMap::from([(
-        key.clone(),
-        ScopeAggregate {
-            expected_support: expected_support.clone(),
-            members: BTreeMap::from([
-                (first, (first.shape_id, first.binding_id)),
-                (second, (second.shape_id, second.binding_id)),
-            ]),
-            applied: BTreeMap::from([(first, (GlobalTime(5), 5)), (second, (GlobalTime(5), 5))]),
-        },
-    )]);
-
-    // A claims or policy transition can make both compiled clauses disappear.
-    // Returning to the same digest must not revive either previous cut.
-    remove_scope_aggregate_member(&mut aggregates, &key, first);
-    remove_scope_aggregate_member(&mut aggregates, &key, second);
-    assert!(aggregates.is_empty());
-
-    let aggregate = aggregates.entry(key).or_insert_with(|| ScopeAggregate {
-        expected_support,
-        members: BTreeMap::new(),
-        applied: BTreeMap::new(),
-    });
-    aggregate
-        .members
-        .insert(first, (first.shape_id, first.binding_id));
-    aggregate
-        .members
-        .insert(second, (second.shape_id, second.binding_id));
-    assert!(
-        aggregate.applied.is_empty(),
-        "the first returning clause has no receipt until its replacement view arrives"
-    );
-    aggregate.applied.insert(first, (GlobalTime(6), 6));
-    assert!(
-        aggregate
-            .members
-            .keys()
-            .any(|member| !aggregate.applied.contains_key(member)),
-        "one refreshed clause still cannot prove the aggregate"
-    );
-    assert!(
-        aggregate
-            .members
-            .keys()
-            .any(|member| !aggregate.applied.contains_key(member))
-    );
-    aggregate.applied.insert(second, (GlobalTime(6), 6));
-    assert!(
-        aggregate
-            .members
-            .keys()
-            .all(|member| aggregate.applied.contains_key(member))
-    );
-}
-
 #[test]
 fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
     let link = AuthorSubject::for_test_bytes([0x8b; 16]);
@@ -2278,179 +1915,6 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
         ),
         "a stale support cut must not ride a fresh authorization generation"
     );
-}
-
-#[test]
-fn authorization_scope_requires_canonical_current_global_support_options() {
-    let expected = RegisterShapeOptions::default();
-    let subscription_for = |opts: &RegisterShapeOptions| SubscriptionKey {
-        shape_id: ShapeId(uuid::Uuid::from_bytes([0x51; 16])),
-        binding_id: BindingId(uuid::Uuid::from_bytes([0x52; 16])),
-        read_view: opts.read_view_key(),
-    };
-    assert!(authorization_scope_support_options_match(
-        &expected,
-        &expected,
-        subscription_for(&expected),
-    ));
-    let variants = [
-        RegisterShapeOptions {
-            tier: DurabilityTier::Global,
-            read_view: ReadViewSpec {
-                source: ReadViewSourceSpec::Snapshot {
-                    snapshot: SnapshotRef {
-                        owner: NodeUuid::from_bytes([0x54; 16]),
-                        global_base: GlobalTime(0),
-                        local_base: TxTime(0),
-                        dots: Vec::new(),
-                    },
-                },
-            },
-            ..RegisterShapeOptions::default()
-        },
-        RegisterShapeOptions {
-            tier: DurabilityTier::Local,
-            read_view: ReadViewSpec::default(),
-            ..RegisterShapeOptions::default()
-        },
-    ];
-    for actual in variants {
-        assert!(
-            !authorization_scope_support_options_match(
-                &expected,
-                &actual,
-                subscription_for(&actual),
-            ),
-            "noncanonical scope support must not satisfy the pure admission fence"
-        );
-    }
-}
-
-#[test]
-fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
-    let schema = schema_with_explicit_public_read();
-    let identity = AuthorSubject::for_test_bytes([0xc4; 16]);
-    let shape = Query::from("todos").validate(&schema).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    let historical = RegisterShapeOptions {
-        tier: DurabilityTier::Global,
-        read_view: ReadViewSpec {
-            source: ReadViewSourceSpec::Snapshot {
-                snapshot: SnapshotRef {
-                    owner: NodeUuid::from_bytes([0x61; 16]),
-                    global_base: GlobalTime(0),
-                    local_base: TxTime(0),
-                    dots: Vec::new(),
-                },
-            },
-        },
-        ..RegisterShapeOptions::default()
-    };
-    let variants = [
-        historical,
-        RegisterShapeOptions {
-            tier: DurabilityTier::Local,
-            read_view: ReadViewSpec::default(),
-            ..RegisterShapeOptions::default()
-        },
-    ];
-
-    // This is the matching positive control: the same shape/binding receives
-    // a proof under the sole canonical current/global registration. Removing
-    // both admission guards below makes the noncanonical cases fail instead.
-    let canonical_opts = RegisterShapeOptions::default();
-    let canonical_subscription = SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: canonical_opts.read_view_key(),
-    };
-    let canonical_server = open_core(0x64, AuthorSubject::SYSTEM, &schema);
-    let (mut canonical_client, canonical_transport) = duplex();
-    let canonical_subscriber = canonical_server.accept_subscriber(canonical_transport, identity);
-    canonical_client
-        .send(SyncMessage::RegisterShape {
-            shape_id: shape.shape_id(),
-            ast: ShapeAst::from_validated(&shape),
-            opts: canonical_opts,
-        })
-        .unwrap();
-    canonical_client
-        .send(SyncMessage::AuthorizationScopeSubscribe {
-            subscribe: Subscribe {
-                shape_id: shape.shape_id(),
-                subscription: canonical_subscription,
-                values: Vec::new(),
-                known_state: None,
-                delegated_session: None,
-            },
-            purpose: AuthorizationScopePurpose {
-                action: PermissionAdviceAction::Read {
-                    table: "todos".to_owned(),
-                    row: row(1),
-                },
-            },
-        })
-        .unwrap();
-    canonical_subscriber.borrow_mut().tick().unwrap();
-    let mut saw_view = false;
-    let mut saw_receipt = false;
-    while let Some(message) = canonical_client.try_recv() {
-        match message {
-            SyncMessage::CatalogueSnapshot(_) => {}
-            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => saw_view = true,
-            SyncMessage::AuthorizationScopeReceipt { .. } => {
-                assert!(saw_view, "canonical receipt follows its support view");
-                saw_receipt = true;
-            }
-            other => panic!("unexpected canonical support response: {other:?}"),
-        }
-    }
-    assert!(
-        !saw_view && !saw_receipt,
-        "the authority-owned protocol rejects client-selected support even at the canonical view"
-    );
-
-    for opts in variants {
-        let server = open_core(0x63, AuthorSubject::SYSTEM, &schema);
-        let subscription = SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: opts.read_view_key(),
-        };
-        let (mut client_transport, server_transport) = duplex();
-        let subscriber = server.accept_subscriber(server_transport, identity);
-        client_transport
-            .send(SyncMessage::RegisterShape {
-                shape_id: shape.shape_id(),
-                ast: ShapeAst::from_validated(&shape),
-                opts,
-            })
-            .unwrap();
-        subscriber.borrow_mut().tick().unwrap();
-        while client_transport.try_recv().is_some() {}
-        client_transport
-            .send(SyncMessage::AuthorizationScopeSubscribe {
-                subscribe: Subscribe {
-                    shape_id: shape.shape_id(),
-                    subscription,
-                    values: Vec::new(),
-                    known_state: None,
-                    delegated_session: None,
-                },
-                purpose: AuthorizationScopePurpose {
-                    action: PermissionAdviceAction::Read {
-                        table: "todos".to_owned(),
-                        row: row(1),
-                    },
-                },
-            })
-            .unwrap();
-        subscriber.borrow_mut().tick().unwrap();
-        assert!(
-            client_transport.try_recv().is_none(),
-            "branch, historic, and local support must never receive a receipt"
-        );
-    }
 }
 
 #[test]
@@ -3090,8 +2554,7 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_include
         Query::from("todos")
     };
     let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let mut stream = prepared_subscribe(&foreground, &query, opts.clone()).unwrap();
@@ -3526,15 +2989,6 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
         )),
         "the injected target reset failure must not fabricate a clone update"
     );
-    assert!(
-        messages.iter().all(|message| !matches!(
-            message,
-            SyncMessage::AuthorizationScopeReceipt { subscription, .. }
-                if [first_subscription, second_subscription, failed_subscription]
-                    .contains(subscription)
-        )),
-        "ordinary query usages must not acquire unpaired authorization-scope receipts"
-    );
     drop(messages);
 
     // This test stays at the connection seam because the injected clone reset
@@ -3744,8 +3198,7 @@ fn invalidated_owner_delivery_cannot_cover_a_waiting_local_read() {
     let _subscriber = relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
     let query = prepared(&foreground, &Query::from("todos"));
     let local = ReadOpts {
-        tier: DurabilityTier::Local,
-        propagation: Propagation::Full,
+        tier: crate::db::ReadTier::LocalFirst,
         ..ReadOpts::default()
     };
     let waiting = foreground
@@ -3837,7 +3290,7 @@ fn prepared_result_projection_failure_retires_one_route_and_rearms_sibling() {
             1,
             NodeUuid::from_bytes([0x92; 16]),
             1,
-            crate::wire::current_wire_features() & !crate::wire::FEATURE_QUERY_RESULT_PROTOCOL,
+            crate::wire::current_wire_features(),
         );
     block_on(browser.connect_upstream(browser_edge));
     let edge_connection = edge.accept_subscriber_with_claims(edge_transport, reader, claims);
@@ -3986,8 +3439,8 @@ fn prepared_result_projection_failure_retires_one_route_and_rearms_sibling() {
     };
     assert_eq!(
         code,
-        SubscribeServerFailureCode::Internal,
-        "an older downstream must receive the legacy-compatible failure code"
+        SubscribeServerFailureCode::QueryResultProtocol,
+        "the downstream must receive the base v5 failure code"
     );
     {
         let sent = edge_sent.borrow();
@@ -4000,12 +3453,12 @@ fn prepared_result_projection_failure_retires_one_route_and_rearms_sibling() {
                     SyncMessage::SubscribeRejected {
                         subscription,
                         reason: SubscribeRejectReason::ServerFailure {
-                            code: SubscribeServerFailureCode::Internal,
+                            code: SubscribeServerFailureCode::QueryResultProtocol,
                         },
                     } if *subscription == failed_edge_subscription
                 )
             })
-            .expect("Edge must send the downgraded rejection");
+            .expect("Edge must forward the typed rejection");
         let sibling_update_index = after_fault
             .iter()
             .position(|message| {
@@ -4067,15 +3520,15 @@ fn prepared_result_projection_failure_retires_one_route_and_rearms_sibling() {
                 },
             } if *subscription == failed_subscription
         )),
-        "Core's negotiated link must retain the typed result-protocol reason"
+        "Core must send the typed result-protocol reason"
     );
     let mut context = Context::from_waker(Waker::noop());
     assert!(
         matches!(
             futures::Stream::poll_next(std::pin::Pin::new(&mut failed), &mut context),
-            Poll::Pending
+            Poll::Ready(None)
         ),
-        "the legacy Internal rejection is nonterminal; the application must reattach"
+        "the typed rejection terminates the failed stream; reattach to recover"
     );
     drop(failed);
     browser.tick().unwrap();
@@ -4141,7 +3594,7 @@ fn prepared_result_projection_failure_retires_one_route_and_rearms_sibling() {
     );
 }
 
-/// A Core sends a negotiated protocol rejection to Alice and terminates only
+/// A Core sends a wire-v5 protocol rejection to Alice and terminates only
 /// the affected subscription stream.
 ///
 /// ```text
@@ -4149,7 +3602,7 @@ fn prepared_result_projection_failure_retires_one_route_and_rearms_sibling() {
 ///     └─QueryResultProtocol─────────► stream closes
 /// ```
 #[test]
-fn negotiated_result_protocol_rejection_terminates_only_its_stream() {
+fn result_protocol_rejection_terminates_only_its_stream() {
     let reader = AuthorSubject::for_test_bytes([0xa1; 16]);
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new()

@@ -15,13 +15,12 @@ use std::time::Duration;
 use futures::task::{ArcWake, waker};
 
 use crate::db::{
-    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
-    EmptyOpening as CoreEmptyOpening, Error as CoreDbError, ErrorCode as CoreDbErrorCode,
-    ExclusiveTxOps, LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
-    Propagation as CorePropagation, ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint,
-    SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
-    TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
-    WriteIdentity as CoreWriteIdentity,
+    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
+    ErrorCode as CoreDbErrorCode, ExclusiveTxOps, FirstLoad as CoreFirstLoad,
+    PeerConnection as CorePeerConnection, ReadOpts as CoreReadOpts,
+    RemoteLinkHint as CoreRemoteLinkHint, SubscriptionEvent as CoreSubscriptionEvent,
+    SubscriptionOutputRow as CoreSubscriptionOutputRow, TickScheduler, TickUrgency,
+    Transport as CoreTransport, WireTransportAdapter, WriteIdentity as CoreWriteIdentity,
 };
 use crate::groove::records::{
     BorrowedRecord, OwnedRecord, Value as CoreValue, ValueType as CoreValueType,
@@ -39,7 +38,6 @@ use crate::model::public_schema::{OrderedRowDelta, QueryResult, Row};
 use crate::model::public_schema::{Schema, validate_json_value};
 use crate::model::transaction::OpenTransactionId;
 use crate::model::transaction::TransactionId;
-use crate::protocol::ReadViewSpec as CoreReadViewSpec;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
 use crate::storage_codec_profile::epoch_1_storage_codec_profile;
 use crate::tools::native_transport_connector::{
@@ -1749,21 +1747,16 @@ impl ClientDb {
     }
 }
 
-fn subscription_rejection_is_retryable(reason: &crate::protocol::SubscribeRejectReason) -> bool {
-    matches!(
-        reason,
-        crate::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission
-            | crate::protocol::SubscribeRejectReason::ServerFailure {
-                code: crate::protocol::SubscribeServerFailureCode::Internal,
-            }
-    )
-}
-
 fn forward_subscription_rejection(
     tx: &mpsc::UnboundedSender<SubscriptionStreamItem>,
     reason: crate::protocol::SubscribeRejectReason,
 ) -> bool {
-    let retryable = subscription_rejection_is_retryable(&reason);
+    let terminal = matches!(
+        reason,
+        crate::protocol::SubscribeRejectReason::ServerFailure {
+            code: crate::protocol::SubscribeServerFailureCode::QueryResultProtocol,
+        }
+    );
     let reason = match reason {
         crate::protocol::SubscribeRejectReason::UnsupportedShapeCapability { detail } => {
             SubscriptionRejectReason::UnsupportedShapeCapability { detail }
@@ -1803,7 +1796,7 @@ fn forward_subscription_rejection(
         }
     };
     let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
-    !retryable
+    terminal
 }
 
 impl ClientDbInner {
@@ -2321,10 +2314,10 @@ impl ClientDbInner {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let mut stream = db
-            .subscribe(prepared, opts)
-            .await
-            .map_err(|error| JazzError::Query(error.to_string()))?;
+        let mut stream =
+            db.0.subscribe_remote_answer(prepared, opts)
+                .await
+                .map_err(|error| JazzError::Query(error.to_string()))?;
         let outcome = async {
             loop {
                 let event = stream.next_event().await.ok_or_else(|| {
@@ -2332,7 +2325,7 @@ impl ClientDbInner {
                         "remote one-shot subscription closed before settlement".to_owned(),
                     )
                 })?;
-                if crate::debug_env::covered_input_trace() {
+                if jazz_types::debug_env::covered_input_trace() {
                     match &event {
                         CoreSubscriptionEvent::Delta {
                             reset,
@@ -2360,14 +2353,14 @@ impl ClientDbInner {
                         let snapshot = stream
                             .settled_receiver_local_snapshot()
                             .map_err(|error| {
-                                if crate::debug_env::covered_input_trace() {
+                                if jazz_types::debug_env::covered_input_trace() {
                                     eprintln!(
                                         "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_snapshot_error error={error}"
                                     );
                                 }
                                 JazzError::Query(error.to_string())
                             })?;
-                        if crate::debug_env::covered_input_trace() {
+                        if jazz_types::debug_env::covered_input_trace() {
                             eprintln!(
                                 "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_settled roots={} rows={}",
                                 snapshot.root_count,
@@ -3285,7 +3278,7 @@ fn aggregate_public_values(
         .into_iter()
         .map(|(public_column, physical_column, column_type)| {
             let idx = descriptor.fields().iter().position(|field| field.name.as_deref() == Some(physical_column.as_str())).ok_or_else(|| {
-                if crate::debug_env::covered_input_trace() {
+                if jazz_types::debug_env::covered_input_trace() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=aggregate_field_missing wanted={physical_column} descriptor_fields={:?}",
                         descriptor
@@ -3316,13 +3309,6 @@ fn core_batch_id(tx_id: CoreTxId) -> TransactionId {
 }
 
 fn core_write_tier(tier: DurabilityTier) -> CoreDurabilityTier {
-    match tier {
-        DurabilityTier::Local => CoreDurabilityTier::Local,
-        DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
-    }
-}
-
-fn core_legacy_read_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     match tier {
         DurabilityTier::Local => CoreDurabilityTier::Local,
         DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
@@ -3458,28 +3444,15 @@ impl JazzClient {
         }
         Ok(())
     }
-    fn core_read_opts(durability_tier: Option<DurabilityTier>) -> CoreReadOpts {
-        CoreReadOpts {
-            tier: durability_tier
-                .map(core_legacy_read_tier)
-                .unwrap_or(CoreDurabilityTier::Local),
-            local_updates: CoreLocalUpdates::Immediate,
-            propagation: CorePropagation::Full,
-            include_deleted: false,
-            read_view: CoreReadViewSpec::default(),
-            empty_opening: CoreEmptyOpening::Deliver,
-        }
+    fn core_read_opts_for_read_tier(tier: ReadTier) -> CoreReadOpts {
+        CoreReadOpts::for_read_tier(tier)
     }
 
-    fn core_read_opts_for_read_tier(tier: ReadTier) -> CoreReadOpts {
-        let mut opts = Self::core_read_opts(Some(tier.legacy_durability_tier()));
-        opts.local_updates = match tier {
-            ReadTier::Remote => CoreLocalUpdates::Deferred,
-            ReadTier::LocalFirst | ReadTier::LocalFirstUnlessEmpty => CoreLocalUpdates::Immediate,
+    fn core_read_opts_local_first(first_load_remote_wait: Duration) -> CoreReadOpts {
+        let mut opts = Self::core_read_opts_for_read_tier(ReadTier::LocalFirst);
+        opts.first_load = CoreFirstLoad::WaitForRemote {
+            timeout_ms: u64::try_from(first_load_remote_wait.as_millis()).unwrap_or(u64::MAX),
         };
-        if tier == ReadTier::LocalFirstUnlessEmpty {
-            opts.empty_opening = CoreEmptyOpening::AwaitRemote;
-        }
         opts
     }
 }
@@ -3732,7 +3705,7 @@ impl PublicQueryDecoder {
                     .map(|result| result.fields)
                     .unwrap_or_default(),
                 Err(error) => {
-                    if crate::debug_env::covered_input_trace() {
+                    if jazz_types::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=subscription_public_fields_error error={error}"
                         );
@@ -3973,13 +3946,79 @@ impl JazzClient {
         self.subscribe_with_read_tier(query, ReadTier::Remote).await
     }
 
-    /// Subscribe using a product-level read tier.
+    /// Subscribe local first, waiting up to `first_load_remote_wait` for the
+    /// server's answer before the first delivery.
     ///
-    /// `LocalFirstUnlessEmpty` passes the core `EmptyOpening::AwaitRemote`
-    /// option through: the core stream withholds only an empty, unsettled
-    /// local opening while the server could answer, and then behaves exactly
-    /// like `LocalFirst`. An offset window is read as a strict remote view
-    /// while the server could answer.
+    /// While the server could answer (a link is live, or its first connection
+    /// attempt is still young), the core stream withholds its opening, empty
+    /// or not, until the server has answered, the link is lost, or
+    /// `first_load_remote_wait` elapses, whichever comes first. Offline, without a
+    /// server, or with a zero wait it opens on local data at once. Afterwards
+    /// it behaves exactly like [`ReadTier::LocalFirst`]: local writes show
+    /// immediately and remote changes as they arrive. An offset window is
+    /// read as the server's page while it waits.
+    pub async fn subscribe_local_first(
+        &self,
+        query: Query,
+        first_load_remote_wait: Duration,
+    ) -> Result<SubscriptionStream> {
+        self.subscribe_with_opts(
+            query,
+            Self::core_read_opts_local_first(first_load_remote_wait),
+        )
+        .await
+    }
+
+    /// One-shot local-first query that waits up to `first_load_remote_wait` for the
+    /// server's answer.
+    ///
+    /// While the server could answer, returns the server's result (with this
+    /// client's pending writes) if it arrives in time, and otherwise the
+    /// local result, dropping the pending remote read. Offline, without a
+    /// server, with a zero wait, or inside a transaction it is a plain
+    /// [`ReadTier::LocalFirst`] query.
+    pub async fn query_local_first(
+        &self,
+        query: Query,
+        first_load_remote_wait: Duration,
+    ) -> Result<Vec<QueryResult>> {
+        let in_transaction = self
+            .write_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.transaction_id.is_some());
+        if first_load_remote_wait.is_zero() || in_transaction {
+            return self
+                .query_with_opts(
+                    query,
+                    Self::core_read_opts_for_read_tier(ReadTier::LocalFirst),
+                )
+                .await;
+        }
+        let backend = self.db.backend()?;
+        let local_opts = Self::core_read_opts_for_read_tier(ReadTier::LocalFirst);
+        let remote_opts = local_opts.clone();
+        let remote_query = query.clone();
+        backend
+            .0
+            .read_local_first_within(
+                first_load_remote_wait,
+                || self.query_with_opts(query, local_opts),
+                || async {
+                    let rows = self
+                        .db
+                        .query_rows(remote_query.clone(), remote_opts, true, self.read_scope()?)
+                        .await?;
+                    self.db
+                        .query_decoder
+                        .core_rows_to_query_results(&remote_query, rows)
+                },
+            )
+            .await
+    }
+
+    /// Subscribe using a product-level read tier. For a local-first read
+    /// whose first load waits for the server, use
+    /// [`JazzClient::subscribe_local_first`].
     pub async fn subscribe_with_read_tier(
         &self,
         query: Query,
@@ -4003,37 +4042,10 @@ impl JazzClient {
         Ok(SubscriptionStream::new(rx, cancellation))
     }
 
-    /// One-shot query with read tier.
-    ///
-    /// `LocalFirstUnlessEmpty` uses the core one-shot rule: a non-empty local
-    /// result is returned as is; an empty one is replaced by the strict remote
-    /// result while the server could answer, falling back to the empty local
-    /// result (and dropping the pending remote read) if it cannot. An offset
-    /// window reads remote first while the server could answer.
+    /// One-shot query with read tier. For a local-first read that waits for
+    /// the server, use [`JazzClient::query_local_first`].
     pub async fn query(&self, query: Query, tier: ReadTier) -> Result<Vec<QueryResult>> {
-        let in_transaction = self
-            .write_context
-            .as_ref()
-            .is_some_and(|ctx| ctx.transaction_id.is_some());
-        if tier != ReadTier::LocalFirstUnlessEmpty || in_transaction {
-            return self
-                .query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
-                .await;
-        }
-        let backend = self.db.backend()?;
-        let local_opts = Self::core_read_opts_for_read_tier(ReadTier::LocalFirst);
-        let mut remote_opts = Self::core_read_opts_for_read_tier(ReadTier::Remote);
-        remote_opts.local_updates = CoreLocalUpdates::Immediate;
-        let windowed = query.offset > 0;
-        let remote_query = query.clone();
-        backend
-            .0
-            .read_local_first_unless_empty(
-                windowed,
-                || self.query_with_opts(query, local_opts),
-                || self.query_with_opts(remote_query, remote_opts),
-                |rows: &Vec<QueryResult>| rows.is_empty(),
-            )
+        self.query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
             .await
     }
 
@@ -4059,7 +4071,7 @@ impl JazzClient {
             // one-shots must own a
             // fresh coverage lifetime and return only after the receiver's
             // local maintained graph has settled that exact coverage.
-            let wait_for_coverage = opts.tier >= CoreDurabilityTier::Global;
+            let wait_for_coverage = opts.tier == ReadTier::Remote;
             self.db
                 .query_rows(query.clone(), opts, wait_for_coverage, self.read_scope()?)
                 .await?
@@ -4067,6 +4079,109 @@ impl JazzClient {
         self.db
             .query_decoder
             .core_rows_to_query_results(&query, rows)
+    }
+
+    /// Read a byte range from a locally observed bytes or string cell.
+    ///
+    /// The connected database identity and ordinary read policy apply. Only
+    /// intersecting large-value chunks are read; this does not materialise the
+    /// whole value or qualify typed-query projection of large cells. Storage
+    /// and missing chunk retrieval may suspend, so hydrate audio outside a
+    /// device's playback callback.
+    ///
+    /// Explicit backend sessions (`for_session`) and transaction-scoped reads
+    /// are unsupported and return a query error rather than ignoring scope.
+    pub async fn read_value_range(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        column: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>> {
+        if let Some(context) = &self.write_context {
+            if context.transaction_id.is_some() {
+                return Err(JazzError::Query(
+                    "byte-range reads in a transaction are not supported".into(),
+                ));
+            }
+            // ponytail: core range reads use the database identity; add a
+            // scoped core operation when backend audio sessions are needed.
+            if context.session().is_some() {
+                return Err(JazzError::Query(
+                    "byte-range reads with an explicit session are not supported".into(),
+                ));
+            }
+        }
+        self.db.ensure_tick_driver_running()?;
+        let backend = self.db.backend()?;
+        let bytes = StackSafeFuture::new(backend.0.read_value_range(
+            table,
+            CoreRowUuid(*object_id.uuid()),
+            column,
+            range,
+        ))
+        .await
+        .map_err(|error| JazzError::Query(error.to_string()))?;
+        self.db.inner.borrow().backend()?;
+        Ok(bytes)
+    }
+
+    /// Stream one bytes, text or JSON cell into a new row using a native reader.
+    ///
+    /// `values` supplies the other columns and must omit `column`. The core
+    /// import uses bounded buffering and publishes the row only after EOF and
+    /// scalar validation. The reader runs on a separate thread. Errors publish
+    /// no row; abandoned staged data follows ordinary staging cleanup.
+    ///
+    /// The database's enrolled identity, permission checks and write settlement
+    /// apply. Await the returned transaction with [`Self::wait_for_transaction`]
+    /// for the required durability tier. No complete imported value is returned.
+    /// Transaction, explicit session and attribution contexts are unsupported
+    /// and rejected before consuming the reader. Native-reader imports are not
+    /// available on WebAssembly.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn insert_streaming_value<R>(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        column: &str,
+        reader: R,
+    ) -> Result<(ObjectId, TransactionId)>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        self.reject_updated_at_override("streaming inserts")?;
+        if let Some(context) = &self.write_context {
+            if context.transaction_id.is_some() {
+                return Err(JazzError::Write(
+                    "streaming inserts in a transaction are not supported".into(),
+                ));
+            }
+            if context.session().is_some() || context.attribution.is_some() {
+                return Err(JazzError::Write(
+                    "streaming inserts with an explicit session or attribution are not supported"
+                        .into(),
+                ));
+            }
+        }
+        let cells = self.core_cells(table, values)?;
+        self.db.ensure_tick_driver_running()?;
+        let backend = self.db.backend()?;
+        let write = StackSafeFuture::new(
+            backend
+                .0
+                .insert_streaming_value(table, cells, column, reader),
+        )
+        .await
+        .map_err(|error| JazzError::Write(error.to_string()))?;
+        let tx_id = write.mergeable_tx_id();
+        let mut inner = self.db.inner.borrow_mut();
+        Self::check_core_write_not_rejected(inner.backend()?, tx_id)?;
+        inner.remember_write(tx_id);
+        Ok((
+            ObjectId::from_uuid(write.row_uuid().0),
+            core_batch_id(tx_id),
+        ))
     }
 
     /// Create a new row in a table.
@@ -4347,10 +4462,11 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
 
-    /// QueryResultProtocol reaches the public stream and is terminal; Internal
-    /// and catalogue-admission-pending events remain retryable.
+    /// Alice receives the typed result-protocol rejection; only that new code
+    /// adds runtime teardown. Bob's existing reasons keep their delivery behaviour.
+    /// This private forwarding seam isolates reason conversion from transports.
     #[test]
-    fn subscription_rejection_delivery_maps_code_and_retryability() {
+    fn subscription_rejection_delivery_terminates_only_result_protocol() {
         use crate::protocol::{SubscribeRejectReason, SubscribeServerFailureCode};
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -4371,7 +4487,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        assert!(forward_subscription_rejection(
+        assert!(!forward_subscription_rejection(
             &tx,
             SubscribeRejectReason::ServerFailure {
                 code: SubscribeServerFailureCode::QueryValidation,
@@ -5129,42 +5245,12 @@ mod tests {
     #[test]
     fn read_tier_lowers_without_changing_write_durability() {
         assert_eq!(
-            ReadTier::LocalFirst.legacy_durability_tier(),
-            DurabilityTier::Local
+            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirst).tier,
+            ReadTier::LocalFirst
         );
         assert_eq!(
-            ReadTier::Remote.legacy_durability_tier(),
-            DurabilityTier::GlobalServer
-        );
-        assert_eq!(
-            ReadTier::LocalFirstUnlessEmpty.legacy_durability_tier(),
-            DurabilityTier::Local,
-            "the empty-opening gate is a read option, not a tier"
-        );
-        assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirst).local_updates,
-            CoreLocalUpdates::Immediate
-        );
-        assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::Remote).local_updates,
-            CoreLocalUpdates::Deferred
-        );
-        assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirstUnlessEmpty).local_updates,
-            CoreLocalUpdates::Immediate
-        );
-        assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirstUnlessEmpty).empty_opening,
-            CoreEmptyOpening::AwaitRemote
-        );
-        assert_eq!(
-            core_legacy_read_tier(DurabilityTier::Local),
-            CoreDurabilityTier::Local
-        );
-        assert_eq!(
-            core_legacy_read_tier(DurabilityTier::GlobalServer),
-            CoreDurabilityTier::Global,
-            "remote reads use the Core-confirmed view"
+            JazzClient::core_read_opts_for_read_tier(ReadTier::Remote).tier,
+            ReadTier::Remote
         );
         assert_eq!(
             core_write_tier(DurabilityTier::Local),

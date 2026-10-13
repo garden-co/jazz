@@ -24,6 +24,7 @@
 //! If a future zero-copy shim is added, hand the host a Rust-defined finalizer
 //! callback that frees through mimalloc instead.
 
+mod e2ee_crypto;
 #[cfg(feature = "rn-test-bridge")]
 mod rn_test_bridge;
 
@@ -48,7 +49,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -66,18 +67,17 @@ use jazz::db::LargeValueUpdate as CoreLargeValueUpdate;
 use jazz::db::StreamingMutationKind as CoreStreamingMutationKind;
 use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
-    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, EmptyOpening as CoreEmptyOpening,
-    InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
+    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, FirstLoad as CoreFirstLoad,
+    InitialSyncFlushCadence as CoreInitialSyncFlushCadence,
     MutationErrorCallback as CoreMutationErrorCallback, PeerConnection as CorePeerConnection,
-    Propagation as CorePropagation, ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint,
-    RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
-    SerializedReadResult as CoreSerializedReadResult,
+    ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint, RowCells as CoreRowCells,
+    SeededRowIdSource as CoreSeededRowIdSource, SerializedReadResult as CoreSerializedReadResult,
     SerializedSubscriptionAuthorization as CoreSerializedSubscriptionAuthorization,
     StreamingValueUpload as CoreStreamingValueUpload,
     StreamingValueUploadCleanupTicket as CoreStreamingValueUploadCleanupTicket,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionStream,
     TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
-    WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
+    WireTransportAdapter as CoreWireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::Value as CoreValue;
 use jazz::groove::storage::{
@@ -112,6 +112,12 @@ use jazz_storage_rocksdb::{
     Durability as CoreRocksDbDurability, RocksDbStorage as CoreRocksDbStorage,
 };
 
+/// Validate a schema and its embedded permissions without opening a database.
+#[napi(js_name = "validateSchema")]
+pub fn validate_schema(schema: Uint8Array) -> napi::Result<()> {
+    decode_public_schema(&schema).map(|_| ())
+}
+
 /// Exact build/ABI fingerprint for the generated native artifact.
 #[napi]
 pub fn native_artifact_fingerprint() -> String {
@@ -128,19 +134,26 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
-/// Test-only direct execution of one frozen complete v1 frame through the
+/// Test-only execution of a frozen v5 frame batch through the
 /// generated NAPI artifact. This reaches the production Rust frame, feature,
 /// compression, and semantic-payload decoders; it is not a host wire API.
-#[napi(js_name = "__testValidateWireFrameCorpus", skip_typescript)]
-pub fn test_validate_wire_frame_corpus(frame: Buffer, negotiated_features: String) -> Result<()> {
+#[napi(js_name = "__testValidateWireFrameBatchCorpus", skip_typescript)]
+pub fn test_validate_wire_frame_batch_corpus(
+    frame: Buffer,
+    negotiated_features: String,
+) -> Result<()> {
     let negotiated_features = negotiated_features
         .parse()
         .map_err(|_| napi::Error::from_reason("test wire corpus features must be a u64 decimal"))?;
-    jazz::wire::validate_frame_for_artifact_corpus(&frame, negotiated_features)
+    jazz::wire::decode_websocket_frame_batch(&frame)
+        .map_err(|error| error.to_string())
+        .and_then(|frames| {
+            jazz::wire::validate_frames_for_artifact_corpus(&frames, negotiated_features)
+        })
         .map_err(napi::Error::from_reason)
 }
 
-/// Test-only feature inventory paired with [`test_validate_wire_frame_corpus`].
+/// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
 #[napi(js_name = "__testWireFrameCorpusFeatures", skip_typescript)]
 pub fn test_wire_frame_corpus_features() -> String {
     jazz::wire::current_wire_features().to_string()
@@ -833,8 +846,93 @@ type NativeReadCleanup = Rc<RefCell<Option<Box<dyn FnOnce()>>>>;
 /// of blocking Node.
 #[napi]
 pub struct PendingNativeRead {
-    future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>>,
+    state: Rc<PendingReadState>,
+}
+
+struct PendingReadState {
+    future: RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>,
     cleanup: NativeReadCleanup,
+    /// A result reached while another host call advanced this read.
+    ready: RefCell<Option<napi::Result<Uint8Array>>>,
+}
+
+impl PendingReadState {
+    /// Poll once with the host's no-op waker. `None` once the read is complete.
+    fn poll(&self) -> Option<Poll<napi::Result<Uint8Array>>> {
+        let mut future = self.future.borrow_mut().take()?;
+        let mut context = Context::from_waker(Waker::noop());
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => {
+                if let Some(cleanup) = self.cleanup.borrow_mut().take() {
+                    cleanup();
+                }
+                Some(Poll::Ready(result))
+            }
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Some(Poll::Pending)
+            }
+        }
+    }
+}
+
+thread_local! {
+    /// Reads the host is driving that returned `Pending`. A parked read can
+    /// hold thread-affine owner state (the node lock) across a cooperative
+    /// yield; only another poll on this thread lets it finish and release it.
+    static PARKED_NATIVE_READS: RefCell<Vec<Weak<PendingReadState>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn park_native_read(state: &Rc<PendingReadState>) {
+    PARKED_NATIVE_READS.with(|parked| {
+        let mut parked = parked.borrow_mut();
+        parked.retain(|read| read.strong_count() > 0);
+        if !parked
+            .iter()
+            .any(|read| std::ptr::eq(read.as_ptr(), Rc::as_ptr(state)))
+        {
+            parked.push(Rc::downgrade(state));
+        }
+    });
+}
+
+/// Advance every parked read once, keeping any result for the host's next poll.
+fn advance_parked_native_reads() {
+    let parked: Vec<_> = PARKED_NATIVE_READS
+        .with(|parked| parked.borrow().iter().filter_map(Weak::upgrade).collect());
+    for read in &parked {
+        if read.ready.borrow().is_some() {
+            continue;
+        }
+        if let Some(Poll::Ready(result)) = read.poll() {
+            *read.ready.borrow_mut() = Some(result);
+        }
+    }
+    PARKED_NATIVE_READS.with(|parked| {
+        parked.borrow_mut().retain(|read| {
+            read.upgrade()
+                .is_some_and(|read| read.future.borrow().is_some())
+        })
+    });
+}
+
+/// Drive a synchronous host call on the JavaScript thread.
+///
+/// The call can wait for owner state that a parked read holds, for example a
+/// first upstream connection installed while a one-shot hydration is
+/// suspended between evaluation turns. The host re-polls that read only after
+/// this call returns, so it is advanced here instead of spinning forever.
+fn core_block_on<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        advance_parked_native_reads();
+        std::thread::yield_now();
+    }
 }
 
 /// Thread-affine subscription opening waiting for the core owner.
@@ -1003,39 +1101,40 @@ impl PendingNativeSubscriptionBatch {
 
 impl PendingNativeRead {
     fn new(future: LocalBoxFuture<'static, napi::Result<Uint8Array>>) -> Self {
-        Self {
-            future: Rc::new(RefCell::new(Some(future))),
-            cleanup: Rc::new(RefCell::new(None)),
-        }
+        Self::from_parts(future, None)
     }
 
     fn with_cleanup(
         future: LocalBoxFuture<'static, napi::Result<Uint8Array>>,
         cleanup: Box<dyn FnOnce()>,
     ) -> Self {
+        Self::from_parts(future, Some(cleanup))
+    }
+
+    fn from_parts(
+        future: LocalBoxFuture<'static, napi::Result<Uint8Array>>,
+        cleanup: Option<Box<dyn FnOnce()>>,
+    ) -> Self {
         Self {
-            future: Rc::new(RefCell::new(Some(future))),
-            cleanup: Rc::new(RefCell::new(Some(cleanup))),
+            state: Rc::new(PendingReadState {
+                future: RefCell::new(Some(future)),
+                cleanup: Rc::new(RefCell::new(cleanup)),
+                ready: RefCell::new(None),
+            }),
         }
     }
 
     fn poll_once(&self) -> napi::Result<Option<Uint8Array>> {
-        let Some(mut future) = self.future.borrow_mut().take() else {
-            return Err(napi::Error::from_reason(
+        if let Some(result) = self.state.ready.borrow_mut().take() {
+            return result.map(Some);
+        }
+        match self.state.poll() {
+            None => Err(napi::Error::from_reason(
                 "native pending read is already complete",
-            ));
-        };
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
-        match Pin::new(&mut future).poll(&mut context) {
-            Poll::Ready(result) => {
-                if let Some(cleanup) = self.cleanup.borrow_mut().take() {
-                    cleanup();
-                }
-                result.map(Some)
-            }
-            Poll::Pending => {
-                *self.future.borrow_mut() = Some(future);
+            )),
+            Some(Poll::Ready(result)) => result.map(Some),
+            Some(Poll::Pending) => {
+                park_native_read(&self.state);
                 Ok(None)
             }
         }
@@ -1098,8 +1197,9 @@ impl PendingNativeRead {
 
     #[napi]
     pub fn cancel(&self) {
-        self.future.borrow_mut().take();
-        if let Some(cleanup) = self.cleanup.borrow_mut().take() {
+        self.state.future.borrow_mut().take();
+        self.state.ready.borrow_mut().take();
+        if let Some(cleanup) = self.state.cleanup.borrow_mut().take() {
             cleanup();
         }
     }
@@ -3078,7 +3178,7 @@ impl NapiDb {
         &self,
         query: Uint8Array,
         #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null"
+            ts_arg_type = "{ tier?: string; include_deleted?: boolean; sync?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
         open_transaction_id: Option<String>,
@@ -3131,9 +3231,8 @@ impl NapiDb {
                             })?
                             .map_err(napi_error)?;
                     }
-                    let requires_coverage = non_durable_client
-                        || (opts.tier >= jazz::tx::DurabilityTier::Global
-                            && opts.propagation == CorePropagation::Full);
+                    let requires_coverage =
+                        non_durable_client || (opts.tier == jazz::db::ReadTier::Remote);
                     // The coverage budget runs from the first wait on the
                     // server. A Global read that first waits for its own
                     // preceding writes to go out has not asked yet (#3839).
@@ -3269,9 +3368,7 @@ impl NapiDb {
     pub fn subscribe(
         &self,
         query: Uint8Array,
-        #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
-        )]
+        #[napi(ts_arg_type = "{ tier?: string; include_deleted?: boolean } | undefined | null")]
         opts: Option<JsonValue>,
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
@@ -3420,7 +3517,7 @@ impl NapiDb {
     /// Report what the host knows about the path to the authoritative server
     /// (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
     /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
-    /// Drives only `local-first-unless-empty` reads. The core timestamps each
+    /// Drives only local-first reads that wait for the server on first load. The core timestamps each
     /// `"attempting"` report as the start of a new attempt; until this is
     /// first called, reachability is derived from this runtime's own upstream.
     #[napi(js_name = "setRemoteLinkHint")]
@@ -3456,8 +3553,7 @@ impl NapiDb {
                 },
                 jazz::wire::WIRE_PROTOCOL_VERSION,
                 jazz::wire::current_wire_features()
-                    & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                        | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+                    & !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
                 None,
                 None,
                 self.trusted_backend,
@@ -3466,11 +3562,11 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
+                connection: Some(core_block_on(db.connect_upstream(transport))),
             },
             NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
                 db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
+                connection: Some(core_block_on(db.connect_upstream(transport))),
             },
         };
         let auxiliary_pump = inner.auxiliary_pump();
@@ -3504,12 +3600,6 @@ impl NapiDb {
             return Err(napi::Error::from_reason(format!(
                 "server negotiated wire features {features:#x}, but this native binding was not compiled with {unsupported:#x}"
             )).into());
-        }
-        if features & jazz::wire::FEATURE_SYNC_MESSAGE_PAYLOAD == 0 {
-            return Err(napi::Error::from_reason(
-                "server did not negotiate required sync message payload frames",
-            )
-            .into());
         }
         let remote_node: [u8; 16] = remote_node.as_ref().try_into().map_err(|_| {
             napi::Error::from_reason("server hello authority node must be 16 bytes")
@@ -3556,11 +3646,11 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
+                connection: Some(core_block_on(db.connect_upstream(transport))),
             },
             NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
                 db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
+                connection: Some(core_block_on(db.connect_upstream(transport))),
             },
         };
         let auxiliary_pump = inner.auxiliary_pump();
@@ -4226,32 +4316,16 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
         return Ok(opts);
     }
     if let Some(tier) = optional_json_string_prop(&value, "tier")? {
-        (opts.tier, opts.empty_opening) = core_read_tier_from_str(&tier)?;
-    }
-    if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
-        opts.local_updates = match local_updates.as_str() {
-            "Immediate" | "immediate" => CoreLocalUpdates::Immediate,
-            "Deferred" | "deferred" => CoreLocalUpdates::Deferred,
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "unknown local_updates {other}"
-                )));
-            }
-        };
-    }
-    if let Some(propagation) = optional_json_string_prop(&value, "propagation")? {
-        opts.propagation = match propagation.as_str() {
-            "Full" | "full" => CorePropagation::Full,
-            "LocalOnly" | "local_only" | "localOnly" | "local-only" => CorePropagation::LocalOnly,
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "unknown propagation {other}"
-                )));
-            }
-        };
+        opts.tier = core_read_tier_from_str(&tier)?;
     }
     if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
+    }
+    // A local-first read's server-wait timeout. `Remote` reads ignore it.
+    if let Some(timeout_ms) = optional_json_wait_ms_prop(&value, "first_load_remote_wait_ms")?
+        && opts.tier == jazz::db::ReadTier::LocalFirst
+    {
+        opts.first_load = CoreFirstLoad::WaitForRemote { timeout_ms };
     }
     if let Some(read_view) = value
         .get("read_view")
@@ -4518,18 +4592,14 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
 
 /// Read-only binding lowering. Write waits keep the durability-tier parser so
 /// `remote` names cannot accidentally become a write settlement tier.
-fn core_read_tier_from_str(tier: &str) -> napi::Result<(CoreDurabilityTier, CoreEmptyOpening)> {
+fn core_read_tier_from_str(tier: &str) -> napi::Result<jazz::db::ReadTier> {
     match tier {
-        "local-first" | "LocalFirst" => Ok((CoreDurabilityTier::Local, CoreEmptyOpening::Deliver)),
-        // The core owns the local-first-unless-empty gate.
-        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
-            Ok((CoreDurabilityTier::Local, CoreEmptyOpening::AwaitRemote))
-        }
-        "remote-if-possible" | "RemoteIfPossible" => Err(napi::Error::from_reason(
-            "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
-        )),
-        "remote" | "Remote" => Ok((CoreDurabilityTier::Global, CoreEmptyOpening::Deliver)),
-        _ => core_durability_tier_from_str(tier).map(|tier| (tier, CoreEmptyOpening::Deliver)),
+        "local-first" | "LocalFirst" => Ok(jazz::db::ReadTier::LocalFirst),
+        "remote" | "Remote" => Ok(jazz::db::ReadTier::Remote),
+        "local-only" | "LocalOnly" => Ok(jazz::db::ReadTier::LocalOnly),
+        other => Err(napi::Error::from_reason(format!(
+            "unknown read tier {other}"
+        ))),
     }
 }
 
@@ -4538,6 +4608,21 @@ fn optional_json_string_prop(value: &JsonValue, name: &str) -> napi::Result<Opti
         Some(JsonValue::String(value)) => Ok(Some(value.clone())),
         Some(JsonValue::Null) | None => Ok(None),
         Some(_) => Err(napi::Error::from_reason(format!("{name} must be a string"))),
+    }
+}
+
+fn optional_json_wait_ms_prop(value: &JsonValue, name: &str) -> napi::Result<Option<u64>> {
+    match value.get(name) {
+        Some(JsonValue::Null) | None => Ok(None),
+        Some(JsonValue::Number(ms)) => match ms.as_f64() {
+            Some(ms) if ms.is_finite() && ms >= 0.0 => Ok(Some(ms.floor() as u64)),
+            _ => Err(napi::Error::from_reason(format!(
+                "{name} must be a non-negative number of milliseconds"
+            ))),
+        },
+        Some(_) => Err(napi::Error::from_reason(format!(
+            "{name} must be a non-negative number of milliseconds"
+        ))),
     }
 }
 
@@ -5416,6 +5501,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn host_waits_advance_a_parked_read_that_holds_owner_state() {
+        // A one-shot read suspended between evaluation turns keeps the owner
+        // lock until the host polls it again. A synchronous host call that
+        // needs the lock runs on the same thread, so it must advance the read
+        // instead of spinning forever.
+        let owner = Rc::new(futures::lock::Mutex::new(()));
+        let held = Rc::clone(&owner);
+        let pending = PendingNativeRead::new(Box::pin(async move {
+            let _guard = held.lock().await;
+            let mut yielded = false;
+            std::future::poll_fn(|context| {
+                if std::mem::replace(&mut yielded, true) {
+                    Poll::Ready(())
+                } else {
+                    context.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            Ok(Uint8Array::new(vec![3]))
+        }));
+
+        assert!(
+            pending.poll_once().unwrap().is_none(),
+            "the read parks while holding the owner lock"
+        );
+        drop(crate::core_block_on(owner.lock()));
+        assert_eq!(
+            pending.poll_once().unwrap().unwrap().to_vec(),
+            vec![3],
+            "the host's next poll still receives the read's result"
+        );
+        assert!(pending.poll_once().is_err(), "the result is delivered once");
+    }
+
     // Internal because this asserts the NAPI object's one-turn retry marker;
     // public transport topology tests separately prove that routed chunks are
     // eventually delivered. The marker is what prevents the binding from
@@ -5471,32 +5592,30 @@ mod tests {
 
     /// Binding read choices lower without widening the write durability parser.
     #[test]
-    fn read_tier_names_lower_to_existing_core_tiers() {
+    fn read_tier_names_are_separate_from_durability() {
         assert_eq!(
             core_read_tier_from_str("local-first").expect("local-first read tier"),
-            (
-                jazz::tx::DurabilityTier::Local,
-                jazz::db::EmptyOpening::Deliver
-            )
+            jazz::db::ReadTier::LocalFirst
         );
         assert_eq!(
             core_read_tier_from_str("remote").expect("strict remote read tier"),
-            (
-                jazz::tx::DurabilityTier::Global,
-                jazz::db::EmptyOpening::Deliver
-            )
+            jazz::db::ReadTier::Remote
         );
-        for name in ["remote-if-possible", "RemoteIfPossible"] {
-            assert!(core_read_tier_from_str(name).is_err(), "{name} was removed");
-        }
-        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
+        for name in [
+            "remote-if-possible",
+            "RemoteIfPossible",
+            "local-first-unless-empty",
+            "LocalFirstUnlessEmpty",
+            "core",
+            "Core",
+            "local",
+            "global",
+            "none",
+            "invalid-tier",
+        ] {
             assert_eq!(
-                core_read_tier_from_str(name).expect("local-first-unless-empty read tier"),
-                (
-                    jazz::tx::DurabilityTier::Local,
-                    jazz::db::EmptyOpening::AwaitRemote
-                ),
-                "{name} reads local-first with the core empty-opening gate"
+                core_read_tier_from_str(name).unwrap_err().reason,
+                format!("unknown read tier {name}"),
             );
         }
         assert!(
@@ -5630,7 +5749,7 @@ mod tests {
     use jazz::account_registry::AccountId;
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
-        MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
+        MergeableTxOps, SubscriptionEvent as CoreSubscriptionEvent,
     };
     use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
@@ -7394,10 +7513,10 @@ mod tests {
 
     #[test]
     fn core_read_opts_accept_public_local_only_spelling() {
-        let opts = core_read_opts_from_json(Some(json!({ "propagation": "local-only" })))
+        let opts = core_read_opts_from_json(Some(json!({ "tier": "local-only" })))
             .expect("parse read opts");
 
-        assert_eq!(opts.propagation, CorePropagation::LocalOnly);
+        assert_eq!(opts.tier, jazz::db::ReadTier::LocalOnly);
     }
 
     #[test]
@@ -7405,7 +7524,7 @@ mod tests {
         let opts =
             core_read_opts_from_json(Some(json!({ "propagate": false }))).expect("parse read opts");
 
-        assert_eq!(opts.propagation, CorePropagation::Full);
+        assert_eq!(opts.tier, jazz::db::ReadTier::LocalFirst);
     }
 
     #[test]

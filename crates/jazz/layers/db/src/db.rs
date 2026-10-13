@@ -86,8 +86,6 @@ mod routed_messages;
 pub use channel_endpoint::{AuxiliaryChannelEndpoint, SharedAuxiliaryEndpoint};
 pub use routed_messages::ReceivedSyncMessage;
 mod wire_transport;
-#[cfg(test)]
-use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
 pub use wire_transport::{WireFlushStatus, WireSendOutcome, WireTransportAdapter};
 
 /// Pragmatic single-threaded serialization boundary for canonical Jazz state.
@@ -2817,21 +2815,6 @@ struct RelaySubscriptionRejection {
     reason: SubscribeRejectReason,
 }
 
-/// Authority-derived scope identity retained for a support subscription.
-/// Never constructed from the caller's wire payload.
-#[derive(Clone, Debug, PartialEq)]
-struct AuthorizedScopePurpose {
-    key: crate::protocol::AuthorizationSupportScopeKey,
-    operation: crate::protocol::AuthorizationOperationKey,
-    action: PermissionAdviceAction,
-    expected_support: BTreeSet<(ShapeId, BindingId)>,
-}
-
-// Compatibility spelling retained for module-local tests while the actual
-// implementation is the shared authority proof primitive.
-#[cfg(test)]
-type ScopeAggregate = AuthorityScopeAggregate;
-
 /// One receipt-bound authorization operation owned by one admitted upstream.
 ///
 /// This state deliberately lives on `ConnectionLink::Upstream`: a receipt is
@@ -3201,9 +3184,9 @@ impl Drop for PermissionAdviceFuture {
 }
 
 mod catalogue;
-mod empty_opening;
-pub use empty_opening::{EmptyOpening, REMOTE_LINK_ATTEMPT_WINDOW, RemoteLinkHint};
-use empty_opening::{OpeningGate, OpeningRoute, RemoteLinkTracker};
+mod first_load;
+pub use first_load::{FirstLoad, REMOTE_LINK_ATTEMPT_WINDOW, RemoteLinkHint};
+use first_load::{OpeningGate, OpeningRoute, RemoteLinkTracker};
 mod lifecycle;
 mod mutation_errors;
 mod mutations;
@@ -3287,62 +3270,57 @@ pub use config::{
     ClientRelayScope, DbConfig, DbIdentity, ProductionRowIdSource, RowIdSource, SeededRowIdSource,
 };
 
+/// Where a read gets its results and whether it includes pending writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum ReadTier {
+    /// Include local data and pending writes, and request results upstream.
+    LocalFirst,
+    /// Read the server-confirmed view without a pending-write overlay.
+    Remote,
+    /// Include locally known data and pending writes without requesting upstream results.
+    LocalOnly,
+}
+
 /// One-shot read options.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ReadOpts {
-    /// Durability tier that gates the first result.
-    pub tier: DurabilityTier,
-    /// Whether own local updates are visible immediately.
-    pub local_updates: LocalUpdates,
-    /// Whether evaluation may propagate upstream.
-    pub propagation: Propagation,
+    /// Read semantics; execution resolves coverage durability separately.
+    pub tier: ReadTier,
     /// Include current rows whose deletion winner is `Deleted`.
     pub include_deleted: bool,
     /// Semantic read view to evaluate against.
     pub read_view: ReadViewSpec,
     /// What to do with an empty, unsettled opening. Host read-option state
-    /// only; an absent serde field is [`EmptyOpening::Deliver`].
+    /// only; an absent serde field is [`FirstLoad::Deliver`].
     #[serde(default)]
-    pub empty_opening: EmptyOpening,
+    pub first_load: FirstLoad,
 }
 
 impl Default for ReadOpts {
     fn default() -> Self {
         Self {
-            tier: DurabilityTier::Local,
-            local_updates: LocalUpdates::Immediate,
-            propagation: Propagation::Full,
+            tier: ReadTier::LocalFirst,
             include_deleted: false,
             read_view: ReadViewSpec::default(),
-            empty_opening: EmptyOpening::Deliver,
+            first_load: FirstLoad::Deliver,
         }
     }
 }
 
 impl ReadOpts {
+    /// Construct a read from product semantics.
+    pub fn for_read_tier(tier: ReadTier) -> Self {
+        Self {
+            tier,
+            ..Self::default()
+        }
+    }
+
     /// Evaluate the query as a live head branch composed over an optional base.
     pub fn branch_view(mut self, head: BranchSelector, base: Option<BranchViewBase>) -> Self {
         self.read_view = ReadViewSpec::branch_view(head, base);
         self
     }
-}
-
-/// Own-write overlay policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum LocalUpdates {
-    /// Include local writes immediately.
-    Immediate,
-    /// Defer local writes until the requested tier observes them.
-    Deferred,
-}
-
-/// Read propagation policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum Propagation {
-    /// Full propagation may be used by future remote paths.
-    Full,
-    /// Evaluate only against local knowledge.
-    LocalOnly,
 }
 
 pub use crate::node::api_error::{Error, ErrorCode};
@@ -3446,11 +3424,12 @@ pub mod doctest_support {
     }
 }
 
-fn effective_read_tier(opts: &ReadOpts) -> DurabilityTier {
-    if opts.local_updates == LocalUpdates::Immediate {
-        opts.tier.max(DurabilityTier::Local)
-    } else {
-        opts.tier
+/// Default coverage for a read. Initial waits and hydration pass their
+/// stronger coverage explicitly without changing the requested read tier.
+fn read_coverage_tier(opts: &ReadOpts) -> DurabilityTier {
+    match opts.tier {
+        ReadTier::LocalFirst | ReadTier::LocalOnly => DurabilityTier::Local,
+        ReadTier::Remote => DurabilityTier::Global,
     }
 }
 
@@ -3462,9 +3441,6 @@ fn upstream_register_shape_options(
     RegisterShapeOptions {
         tier: remote_subscription_tier(tier, upstream_durability_floor),
         read_view,
-        // LocalOnly controls whether the caller attaches a remote usage.
-        // Every usage that crosses a node boundary propagates normally.
-        propagate_upstream: true,
         ..RegisterShapeOptions::default()
     }
 }
@@ -3526,12 +3502,6 @@ fn ensure_supported_register_shape_options(
     delegated_session_capability: bool,
 ) -> Result<(), Error> {
     ensure_supported_register_shape_read_view(opts)?;
-    if !opts.propagate_upstream {
-        return Err(Error::new(
-            ErrorCode::Query,
-            "remote subscriptions cannot disable upstream propagation; LocalOnly is a local read setting",
-        ));
-    }
     if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(
@@ -3585,31 +3555,6 @@ fn server_subscription_failure_rejection_message(
     subscription: SubscriptionKey,
     error: &crate::node::Error,
 ) -> SyncMessage {
-    server_subscription_failure_rejection_message_with_feature(
-        subscription,
-        error,
-        crate::wire::FEATURE_NONE,
-    )
-}
-
-fn server_failure_code_for_features(
-    code: SubscribeServerFailureCode,
-    negotiated_features: crate::wire::WireFeatures,
-) -> SubscribeServerFailureCode {
-    if code == SubscribeServerFailureCode::QueryResultProtocol
-        && negotiated_features & crate::wire::FEATURE_QUERY_RESULT_PROTOCOL == 0
-    {
-        SubscribeServerFailureCode::Internal
-    } else {
-        code
-    }
-}
-
-fn server_subscription_failure_rejection_message_with_feature(
-    subscription: SubscriptionKey,
-    error: &crate::node::Error,
-    negotiated_features: crate::wire::WireFeatures,
-) -> SyncMessage {
     // Keep the complete error on the serving process only. Subscription keys
     // provide a correlation handle without disclosing schema, policy, or
     // storage details to the peer.
@@ -3617,19 +3562,12 @@ fn server_subscription_failure_rejection_message_with_feature(
         "jazz subscription rejected: shape={} binding={} read_view={} server_error={error}",
         subscription.shape_id.0, subscription.binding_id.0, subscription.read_view.id,
     );
-    let code = server_failure_code_for_features(server_failure_code(error), negotiated_features);
-    subscription_rejection_message(subscription, SubscribeRejectReason::ServerFailure { code })
-}
-fn relay_subscription_rejection_reason_with_feature(
-    reason: SubscribeRejectReason,
-    negotiated_features: crate::wire::WireFeatures,
-) -> SubscribeRejectReason {
-    match reason {
-        SubscribeRejectReason::ServerFailure { code } => SubscribeRejectReason::ServerFailure {
-            code: server_failure_code_for_features(code, negotiated_features),
+    subscription_rejection_message(
+        subscription,
+        SubscribeRejectReason::ServerFailure {
+            code: server_failure_code(error),
         },
-        reason => reason,
-    }
+    )
 }
 
 fn subscription_rejection_message(
@@ -3725,8 +3663,6 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
             | SyncMessage::RowVersionPayloads { .. }
             | SyncMessage::CatalogueSnapshot(_)
-            | SyncMessage::PermissionAdviceResponse { .. }
-            | SyncMessage::AuthorizationScopeReceipt { .. }
             | SyncMessage::AuthorizationScopeView { .. }
             | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
             | SyncMessage::AuthorizationScopeUnavailable { .. }
@@ -4936,7 +4872,6 @@ struct SubscriptionState {
     /// from each replacement connection before it can be settled again.
     requires_authority_receipt: bool,
     /// Routing intent sent with this subscription's remote registration.
-    remote_propagate_upstream: bool,
     read_view: ReadViewSpec,
     snapshot: RelationSnapshot,
     snapshot_index: RelationSnapshotIndex,
@@ -4950,8 +4885,8 @@ struct SubscriptionState {
     /// This gates only opening; later disconnections retain the published view.
     pending_initial_owner_result: bool,
     /// Global coverage held only while a non-durable foreground's
-    /// local-first-unless-empty opening gate is armed: its settled authority
-    /// answer, relayed by the storage owner, is what may release an empty
+    /// first-load opening gate is armed: its settled authority answer,
+    /// relayed by the storage owner, is what may release the withheld
     /// opening. Retired as soon as the gate releases.
     authority_witness: Vec<UpstreamCoverageHandle>,
     sender: SubscriptionSender,
@@ -4972,9 +4907,9 @@ struct SubscriptionPublication {
     deferred: Option<SubscriptionPublicationSnapshot>,
     reset: bool,
     unresolved: BTreeSet<OutputOccurrenceId>,
-    /// Armed `EmptyOpening::AwaitRemote` gate, cleared once it releases.
+    /// Armed `FirstLoad::WaitForRemote` gate, cleared once it releases.
     opening_gate: Option<OpeningGate>,
-    /// This stream is an `EmptyOpening::AwaitRemote` offset window read as a
+    /// This stream is a gated (`WaitForRemote`) offset window read as a
     /// strict remote view, with a local-first fallback beside it.
     remote_window: bool,
     /// The remote window released unopened because its remote could no
@@ -5120,16 +5055,14 @@ impl SubscriptionSender {
             return Ok(false);
         }
         if publication.opening_gate.is_some() {
-            // Local-first unless empty: withhold the opening while it is still
-            // empty and unanswered (unsettled, or for a non-durable foreground
-            // its authority witness unanswered). The first answered or
-            // non-empty result releases the gate and opens with a canonical
-            // reset below.
+            // Withhold the opening while it is unanswered (unsettled, or for a
+            // non-durable foreground its authority witness unanswered); the
+            // gate releases from outside at its deadline. The first answered
+            // result releases the gate and opens with a canonical reset below.
             if !publication.opened
                 && publication
                     .opening_gate
                     .is_some_and(|gate| gate.awaits_answer(settled))
-                && snapshot.root_count == 0
             {
                 if let Some(gate) = publication.opening_gate.as_mut() {
                     gate.withheld = true;
@@ -5179,30 +5112,20 @@ impl SubscriptionSender {
                 if !matches!(reason, SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission));
         if releases_opening {
             let mut publication = self.publication.borrow_mut();
-            if subscription_event_is_terminal(&event) {
+            // A locally rejected closure can be followed by a valid frame on
+            // this stream; retain its last published occurrence baseline.
+            if !matches!(
+                &event,
+                SubscriptionEvent::Rejected {
+                    reason: SubscribeRejectReason::InvalidAuthoritySourceClosure { .. },
+                }
+            ) {
                 publication.deferred = None;
             }
-            // A rejection releases a withheld local-first opening: the
-            // caller sees the (empty) local result, then the rejection.
-            if let Some(gate) = publication.opening_gate.take()
-                && gate.withheld
-                && gate.route == OpeningRoute::LocalFirst
-                && !publication.opened
-                && publication.unresolved.is_empty()
-            {
-                publication.opened = true;
-                drop(publication);
-                let _ = self.sender.unbounded_send(SubscriptionEvent::Delta {
-                    reset: true,
-                    publishable: true,
-                    added: Vec::new(),
-                    updated: Vec::new(),
-                    removed: Vec::new(),
-                    terminal_operations: Vec::new(),
-                    settled: false,
-                    tier: self.requested_tier,
-                });
-            }
+            // A rejection or close ends any first-load wait. A rejection's
+            // withheld opening was already published by
+            // `SubscriptionState::send_rejection`.
+            publication.opening_gate = None;
         } else if matches!(&event, SubscriptionEvent::Delta { .. }) {
             // Receipt-only transitions bypass `publish`; before a gated
             // stream has opened there is no published view to transition.
@@ -5542,7 +5465,8 @@ impl SubscriptionStream {
                 // Anything before the window's opening reset (its link wake,
                 // receipt-only transitions) describes no published view.
                 Poll::Ready(Some(SubscriptionEvent::Delta { .. })) => continue,
-                // A non-retryable rejection terminates this exact query stream.
+                // Only a result-protocol rejection terminates this exact query
+                // stream; other rejections keep serving the cached fallback.
                 Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. })) => {
                     if subscription_event_is_terminal(&event) {
                         self.mark_terminated();
@@ -5627,6 +5551,7 @@ impl SubscriptionStream {
             return Some(event);
         }
     }
+
     #[cfg(test)]
     fn compiled_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
         let state = self._state.borrow();
@@ -5639,19 +5564,17 @@ impl SubscriptionStream {
             .and_then(LocalMaintainedViewSubscription::compiled_authorization_mode)
     }
 }
+
 fn subscription_event_is_terminal(event: &SubscriptionEvent) -> bool {
-    match event {
-        SubscriptionEvent::Closed => true,
-        SubscriptionEvent::Rejected { reason } => !matches!(
-            reason,
-            SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission
-                | SubscribeRejectReason::InvalidAuthoritySourceClosure { .. }
-                | SubscribeRejectReason::ServerFailure {
-                    code: SubscribeServerFailureCode::Internal,
-                }
-        ),
-        SubscriptionEvent::Delta { .. } => false,
-    }
+    matches!(
+        event,
+        SubscriptionEvent::Closed
+            | SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::QueryResultProtocol,
+                },
+            }
+    )
 }
 
 fn subscription_event_is_publishable(event: &SubscriptionEvent) -> bool {
@@ -6883,7 +6806,6 @@ fn subscription_is_settled<S>(
     binding: &Binding,
     tier: DurabilityTier,
     read_view: ReadViewSpec,
-    propagate_upstream: bool,
     requires_authority_receipt: bool,
     authority_result_key: Option<&crate::protocol::AuthorityResultKey>,
 ) -> bool
@@ -6899,7 +6821,6 @@ where
         read_view: RegisterShapeOptions {
             tier,
             read_view,
-            propagate_upstream,
             ..RegisterShapeOptions::default()
         }
         .read_view_key(),
