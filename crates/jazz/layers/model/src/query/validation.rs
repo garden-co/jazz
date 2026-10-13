@@ -211,9 +211,7 @@ pub fn binding_values_from_canonical_bytes(
 }
 
 #[doc(hidden)]
-pub fn binding_id_for_values(
-    values: &BTreeMap<String, Value>,
-) -> Result<BindingId, QueryError> {
+pub fn binding_id_for_values(values: &BTreeMap<String, Value>) -> Result<BindingId, QueryError> {
     Ok(BindingId(uuid::Uuid::new_v5(
         &QUERY_NAMESPACE,
         &canonical_binding_bytes(values)?,
@@ -249,6 +247,14 @@ pub enum QueryError {
     /// Operand types do not match.
     #[error("operand type mismatch")]
     OperandTypeMismatch,
+    /// A `contains` needle has a different type than its text/array haystack requires.
+    #[error("contains needle has type {actual:?}; expected {expected:?}")]
+    ContainsNeedleTypeMismatch {
+        /// Required needle type from the text or array haystack.
+        expected: Box<ColumnType>,
+        /// Inferred type of the supplied needle.
+        actual: Box<ColumnType>,
+    },
     /// An `in` candidate does not match its column's whole-value type.
     #[error(
         "in candidate for column {column} has type {candidate_type:?}, but the column has type {column_type:?}"
@@ -1190,8 +1196,7 @@ fn is_full_identity_projection(
         let identity = match &column.expr {
             RelationProjectExpr::RowId(RelationRowIdRef::Current) => column.alias == "id",
             RelationProjectExpr::Column(reference) => {
-                reference.scope.as_deref() == Some(output_scope)
-                    && reference.column == column.alias
+                reference.scope.as_deref() == Some(output_scope) && reference.column == column.alias
             }
             RelationProjectExpr::RowId(_) => false,
         };
@@ -1326,8 +1331,11 @@ fn validate_retained_relation_union(
         }
         let mut arm_query = arm_query;
         arm_query.relation = Some(arm_relation);
-        let (_, arm_params, _) =
-            validate_query_canonical_parts_as(&arm_query, schema, RelationProjectionRole::UnionArm)?;
+        let (_, arm_params, _) = validate_query_canonical_parts_as(
+            &arm_query,
+            schema,
+            RelationProjectionRole::UnionArm,
+        )?;
         for (name, ty) in arm_params {
             match params.entry(name) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
@@ -1367,7 +1375,6 @@ fn relation_projection_contract(
         })
         .collect()
 }
-
 
 fn reject_author_ordering(order_by: &[OrderBy]) -> Result<(), QueryError> {
     if let Some(order) = order_by
@@ -1483,9 +1490,7 @@ fn rewrite_flat_join_predicate_columns(
 }
 
 #[doc(hidden)]
-pub fn flat_join_predicate_sources(
-    predicate: &Predicate,
-) -> Result<BTreeSet<String>, QueryError> {
+pub fn flat_join_predicate_sources(predicate: &Predicate) -> Result<BTreeSet<String>, QueryError> {
     let mut predicate = predicate.clone();
     let mut sources = BTreeSet::new();
     rewrite_flat_join_predicate_columns(&mut predicate, &mut |column| {
@@ -2312,21 +2317,31 @@ fn validate_predicate(
         Predicate::Contains(left, right) => {
             let left_type = operand_type(table, left, params)?;
             let right_type = operand_type(table, right, params)?;
-            match (
-                left_type.map(|column_type| non_null_column_type(&column_type)),
-                right_type,
-            ) {
-                (Some(ColumnType::String), _) => {
-                    validate_operand_against_type(table, right, ColumnType::String, params)
+            let expected = match left_type {
+                Some(column_type) => match non_null_column_type(&column_type) {
+                    ColumnType::String => ColumnType::String,
+                    ColumnType::Array(member) => *member,
+                    _ => return Err(QueryError::OperandTypeMismatch),
+                },
+                None => {
+                    return match right_type {
+                        Some(right_type) => check_inferred_param(
+                            left,
+                            ColumnType::Array(Box::new(right_type)),
+                            params,
+                        ),
+                        None => Err(QueryError::OperandTypeMismatch),
+                    };
                 }
-                (Some(ColumnType::Array(member)), _) => {
-                    validate_operand_against_type(table, right, *member, params)
-                }
-                (Some(_), _) => Err(QueryError::OperandTypeMismatch),
-                (None, Some(right_type)) => {
-                    check_inferred_param(left, ColumnType::Array(Box::new(right_type)), params)
-                }
-                (None, None) => Err(QueryError::OperandTypeMismatch),
+            };
+
+            match right_type {
+                Some(actual) if actual != expected => Err(QueryError::ContainsNeedleTypeMismatch {
+                    expected: Box::new(expected),
+                    actual: Box::new(actual),
+                }),
+                Some(_) => Ok(()),
+                None => check_inferred_param(right, expected, params),
             }
         }
         // Claims are dynamically typed and become literals when binding the session.
@@ -2412,19 +2427,6 @@ fn validate_comparable_operands(
         }
         (Some(left_type), Some(_)) => Ok(left_type),
         (None, None) => Err(QueryError::OperandTypeMismatch),
-    }
-}
-
-fn validate_operand_against_type(
-    table: &TableSchema,
-    operand: &Operand,
-    expected: ColumnType,
-    params: &BTreeMap<String, ColumnType>,
-) -> Result<(), QueryError> {
-    match operand_type(table, operand, params)? {
-        Some(actual) if actual == expected => Ok(()),
-        Some(_) => Err(QueryError::OperandTypeMismatch),
-        None => check_inferred_param(operand, expected, params),
     }
 }
 

@@ -654,8 +654,7 @@ not wait for the draft or start edit-specific retries. The durable denial stays
 in place, so rejecting or removing the draft cannot resurrect the settled row.
 Settled-only reads still exclude the row. Ahead storage can also contain confirmed versions awaiting cleanup; those
 settled versions are excluded by exact version identity while distinct pending
-versions continue to participate. Legacy edge receipts without Core acceptance
-are reopened as pending local writes, not as confirmed versions.
+versions continue to participate.
 SYSTEM, trusted serving sources, authorization proof evaluation, historical
 snapshots, and non-default branch views do not consume the marker. Stored row
 content remains intact. A fresh verified `Readable` evaluation readmits the row;

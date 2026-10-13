@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { expect, it } from "vitest";
-import { fetchSchemaHashes } from "./schema-fetch.js";
+import { fetchSchemaHashes } from "./catalogue-api.js";
 
 for (const status of [404, 401, 403, 400, 503]) {
   it(`reports schema catalogue HTTP ${status} without automatic retries`, async () => {

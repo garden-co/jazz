@@ -7,7 +7,7 @@ import type {
 } from "../drivers/types.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { normalizePermissionsForWasm } from "../schema-permissions.js";
-import { appScopedUrl } from "./url.js";
+import { appScopedUrl } from "../runtime/url.js";
 
 export interface FetchStoredWasmSchemaOptions {
   appId: string;
@@ -148,69 +148,11 @@ export async function fetchSchemaHashes(
   };
 }
 
-export interface PublishStoredSchemaOptions {
-  appId: string;
-  adminSecret: string;
-  schema: WasmSchema;
-}
-
-export async function publishStoredSchema(
-  serverUrl: string,
-  options: PublishStoredSchemaOptions,
-): Promise<{ objectId: string; hash: string }> {
-  const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/schemas"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Jazz-Admin-Secret": options.adminSecret,
-    },
-    body: JSON.stringify({ schema: { tables: options.schema } }, runtimeSchemaJsonReplacer),
-  });
-
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    const detail = bodyText ? ` - ${bodyText}` : "";
-    throw new Error(`Schema publish failed: ${response.status} ${response.statusText}${detail}`);
-  }
-
-  return (await response.json()) as { objectId: string; hash: string };
-}
-
 export interface StoredPermissionsHead {
   schemaHash: string;
   version: number;
   parentBundleObjectId: string | null;
   bundleObjectId: string;
-}
-
-export interface FetchPermissionsHeadOptions {
-  appId: string;
-  adminSecret: string;
-}
-
-export async function fetchPermissionsHead(
-  serverUrl: string,
-  options: FetchPermissionsHeadOptions,
-): Promise<{ head: StoredPermissionsHead | null }> {
-  const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/permissions/head"), {
-    method: "GET",
-    headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
-    },
-  });
-
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    const detail = bodyText ? ` - ${bodyText}` : "";
-    throw new Error(
-      `Permissions head fetch failed: ${response.status} ${response.statusText}${detail}`,
-    );
-  }
-
-  const body = (await response.json()) as { head?: StoredPermissionsHead | null };
-  return {
-    head: body.head ?? null,
-  };
 }
 
 export interface StoredPermissionsResponse {
@@ -247,81 +189,6 @@ export async function fetchStoredPermissions(
   return {
     head: body.head ?? null,
     permissions: body.permissions ?? null,
-  };
-}
-
-export interface PublishStoredPermissionsOptions {
-  appId: string;
-  adminSecret: string;
-  schemaHash: string;
-  permissions: CompiledPermissionsMap;
-  expectedParentBundleObjectId?: string | null;
-}
-
-export async function publishStoredPermissions(
-  serverUrl: string,
-  options: PublishStoredPermissionsOptions,
-): Promise<{ head: StoredPermissionsHead | null }> {
-  const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/permissions"), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Jazz-Admin-Secret": options.adminSecret,
-    },
-    body: JSON.stringify({
-      schemaHash: options.schemaHash,
-      permissions: normalizePermissionsForWasm(options.permissions),
-      expectedParentBundleObjectId: options.expectedParentBundleObjectId ?? null,
-    }),
-  });
-
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    const detail = bodyText ? ` - ${bodyText}` : "";
-    throw new Error(
-      `Permissions publish failed: ${response.status} ${response.statusText}${detail}`,
-    );
-  }
-
-  const body = (await response.json()) as { head?: StoredPermissionsHead | null };
-  return {
-    head: body.head ?? null,
-  };
-}
-
-export interface FetchSchemaConnectivityOptions {
-  appId: string;
-  adminSecret: string;
-  fromHash: string;
-  toHash: string;
-}
-
-export async function fetchSchemaConnectivity(
-  serverUrl: string,
-  options: FetchSchemaConnectivityOptions,
-): Promise<{ connected: boolean }> {
-  const url = new URL(appScopedUrl(serverUrl, options.appId, "admin/schema-connectivity"));
-  url.searchParams.set("fromHash", options.fromHash);
-  url.searchParams.set("toHash", options.toHash);
-
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
-    },
-  });
-
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    const detail = bodyText ? ` - ${bodyText}` : "";
-    throw new Error(
-      `Schema connectivity fetch failed: ${response.status} ${response.statusText}${detail}`,
-    );
-  }
-
-  const body = (await response.json()) as { connected?: boolean };
-  return {
-    connected: body.connected ?? false,
   };
 }
 
@@ -366,14 +233,6 @@ export interface PublishedTableLens {
   operations: PublishedMigrationOp[];
 }
 
-export interface PublishStoredMigrationOptions {
-  appId: string;
-  adminSecret: string;
-  fromHash: string;
-  toHash: string;
-  forward: PublishedTableLens[];
-}
-
 export function encodePublishedMigrationValue(value: WasmValue): PublishedMigrationValue {
   switch (value.type) {
     case "BigInt":
@@ -412,28 +271,72 @@ export function encodePublishedMigrationValue(value: WasmValue): PublishedMigrat
   }
 }
 
-export async function publishStoredMigration(
+export interface DeploymentArtifacts {
+  targetSchemaHash: string;
+  schemas: Array<{ hash: string; schema: WasmSchema }>;
+  migrations: Array<{ fromHash: string; toHash: string; forward: PublishedTableLens[] }>;
+  permissions: CompiledPermissionsMap;
+}
+
+export interface DeploymentRequest extends Omit<DeploymentArtifacts, "schemas"> {
+  schemas: Array<{ hash: string; schema: { tables: WasmSchema } }>;
+}
+
+export interface DeploymentResponse {
+  changed: boolean;
+  published: {
+    schemas: string[];
+    migrations: Array<{ fromHash: string; toHash: string }>;
+  };
+}
+
+export class DeploymentError extends Error {
+  readonly name = "DeploymentError";
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly details?: { target?: string; active?: string; roots?: string[] },
+  ) {
+    super(message);
+  }
+}
+
+export async function publishDeployment(
   serverUrl: string,
-  options: PublishStoredMigrationOptions,
-): Promise<{ objectId: string; fromHash: string; toHash: string }> {
-  const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/migrations"), {
+  options: { appId: string; adminSecret: string } & DeploymentArtifacts,
+): Promise<DeploymentResponse> {
+  const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/deploy"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-Jazz-Admin-Secret": options.adminSecret,
     },
-    body: JSON.stringify({
-      fromHash: options.fromHash,
-      toHash: options.toHash,
-      forward: options.forward,
-    }),
+    body: JSON.stringify(
+      {
+        targetSchemaHash: options.targetSchemaHash,
+        schemas: options.schemas.map(({ hash, schema }) => ({ hash, schema: { tables: schema } })),
+        migrations: options.migrations,
+        permissions: normalizePermissionsForWasm(options.permissions),
+      },
+      runtimeSchemaJsonReplacer,
+    ),
   });
-
   if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    const detail = bodyText ? ` - ${bodyText}` : "";
-    throw new Error(`Migration push failed: ${response.status} ${response.statusText}${detail}`);
+    const text = await response.text();
+    let body: { error?: string; code?: string; details?: DeploymentError["details"] } = {};
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object") body = parsed;
+    } catch {
+      /* Preserve non-JSON HTTP errors. */
+    }
+    throw new DeploymentError(
+      `Deploy failed: ${body.error ?? `${response.status} ${response.statusText}${text ? ` - ${text}` : ""}`}`,
+      response.status,
+      body.code,
+      body.details,
+    );
   }
-
-  return (await response.json()) as { objectId: string; fromHash: string; toHash: string };
+  return (await response.json()) as DeploymentResponse;
 }

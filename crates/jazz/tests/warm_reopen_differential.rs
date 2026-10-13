@@ -4,8 +4,7 @@ mod common;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, RemovedRow, SeededRowIdSource,
-    SubscriptionEvent,
+    Db, DbConfig, DbIdentity, ReadOpts, RemovedRow, SeededRowIdSource, SubscriptionEvent,
 };
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -90,9 +89,7 @@ fn query() -> Query {
 
 fn local_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }

@@ -447,6 +447,9 @@ mod tests {
         );
     }
 
+    /// Alice may use an array parameter as the `contains` haystack; model
+    /// validation infers its type from the compared UUID column. This
+    /// layer-level test isolates parameter inference before DB preparation.
     #[test]
     fn contains_param_array_against_column_infers_array_type() {
         let validated = Query::from("issues")
@@ -458,6 +461,117 @@ mod tests {
             validated.params()["teams"],
             ColumnType::Array(Box::new(ColumnType::Uuid))
         );
+    }
+    /// Alice may leave a `contains` needle untyped; validation infers its array
+    /// member or text type from the haystack. This layer-level test isolates
+    /// inference before database preparation.
+    #[test]
+    fn contains_unknown_needle_parameter_infers_array_member_and_text_types() {
+        let schema = RuntimeSchema::new([TableSchema::new(
+            "items",
+            [
+                ColumnSchema::new(
+                    "uuids",
+                    ColumnType::Array(Box::new(ColumnType::Uuid)),
+                ),
+                ColumnSchema::new("text", ColumnType::String),
+            ],
+        )]);
+
+        let uuid_query = Query::from("items")
+            .filter(contains(col("uuids"), param("uuid_needle")))
+            .validate_runtime(&schema)
+            .unwrap();
+        assert_eq!(uuid_query.params()["uuid_needle"], ColumnType::Uuid);
+
+        let text_query = Query::from("items")
+            .filter(contains(col("text"), param("text_needle")))
+            .validate_runtime(&schema)
+            .unwrap();
+        assert_eq!(text_query.params()["text_needle"], ColumnType::String);
+    }
+
+    /// Alice's provider claim can be the `contains` needle; validation leaves
+    /// its type dynamic and does not turn it into a query binding. This
+    /// model-level test pins the static/dynamic boundary before policy binding.
+    #[test]
+    fn contains_unknown_needle_claim_remains_dynamic() {
+        let query = Query::from("issues").filter(contains(col("title"), claim("unknown_needle")));
+        let validated = query.clone().validate_runtime(&schema()).unwrap();
+
+        assert_eq!(
+            validated.query(),
+            &query,
+            "the validated AST must retain the dynamic claim operand",
+        );
+        assert!(
+            validated.params().is_empty(),
+            "the claim must not become a user query binding"
+        );
+    }
+
+    /// Alice's provider claim can be the `contains` haystack; validation leaves
+    /// its type dynamic and does not turn it into a query binding. This
+    /// model-level test pins the static/dynamic boundary before policy binding.
+    #[test]
+    fn contains_unknown_haystack_claim_remains_dynamic() {
+        let query =
+            Query::from("issues").filter(contains(claim("unknown_haystack"), lit("needle")));
+        let validated = query.clone().validate_runtime(&schema()).unwrap();
+
+        assert_eq!(
+            validated.query(),
+            &query,
+            "the validated AST must retain the dynamic claim operand",
+        );
+        assert!(
+            validated.params().is_empty(),
+            "the claim must not become a user query binding"
+        );
+    }
+
+    /// Bob's mismatched needle receives expected and actual types with
+    /// nullability preserved. This model-level test checks typed error
+    /// construction; the DB test covers its public diagnostic.
+    #[test]
+    fn contains_mismatch_preserves_declared_member_and_actual_nullability() {
+        let nullable = |inner| ColumnType::Nullable(Box::new(inner));
+        let schema = RuntimeSchema::new([TableSchema::new(
+            "items",
+            [
+                ColumnSchema::new(
+                    "nullable_uuids",
+                    nullable(ColumnType::Array(Box::new(nullable(ColumnType::Uuid)))),
+                ),
+                ColumnSchema::new("nullable_text", nullable(ColumnType::String)),
+                ColumnSchema::new("nullable_uuid", nullable(ColumnType::Uuid)),
+            ],
+        )]);
+
+        for (predicate, expected, actual) in [
+            (
+                contains(col("nullable_uuids"), col("nullable_text")),
+                nullable(ColumnType::Uuid),
+                nullable(ColumnType::String),
+            ),
+            (
+                contains(col("nullable_text"), col("nullable_uuid")),
+                ColumnType::String,
+                nullable(ColumnType::Uuid),
+            ),
+        ] {
+            let error = Query::from("items")
+                .filter(predicate)
+                .validate_runtime(&schema)
+                .unwrap_err();
+            assert_eq!(
+                error,
+                QueryError::ContainsNeedleTypeMismatch {
+                    expected: Box::new(expected),
+                    actual: Box::new(actual),
+                }
+            );
+        }
     }
 
     #[test]

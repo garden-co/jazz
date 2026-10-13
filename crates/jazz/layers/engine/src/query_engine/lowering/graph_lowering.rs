@@ -3484,13 +3484,21 @@ fn lower_predicate_inner(
         PredicateExpr::True => GroovePredicateExpr::And(Vec::new()),
         PredicateExpr::False => GroovePredicateExpr::Or(Vec::new()),
         PredicateExpr::Compare { left, op, right } => {
-            lower_compare(left, *op, right, source_id, source, request)?
+            lower_compare(left, *op, right, false, source_id, source, request)?
         }
         PredicateExpr::In { value, options } => {
             let predicates = options
                 .iter()
                 .map(|option| {
-                    lower_compare(value, ComparisonOp::Eq, option, source_id, source, request)
+                    lower_compare(
+                        value,
+                        ComparisonOp::Eq,
+                        option,
+                        false,
+                        source_id,
+                        source,
+                        request,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             GroovePredicateExpr::Or(predicates)
@@ -3641,14 +3649,9 @@ fn lower_not_predicate_inner(
     Ok(match predicate {
         PredicateExpr::True => GroovePredicateExpr::Or(Vec::new()),
         PredicateExpr::False => GroovePredicateExpr::And(Vec::new()),
-        PredicateExpr::Compare { left, op, right } => lower_compare(
-            left,
-            invert_comparison(*op),
-            right,
-            source_id,
-            source,
-            request,
-        )?,
+        PredicateExpr::Compare { left, op, right } => {
+            lower_compare(left, *op, right, true, source_id, source, request)?
+        }
         PredicateExpr::In { value, options } => GroovePredicateExpr::And(
             options
                 .iter()
@@ -3692,9 +3695,9 @@ fn lower_two_valued_ne(
     source: &ResolvedSource,
     request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
-    // Groove comparisons deliberately use SQL-null semantics. Jazz comparison
-    // predicates are two-valued, so unequal means either exactly one operand is
-    // null or both are non-null and Groove reports inequality.
+    // Groove comparisons deliberately use SQL-null semantics. Jazz membership
+    // negation is two-valued: exactly one operand is null, or equality is false.
+    // Row-dependent negated equality still uses Groove's inequality semantics.
     Ok(GroovePredicateExpr::Or(vec![
         GroovePredicateExpr::And(vec![
             lower_null_test(left, true, source_id, source, request)?,
@@ -3704,7 +3707,15 @@ fn lower_two_valued_ne(
             lower_null_test(left, false, source_id, source, request)?,
             lower_null_test(right, true, source_id, source, request)?,
         ]),
-        lower_compare(left, ComparisonOp::Ne, right, source_id, source, request)?,
+        lower_compare(
+            left,
+            ComparisonOp::Eq,
+            right,
+            true,
+            source_id,
+            source,
+            request,
+        )?,
     ])
     .canonicalize())
 }
@@ -3724,13 +3735,15 @@ fn lower_compare(
     left: &NormalizedValueRef,
     op: ComparisonOp,
     right: &NormalizedValueRef,
+    negated: bool,
     source_id: &SourceId,
     source: &ResolvedSource,
     request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
     let left = lower_value_ref(left, source_id, source, request)?;
     let right = lower_value_ref(right, source_id, source, request)?;
-    let kind = predicate_kind(op);
+    let effective_op = if negated { invert_comparison(op) } else { op };
+    let kind = predicate_kind(effective_op);
 
     match (left, right) {
         (LoweredValueRef::Field(field), LoweredValueRef::Literal(value)) => {
@@ -3744,16 +3757,20 @@ fn lower_compare(
                 coerce_literal_for_source_field(value, source, &field),
             ))
         }
-        (LoweredValueRef::Field(field), LoweredValueRef::Field(value_field)) => match op {
-            ComparisonOp::Eq => Ok(GroovePredicateExpr::EqField { field, value_field }),
-            ComparisonOp::Ne => Ok(GroovePredicateExpr::NeqField { field, value_field }),
-            _ => Err(UnsupportedReason::Operator(format!(
-                "field-to-field comparison {:?} is not lowered yet",
-                op
-            ))),
-        },
+        (LoweredValueRef::Field(field), LoweredValueRef::Field(value_field)) => {
+            match effective_op {
+                ComparisonOp::Eq => Ok(GroovePredicateExpr::EqField { field, value_field }),
+                ComparisonOp::Ne => Ok(GroovePredicateExpr::NeqField { field, value_field }),
+                _ => Err(UnsupportedReason::Operator(format!(
+                    "field-to-field comparison {:?} is not lowered yet",
+                    effective_op
+                ))),
+            }
+        }
         (LoweredValueRef::Literal(left), LoweredValueRef::Literal(right)) => {
-            Ok(constant_predicate(compare_literals(&left, op, &right)))
+            // Inverting an operator is not boolean negation for unordered floats.
+            let matches = compare_literals(&left, op, &right);
+            Ok(constant_predicate(if negated { !matches } else { matches }))
         }
     }
 }
@@ -3891,7 +3908,33 @@ fn predicate_kind(op: ComparisonOp) -> PredicateKind {
     }
 }
 
+fn literal_float(mut value: &LiteralValue) -> Option<f64> {
+    while let LiteralValue::Nullable(Some(inner)) = value {
+        value = inner;
+    }
+    match value {
+        LiteralValue::F64(bits) => Some(f64::from_bits(*bits)),
+        _ => None,
+    }
+}
+
 fn compare_literals(left: &LiteralValue, op: ComparisonOp, right: &LiteralValue) -> bool {
+    if let Some(left_float) = literal_float(left)
+        && let Some(right_float) = literal_float(right)
+    {
+        // Predicate semantics are numeric; raw bits remain structural identity.
+        // Unordered comparisons are false for every operator, including Ne.
+        return left_float
+            .partial_cmp(&right_float)
+            .is_some_and(|ordering| match op {
+                ComparisonOp::Eq => ordering.is_eq(),
+                ComparisonOp::Ne => ordering.is_ne(),
+                ComparisonOp::Lt => ordering.is_lt(),
+                ComparisonOp::Lte => ordering.is_le(),
+                ComparisonOp::Gt => ordering.is_gt(),
+                ComparisonOp::Gte => ordering.is_ge(),
+            });
+    }
     match op {
         ComparisonOp::Eq => left == right,
         ComparisonOp::Ne => left != right,
