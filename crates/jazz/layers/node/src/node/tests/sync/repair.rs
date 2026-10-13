@@ -1354,3 +1354,135 @@ fn deleted_row_repair_checks_read_permission_without_current_membership() {
         }
     }
 }
+
+/// Alice's exclusive write survives a table rename in Bob's scoped snapshot.
+/// Alice -> two-table transaction -> server rename -> Bob's one-table view.
+/// The node-level wire assertion is needed to prove that a same-UUID sibling
+/// outside Bob's requested shape is not shipped alongside the selected body.
+#[test]
+fn renamed_exclusive_snapshot_preserves_only_selected_physical_rows() {
+    let base = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("projects").column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("private_notes")
+                    .column("title", PublicColumnType::Text),
+            ),
+    );
+    let renamed = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("workspaces").column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("private_notes")
+                    .column("title", PublicColumnType::Text),
+            ),
+    ));
+    let (_server_dir, mut server) = open_node_with_schema(node(0xa8), base.clone());
+    let shared_uuid = row(0xa9);
+    let open = OpenTransactionId::new();
+    server.open_exclusive(open).unwrap();
+    server
+        .tx_write(
+            open,
+            "projects",
+            shared_uuid,
+            title_cells("selected project"),
+            None,
+        )
+        .unwrap();
+    server
+        .tx_write(
+            open,
+            "private_notes",
+            shared_uuid,
+            title_cells("unselected sibling"),
+            None,
+        )
+        .unwrap();
+    let (tx_id, _) = server
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10)
+        .unwrap();
+    server
+        .apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(GlobalTime(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+    publish_schema_lineage(
+        &mut server,
+        renamed.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![
+                TableLens {
+                    source_table: "projects".to_owned(),
+                    target_table: "workspaces".to_owned(),
+                    ops: vec![LensOp::RenameTable {
+                        from: "projects".to_owned(),
+                        to: "workspaces".to_owned(),
+                    }],
+                },
+                TableLens {
+                    source_table: "private_notes".to_owned(),
+                    target_table: "private_notes".to_owned(),
+                    ops: vec![],
+                },
+            ],
+        )
+        .unwrap(),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    server
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
+        })
+        .unwrap();
+    let (_bob_dir, mut bob) = open_node_with_schema(node(0xaa), base);
+    bob.apply_trusted_catalogue_snapshot_settled(server.catalogue_snapshot().unwrap())
+        .unwrap();
+    let (shape, binding) = server.whole_table_shape_binding("workspaces").unwrap();
+    register_shape_binding(&mut bob, &shape, &binding);
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let update = system_authority_reset(&mut server, &shape, &binding, subscription);
+    let SyncMessage::ViewUpdate(payload) = &update else {
+        panic!("expected snapshot")
+    };
+    let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    let bodies = bundles
+        .iter()
+        .flat_map(|bundle| &bundle.versions)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "only the selected physical row crosses the wire"
+    );
+    assert_eq!(
+        bodies[0].table(),
+        "projects",
+        "the selected body retains its authored name"
+    );
+    assert_eq!(bodies[0].row_uuid(), shared_uuid);
+    bob.apply_sync_message_settled(update).unwrap();
+    assert_eq!(
+        receiver_rows(&mut bob, &shape, &binding, DurabilityTier::Global)
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(shared_uuid, title_cells("selected project"))]),
+    );
+}

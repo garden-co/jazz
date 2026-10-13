@@ -12,10 +12,9 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    CommitUnitTrust, Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, LocalUpdates,
-    MergeableTxOps, PeerIoPump, PreparedQuery, Propagation, ReadOpts, RestoreOptions, ResumeCursor,
-    SubscriptionEvent, SubscriptionStream, UpdateOptions, WireTransportAdapter, WriteIdentity,
-    block_on,
+    CommitUnitTrust, Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, MergeableTxOps,
+    PeerIoPump, PreparedQuery, ReadOpts, ReadTier, RestoreOptions, ResumeCursor, SubscriptionEvent,
+    SubscriptionStream, UpdateOptions, WireTransportAdapter, WriteIdentity, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
@@ -27,11 +26,7 @@ use jazz::tools::{
     Value as PublicValue,
 };
 use jazz::tx::DurabilityTier;
-use jazz::wire::{
-    FEATURE_MESSAGE_FRAGMENTATION, FEATURE_SESSION_FRAME, FEATURE_STRUCTURED_ERRORS,
-    FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireSession,
-    WireTransport,
-};
+use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireSession, WireTransport};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use tempfile::TempDir;
 
@@ -234,9 +229,7 @@ impl ResumeFixture {
         let mut subscription = block_on(client.subscribe(
             &prepared,
             ReadOpts {
-                tier: DurabilityTier::Global,
-                local_updates: LocalUpdates::Deferred,
-                propagation: Propagation::Full,
+                tier: ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -477,9 +470,7 @@ fn fresh_task_snapshot_bytes(tasks: usize, comments: usize, activity_events: usi
     let mut subscription = block_on(client.subscribe(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::Full,
+            tier: ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -741,9 +732,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         let subscription = block_on(self.db.subscribe(
             &self.maintained_activity,
             ReadOpts {
-                tier: DurabilityTier::Local,
-                local_updates: LocalUpdates::Deferred,
-                propagation: Propagation::LocalOnly,
+                tier: ReadTier::LocalOnly,
                 ..ReadOpts::default()
             },
         ))
@@ -760,9 +749,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         let mut subscription = block_on(self.db.subscribe(
             &self.point_activity,
             ReadOpts {
-                tier: DurabilityTier::Local,
-                local_updates: LocalUpdates::Deferred,
-                propagation: Propagation::LocalOnly,
+                tier: ReadTier::LocalOnly,
                 ..ReadOpts::default()
             },
         ))
@@ -946,10 +933,7 @@ fn byte_duplex(epoch: u64) -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::T
         epoch,
         identity: Some(AuthorSubject::SYSTEM),
     };
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-        | FEATURE_SESSION_FRAME
-        | FEATURE_STRUCTURED_ERRORS
-        | FEATURE_MESSAGE_FRAGMENTATION;
+    let features = 0;
     (
         Box::new(WireTransportAdapter::new(
             left_transport,
