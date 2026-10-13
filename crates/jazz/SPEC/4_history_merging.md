@@ -26,6 +26,10 @@ Invariant digest:
 - `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another base. A write whose pending predecessor has no fate at Core yet MUST NOT be held or stored by Core: after its cheap admission checks pass, Core MUST answer `RetryLater` naming that predecessor and store nothing for the write. Its writer MUST keep it pending, MUST NOT let a later upload of the same writer node on that link overtake it (other writers' uploads are not held back), MUST send it again from the predecessor (when it still holds the predecessor pending) after a backoff, and only its author MUST fail it with a surfaced "predecessor lost" error when the predecessor can no longer reach Core; a relay never fates it and forwards the `RetryLater` towards its author.
 - `INV-HIST-21`: Whether a write maybe conflicts MUST be derived from the row's accepted history and never stored: a write is maybe conflicting iff it has a base and an accepted record of the row that is not of the writer's own chain (the accepted writes of its pending predecessor's node with a transaction time at most the predecessor's) lies after its seen seq and before it. The seen seq is the larger of its base seq and its chain root's settled base seq (followed through accepted predecessors, and through a rejected predecessor to that one's own predecessor), never a predecessor's later accepted seq. Inserts and blind updates are never maybe conflicting. Its conflict analysis MUST be the row's accepted writes after the seen seq and before the write, outside its own chain, whose authored columns overlap the write's.
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
+- `INV-REF-1`: A read MUST compose its layers by one rule: the top layer holding a row supplies it whatever its stamp, each layer masks the layers below it before any predicate or relational operator, and content and deletion registers are each stacked by that rule independently.
+- `INV-REF-2`: A read's refs MUST follow its tier: `Global` reads origin alone; `Local` and `None` read the local delta over origin.
+- `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; origin's shadow for the local delta under an index; a branch's whole presence for a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix.
+- `INV-REF-4`: The rule that a pending predecessor is the writer's own node MUST be decided only in validation and in the conflict walk, never encoded in stored or sent bytes.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
 
 ## Details
@@ -506,6 +510,84 @@ repeated per record. The byte receipt is the protocol test of the
 **Per-row cost.** A history record costs its `seq` (8 bytes) and its two
 nullable base fields over the former stamp-free layout, and nothing on
 current rows.
+
+### 4.7 Refs: local work over origin
+
+Every row image a node holds has a coordinate `(table, branch_key,
+row_uuid)` (SPEC 11) and a **ref**, which says where the image comes from:
+
+- **origin** (`Remote(Origin)`): Core's settled state as this node last
+  received it. Core is the only remote and the only one that mints seqs.
+- **local** (`Local`): this node's working state, which is origin plus every
+  pending write the node holds (its own, and those it relays) that origin has
+  not fated yet.
+
+This is git with one remote. Origin is `origin/main`, the local ref is the
+local branch with unpushed commits, and uploading is a push. Core accepting a
+write is a rebase onto origin with per-cell auto-resolve (§4.6). A **maybe
+conflicting** write (`INV-HIST-21`) is one Core rebased rather than
+fast-forwarded: another writer's write landed between what its writer saw and
+the write. Settling moves a write from the local ref into origin.
+
+Storage is delta-encoded and does not name refs. Origin is
+`jazz_physical_{id}_global_current`, stored in full. Local is origin plus
+the sparse delta `jazz_physical_{id}_ahead_current`, which holds the newest
+pending image of each row, already folded over origin's image. The shadow
+`jazz_physical_{id}_ahead_shadow` holds origin's images of the rows the
+delta overrides, indexed like origin. The tier of a read picks its refs
+(`INV-REF-2`): `Global` reads `[origin]`, and `Local` and `None` read
+`[local delta, origin]`.
+
+**The stack rule.** A read is a stack of layers, top first, and the top
+layer holding a row supplies it, whatever its stamp (`INV-REF-1`). Every
+layer masks the rows of the layers below it before any predicate or
+relational operator runs. Content and the deletion register are stacked
+separately by the same rule (`INV-BVIEW-9`, `INV-BVIEW-10`). The stacks are:
+
+```text
+plain current read        [local, origin]
+branch view, live base    [head@local, head@origin, base@local, base@origin]
+branch view, frozen base  [head@local, head@origin, snapshot of base]
+```
+
+**Masks.** A layer narrowed by the read's access path must hide lower rows
+by a relation that stays exact under that narrowing (`INV-REF-3`):
+
+- _Own rows._ The layer's own row ids. Exact when the layer is whole, or
+  when one row-closed path (a row-id prefix) bounds every layer of the stack.
+- _Shadow._ The local delta masks origin by the shadow read under the same
+  index prefix. A pending edit that moved a row out of the prefix still masks
+  its origin image, because the shadow holds that image.
+- _Presence._ A branch's every row id, read without the index. A branch view
+  masks its base by the head's presence. That costs the head's row count, not
+  the base's, so a head edit that left the predicate still hides its base
+  row.
+
+Under an index prefix each content layer of a branch view therefore reads
+only that prefix, and the base's content costs its index matches. The
+deletion registers of the branch layers stay whole: a head row inside the
+prefix can still be deleted by its base image anywhere in the base key, and
+finding that image by row id needs a keyed lookup that Groove graphs do not
+have ([#4005](https://github.com/garden-co/jazz/issues/4005)). A row-id read
+bounds every layer, the deletion registers included.
+
+**Peers (out of scope).** A peer remote would be one more sparse delta, read
+as `[local, peer, origin]`. Merging all peers into one delta keeps the stack
+short, as a relay's overlay already does. The model leaves room for it,
+because no stored or sent byte encodes "a pending predecessor is the
+writer's own node" (`INV-REF-4`): `base.pending` is a full `TxId`, and
+pending history is keyed by writer. Peers would need:
+
+- per-transaction signatures, so Core can accept a write forwarded by a node
+  that did not author it (SPEC 7 is not an end-to-end signature protocol);
+- grant-based sharing of pending rows, since a peer cannot evaluate read
+  policy authoritatively;
+- relaxing `INV-HIST-20` to accept a foreign pending predecessor, and the
+  conflict walk's "own chain" becoming "the chain the writer saw";
+- push forwarding the predecessors a write contains ahead of it on the
+  pusher's Core link, so link order still puts the predecessor first.
+
+[#4006](https://github.com/garden-co/jazz/issues/4006) tracks this design.
 
 ### 4.8 Subsumed merge-strategy backlog
 

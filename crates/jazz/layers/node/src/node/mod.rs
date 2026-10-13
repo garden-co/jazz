@@ -326,6 +326,7 @@ mod eviction;
 mod exclusive_read_evidence;
 mod global_state;
 mod ingest;
+mod layer_stack;
 mod node_aliases;
 pub use node_aliases::NodeAliases;
 #[doc(hidden)]
@@ -345,6 +346,7 @@ mod policy;
 pub use jazz_engine::query_engine;
 mod query_eval;
 mod recovery;
+mod refs;
 pub mod relay_scope;
 mod row_availability;
 mod source_resolution;
@@ -372,6 +374,7 @@ use codec::*;
 use database_slot::DatabaseSlot;
 use open_tx::*;
 use physical::*;
+use refs::{Ref, Remote};
 
 pub use eviction::{ClientCacheBudget, ClientCacheBudgetReport, ClientCacheClass, EvictColdReport};
 
@@ -2474,6 +2477,11 @@ pub struct QueryEngineReadMetrics {
     pub source_global_time_range_scans: u64,
     /// Visible-current source resolutions that fell back to a full source scan.
     pub source_full_scans: u64,
+    /// Branch-view deletion-register and presence-mask layers that read a
+    /// whole branch key. Only a primary-key access path bounds them; under an
+    /// index they stay whole (#4005), even when every content layer reads
+    /// only its index prefix.
+    pub source_branch_register_full_scans: u64,
 }
 
 /// Wall-clock attribution for one synchronous query materialization.

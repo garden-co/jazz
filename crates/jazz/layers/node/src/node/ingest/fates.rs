@@ -812,7 +812,9 @@ where
             let Some(predecessor) = version.base().pending else {
                 continue;
             };
-            if predecessor.node != tx.tx_id.node || predecessor.time >= tx.tx_id.time {
+            // A predecessor Core would refuse is answered by validation,
+            // not waited for.
+            if pending_predecessor_refusal(predecessor, tx.tx_id).is_some() {
                 continue;
             }
             match self.query_transaction(predecessor).await? {

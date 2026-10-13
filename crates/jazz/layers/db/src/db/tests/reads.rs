@@ -88,6 +88,459 @@ fn multi_index_documents_schema() -> JazzSchema {
     )
 }
 
+fn indexed_branch_todos_schema() -> JazzSchema {
+    use crate::model::test_support::AllowAll;
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .index_only(["title"]),
+            )
+            .allow_all(),
+    )
+}
+
+/// Alice reads her draft branch over main with an indexed equality. Each
+/// content layer of the stack `[draft@local, draft@origin, main@local,
+/// main@origin]` reads only its `title` index prefix: no content source scans
+/// a whole branch key, and main's settled rows outside the prefix are never
+/// read as content. Main is still masked exactly: by the draft's presence (a
+/// draft edit that left the prefix hides its main row) and, within main, by
+/// the shadow of main's pending edits (a pending edit that left the prefix
+/// hides its settled image; one that entered it is found by the local
+/// index). An unindexed read of the same view is the control: it scans both
+/// branch keys.
+///
+/// What got cheaper is the content: the deletion registers and the draft's
+/// presence mask are not index-bounded (a draft row can be deleted by its
+/// main image anywhere in main, #4005), so main's settled rows are still all
+/// read once, through main's deletion register. The storage counters say so:
+/// the indexed read reads more settled rows than the unindexed control,
+/// whose content and register share one scan of main.
+///
+/// White-box because the read path's source and storage counters are not
+/// public.
+///
+/// ```text
+/// main (settled):  overridden=needle  inherited=needle  moved_out=needle
+///                  moved_in=hay  hay x 40
+/// main (pending):  moved_out -> hay   moved_in -> needle
+/// draft (pending): overridden -> hidden
+/// alice ──title = needle, draft over main──► {inherited, moved_in}
+/// ```
+#[test]
+fn indexed_branch_view_reads_each_content_layer_under_the_index_prefix() {
+    let schema = indexed_branch_todos_schema();
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd7; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd7))),
+    }))
+    .expect("open history-complete authority");
+    let main = BranchSelector::new([("branch_id", Value::Uuid(row(0xe0).0))]);
+    let draft = BranchSelector::new([("branch_id", Value::Uuid(row(0xe1).0))]);
+    let (overridden, inherited, moved_out, moved_in) = (row(1), row(2), row(3), row(4));
+    let title =
+        |title: &str| BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]);
+    let settled = [
+        (overridden, "needle"),
+        (inherited, "needle"),
+        (moved_out, "needle"),
+        (moved_in, "hay"),
+    ]
+    .into_iter()
+    .chain((0x10..0x38).map(|byte| (row(byte), "hay")));
+    for (row_id, value) in settled {
+        let write = block_on(db.insert(
+            "todos",
+            title(value),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                target: crate::db::ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        ))
+        .expect("seed main row");
+        db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+            .expect("settle main row");
+    }
+    for (row_id, value) in [(moved_out, "hay"), (moved_in, "needle")] {
+        block_on(db.update(
+            "todos",
+            row_id,
+            title(value),
+            crate::db::UpdateOptions {
+                target: crate::db::WriteTarget::BranchView {
+                    head: main.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        ))
+        .expect("pending main edit");
+    }
+    block_on(db.update(
+        "todos",
+        overridden,
+        title("hidden"),
+        crate::db::UpdateOptions {
+            target: crate::db::WriteTarget::BranchView {
+                head: draft.clone(),
+                base: Some(BranchViewBase::current(main.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("pending draft edit");
+
+    let view = ReadOpts {
+        tier: crate::db::ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(draft, Some(BranchViewBase::current(main.clone())));
+    let needle = db
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
+        .expect("prepare indexed query");
+    // Warm the plan so the measured read is the row read alone.
+    block_on(db.all(&needle, view.clone())).expect("warm indexed read");
+    db.reset_storage_read_metrics_for_test();
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let mut rows = row_ids(&block_on(db.all(&needle, view.clone())).expect("indexed read"));
+    rows.sort();
+    assert_eq!(rows, vec![inherited, moved_in]);
+    let storage = db.take_storage_read_metrics_for_test();
+    let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+    assert_eq!(
+        metrics.source_full_scans, 0,
+        "no content layer of the indexed branch view may scan a whole branch key"
+    );
+    // Draft and main each read local, origin and origin's shadow.
+    assert_eq!(metrics.source_index_probes, 6, "{metrics:?}");
+    // Both deletion registers and the draft's presence read whole.
+    assert_eq!(metrics.source_branch_register_full_scans, 3, "{metrics:?}");
+    // All 44 settled main rows through main's register, plus the 3 settled
+    // `needle` images main's index prefix finds (overridden, inherited and
+    // moved_out's settled image).
+    assert_eq!(storage.global_current_rows.reads, 44 + 3, "{storage:?}");
+
+    let all = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare full query");
+    block_on(db.all(&all, view.clone())).expect("warm unindexed read");
+    db.reset_storage_read_metrics_for_test();
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let rows = block_on(db.all(&all, view)).expect("unindexed read");
+    assert_eq!(rows.len(), 44);
+    let storage = db.take_storage_read_metrics_for_test();
+    let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+    assert_eq!(
+        metrics.source_full_scans, 2,
+        "without an index both branch keys are read whole"
+    );
+    assert_eq!(metrics.source_branch_register_full_scans, 2, "{metrics:?}");
+    assert_eq!(storage.global_current_rows.reads, 44, "{storage:?}");
+}
+
+/// Bob reads alice's draft over main with an indexed root filter, a join to
+/// a shared (not branch-scoped) table filtered by its own index, and a read
+/// policy whose `EXISTS` proof reads that shared table. A branch view turns
+/// on secondary indexes for this one-shot read, so the shared join source and
+/// the policy subplan can take the one-shot index shapes (candidate filter,
+/// source limit) here for the first time, while the branch layers ignore both
+/// and stay masked before their predicates. The unindexed read of the same
+/// view is the control. White-box because the read path's source counters
+/// are not public.
+///
+/// ```text
+/// labels (shared): a(visible=yes)  b(visible=no)
+/// main (settled):  overridden=needle/a  inherited=needle/a  closed=needle/b
+///                  orphan=needle/ghost  hay x 20 = hay/a
+/// draft (pending): overridden -> hidden/a
+/// bob ──title = needle ⋈ labels(visible = yes), draft over main──► {inherited}
+/// ```
+#[test]
+fn branch_view_join_and_policy_subplan_match_the_unindexed_control() {
+    let labelled = public_exists("labels", [public_outer_eq("name", "label")]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("labels")
+                    .column("name", PublicColumnType::Text)
+                    .column("visible", PublicColumnType::Text)
+                    .index_only(["name"])
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_insert(PublicPolicyExpr::True),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text)
+                    .column("label", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .index_only(["title"])
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(labelled)
+                            .with_insert(PublicPolicyExpr::True)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                    ),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd9; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
+    }))
+    .expect("open history-complete authority");
+    let bob = AuthorSubject::for_test_bytes([0xda; 16]);
+    let text = |value: &str| Value::String(value.to_owned());
+    for (id, name, visible) in [(row(0x60), "a", "yes"), (row(0x61), "b", "no")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "labels",
+            id,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("name".to_owned(), text(name)),
+                ("visible".to_owned(), text(visible)),
+            ]),
+        )
+        .expect("seed label");
+    }
+    let main = BranchSelector::new([("branch_id", Value::Uuid(row(0xe0).0))]);
+    let draft = BranchSelector::new([("branch_id", Value::Uuid(row(0xe1).0))]);
+    let (overridden, inherited, closed, orphan) = (row(1), row(2), row(3), row(4));
+    let cells = |title: &str, label: &str| {
+        BTreeMap::from([
+            ("title".to_owned(), text(title)),
+            ("label".to_owned(), text(label)),
+        ])
+    };
+    let settled = [
+        (overridden, "needle", "a"),
+        (inherited, "needle", "a"),
+        (closed, "needle", "b"),
+        (orphan, "needle", "ghost"),
+    ]
+    .into_iter()
+    .chain((0x10..0x24).map(|byte| (row(byte), "hay", "a")));
+    for (row_id, title, label) in settled {
+        let write = block_on(db.insert(
+            "todos",
+            cells(title, label),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                target: crate::db::ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        ))
+        .expect("seed main row");
+        db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+            .expect("settle main row");
+    }
+    block_on(db.update(
+        "todos",
+        overridden,
+        cells("hidden", "a"),
+        crate::db::UpdateOptions {
+            target: crate::db::WriteTarget::BranchView {
+                head: draft.clone(),
+                base: Some(BranchViewBase::current(main.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("pending draft edit");
+
+    let view = ReadOpts {
+        tier: crate::db::ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(draft, Some(BranchViewBase::current(main)));
+    let join = |query: Query| {
+        query.join_via_column("labels", "name", "label", [eq(col("visible"), lit("yes"))])
+    };
+    let read = |query: &Query| {
+        let prepared = db.prepare_query(query).expect("prepare joined query");
+        // Warm the plan and the policy proof so the measured read is the
+        // row read alone.
+        block_on(db.all_for_identity(&prepared, view.clone(), bob)).expect("warm joined read");
+        db.node.node.borrow_mut().reset_query_engine_read_metrics();
+        let mut rows = row_ids(
+            &block_on(db.all_for_identity(&prepared, view.clone(), bob)).expect("joined read"),
+        );
+        rows.sort();
+        let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+        (rows, metrics)
+    };
+
+    let needle = || Query::from("todos").filter(eq(col("title"), lit("needle")));
+    let hay = || (0x10..0x24).map(row);
+    let sorted = |mut rows: Vec<RowUuid>| {
+        rows.sort();
+        rows
+    };
+
+    // The policy subplan under an indexed branch view. The proof is
+    // specialized from the outer `todos` source and shares its deduplicated
+    // physical branch layers, so they are counted once, for the outer read:
+    // draft and main each read local, origin and origin's shadow under the
+    // prefix; both deletion registers and the draft's presence stay whole.
+    // The specialized proof is compiled for this read, and its `labels`
+    // source, correlated only through the outer row, reads whole. The
+    // control reads both branch keys and both registers whole, no presence.
+    let (indexed, metrics) = read(&needle());
+    let (control, control_metrics) = read(&Query::from("todos"));
+    assert_eq!(
+        indexed,
+        sorted(vec![inherited, closed]),
+        "the head masks overridden; the policy drops orphan"
+    );
+    assert_eq!(
+        control,
+        sorted(
+            [overridden, inherited, closed]
+                .into_iter()
+                .chain(hay())
+                .collect()
+        ),
+        "the unindexed control agrees once its non-needle rows are set aside"
+    );
+    assert_eq!(
+        (
+            metrics.policy_authorization_graphs,
+            metrics.source_index_probes,
+            metrics.source_full_scans,
+            metrics.source_branch_register_full_scans,
+        ),
+        (1, 6, 1, 3),
+        "{metrics:?}"
+    );
+    assert_eq!(
+        (
+            control_metrics.source_index_probes,
+            control_metrics.source_full_scans,
+            control_metrics.source_branch_register_full_scans,
+        ),
+        (0, 2, 2),
+        "{control_metrics:?}"
+    );
+
+    // The joined read: the access-path selector takes no index through a
+    // join, so the branch view's one-shot index switch changes nothing for
+    // it and it resolves exactly like its unindexed control. Every layer
+    // reads whole: draft and main of `todos`, and the shared `labels`, whose
+    // branch view is its one shared key (content plus deletion register).
+    let (indexed, metrics) = read(&join(needle()));
+    let (control, control_metrics) = read(&join(Query::from("todos")));
+    assert_eq!(
+        indexed,
+        vec![inherited],
+        "the head masks overridden; the join drops closed; the policy drops orphan"
+    );
+    assert_eq!(
+        control,
+        sorted([overridden, inherited].into_iter().chain(hay()).collect())
+    );
+    assert_eq!(metrics, control_metrics);
+    assert_eq!(
+        (
+            metrics.source_index_probes,
+            metrics.source_full_scans,
+            metrics.source_branch_register_full_scans,
+        ),
+        (0, 3, 3),
+        "{metrics:?}"
+    );
+}
+
+/// A by-id read of alice's draft over main bounds every layer of both stacks,
+/// content and deletion registers alike, to the row's key: storage reads do
+/// not grow with main's other rows. White-box because storage-read
+/// attribution is not public.
+///
+/// ```text
+/// main (settled): target + hay x 40
+/// alice ──id = target, draft over main──► {target}   (O(1) current rows read)
+/// ```
+#[test]
+fn by_id_branch_view_read_is_bounded_by_the_row_key() {
+    let schema = indexed_branch_todos_schema();
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd8; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd8))),
+    }))
+    .expect("open history-complete authority");
+    let main = BranchSelector::new([("branch_id", Value::Uuid(row(0xe0).0))]);
+    let draft = BranchSelector::new([("branch_id", Value::Uuid(row(0xe1).0))]);
+    let target = row(1);
+    for byte in 1..0x2a {
+        let write = block_on(db.insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("hay".to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(byte)),
+                target: crate::db::ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        ))
+        .expect("seed main row");
+        db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+            .expect("settle main row");
+    }
+    let view = ReadOpts {
+        tier: crate::db::ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(draft, Some(BranchViewBase::current(main)));
+    let by_id = db
+        .prepare_query(&Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(target.0)))))
+        .expect("prepare by-id query");
+    // Warm the plan so the measured read is the row read alone.
+    assert_eq!(
+        row_ids(&block_on(db.all(&by_id, view.clone())).expect("warm read")),
+        vec![target]
+    );
+    db.reset_storage_read_metrics_for_test();
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    assert_eq!(
+        row_ids(&block_on(db.all(&by_id, view)).expect("by-id read")),
+        vec![target]
+    );
+    let storage = db.take_storage_read_metrics_for_test();
+    let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+    assert_eq!(
+        (
+            metrics.source_full_scans,
+            metrics.source_branch_register_full_scans,
+        ),
+        (0, 0),
+        "{metrics:?}"
+    );
+    assert!(
+        storage.global_current_rows.reads <= 4,
+        "a by-id branch-view read must not read main's other rows: {storage:?}"
+    );
+}
+
 /// A maintained equality source is both an indexed hydration source and a
 /// live IVM source. In particular, a row changing either indexed equality must
 /// enter/leave exactly once rather than remaining filtered by the prefix that
