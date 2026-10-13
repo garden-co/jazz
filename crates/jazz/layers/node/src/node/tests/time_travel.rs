@@ -307,3 +307,49 @@ fn snapshot_reads_survive_mid_tx_current_winner_shift() {
         "snapshot reads must remain stable across current-winner changes"
     );
 }
+
+#[test]
+fn open_transactions_read_unsettled_relay_versions_present_at_open() {
+    // A browser foreground runtime that restarts after an unclean close runs as a new
+    // node; the previous node's unsettled writes reach it through the relay. Current
+    // reads already show them, and a transaction opened afterwards must read them too.
+    let (_dir, mut node_under_test) = open_node_with_uuid(node(3));
+    let row = row(9);
+    let pending = TxId::new(TxTime::from(100), node(1));
+    ingest_relay_version(&mut node_under_test, pending, 100, Vec::new(), row, "pending");
+    assert_eq!(
+        node_under_test
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()[0]
+            .cell(&schema().tables[0], "title")
+            .unwrap(),
+        v("pending"),
+    );
+
+    let mergeable = OpenTransactionId::new();
+    node_under_test
+        .open_mergeable(mergeable, AuthorSubject::SYSTEM, None)
+        .unwrap();
+    assert_eq!(
+        node_under_test
+            .tx_read(mergeable, "todos", row)
+            .unwrap()
+            .expect("the unsettled row is visible to a mergeable transaction")
+            .get("title")
+            .unwrap(),
+        &v("pending")
+    );
+    node_under_test.abandon_tx(mergeable).unwrap();
+
+    let exclusive = OpenTransactionId::new();
+    node_under_test.open_exclusive(exclusive).unwrap();
+    assert_eq!(
+        node_under_test
+            .tx_read(exclusive, "todos", row)
+            .unwrap()
+            .expect("the unsettled row is visible to an exclusive transaction")
+            .get("title")
+            .unwrap(),
+        &v("pending")
+    );
+}

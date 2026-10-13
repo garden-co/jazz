@@ -467,6 +467,7 @@ impl NativeRelayHost {
                         relay.clone(),
                         author,
                         session,
+                        self.socket_connector(),
                     )?)
                 }
                 _ => None,

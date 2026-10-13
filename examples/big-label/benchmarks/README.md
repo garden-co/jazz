@@ -19,7 +19,12 @@ release-time fields. The measured workloads are prepared, ordered Jazz reads for
   (`big_label_releases_live_view_100k`, formerly
   `maintained_subscription_hydration_100k` in
   `crates/jazz/benches/selective_global_hydration.rs`), whose hydration must
-  follow the `label` index.
+  follow the `label` index;
+- a release plan's first edit under a sign-off policy with 16 and 64 branches
+  (`big_label_sign_off_first_edit`, formerly `update_support_branches` in
+  `crates/jazz/benches/authorization_support_branches.rs`): a fresh node
+  compiles the update authorization-support view and hydrates it. The policy
+  needs a lead or deputy grant on each of 4 or 6 sign-off desks.
 
 The artist and catalogue loads were dropped (same query shape as the label
 load), as were the 512-release points and batch size 10. The 100k-row import at

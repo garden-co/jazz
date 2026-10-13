@@ -23,43 +23,18 @@ import {
 } from "@astryxdesign/core";
 import { Operations } from "../src/App";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
+import { beginSignupIntent, clearSignupIntent, enrollAndBootstrap } from "../src/lib/enrollment";
 import { JazzLifecycle } from "../src/lib/jazz-lifecycle";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
-const signupMarker = "big-label-register-external-account";
 
-type SignupIntent = { email: string; identityId?: string };
 type ManagerSlot = {
   sessionId: string;
   identityId: string;
   manager?: AccountManager<JWTAuth>;
   error?: Error;
 };
-
-function beginSignupIntent(email: string) {
-  sessionStorage.setItem(signupMarker, JSON.stringify({ email } satisfies SignupIntent));
-}
-
-function clearSignupIntent() {
-  sessionStorage.removeItem(signupMarker);
-}
-
-function claimsSignupIntent(email: string, identityId: string) {
-  const encoded = sessionStorage.getItem(signupMarker);
-  if (!encoded) return false;
-  try {
-    const intent = JSON.parse(encoded) as SignupIntent;
-    if (intent.email !== email) return false;
-    if (intent.identityId && intent.identityId !== identityId) return false;
-    if (!intent.identityId)
-      sessionStorage.setItem(signupMarker, JSON.stringify({ ...intent, identityId }));
-    return true;
-  } catch {
-    clearSignupIntent();
-    return false;
-  }
-}
 
 function toError(cause: unknown) {
   return cause instanceof Error ? cause : new Error(String(cause));
@@ -75,14 +50,14 @@ function SignIn() {
   async function authenticate() {
     setPending(true);
     setError(null);
-    if (mode === "sign-up") beginSignupIntent(email);
+    if (mode === "sign-up") beginSignupIntent(sessionStorage, email);
     const result =
       mode === "sign-in"
         ? await authClient.signIn.email({ email, password })
         : await authClient.signUp.email({ email, password, name: name.trim() || email });
     setPending(false);
     if (result.error) {
-      if (mode === "sign-up") clearSignupIntent();
+      if (mode === "sign-up") clearSignupIntent(sessionStorage);
       setError(result.error.message ?? "Authentication failed");
     }
   }
@@ -242,37 +217,41 @@ function AccountApp({
     );
   const lifecycle = lifecycleRef.current;
 
-  const enrollAndBootstrap = React.useCallback(async () => {
-    const registering = claimsSignupIntent(email, identityId);
+  React.useEffect(() => {
+    // Each run owns its own flag: strict mode's discarded run must stay
+    // discarded after the next run marks the component active again.
+    let current = true;
+    active.current = true;
     setError(undefined);
     setReady(false);
-    await lifecycle.transition(
-      (manager) =>
-        registering
-          ? manager.registerJWT({ getToken: requireJazzToken })
-          : manager.loginJWT({ getToken: requireJazzToken }),
-      () => active.current,
+    enrollAndBootstrap({
+      lifecycle,
+      storage: sessionStorage,
+      email,
+      identityId,
+      getToken: requireJazzToken,
+      bootstrap: async (token) => {
+        const response = await fetch("/api/bootstrap", {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error(`bootstrap failed (${response.status})`);
+      },
+      isCurrent: () => current,
+    }).then(
+      (finished) => {
+        if (finished) setReady(true);
+      },
+      (cause) => {
+        if (current) setError(toError(cause));
+      },
     );
-    if (registering) clearSignupIntent();
-    const token = await requireJazzToken();
-    const response = await fetch("/api/bootstrap", {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}` },
-    });
-    if (!response.ok) throw new Error(`bootstrap failed (${response.status})`);
-    if (active.current) setReady(true);
-  }, [email, identityId, lifecycle]);
-
-  React.useEffect(() => {
-    active.current = true;
-    void enrollAndBootstrap().catch((cause) => {
-      if (active.current) setError(toError(cause));
-    });
     return () => {
+      current = false;
       active.current = false;
       void lifecycle.close().catch((cause) => console.error("Jazz shutdown failed", cause));
     };
-  }, [enrollAndBootstrap, lifecycle, retry]);
+  }, [email, identityId, lifecycle, retry]);
 
   const signOut = React.useCallback(async () => {
     try {

@@ -708,7 +708,8 @@ impl SourceGraphPreparer for FakeSourceResolver {
                 table_schema: TableSchema::new(
                     request.source.table.clone(),
                     [ColumnSchema::new("title", ColumnType::String)],
-                ),
+                )
+                .into(),
                 graph: {
                     let graph = GraphBuilder::table(format!("resolved_{}", request.source.table));
                     if self.current_rows_use_arg_by {
@@ -972,7 +973,8 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                         ColumnSchema::new("title", ColumnType::String),
                         ColumnSchema::new("todo", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
                     ],
-                ),
+                )
+                .into(),
                 graph: GraphBuilder::inline_records(descriptor.clone(), rows),
                 row_shape: SourceRowShape {
                     source: request.source.clone(),

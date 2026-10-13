@@ -75,8 +75,9 @@ pub enum StaticScanSpec {
     Prefix(Vec<LiteralValue>),
     /// A prefix scan whose physical source is proven to need no more than this
     /// many entries. This is deliberately distinct from cursor batching: it is
-    /// only emitted by conservative one-shot lowering after every downstream
-    /// operation that could discard or reorder a candidate has been ruled out.
+    /// only emitted by one-shot lowering when downstream operations cannot
+    /// change the page, or by a bounded probe that proves the page after
+    /// applying those operations and falls back if proof fails.
     PrefixLimit {
         prefix: Vec<LiteralValue>,
         max_items: usize,
@@ -460,6 +461,43 @@ pub struct CollectByOp {
     pub sort_directions: Vec<TopByDirection>,
     pub offset: u64,
     pub limit: TopByLimit,
+}
+
+impl CollectByOp {
+    /// Every input field the collector reads to group, order, window and
+    /// render its output, sorted and deduplicated.
+    ///
+    /// Input fields outside this set never reach the output, so their large
+    /// values need not be rebuilt: a collector over a projected listing must
+    /// not fetch the chunks of columns it drops (#3830).
+    pub fn read_field_indices(&self) -> Vec<usize> {
+        let mut fields = Vec::new();
+        fields.extend(&self.group_field_indices);
+        fields.extend(self.parent_fields.iter().map(|field| field.field_idx));
+        fields.extend(self.child_fields.iter().map(|field| field.field_idx));
+        fields.extend(self.tuple_fields.iter().map(|field| field.field_idx));
+        fields.extend(&self.occurrence_id_field_indices);
+        fields.extend(&self.sort_field_indices);
+        for slot in &self.slots {
+            slot.extend_read_field_indices(&mut fields);
+        }
+        fields.sort_unstable();
+        fields.dedup();
+        fields
+    }
+}
+
+impl CollectBySlot {
+    fn extend_read_field_indices(&self, fields: &mut Vec<usize>) {
+        fields.extend(&self.group_field_indices);
+        fields.extend(self.child_fields.iter().map(|field| field.field_idx));
+        fields.extend(self.presence_field_index);
+        fields.extend(self.reference_array_field_index);
+        fields.extend(&self.sort_field_indices);
+        for slot in &self.slots {
+            slot.extend_read_field_indices(fields);
+        }
+    }
 }
 
 /// The rendered shape selected by the terminal [`CollectByOp`].

@@ -35,30 +35,49 @@ export function NewRoomDialog({
     const trimmed = name.trim();
     if (!trimmed) return;
     setError(null);
+    // Local-first: the room is usable before the server confirms it. The
+    // room and its creator's membership commit together; the membership is
+    // the bootstrap step the room policy allows only for the creator, and its
+    // `exists` check sees the room inserted earlier in the same transaction.
+    //
+    // This stages and commits by hand instead of using `db.transaction`,
+    // which returns a Promise: the dialog must close and select the room in
+    // this handler, before the new room renders, or it would render under the
+    // still-open modal.
+    const tx = db.beginTransaction();
+    let roomId: string;
     try {
-      // Both writes are local-first: the room is usable before the server
-      // confirms them. The creator's own membership is the bootstrap step
-      // the room policy allows only for the creator.
-      //
-      // They are deliberately two writes, not one transaction: the membership
-      // policy's `exists` check on the room only sees committed rows (INV-RLS-9
-      // in the Jazz authorization spec; garden-co/jazz#3755), so a membership
-      // staged in the same transaction as its room would be rejected. Once
-      // #3755 is fixed they become one transaction. Until then, if the
-      // membership write is rejected, the creator still sees the room (they
-      // can read it as its creator) and the room view offers them "Join room".
-      const room = db.insert(app.rooms, { name: trimmed }).value;
-      db.insert(app.roomMembers, {
+      const room = tx.insert(app.rooms, { name: trimmed });
+      tx.insert(app.roomMembers, {
         roomId: room.id,
         memberAuthor: author,
         memberProfileId: profile.id,
       });
-      setName("");
-      onOpenChange(false);
-      onCreated(room.id);
+      roomId = room.id;
+    } catch (cause) {
+      void tx.rollback().catch(() => {});
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
+    let committed: ReturnType<typeof tx.commit>;
+    try {
+      committed = tx.commit();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      return;
     }
+    setName("");
+    onOpenChange(false);
+    onCreated(roomId);
+    // If the server rejects the room, it disappears; reopen the dialog with
+    // the name and the reason so the creator can see what happened.
+    committed.wait({ tier: "global" }).catch((cause: unknown) => {
+      setName(trimmed);
+      setError(
+        `Could not create the room: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      onOpenChange(true);
+    });
   }
 
   return (

@@ -240,6 +240,19 @@ impl EvaluationInputs {
     pub(super) fn take_missing(&mut self) -> BTreeSet<EvaluationRequestKey> {
         std::mem::take(&mut self.missing)
     }
+
+    /// Move every loaded large-value chunk into `successor`, a session that
+    /// replaces this one (#3901). Chunks are immutable, so they stay valid
+    /// for any snapshot.
+    pub(super) fn hand_off_chunks(&mut self, successor: &mut Self) {
+        for (key, output) in std::mem::take(&mut self.loaded) {
+            if matches!(key, EvaluationRequestKey::Chunk(_)) {
+                successor.loaded.entry(key).or_insert(output);
+            } else {
+                self.loaded.insert(key, output);
+            }
+        }
+    }
 }
 
 type PendingRequestFuture<'a> =
@@ -712,6 +725,28 @@ impl<'a> EvaluationRequests<'a> {
 
     pub(super) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// Move every large-value chunk fetch, in flight or finished, into
+    /// `successor`, a session that replaces this one (#3901). The in-flight
+    /// future keeps its demand with the chunk provider, so the replacement
+    /// neither loses nor repeats the fetch: when it reaches the same chunk,
+    /// [`Self::request`] finds the future already registered.
+    pub(super) fn hand_off_chunks(&mut self, successor: &mut Self) {
+        for (key, request) in std::mem::take(&mut self.pending) {
+            if matches!(key, EvaluationRequestKey::Chunk(_)) {
+                successor.pending.entry(key).or_insert(request);
+            } else {
+                self.pending.insert(key, request);
+            }
+        }
+        for (key, result) in std::mem::take(&mut self.ready) {
+            if matches!(key, EvaluationRequestKey::Chunk(_)) {
+                successor.ready.entry(key).or_insert(result);
+            } else {
+                self.ready.insert(key, result);
+            }
+        }
     }
 
     /// Whether any in-flight request is a large-value chunk fetch.

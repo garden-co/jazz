@@ -132,8 +132,12 @@ New phases, all behind the same feature:
 - `pending_hydration` / `pending_incremental`: one poll of a queued evaluation,
   excluding the operator kernels below.
 - `op_source`, `op_arrange`, `op_join`, `op_map`, `op_aggregate`, `op_other`:
-  synchronous kernel time per operator family (`compute_batch`, fused
-  filter/map pipelines, and the async index-source read), wherever it is polled.
+  synchronous kernel time per operator family (`compute_batch`, the row loop of
+  fused filter/map pipelines, streaming checksums, and the async index-source
+  read), wherever it is polled. Memo lookups and the pipeline's fallbacks to
+  single-node evaluation stay with the caller's phase.
+- `op_recursive`: recursive fixpoint iteration outside the kernels (seed and
+  step scheduling, frontier unions, snapshot and witness bookkeeping).
 - `ivm_tick`: a storage write's resident IVM tick, excluding kernels and queued
   evaluations. `table_deltas`: computing table deltas for that write.
 - `query_compile`, `query_subscribe`, `query_bind`, `query_prepare` and
@@ -160,4 +164,6 @@ The largest single phase per node fell from 63% to 19% of Core tick time and
 from 56% to 25% on the client. The relay's unphased remainder (1.58 s, 20%) is
 unchanged and still needs a boundary. `pending_hydration` and `ivm_tick`
 exclusive time is scheduler, memo and install work around the kernels, not
-kernel time.
+kernel time. In this receipt it also included recursive fixpoint glue and
+streaming checksums; those now have their own phases (#3798). On the same
+fixture `op_recursive` is 0.05 s on Core, so the overstatement was small.

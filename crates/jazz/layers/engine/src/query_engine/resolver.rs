@@ -131,8 +131,11 @@ pub trait SourceGraphPreparer {
 pub struct ResolvedSource {
     /// Catalogue-owned IDs for logical columns in the selected read schema.
     pub stored_column_ids: BTreeMap<String, crate::ids::PhysicalColumnId>,
-    /// Logical table schema after schema/lens resolution.
-    pub table_schema: TableSchema,
+    /// Logical table schema after schema/lens resolution. It carries the
+    /// table's compiled policies, which grow with the policy's branch count,
+    /// so lowering shares it rather than copying it into every source
+    /// occurrence and lowered step.
+    pub table_schema: std::sync::Arc<TableSchema>,
     /// Concrete groove graph source.
     pub graph: GraphBuilder,
     /// Canonical row shape emitted by the source graph.

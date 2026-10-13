@@ -4,6 +4,7 @@
 //! benchmark. It does not import an application runtime or fixture helper.
 
 pub mod live_view;
+pub mod policy_graph;
 
 use std::collections::BTreeMap;
 

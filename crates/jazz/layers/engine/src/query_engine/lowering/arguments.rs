@@ -6,6 +6,11 @@ pub(super) struct LoweringContext<'a> {
     request: &'a QueryProgramRequest,
     arguments: Option<&'a RefCell<ProgramArgumentRecipes>>,
     literals: &'a [Value],
+    /// The request's parameter domain. It is a function of the whole
+    /// request, so derive it once per lowering rather than once per union
+    /// branch or plan step: a policy with B branches would otherwise rescan
+    /// all B branches B times.
+    parameter_domain: std::cell::OnceCell<Result<ParameterDomain, UnsupportedReason>>,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -14,6 +19,7 @@ impl<'a> LoweringContext<'a> {
             request,
             arguments: None,
             literals: &[],
+            parameter_domain: std::cell::OnceCell::new(),
         }
     }
 
@@ -25,7 +31,16 @@ impl<'a> LoweringContext<'a> {
             request,
             arguments: Some(arguments),
             literals: &[],
+            parameter_domain: std::cell::OnceCell::new(),
         }
+    }
+
+    /// [`parameter_domain_for_request`] for this context's request.
+    pub(super) fn parameter_domain(&self) -> Result<&ParameterDomain, UnsupportedReason> {
+        self.parameter_domain
+            .get_or_init(|| parameter_domain_for_request(self.request))
+            .as_ref()
+            .map_err(Clone::clone)
     }
 
     pub(super) fn predicate_argument(
@@ -145,6 +160,7 @@ impl ProgramArgumentRecipes {
             request,
             arguments: None,
             literals,
+            parameter_domain: std::cell::OnceCell::new(),
         };
         let predicates = self
             .predicates

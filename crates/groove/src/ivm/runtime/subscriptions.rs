@@ -24,14 +24,17 @@ pub enum SubscriptionLifetime {
     Retained,
 }
 
-/// How indirect (large) scalar values appear in an *initial* root snapshot:
-/// a one-shot query result or a subscription's first published result.
+/// How indirect (large) scalar values appear in a subscription's root output:
+/// a one-shot query result, or every result a retained subscription publishes.
 ///
 /// Operators still materialize exactly the fields they inspect (filters,
 /// sorts, collectors), so this choice never changes which rows a graph
 /// produces. It only decides whether the root output rebuilds whole large
-/// values for its caller. Incremental updates of a retained subscription are
-/// always materialized, whatever its initial snapshot used.
+/// values for its caller. A retained subscription keeps its choice for its
+/// whole lifetime: its initial snapshot and every later update present the
+/// same fields physically, so a retraction always names the exact record its
+/// insertion published. Subscriptions sharing a graph node may choose
+/// differently, because the choice is applied per subscription at publication.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum RootIndirectValues {
     /// Rebuild every indirect root value into its logical scalar.
@@ -70,17 +73,6 @@ impl RootIndirectValues {
                     .map(|(index, _)| index)
                     .collect(),
             ),
-        }
-    }
-}
-
-impl RootIndirectValues {
-    /// Retained subscriptions always deliver materialized updates, so a
-    /// physical first snapshot could never be retracted by them.
-    fn check_lifetime(&self, lifetime: SubscriptionLifetime) -> Result<(), IvmRuntimeError> {
-        match (self, lifetime) {
-            (Self::Materialize, _) | (_, SubscriptionLifetime::FirstResult) => Ok(()),
-            _ => Err(IvmRuntimeError::PhysicalRootValuesRequireFirstResult),
         }
     }
 }
@@ -756,6 +748,9 @@ pub(super) struct MultisinkSubscriptionState {
     pub(super) outputs: BTreeMap<String, CompiledNode>,
     pub(super) target: MultisinkSubscriptionTarget,
     pub(super) failed: bool,
+    /// How this subscription's published root records present indirect
+    /// values, for its initial snapshot and every later update alike.
+    pub(super) root_indirect_values: RootIndirectValues,
 }
 
 #[derive(Clone, Debug)]
@@ -779,6 +774,8 @@ pub(super) struct RoutedMultisinkShapeState {
     /// with identical terminals reuse it, and it retires itself once its
     /// last retained binding unsubscribes.
     pub(super) shared_key: Option<SharedShapeKey>,
+    /// Lifetime ownership is independent of whether the shape is shared.
+    pub(super) retire_when_unbound: bool,
 }
 
 /// Identity of a shared prepared shape: its binding source plus its
@@ -798,9 +795,55 @@ pub(super) struct BindingKey(pub(super) Vec<u8>);
 /// by an ordinary binding tick. See [`IvmRuntime::prepare_live_attach`].
 #[derive(Debug)]
 pub(crate) struct LiveAttach {
+    /// Survives retirement of the prepared shape during admission.
+    pub(super) binding_source: BindingSourceKey,
     pub(super) binding_key: BindingKey,
     /// The shared, already-maintained nodes the new subscription reads.
     pub(super) borrowed: HashSet<NodeId>,
+}
+
+enum PreparedPublicOutput {
+    Fields(BTreeMap<String, Vec<String>>),
+    OneSink(RecordDescriptor),
+}
+
+/// Owns a live binding reference until its asynchronous admission is handed off.
+/// An unpublished tick owes metadata rollback, not a compensating negative delta.
+struct LiveAttachAdmission<'a> {
+    runtime: &'a mut IvmRuntime,
+    binding: Option<(BindingSourceKey, BindingKey)>,
+    published: bool,
+}
+
+impl LiveAttachAdmission<'_> {
+    fn finish(mut self, borrowed: HashSet<NodeId>) -> LiveAttach {
+        let (binding_source, binding_key) = self
+            .binding
+            .take()
+            .expect("live admission retains its binding until handoff");
+        LiveAttach {
+            binding_source,
+            binding_key,
+            borrowed,
+        }
+    }
+}
+
+impl Drop for LiveAttachAdmission<'_> {
+    fn drop(&mut self) {
+        let Some((source, binding)) = self.binding.take() else {
+            return;
+        };
+        if self.published {
+            if let Some(delta) = self.runtime.remove_binding_ref_for_source(source, &binding)
+                && !delta.deltas.is_empty()
+            {
+                self.runtime.pending_binding_retractions.push(delta);
+            }
+        } else {
+            self.runtime.remove_binding_metadata(&source, &binding);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3478,7 +3521,6 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage + 'static,
     {
-        root_indirect_values.check_lifetime(lifetime)?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
@@ -3495,6 +3537,9 @@ impl IvmRuntime {
         &mut self,
         progress_waker: Option<&Waker>,
     ) -> Result<(), IvmRuntimeError> {
+        if let Some(owner) = progress_waker {
+            self.retain_owner_progress_waker(owner);
+        }
         let mut cx = Context::from_waker(progress_waker.unwrap_or(Waker::noop()));
         match self.poll_pending_incremental(&mut cx) {
             Poll::Ready(result) => result,
@@ -3581,6 +3626,7 @@ impl IvmRuntime {
                 outputs: outputs.clone(),
                 target: MultisinkSubscriptionTarget::Direct,
                 failed: false,
+                root_indirect_values: root_indirect_values.clone(),
             },
         );
         if lifetime == SubscriptionLifetime::Retained {
@@ -3729,6 +3775,7 @@ impl IvmRuntime {
                 terminals: terminal_states,
                 auto_family_key: None,
                 shared_key: None,
+                retire_when_unbound: false,
             },
         );
         install.commit();
@@ -3769,6 +3816,7 @@ impl IvmRuntime {
             .await?;
         if let Some(state) = self.prepared_shapes.get_mut(&prepared.id) {
             state.shared_key = Some(key.clone());
+            state.retire_when_unbound = true;
         }
         self.shared_prepared_shapes.insert(key, prepared.id);
         Ok(prepared)
@@ -3778,7 +3826,16 @@ impl IvmRuntime {
     /// caller whose bind failed or was cancelled. A shape other bindings
     /// still hold is left alone.
     pub fn release_shared_prepared_shape(&mut self, shape_id: PreparedShapeId) {
-        self.remove_unreferenced_shared_shape(shape_id);
+        self.remove_unreferenced_binding_owned_shape(shape_id);
+    }
+
+    /// Transfer a successful binding's shape to its retained bindings.
+    /// Initial hydration may already have ended the binding with an error.
+    pub(crate) fn transfer_prepared_shape_to_bindings(&mut self, shape_id: PreparedShapeId) {
+        if let Some(shape) = self.prepared_shapes.get_mut(&shape_id) {
+            shape.retire_when_unbound = true;
+        }
+        self.remove_unreferenced_binding_owned_shape(shape_id);
     }
 
     pub fn bind_shape<S>(
@@ -3813,11 +3870,10 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
-        root_indirect_values.check_lifetime(lifetime)?;
         let subscription = self.bind_shape_with_public_fields_staged(
             shape_id,
             binding_values,
-            BTreeMap::new(),
+            PreparedPublicOutput::Fields(BTreeMap::new()),
             storage,
             lifetime,
             root_indirect_values,
@@ -3841,7 +3897,7 @@ impl IvmRuntime {
         let subscription = self.bind_shape_with_public_fields_staged(
             shape_id,
             binding_values,
-            public_fields,
+            PreparedPublicOutput::Fields(public_fields),
             storage,
             SubscriptionLifetime::Retained,
             RootIndirectValues::Materialize,
@@ -3862,33 +3918,31 @@ impl IvmRuntime {
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
-        public_fields: BTreeMap<String, Vec<String>>,
+        public_output: PreparedPublicOutput,
         storage: &Rc<S>,
         lifetime: SubscriptionLifetime,
         root_indirect_values: RootIndirectValues,
-        live: Option<LiveAttach>,
+        mut live: Option<LiveAttach>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
     {
-        let live_binding = live
-            .as_ref()
-            .map(|live| (shape_id, live.binding_key.clone()));
         let result = self.bind_shape_with_public_fields_staged_inner(
             shape_id,
             binding_values,
-            public_fields,
+            public_output,
             storage,
             lifetime,
             root_indirect_values,
-            live,
+            live.as_mut(),
         );
         if result.is_err()
-            && let Some((shape_id, binding_key)) = live_binding
+            && let Some(live) = live
         {
             // The attach tick already admitted this binding into the shared
             // graph. Retract it on the next tick, as an unsubscribe would.
-            if let Some(delta) = self.remove_binding_ref(shape_id, &binding_key)
+            if let Some(delta) =
+                self.remove_binding_ref_for_source(live.binding_source, &live.binding_key)
                 && !delta.deltas.is_empty()
             {
                 self.pending_binding_retractions.push(delta);
@@ -3902,11 +3956,11 @@ impl IvmRuntime {
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
-        public_fields: BTreeMap<String, Vec<String>>,
+        public_output: PreparedPublicOutput,
         storage: &Rc<S>,
         lifetime: SubscriptionLifetime,
         root_indirect_values: RootIndirectValues,
-        live: Option<LiveAttach>,
+        live: Option<&mut LiveAttach>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -3914,15 +3968,22 @@ impl IvmRuntime {
         let shape = self
             .prepared_shapes
             .get(&shape_id)
-            .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?
-            .clone();
+            .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
+        let public_fields = match public_output {
+            PreparedPublicOutput::Fields(fields) => fields,
+            PreparedPublicOutput::OneSink(output) => {
+                validate_public_output_for_shape(shape, DEFAULT_SINK, &output)?;
+                [(DEFAULT_SINK.to_owned(), descriptor_field_names(&output)?)].into()
+            }
+        };
+        let shape = shape.clone();
         let binding_record = shape.binding_descriptor.create(binding_values)?;
         let binding_key = BindingKey(binding_record);
         if let Some(live) = &live {
             debug_assert_eq!(live.binding_key, binding_key);
         }
         let subscription_id = self.next_subscription_id();
-        let (outputs, binding_snapshots, route_barriers) = {
+        let (outputs, binding_snapshots, route_barriers, binding_added) = {
             let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
             let runtime = install.runtime();
             runtime.logical_nodes_requested += shape
@@ -3979,11 +4040,19 @@ impl IvmRuntime {
                     runtime.add_retainer(output.node, lifetime.retainer(subscription_id));
                 }
                 install.commit();
-                (outputs, binding_snapshots, route_barriers)
+                (outputs, binding_snapshots, route_barriers, false)
             } else {
                 let cancelled_retraction = lifetime == SubscriptionLifetime::Retained
                     && runtime.cancel_pending_binding_retraction(&binding_shape, &binding_key);
                 let binding_delta = runtime.provisional_binding_delta(shape_id, &binding_key)?;
+                // A queued retraction still changes the source's binding set
+                // before this hydration's results are current, so it keeps the
+                // conservative path even for a binding the source holds.
+                let binding_added = !binding_delta.deltas.is_empty()
+                    || runtime
+                        .pending_binding_retractions
+                        .iter()
+                        .any(|pending| pending.key == binding_delta.key);
                 let mut binding_snapshots = runtime.binding_snapshot_deltas();
                 let snapshot = Arc::make_mut(
                     Arc::make_mut(&mut binding_snapshots)
@@ -4016,7 +4085,7 @@ impl IvmRuntime {
                     runtime.add_retainer(output.node, lifetime.retainer(subscription_id));
                 }
                 install.commit();
-                (outputs, binding_snapshots, route_barriers)
+                (outputs, binding_snapshots, route_barriers, binding_added)
             }
         };
         let (sender, receiver) = mpsc::channel();
@@ -4042,15 +4111,22 @@ impl IvmRuntime {
                     MultisinkSubscriptionTarget::Direct
                 },
                 failed: false,
+                root_indirect_values: root_indirect_values.clone(),
             },
         );
         if lifetime == SubscriptionLifetime::Retained {
             self.index_subscription_outputs(subscription_id, &outputs);
         }
         let initial = Arc::new(Mutex::new(None));
+        // Only a change to the source's binding set changes what its readers
+        // produce. Another reference to a live binding leaves every retained
+        // result over the shape valid, so it must not invalidate them (#3797).
         let (binding_frontier_advance, borrowed) = match live {
-            Some(live) => (None, live.borrowed),
-            None => (Some(shape.shape.as_str()), HashSet::default()),
+            Some(live) => (None, std::mem::take(&mut live.borrowed)),
+            None => (
+                binding_added.then_some(shape.shape.as_str()),
+                HashSet::default(),
+            ),
         };
         self.enqueue_subscription_hydration(
             subscription_id,
@@ -4173,7 +4249,7 @@ impl IvmRuntime {
         let multisink = self.bind_shape_with_public_fields_staged(
             shape_id,
             binding_values,
-            BTreeMap::new(),
+            PreparedPublicOutput::Fields(BTreeMap::new()),
             storage,
             SubscriptionLifetime::Retained,
             RootIndirectValues::Materialize,
@@ -4196,18 +4272,10 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
-        validate_public_output_for_shape(
-            self.prepared_shapes
-                .get(&shape_id)
-                .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?,
-            DEFAULT_SINK,
-            &public_output,
-        )?;
-        let public_fields = descriptor_field_names(&public_output)?;
         let multisink = self.bind_shape_with_public_fields_staged(
             shape_id,
             binding_values,
-            [(DEFAULT_SINK.to_owned(), public_fields)].into(),
+            PreparedPublicOutput::OneSink(public_output),
             storage,
             SubscriptionLifetime::Retained,
             RootIndirectValues::Materialize,
@@ -4343,7 +4411,7 @@ impl IvmRuntime {
         Some((current.id, *shared, shared_output))
     }
 
-    fn index_subscription_outputs(
+    pub(super) fn index_subscription_outputs(
         &mut self,
         subscription_id: SubscriptionId,
         outputs: &BTreeMap<String, CompiledNode>,
@@ -4356,7 +4424,7 @@ impl IvmRuntime {
         }
     }
 
-    fn unindex_subscription_outputs(
+    pub(super) fn unindex_subscription_outputs(
         &mut self,
         subscription_id: SubscriptionId,
         outputs: &BTreeMap<String, CompiledNode>,
@@ -4399,7 +4467,7 @@ impl IvmRuntime {
                     self.pending_binding_retractions.push(param_delta);
                     self.remove_unreferenced_auto_family(shape_id);
                 }
-                self.remove_unreferenced_shared_shape(shape_id);
+                self.remove_unreferenced_binding_owned_shape(shape_id);
             }
             return removed;
         }
@@ -4432,19 +4500,20 @@ impl IvmRuntime {
                 ..
             } = subscription.target
             {
-                if let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
-                    && !param_delta.deltas.is_empty()
-                {
-                    self.tick_with_params(
-                        Vec::new(),
-                        vec![param_delta],
-                        OwnedStorage::new(Rc::new(storage)),
-                        None,
-                    )
-                    .await?;
+                let retraction = self
+                    .remove_binding_ref(shape_id, &binding_key)
+                    .filter(|delta| !delta.deltas.is_empty());
+                let has_retraction = retraction.is_some();
+                if let Some(delta) = retraction {
+                    self.pending_binding_retractions.push(delta);
+                }
+                // No removed receiver remains to own this cleanup across a cold tick.
+                self.remove_unreferenced_binding_owned_shape(shape_id);
+                if has_retraction {
+                    self.flush_pending_binding_retractions(storage).await?;
+                    // Auto families also remove their source, after its required tick.
                     self.remove_unreferenced_auto_family(shape_id);
                 }
-                self.remove_unreferenced_shared_shape(shape_id);
             }
             return Ok(removed);
         }
@@ -4992,34 +5061,32 @@ impl IvmRuntime {
         let binding_key = BindingKey(shape.binding_descriptor.create(binding_values)?);
         let delta = self.add_binding_ref(shape_id, binding_key.clone())?;
         debug_assert_eq!(delta.deltas.len(), 1, "a live attach admits a new binding");
-        if let Err(error) = self
+        let mut admission = LiveAttachAdmission {
+            runtime: self,
+            binding: Some((delta.key.clone(), binding_key)),
+            published: false,
+        };
+        admission
+            .runtime
             .tick_with_params(
                 Vec::new(),
                 vec![delta],
                 OwnedStorage::new(Rc::clone(storage)),
                 None,
             )
-            .await
-        {
-            if let Some(delta) = self.remove_binding_ref(shape_id, &binding_key)
-                && !delta.deltas.is_empty()
-            {
-                self.pending_binding_retractions.push(delta);
-            }
-            return Err(error);
-        }
+            .await?;
+        admission.published = true;
         // A receiver dropped concurrently with the attach tick is discovered
         // there and its retraction queued. Apply it before the new binding
         // hydrates, so the borrowed nodes match the source's refcounts.
-        while !self.pending_binding_retractions.is_empty() {
-            self.flush_pending_binding_retractions(storage.as_ref())
+        while !admission.runtime.pending_binding_retractions.is_empty() {
+            admission
+                .runtime
+                .flush_pending_binding_retractions(storage.as_ref())
                 .await?;
         }
-        self.live_attaches += 1;
-        Ok(Some(LiveAttach {
-            binding_key,
-            borrowed,
-        }))
+        admission.runtime.live_attaches += 1;
+        Ok(Some(admission.finish(borrowed)))
     }
 
     #[cfg(test)]
@@ -5219,35 +5286,41 @@ impl IvmRuntime {
         binding: &BindingKey,
     ) -> Option<BindingDelta> {
         let shape = self.binding_source_shape_name(shape_id).ok()?;
-        self.remove_binding_ref_for_shape(&shape, binding)
+        self.remove_binding_ref_for_source(BindingSourceKey::prepared(shape), binding)
     }
 
-    fn remove_binding_ref_for_shape(
+    fn remove_binding_metadata(
         &mut self,
-        shape: &str,
+        source_key: &BindingSourceKey,
         binding: &BindingKey,
-    ) -> Option<BindingDelta> {
-        let source = self
-            .binding_sources
-            .get_mut(&BindingSourceKey::prepared(shape))?;
+    ) -> Option<(RecordDescriptor, bool)> {
+        let source = self.binding_sources.get_mut(source_key)?;
         let count = source.refcounts.get_mut(binding)?;
         *count -= 1;
-        if *count > 0 {
-            return Some(BindingDelta {
-                key: BindingSourceKey::prepared(shape),
-                descriptor: source.descriptor,
-                deltas: Vec::new(),
-                initializes_snapshot: false,
-            });
+        let last_reference = *count == 0;
+        if last_reference {
+            source.refcounts.remove(binding);
         }
-        source.refcounts.remove(binding);
+        Some((source.descriptor, last_reference))
+    }
+
+    fn remove_binding_ref_for_source(
+        &mut self,
+        source_key: BindingSourceKey,
+        binding: &BindingKey,
+    ) -> Option<BindingDelta> {
+        let (descriptor, last_reference) = self.remove_binding_metadata(&source_key, binding)?;
         Some(BindingDelta {
-            key: BindingSourceKey::prepared(shape),
-            descriptor: source.descriptor,
-            deltas: vec![RecordDelta {
-                record: binding.0.clone().into(),
-                weight: -1,
-            }],
+            key: source_key,
+            descriptor,
+            deltas: if last_reference {
+                vec![RecordDelta {
+                    record: binding.0.clone().into(),
+                    weight: -1,
+                }]
+            } else {
+                Vec::new()
+            },
             initializes_snapshot: false,
         })
     }
@@ -5266,14 +5339,14 @@ impl IvmRuntime {
         self.binding_sources.snapshot()
     }
 
-    /// Retire a shared prepared shape once no retained binding targets it.
+    /// Retire a binding-owned shape once no retained binding targets it.
     /// Its binding source stays: a queued retraction may still name it, and
     /// the next preparation of the same source reuses the entry.
-    fn remove_unreferenced_shared_shape(&mut self, shape_id: PreparedShapeId) {
+    fn remove_unreferenced_binding_owned_shape(&mut self, shape_id: PreparedShapeId) {
         if self
             .prepared_shapes
             .get(&shape_id)
-            .is_none_or(|shape| shape.shared_key.is_none())
+            .is_none_or(|shape| !shape.retire_when_unbound)
         {
             return;
         }

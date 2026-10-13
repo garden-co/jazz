@@ -1,4 +1,5 @@
 use jazz_example_big_label_benchmark::live_view::LiveViewFixture;
+use jazz_example_big_label_benchmark::policy_graph::{self, PolicyGraphFixture};
 use jazz_example_big_label_benchmark::{Fixture, IngestFixture};
 
 // Wall-clock suite on CodSpeed's macro runner. Names are app-prefixed because
@@ -42,4 +43,19 @@ fn big_label_releases_live_view_100k(bencher: divan::Bencher<'_, '_>) {
     fixture.assert_subscription_baseline(baseline, "validation hydration");
     bencher.bench_local(|| divan::black_box(fixture.hydrate()));
     fixture.assert_subscription_baseline(baseline, "Divan samples");
+}
+
+/// A release plan's first edit under a sign-off policy that needs a lead or a
+/// deputy grant on every one of `desks` desks (`2^desks` policy branches): a
+/// fresh node compiles the update authorization-support view and hydrates
+/// each of its subscriptions. Schema compilation and node opening are untimed
+/// per-sample inputs, so no compiled program is reused between samples.
+#[divan::bench(args = [4, 6], sample_count = 5)]
+fn big_label_sign_off_first_edit(bencher: divan::Bencher<'_, '_>, desks: usize) {
+    let fixture = PolicyGraphFixture::new(desks);
+    bencher
+        .with_inputs(|| fixture.open_node())
+        .bench_local_values(|mut node| {
+            divan::black_box(policy_graph::open_update_support(&mut node))
+        });
 }

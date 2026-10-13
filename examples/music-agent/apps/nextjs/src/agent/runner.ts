@@ -366,8 +366,8 @@ function turnSink(
  * writes per second. Each append is a lease write, so it only lands while
  * this runner still owns the turn.
  *
- * A transaction can't take `applyDiffs`, so an append writes the whole body
- * (the stored text plus the batch) rather than a page-relative splice.
+ * Each append is a page-relative splice at the end of the body, so a write
+ * carries only the new text however long the reply grows.
  */
 class BodyWriter {
   private pending = "";
@@ -399,9 +399,19 @@ class BodyWriter {
       while (this.pending) {
         const insert = this.pending;
         this.pending = "";
-        await this.lease.write((tx, turn) =>
-          tx.update(app.turns, turn.id, { body: turn.body + insert }),
-        );
+        await this.lease.write((tx, turn) => {
+          const end = turn.body.length;
+          tx.update(
+            app.turns,
+            turn.id,
+            {},
+            {
+              applyDiffs: {
+                body: { within: { from: end, to: end }, splices: [{ at: 0, delete: 0, insert }] },
+              },
+            },
+          );
+        });
       }
     } catch (error) {
       this.failure ??= error;

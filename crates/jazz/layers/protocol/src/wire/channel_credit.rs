@@ -6,9 +6,7 @@ use super::channels::{
     CHANNEL_CHUNK_BYTES, CONTROL_RESERVE_BYTES, CONTROL_RESERVE_MESSAGES, ChannelClass,
     INTERACTIVE_RESERVE_BYTES, MAX_CHANNEL_FRAME_PAYLOAD, MAX_CHANNEL_QUEUED_MESSAGES,
 };
-use super::{
-    WireChannelCredit, WireCreditKind, WireEnvelope, WireFrame, WireInboundContext, encode_frame,
-};
+use super::{WireChannelCredit, WireCreditKind, WireFrame, WireInboundContext, encode_frame};
 use crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
 
 /// A tiny physical frame still occupies a bounded queue slot.
@@ -29,6 +27,19 @@ const WINDOWS: [usize; 6] = [
     1024 * 1024,
     1024 * 1024,
 ];
+/// All channel-frame credit (charged at [`channel_frame_credit_cost`]) that a
+/// conforming sender can have outstanding on one connection, across classes.
+/// A receiver that queues raw inbound channel frames must admit at least this
+/// much, or a peer that honours every window can still overrun it.
+pub const MAX_OUTSTANDING_CHANNEL_CREDIT: usize = {
+    let mut total = 0;
+    let mut index = 0;
+    while index < WINDOWS.len() {
+        total += WINDOWS[index];
+        index += 1;
+    }
+    total
+};
 fn bucket(class: ChannelClass) -> usize {
     match class {
         ChannelClass::Control => 0,
@@ -247,12 +258,11 @@ impl ChannelCredits {
     /// balance before making another outbound channel extent eligible.
     pub fn receive_credit(&mut self, grant: WireChannelCredit) -> Result<(), String> {
         self.context
-            .validate_envelope_metadata(&WireEnvelope {
-                protocol_version: grant.protocol_version,
-                features: grant.features,
-                session: grant.session,
-                payload: Vec::new(),
-            })
+            .validate_metadata(
+                grant.protocol_version,
+                grant.features,
+                grant.session.as_ref(),
+            )
             .map_err(|error| format!("invalid credit context: {error:?}"))?;
         if grant.sequence != self.next_received {
             return Err("channel credit sequence mismatch".into());
@@ -393,9 +403,9 @@ impl ChannelCredits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, decode_frame};
+    use crate::wire::{WIRE_PROTOCOL_VERSION, decode_frame};
     fn context() -> WireInboundContext {
-        WireInboundContext::new(WIRE_PROTOCOL_VERSION, FEATURE_SYNC_MESSAGE_PAYLOAD, None)
+        WireInboundContext::new(WIRE_PROTOCOL_VERSION, 0, None)
     }
     // Internal tests pin physical-byte credit and fixed postcard bytes, neither
     // of which can be asserted through the semantic row-query API.
@@ -454,7 +464,8 @@ mod tests {
         sender.charge(ChannelClass::Requests, 7).unwrap();
         receiver.consumed(ChannelClass::Requests, 7).unwrap();
         let bytes = receiver.peek_grant().unwrap().unwrap();
-        assert_eq!(hex::encode(&bytes), "05030100010080800100");
+        assert_eq!(hex::encode(&bytes), "03050000010080800100");
+        assert!(crate::wire::is_channel_credit_frame(&bytes));
         assert_eq!(receiver.peek_grant().unwrap().unwrap(), bytes);
         let WireFrame::ChannelCredit(grant) = decode_frame(&bytes).unwrap() else {
             panic!("credit frame")

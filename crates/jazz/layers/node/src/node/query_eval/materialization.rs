@@ -670,6 +670,8 @@ where
         read_schema: SchemaVersionId,
         version: &VersionRow,
     ) -> Result<Option<CurrentRow>, Error> {
+        #[cfg(feature = "cold-settle-attribution")]
+        version.record_conversion("version_to_current_row", 0);
         let authored_schema = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(

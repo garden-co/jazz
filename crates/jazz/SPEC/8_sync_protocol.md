@@ -47,7 +47,7 @@ Invariant digest:
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; accepted state and the core committed frontier MUST become durable atomically before publication.
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it MUST NOT accept, assign global timestamp, or create merge versions from that payload.
 
-- `INV-SYNC-37`: LocalOnly propagation MUST remain on the calling node. Every remote subscription with propagate_upstream=false MUST be rejected regardless of identity, trust, role or worker transport.
+- `INV-SYNC-37`: `ReadTier::LocalOnly` MUST remain on the calling node. Remote subscriptions have no propagation switch; every receiving node follows normal upstream routing.
 - `INV-SYNC-38`: An extra local query input absent from a completed selected-authority scope MUST be revalidated; scope absence or Unknown MUST NOT assert deletion or access loss. Bounded batches MUST preserve eventual retry/progression for supported active queries.
 - `INV-SYNC-39`: Confirmed current unavailability MUST be scoped to the exact effective identity/claims and filter current application inputs before joins, counts and limits. It MUST NOT erase shared content, expose the cause, or affect SYSTEM and other contexts.
 - `INV-SYNC-40`: Readmission MUST follow complete authorized native content ingestion and fresh correlated evidence. Durable per-row denial and clear watermarks MUST survive reopen and prevent stale replies from reversing a newer decision; authoritative inclusion MUST be able to revalidate an excluded row.
@@ -125,8 +125,9 @@ shape is intended, but the current implementation does not guarantee it. Its
 aggregation and covering-shape semantics remain an open design question below.
 
 The peer wire form is binary-first. `WireFrame` wraps `Hello`,
-`Message(WireEnvelope)`, and `Error`; `WireEnvelope.payload` contains a
-postcard-encoded `SyncMessage` plus protocol version and feature bits. Postcard
+`Error`, `Channel`, and `ChannelCredit`. Ordered channel extents carry a
+postcard-encoded `SyncMessage` with protocol version, feature bits, and session
+metadata. Postcard
 is the canonical runtime frame/envelope format; JSON fixtures are only
 human-readable golden checks. Row/version payloads remain groove custom
 `Record` bytes inside protocol messages; postcard wraps those bytes, it does not
@@ -146,22 +147,23 @@ the Rust receipt rejects noncanonical payloads, and TypeScript independently
 encodes the corpus and rejects malformed relation input. It is compatibility
 evidence, not a migration input.
 
-**Deployment boundary, 2026-09-18 — the sole wire protocol is v3.** `ViewUpdate` carries
+**Deployment boundary — the sole wire protocol is v5.** `ViewUpdate` carries
 settled version payloads only through `version_carriers`; the transitional
 duplicate `version_bundles` field is absent. Every endpoint advertises exactly
-wire-protocol v3 and requires every peer Hello to advertise exactly
-`min_protocol_version=3, max_protocol_version=3`; v1, v2, and ranges such as `0..=3`,
+wire-protocol v5 and requires every peer Hello to advertise exactly
+`min_protocol_version=5, max_protocol_version=5`; v1, v2, v3, v4, and ranges such as `0..=5`,
 `2..=3`, and `3..=15` reject before payload decoding. There are no compatibility
 aliases, migration paths, or old wire decoders. `VersionBundle` remains the semantic unit produced when a
 carrier is expanded and remains the direct payload of `RowVersionPayloads`
 repair responses.
 
-Wire v3 introduces deployment-aware catalogue policy snapshot semantics: an old
-Core can emit a policy-only snapshot at the same write revision that v3 receivers
-reject. Therefore v2 peers fail the Hello handshake rather than reaching that
-semantic mismatch. Clients and Core servers must upgrade together. Existing
-message discriminants remain fixed, including retired tag 12; this wire boundary
-does not change storage formats or remove legacy storage upgrade paths.
+Wire v5 removes the remote registration propagation flag and the retired Edge
+role, and compacts durability tags (ch. 9).
+It retains v4’s replacement of the single incoming migration in each schema publication with
+an explicit predecessor vector. V4 and older peers fail the Hello handshake
+before decoding these snapshots. Clients and Core servers must upgrade together.
+It retains v3's deployment-aware catalogue policy semantics: policy changes must
+advance the write revision.
 
 Transaction and row-version authors use the native record
 `{account: UUID, identity: {issuer: String, subject: String}}`. System authors
@@ -171,8 +173,8 @@ Accountless reader sessions remain distinct from non-null row authors. Large sca
 internal enum/record encoding rather than the former private tagged/postcard
 payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
 milliseconds; the packed HLC is internal ordering state and is not protocol
-data. The wire-v3 golden fixture set is the only supported message layout.
-Wire-protocol v3 is independent of other formats that are also labelled v1,
+data. The wire-v5 golden fixture set is the only supported message layout.
+Wire-protocol v5 is independent of other formats that are also labelled v1,
 including storage, catalogue, migration-lens, and NAPI/WASM binding formats.
 `MigrationLens` payloads in that fixture set are
 their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
@@ -201,10 +203,10 @@ evaluate policy. `SYSTEM` is never a relay transport identity or delegated
 subject. This is a deliberate redefinition of the sole, unreleased v1 layout:
 there is no old-shape decoder or compatibility path.
 
-### 8.1.1 Frozen wire-protocol v3 byte contract
+### 8.1.1 Frozen wire-protocol v5 byte contract
 
-`WireFrame` and its `WireEnvelope.payload` are each **one complete postcard
-value**. A conformant decoder MUST reject a valid prefix followed by any
+`WireFrame` and each reassembled semantic channel message are **one complete
+postcard value**. A conformant decoder MUST reject a valid prefix followed by any
 trailing byte; concatenation belongs only to the documented WebSocket
 `Vec<Vec<u8>>` batch carrier. In particular, a binding MUST NOT hand a byte
 suffix from one frame to the semantic decoder, and a semantic decoder MUST NOT
@@ -231,65 +233,53 @@ endpoint byte as a suffix is malformed framing, not version compatibility. A
 length other than exactly `16` MUST be rejected even when the declared byte
 sequence and the remaining Hello fields are otherwise well formed.
 
-Postcard enum ordinals are wire data. The wire-protocol v3 baseline freezes these permanent
-discriminants (decimal):
+Postcard enum ordinals are wire data. The current wire-protocol v5 encoding
+uses these pinned discriminants (decimal):
 
-| enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WireFrame`     | `Hello=0`, `Message=1`, `Error=2`, `MessageFragment=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `WirePeerRole`  | `Client=0`, `Core=1`, retired/rejected `2`, `Relay=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `WireErrorCode` | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `WireRetry`     | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `SyncMessage`   | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `reserved=12`, `CatalogueAck=13`, `ViewUpdate=14`, `FetchRowVersions=15`, `RowVersionPayloads=16`, `CatalogueSnapshot=17`, `PermissionAdviceRequest=18`, `PermissionAdviceResponse=19`, `AuthorizationScopeSubscribe=20`, `AuthorizationScopeReceipt=21`, `AuthorizationScopeIntent=22`, `AuthorizationScopeView=23`, `AuthorizationScopeAggregateReceipt=24`, `AuthorizationScopeUnavailable=25`, `AuthorizationScopeDecision=26`, `ChunkUploadStart=27`, `ChunkUploadNodes=28`, `ChunkUploadResult=29`, `reserved=30` |
+| enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WireFrame`     | `Hello=0`, `Error=1`, `Channel=2`, `ChannelCredit=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `WirePeerRole`  | `Client=0`, `Core=1`, `Relay=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `WireErrorCode` | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `WireRetry`     | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `SyncMessage`   | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `CatalogueAck=12`, `ViewUpdate=13`, `FetchRowVersions=14`, `RowVersionPayloads=15`, `CatalogueSnapshot=16`, `AuthorizationScopeIntent=17`, `AuthorizationScopeView=18`, `AuthorizationScopeAggregateReceipt=19`, `AuthorizationScopeUnavailable=20`, `AuthorizationScopeDecision=21`, `ChunkUploadStart=22`, `ChunkUploadNodes=23`, `ChunkUploadResult=24`, `CurrentRowsRequest=25`, `CurrentRowsReceipt=26`, `CurrentRowsCancel=27` |
 
-Tag 12 is retired and MUST reject decoding; it has no constructible message.
+These are the compact v5 tags; historical fixtures retain their original bytes
+and are rejected using their original wire version.
 
 Future variants MUST append after these values; existing variants, fields, and
 their field order MUST NOT be reordered, inserted before, reused, or decoded
 through a migration path. A new optional semantic variant additionally needs a
-new negotiated feature bit. Wire-protocol v3 intentionally provides neither
+new negotiated feature bit. Wire-protocol v5 intentionally provides neither
 old-version decoding nor migration.
 
-Tag 30 (`AuthorityPublication`) is retired. Its former edge-admission
-shortcut MUST NOT authorize a transaction, including on privileged links.
-Its uninhabited reserved slot rejects even a complete legacy carrier during
-decoding, before any trust-specific transaction admission.
-Recoverable locally authored writes use ordinary `CommitUnit` admission,
-which applies current Core authorization and normal idempotent replay rules.
-There is no edge catalogue-bootstrap exchange; an explicit legacy request is
-rejected with `UnsupportedFeature`/`Never` rather than reinterpreted as a
-different kind of session.
-
-Feature bits are also permanent: `SyncMessagePayload=1<<0`,
-`SessionFrame=1<<1`, `StructuredErrors=1<<2`, `PayloadLz4=1<<3`,
-`PayloadZstd=1<<4`, `MessageFragmentation=1<<5`,
-`AuthorizationScopeReceipts=1<<6`, `AuthorizationScopeViews=1<<7`, and
-`AuxiliaryChunks=1<<8`, `ScopeIsolatedClientRelay=1<<9`, and
-retired `AuthorityPublications=1<<10` (never advertised). `Hello` negotiates
-only the intersection. A message
-envelope or fragment MUST NOT declare a bit outside that intersection. Feature
+The optional feature bits are `PayloadLz4=1<<3`,
+`PayloadZstd=1<<4`,
+`AuthorizationScopeViews=1<<7`, `AuxiliaryChunks=1<<8`, and
+`ScopeIsolatedClientRelay=1<<9`. `Hello` negotiates only the intersection of optional features.
+A channel extent MUST NOT declare a bit outside that intersection. Feature
 masks are postcard `u64` values and MUST be decoded and compared across all 64
 bits; a binding language MUST NOT apply a narrowing 32-bit bitwise operation.
 Any unsupported low or high bit, including `1<<32`, rejects the Hello before
 its accepted mask is converted to a narrower runtime type. The feature mask
 and authority epoch remain `bigint` through wire decoding, so canonical values
 through `2^64-1` are representable without a JavaScript number conversion. Exactly
-one compression bit may be active on an envelope; when both codecs are
-negotiated, an outbound wire-protocol v3 sender selects LZ4 and emits only its bit. A
-receiver rejects an envelope declaring both codecs, a codec change within one
-connection, corrupt compressed bytes, or an encoded payload exceeding `E`
-before fragment admission, or a decompressed payload exceeding `D`.
-Compression is applied before fragmentation and removed only after complete
-fragment reassembly; it never changes semantic bytes.
+one compression bit may be active on a channel extent; when both codecs are
+negotiated, an outbound sender selects LZ4 and emits only its bit. Compression
+is streamed per channel generation. Receivers enforce contiguous sequence
+numbers, unchanged authenticated metadata, bounded decoded chunks, and complete
+logical-message coverage before semantic admission. The resource limits and
+expiry rules are normative in `SPEC/13_transport_message_fragmentation.md`.
 
-`WireMessageFragment` is the complete physical-fragment layout in field order:
-`protocol_version`, `features`, `session`, `message_id`, `message_digest`,
-`total_len`, `offset`, `payload`. Its digest covers the entire compressed
-payload; reassembly admits only negotiated, session-authenticated, in-range,
-non-overlapping extents with exact contiguous coverage and matching metadata,
-then verifies that digest before decompression or semantic decode. The resource
-limits and expiry/deduplication rules are normative in
-`SPEC/13_transport_message_fragmentation.md`.
+Wire v5 removes the obsolete `Message` and `MessageFragment` frames, their
+envelope/fragment layouts, and the old digest-based reassembler. The remaining
+outer tags are compacted as above, within this branch's existing v5 break.
+For example, a small semantic message occupies one `Channel` frame; a larger
+message spans ordered extents and is admitted only after the final extent.
+A missing or reordered extent fails channel admission. Prior-version peers
+fail Hello negotiation; there is no old-frame decoder or storage-format change.
+Historical fixtures remain unchanged, while current v5 fixtures use channel
+batches and the compact error tag.
 
 JSON version cells use the schema-derived `StoredScalar(Json)` descriptor,
 including inline cells. This is the same existing scalar codec used by local
@@ -304,13 +294,12 @@ new durable storage encoding or compatibility fallback.
 inline/indirect records. Rust checks exact bytes, decoded values, roundtrips,
 and rejection of the old descriptor before storage.
 
-The wire-protocol v3 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
-`crates/jazz/fixtures/wire_hello_frames.json`:
+The wire-protocol v5 frozen corpora are `crates/jazz/fixtures/wire_message_frames_v5.json` and
+`crates/jazz/fixtures/wire_hello_frames_v5.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic
 value to the exact same payload and frame bytes, and TypeScript independently
-reads every transport envelope through its production postcard reader, rejects
-a suffix on every corpus frame, and round-trips each through the exact batch
-carrier. The Hello corpus crosses every frozen peer role with both absent and
+round-trips every channel batch through its production batch codec. Rust
+rejects suffixes on each frame and semantic payload. The Hello corpus crosses every frozen peer role with both absent and
 present authority endpoints and one- and multi-byte feature masks; supported
 Core cases additionally pass through the production TypeScript WebSocket
 negotiation path. Its
@@ -627,7 +616,7 @@ transaction payload coverage, not broad "known versions" and not partial row
 payload coverage. Partial and version-level dedup is the committed known-state
 design (§8.11), which retires this inventory rather than extending it.
 
-The postcard `WireFrame`/`WireEnvelope` format and groove row `Record` encoding
+The postcard `WireFrame` channel format and groove row `Record` encoding
 do not change when future inventory fields are added.
 
 ### 8.8 Protocol size limits
@@ -635,23 +624,14 @@ do not change when future inventory fields are added.
 Protocol size limits are enforced at the layer that can recover correctly:
 
 - An encoded `WireFrame` is capped at 2 MiB before postcard frame decode.
-  `WireEnvelope.payload` is one physical fragment, not a semantic-message
-  ceiling. Generic fragmentation/reassembly carries an encoded `SyncMessage`
-  within the separate D/E payload budgets atomically across bounded frames.
-- A logical `SyncMessage` has two independent payload budgets. `D =
-MAX_LOGICAL_MESSAGE_BYTES` is the decoded semantic payload ceiling, checked
-  by the sender before compression and by the decoder after decompression.
-  `E = MAX_ENCODED_MESSAGE_BYTES = D + D/10 + 24` is the encoded payload
-  ceiling, checked by the sender after compression and by reassembly against
-  each fragment's advertised `total_len`. Aggregate staged encoded bytes use
-  `MAX_INFLIGHT_ENCODED_MESSAGE_BYTES`; decompressed output and uncompressed
-  semantic queues retain the `D` bound.
-- At `D = 256 MiB`, `E = 295,279,025` bytes, so a 512 KiB fragment extent
-  needs at most 564 extents. The installed LZ4 worst-case bound is
-  `floor(1.1 * D) + 20`, and `compress_prepend_size` adds its four-byte
-  decoded-size prefix. The installed zstd `ZSTD_compressBound(D)` also fits
-  within `E`. The addition/division formula avoids intermediate multiplication
-  overflow on wasm32.
+  Channel extents carry at most 64 KiB of decoded bytes per codec flush.
+  Complete messages are admitted atomically after bounded channel reassembly.
+- A logical `SyncMessage` has independent decoded and encoded payload budgets:
+  `D = MAX_LOGICAL_MESSAGE_BYTES` and `E = MAX_ENCODED_MESSAGE_BYTES`.
+  Channels check the advertised decoded message length before reserving a
+  buffer, enforce the exact decoded chunk length, and accumulate encoded bytes
+  against `E`. Channel credits bound physical queues and retained decoded
+  buffers independently. See chapter 13 for channel resource and timeout rules.
 - A `RegisterShape` AST is capped at 64 KiB encoded. This is a semantic
   admission limit for the shape-registration request; the connection may
   continue after the rejected request. Server shells may expose this as
@@ -690,8 +670,8 @@ message semantics: (1) **per-connection stream compression** — a compression
 context that persists across frames on one transport, so cross-message
 repetition (subscription keys, row ids, authors, adjacent timestamps)
 compresses without any wire-format change; and (2) **columnar `ViewUpdate`
-internals** — a reserved append-only message variant whose member/bundle
-payloads use this protocol's independent columnar wire encoding. A lone single-edit transaction with nothing before or after it pays full framing and transaction overhead by design — it is lone precisely when there is nothing to amortize against. Storage remains an independent row-only layer.
+internals** — the `ViewUpdate` message carries payloads using this protocol's
+independent columnar wire encoding. A lone single-edit transaction with nothing before or after it pays full framing and transaction overhead by design — it is lone precisely when there is nothing to amortize against. Storage remains an independent row-only layer.
 
 Native transports advertise zstd-3 stream compression by default when the
 feature is compiled in. WASM/browser artifacts keep transport compression
@@ -1004,12 +984,11 @@ is deferred.
 
 ### Local propagation is not a remote capability
 
-`Propagation::LocalOnly` is a setting on the calling node. It MUST NOT send a
+`ReadTier::LocalOnly` evaluates on the calling node. It MUST NOT send a
 remote query and MUST NOT be implemented by telling another node to stop there.
-Every peer subscription with `propagate_upstream=false` MUST be rejected through
-the ordinary subscription rejection path, regardless of trust, SYSTEM identity,
-Core role or worker transport. This rule covers both RegisterShape and
-Subscribe admission. Local-only API execution remains available on every node.
+Remote registrations have no propagation switch. Every receiving node follows
+normal upstream routing under its admitted identity, trust, and topology.
+Local-only API execution remains available on every node.
 
 A browser foreground's strictly local query therefore reads its own cached and
 pending state. It does not fetch worker-only rows. A normal propagated query can
@@ -1056,7 +1035,7 @@ selected scope's deletion witnesses and changes only with its source receipt.
 ### Mandatory current-row availability messages
 
 `CurrentRowsRequest`, `CurrentRowsReceipt`, and `CurrentRowsCancel` are mandatory
-wire-protocol v3 semantic messages. They require no optional feature bit and use
+wire-protocol v5 semantic messages. They require no optional feature bit and use
 the existing named postcard control codec and native `VersionCarrier` encoding;
 the byte corpus pins all three variants. Ordinary version validation and
 authenticated link admission still apply. No compatibility with peers lacking
@@ -1071,11 +1050,11 @@ current-row availability contract for authorization and receipt validation.
 - `Snapshot { revision: [u8;16], rows: Vec<SupportingRow> }`.
 - `Delta { predecessor: [u8;16], revision: [u8;16], adds: Vec<SupportingRow>, removes: Vec<SupportingRow> }`.
 
-The named semantic encoding is postcard in the version-3 WireEnvelope. Enum
+The named semantic encoding is postcard in version-5 channel messages. Enum
 discriminants are respectively 0 and 1, followed by fields in declaration order.
 Revisions are exactly 16 raw array bytes (no length prefix). Vectors use postcard
 lengths and the existing exact SupportingRow field encoding. Populated snapshots
-and deltas are pinned in wire_message_frames.json; the empty forms, truncation
+and deltas are pinned in wire_message_frames_v5.json; the empty forms, truncation
 and v1 negotiation rejection have explicit Rust byte-level tests. There is no
 v1 compatibility decoder. Storage/catalogue/binding encodings are unchanged.
 

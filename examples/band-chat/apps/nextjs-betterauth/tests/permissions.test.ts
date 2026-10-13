@@ -270,8 +270,9 @@ describe("BandChat room admission and authorship", () => {
     const canvas = await guest
       .insert(app.canvases, { roomId: room.id, title: "Stage plot" })
       .wait({ tier: "global" });
-    // As in the app: the committed canvas first, then its message and the
-    // room's activity in one transaction.
+    // The app writes the canvas, its message and the room's activity in one
+    // transaction (see tests/single-transaction.test.ts); here the canvas is
+    // already committed, which the message policy accepts too.
     const posting = await guest.transaction((tx) => {
       tx.insert(app.messages, {
         roomId: room.id,

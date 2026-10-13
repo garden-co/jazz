@@ -321,23 +321,31 @@ where
     }
 }
 
-// The current API cannot author a legacy edge receipt. Only this test fixture
-// writes the retired tag; the replay tests use normal Db reopen and transport.
+// Historical exclusive-read evidence fixture support.
 #[cfg(any(test, feature = "testing"))]
 impl<S: OrderedKvStorage> NodeState<S> {
+    /// Rewrite a pending transaction's audit row as a build from before
+    /// `jazz.exclusive-read-evidence.v1` wrote it: slots 5-8 null.
     #[doc(hidden)]
-    pub async fn persist_legacy_edge_receipt_for_test(&mut self, tx_id: TxId) {
+    pub async fn persist_without_exclusive_read_evidence_for_test(&mut self, tx_id: TxId) {
         let stored = self.query_transaction(tx_id).await.unwrap().unwrap();
-        let mut values = transaction_values(
+        let mut tx = stored.tx.clone();
+        tx.base_snapshot = None;
+        tx.row_read_set = None;
+        tx.absent_read_set = None;
+        tx.predicate_read_set = None;
+        let contribution_merge = self
+            .contribution_merge_storage_value(tx.contribution_merge.as_ref())
+            .unwrap();
+        let values = transaction_values(
             stored.node_alias,
-            &stored.tx,
-            Fate::Accepted,
-            None,
-            DurabilityTier::Local,
-            Value::Nullable(None),
+            &tx,
+            stored.fate.clone(),
+            stored.global_time,
+            stored.durability,
+            contribution_merge,
         )
         .unwrap();
-        values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(2);
         let mut batch = self.database.open_batch();
         batch.update("jazz_transactions", values);
         let applied = self.database.apply_batch(batch).await.unwrap();

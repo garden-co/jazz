@@ -3002,7 +3002,91 @@ where
             &query.filters
         };
         let unsupported_policy_branch = unsupported_policy_branch_reason(query);
-        if unsupported_policy_branch.is_none() && !query.policy_branches.is_empty() {
+        let policy_factors = (unsupported_policy_branch.is_none()
+            && policy_branch_base_is_converter_false(query))
+        .then(|| super::policy_factoring::factor_policy_branches(&query.policy_branches))
+        .flatten();
+        if let Some(factors) = policy_factors {
+            // The branches are a product of independent factors: authorize a
+            // row when each factor has a satisfied alternative, instead of
+            // lowering every combination.
+            for (factor_index, alternatives) in factors.iter().enumerate() {
+                let mut union_inputs = Vec::with_capacity(alternatives.len());
+                for (index, alternative) in alternatives.iter().enumerate() {
+                    let prefix = format!("policy_factor:{factor_index}:{index}");
+                    let alternative_source_node = RowSetNodeId(format!("{prefix}:root"));
+                    nodes.insert(
+                        alternative_source_node.clone(),
+                        RowSetExpr::Source {
+                            source: root_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    );
+                    let alternative_current = normalize_policy_atom_chain(
+                        &mut nodes,
+                        &mut auxiliary_sources,
+                        &mut join_contributions,
+                        &mut inherited_contributions,
+                        &mut reachable_contributions,
+                        schema,
+                        &root_source,
+                        alternative_source_node,
+                        &prefix,
+                        PolicyAtomChain {
+                            filters: &alternative.filters,
+                            joins: &alternative.joins,
+                            inherits: &alternative.inherits,
+                            reachable: &alternative.reachable,
+                        },
+                        &binding_source_shape,
+                        shape.params(),
+                        false,
+                        false,
+                        &inheritance_path,
+                    )?;
+                    union_inputs.push(UnionInput {
+                        node: normalize_row_id_projection(
+                            &mut nodes,
+                            alternative_current,
+                            &root_source,
+                            RowSetNodeId(format!("{prefix}:row_id")),
+                        ),
+                        label: policy_branch_semantic_label(
+                            &alternative.filters,
+                            &alternative.joins,
+                            &alternative.reachable,
+                            &alternative.inherits,
+                        )?,
+                    });
+                }
+                let union_node =
+                    RowSetNodeId(format!("policy_factor:{factor_index}:authorized_rows"));
+                nodes.insert(
+                    union_node.clone(),
+                    RowSetExpr::Union {
+                        inputs: union_inputs,
+                    },
+                );
+                let join_node = RowSetNodeId(format!("policy_factor:{factor_index}:authorize"));
+                nodes.insert(
+                    join_node.clone(),
+                    RowSetExpr::Join {
+                        left: current,
+                        right: union_node,
+                        mode: NormalizedJoinMode::Inner,
+                        on: NormalizedPredicateExpr::Compare {
+                            left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+                            op: NormalizedComparisonOp::Eq,
+                            right: NormalizedValueRef::SourceField {
+                                source: root_source.clone(),
+                                field: "row_uuid".to_owned(),
+                            },
+                        },
+                    },
+                );
+                current = join_node;
+            }
+        } else if unsupported_policy_branch.is_none() && !query.policy_branches.is_empty() {
             let mut union_inputs = Vec::new();
             if !policy_branch_base_is_converter_false(query) {
                 let base_source_node = RowSetNodeId("policy_branch:base:root".to_owned());

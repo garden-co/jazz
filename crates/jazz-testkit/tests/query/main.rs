@@ -7,8 +7,10 @@ mod support {
 mod common;
 // Enable the copied suites one at a time as each public-API migration lands.
 mod joins;
+mod nested_fk_subscriptions;
 mod ordered_includes;
 mod pagination;
 mod recursive_queries;
 mod subqueries;
 mod subscriptions;
+mod writer_nested_subscriptions;

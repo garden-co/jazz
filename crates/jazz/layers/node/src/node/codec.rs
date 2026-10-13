@@ -405,6 +405,7 @@ const CATALOGUE_BOOTSTRAP_READY_VERSION: u8 = 1;
 const CATALOGUE_WRITE_POINTER_VERSION: u8 = 1;
 const CATALOGUE_LINEAGE_ACTIVATION_VERSION: u8 = 1;
 const CATALOGUE_PROTOCOL_PUBLICATION_VERSION: u8 = 1;
+const CATALOGUE_MULTI_PREDECESSOR_PUBLICATION_VERSION: u8 = 2;
 const CATALOGUE_STAGED_LINEAGE_VERSION: u8 = 1;
 const CATALOGUE_PENDING_LINEAGE_VERSION: u8 = 1;
 // This is deliberately independent of the catalogue-record payload versions:
@@ -1052,8 +1053,12 @@ pub(super) fn decode_catalogue_lens(payload: &[u8]) -> Result<MigrationLens, Err
 
 fn encode_catalogue_publication(publication: &SchemaLineagePublication) -> Result<Vec<u8>, Error> {
     let schema = encode_catalogue_schema(&publication.schema)?;
-    let lens = encode_catalogue_lens(&publication.lens);
-    let mut payload = vec![CATALOGUE_PROTOCOL_PUBLICATION_VERSION];
+    let version = if publication.predecessors.len() == 1 {
+        CATALOGUE_PROTOCOL_PUBLICATION_VERSION
+    } else {
+        CATALOGUE_MULTI_PREDECESSOR_PUBLICATION_VERSION
+    };
+    let mut payload = vec![version];
     payload.extend_from_slice(publication.id.0.as_bytes());
     put_len(
         &mut payload,
@@ -1061,41 +1066,60 @@ fn encode_catalogue_publication(publication: &SchemaLineagePublication) -> Resul
         "catalogue publication schema length",
     )?;
     payload.extend_from_slice(&schema);
-    put_len(
-        &mut payload,
-        lens.len(),
-        "catalogue publication lens length",
-    )?;
-    payload.extend_from_slice(&lens);
-    let mut new_tables = publication.new_tables.clone();
-    new_tables.sort();
-    if new_tables.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(Error::InvalidStoredValue(
-            "catalogue publication duplicate new table",
-        ));
+    let mut predecessors = publication.predecessors.iter().collect::<Vec<_>>();
+    predecessors.sort_by_key(|predecessor| predecessor.lens.source);
+    if predecessors.is_empty()
+        || predecessors
+            .windows(2)
+            .any(|pair| pair[0].lens.source == pair[1].lens.source)
+    {
+        return Err(Error::InvalidStoredValue("invalid schema predecessors"));
     }
-    put_len(
-        &mut payload,
-        new_tables.len(),
-        "catalogue publication new table count",
-    )?;
-    for table in new_tables {
-        put_string(&mut payload, &table, "catalogue publication table")?;
+    if version == 2 {
+        put_len(
+            &mut payload,
+            predecessors.len(),
+            "catalogue predecessor count",
+        )?;
     }
-    let mut dropped_tables = publication.dropped_tables.clone();
-    dropped_tables.sort();
-    if dropped_tables.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(Error::InvalidStoredValue(
-            "catalogue publication duplicate dropped table",
-        ));
-    }
-    put_len(
-        &mut payload,
-        dropped_tables.len(),
-        "catalogue publication dropped table count",
-    )?;
-    for table in dropped_tables {
-        put_string(&mut payload, &table, "catalogue publication table")?;
+    for predecessor in predecessors {
+        let lens = encode_catalogue_lens(&predecessor.lens);
+        put_len(
+            &mut payload,
+            lens.len(),
+            "catalogue publication lens length",
+        )?;
+        payload.extend_from_slice(&lens);
+        let mut new_tables = predecessor.new_tables.clone();
+        new_tables.sort();
+        if new_tables.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(Error::InvalidStoredValue(
+                "catalogue publication duplicate new table",
+            ));
+        }
+        put_len(
+            &mut payload,
+            new_tables.len(),
+            "catalogue publication new table count",
+        )?;
+        for table in new_tables {
+            put_string(&mut payload, &table, "catalogue publication table")?;
+        }
+        let mut dropped_tables = predecessor.dropped_tables.clone();
+        dropped_tables.sort();
+        if dropped_tables.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(Error::InvalidStoredValue(
+                "catalogue publication duplicate dropped table",
+            ));
+        }
+        put_len(
+            &mut payload,
+            dropped_tables.len(),
+            "catalogue publication dropped table count",
+        )?;
+        for table in dropped_tables {
+            put_string(&mut payload, &table, "catalogue publication table")?;
+        }
     }
     encode_physical_identity_manifest(&mut payload, &publication.physical_identities)?;
     Ok(payload)
@@ -1103,21 +1127,31 @@ fn encode_catalogue_publication(publication: &SchemaLineagePublication) -> Resul
 
 fn decode_catalogue_publication(payload: &[u8]) -> Result<SchemaLineagePublication, Error> {
     const CONTEXT: &str = "invalid catalogue protocol publication";
-    let mut cursor =
-        CataloguePayloadCursor::new(payload, CATALOGUE_PROTOCOL_PUBLICATION_VERSION, CONTEXT)?;
+    let version = *payload.first().ok_or(Error::InvalidStoredValue(CONTEXT))?;
+    if version != 1 && version != 2 {
+        return Err(Error::InvalidStoredValue(CONTEXT));
+    }
+    let mut cursor = CataloguePayloadCursor::new(payload, version, CONTEXT)?;
     let id = SchemaLineagePublicationId(cursor.uuid()?);
     let schema = decode_catalogue_schema(cursor.sized_bytes()?)?;
-    let lens = decode_catalogue_lens(cursor.sized_bytes()?)?;
-    let new_tables = decode_sorted_strings(&mut cursor, CONTEXT)?;
-    let dropped_tables = decode_sorted_strings(&mut cursor, CONTEXT)?;
+    let count = if version == 1 { 1 } else { cursor.u32()? };
+    if count == 0 || (version == 2 && count == 1) {
+        return Err(Error::InvalidStoredValue(CONTEXT));
+    }
+    let mut predecessors = Vec::new();
+    for _ in 0..count {
+        predecessors.push(crate::protocol::SchemaPredecessor {
+            lens: decode_catalogue_lens(cursor.sized_bytes()?)?,
+            new_tables: decode_sorted_strings(&mut cursor, CONTEXT)?,
+            dropped_tables: decode_sorted_strings(&mut cursor, CONTEXT)?,
+        });
+    }
     let physical_identities = decode_physical_identity_manifest(&mut cursor)?;
     cursor.finish()?;
     let publication = SchemaLineagePublication {
         id,
         schema,
-        lens,
-        new_tables,
-        dropped_tables,
+        predecessors,
         physical_identities,
     };
     if publication.id != publication.content_id()
@@ -1442,6 +1476,59 @@ mod catalogue_payload_tests {
                 tables: BTreeMap::new(),
             },
         }
+    }
+
+    /// Internal byte corpus: public queries cannot pin recovery record encodings.
+    #[test]
+    fn predecessor_publication_encodings_preserve_v1_and_pin_v2() {
+        let mut publication = staged_fixture().publication;
+        let mut records = Vec::new();
+        for count in [1, 2] {
+            publication.predecessors = (1..=count)
+                .map(|source| crate::protocol::SchemaPredecessor {
+                    lens: MigrationLens::new(schema_id(source), publication.schema.id, vec![])
+                        .unwrap(),
+                    new_tables: vec![],
+                    dropped_tables: vec![],
+                })
+                .collect();
+            publication.id = publication.content_id();
+            let bytes = encode_catalogue_publication(&publication).unwrap();
+            assert_eq!(bytes[0], count as u8);
+            assert_eq!(decode_catalogue_publication(&bytes).unwrap(), publication);
+            let mut reversed = publication.clone();
+            reversed.predecessors.reverse();
+            assert_eq!(encode_catalogue_publication(&reversed).unwrap(), bytes);
+            for bad in [
+                bytes[..bytes.len() - 1].to_vec(),
+                [bytes.clone(), vec![0]].concat(),
+                [vec![3], bytes[1..].to_vec()].concat(),
+            ] {
+                assert!(decode_catalogue_publication(&bad).is_err());
+            }
+            records.push(
+                bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
+            );
+        }
+        let actual = records.join("\n") + "\n";
+        if std::env::var_os("JAZZ_UPDATE_PREDECESSOR_FIXTURE").is_some() {
+            std::fs::write(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/catalogue-predecessors.hex"
+                ),
+                actual,
+            )
+            .unwrap();
+            return;
+        }
+        assert_eq!(
+            actual,
+            include_str!("../../../../fixtures/catalogue-predecessors.hex")
+        );
     }
 
     #[test]
@@ -2253,6 +2340,23 @@ pub(super) fn register_record_descriptor(table: &TableSchema) -> records::Record
 }
 
 impl VersionRow {
+    /// Count one cold-path conversion that produced or consumed this version.
+    #[cfg(feature = "cold-settle-attribution")]
+    pub(super) fn record_conversion(&self, site: &'static str, bytes: usize) {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (
+            self.table(),
+            self.row_uuid(),
+            self.branch_key(),
+            self.tx_time(),
+            self.tx_node_alias(),
+            self.layer(),
+        )
+            .hash(&mut hasher);
+        groove::cold_settle_attribution::conversions::record(site, hasher.finish(), bytes);
+    }
+
     pub(super) fn from_parts_with_schema_version(
         table: &TableSchema,
         parts: VersionRowParts,
@@ -2412,11 +2516,14 @@ impl VersionRow {
                 "borrowed wire ingest changed storage bytes"
             );
         }
-        Ok(Self {
+        let row = Self {
             table: groove::Intern::new(version.table().to_owned()),
             branch_key: version.branch_key().clone(),
             record: OwnedRecord::new(raw, descriptor),
-        })
+        };
+        #[cfg(feature = "cold-settle-attribution")]
+        row.record_conversion("wire_to_version_row", row.record.raw().len());
+        Ok(row)
     }
 
     pub(super) fn table(&self) -> &str {
@@ -3581,6 +3688,14 @@ pub(super) fn transaction_values_with_cardinality_scope(
     view_scoped_cardinality: bool,
     contribution_merge: Value,
 ) -> Result<Vec<Value>, Error> {
+    // Slots 5-8: `jazz.exclusive-read-evidence.v1` while an exclusive fate is
+    // pending, null otherwise (SPEC 2 §2.8).
+    let [
+        base_snapshot,
+        row_read_set,
+        absent_read_set,
+        predicate_read_set,
+    ] = super::exclusive_read_evidence::evidence_slot_values(tx, matches!(fate, Fate::Pending))?;
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
         Value::U64(node_alias.0),
@@ -3592,10 +3707,10 @@ pub(super) fn transaction_values_with_cardinality_scope(
         RowAuthor::from_persisted_subject(tx.made_by)
             .map_err(|_| Error::UnadmittedWriteAuthor)?
             .to_value(),
-        Value::Nullable(None),
-        Value::Nullable(None),
-        Value::Nullable(None),
-        Value::Nullable(None),
+        base_snapshot,
+        row_read_set,
+        absent_read_set,
+        predicate_read_set,
         Value::Nullable(
             tx.user_metadata_json
                 .clone()
@@ -4806,15 +4921,6 @@ pub(super) fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, Error> {
 pub(super) fn fate_from_encoded_fields(record: BorrowedRecord<'_>) -> Result<Fate, Error> {
     match record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)? {
         0 => Ok(Fate::Pending),
-        1 if record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)? == 2
-            && record
-                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
-                .is_none() =>
-        {
-            // Legacy edge acceptance is not Core confirmation. Preserve the
-            // authored unit and let normal local-author replay recover its fate.
-            Ok(Fate::Pending)
-        }
         1 => Ok(Fate::Accepted),
         2 => Ok(Fate::Rejected(rejection_reason_from_encoded_fields(
             record,

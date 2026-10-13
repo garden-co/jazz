@@ -242,10 +242,15 @@ const assertEntryCacheTrustBoundary = (source) => {
   const entryJobs = document.jobs;
   assert.deepEqual(
     Object.keys(entryJobs).sort(),
-    ["test-rust", "trusted", "untrusted"],
+    ["report-dispatched-test-rust", "test-rust", "trusted", "untrusted"],
     "the credential boundary must account for every entry-workflow job",
   );
-  const { untrusted, trusted, "test-rust": aggregate } = entryJobs;
+  const {
+    untrusted,
+    trusted,
+    "test-rust": aggregate,
+    "report-dispatched-test-rust": dispatchedStatus,
+  } = entryJobs;
   assert.deepEqual(
     Object.keys(untrusted).sort(),
     ["if", "permissions", "uses", "with"],
@@ -292,6 +297,22 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(aggregate.if, "always()");
   assert.deepEqual(aggregate.needs, ["untrusted", "trusted"]);
   assert.deepEqual(aggregate.permissions, { contents: "read" });
+
+  // Only dispatched runs may write a commit status, and only test-rust's own.
+  assert.deepEqual(Object.keys(dispatchedStatus).sort(), [
+    "if",
+    "needs",
+    "permissions",
+    "runs-on",
+    "steps",
+    "timeout-minutes",
+  ]);
+  assert.equal(dispatchedStatus.if, "always() && github.event_name == 'workflow_dispatch'");
+  assert.deepEqual(dispatchedStatus.needs, ["test-rust"]);
+  assert.deepEqual(dispatchedStatus.permissions, { statuses: "write" });
+  assert.equal(dispatchedStatus.steps.length, 1);
+  assert.equal(dispatchedStatus.steps[0].uses, undefined);
+  assert.match(dispatchedStatus.steps[0].run, /-f context=test-rust /);
   assert.equal(document.on.pull_request_target, undefined);
   assert.equal(document.on.pull_request, null, "stacked PR bases must not be branch-filtered");
   assert.deepEqual(document.on.push, { branches: ["main", "release"] });

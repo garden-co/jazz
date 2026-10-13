@@ -86,8 +86,6 @@ mod routed_messages;
 pub use channel_endpoint::{AuxiliaryChannelEndpoint, SharedAuxiliaryEndpoint};
 pub use routed_messages::ReceivedSyncMessage;
 mod wire_transport;
-#[cfg(test)]
-use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
 pub use wire_transport::{WireFlushStatus, WireSendOutcome, WireTransportAdapter};
 
 /// Pragmatic single-threaded serialization boundary for canonical Jazz state.
@@ -1031,6 +1029,17 @@ impl PeerIoPump {
             .lock()
             .map_err(|_| "auxiliary endpoint lock poisoned".to_owned())?
             .channel_credits())
+    }
+
+    /// The connection-scoped credit ledger, for a host that applies inbound
+    /// credit grants at its socket edge instead of queueing them behind
+    /// semantic work (see `ServerRuntimeHandle::receive_wire_frames`).
+    #[cfg(feature = "runtime")]
+    #[doc(hidden)]
+    pub fn shared_channel_credits(
+        &self,
+    ) -> Result<crate::wire::channel_credit::SharedChannelCredits, String> {
+        self.channel_credits()
     }
 
     #[cfg(feature = "runtime")]
@@ -2806,21 +2815,6 @@ struct RelaySubscriptionRejection {
     reason: SubscribeRejectReason,
 }
 
-/// Authority-derived scope identity retained for a support subscription.
-/// Never constructed from the caller's wire payload.
-#[derive(Clone, Debug, PartialEq)]
-struct AuthorizedScopePurpose {
-    key: crate::protocol::AuthorizationSupportScopeKey,
-    operation: crate::protocol::AuthorizationOperationKey,
-    action: PermissionAdviceAction,
-    expected_support: BTreeSet<(ShapeId, BindingId)>,
-}
-
-// Compatibility spelling retained for module-local tests while the actual
-// implementation is the shared authority proof primitive.
-#[cfg(test)]
-type ScopeAggregate = AuthorityScopeAggregate;
-
 /// One receipt-bound authorization operation owned by one admitted upstream.
 ///
 /// This state deliberately lives on `ConnectionLink::Upstream`: a receipt is
@@ -2887,7 +2881,20 @@ pub(super) struct UploadOutbox {
     declared_root: bool,
     /// Sticky: set once any upstream attaches, including after the fact.
     upstream_attached: bool,
+    /// Queued commits an upstream link has put on the wire. A Global read
+    /// orders its open after the local writes it must observe (#3839).
+    on_wire: HashSet<TxId>,
+    /// Recent commits whose upload failed, with the reason. Bounded: only a
+    /// read already waiting on one of them consults this.
+    upload_failures: VecDeque<(TxId, &'static str)>,
+    /// Counts upload steps: a message handed to an upstream transport or a
+    /// large-value chunk the server acknowledged. A Global read waiting on
+    /// local writes gives up when this stops moving (see `reads.rs`).
+    upload_progress: u64,
 }
+
+/// How many recent upload failures a waiting Global read can still observe.
+const RECENT_UPLOAD_FAILURES: usize = 64;
 
 impl UploadOutbox {
     /// Whether a subscriber upload this node settled terminally has nobody
@@ -2931,6 +2938,49 @@ impl UploadOutbox {
         self.tx_ids.clear();
         self.tx_ids
             .extend(self.entries.iter().map(|pending| pending.tx_id));
+        let tx_ids = &self.tx_ids;
+        self.on_wire.retain(|tx_id| tx_ids.contains(tx_id));
+    }
+
+    /// Record that an upstream link has sent this queued commit.
+    pub(super) fn mark_on_wire(&mut self, tx_id: TxId) {
+        if self.tx_ids.contains(&tx_id) {
+            self.on_wire.insert(tx_id);
+        }
+        self.note_upload_progress();
+    }
+
+    /// Record that an upload moved: a message went out or was acknowledged.
+    pub(super) fn note_upload_progress(&mut self) {
+        self.upload_progress = self.upload_progress.wrapping_add(1);
+    }
+
+    pub(super) fn upload_progress(&self) -> u64 {
+        self.upload_progress
+    }
+
+    /// Forget what a detached link sent: its successor sends it again.
+    pub(super) fn forget_on_wire(&mut self) {
+        self.on_wire.clear();
+    }
+
+    /// Whether this queued commit still waits to be sent upstream.
+    fn awaits_wire(&self, tx_id: TxId) -> bool {
+        self.tx_ids.contains(&tx_id) && !self.on_wire.contains(&tx_id)
+    }
+
+    /// Record why a commit was dropped from the queue without being sent.
+    pub(super) fn mark_upload_failed(&mut self, tx_id: TxId, reason: &'static str) {
+        if self.upload_failures.len() >= RECENT_UPLOAD_FAILURES {
+            self.upload_failures.pop_front();
+        }
+        self.upload_failures.push_back((tx_id, reason));
+    }
+
+    fn upload_failure(&self, tx_id: TxId) -> Option<&'static str> {
+        self.upload_failures
+            .iter()
+            .find_map(|(failed, reason)| (*failed == tx_id).then_some(*reason))
     }
 
     fn remove_released(&mut self, released: &mut HashSet<TxId>) -> HashSet<TxId> {
@@ -2946,6 +2996,7 @@ impl UploadOutbox {
                 .pop_front()
                 .expect("released outbox front remains present");
             self.tx_ids.remove(&pending.tx_id);
+            self.on_wire.remove(&pending.tx_id);
         }
         if released.is_empty() {
             return completed;
@@ -3133,9 +3184,9 @@ impl Drop for PermissionAdviceFuture {
 }
 
 mod catalogue;
-mod empty_opening;
-pub use empty_opening::{EmptyOpening, REMOTE_LINK_ATTEMPT_WINDOW, RemoteLinkHint};
-use empty_opening::{OpeningGate, OpeningRoute, RemoteLinkTracker};
+mod first_load;
+pub use first_load::{FirstLoad, REMOTE_LINK_ATTEMPT_WINDOW, RemoteLinkHint};
+use first_load::{OpeningGate, OpeningRoute, RemoteLinkTracker};
 mod lifecycle;
 mod mutation_errors;
 mod mutations;
@@ -3219,62 +3270,57 @@ pub use config::{
     ClientRelayScope, DbConfig, DbIdentity, ProductionRowIdSource, RowIdSource, SeededRowIdSource,
 };
 
+/// Where a read gets its results and whether it includes pending writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum ReadTier {
+    /// Include local data and pending writes, and request results upstream.
+    LocalFirst,
+    /// Read the server-confirmed view without a pending-write overlay.
+    Remote,
+    /// Include locally known data and pending writes without requesting upstream results.
+    LocalOnly,
+}
+
 /// One-shot read options.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ReadOpts {
-    /// Durability tier that gates the first result.
-    pub tier: DurabilityTier,
-    /// Whether own local updates are visible immediately.
-    pub local_updates: LocalUpdates,
-    /// Whether evaluation may propagate upstream.
-    pub propagation: Propagation,
+    /// Read semantics; execution resolves coverage durability separately.
+    pub tier: ReadTier,
     /// Include current rows whose deletion winner is `Deleted`.
     pub include_deleted: bool,
     /// Semantic read view to evaluate against.
     pub read_view: ReadViewSpec,
     /// What to do with an empty, unsettled opening. Host read-option state
-    /// only; an absent serde field is [`EmptyOpening::Deliver`].
+    /// only; an absent serde field is [`FirstLoad::Deliver`].
     #[serde(default)]
-    pub empty_opening: EmptyOpening,
+    pub first_load: FirstLoad,
 }
 
 impl Default for ReadOpts {
     fn default() -> Self {
         Self {
-            tier: DurabilityTier::Local,
-            local_updates: LocalUpdates::Immediate,
-            propagation: Propagation::Full,
+            tier: ReadTier::LocalFirst,
             include_deleted: false,
             read_view: ReadViewSpec::default(),
-            empty_opening: EmptyOpening::Deliver,
+            first_load: FirstLoad::Deliver,
         }
     }
 }
 
 impl ReadOpts {
+    /// Construct a read from product semantics.
+    pub fn for_read_tier(tier: ReadTier) -> Self {
+        Self {
+            tier,
+            ..Self::default()
+        }
+    }
+
     /// Evaluate the query as a live head branch composed over an optional base.
     pub fn branch_view(mut self, head: BranchSelector, base: Option<BranchViewBase>) -> Self {
         self.read_view = ReadViewSpec::branch_view(head, base);
         self
     }
-}
-
-/// Own-write overlay policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum LocalUpdates {
-    /// Include local writes immediately.
-    Immediate,
-    /// Defer local writes until the requested tier observes them.
-    Deferred,
-}
-
-/// Read propagation policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum Propagation {
-    /// Full propagation may be used by future remote paths.
-    Full,
-    /// Evaluate only against local knowledge.
-    LocalOnly,
 }
 
 pub use crate::node::api_error::{Error, ErrorCode};
@@ -3378,11 +3424,12 @@ pub mod doctest_support {
     }
 }
 
-fn effective_read_tier(opts: &ReadOpts) -> DurabilityTier {
-    if opts.local_updates == LocalUpdates::Immediate {
-        opts.tier.max(DurabilityTier::Local)
-    } else {
-        opts.tier
+/// Default coverage for a read. Initial waits and hydration pass their
+/// stronger coverage explicitly without changing the requested read tier.
+fn read_coverage_tier(opts: &ReadOpts) -> DurabilityTier {
+    match opts.tier {
+        ReadTier::LocalFirst | ReadTier::LocalOnly => DurabilityTier::Local,
+        ReadTier::Remote => DurabilityTier::Global,
     }
 }
 
@@ -3394,9 +3441,6 @@ fn upstream_register_shape_options(
     RegisterShapeOptions {
         tier: remote_subscription_tier(tier, upstream_durability_floor),
         read_view,
-        // LocalOnly controls whether the caller attaches a remote usage.
-        // Every usage that crosses a node boundary propagates normally.
-        propagate_upstream: true,
         ..RegisterShapeOptions::default()
     }
 }
@@ -3458,12 +3502,6 @@ fn ensure_supported_register_shape_options(
     delegated_session_capability: bool,
 ) -> Result<(), Error> {
     ensure_supported_register_shape_read_view(opts)?;
-    if !opts.propagate_upstream {
-        return Err(Error::new(
-            ErrorCode::Query,
-            "remote subscriptions cannot disable upstream propagation; LocalOnly is a local read setting",
-        ));
-    }
     if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(
@@ -3624,8 +3662,6 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
             | SyncMessage::RowVersionPayloads { .. }
             | SyncMessage::CatalogueSnapshot(_)
-            | SyncMessage::PermissionAdviceResponse { .. }
-            | SyncMessage::AuthorizationScopeReceipt { .. }
             | SyncMessage::AuthorizationScopeView { .. }
             | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
             | SyncMessage::AuthorizationScopeUnavailable { .. }
@@ -4686,10 +4722,14 @@ where
     }
 }
 
+/// The message keeps the core diagnostic (transaction and reason tokens) and
+/// ends with the same readable reason `onMutationError` events carry, so
+/// bindings can surface one consistent `reason` for waits and events.
 fn write_rejected(transaction_id: impl std::fmt::Debug, reason: RejectionReason) -> Error {
+    let (_, readable) = mutation_errors::mutation_error_details(&reason);
     Error::new(
         ErrorCode::WriteRejected,
-        format!("transaction {transaction_id:?} was rejected: {reason:?}"),
+        format!("transaction {transaction_id:?} was rejected: {reason:?} (reason: {readable})"),
     )
 }
 
@@ -4831,7 +4871,6 @@ struct SubscriptionState {
     /// from each replacement connection before it can be settled again.
     requires_authority_receipt: bool,
     /// Routing intent sent with this subscription's remote registration.
-    remote_propagate_upstream: bool,
     read_view: ReadViewSpec,
     snapshot: RelationSnapshot,
     snapshot_index: RelationSnapshotIndex,
@@ -4845,8 +4884,8 @@ struct SubscriptionState {
     /// This gates only opening; later disconnections retain the published view.
     pending_initial_owner_result: bool,
     /// Global coverage held only while a non-durable foreground's
-    /// local-first-unless-empty opening gate is armed: its settled authority
-    /// answer, relayed by the storage owner, is what may release an empty
+    /// first-load opening gate is armed: its settled authority answer,
+    /// relayed by the storage owner, is what may release the withheld
     /// opening. Retired as soon as the gate releases.
     authority_witness: Vec<UpstreamCoverageHandle>,
     sender: SubscriptionSender,
@@ -4867,9 +4906,9 @@ struct SubscriptionPublication {
     deferred: Option<SubscriptionPublicationSnapshot>,
     reset: bool,
     unresolved: BTreeSet<OutputOccurrenceId>,
-    /// Armed `EmptyOpening::AwaitRemote` gate, cleared once it releases.
+    /// Armed `FirstLoad::WaitForRemote` gate, cleared once it releases.
     opening_gate: Option<OpeningGate>,
-    /// This stream is an `EmptyOpening::AwaitRemote` offset window read as a
+    /// This stream is a gated (`WaitForRemote`) offset window read as a
     /// strict remote view, with a local-first fallback beside it.
     remote_window: bool,
     /// The remote window released unopened because its remote could no
@@ -5015,16 +5054,14 @@ impl SubscriptionSender {
             return Ok(false);
         }
         if publication.opening_gate.is_some() {
-            // Local-first unless empty: withhold the opening while it is still
-            // empty and unanswered (unsettled, or for a non-durable foreground
-            // its authority witness unanswered). The first answered or
-            // non-empty result releases the gate and opens with a canonical
-            // reset below.
+            // Withhold the opening while it is unanswered (unsettled, or for a
+            // non-durable foreground its authority witness unanswered); the
+            // gate releases from outside at its deadline. The first answered
+            // result releases the gate and opens with a canonical reset below.
             if !publication.opened
                 && publication
                     .opening_gate
                     .is_some_and(|gate| gate.awaits_answer(settled))
-                && snapshot.root_count == 0
             {
                 if let Some(gate) = publication.opening_gate.as_mut() {
                     gate.withheld = true;
@@ -5075,27 +5112,10 @@ impl SubscriptionSender {
         if terminal {
             let mut publication = self.publication.borrow_mut();
             publication.deferred = None;
-            // A rejection releases a withheld local-first opening: the
-            // caller sees the (empty) local result, then the rejection.
-            if let Some(gate) = publication.opening_gate.take()
-                && gate.withheld
-                && gate.route == OpeningRoute::LocalFirst
-                && !publication.opened
-                && publication.unresolved.is_empty()
-            {
-                publication.opened = true;
-                drop(publication);
-                let _ = self.sender.unbounded_send(SubscriptionEvent::Delta {
-                    reset: true,
-                    publishable: true,
-                    added: Vec::new(),
-                    updated: Vec::new(),
-                    removed: Vec::new(),
-                    terminal_operations: Vec::new(),
-                    settled: false,
-                    tier: self.requested_tier,
-                });
-            }
+            // A terminal event ends any first-load wait. A rejection's
+            // withheld opening was already published by
+            // `SubscriptionState::send_rejection`.
+            publication.opening_gate = None;
         } else if matches!(&event, SubscriptionEvent::Delta { .. }) {
             // Receipt-only transitions bypass `publish`; before a gated
             // stream has opened there is no published view to transition.
@@ -6229,8 +6249,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
     tier: DurabilityTier,
     settled: bool,
 ) -> Result<SubscriptionEvent, Error> {
-    let mut root_operations = Vec::new();
-    let mut descendant_operations = Vec::new();
+    let mut addressed_operations = Vec::new();
     for operation in operations {
         if operation.root_descriptor != layout.root_descriptor {
             return Err(Error::new(
@@ -6261,9 +6280,9 @@ fn apply_terminal_operations_to_subscription_snapshot(
                         layout.root_union_arm,
                     )
                 })?;
-            root_operations.push((occurrence_id, operation));
+            addressed_operations.push((Some(occurrence_id), operation));
         } else {
-            descendant_operations.push(operation);
+            addressed_operations.push((None, operation));
         }
     }
 
@@ -6277,9 +6296,9 @@ fn apply_terminal_operations_to_subscription_snapshot(
             "maintained snapshot root is missing an occurrence identity",
         ));
     }
-    let affected = root_operations
+    let affected = addressed_operations
         .iter()
-        .map(|(occurrence_id, _)| occurrence_id.clone())
+        .filter_map(|(occurrence_id, _)| occurrence_id.clone())
         .collect::<BTreeSet<_>>();
     for occurrence in &affected {
         materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
@@ -6292,52 +6311,55 @@ fn apply_terminal_operations_to_subscription_snapshot(
         })
         .collect::<BTreeMap<_, _>>();
 
-    let inserted = root_operations
-        .iter()
-        .filter_map(|(occurrence, operation)| match operation.edit {
-            groove::ivm::TerminalEdit::Insert { .. } => Some((occurrence.clone(), true)),
-            groove::ivm::TerminalEdit::Remove { .. } => Some((occurrence.clone(), false)),
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .filter_map(|(key, present)| present.then_some(key))
-        .collect::<BTreeSet<_>>();
-    let replaced = root_operations
-        .iter()
-        .filter_map(|(occurrence, operation)| {
-            (matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. })
-                && inserted.contains(occurrence))
-            .then_some(occurrence.clone())
-        })
-        .collect::<BTreeSet<_>>();
-    for (occurrence, operation) in &root_operations {
-        if replaced.contains(occurrence) {
-            if let groove::ivm::TerminalEdit::Insert { value, .. } = &operation.edit {
-                if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
-                    state.update_record(OwnedRecord::new(
-                        value.clone(),
-                        operation.root_descriptor,
-                    ))?;
-                }
-            }
-            continue;
-        }
-        if let groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit {
-            if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
-                state.update_record(OwnedRecord::new(value.clone(), operation.root_descriptor))?;
-            }
-        } else if !matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. }) {
-            snapshot_index.terminal_records.remove(occurrence);
-        }
-    }
-
     // Apply Groove's positional edits directly to the root order: each edit
     // costs O(log n) index work plus one row-vector shift, and unchanged
     // roots are never renumbered or revisited.
-    for (occurrence_id, operation) in root_operations {
+    let mut descendant_operations = Vec::new();
+    let mut removed_roots = BTreeSet::new();
+    for (occurrence_id, operation) in addressed_operations {
+        let Some(occurrence_id) = occurrence_id else {
+            apply_descendant_terminal_operations_to_snapshot(
+                snapshot,
+                snapshot_index,
+                &removed_roots,
+                std::slice::from_ref(&operation),
+                layout.root_union_arm,
+            )?;
+            descendant_operations.push(operation);
+            continue;
+        };
+        let occurrence = &occurrence_id;
+        if let groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit {
+            // A root which has not received child edits still holds its
+            // collections in the snapshot row. Retain that pre-update state
+            // before replacing the scalar payload below.
+            if !snapshot_index.terminal_records.contains_key(occurrence) {
+                let position = snapshot_index.roots.position(occurrence).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Protocol,
+                        "terminal root update addressed a missing result",
+                    )
+                })?;
+                let (descriptor, raw) = snapshot.rows[position].encoded_record();
+                let state = terminal_record::TerminalRecordState::new(OwnedRecord::new(
+                    raw.to_vec(),
+                    *descriptor,
+                ))?;
+                snapshot_index
+                    .terminal_records
+                    .insert(occurrence.clone(), state);
+            }
+            snapshot_index
+                .terminal_records
+                .get_mut(occurrence)
+                .expect("initialized above")
+                .update_record(OwnedRecord::new(value.clone(), operation.root_descriptor))?;
+        } else if !matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. }) {
+            snapshot_index.terminal_records.remove(occurrence);
+        }
         match operation.edit {
             groove::ivm::TerminalEdit::Insert { index, value, .. } => {
+                removed_roots.remove(&occurrence_id);
                 if let Some(existing) = snapshot_index.roots.remove(&occurrence_id) {
                     snapshot.rows.remove(existing);
                     snapshot.root_count -= 1;
@@ -6374,6 +6396,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
                 .row;
             }
             groove::ivm::TerminalEdit::Remove { .. } => {
+                removed_roots.insert(occurrence_id.clone());
                 let Some(index) = snapshot_index.roots.remove(&occurrence_id) else {
                     return Err(Error::new(
                         ErrorCode::Protocol,
@@ -6398,19 +6421,13 @@ fn apply_terminal_operations_to_subscription_snapshot(
         }
     }
 
-    // The facade retains the exact collector tree by folding the same
-    // root/descendant terminal stream it exposes to consumers.  This is not
-    // a second materializer: a later reset is simply a snapshot of this
-    // receiver-local reducer after the ordered operations below have been
-    // applied.  In particular, an authority-covered receiver must never
-    // reconstruct nested children from result membership or authority facts.
-    apply_descendant_terminal_operations_to_snapshot(
-        snapshot,
-        snapshot_index,
-        &affected,
-        &descendant_operations,
-        layout.root_union_arm,
-    )?;
+    // Roots changed in this drain are published as complete final rows below.
+    // Do not replay their earlier child edits on top of those replacements.
+    descendant_operations.retain(|operation| {
+        let occurrence =
+            terminal_root_occurrence_id_with_root_union(&operation.root_key, layout.root_union_arm);
+        !occurrence.is_ok_and(|occurrence| affected.contains(&occurrence))
+    });
 
     for occurrence in &affected {
         materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
@@ -6472,7 +6489,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
 fn apply_descendant_terminal_operations_to_snapshot(
     snapshot: &mut RelationSnapshot,
     snapshot_index: &mut RelationSnapshotIndex,
-    roots_changed_in_batch: &BTreeSet<OutputOccurrenceId>,
+    removed_roots: &BTreeSet<OutputOccurrenceId>,
     operations: &[groove::ivm::TerminalOperation],
     root_union_arm: bool,
 ) -> Result<(), Error> {
@@ -6484,11 +6501,9 @@ fn apply_descendant_terminal_operations_to_snapshot(
             terminal_root_occurrence_id_with_root_union(&operation.root_key, root_union_arm)?;
         let Some(root_index) = snapshot_index.roots.position(&occurrence) else {
             // A collector can emit the child retractions belonging to a root
-            // it retracts in the same terminal batch.  The public operation
-            // remains useful to a consumer which folds its child state before
-            // the root removal, but the receiver snapshot has already
-            // dropped that root in the root-edit phase above.
-            if roots_changed_in_batch.contains(&occurrence) {
+            // it has already retracted. Ignore those edits only until a new
+            // insertion starts another lifetime for that root.
+            if removed_roots.contains(&occurrence) {
                 continue;
             }
             return Err(Error::new(
@@ -6747,7 +6762,6 @@ fn subscription_is_settled<S>(
     binding: &Binding,
     tier: DurabilityTier,
     read_view: ReadViewSpec,
-    propagate_upstream: bool,
     requires_authority_receipt: bool,
     authority_result_key: Option<&crate::protocol::AuthorityResultKey>,
 ) -> bool
@@ -6763,7 +6777,6 @@ where
         read_view: RegisterShapeOptions {
             tier,
             read_view,
-            propagate_upstream,
             ..RegisterShapeOptions::default()
         }
         .read_view_key(),

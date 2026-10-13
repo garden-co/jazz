@@ -21,6 +21,8 @@ use thiserror::Error;
 
 use super::op_types::*;
 
+mod join_chains;
+
 /// Snapshot-only index-key filter: an indexed row is hydrated only when its
 /// `source_column` UUID also appears in the candidate index's `candidate_column`.
 /// The candidate side is a conservative superset; the ordinary graph still

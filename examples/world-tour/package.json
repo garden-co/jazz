@@ -8,7 +8,7 @@
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
-    "test": "pnpm run test:unit && pnpm run test:browser",
+    "test": "pnpm run test:unit",
     "test:unit": "vitest run --config vitest.config.ts",
     "test:browser": "vitest run --config vitest.config.browser.ts",
     "walkthrough:shots": "NODE_OPTIONS=\"--import ./walkthrough/patch-expect.mjs\" playwright test --config playwright.screenshots.config.ts"

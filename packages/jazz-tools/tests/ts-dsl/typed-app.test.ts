@@ -779,6 +779,30 @@ describe("typed app prototype", () => {
           },
         },
       );
+      // Transactions take the same applyDiffs option (#2087).
+      void db.transaction((tx) => {
+        tx.update(
+          largeValueUpdateApp.documents,
+          "00000000-0000-0000-0000-000000000001",
+          { done: true },
+          {
+            applyDiffs: {
+              title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
+            },
+          },
+        );
+        // @ts-expect-error a column cannot be both replaced and diffed in a transaction either
+        tx.update(
+          largeValueUpdateApp.documents,
+          "00000000-0000-0000-0000-000000000001",
+          { title: "replacement" },
+          {
+            applyDiffs: {
+              title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
+            },
+          },
+        );
+      });
       db.upsert(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
         // @ts-expect-error partial descriptors belong exclusively to update's applyDiffs option
         title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },

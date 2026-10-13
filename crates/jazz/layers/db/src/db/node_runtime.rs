@@ -270,7 +270,7 @@ where
     /// operation. The next tick detaches them once those owners are released.
     pending_detaches: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
-    /// Remote reachability for `EmptyOpening::AwaitRemote` reads.
+    /// Remote reachability for `FirstLoad::WaitForRemote` reads.
     pub(super) remote_link: Rc<RemoteLinkTracker>,
     query_runtime_wake_pending: Arc<AtomicBool>,
     query_runtime_waker: Rc<RefCell<Option<Waker>>>,
@@ -1041,6 +1041,28 @@ where
         !self.pending_local_publications.borrow().is_empty()
     }
 
+    /// Local commits still settling before they join the upload outbox, with
+    /// the storage tables each one changed.
+    pub(super) fn pending_local_publication_tables(&self) -> Vec<(TxId, Vec<String>)> {
+        self.pending_local_publications
+            .borrow()
+            .iter()
+            .map(|pending| {
+                (
+                    pending.published.tx_id(),
+                    pending.published.changed_tables().to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    pub(super) fn is_pending_local_publication(&self, tx_id: TxId) -> bool {
+        self.pending_local_publications
+            .borrow()
+            .iter()
+            .any(|pending| pending.published.tx_id() == tx_id)
+    }
+
     fn poll_local_publication_settlement(
         &self,
         cx: &mut std::task::Context<'_>,
@@ -1415,6 +1437,9 @@ where
         if let Some(mut node) = self.node.try_lock() {
             if Self::abandon_transaction_for_maintenance(&mut node, open_tx_id).is_ok() {
                 self.clear_transaction_abandonment(open_tx_id);
+                if node.has_released_large_values() {
+                    self.schedule_tick(TickUrgency::Immediate);
+                }
             } else {
                 self.schedule_tick(TickUrgency::Immediate);
             }
@@ -1474,7 +1499,13 @@ where
 
     async fn drain_transaction_abandonments(&self) -> Result<usize, Error> {
         let mut node = self.node.lock().await;
-        self.finish_transaction_abandonment_shutdown_in(&mut node)
+        let drained = self.finish_transaction_abandonment_shutdown_in(&mut node);
+        // Groove defers eviction while a local publication is resident; a
+        // later tick picks the released roots up once it has settled.
+        if node.has_released_large_values() && !self.has_pending_local_publications() {
+            node.evict_released_large_values().await;
+        }
+        drained
     }
 
     /// Close transaction admission and transfer the final open-transaction
@@ -1492,8 +1523,26 @@ where
     }
 
     pub(super) async fn finish_transaction_abandonment_shutdown(&self) -> Result<usize, Error> {
-        let mut node = self.node.lock().await;
-        self.finish_transaction_abandonment_shutdown_in(&mut node)
+        let drained = {
+            let mut node = self.node.lock().await;
+            self.finish_transaction_abandonment_shutdown_in(&mut node)
+        };
+        // No later owner turn runs after close, so release now what the
+        // retired transactions staged.
+        self.evict_released_large_values().await;
+        drained
+    }
+
+    /// Best-effort eviction of Groove roots staged by abandoned transactions,
+    /// after settling earlier local publications so Groove does not defer it.
+    /// Whatever this misses is reclaimed by the staging TTL.
+    pub(super) async fn evict_released_large_values(&self) {
+        if !self.node.lock().await.has_released_large_values() {
+            return;
+        }
+        if let Ok(mut node) = self.lock_for_large_value_staging().await {
+            node.evict_released_large_values().await;
+        }
     }
 
     #[cfg(test)]
@@ -2349,9 +2398,7 @@ where
                                     connection.connection_epoch,
                                     coverage.opts.read_view_key(),
                                 ))?;
-                                (group.upstream_opts.propagate_upstream
-                                    && owner.downstream_connection_epoch
-                                        == connection.connection_epoch
+                                (owner.downstream_connection_epoch == connection.connection_epoch
                                     && owner.coverage == *coverage)
                                     .then(|| PendingUpstreamSubscription {
                                         subscription: group.upstream_subscription,
@@ -2440,8 +2487,6 @@ where
                     pending_row_version_fetches: VecDeque::new(),
                     pending_row_version_repairs: VecDeque::new(),
                     deferred_repair_fates: VecDeque::new(),
-                    scope_view_cuts: BTreeMap::new(),
-                    scope_receipts: BTreeMap::new(),
                     expected_scope_authority,
                     scope_lease_manager: AuthorizationScopeLeaseManager::default(),
                 }),
@@ -2834,8 +2879,6 @@ where
                 shape_registrations: BTreeMap::new(),
                 deferred_subscribe_rejections: VecDeque::new(),
                 pending_catalogue_subscriptions: BTreeMap::new(),
-                scope_purposes: BTreeMap::new(),
-                scope_aggregates: BTreeMap::new(),
                 authority_scope_hydrations: BTreeMap::new(),
                 authority_scope_hydration_count: 0,
                 serve_dirty: true,
@@ -3114,8 +3157,6 @@ where
                     served,
                     coverage_groups,
                     shape_registrations,
-                    scope_purposes,
-                    scope_aggregates,
                     authority_scope_hydrations,
                     ..
                 }) => {
@@ -3132,7 +3173,6 @@ where
                         for subscription in group.subscribers {
                             node.apply_unsubscribe(subscription);
                             served.remove(&subscription);
-                            scope_purposes.remove(&subscription);
                         }
                         peer.forget_subscription_with_node(
                             &mut node,
@@ -3141,7 +3181,6 @@ where
                     }
                     node.release_shapes_for_peer(connection_epoch);
                     shape_registrations.clear();
-                    scope_aggregates.clear();
                     authority_scope_hydrations.clear();
                     (None, None, None, retired)
                 }
@@ -3163,8 +3202,11 @@ where
         drop(connections);
         let detached = true;
         if upstream_epoch.is_some() {
-            // Releases empty openings that were waiting on this link.
+            // Releases openings that were waiting on this link.
             self.remote_link.upstream_detached();
+            // Commits that link sent are resent by the next one; until then a
+            // Global read must not treat them as ahead of its open.
+            self.outbox.borrow_mut().forget_on_wire();
         }
         for request_id in terminal_permission_advice {
             if let Some(waiter) = self
@@ -3412,7 +3454,7 @@ where
         Ok(stats)
     }
 
-    /// Settle local-first-unless-empty authority witnesses after this turn's
+    /// Settle first-load authority witnesses after this turn's
     /// inputs were folded into every stream, and retire the witness coverage
     /// of every gate that has released.
     async fn resolve_authority_witnesses(&self) {
@@ -3539,8 +3581,7 @@ where
         state: &mut ScalarReconciliation,
         local_owner: Option<&Rc<RefCell<SubscriptionState>>>,
     ) -> Result<(), Error> {
-        if !request.opts.propagate_upstream
-            || !request.opts.read_view.is_default()
+        if !request.opts.read_view.is_default()
             || !crate::node::simple_scalar_exit_query(request.shape.query())
         {
             return Ok(());
@@ -4009,7 +4050,6 @@ where
             pending_overlay,
             remote_read_tier,
             requires_authority_receipt,
-            remote_propagate_upstream,
             read_view,
             previous_source,
             previous_settled,
@@ -4024,7 +4064,6 @@ where
                 state.pending_overlay,
                 state.remote_read_tier,
                 state.requires_authority_receipt,
-                state.remote_propagate_upstream,
                 state.read_view.clone(),
                 state.snapshot_source,
                 state.settled,
@@ -4202,7 +4241,6 @@ where
                 read_view: RegisterShapeOptions {
                     tier: settled_tier,
                     read_view: read_view.clone(),
-                    propagate_upstream: remote_propagate_upstream,
                     ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
@@ -4319,7 +4357,6 @@ where
                 &binding,
                 settled_tier,
                 read_view.clone(),
-                remote_propagate_upstream,
                 requires_authority_receipt,
                 settled_authority_result.as_ref(),
             );
@@ -4412,7 +4449,6 @@ where
                 read_view: RegisterShapeOptions {
                     tier: settled_tier,
                     read_view: read_view.clone(),
-                    propagate_upstream: remote_propagate_upstream,
                     ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
@@ -4551,7 +4587,6 @@ where
                     &binding,
                     settled_tier,
                     read_view,
-                    remote_propagate_upstream,
                     requires_authority_receipt,
                     settled_authority_result.as_ref(),
                 );
@@ -4708,7 +4743,6 @@ where
                         &binding,
                         settled_tier,
                         read_view,
-                        remote_propagate_upstream,
                         requires_authority_receipt,
                         settled_authority_result.as_ref(),
                     );
@@ -4774,7 +4808,6 @@ where
                                     &binding,
                                     settled_tier,
                                     read_view,
-                                    remote_propagate_upstream,
                                     requires_authority_receipt,
                                     settled_authority_result.as_ref(),
                                 );
@@ -4906,7 +4939,6 @@ where
                                 &binding,
                                 settled_tier,
                                 read_view,
-                                remote_propagate_upstream,
                                 requires_authority_receipt,
                                 settled_authority_result.as_ref(),
                             ) && node
@@ -5014,7 +5046,6 @@ where
                         &binding,
                         settled_tier,
                         read_view,
-                        remote_propagate_upstream,
                         requires_authority_receipt,
                         settled_authority_result.as_ref(),
                     );
@@ -5122,7 +5153,6 @@ where
                     &binding,
                     settled_tier,
                     read_view,
-                    remote_propagate_upstream,
                     requires_authority_receipt,
                     settled_authority_result.as_ref(),
                 );
@@ -5382,7 +5412,7 @@ pub(super) fn route_upstream_subscription_rejection(
             let event = SubscriptionEvent::Rejected {
                 reason: reason.clone(),
             };
-            if state.borrow().sender.unbounded_send(event).is_ok() {
+            if state.borrow().send_rejection(event).is_ok() {
                 delivered += 1;
             }
         }
@@ -5400,7 +5430,6 @@ pub(super) fn route_upstream_subscription_rejection(
         let opts = RegisterShapeOptions {
             tier: state_ref.remote_read_tier.unwrap_or(state_ref.read_tier),
             read_view: state_ref.read_view.clone(),
-            propagate_upstream: state_ref.remote_propagate_upstream,
             ..RegisterShapeOptions::default()
         };
         if !register_shape_rejection_matches(subscription, shape, &opts) {
@@ -5414,7 +5443,7 @@ pub(super) fn route_upstream_subscription_rejection(
         let event = SubscriptionEvent::Rejected {
             reason: reason.clone(),
         };
-        if state_ref.sender.unbounded_send(event).is_ok() {
+        if state_ref.send_rejection(event).is_ok() {
             delivered += 1;
         }
     }
@@ -5436,6 +5465,18 @@ pub(super) fn route_upstream_subscription_rejection(
 pub trait Transport {
     /// Hand an outbound message to the binding's wire.
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
+    /// Like [`Self::send`], but backpressure hands the unsent message back
+    /// (`Ok(Some(message))`) so a caller that must retry it keeps no copy of
+    /// its own. The default copies the message before sending; bindings that
+    /// can return a rejected message override it.
+    fn try_send(&mut self, message: SyncMessage) -> Result<Option<SyncMessage>, TransportError> {
+        let retained = message.clone();
+        match self.send(message) {
+            Ok(()) => Ok(None),
+            Err(TransportError::Backpressure) => Ok(Some(retained)),
+            Err(error) => Err(error),
+        }
+    }
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
     /// Fallible receive poll for connection servicing.
@@ -5463,6 +5504,13 @@ pub trait Transport {
     /// Runtime owners retire only this peer; database/storage errors remain errors.
     fn has_terminal_failure(&self) -> bool {
         false
+    }
+
+    /// The structured error the remote peer sent before ending this link, if
+    /// it sent one. Owners use its retry guidance to decide whether to
+    /// reconnect.
+    fn remote_wire_error(&self) -> Option<crate::wire::WireError> {
+        None
     }
 
     /// Remaining time until an incomplete receive must be serviced, even if

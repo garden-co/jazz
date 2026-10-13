@@ -96,6 +96,17 @@ pub fn fail_next_cloned_subscription_reset_for_test() {
 }
 
 impl PeerState {
+    /// Number of maintained subscription views this peer retains, including
+    /// authority-owned authorization support views.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn maintained_subscription_count(&self) -> usize {
+        self.publication_states
+            .values()
+            .filter(|state| state.maintained_subscription_view.is_some())
+            .count()
+    }
+
     #[doc(hidden)]
     pub fn has_maintained_subscription(&self, subscription: SubscriptionKey) -> bool {
         self.publication_states

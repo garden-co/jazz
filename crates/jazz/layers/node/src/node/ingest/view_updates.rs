@@ -767,7 +767,7 @@ where
             Self::write_merge_heads(&mut batch, *table_id, branch_key, *row_uuid, &heads)?;
         }
         let applied = self.database.apply_batch(batch).await?;
-        let persisted = applied.persist().await;
+        let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
         Ok(())
     }
@@ -1064,7 +1064,7 @@ where
             &heads,
         )?;
         let applied = self.database.apply_batch(batch).await?;
-        let persisted = applied.persist().await;
+        let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
         Ok(())
     }

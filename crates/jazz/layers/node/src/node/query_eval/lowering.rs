@@ -9,8 +9,8 @@ use super::*;
 use crate::node::query_engine::RequestedSourceExpr;
 use groove::db::{RootIndirectValues, SubscriptionLifetime};
 
-/// A first-result consumer owns exactly its subscription and, when needed,
-/// its prepared shape. Dropping a suspended read cannot keep a binding alive
+/// An installing or first-result consumer owns its subscription and, when needed,
+/// its prepared shape. Dropping a suspended operation cannot keep a binding alive
 /// or retire graph roots owned by a different subscription.
 struct HydrationSubscription<'a> {
     database: &'a mut groove::db::Database,
@@ -317,7 +317,6 @@ pub(super) fn fact_public_fields(
             let mut fields = vec![
                 schema.synthetic.table_field.clone(),
                 schema.synthetic.row_field.clone(),
-                schema.synthetic.replacement_field.clone(),
             ];
             fields.extend(
                 schema
@@ -841,6 +840,30 @@ where
             covered_input_descriptors,
             true,
             None,
+            TransactionWriteOverlay::default(),
+        )
+        .await
+    }
+
+    /// Compile a write-policy candidate program whose committed evidence is
+    /// overlaid with the candidate transaction's own writes (`INV-RLS-9`).
+    /// The overlay is request-owned data, so the result is never cached.
+    pub(super) async fn compile_query_program_request_with_inline_sources_and_transaction_overlay(
+        &mut self,
+        request: QueryProgramRequest,
+        inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        transaction_overlay: TransactionWriteOverlay,
+    ) -> Result<QueryProgram, Error> {
+        self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
+            request,
+            inline_sources,
+            access_paths,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            true,
+            None,
+            transaction_overlay,
         )
         .await
     }
@@ -859,6 +882,7 @@ where
             BTreeMap::new(),
             false,
             bounded_deletion_register,
+            TransactionWriteOverlay::default(),
         )
         .await
     }
@@ -879,6 +903,7 @@ where
             BTreeMap::new(),
             true,
             Some(bounded_deletion_register),
+            TransactionWriteOverlay::default(),
         )
         .await
     }
@@ -892,6 +917,7 @@ where
             name = "cold.phase.query_lowering"
         )
     )]
+    #[allow(clippy::too_many_arguments)]
     async fn compile_query_program_request_with_inline_sources_and_access_paths_inner(
         &mut self,
         request: QueryProgramRequest,
@@ -901,6 +927,7 @@ where
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         count_access_path_metrics: bool,
         bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
+        transaction_overlay: TransactionWriteOverlay,
     ) -> Result<QueryProgram, Error> {
         #[cfg(any(test, feature = "testing"))]
         {
@@ -937,6 +964,20 @@ where
         let compilation = QueryProgramCompilation::analyze(request)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
         let request = compilation.request();
+        // The transaction overlay reaches only this program's own sources.
+        // Nested policy-filtered dependency graphs neither overlay nor record
+        // reads, so a write-policy subplan under an active overlay must read
+        // raw evidence only (`INV-RLS-21`).
+        debug_assert!(
+            !transaction_overlay.is_active()
+                || compilation.sources().iter().all(|source| {
+                    !matches!(
+                        source.authorization,
+                        SourceAuthorizationRequest::PolicyFiltered { .. }
+                    )
+                }),
+            "a write-policy subplan under a transaction overlay read a policy-filtered source"
+        );
         let policy_dependency_footprint = Box::pin(self.prepare_query_program_policy_dependencies(
             request,
             compilation.sources(),
@@ -959,6 +1000,7 @@ where
             count_access_path_metrics,
             current_projection_targets: BTreeMap::new(),
             policy_subplan: matches!(request.policy, PolicyContext::AuthorizationSubplan { .. }),
+            transaction_overlay,
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
@@ -1033,6 +1075,7 @@ where
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
                 policy_subplan: false,
+                transaction_overlay: TransactionWriteOverlay::default(),
             };
             let mut dependencies = Vec::new();
             let mut footprint = PolicyDependencyFootprint::default();
@@ -1371,6 +1414,34 @@ where
         }
     }
 
+    /// Subscribes with every root value materialized. Production retained
+    /// views choose their representation from the projection through
+    /// [`Self::subscribe_lowered_program_with_root_values`].
+    #[cfg(test)]
+    pub(super) async fn subscribe_lowered_program(
+        &mut self,
+        program: QueryProgram,
+        binding: &Binding,
+        binding_source_shape: String,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error> {
+        self.subscribe_lowered_program_with_root_values(
+            program,
+            binding,
+            binding_source_shape,
+            prepared_claim_binding_mode,
+            progress_waker,
+            RootIndirectValues::Materialize,
+        )
+        .await
+    }
+
+    /// Like [`Self::subscribe_lowered_program`], choosing which root fields
+    /// the retained subscription rebuilds into logical large values. The
+    /// choice holds for its initial snapshot and every later update. Fields
+    /// kept physical must be dropped, or hydrated, before rows cross a public
+    /// boundary.
     #[cfg_attr(
         feature = "cold-settle-attribution",
         tracing::instrument(
@@ -1380,13 +1451,14 @@ where
             name = "cold.phase.query_subscribe"
         )
     )]
-    pub(super) async fn subscribe_lowered_program(
+    pub(super) async fn subscribe_lowered_program_with_root_values(
         &mut self,
         program: QueryProgram,
         binding: &Binding,
         binding_source_shape: String,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         progress_waker: Option<&std::task::Waker>,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<MultisinkSubscription, Error> {
         self.install_lowered_program_subscription(
             program,
@@ -1395,7 +1467,7 @@ where
             prepared_claim_binding_mode,
             progress_waker,
             SubscriptionLifetime::Retained,
-            RootIndirectValues::Materialize,
+            root_indirect_values,
             None,
         )
         .await
@@ -1404,6 +1476,8 @@ where
 
     /// The same installation and binding path serves one-result and retained
     /// consumers. Output terminals differ, but source hydration does not.
+    /// Only a first-result private shape leaves a caller-owned retirement
+    /// obligation; retained bindings own their private or shared shapes.
     async fn install_lowered_program_subscription(
         &mut self,
         program: QueryProgram,
@@ -1480,8 +1554,8 @@ where
             .collect::<Result<Vec<_>, Error>>()?;
         // Retained client-local subscribers of identical terminals share one
         // prepared shape, which retires itself with its last retained
-        // binding. Serving installs keep a shape per subscriber for now. A
-        // first-result read owns a private shape and retires it on return.
+        // binding. Serving installs keep a private shape owned by that
+        // subscriber. First-result reads retire their private shape on return.
         let shared_shape = lifetime == SubscriptionLifetime::Retained
             && binding_source_shape.ends_with(":client-local");
         let prepared = if shared_shape {
@@ -1507,24 +1581,39 @@ where
             prepared_shape: Some(prepared.id()),
             shared_shape,
         };
-        let subscription = owner
-            .database
-            .bind_shape_with_lifetime_and_root_values(
-                prepared.id(),
-                &values,
-                lifetime,
-                root_indirect_values,
-                progress_waker,
-            )
-            .await
-            .map_err(|error| {
-                if crate::debug_env::covered_input_trace() {
-                    eprintln!("JAZZ_COVERED_INPUT_TRACE stage=bind_receiver_error error={error:?}");
-                }
-                Error::Groove(error)
-            })?;
+        let subscription = if lifetime == SubscriptionLifetime::Retained && !shared_shape {
+            owner
+                .database
+                .bind_shape_owned_with_root_values(
+                    prepared.id(),
+                    &values,
+                    root_indirect_values,
+                    progress_waker,
+                )
+                .await
+        } else {
+            owner
+                .database
+                .bind_shape_with_lifetime_and_root_values(
+                    prepared.id(),
+                    &values,
+                    lifetime,
+                    root_indirect_values,
+                    progress_waker,
+                )
+                .await
+        }
+        .map_err(|error| {
+            if crate::debug_env::covered_input_trace() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=bind_receiver_error error={error:?}");
+            }
+            Error::Groove(error)
+        })?;
         owner.prepared_shape = None;
-        Ok((subscription, Some(prepared.id())))
+        Ok((
+            subscription,
+            (lifetime == SubscriptionLifetime::FirstResult).then_some(prepared.id()),
+        ))
     }
 
     /// `root_indirect_values` decides which root fields the result rebuilds
