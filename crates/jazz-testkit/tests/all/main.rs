@@ -52,6 +52,8 @@ mod merged_redelivery;
 mod mixed_generation_history;
 #[path = "../native_account_admission.rs"]
 mod native_account_admission;
+#[path = "../native_audio_streaming.rs"]
+mod native_audio_streaming;
 #[path = "../native_client_channel_pump.rs"]
 mod native_client_channel_pump;
 #[path = "../nullable_writes.rs"]
