@@ -23,14 +23,13 @@ use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::serving::ServerLinkAdmission;
 use jazz::tools::Session;
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame,
-    WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
+    WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
+    current_wire_features, encode_frame, negotiate_wire,
 };
 use tokio::sync::mpsc;
 
 use crate::server::ServerState;
 
-const WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
 const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
@@ -698,20 +697,7 @@ async fn handle_ws_connection(
     };
 
     let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
-        Ok(negotiated) if negotiated.features & WS_REQUIRED_FEATURES != 0 => negotiated,
-        Ok(_) => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(
-                    WireErrorCode::UnsupportedFeature,
-                    WireRetry::Never,
-                    "websocket requires sync message payload frames",
-                ),
-            )
-            .await;
-            let _ = socket.close().await;
-            return;
-        }
+        Ok(negotiated) => negotiated,
         Err(error) => {
             send_ws_error(&mut socket, error).await;
             let _ = socket.close().await;
@@ -761,23 +747,20 @@ async fn handle_ws_connection(
     // client need not (and must not) self-assert one merely to learn which
     // authority issued its downstream fates.
     let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
-    let session_context = if negotiated.features
-        & (jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-            | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
-        != 0
-    {
-        // An authenticated client can request current rows without itself
-        // being an authority. Retain our receipt epoch and its admitted identity
-        // independently of whether it advertises a remote authority endpoint.
-        Some(ConnectionSessionContext {
-            local: server_endpoint,
-            remote: remote_hello.authority,
-            link_identity: admission.identity,
-            negotiated_features: negotiated.features,
-        })
-    } else {
-        None
-    };
+    let session_context =
+        if negotiated.features & jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0 {
+            // An authenticated client can request current rows without itself
+            // being an authority. Retain our receipt epoch and its admitted identity
+            // independently of whether it advertises a remote authority endpoint.
+            Some(ConnectionSessionContext {
+                local: server_endpoint,
+                remote: remote_hello.authority,
+                link_identity: admission.identity,
+                negotiated_features: negotiated.features,
+            })
+        } else {
+            None
+        };
     let link_admission =
         match ws_link_admission(&admission, negotiated.features, server_endpoint.epoch) {
             Ok(link_admission) => link_admission,
@@ -1123,10 +1106,7 @@ mod tests {
     use jazz::schema::{JazzSchema, TableSchema};
     use jazz::tx::{DurabilityTier, Fate, TxId};
     use jazz::wire::decode_frame;
-    use jazz::wire::{
-        FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
-        WIRE_PROTOCOL_VERSION, WireMessageFragment, WireTransport,
-    };
+    use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireTransport};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
     use crate::middleware::AuthConfig;
@@ -2059,10 +2039,7 @@ mod tests {
             .expect("send Alice prelude");
         alice
             .send(WsMessage::Binary(
-                ws_client_hello_batch_with_features(
-                    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-                )
-                .into(),
+                ws_client_hello_batch_with_features(0).into(),
             ))
             .await
             .expect("send Alice hello");
@@ -2218,10 +2195,7 @@ mod tests {
         // reaches normal handshake admission and produces a server Hello.
         let _ = ws
             .send(WsMessage::Binary(
-                ws_client_hello_batch_with_features(
-                    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-                )
-                .into(),
+                ws_client_hello_batch_with_features(0).into(),
             ))
             .await;
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
@@ -2343,13 +2317,11 @@ mod tests {
                 WsMessage::Binary(json.into_bytes().into())
             };
             ws.send(message).await.expect("send writer prelude");
-            let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-                | FEATURE_STRUCTURED_ERRORS
-                | if entry["requested_link"] == "scope_isolated_client_relay" {
-                    jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
-                } else {
-                    0
-                };
+            let features = if entry["requested_link"] == "scope_isolated_client_relay" {
+                jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
+            } else {
+                0
+            };
             expect_ws_server_hello(&mut ws, features).await;
         }
     }
@@ -2378,10 +2350,7 @@ mod tests {
         .await
         .expect("send scope-isolated prelude");
         ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(
-                FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-            )
-            .into(),
+            ws_client_hello_batch_with_features(0).into(),
         ))
         .await
         .expect("send client hello without scope feature");
@@ -2420,11 +2389,7 @@ mod tests {
                 .await
                 .expect("connect websocket");
             ws.send(message).await.expect("send exact-cap prelude");
-            expect_ws_server_hello(
-                &mut ws,
-                FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-            )
-            .await;
+            expect_ws_server_hello(&mut ws, 0).await;
         }
 
         let oversized = padded_ws_prelude(identity, WS_MAX_MESSAGE_BYTES + 1);
@@ -2445,9 +2410,7 @@ mod tests {
         let state = make_ws_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorSubject::for_test_bytes([0x7a; 16]);
-        let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-            | FEATURE_STRUCTURED_ERRORS
-            | FEATURE_MESSAGE_FRAGMENTATION;
+        let features = 0;
         let mut ws = open_negotiated_ws_with_prelude_and_features(
             addr,
             &state,
@@ -2455,24 +2418,31 @@ mod tests {
             features,
         )
         .await;
-        let fragment_payload_len = 512 * 1024;
-        let logical_payload = vec![0x42; fragment_payload_len * 4];
-        let message_digest = [0; 32];
-        let encoded = (0..3)
+        let chunk_len = jazz::wire::channels::CHANNEL_CHUNK_BYTES;
+        let encoded = (0..24)
             .map(|index| {
-                let offset = index * fragment_payload_len;
-                let fragment = WireMessageFragment {
+                let envelope = jazz::wire::WireChannelEnvelope {
                     protocol_version: WIRE_PROTOCOL_VERSION,
                     features,
                     session: None,
-                    message_id: 1,
-                    message_digest,
-                    total_len: logical_payload.len() as u64,
-                    offset: offset as u64,
-                    payload: logical_payload[offset..offset + fragment_payload_len].to_vec(),
+                    extent: jazz::wire::channels::ChannelFrame {
+                        channel: 1,
+                        generation: 0,
+                        sequence: index,
+                        class: jazz::wire::channels::ChannelClass::Writes,
+                        first: index == 0,
+                        last: false,
+                        message_len: if index == 0 {
+                            (chunk_len * 32) as u32
+                        } else {
+                            0
+                        },
+                        decoded_len: chunk_len as u32,
+                        payload: vec![0x42; chunk_len],
+                    },
                 };
-                encode_frame(&WireFrame::MessageFragment(fragment))
-                    .expect("encode large websocket fragment")
+                encode_frame(&WireFrame::Channel(envelope))
+                    .expect("encode large websocket channel batch")
             })
             .collect::<Vec<_>>();
         let batch = postcard::to_allocvec(&encoded).expect("encode large websocket batch");
@@ -2627,13 +2597,7 @@ mod tests {
         prelude: Vec<u8>,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        open_negotiated_ws_with_prelude_and_features(
-            addr,
-            state,
-            prelude,
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        )
-        .await
+        open_negotiated_ws_with_prelude_and_features(addr, state, prelude, 0).await
     }
 
     async fn open_negotiated_ws_with_prelude_and_features(
@@ -2832,7 +2796,7 @@ mod tests {
                 adapter: WireTransportAdapter::new(
                     transport.clone(),
                     WIRE_PROTOCOL_VERSION,
-                    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+                    0,
                     None,
                 ),
             }))
