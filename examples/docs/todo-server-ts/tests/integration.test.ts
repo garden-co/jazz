@@ -319,11 +319,11 @@ describe("Todo Server Integration", () => {
       );
 
       // This receipt is specifically about the local Fjall store surviving a
-      // cold restart. Read it explicitly at Local: an Edge read asks the
+      // cold restart. Read it explicitly local-first: a remote read asks the
       // upstream for canonical membership, and its read-your-writes behavior
       // immediately after reopening is intentionally tracked separately in
       // https://github.com/garden-co/jazz/issues/1995.
-      const todos = await server2.db.all(app.todos, { tier: "local" });
+      const todos = await server2.db.all(app.todos, { tier: "local-first" });
 
       // Both todos should be present
       expect(todos.length).toBe(2);

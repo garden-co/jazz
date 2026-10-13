@@ -1,6 +1,5 @@
 import { rel, reverse } from "./relationships.js";
-import { col, allowExternalProvenanceName } from "./dsl.js";
-import { defineMigration, renameTableFrom } from "./migrations.js";
+import { schemaColumns, allowExternalProvenanceName } from "./dsl.js";
 import { definePermissions } from "./permissions/index.js";
 import { defineApp, defineSchema, defineSliceableApp, defineTable } from "./typed-app.js";
 import type {
@@ -19,29 +18,25 @@ import type {
   WhereOf as TypedWhereOf,
 } from "./typed-app.js";
 
-type RuntimeSchemaNamespace = typeof col & {
+type RuntimeSchemaNamespace = typeof schemaColumns & {
   rel: typeof rel;
   reverse: typeof reverse;
   table: typeof defineTable;
   defineSchema: typeof defineSchema;
   defineApp: typeof defineApp;
   defineSliceableApp: typeof defineSliceableApp;
-  defineMigration: typeof defineMigration;
-  renameTableFrom: typeof renameTableFrom;
   definePermissions: typeof definePermissions;
   allowExternalProvenanceName: typeof allowExternalProvenanceName;
 };
 
 /** Schema builders shared by every public binding, including React Native. */
-export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
+export const schema: RuntimeSchemaNamespace = Object.assign({}, schemaColumns, {
   rel,
   reverse,
   table: defineTable,
   defineSchema,
   defineApp,
   defineSliceableApp,
-  defineMigration,
-  renameTableFrom,
   definePermissions,
   allowExternalProvenanceName,
 } as const);

@@ -53,10 +53,10 @@ describe.each(["direct", "mergeable", "exclusive"] as const)(
         return tx.commit();
       })();
       await expect(write.wait({ tier: "local" })).rejects.toThrow("missing required field `title`");
-      await expect(db.all(app.todos, { tier: "local" })).resolves.toEqual([]);
+      await expect(db.all(app.todos, { tier: "local-first" })).resolves.toEqual([]);
       // Advance subsequent work too: handling the error must consume, not defer, its callback.
       await db.insert(app.todos, { title: "valid", done: false }).wait({ tier: "local" });
-      await db.all(app.todos, { tier: "local" });
+      await db.all(app.todos, { tier: "local-first" });
       expect(onError).not.toHaveBeenCalled();
     });
 
@@ -87,7 +87,7 @@ describe.each(["direct", "mergeable", "exclusive"] as const)(
       );
       // Fallback delivery must not erase the failure from the returned handle.
       await expect(write.wait({ tier: "local" })).rejects.toThrow("missing required field `title`");
-      await expect(db.all(app.todos, { tier: "local" })).resolves.toEqual([]);
+      await expect(db.all(app.todos, { tier: "local-first" })).resolves.toEqual([]);
       expect(onError).toHaveBeenCalledTimes(1);
     });
   },
@@ -424,7 +424,7 @@ describe("db exclusive transaction reads browser integration", () => {
       const inserted = writer.insert(app.todos, { title: "remote", done: false });
       await inserted.wait({ tier: "global" });
       await reader.all(app.todos.where({ id: "00000000-0000-4000-8000-000000000000" }), {
-        tier: "global",
+        tier: "remote",
       });
 
       const transaction = reader.beginExclusiveTransaction();
@@ -432,7 +432,7 @@ describe("db exclusive transaction reads browser integration", () => {
         const transactionRowsBeforeUpdate = await transaction.all(
           app.todos.where({ id: inserted.value.id }),
           {
-            tier: "global",
+            tier: "remote",
           },
         );
 
@@ -441,12 +441,12 @@ describe("db exclusive transaction reads browser integration", () => {
           .wait({ tier: "global" });
 
         const directRows = await reader.all(app.todos.where({ id: inserted.value.id }), {
-          tier: "global",
+          tier: "remote",
         });
         const transactionRowsAfterUpdate = await transaction.all(
           app.todos.where({ id: inserted.value.id }),
           {
-            tier: "global",
+            tier: "remote",
           },
         );
 

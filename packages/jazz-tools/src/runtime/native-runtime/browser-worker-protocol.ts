@@ -347,6 +347,7 @@ export type BrowserForegroundNodeLeaseAcquireResponse =
   | { type: "foreground-node-lease-busy"; message: string }
   | {
       type: "foreground-node-lease-ready";
+      workerRealmId?: string;
       leaseId: string;
       node: Uint8Array;
       /** Canonical decimal u64: never a lossy JS number. */
@@ -556,8 +557,8 @@ export type BrowserFollowerPortEvent =
   | { type: "transport-state"; explicitlyDisconnected: boolean }
   /**
    * Live reachability of the worker's upstream server. Tabs use it only to
-   * decide whether an empty local-first-unless-empty opening may wait for a
-   * remote answer; older tabs ignore it.
+   * decide whether a local-first read's first load may wait for a remote
+   * answer; older tabs ignore it.
    */
   | { type: "remote-link"; state: RemoteLinkState }
   | {
@@ -567,6 +568,8 @@ export type BrowserFollowerPortEvent =
       /** Present only on an init reply for a worker-authenticated Inspector peer. */
       inspectorAttachmentPhysicalDbName?: string;
       peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
+      /** Present on init replies; identifies the worker owning the durable root. */
+      workerRealmId?: string;
     }
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }

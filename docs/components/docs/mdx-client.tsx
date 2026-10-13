@@ -42,6 +42,8 @@ export function Code({
       language={lang}
       title={title}
       tokenizer={customTokenizer(lang)}
+      // Firefox loses syntax colors in the automatic range mode after client navigation.
+      highlightMode="spans"
       hasLanguageLabel={false}
       width="100%"
       maxHeight={isScrollable ? 600 : undefined}
