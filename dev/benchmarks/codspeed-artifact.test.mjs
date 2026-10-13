@@ -457,21 +457,32 @@ test("the nightly suite measures only the nightly extras, never a merge case", a
   const native = (name, benches) =>
     `--package jazz-example-${name}-benchmark ${benches.map((b) => `--bench ${b}`).join(" ")} --features jazz-benchmark-guard/mimalloc`;
   assert.equal(buildArgs("stage-plan", "nightly").join(" "), native("stage-plan", ["nightly"]));
+  assert.equal(buildArgs("band-chat", "nightly").join(" "), native("band-chat", ["nightly"]));
   assert.equal(buildArgs("band-book", "nightly").join(" "), native("band-book", ["nightly"]));
   // Only workloads with extras run at night, in only the groups holding them.
   // The perf timeline admits scheduled main runs, so a nightly run that
   // re-measured a merge case would add a second point at the same commit.
   assert.deepEqual(suiteWorkloads("merge"), workloads);
-  assert.deepEqual(suiteWorkloads("nightly"), ["stage-plan", "band-book", "groove-ivm"]);
+  assert.deepEqual(suiteWorkloads("nightly"), [
+    "stage-plan",
+    "band-chat",
+    "band-book",
+    "groove-ivm",
+  ]);
   assert.deepEqual(suiteGroups("merge"), groups);
-  assert.deepEqual(suiteGroups("nightly"), ["stage-plan", "docs-and-access", "engine"]);
+  assert.deepEqual(suiteGroups("nightly"), [
+    "stage-plan",
+    "docs-and-access",
+    "live-apps",
+    "engine",
+  ]);
   assert.deepEqual(groupWorkloads("docs-and-access", "nightly"), ["band-book"]);
-  assert.deepEqual(groupWorkloads("live-apps", "nightly"), []);
+  assert.deepEqual(groupWorkloads("live-apps", "nightly"), ["band-chat"]);
   for (const workload of workloads.filter((w) => !suiteWorkloads("nightly").includes(w))) {
     assert.throws(() => buildArgs(workload, "nightly"), /no nightly extras/, workload);
   }
   // Example extras are other bench targets than the merge ones.
-  for (const workload of ["stage-plan", "band-book"]) {
+  for (const workload of ["stage-plan", "band-chat", "band-book"]) {
     const merge = artifactPaths(workload, "merge").binaries;
     const nightly = artifactPaths(workload, "nightly").binaries;
     assert.deepEqual(

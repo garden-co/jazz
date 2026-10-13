@@ -14,7 +14,6 @@ import {
 import { app } from "../../schema";
 import { attachmentAccept, attachmentProblem, formatBytes, isImageType } from "../lib/attachments";
 import { useObjectUrl } from "../lib/use-object-url";
-import { writeRejectionReason } from "../lib/write-rejection";
 import { useUnsentMessages } from "./UnsentNotices";
 
 interface PendingFile {
@@ -83,12 +82,9 @@ export function Composer({
     try {
       const base = { roomId, senderId: profileId };
       if (outgoing.length === 0) {
-        // The message and the room's new activity commit together. Members
-        // may record activity on the room; the policy keeps its name fixed.
-        const committed = await db.transaction((tx) => {
-          tx.insert(app.messages, { ...base, text: body });
-          tx.update(app.rooms, roomId, { lastActivityAt: new Date() });
-        });
+        // The room list picks the message up as the room's newest; nothing
+        // else is written.
+        const committed = db.insert(app.messages, { ...base, text: body });
         unsent.track(committed, { roomId, roomName, text: body });
         setText("");
         return;
@@ -113,15 +109,6 @@ export function Composer({
         if (index === 0) setText("");
         setFiles((current) => current.filter((item) => item.key !== key));
       }
-      // The messages are already sent. A rejected activity update only leaves
-      // the room lower in the list, so it is logged, not shown. Any other
-      // failure while waiting leaves the update committed locally.
-      db.update(app.rooms, roomId, { lastActivityAt: new Date() })
-        .wait({ tier: "global" })
-        .catch((cause: unknown) => {
-          const reason = writeRejectionReason(cause);
-          if (reason !== undefined) console.warn(`Room activity not updated: ${reason}`);
-        });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {

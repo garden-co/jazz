@@ -244,19 +244,48 @@ describe("BandChat room admission and authorship", () => {
       await guest.all(app.roomMembers.where({ memberAuthor: ownerAuthor }))
     )[0]!;
     await guest.expectDenied((db) => db.delete(app.roomMembers, ownerMembership.id));
-    // A member records activity but cannot rename the room.
-    await guest.update(app.rooms, room.id, { lastActivityAt: new Date() }).wait({ tier: "global" });
+    // Members never write to the room; only its creator renames it.
     await guest.expectDenied((db) => db.update(app.rooms, room.id, { name: "Renamed" }));
     await owner.update(app.rooms, room.id, { name: "Setlist v2" }).wait({ tier: "global" });
 
-    // Read markers are private to their reader and need membership.
-    const marker = await guest
-      .insert(app.readMarkers, { roomId: room.id, reader: guestAuthor, lastReadAt: new Date() })
-      .wait({ tier: "global" });
-    expect(await owner.all(app.readMarkers)).toEqual([]);
-    // Someone else's marker is not even visible, so the update fails up front.
-    expect(() => owner.update(app.readMarkers, marker.id, { lastReadAt: new Date() })).toThrow(
-      /read policy denied/,
+    // A marker move and its journal entry commit together. Co-members see
+    // both (check marks and "Read by"); outsiders see neither.
+    const readUpTo = new Date();
+    const reading = await guest.transaction((tx) => {
+      const marker = tx.insert(app.readMarkers, {
+        roomId: room.id,
+        reader: guestAuthor,
+        lastReadAt: readUpTo,
+      });
+      tx.insert(app.readProgress, {
+        roomId: room.id,
+        memberId: guestMembership.id,
+        reader: guestAuthor,
+        upToAt: readUpTo,
+      });
+      return marker;
+    });
+    const marker = await reading.wait({ tier: "global" });
+    expect((await owner.all(app.readMarkers)).map((row) => row.reader)).toEqual([guestAuthor]);
+    expect(
+      (await owner.all(app.readProgress.where({ memberId: guestMembership.id }))).map((row) =>
+        row.upToAt.getTime(),
+      ),
+    ).toEqual([readUpTo.getTime()]);
+    expect(await stranger.all(app.readMarkers)).toEqual([]);
+    expect(await stranger.all(app.readProgress)).toEqual([]);
+    // Only the reader moves their marker, and only through their own
+    // membership can they journal a read.
+    await owner.expectDenied((db) =>
+      db.update(app.readMarkers, marker.id, { lastReadAt: new Date() }),
+    );
+    await guest.expectDenied((db) =>
+      db.insert(app.readProgress, {
+        roomId: room.id,
+        memberId: ownerMembership.id,
+        reader: guestAuthor,
+        upToAt: new Date(),
+      }),
     );
     await stranger.expectDenied((db) =>
       db.insert(app.readMarkers, {
@@ -270,19 +299,17 @@ describe("BandChat room admission and authorship", () => {
     const canvas = await guest
       .insert(app.canvases, { roomId: room.id, title: "Stage plot" })
       .wait({ tier: "global" });
-    // The app writes the canvas, its message and the room's activity in one
-    // transaction (see tests/single-transaction.test.ts); here the canvas is
-    // already committed, which the message policy accepts too.
-    const posting = await guest.transaction((tx) => {
-      tx.insert(app.messages, {
+    // The app writes the canvas and its message in one transaction (see
+    // tests/single-transaction.test.ts); here the canvas is already
+    // committed, which the message policy accepts too.
+    await guest
+      .insert(app.messages, {
         roomId: room.id,
         senderId: guestProfile.id,
         text: "",
         canvasId: canvas.id,
-      });
-      tx.update(app.rooms, room.id, { lastActivityAt: new Date() });
-    });
-    await posting.wait({ tier: "global" });
+      })
+      .wait({ tier: "global" });
     await owner
       .insert(app.strokes, {
         canvasId: canvas.id,
@@ -315,9 +342,9 @@ describe("BandChat room admission and authorship", () => {
     );
     expect(await stranger.all(app.strokes)).toEqual([]);
 
-    // A member may leave on their own, dropping their private read markers in
-    // the same transaction; afterwards they can no longer draw.
-    const guestMarkers = await guest.all(app.readMarkers);
+    // A member may leave on their own, dropping their read markers in the
+    // same transaction; afterwards they can no longer draw.
+    const guestMarkers = await guest.all(app.readMarkers.where({ reader: guestAuthor }));
     const leaving = await guest.transaction((tx) => {
       for (const marker of guestMarkers) tx.delete(app.readMarkers, marker.id);
       tx.delete(app.roomMembers, guestMembership.id);
