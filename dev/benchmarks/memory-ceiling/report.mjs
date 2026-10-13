@@ -5,8 +5,9 @@ const GiB = 1024 * MiB;
 export const fmt = (bytes) =>
   Math.abs(bytes) >= GiB ? `${(bytes / GiB).toFixed(2)} GiB` : `${(bytes / MiB).toFixed(0)} MiB`;
 
-function renderCounts(counts) {
+function renderCounts(counts, unit) {
   return Object.entries(counts)
+    .filter(([k]) => k !== unit)
     .map(([k, v]) => `${v.toLocaleString("en-US")} ${k}`)
     .join(", ");
 }
@@ -28,7 +29,7 @@ export function renderSummary(summary, steps) {
   if (summary.firstToCross) {
     const c = summary.ceilings[summary.firstToCross];
     lines.push(
-      `**Ceiling: ${c.units.toLocaleString("en-US")} ${summary.unit}** (${renderCounts(c.counts)}); first to cross: ${sideNames[summary.firstToCross]}, over budget at ${c.overAt.toLocaleString("en-US")} ${summary.unit}.`,
+      `**Ceiling: ${c.units.toLocaleString("en-US")} ${summary.unit}** (${renderCounts(c.counts, summary.unit)}); first to cross: ${sideNames[summary.firstToCross]}, over budget at ${c.overAt.toLocaleString("en-US")} ${summary.unit}.`,
       "",
     );
     for (const [side, other] of Object.entries(summary.ceilings)) {
@@ -84,15 +85,17 @@ export function renderSummary(summary, steps) {
       `| ${s.scale.toLocaleString("en-US")} | ${s.ingest.rows.toLocaleString("en-US")} | ${cell(Math.max(0, ...s.ingest.chunks.map((ch) => ch.serverPeak)))} | ${cell(s.ingest.probe?.serverPeak)} | ${s.ingest.probe?.msPerTransaction ?? (s.ingest.probe?.error ? "rejected" : "–")} | ${cell(c.serverIdle)} | ${cell(c.serverPeakClientOnly)} | ${cell(c.serverPeak && Math.max(c.serverPeak, c.serverHwm))} | ${cell(c.serverAfterDisconnect)} | ${cell(c.clientGrowth)} |`,
     );
   }
-  const heap = last?.heapCold;
-  if (heap) {
+  const sites = (title, heap) => {
+    if (!heap) return;
     lines.push(
       "",
-      `Top server allocation sites, restart + users at ${last.scale.toLocaleString("en-US")} ${summary.unit} (${fmt(heap.inUseBytes)} sampled in use):`,
+      `Top server allocation sites ${title} at ${last.scale.toLocaleString("en-US")} ${summary.unit} (${fmt(heap.inUseBytes)} sampled in use):`,
       "",
     );
-    for (const site of heap.sites.slice(0, 10))
+    for (const site of heap.sites.slice(0, 8))
       lines.push(`- ${fmt(site.bytes)} (${(site.share * 100).toFixed(0)}%) \`${site.name}\``);
-  }
+  };
+  sites("after the import and a user's edits", last?.heapIngest);
+  sites("with the restarted server's users connected", last?.heapCold);
   return lines.join("\n") + "\n";
 }
