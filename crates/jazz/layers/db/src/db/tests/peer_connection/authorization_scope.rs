@@ -1307,6 +1307,133 @@ fn scope_relays_forward_new_rows_after_empty_subscription_settlement() {
     }
 }
 
+/// Two browser-shaped chains (foreground -> scope relay -> Core) update the
+/// same row concurrently. Core stores post-images for the sequenced units, so
+/// each relay must accept Core's post-image for the unit it relayed for its
+/// foreground instead of rejecting it as a conflicting commit unit.
+#[test]
+fn scope_relays_accept_core_post_images_for_relayed_concurrent_updates() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb6; 16]);
+    let core = open_core(0x70, AuthorSubject::SYSTEM, &schema);
+    let alice_relay = open_db(0x71, alice, &schema);
+    let bob_relay = open_db(0x72, bob, &schema);
+    let alice_fg = open_db(0x73, alice, &schema);
+    let bob_fg = open_db(0x74, bob, &schema);
+    for (relay, foreground, author) in
+        [(&alice_relay, &alice_fg, alice), (&bob_relay, &bob_fg, bob)]
+    {
+        relay.set_relay_authority_session_owner_for_test();
+        foreground.set_non_durable_client();
+        let (up, down) = duplex();
+        block_on(relay.connect_upstream(up));
+        core.accept_scope_isolated_relay_subscriber(down, author, BTreeMap::new(), 1);
+        let (up, down) = duplex();
+        block_on(foreground.connect_upstream(up));
+        relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    }
+    let local = ReadOpts {
+        tier: crate::db::ReadTier::LocalFirst,
+        ..ReadOpts::default()
+    };
+    let query = Query::from("todos");
+    let _streams = [&alice_fg, &bob_fg]
+        .map(|foreground| prepared_subscribe(foreground, &query, local.clone()).unwrap());
+    let drive = || {
+        for _ in 0..32 {
+            alice_fg.tick().unwrap();
+            bob_fg.tick().unwrap();
+            alice_relay.tick().unwrap();
+            bob_relay.tick().unwrap();
+            core.tick().unwrap();
+        }
+    };
+    let shared = row(0x75);
+    let insert = alice_fg
+        .insert(
+            "todos",
+            cells("original", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(shared),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    drive();
+    assert_eq!(
+        block_on(insert.write_state()).unwrap().durability,
+        DurabilityTier::Global
+    );
+    assert_eq!(
+        row_ids(&prepared_all(&bob_fg, &query, local.clone())),
+        vec![shared]
+    );
+
+    let mut updates = Vec::new();
+    for (foreground, author, title) in
+        [(&alice_fg, alice, "alice edit"), (&bob_fg, bob, "bob edit")]
+    {
+        updates.push(
+            block_on(foreground.update(
+                "todos",
+                shared,
+                BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                crate::db::UpdateOptions {
+                    identity: crate::db::WriteIdentity::Attribution(author),
+                    ..Default::default()
+                },
+            ))
+            .unwrap(),
+        );
+    }
+    drive();
+    for update in &updates {
+        let state = block_on(update.write_state()).unwrap();
+        assert!(matches!(state.fate, Fate::Accepted), "{state:?}");
+        assert_eq!(state.durability, DurabilityTier::Global);
+    }
+    let title = |db: &Db| {
+        let rows = prepared_all(db, &query, local.clone());
+        assert_eq!(row_ids(&rows), vec![shared]);
+        match rows[0].cell(&schema.tables[0], "title").unwrap() {
+            Value::String(title) => title,
+            value => panic!("expected text title, got {value:?}"),
+        }
+    };
+    // Core's result is the convergence target; every relay and foreground
+    // must show it, including the loser's own foreground.
+    let core_rows = core.read(&query).unwrap();
+    assert_eq!(row_ids(&core_rows), vec![shared]);
+    let converged = match core_rows[0].cell(&schema.tables[0], "title").unwrap() {
+        Value::String(title) => title,
+        value => panic!("expected text title, got {value:?}"),
+    };
+    assert!(
+        converged == "alice edit" || converged == "bob edit",
+        "{converged}"
+    );
+    assert_eq!(
+        [&alice_fg, &alice_relay, &bob_relay, &bob_fg].map(|db| title(db)),
+        [(); 4].map(|()| converged.clone()),
+        "alice foreground, alice relay, bob relay, bob foreground"
+    );
+}
+
 #[test]
 fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
     let creator = public_session_eq("$createdBy", &["user"]);

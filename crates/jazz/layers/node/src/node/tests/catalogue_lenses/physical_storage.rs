@@ -205,24 +205,11 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
     );
     for logical_table in ["todos", "tasks"] {
         assert_eq!(
-            core.version_storage_sources_for_layer(logical_table, VersionLayer::Deletion)
+            core.version_storage_sources(logical_table)
                 .unwrap(),
-            vec![SHARED_DELETION_HISTORY_TABLE.to_owned()]
+            vec![physical_history_table_name(table_id)]
         );
     }
-    assert_eq!(
-        core.database
-            .primary_key_scan_raw(
-                SHARED_DELETION_HISTORY_TABLE,
-                &[
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                    Value::U64(table_id.0),
-                ],
-            )
-            .unwrap()
-            .len(),
-        2
-    );
     let deletion_versions = core
         .query_table_versions("tasks")
         .unwrap()
@@ -257,9 +244,9 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
     let mut reopened = reopen_node_at(&dir, node(0x2b), base);
     assert_eq!(
         reopened
-            .version_storage_sources_for_layer("tasks", VersionLayer::Deletion)
+            .version_storage_sources("tasks")
             .unwrap(),
-        vec![SHARED_DELETION_HISTORY_TABLE.to_owned()]
+        vec![physical_history_table_name(table_id)]
     );
     assert_eq!(
         reopened
@@ -363,12 +350,10 @@ fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
     .expect("late v1 fate must compare through its authored deletion prefix");
 
     let winner = core
-        .query_global_layer_winner_in_schema(
+        .query_global_winner_in_schema(
             renamed.id,
             "tasks",
-            row_uuid,
-            VersionLayer::Deletion,
-        )
+            row_uuid,)
         .expect("read v2 deletion winner")
         .expect("v2 deletion remains current");
     assert_eq!(winner.table(), "tasks");
@@ -409,17 +394,16 @@ fn shared_deletion_history_keeps_same_row_uuid_table_scoped() {
         assert_eq!(
             core.database
                 .primary_key_scan_raw(
-                    SHARED_DELETION_HISTORY_TABLE,
+                    &physical_history_table_name(table_id),
                     &[
                         Value::Bytes(BranchKey::default().canonical_bytes()),
-                        Value::U64(table_id.0),
                         Value::Uuid(shared_row.0),
                     ],
                 )
                 .unwrap()
                 .len(),
-            1,
-            "table/row prefix must not see the other table's deletion",
+            2,
+            "table/row prefix must see only this table's content and deletion images",
         );
     }
     for table in ["todos", "notes"] {

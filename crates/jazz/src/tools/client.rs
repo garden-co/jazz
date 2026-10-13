@@ -39,7 +39,7 @@ use crate::model::public_schema::{Schema, validate_json_value};
 use crate::model::transaction::OpenTransactionId;
 use crate::model::transaction::TransactionId;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
-use crate::storage_codec_profile::epoch_1_storage_codec_profile;
+use crate::storage_codec_profile::node_storage_codec_profile;
 use crate::tools::native_transport_connector::{
     ConnectedNativeTransport, NativeTransportConnector, NativeTransportRequest,
     NativeTransportTerminal, NativeTransportTerminalFuture,
@@ -615,9 +615,12 @@ impl Backend {
         } else {
             StackSafeFuture::new(CoreDb::open(config)).await
         };
-        Ok(Self(Rc::new(db.map_err(|error| {
-            JazzError::Connection(error.to_string())
-        })?)))
+        let db = db.map_err(|error| JazzError::Connection(error.to_string()))?;
+        // Application writes carry wall-clock physical milliseconds, exactly
+        // as the TypeScript runtime passes `Date.now()`: linear history
+        // resolves plain columns last-writer-wins by that time.
+        db.use_wall_clock_for_writes();
+        Ok(Self(Rc::new(db)))
     }
 
     fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
@@ -808,7 +811,7 @@ impl Backend {
         &self,
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
-        self.0.prepare_query_for_open_schema_async(query).await
+        StackSafeFuture::new(self.0.prepare_query_for_open_schema_async(query)).await
     }
 
     async fn row_provenance_for_subscription(
@@ -2908,7 +2911,7 @@ async fn core_storage(
                 .open(
                     context.data_dir.join("jazz-core.rocksdb"),
                     column_families,
-                    epoch_1_storage_codec_profile()
+                    node_storage_codec_profile()
                         .map_err(|error| JazzError::Connection(error.to_string()))?,
                 )
                 .await
@@ -3112,8 +3115,10 @@ fn core_row_provenance_to_public(
 /// Current rows already expose public provenance in Unix milliseconds. Packed
 /// HLC values remain internal version and transaction-ordering state.
 fn public_subscription_record(row: &crate::node::CurrentRow) -> Result<Vec<u8>> {
-    let (descriptor, raw) = row.encoded_record();
-    let mut values = BorrowedRecord::new(raw, descriptor)
+    let published = crate::binding_codec::published_record(row)
+        .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
+    let descriptor = &published.descriptor;
+    let mut values = BorrowedRecord::new(&published.raw, descriptor)
         .to_values()
         .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
     normalize_public_subscription_record_values(descriptor, &mut values)?;
@@ -4062,6 +4067,109 @@ impl JazzClient {
         self.db
             .query_decoder
             .core_rows_to_query_results(&query, rows)
+    }
+
+    /// Read a byte range from a locally observed bytes or string cell.
+    ///
+    /// The connected database identity and ordinary read policy apply. Only
+    /// intersecting large-value chunks are read; this does not materialise the
+    /// whole value or qualify typed-query projection of large cells. Storage
+    /// and missing chunk retrieval may suspend, so hydrate audio outside a
+    /// device's playback callback.
+    ///
+    /// Explicit backend sessions (`for_session`) and transaction-scoped reads
+    /// are unsupported and return a query error rather than ignoring scope.
+    pub async fn read_value_range(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        column: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>> {
+        if let Some(context) = &self.write_context {
+            if context.transaction_id.is_some() {
+                return Err(JazzError::Query(
+                    "byte-range reads in a transaction are not supported".into(),
+                ));
+            }
+            // ponytail: core range reads use the database identity; add a
+            // scoped core operation when backend audio sessions are needed.
+            if context.session().is_some() {
+                return Err(JazzError::Query(
+                    "byte-range reads with an explicit session are not supported".into(),
+                ));
+            }
+        }
+        self.db.ensure_tick_driver_running()?;
+        let backend = self.db.backend()?;
+        let bytes = StackSafeFuture::new(backend.0.read_value_range(
+            table,
+            CoreRowUuid(*object_id.uuid()),
+            column,
+            range,
+        ))
+        .await
+        .map_err(|error| JazzError::Query(error.to_string()))?;
+        self.db.inner.borrow().backend()?;
+        Ok(bytes)
+    }
+
+    /// Stream one bytes, text or JSON cell into a new row using a native reader.
+    ///
+    /// `values` supplies the other columns and must omit `column`. The core
+    /// import uses bounded buffering and publishes the row only after EOF and
+    /// scalar validation. The reader runs on a separate thread. Errors publish
+    /// no row; abandoned staged data follows ordinary staging cleanup.
+    ///
+    /// The database's enrolled identity, permission checks and write settlement
+    /// apply. Await the returned transaction with [`Self::wait_for_transaction`]
+    /// for the required durability tier. No complete imported value is returned.
+    /// Transaction, explicit session and attribution contexts are unsupported
+    /// and rejected before consuming the reader. Native-reader imports are not
+    /// available on WebAssembly.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn insert_streaming_value<R>(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        column: &str,
+        reader: R,
+    ) -> Result<(ObjectId, TransactionId)>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        self.reject_updated_at_override("streaming inserts")?;
+        if let Some(context) = &self.write_context {
+            if context.transaction_id.is_some() {
+                return Err(JazzError::Write(
+                    "streaming inserts in a transaction are not supported".into(),
+                ));
+            }
+            if context.session().is_some() || context.attribution.is_some() {
+                return Err(JazzError::Write(
+                    "streaming inserts with an explicit session or attribution are not supported"
+                        .into(),
+                ));
+            }
+        }
+        let cells = self.core_cells(table, values)?;
+        self.db.ensure_tick_driver_running()?;
+        let backend = self.db.backend()?;
+        let write = StackSafeFuture::new(
+            backend
+                .0
+                .insert_streaming_value(table, cells, column, reader),
+        )
+        .await
+        .map_err(|error| JazzError::Write(error.to_string()))?;
+        let tx_id = write.mergeable_tx_id();
+        let mut inner = self.db.inner.borrow_mut();
+        Self::check_core_write_not_rejected(inner.backend()?, tx_id)?;
+        inner.remember_write(tx_id);
+        Ok((
+            ObjectId::from_uuid(write.row_uuid().0),
+            core_batch_id(tx_id),
+        ))
     }
 
     /// Create a new row in a table.
