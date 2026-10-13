@@ -43,6 +43,10 @@ pub fn init_process_tracing_with_endpoint_once(
                 panic!("invalid tracing directive {directive:?}: {error}")
             }));
         }
+        // Profiling spans are opt-in by name (`RUST_LOG=jazz::profile=debug`).
+        if !std::env::var("RUST_LOG").is_ok_and(|value| value.contains("jazz::profile")) {
+            filter = filter.add_directive("jazz::profile=off".parse().unwrap());
+        }
 
         if tracing::subscriber::set_global_default(
             tracing_subscriber::registry().with(filter).with(otel_layer),

@@ -269,6 +269,12 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
     fn enabled(&self, metadata: &tracing::Metadata<'_>, _: Context<'_, S>) -> bool {
         let level = metadata.level();
         level <= &self.config.max_level
+            && !self.config.excluded_targets.iter().any(|excluded| {
+                metadata
+                    .target()
+                    .strip_prefix(excluded)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+            })
     }
 
     fn on_new_span(

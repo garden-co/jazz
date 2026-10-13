@@ -725,7 +725,12 @@ where
 
     #[cfg_attr(
         feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_compile")
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.query_compile"
+        )
     )]
     pub(super) async fn compile_query_program_request_with_access_paths(
         &mut self,
@@ -812,7 +817,12 @@ where
     /// graph is subscribed.
     #[cfg_attr(
         feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_compile")
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.query_compile"
+        )
     )]
     pub(super) async fn compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
         &mut self,
@@ -900,7 +910,12 @@ where
 
     #[cfg_attr(
         feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_lowering")
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.query_lowering"
+        )
     )]
     #[allow(clippy::too_many_arguments)]
     async fn compile_query_program_request_with_inline_sources_and_access_paths_inner(
@@ -1429,7 +1444,12 @@ where
     /// boundary.
     #[cfg_attr(
         feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_subscribe")
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.query_subscribe"
+        )
     )]
     pub(super) async fn subscribe_lowered_program_with_root_values(
         &mut self,

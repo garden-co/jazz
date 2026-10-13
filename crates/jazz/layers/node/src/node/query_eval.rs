@@ -4578,7 +4578,12 @@ where
 
     #[cfg_attr(
         feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_setup")
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.query_setup"
+        )
     )]
     async fn open_seeded_maintained_subscription_view_in_authorization_mode(
         &mut self,

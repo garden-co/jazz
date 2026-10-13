@@ -2499,7 +2499,12 @@ impl IvmRuntime {
 
     #[cfg_attr(
         feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.ivm_tick")
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.ivm_tick"
+        )
     )]
     pub(crate) async fn tick_resident_staged(
         &mut self,
@@ -2950,13 +2955,11 @@ impl IvmRuntime {
                 // each poll its own phase so that work is not charged to the
                 // unrelated caller.
                 PendingEvaluation::Incremental(incremental) => {
-                    #[cfg(feature = "cold-settle-attribution")]
-                    let _phase = tracing::trace_span!("cold.phase.pending_incremental").entered();
+                    let _phase = tracing::trace_span!(target: "jazz::profile", "cold.phase.pending_incremental").entered();
                     incremental.poll(self, cx)
                 }
                 PendingEvaluation::SubscriptionHydration(hydration) => {
-                    #[cfg(feature = "cold-settle-attribution")]
-                    let _phase = tracing::trace_span!("cold.phase.pending_hydration").entered();
+                    let _phase = tracing::trace_span!(target: "jazz::profile", "cold.phase.pending_hydration").entered();
                     hydration
                         .session
                         .poll(

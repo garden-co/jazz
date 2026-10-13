@@ -404,8 +404,8 @@ impl TickEvaluator<'_> {
             // Only the fused row loop is filter/map work: memo lookups and
             // the `compute_node` fallbacks above belong to the caller's phase,
             // and fallback kernels enter their own operator phase.
-            #[cfg(feature = "cold-settle-attribution")]
-            let _phase = tracing::trace_span!("cold.phase.op_map").entered();
+            let _phase =
+                tracing::trace_span!(target: "jazz::profile", "cold.phase.op_map").entered();
             let batch = pending.get_mut(&tail).expect("prepared pipeline");
             let mut budget = 256;
             while batch.next < batch.input.deltas.len() && budget > 0 {
