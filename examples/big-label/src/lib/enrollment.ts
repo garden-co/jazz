@@ -33,8 +33,16 @@ export function claimsSignupIntent(storage: IntentStorage, email: string, identi
 }
 
 /**
- * One attempt to enroll the signed-in identity with Jazz and bootstrap its
- * personal label. Resolves true when the attempt finished and is still current.
+ * One attempt to enroll the signed-in identity with Jazz. Resolves true when
+ * the attempt finished and is still current, as soon as the account's client
+ * is open; the personal label bootstrap then runs in the background.
+ *
+ * A Jazz account this browser kept from an earlier sign-in of the same
+ * identity opens its local data at once, and the attempt resolves then. It
+ * has no credential until it logs in again, so it cannot sync before that
+ * login, which runs in the background: logging in as the same identity hands
+ * the credential to the client already open instead of closing and reopening
+ * it, and a failure is reported through `onLoginError`.
  *
  * `isCurrent` must belong to this attempt alone. React strict mode (and Retry)
  * abandon an attempt and start the next one straight away; a flag shared
@@ -48,21 +56,58 @@ export async function enrollAndBootstrap(options: {
   email: string;
   identityId: string;
   getToken: () => Promise<string>;
-  bootstrap: (token: string) => Promise<void>;
+  /** Whether the server still has to bootstrap this account (default: yes). */
+  needsBootstrap?: (accountId: string) => boolean;
+  bootstrap: (token: string, accountId: string) => Promise<void>;
+  /**
+   * Called before this attempt resolves when a background bootstrap starts,
+   * with the account it is for, so a failed attempt (token or bootstrap) can
+   * be retried.
+   */
+  onBootstrapStart?: (accountId: string) => void;
+  onBootstrapError?: (error: unknown) => void;
+  /** A retained account's background login failed; its client stays open. */
+  onLoginError?: (error: unknown) => void;
   isCurrent: () => boolean;
 }): Promise<boolean> {
   const { lifecycle, storage, email, identityId, getToken, isCurrent } = options;
   const registering = claimsSignupIntent(storage, email, identityId);
   let registered = false;
-  await lifecycle.transition(async (manager) => {
-    if (!registering) return manager.loginJWT({ getToken });
-    await manager.registerJWT({ getToken });
-    registered = true;
-  }, isCurrent);
+  const startBootstrap = () => {
+    const account = lifecycle.selectedAccount();
+    if (!account || !(options.needsBootstrap?.(account.id) ?? true)) return;
+    options.onBootstrapStart?.(account.id);
+    void getToken()
+      .then((token) => options.bootstrap(token, account.id))
+      .catch((error: unknown) => options.onBootstrapError?.(error));
+  };
+  const retained = lifecycle.selectedAccount();
+  if (!registering && retained?.identity.subject === identityId) {
+    await lifecycle.attach(isCurrent);
+    void lifecycle
+      .revalidate((manager) => manager.loginJWT({ getToken }), isCurrent)
+      .then(
+        () => {
+          // The login selected another account for this identity: the
+          // lifecycle has opened it, and it may still need its bootstrap.
+          const account = lifecycle.selectedAccount();
+          if (isCurrent() && account && account.id !== retained.id) startBootstrap();
+        },
+        (error: unknown) => {
+          if (isCurrent()) options.onLoginError?.(error);
+        },
+      );
+  } else {
+    await lifecycle.transition(async (manager) => {
+      if (!registering) return manager.loginJWT({ getToken });
+      await manager.registerJWT({ getToken });
+      registered = true;
+    }, isCurrent);
+  }
   // A registration consumes the intent even when its attempt was abandoned
   // meanwhile: the identity now has an account, so every later attempt logs in.
   if (registered) clearSignupIntent(storage);
   if (!isCurrent()) return false;
-  await options.bootstrap(await getToken());
+  startBootstrap();
   return isCurrent();
 }

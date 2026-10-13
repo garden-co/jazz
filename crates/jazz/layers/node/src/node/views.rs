@@ -1578,10 +1578,33 @@ where
             let Some(wanted_rows) = wanted_add_rows_by_tx.get(&bundle.tx.tx_id) else {
                 continue;
             };
-            bundle.versions.retain(|version| {
-                version.deletion().is_some()
-                    || wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
-            });
+            // Selection uses the query's logical names, while the canonical
+            // wire bodies retain their authored names. Compare physical table
+            // identities across renames without admitting same-UUID siblings.
+            let wanted_physical_rows = wanted_rows
+                .iter()
+                .map(|(table, row)| {
+                    Ok((
+                        self.physical_table_id_for_schema(shape.schema_version(), table)?,
+                        *row,
+                    ))
+                })
+                .collect::<Result<BTreeSet<_>, Error>>()?;
+            let mut scoped_versions = Vec::with_capacity(bundle.versions.len());
+            for version in std::mem::take(&mut bundle.versions) {
+                if version.deletion().is_some()
+                    || wanted_physical_rows.contains(&(
+                        self.physical_table_id_for_schema(
+                            version.schema_version(),
+                            version.table(),
+                        )?,
+                        version.row_uuid(),
+                    ))
+                {
+                    scoped_versions.push(version);
+                }
+            }
+            bundle.versions = scoped_versions;
             bundle.tx.n_total_writes = bundle
                 .versions
                 .len()
