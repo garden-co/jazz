@@ -139,6 +139,14 @@ pub(super) fn transaction_flags(record: BorrowedRecord<'_>) -> Result<u8, Error>
 }
 
 groove::define_record! {
+    /// A history write's pending predecessor (`base_pending`).
+    pub(super) struct BasePendingRecord {
+        0 => time: TxTime,
+        1 => node: NodeUuid,
+    }
+}
+
+groove::define_record! {
     /// The rejection reason inside a rejected `jazz_transactions` record.
     pub(super) struct TxRejectionRecord {
         0 => reason: RejectionReasonTag,
@@ -2824,7 +2832,9 @@ impl VersionRow {
         };
         let pending = match self.trailing_field(crate::schema::BASE_PENDING_FIELD)? {
             None => None,
-            Some(value) => nullable_value(value)?.map(tx_id_from_value).transpose()?,
+            Some(value) => nullable_value(value)?
+                .map(base_pending_from_value)
+                .transpose()?,
         };
         Ok(RowBase { seq, pending })
     }
@@ -4166,7 +4176,38 @@ pub(super) fn base_seq_value(base: RowBase) -> Value {
 
 /// History `base_pending` value of `base`.
 pub(super) fn base_pending_value(base: RowBase) -> Value {
-    Value::Nullable(base.pending.map(|tx_id| Box::new(tx_id_value(tx_id))))
+    Value::Nullable(base.pending.map(|tx_id| {
+        let record = BasePendingRecord::encode(&BASE_PENDING_DESCRIPTOR, tx_id.time, tx_id.node)
+            .expect("base_pending record fields match their descriptor");
+        Box::new(Value::Record(record.record().clone()))
+    }))
+}
+
+static BASE_PENDING_DESCRIPTOR: std::sync::LazyLock<records::RecordDescriptor> =
+    std::sync::LazyLock::new(|| {
+        let records::ValueType::Nullable(inner) =
+            crate::schema::history_base_pending_storage_type()
+        else {
+            unreachable!("history base_pending is nullable")
+        };
+        let records::ValueType::Record(descriptor) = *inner else {
+            unreachable!("history base_pending is a record")
+        };
+        *descriptor
+    });
+
+/// The pending predecessor stored in a history `base_pending` record.
+fn base_pending_from_value(value: Value) -> Result<TxId, Error> {
+    let Value::Record(record) = value else {
+        return Err(Error::InvalidStoredValue(
+            "history base_pending must be a record",
+        ));
+    };
+    let record = record.borrowed();
+    Ok(TxId::new(
+        TxTime(record.get_u64(BasePendingRecord::FIELD_TIME_IDX)?),
+        NodeUuid(record.get_uuid(BasePendingRecord::FIELD_NODE_IDX)?),
+    ))
 }
 
 #[cfg(test)]

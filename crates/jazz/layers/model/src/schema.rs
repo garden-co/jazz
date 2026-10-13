@@ -1091,7 +1091,10 @@ impl TableSchema {
         // The write's base: the settled seq its writer's image rested on and
         // the writer's own pending predecessor to this row.
         columns.push(column(BASE_SEQ_FIELD, GrooveColumnType::U64.nullable()));
-        columns.push(column(BASE_PENDING_FIELD, tx_id_column().nullable()));
+        columns.push(column(
+            BASE_PENDING_FIELD,
+            history_base_pending_storage_type(),
+        ));
 
         // Accepted writes are keyed by seq, so "the row at seq S" is a point
         // read and "the row's writes after S" a range read. A write without
@@ -1392,6 +1395,18 @@ pub const BASE_SEQ_FIELD: &str = "base_seq";
 /// History field holding the pending predecessor of a write's base.
 #[doc(hidden)]
 pub const BASE_PENDING_FIELD: &str = "base_pending";
+
+/// Physical type of the history `base_pending` field: a nullable record of the
+/// predecessor's `(time, node)`. A record is variable-width, so the common
+/// null costs a null byte and an offset instead of a reserved 25-byte tuple.
+#[doc(hidden)]
+pub fn history_base_pending_storage_type() -> GrooveColumnType {
+    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+        ("time", GrooveColumnType::U64),
+        ("node", GrooveColumnType::Uuid),
+    ])))
+    .nullable()
+}
 
 /// History field carrying the sign bits of a patch's counter ops: bit `i`
 /// (least significant first) belongs to the table's `i`-th counter column in
