@@ -1,0 +1,92 @@
+  -32.0%      0.6671s  base     0.9816  walltime.rs::batch_update_1350_rocksdb
+  -20.3%      0.0006s  base     0.0008  reads_rocksdb_walltime.rs::update_activity_indexed_predicate_no_subscription_rocksdb
+  -15.7%      4.2022s  base     4.9832  walltime.rs::sequential_update_1350_rocksdb
+  -15.1%      0.0010s  base     0.0012  reads_memory_walltime.rs::restore_task_point_scaling_memory[900]
+  -14.9%      0.0005s  base     0.0005  reads_memory_walltime.rs::update_activity_indexed_predicate_no_subscription_memory
+  -11.9%      1.4680s  base      1.667  ingest_walltime.rs::ingest_walltime_10k
+  -11.7%     16.3685s  base    18.5375  ingest_walltime.rs::ingest_walltime_100k
+  -10.5%      0.5309s  base      0.593  walltime.rs::reopen_1500_rocksdb
+  -10.3%      0.0778s  base     0.0867  reads_memory_walltime.rs::subscribe_activity_point_scaling_memory[9000]
+  -10.2%      3.4449s  base     3.8376  loads.rs::ingest_high_scale[10000]
+   -9.2%      0.3407s  base     0.3751  loads.rs::ingest_batch_amortization[1000]
+   -9.0%      0.0010s  base     0.0011  reads_memory_walltime.rs::restore_task_point_scaling_memory[9000]
+   -9.0%      0.3000s  base     0.3297  loads.rs::ingest_batch_amortization[100]
+   -8.0%      0.1071s  base     0.1164  reads_rocksdb_walltime.rs::query_bounded_activity_page_profile_s_rocksdb
+   -7.5%      0.3539s  base     0.3825  loads.rs::ingest_batch_amortization[10]
+   -7.1%      0.1195s  base     0.1287  reads_memory_walltime.rs::query_comments_scaling_memory[(3000, 12000, 9000)]
+   -5.9%      0.3882s  base     0.4126  reads_rocksdb_walltime.rs::query_bounded_activity_page_scaling_rocksdb[30000]
+   -5.8%      0.0023s  base     0.0024  reads_memory_walltime.rs::delete_task_point_scaling_memory[900]
+   -5.6%      0.1308s  base     0.1386  reads_rocksdb_walltime.rs::query_comments_scaling_rocksdb[(3000, 12000, 9000)]
+   -5.6%      0.3478s  base     0.3685  reads_memory_walltime.rs::query_bounded_activity_page_scaling_memory[30000]
+   -5.1%      0.0579s  base     0.0611  reads_memory_walltime.rs::subscribe_activity_point_scaling_memory[900]
+   -5.1%      5.6081s  base     5.9073  walltime.rs::sequential_insert_1350_rocksdb
+   -4.8%      0.2994s  base     0.3145  reads_memory_walltime.rs::subscribe_activity_policy_point_scaling_memory[9000]
+   -4.7%      0.0032s  base     0.0033  reads_memory_walltime.rs::update_activity_policy_scaling_memory[9000]
+   -4.4%      0.2289s  base     0.2394  reads_rocksdb_walltime.rs::query_task_detail_profile_s_rocksdb
+   -4.2%      0.0787s  base     0.0822  reads_memory_walltime.rs::subscribe_activity_policy_point_scaling_memory[900]
+   -3.4%      0.1048s  base     0.1085  reads_memory_walltime.rs::query_bounded_activity_page_scaling_memory[9000]
+   -3.4%      0.2133s  base     0.2207  reads_memory_walltime.rs::query_task_detail_profile_s_memory
+   -3.3%      0.0031s  base     0.0033  reads_memory_walltime.rs::update_activity_policy_no_subscription_memory
+   -3.1%      1.0646s  base     1.0982  loads.rs::ingest_batch_amortization[1]
+   -2.7%      0.1018s  base     0.1046  reads_memory_walltime.rs::query_bounded_activity_page_profile_s_memory
+   -2.6%      0.0013s  base     0.0013  reads_memory_walltime.rs::delete_task_point_scaling_memory[9000]
+   -2.6%      0.1138s  base     0.1168  reads_rocksdb_walltime.rs::query_bounded_activity_page_scaling_rocksdb[9000]
+   -2.5%     40.9622s  base    41.9966  walltime.rs::first_sync_27518_rocksdb
+   -2.3%      0.0085s  base     0.0087  walltime.rs::policy_free_owner_page50[10000]
+   -2.3%      0.0289s  base     0.0296  reads_memory_walltime.rs::resubscribe_activity_point_profile_s_memory
+   -2.0%      0.0722s  base     0.0736  reads_memory_walltime.rs::resume_one_task_update_scaling_memory[(300, 1200, 900)]
+   -1.8%      0.0148s  base     0.0151  ahead_current.rs::local_ahead_current_history[1000]
+   -1.7%      0.0756s  base     0.0768  walltime.rs::subscribe_owner_policy_page50[10000]
+   -1.5%      0.1191s  base     0.1209  reads_memory_walltime.rs::resume_one_task_update_scaling_memory[(500, 2000, 1500)]
+   -1.5%      0.0088s  base     0.0089  reads_rocksdb_walltime.rs::subscribe_activity_intersection_delta_rocksdb
+   -1.5%      0.0097s  base     0.0099  walltime.rs::owner_policy_page50[10000]
+   -1.5%      0.0701s  base     0.0712  walltime.rs::subscribe_policy_free_owner_page50[10000]
+   -1.5%      0.1120s  base     0.1137  walltime.rs::subscribe_owner_or_org_policy_owner_page50[10000]
+   -1.4%      0.0246s  base      0.025  walltime.rs::owner_or_org_policy_org_page50[10000]
+   -1.1%      0.0847s  base     0.0857  walltime.rs::subscribe_policy_free_org_page50[10000]
+   -1.1%      0.0038s  base     0.0039  ahead_current.rs::local_ahead_current_history[100]
+   -1.1%      0.0083s  base     0.0083  reads_memory_walltime.rs::subscribe_activity_intersection_delta_memory
+   -0.8%      0.0392s  base     0.0396  reads_rocksdb_walltime.rs::query_board_profile_s_rocksdb
+   -0.7%      0.0336s  base     0.0338  loads.rs::author_history[1024]
+   -0.6%      0.1507s  base     0.1517  fast_resume.rs::caught_up_fast_resume[1000]
+   -0.6%      0.0337s  base      0.034  walltime.rs::policy_free_owner_page50[100000]
+   -0.6%      0.0164s  base     0.0165  walltime.rs::policy_free_org_page50[10000]
+   -0.5%      0.0378s  base      0.038  reads_memory_walltime.rs::query_board_profile_s_memory
+   -0.5%      0.0139s  base     0.0139  walltime.rs::owner_or_org_policy_owner_page50[10000]
+   -0.5%      0.1206s  base     0.1212  walltime.rs::subscribe_policy_free_owner_page50[100000]
+   -0.4%      0.1311s  base     0.1316  walltime.rs::subscribe_owner_or_org_policy_org_page50[10000]
+   -0.3%      1.9716s  base     1.9784  fast_resume.rs::caught_up_fast_resume[10000]
+   -0.3%      0.2153s  base     0.2159  queries.rs::member_calendar_window[4096]
+   -0.3%      0.1810s  base     0.1815  walltime.rs::subscribe_owner_or_org_policy_owner_page50[100000]
+   -0.2%      0.0217s  base     0.0218  queries.rs::member_calendar_window[128]
+   -0.2%      0.0331s  base     0.0332  loads.rs::timeline_second_page[1024]
+   -0.2%      0.0124s  base     0.0124  reads_rocksdb_walltime.rs::query_comments_scaling_rocksdb[(300, 1200, 900)]
+   -0.2%      0.1518s  base     0.1521  loads.rs::label_load[4096]
+   -0.2%      0.2793s  base     0.2798  walltime.rs::subscribe_policy_free_org_page50[100000]
+   -0.2%      0.0219s  base     0.0219  queries.rs::public_calendar_window[128]
+   -0.0%      0.0392s  base     0.0392  walltime.rs::owner_policy_page50[100000]
+   -0.0%      0.2214s  base     0.2215  queries.rs::public_calendar_window[4096]
+   +0.0%      0.0000s  base        0.0  fixture.rs::indexed_fixture_count[(16, 512)]
+   +0.0%      0.0000s  base        0.0  fixture.rs::indexed_fixture_count[(4, 128)]
+   +0.1%      0.1163s  base     0.1162  loads.rs::artist_load[4096]
+   +0.1%      0.1199s  base     0.1197  walltime.rs::policy_free_org_page50[100000]
+   +0.2%      0.1736s  base     0.1733  walltime.rs::owner_or_org_policy_org_page50[100000]
+   +0.2%      0.0531s  base      0.053  walltime.rs::owner_or_org_policy_owner_page50[100000]
+   +0.2%      0.0237s  base     0.0237  loads.rs::artist_load[512]
+   +0.3%      0.1017s  base     0.1014  loads.rs::timeline_second_page[4096]
+   +0.3%      0.1320s  base     0.1316  walltime.rs::subscribe_owner_policy_page50[100000]
+   +0.3%      0.1997s  base      0.199  loads.rs::catalog_load[4096]
+   +0.4%      0.0093s  base     0.0092  selective_global_hydration.rs::maintained_subscription_hydration_10k
+   +0.6%      0.1122s  base     0.1116  loads.rs::author_history[4096]
+   +0.7%      0.0334s  base     0.0332  loads.rs::catalog_load[512]
+   +0.7%      0.0188s  base     0.0186  fast_resume.rs::caught_up_fast_resume[100]
+   +0.8%      0.0279s  base     0.0277  loads.rs::label_load[512]
+   +0.8%      0.0093s  base     0.0093  selective_global_hydration.rs::maintained_subscription_hydration_100k
+   +1.0%      0.3976s  base     0.3938  walltime.rs::subscribe_owner_or_org_policy_org_page50[100000]
+   +1.3%      0.0159s  base     0.0157  loads.rs::unread_recent_rooms[4096]
+   +1.4%      0.0110s  base     0.0109  loads.rs::unread_recent_rooms[1024]
+   +1.4%      0.0122s  base      0.012  reads_memory_walltime.rs::query_comments_scaling_memory[(300, 1200, 900)]
+   +1.7%      0.0437s  base      0.043  route_subscription_curve.rs::matching_write_fanout[100]
+   +1.7%      0.9229s  base     0.9071  route_subscription_curve.rs::attach_route_bindings[100]
+   +1.8%      0.1370s  base     0.1346  ahead_current.rs::local_ahead_current_history[10000]
+   +2.0%      0.0032s  base     0.0032  reads_memory_walltime.rs::update_activity_policy_scaling_memory[900]

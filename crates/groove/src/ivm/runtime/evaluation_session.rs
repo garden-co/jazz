@@ -838,20 +838,15 @@ fn indexed_uuid_values(
     entries: &[KeyValue],
     column: &str,
 ) -> Result<Vec<Option<uuid::Uuid>>, super::IvmRuntimeError> {
-    let index_descriptor = crate::db::index_record_descriptor();
     entries
         .iter()
-        .map(|(storage_key, persisted_record)| {
-            let index_record = index_descriptor.bind(persisted_record);
-            let stored_value = index_record
-                .get("value")
-                .map_err(super::IvmRuntimeError::RecordEncoding)?;
+        .map(|(storage_key, stored_value)| {
             let value = crate::db::persisted_index_column_value(
                 table,
                 index_name,
                 index_schema,
                 storage_key,
-                &stored_value,
+                stored_value,
                 column,
             )
             .map_err(|_| super::IvmRuntimeError::InvalidPersistedIndex(index_name.to_owned()))?;
@@ -876,19 +871,14 @@ fn indexed_primary_keys(
     index_schema: &crate::schema::IndexSchema,
     entries: &[KeyValue],
 ) -> Result<Vec<Vec<u8>>, super::IvmRuntimeError> {
-    let index_descriptor = crate::db::index_record_descriptor();
     let mut primary_keys = Vec::with_capacity(entries.len());
-    for (storage_key, persisted_record) in entries {
-        let index_record = index_descriptor.bind(persisted_record);
-        let stored_value = index_record
-            .get("value")
-            .map_err(super::IvmRuntimeError::RecordEncoding)?;
+    for (storage_key, stored_value) in entries {
         let primary_key = crate::db::persisted_index_primary_key(
             table,
             index_name,
             index_schema,
             storage_key,
-            &stored_value,
+            stored_value,
         )
         .map_err(|_| super::IvmRuntimeError::InvalidPersistedIndex(index_name.to_owned()))?;
         primary_keys.push(primary_key);

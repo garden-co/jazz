@@ -26,6 +26,8 @@ mod client_storage_shutdown_integration;
 mod clients_sync;
 #[path = "../compatible_deployment.rs"]
 mod compatible_deployment;
+#[path = "../concurrent_edits.rs"]
+mod concurrent_edits;
 #[path = "../durable_local_write_replay_integration.rs"]
 mod durable_local_write_replay_integration;
 #[path = "../flush_once_per_refresh.rs"]
@@ -36,6 +38,8 @@ mod gset_merge;
 mod history_conflict;
 #[path = "../inherited_policies.rs"]
 mod inherited_policies;
+#[path = "../invitation_revocation.rs"]
+mod invitation_revocation;
 #[path = "../json_storage.rs"]
 mod json_storage;
 #[path = "../large_json_permissions.rs"]
@@ -52,6 +56,8 @@ mod merged_redelivery;
 mod mixed_generation_history;
 #[path = "../native_account_admission.rs"]
 mod native_account_admission;
+#[path = "../native_audio_streaming.rs"]
+mod native_audio_streaming;
 #[path = "../native_client_channel_pump.rs"]
 mod native_client_channel_pump;
 #[path = "../nullable_writes.rs"]

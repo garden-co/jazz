@@ -282,6 +282,7 @@ mod tests {
                 storage: crate::ivm::DurableStorage {
                     column_family: "durable".into(),
                     key_prefix: Vec::new(),
+                    name: "durable".into(),
                 },
             },
         );

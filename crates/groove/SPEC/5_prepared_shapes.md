@@ -135,6 +135,22 @@ any subsequent table or binding deltas and before any prepare or bind hydration
 snapshot (`INV-SHAPE-11`). This prevents a dead subscriber's pending retraction
 from corrupting a freshly hydrated sibling that shares the same binding source.
 
+Live admission owns its binding reference until the subscription opening
+succeeds. Before the admission tick publishes, cancellation or a storage error
+MUST remove only that metadata reference: no negative delta may compensate a
+positive that was never installed. After publication, a failed or cancelled
+opening MUST queue the ordinary retraction when it removes the last reference.
+This obligation covers later retraction flushes and public-output validation.
+Cleanup uses the binding source identity and encoded key even if the prepared
+shape retires before opening finishes.
+
+Receiver detachment MUST queue its retraction and retire an unreferenced
+binding-owned shape before awaiting cold maintenance. Cancellation cannot lose
+that queued work: the ordinary tick removes the queued prefix only after
+installing it. During asynchronous receiver pruning, automatic direct-query
+families retain their separate ordering: their binding source is removed only
+after its required retraction tick.
+
 ### 5.4 Output routing
 
 The shared graph computes rows for all active bindings, so each output delta
@@ -181,10 +197,19 @@ are defined in chapter 6.
 Prepared shapes retain their output graph nodes while registered
 (`INV-SHAPE-16`).
 
-**Implementation-status note.** The current API defines no shape-drop
-operation, so registered prepared shapes remain for the database lifetime.
-`prepared_shapes_retain_output_graph_nodes_without_subscribers` covers that
-behavior.
+Ordinary preparation is caller-owned. Closing its last binding does not remove
+the registration: callers may bind it again or call `retire_prepared_shape` once
+no binding targets it. Retirement releases only that shape's graph retainers,
+preserving other shapes and subscriptions that share graph nodes.
+
+`prepare_shared` deduplicates identical terminal sets and gives their retained
+bindings ownership of the shape. `bind_shape_owned_with_root_values` instead
+transfers an existing shape to its retained bindings after a successful opening,
+without changing whether the shape is shared. Its last unsubscribe or receiver
+cleanup retires it. A successful handle may already contain a terminal hydration
+error; an already-unreferenced shape is retired before that handle returns.
+Failed or cancelled openings do not change the shape's existing lifetime
+ownership, and rollback must not depend on its registration still being present.
 
 ## Open Questions
 

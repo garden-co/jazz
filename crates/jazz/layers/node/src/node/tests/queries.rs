@@ -654,7 +654,9 @@ fn nullable_reference_index_matches_present_uuid_and_excludes_nulls() {
         let (optional_rows, optional_metrics) =
             query_rows_by_uuid(&mut core, optional.clone(), tier);
         assert_eq!(optional_rows, vec![matching_optional]);
-        assert_eq!(optional_metrics.source_index_probes, 1);
+        // A Local read also probes the overlay and its shadow of settled rows.
+        let probes = if tier == DurabilityTier::Local { 3 } else { 1 };
+        assert_eq!(optional_metrics.source_index_probes, probes);
         let (required_rows, _) = query_rows_by_uuid(&mut core, required.clone(), tier);
         assert_eq!(required_rows, vec![matching_required]);
         let (null_rows, _) = query_rows_by_uuid(&mut core, explicit_null.clone(), tier);
@@ -742,11 +744,10 @@ fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
     assert_eq!(selected_metrics.source_primary_key_scans, 0);
     assert_eq!(selected_metrics.source_index_probes, 1);
     assert_eq!(selected_metrics.source_full_scans, 0);
-    assert_eq!(local_metrics.source_index_probes, 1);
-    assert_eq!(
-        local_metrics.source_full_scans, 1,
-        "Local index reads must scan ahead candidates because a newer winner can change owner"
-    );
+    // Settled, overlay and shadow index probes; a newer pending winner that
+    // changed owner is shadowed without scanning the overlay.
+    assert_eq!(local_metrics.source_index_probes, 3);
+    assert_eq!(local_metrics.source_full_scans, 0);
 }
 
 #[test]
@@ -815,8 +816,8 @@ fn local_indexed_read_includes_ahead_winners_outside_the_settled_prefix() {
         local.into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([moved_in, duplicate])
     );
-    assert_eq!(metrics.source_index_probes, 1);
-    assert_eq!(metrics.source_full_scans, 1);
+    assert_eq!(metrics.source_index_probes, 3);
+    assert_eq!(metrics.source_full_scans, 0);
 }
 
 #[test]
@@ -1056,8 +1057,8 @@ fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
     assert_eq!(selected, vec![first]);
     assert_eq!(selected_metrics.source_index_probes, 2);
     assert_eq!(selected_metrics.source_full_scans, 0);
-    assert_eq!(local_metrics.source_index_probes, 2);
-    assert_eq!(local_metrics.source_full_scans, 1);
+    assert_eq!(local_metrics.source_index_probes, 6);
+    assert_eq!(local_metrics.source_full_scans, 0);
 }
 
 #[test]
@@ -1151,7 +1152,6 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
         &mut node,
         &mut oracle,
         MergeableCommit::new("todos", row, 11)
-            .parents(vec![base])
             .cells(title_cells("child")),
     );
     assert_current_rows_match_oracle(&mut node, &oracle);
@@ -1167,7 +1167,6 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
         &mut node,
         &mut oracle,
         MergeableCommit::new("todos", row, 13)
-            .parents(vec![child])
             .cells(BTreeMap::from([(
                 "title".to_owned(),
                 "delete-concurrent update".to_owned(),
@@ -1184,7 +1183,7 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
 }
 
 #[test]
-fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
+fn local_current_from_ahead_index_matches_pending_fold_for_seeded_commits() {
     for seed in 0..16_u64 {
         let (_temp_dir, mut node) = open_node();
         let mut parents = BTreeMap::<RowUuid, (Option<TxId>, Option<TxId>)>::new();
@@ -1197,15 +1196,6 @@ fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
             let action = (rng >> 48) % 9;
             let deletion = matches!(action, 0..=3);
             let mut commit = MergeableCommit::new("todos", row_uuid, 1_000 + step);
-            if let Some(parent) =
-                parents.get(&row_uuid).and_then(
-                    |(content, deletion_parent)| {
-                        if deletion { *deletion_parent } else { *content }
-                    },
-                )
-            {
-                commit = commit.parents(vec![parent]);
-            }
             commit = match action {
                 0 | 1 => commit.deletion(DeletionEvent::Deleted),
                 2 | 3 => commit.deletion(DeletionEvent::Restored),
@@ -1281,41 +1271,83 @@ fn history_argmax_current_rows(
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let table = node.table("todos").unwrap().clone();
     let versions = node.query_table_versions("todos").unwrap();
-    let mut content = BTreeMap::<RowUuid, &VersionRow>::new();
-    let mut registers = BTreeMap::<RowUuid, &VersionRow>::new();
+    // The local row is the synced image (the newest accepted post-image) with
+    // the row's still-pending patches folded on top in tx order. A pending
+    // patch stores a full image but replaces only the columns it authors.
+    let mut synced = BTreeMap::<RowUuid, (GlobalTime, &VersionRow)>::new();
+    let mut pending =
+        BTreeMap::<RowUuid, Vec<(TxId, &VersionRow, Option<BTreeSet<String>>)>>::new();
     for version in &versions {
-        let winners = match version.layer() {
-            VersionLayer::Content => &mut content,
-            VersionLayer::Deletion => &mut registers,
-        };
-        if winners.get(&version.row_uuid()).is_none_or(|current| {
-            (version.tx_time(), version.tx_node_alias())
-                > (current.tx_time(), current.tx_node_alias())
-        }) {
-            winners.insert(version.row_uuid(), version);
+        let tx_id = node.version_tx_id(version).unwrap();
+        match node.transaction_state_settled(tx_id) {
+            Some((Fate::Accepted, Some(global_time), _)) => {
+                if synced
+                    .get(&version.row_uuid())
+                    .is_none_or(|(current, _)| global_time > *current)
+                {
+                    synced.insert(version.row_uuid(), (global_time, version));
+                }
+            }
+            Some((Fate::Pending, None, _)) => {
+                let authored = node.authored_columns_for_version(version).unwrap();
+                pending
+                    .entry(version.row_uuid())
+                    .or_default()
+                    .push((tx_id, version, authored))
+            }
+            _ => {}
         }
     }
-    content
-        .into_iter()
-        .filter_map(|(row_uuid, version)| {
-            let deleted = registers
+    let cells_of = |version: &VersionRow| {
+        table
+            .columns
+            .iter()
+            .filter_map(|column| {
+                version
+                    .cell(&table, &column.name)
+                    .unwrap()
+                    .map(|value| (column.name.clone(), value))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let rows = synced
+        .keys()
+        .chain(pending.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    rows.into_iter()
+        .filter_map(|row_uuid| {
+            let mut image = synced
                 .get(&row_uuid)
-                .and_then(|register| register.deletion())
-                == Some(DeletionEvent::Deleted);
-            if deleted {
-                return None;
+                .map(|(_, version)| (cells_of(version), version.is_deleted()));
+            let mut patches = pending.remove(&row_uuid).unwrap_or_default();
+            patches.sort_by_key(|(tx_id, _, _)| *tx_id);
+            for (_, patch, authored) in patches {
+                let authors =
+                    |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
+                image = Some(match image {
+                    Some((mut cells, deleted)) => {
+                        let patch_cells = cells_of(patch);
+                        for column in &table.columns {
+                            if authors(&column.name) {
+                                match patch_cells.get(&column.name) {
+                                    Some(value) => cells.insert(column.name.clone(), value.clone()),
+                                    None => cells.remove(&column.name),
+                                };
+                            }
+                        }
+                        let deleted = if authors(crate::node::DELETION_COLUMN_NAME) {
+                            patch.is_deleted()
+                        } else {
+                            deleted
+                        };
+                        (cells, deleted)
+                    }
+                    None => (cells_of(patch), patch.is_deleted()),
+                });
             }
-            let cells = table
-                .columns
-                .iter()
-                .filter_map(|column| {
-                    version
-                        .cell(&table, &column.name)
-                        .unwrap()
-                        .map(|value| (column.name.clone(), value))
-                })
-                .collect::<BTreeMap<_, _>>();
-            Some((row_uuid, cells))
+            let (cells, deleted) = image?;
+            (!deleted).then_some((row_uuid, cells))
         })
         .collect()
 }
@@ -3406,7 +3438,7 @@ fn cached_subscription_programs_preserve_identity_claims_and_query_inputs() {
 
 #[test]
 fn compiled_subscription_cache_excludes_branch_read_views() {
-    let schema = merge_head_branch_schema();
+    let schema = branch_commit_unit_schema();
     let (_dir, mut core) = open_history_complete_node_with_schema(node(0xd5), schema);
     for index in [1, 2] {
         core.commit_mergeable_settled(
