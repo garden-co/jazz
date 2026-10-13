@@ -2108,6 +2108,22 @@ fn reencode_terminal_root_record(
         .bind(raw)
         .to_values()
         .map_err(|_| super::Error::InvalidStoredValue("invalid structured terminal record"))?;
+    rebind_terminal_record_values(
+        &source,
+        target,
+        values,
+        "structured terminal root re-encoding failed",
+    )
+}
+
+/// Rebind each field value of a `source` record to `target`'s layout and
+/// encode the result under `target`.
+fn rebind_terminal_record_values(
+    source: &RecordDescriptor,
+    target: &RecordDescriptor,
+    values: Vec<Value>,
+    encoding_failed: &'static str,
+) -> Result<Vec<u8>, super::Error> {
     let values = source
         .fields()
         .iter()
@@ -2117,9 +2133,9 @@ fn reencode_terminal_root_record(
             rebind_terminal_value(value, &source.value_type, &target.value_type)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    target.create(&values).map_err(|_| {
-        super::Error::InvalidStoredValue("structured terminal root re-encoding failed")
-    })
+    target
+        .create(&values)
+        .map_err(|_| super::Error::InvalidStoredValue(encoding_failed))
 }
 
 fn rebind_terminal_value(
@@ -2172,18 +2188,12 @@ fn rebind_terminal_value(
             let values = record.to_values().map_err(|_| {
                 super::Error::InvalidStoredValue("invalid structured terminal record")
             })?;
-            let values = source
-                .fields()
-                .iter()
-                .zip(target.fields())
-                .zip(values)
-                .map(|((source, target), value)| {
-                    rebind_terminal_value(value, &source.value_type, &target.value_type)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let raw = target.create(&values).map_err(|_| {
-                super::Error::InvalidStoredValue("structured terminal nested re-encoding failed")
-            })?;
+            let raw = rebind_terminal_record_values(
+                source,
+                target,
+                values,
+                "structured terminal nested re-encoding failed",
+            )?;
             Ok(Value::Record(OwnedRecord::new(raw, **target)))
         }
         (Value::Enum(value), ValueType::Enum(source), ValueType::Enum(target)) => {
@@ -2600,17 +2610,14 @@ fn decode_typed_terminal_record(
                     "aggregate terminal lost its lowered schema",
                 ));
             };
-            decode_aggregate_app_row(record, schema)
+            decode_aggregate_result(record, schema, "aggregate_result".to_owned())
         }
         MaintainedTerminalKind::ResultCurrent(schema) => {
-            let table_name = match record.get_idx(field_idx(record, &schema.table_field)?)? {
-                Value::String(value) => value,
-                _ => {
-                    return Err(super::Error::InvalidStoredValue(
-                        "maintained result membership table field must be string",
-                    ));
-                }
-            };
+            let table_name = record_string(
+                record,
+                &schema.table_field,
+                "maintained result membership table field must be string",
+            )?;
             let table = tables
                 .get(&table_name)
                 .ok_or(super::Error::InvalidStoredValue(
@@ -2743,43 +2750,12 @@ fn decode_typed_terminal_record(
             Ok(DecodedMaintainedEvent::ResultCurrent { member, payload })
         }
         MaintainedTerminalKind::AggregateResult(schema) => {
-            let table = match record.get_idx(field_idx(record, &schema.synthetic.table_field)?)? {
-                Value::String(value) => value,
-                _ => {
-                    return Err(super::Error::InvalidStoredValue(
-                        "aggregate result table field must be string",
-                    ));
-                }
-            };
-            let prepared =
-                super::descriptor_roles::encode_aggregate_payload_record(record, schema)?;
-            let member = ResultMemberEntry::Synthetic {
-                table,
-                row: prepared.row_identity,
-                replacement: SyntheticReplacementToken::from_encoded_record(
-                    prepared.replacement_identity,
-                ),
-            };
-            let payload = ResultMemberPayloadEntry {
-                member: member.clone(),
-                descriptor: prepared.descriptor,
-                record: prepared.record,
-            };
-            Ok(DecodedMaintainedEvent::AggregateResult {
-                member,
-                payload,
-                synthetic: schema.synthetic.clone(),
-                value_fields: schema
-                    .value_fields
-                    .iter()
-                    .map(|field| {
-                        field
-                            .name
-                            .clone()
-                            .expect("lowered aggregate output is named")
-                    })
-                    .collect(),
-            })
+            let table = record_string(
+                record,
+                &schema.synthetic.table_field,
+                "aggregate result table field must be string",
+            )?;
+            decode_aggregate_result(record, schema, table)
         }
         MaintainedTerminalKind::ProgramSourceCoverage(schema) => {
             let complete = match record.get_idx(field_idx(record, "complete")?)? {
@@ -2853,18 +2829,19 @@ fn decode_typed_terminal_record(
     }
 }
 
-/// Decode the aggregate graph's sole application terminal into the synthetic
-/// member/payload pair used by the maintained reducer.  The member identity is
+/// Decode an aggregate terminal into the synthetic member/payload pair used
+/// by the maintained reducer, as a member of `table`.  The member identity is
 /// derived from the group key (or the one ungrouped empty group) and the
 /// replacement token from the complete aggregate summary; neither is an authority-sent
 /// result row.
-fn decode_aggregate_app_row(
+fn decode_aggregate_result(
     record: BorrowedRecord<'_>,
     schema: &AggregateResultSchema,
+    table: String,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     let prepared = super::descriptor_roles::encode_aggregate_payload_record(record, schema)?;
     let member = ResultMemberEntry::Synthetic {
-        table: "aggregate_result".to_owned(),
+        table,
         row: prepared.row_identity,
         replacement: SyntheticReplacementToken::from_encoded_record(prepared.replacement_identity),
     };
@@ -3013,14 +2990,11 @@ fn decode_typed_relation_edge(
 ) -> Result<RelationEdgeEntry, super::Error> {
     let source_table = table_name_from_versioned_ref(record, &schema.source, tables)?;
     let target_table = table_name_from_versioned_ref(record, &schema.target, tables)?;
-    let path = match record.get_idx(field_idx(record, &schema.path_field)?)? {
-        Value::String(value) => value,
-        _ => {
-            return Err(super::Error::InvalidStoredValue(
-                "relation edge path field must be string",
-            ));
-        }
-    };
+    let path = record_string(
+        record,
+        &schema.path_field,
+        "relation edge path field must be string",
+    )?;
     Ok(RelationEdgeEntry {
         path,
         source_table: source_table.clone().into(),
@@ -3044,14 +3018,11 @@ fn table_name_from_versioned_ref(
     schema: &VersionedRowRefSchema,
     tables: &TableSchemas,
 ) -> Result<String, super::Error> {
-    let table_name = match record.get_idx(field_idx(record, &schema.row.table_field)?)? {
-        Value::String(value) => value,
-        _ => {
-            return Err(super::Error::InvalidStoredValue(
-                "relation edge table field must be string",
-            ));
-        }
-    };
+    let table_name = record_string(
+        record,
+        &schema.row.table_field,
+        "relation edge table field must be string",
+    )?;
     tables
         .get(&table_name)
         .ok_or(super::Error::InvalidStoredValue(
@@ -3131,14 +3102,11 @@ fn decode_typed_version_witness(
     tables: &TableSchemas,
     decode_plan_cache: &mut VersionDecodePlanCache,
 ) -> Result<VersionRow, super::Error> {
-    let table_name = match record.get_idx(field_idx(record, &schema.identity.table_field)?)? {
-        Value::String(value) => value,
-        _ => {
-            return Err(super::Error::InvalidStoredValue(
-                "maintained witness table field must be string",
-            ));
-        }
-    };
+    let table_name = record_string(
+        record,
+        &schema.identity.table_field,
+        "maintained witness table field must be string",
+    )?;
     let table = tables
         .get(&table_name)
         .ok_or(super::Error::InvalidStoredValue(
@@ -3347,6 +3315,17 @@ fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, sup
         _ => Err(super::Error::InvalidStoredValue(
             "tagged _deletion must be nullable",
         )),
+    }
+}
+
+fn record_string(
+    record: BorrowedRecord<'_>,
+    field: &str,
+    not_string: &'static str,
+) -> Result<String, super::Error> {
+    match record.get_idx(field_idx(record, field)?)? {
+        Value::String(value) => Ok(value),
+        _ => Err(super::Error::InvalidStoredValue(not_string)),
     }
 }
 
