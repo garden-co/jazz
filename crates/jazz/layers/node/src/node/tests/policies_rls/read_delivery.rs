@@ -2124,6 +2124,114 @@ fn serving_subscribers_of_claims_only_query_share_one_prepared_program() {
     assert_eq!(released.graph_nodes, baseline.graph_nodes);
 }
 
+/// Contract: in a program shared by many subscribers, a subscriber's state
+/// grows with the rows it can read, not with the whole protected table
+/// (#4017).
+///
+/// Actors: eight members of one chat subscribe to `messages`. The table also
+/// holds many more messages of chats none of them belongs to. The policy's
+/// proof routes each admitted row by the member's claim, so a later
+/// subscriber should add state for its chat's rows only. Pairing every
+/// source row with every live binding before the proof made each subscriber
+/// add a copy of the whole table.
+#[test]
+fn serving_subscriber_state_grows_with_visible_rows_not_table_size() {
+    let (_core_dir, mut core) = open_node_with_schema(node(9), private_message_membership_schema());
+    let readers = (0..8u8).map(|i| user(0xa0 + i)).collect::<Vec<_>>();
+    let shared_chat = row(0x10);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("chats", shared_chat, 10).cells(BTreeMap::from([
+            ("isPublic".to_owned(), Value::Bool(false)),
+            ("createdBy".to_owned(), Value::String("owner".to_owned())),
+        ])),
+    );
+    for (i, reader) in readers.iter().enumerate() {
+        core.set_test_provider_claims(
+            *reader,
+            BTreeMap::from([(
+                "user_id".to_owned(),
+                Value::String(reader.test_uuid().to_string()),
+            )]),
+        );
+        accept_global(
+            &mut core,
+            MergeableCommit::new("chatMembers", row(0x20 + i as u8), 11).cells(BTreeMap::from([
+                ("chatId".to_owned(), Value::Uuid(shared_chat.0)),
+                ("userId".to_owned(), Value::String(reader.test_uuid().to_string())),
+            ])),
+        );
+    }
+    let message = |core: &mut NodeState, id: RowUuid, chat: RowUuid, at: u64| {
+        accept_global(
+            core,
+            MergeableCommit::new("messages", id, 12).cells(BTreeMap::from([
+                ("chatId".to_owned(), Value::Uuid(chat.0)),
+                ("text".to_owned(), Value::String(format!("m{at}"))),
+                ("createdAt".to_owned(), Value::U64(at)),
+            ])),
+        );
+    };
+    let visible = 4u64;
+    for at in 0..visible {
+        message(&mut core, RowUuid(uuid::Uuid::from_u128(0x1000 + u128::from(at))), shared_chat, at);
+    }
+    for other in 0..4u8 {
+        let chat = row(0x60 + other);
+        accept_global(
+            &mut core,
+            MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
+                ("isPublic".to_owned(), Value::Bool(false)),
+                ("createdBy".to_owned(), Value::String("owner".to_owned())),
+            ])),
+        );
+        for at in 0..32u64 {
+            let id = 0x2000 + u128::from(other) * 0x100 + u128::from(at);
+            message(&mut core, RowUuid(uuid::Uuid::from_u128(id)), chat, 100 + at);
+        }
+    }
+
+    let shape = Query::from("messages")
+        .order_by("createdAt", OrderDirection::Asc)
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        ..RegisterShapeOptions::default()
+    };
+    core.drive_query_runtime().unwrap();
+    let baseline = core.runtime_stats_for_test();
+    let mut peers = Vec::new();
+    let mut after_first = None;
+    for reader in &readers {
+        let mut peer = PeerState::client_link(*reader);
+        let update = peer
+            .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
+            .unwrap();
+        let rows = canonical_view_update_rows(&update)
+            .into_iter()
+            .filter(|(table, _, _)| table.as_str() == "messages")
+            .count() as u64;
+        assert_eq!(rows, visible, "each member reads only its chat's messages");
+        peers.push(peer);
+        after_first.get_or_insert_with(|| core.runtime_stats_for_test());
+    }
+    let after_first = after_first.unwrap();
+    let after_all = core.runtime_stats_for_test();
+    assert_eq!(after_all.active_prepared_shapes, after_first.active_prepared_shapes);
+    let first_rows = after_first.arrangement_rows - baseline.arrangement_rows;
+    let later_rows =
+        (after_all.arrangement_rows - after_first.arrangement_rows) / (readers.len() - 1);
+    // 128 unreadable messages: a per-binding copy of the table alone would
+    // add more than that for every later subscriber.
+    assert!(
+        later_rows < 128,
+        "a later subscriber adds state for its visible rows only \
+         (first {first_rows}, each later {later_rows})",
+    );
+}
+
 /// Contract: trusted-serving subscribers whose read policy inherits a parent's
 /// claim-scoped access share one prepared program, and each binding's proof
 /// keeps its own claim route through the inherited parent check (#4017).
