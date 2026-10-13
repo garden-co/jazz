@@ -238,9 +238,9 @@ export const readOrdersWithRequiredCustomer = Effect.gen(function* () {
 // #region reading-seeding-effect
 export const seedDefaultProject = Effect.gen(function* () {
   const jazz = yield* Jazz;
-  // Wait for the global core before reading — prevents duplicate seeding
+  // Read from the server before seeding — prevents duplicate seeding
   // from concurrent fresh clients on first visit.
-  const existing = yield* jazz.all(app.projects, { tier: "global" });
+  const existing = yield* jazz.all(app.projects, { tier: "remote" });
 
   if (existing.length === 0) {
     yield* jazz.insert(app.projects, { name: "Default" });

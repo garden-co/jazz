@@ -1265,7 +1265,7 @@ fn dropping_local_stream_releases_groove_subscription_without_a_write() {
         .unwrap();
     let baseline = db.runtime_stats_for_test().active_subscriptions;
     let opts = ReadOpts {
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
 
@@ -1300,7 +1300,7 @@ fn dropping_one_local_stream_preserves_a_sibling_on_the_same_binding() {
         .unwrap();
     let baseline = db.runtime_stats_for_test().active_subscriptions;
     let opts = ReadOpts {
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     let mut first = block_on(db.subscribe(&prepared, opts.clone())).unwrap();
@@ -1686,7 +1686,7 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
     let one_shot = block_on(db.all_for_identity(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: crate::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         member,
@@ -1698,7 +1698,7 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
     let access_rows = block_on(db.all_for_identity(
         &access,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: crate::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         member,
@@ -2084,8 +2084,7 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
         &client,
         &Query::from("res_i"),
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
+            tier: crate::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     )
@@ -2265,8 +2264,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let remote_opts = ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
+        tier: crate::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     let mut remote =
@@ -2444,8 +2442,7 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
         &client,
         &Query::from("res_i_child"),
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
+            tier: crate::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     )

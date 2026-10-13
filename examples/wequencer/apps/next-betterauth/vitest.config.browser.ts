@@ -5,11 +5,13 @@ import topLevelAwait from "vite-plugin-top-level-await";
 import wasm from "vite-plugin-wasm";
 
 import {
-  blockJazzServerNetwork,
   jazzServerInfo,
+  createJazzServerTransportControl,
+  blockJazzServerTransport,
+  unblockJazzServerTransport,
+  stopJazzServerTransportControl,
   jazzServerJwtForUser,
   stopJazzServerByUrl,
-  unblockJazzServerNetwork,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
 function jazzBrowserTopologyLog(
@@ -37,11 +39,14 @@ export default defineConfig({
       commands: {
         jazzBrowserTopologyLog,
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
+        jazzServerTransportControlCreate: async (_context, url) =>
+          createJazzServerTransportControl(url),
+        jazzServerTransportControlBlock: async (_context, url, direction: "both" | "inbound") =>
+          blockJazzServerTransport(url, direction),
+        jazzServerTransportControlUnblock: async (_context, url) => unblockJazzServerTransport(url),
+        jazzServerTransportControlStop: async (_context, url) =>
+          stopJazzServerTransportControl(url),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
-        jazzServerBlockNetwork: async ({ context }, serverUrl) =>
-          blockJazzServerNetwork(context, serverUrl),
-        jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
-          unblockJazzServerNetwork(context, serverUrl),
         jazzServerJwtForUser: async (_context, userId, claims, appId) =>
           jazzServerJwtForUser(userId, claims, appId),
       },
