@@ -289,16 +289,14 @@ export const memoryCeilings: MemoryCeilingSet = {
         ceiling: 396,
         unit: "labels",
         previous: { label: "alpha.59", ceiling: 218 },
-        firstToCross:
-          "The server, while a member edits a release under the label's policies.",
+        firstToCross: "The server, while a member edits a release under the label's policies.",
       },
       {
         scenario: "One label growing",
         ceiling: 6329,
         unit: "releases",
         previous: { label: "alpha.59", ceiling: 4219 },
-        firstToCross:
-          "The server, on a restart with nine of the label's members reconnecting.",
+        firstToCross: "The server, on a restart with nine of the label's members reconnecting.",
       },
     ],
   },

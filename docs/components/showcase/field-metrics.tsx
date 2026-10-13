@@ -57,9 +57,7 @@ function LoadTimes({ rows }: { rows: LoadTime[] }) {
                 </Text>
               </TableCell>
               <TableCell>
-                <Text hasTabularNumbers>
-                  {row.rttMs === null ? "—" : seconds(row.rttMs)}
-                </Text>
+                <Text hasTabularNumbers>{row.rttMs === null ? "—" : seconds(row.rttMs)}</Text>
               </TableCell>
             </TableRow>
           ))}
@@ -86,8 +84,8 @@ function CeilingCard({ ceiling }: { ceiling: MemoryCeiling }) {
         </Text>
         {ceiling.previous && (
           <Text type="supporting" hasTabularNumbers display="block">
-            {ceiling.previous.label}:{" "}
-            {ceiling.previous.ceiling.toLocaleString("en-US")} {ceiling.unit}
+            {ceiling.previous.label}: {ceiling.previous.ceiling.toLocaleString("en-US")}{" "}
+            {ceiling.unit}
           </Text>
         )}
         <Text as="p" display="block">
@@ -103,8 +101,8 @@ function MemoryCeilings({ ceilings }: { ceilings: MemoryCeiling[] }) {
     <VStack gap={2}>
       <Heading level={4}>Memory ceiling</Heading>
       <Text as="p" color="secondary" display="block" className="max-w-3xl">
-        The most data the app holds before its server or a client crosses its
-        memory budget: {memoryCeilings.budgets}.
+        The most data the app holds before its server or a client crosses its memory budget:{" "}
+        {memoryCeilings.budgets}.
       </Text>
       <VStack gap={3}>
         {ceilings.map((ceiling) => (
@@ -112,8 +110,7 @@ function MemoryCeilings({ ceilings }: { ceilings: MemoryCeiling[] }) {
         ))}
       </VStack>
       <Text type="supporting" display="block">
-        Measured {memoryCeilings.measured} on {memoryCeilings.build}.{" "}
-        {memoryCeilings.method}
+        Measured {memoryCeilings.measured} on {memoryCeilings.build}. {memoryCeilings.method}
       </Text>
       <Harness path={memoryCeilings.harness} />
     </VStack>
