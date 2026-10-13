@@ -761,7 +761,7 @@ single-owner query rule.
 The binding surface is a thin host-language wrapper around Rust-owned `Db`,
 transaction, subscription, and selected serving `Node` objects. It is not a
 second semantic protocol. Sync semantics remain `SyncMessage` inside Rust
-transports, byte transport uses `WireFrame`/`WireEnvelope` (ch. 8), and
+transports, byte transport uses `WireFrame::Channel` (ch. 8), and
 TypeScript owns ergonomic objects, validation helpers, promise/stream adapters,
 and framework integrations.
 
@@ -834,7 +834,7 @@ from the transaction fate.
 
 Bindings never decode `SyncMessage` as their primary sync API. The only portable
 byte transport payload is an encoded `WireFrame`; when the frame is
-`WireFrame::Message`, its `WireEnvelope.payload` contains the postcard-encoded
+`WireFrame::Channel`, its reassembled message contains the postcard-encoded
 `SyncMessage` owned by ch. 8. The binding is responsible for moving bytes between
 sockets, workers, or host channels and the Rust transport object exposed by the
 binding.
