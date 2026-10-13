@@ -69,6 +69,13 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "RUSTC_WRAPPER",
+        "SCCACHE_BASEDIRS",
+        "SCCACHE_DIR",
+        "SCCACHE_SERVER_UDS",
+        "SCCACHE_CACHE_SIZE",
+        "SCCACHE_MULTILEVEL_CHAIN",
+        "SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY",
         "JAZZ_RN_TEST_BRIDGE",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
@@ -103,6 +110,13 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "RUSTC_WRAPPER",
+        "SCCACHE_BASEDIRS",
+        "SCCACHE_DIR",
+        "SCCACHE_SERVER_UDS",
+        "SCCACHE_CACHE_SIZE",
+        "SCCACHE_MULTILEVEL_CHAIN",
+        "SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
         "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
@@ -133,6 +147,13 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "RUSTC_WRAPPER",
+        "SCCACHE_BASEDIRS",
+        "SCCACHE_DIR",
+        "SCCACHE_SERVER_UDS",
+        "SCCACHE_CACHE_SIZE",
+        "SCCACHE_MULTILEVEL_CHAIN",
+        "SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
         "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
