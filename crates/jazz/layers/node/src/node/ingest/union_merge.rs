@@ -11,7 +11,6 @@
 struct UnionMerge {
     layout: SchemaVersionId,
     layout_table: String,
-    columns: Vec<UnionColumn>,
     cells: BTreeMap<PhysicalColumnId, Value>,
     deletion: Value,
 }
@@ -62,41 +61,6 @@ where
         newest
             .map(|(_, schema, name)| (schema, name))
             .ok_or(Error::InvalidStoredValue("union layout schema missing"))
-    }
-
-    /// The authored spelling of `value` turned into the physical spelling of
-    /// its column (enum tags re-tagged to the lineage's physical tags). A
-    /// cell without an enum boundary is returned unchanged.
-    fn authored_cell_to_physical(
-        &mut self,
-        schema_version: SchemaVersionId,
-        table: &str,
-        column: usize,
-        value: Value,
-    ) -> Result<Value, Error> {
-        let plan =
-            self.prepared_physical_write_plan(schema_version, table, PhysicalWriteTarget::History)?;
-        let Some(remaps) = plan.enum_remaps.get(column) else {
-            return Ok(value);
-        };
-        if remaps.scalar.is_empty() && remaps.payload.is_empty() {
-            return Ok(value);
-        }
-        let physical_type = plan.physical_descriptor.fields()[HistoryRowRecord::USER_CELLS + column]
-            .value_type
-            .clone();
-        match (value, physical_type) {
-            (Value::Nullable(Some(inner)), records::ValueType::Nullable(physical)) => {
-                Ok(Value::Nullable(Some(Box::new(super::physical::remap_nested_enum_value(
-                    *inner,
-                    &plan.source_table.columns[column].column_type,
-                    &physical,
-                    remaps,
-                    "root",
-                )?))))
-            }
-            (value, _) => Ok(value),
-        }
     }
 
     /// `image`'s cells by physical column, nullable as stored and in physical
@@ -327,7 +291,6 @@ where
         Ok(Ok(UnionMerge {
             layout,
             layout_table,
-            columns,
             cells,
             deletion,
         }))
@@ -343,80 +306,129 @@ where
         merge: UnionMerge,
         global_time: GlobalTime,
     ) -> Result<VersionRow, Error> {
+        self.union_image_row(
+            merge.layout,
+            &merge.layout_table,
+            &merge.cells,
+            merge.deletion,
+            incoming,
+            previous,
+        )?
+        .with_merge_fields(global_time, incoming.base()?)
+    }
+
+    /// A row image in `layout`'s union layout: `identity`'s prefix and
+    /// merge fields, `created`'s creation provenance, `deletion`, and each
+    /// union column's cell from `cells` (physical spelling; missing cells
+    /// and derived extras are null).
+    fn union_image_row(
+        &mut self,
+        layout: SchemaVersionId,
+        layout_table: &str,
+        cells: &BTreeMap<PhysicalColumnId, Value>,
+        deletion: Value,
+        identity: &VersionRow,
+        created: &VersionRow,
+    ) -> Result<VersionRow, Error> {
         let layout_alias = self
             .catalogue
             .schema_version_aliases
-            .get(&merge.layout)
+            .get(&layout)
             .copied()
             .ok_or(Error::InvalidStoredValue("union layout schema alias missing"))?;
-        let layout_width = self
-            .table_in_schema_ref(&merge.layout_table, merge.layout)?
-            .columns
-            .len();
+        let layout_columns = self.union_columns(layout, layout_table)?;
+        let layout_width = self.table_in_schema_ref(layout_table, layout)?.columns.len();
         // Every extra field of the union case, in its order; the ones the
         // row derives from its own cells stay null (`union_stored_extras`).
         let extras = union_extra_columns(
             &self.catalogue.physical_mappings,
             &self.catalogue.schema_version_aliases,
-            merge.layout,
-            &merge.layout_table,
+            layout,
+            layout_table,
         )?;
-        let union = !extras.is_empty();
         let plan = self.prepared_physical_write_plan_for_layout(
-            merge.layout,
-            &merge.layout_table,
+            layout,
+            layout_table,
             PhysicalWriteTarget::History,
-            union,
+            !extras.is_empty(),
         )?;
         let descriptor = plan.logical_descriptor.clone();
-        let incoming_values = incoming.record.to_values()?;
-        let previous_record = previous.record.borrowed();
-        let incoming_table_width = incoming_values.len()
+        let identity_values = identity.record.to_values()?;
+        let created_record = created.record.borrowed();
+        let identity_table_width = identity_values.len()
             - HistoryRowRecord::USER_CELLS
-            - incoming.union_extra_cells()?.len()
+            - identity.union_extra_cells()?.len()
             - HISTORY_SUFFIX_FIELDS;
+        let cell = |id: &PhysicalColumnId| cells.get(id).cloned().unwrap_or(Value::Nullable(None));
         let mut values = Vec::with_capacity(descriptor.fields().len());
-        values.extend(incoming_values[..HistoryRowRecord::USER_CELLS].iter().cloned());
+        values.extend(identity_values[..HistoryRowRecord::USER_CELLS].iter().cloned());
         values[HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX] = Value::U64(layout_alias.0);
-        values[HistoryRowRecord::FIELD__DELETION_IDX] = merge.deletion;
+        values[HistoryRowRecord::FIELD__DELETION_IDX] = deletion;
         for index in [
             HistoryRowRecord::FIELD_CREATED_BY_IDX,
             HistoryRowRecord::FIELD_CREATED_AT_IDX,
         ] {
-            values[index] = previous_record.get_idx(index)?;
+            values[index] = created_record.get_idx(index)?;
         }
-        for column in &merge.columns[..layout_width] {
-            let value = merge.cells[&column.id].clone();
+        for column in &layout_columns[..layout_width] {
             values.push(self.physical_cell_to_authored(
-                merge.layout,
-                &merge.layout_table,
+                layout,
+                layout_table,
                 column.index,
-                value,
+                cell(&column.id),
             )?);
         }
-        let suffix_start = HistoryRowRecord::USER_CELLS + incoming_table_width;
+        let suffix_start = HistoryRowRecord::USER_CELLS + identity_table_width;
         values.extend(
-            incoming_values[suffix_start..suffix_start + HISTORY_SUFFIX_FIELDS]
+            identity_values[suffix_start..suffix_start + HISTORY_SUFFIX_FIELDS]
                 .iter()
                 .cloned(),
         );
-        for id in extras {
-            values.push(
-                merge
-                    .cells
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or(Value::Nullable(None)),
-            );
-        }
+        values.extend(extras.iter().map(cell));
         crate::node::merge_ops::clear_counter_signs(&mut values, &descriptor);
         let raw = descriptor.create(&values)?;
-        VersionRow {
-            table: groove::Intern::new(merge.layout_table),
-            branch_key: incoming.branch_key().clone(),
+        Ok(VersionRow {
+            table: groove::Intern::new(layout_table.to_owned()),
+            branch_key: identity.branch_key().clone(),
             record: OwnedRecord::new(raw, descriptor),
+        })
+    }
+
+    /// A received version's row (`VersionRow::from_wire_with_schema_version`)
+    /// as this node stores it: unchanged, or for a Core image with union
+    /// cells, laid out in this node's own union layout of the table (its
+    /// newest schema version mapping it), deriving the cells the image lacks
+    /// as a reader of each column would.
+    pub(super) fn with_wire_union_cells(
+        &mut self,
+        row: VersionRow,
+        version: &VersionRecord,
+    ) -> Result<VersionRow, Error> {
+        if version.extra_cells().is_empty() {
+            return Ok(row);
         }
-        .with_merge_fields(global_time, incoming.base()?)
+        let schema_version = version.schema_version();
+        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
+        let (_, mut cells) = self.image_union_cells(&row)?;
+        for (id, value) in self.union_cells_from_wire(version, table_id)? {
+            if cells.insert(id, value).is_some() {
+                return Err(Error::MalformedViewUpdate(
+                    "row version union cells repeat a column of its schema",
+                ));
+            }
+        }
+        let (layout, layout_table) = self.union_layout_schema(schema_version, version.table())?;
+        let columns = self.union_columns(layout, &layout_table)?;
+        if self
+            .complete_union_cells(schema_version, version.table(), &mut cells, &columns)?
+            .is_err()
+        {
+            return Err(Error::MalformedViewUpdate(
+                "row version union cells cannot be laid out on this node",
+            ));
+        }
+        let deletion = row.record.borrowed().get_idx(HistoryRowRecord::FIELD__DELETION_IDX)?;
+        self.union_image_row(layout, &layout_table, &cells, deletion, &row, &row)
     }
 
     /// Why Core refuses to merge `incoming` into `previous`, if it does.

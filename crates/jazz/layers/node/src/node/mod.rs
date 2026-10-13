@@ -2784,6 +2784,14 @@ fn version_indirect_descriptors(
                 collect_indirect_descriptors(&value, &mut descriptors);
             }
         }
+        for extra in version.extra_cells() {
+            let record = extra.record().borrowed();
+            for index in 0..extra.record().descriptor().fields().len() {
+                if let Ok(Value::Nullable(Some(value))) = record.get_idx(index) {
+                    collect_indirect_descriptors(&value, &mut descriptors);
+                }
+            }
+        }
     }
     descriptors
 }

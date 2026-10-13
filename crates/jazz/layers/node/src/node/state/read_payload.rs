@@ -232,7 +232,7 @@ where
         Ok(TxId::new(version.tx_time(), node))
     }
 
-    fn version_record_from_row(&self, version: &VersionRow) -> Result<VersionRecord, Error> {
+    fn version_record_from_row(&mut self, version: &VersionRow) -> Result<VersionRecord, Error> {
         #[cfg(feature = "cold-settle-attribution")]
         version.record_conversion("version_row_to_wire", 0);
         let schema_version = self
@@ -242,7 +242,8 @@ where
             ))?;
         let table = self.table_in_schema_ref(version.table(), schema_version)?;
         let authored_columns = self.authored_columns_for_version(version)?;
-        VersionRecord::from_stored(version, table, schema_version, authored_columns)
+        let record = VersionRecord::from_stored(version, table, schema_version, authored_columns)?;
+        Ok(record.with_extra_cells(self.union_extra_cells_for_wire(version)?))
     }
 
     #[allow(dead_code)]

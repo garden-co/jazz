@@ -235,6 +235,41 @@ where
         Ok(columns)
     }
 
+    /// The authored spelling of `value` turned into the physical spelling of
+    /// its column (enum tags re-tagged to the lineage's physical tags). A
+    /// cell without an enum boundary is returned unchanged.
+    pub(super) fn authored_cell_to_physical(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        column: usize,
+        value: Value,
+    ) -> Result<Value, Error> {
+        let plan =
+            self.prepared_physical_write_plan(schema_version, table, PhysicalWriteTarget::History)?;
+        let Some(remaps) = plan.enum_remaps.get(column) else {
+            return Ok(value);
+        };
+        if remaps.scalar.is_empty() && remaps.payload.is_empty() {
+            return Ok(value);
+        }
+        let physical_type = plan.physical_descriptor.fields()[HistoryRowRecord::USER_CELLS + column]
+            .value_type
+            .clone();
+        match (value, physical_type) {
+            (Value::Nullable(Some(inner)), records::ValueType::Nullable(physical)) => {
+                Ok(Value::Nullable(Some(Box::new(remap_nested_enum_value(
+                    *inner,
+                    &plan.source_table.columns[column].column_type,
+                    &physical,
+                    remaps,
+                    "root",
+                )?))))
+            }
+            (value, _) => Ok(value),
+        }
+    }
+
     /// The stored (physical, nullable) type of column `index` of
     /// `schema_version`'s `table`.
     fn physical_cell_type(
@@ -317,5 +352,116 @@ where
             .map(|value| Value::Nullable(Some(Box::new(value))))),
             _ => Err(Error::InvalidStoredValue("stored cell is not nullable")),
         }
+    }
+
+    /// The union cells of a stored row image for the wire: its stored
+    /// extras, grouped by the schema version that defines each column and
+    /// spelled as that schema's authored cells (`UnionExtraCells`). Empty for
+    /// a row stored in its schema's own case.
+    pub(super) fn union_extra_cells_for_wire(
+        &mut self,
+        version: &VersionRow,
+    ) -> Result<Vec<crate::protocol::UnionExtraCells>, Error> {
+        let extras = version.union_extra_cells()?;
+        if extras.is_empty() {
+            return Ok(Vec::new());
+        }
+        let layout = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("union row schema alias missing"))?;
+        let stored = self
+            .union_stored_extras(layout, version.table())?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut groups = BTreeMap::<(SchemaVersionId, String), BTreeMap<usize, Value>>::new();
+        for (id, value) in extras {
+            if !stored.contains(&id) {
+                continue;
+            }
+            let (schema, table, column) = self.union_column_definer(layout, version.table(), id)?;
+            let index = self
+                .table_in_schema_ref(&table, schema)?
+                .columns
+                .iter()
+                .position(|candidate| candidate.name == column)
+                .ok_or(Error::InvalidStoredValue("union extra column missing"))?;
+            let value = self.physical_cell_to_authored(schema, &table, index, value)?;
+            groups.entry((schema, table)).or_default().insert(index, value);
+        }
+        let mut wire = Vec::with_capacity(groups.len());
+        for ((schema, table), cells) in groups {
+            let descriptor = self.table_in_schema_ref(&table, schema)?.wire_record_descriptor();
+            let fields = cells
+                .keys()
+                .map(|index| descriptor.fields()[WireRowRecord::USER_CELLS + index].clone())
+                .collect::<Vec<_>>();
+            let descriptor = records::RecordDescriptor::new(fields.into_iter().map(|field| {
+                (
+                    field.name.expect("wire user cells are named"),
+                    field.value_type,
+                )
+            }));
+            let values = cells.into_values().collect::<Vec<_>>();
+            let raw = descriptor.create(&values)?;
+            wire.push(crate::protocol::UnionExtraCells::new(
+                schema,
+                table,
+                OwnedRecord::new(raw, descriptor),
+            ));
+        }
+        Ok(wire)
+    }
+
+    /// The physical cells a received version's union cells name, keyed by
+    /// this node's physical column ids: each entry's schema version must be
+    /// known, its table must be `table_id`'s lineage, and each cell must be
+    /// a column of that table with that schema's exact wire type.
+    pub(super) fn union_cells_from_wire(
+        &mut self,
+        version: &crate::protocol::VersionRecord,
+        table_id: PhysicalTableId,
+    ) -> Result<BTreeMap<PhysicalColumnId, Value>, Error> {
+        let malformed = || Error::MalformedViewUpdate("row version union cells do not match their schema");
+        let mut cells = BTreeMap::new();
+        for extra in version.extra_cells() {
+            let schema = extra.schema_version();
+            let table = self.table_in_schema(extra.table(), schema).map_err(|_| malformed())?;
+            let mapping = self
+                .catalogue
+                .physical_mappings
+                .get(&schema)
+                .and_then(|mapping| mapping.tables.get(extra.table()))
+                .cloned()
+                .ok_or_else(malformed)?;
+            if mapping.table_id != table_id {
+                return Err(malformed());
+            }
+            let descriptor = table.wire_record_descriptor();
+            let record = extra.record().borrowed();
+            for (field_index, field) in extra.record().descriptor().fields().iter().enumerate() {
+                let index = table
+                    .columns
+                    .iter()
+                    .position(|column| {
+                        Some(crate::schema::app_storage_column_name(&column.name).as_str()) == field.name.as_deref()
+                    })
+                    .ok_or_else(malformed)?;
+                if descriptor.fields()[WireRowRecord::USER_CELLS + index].value_type
+                    != field.value_type
+                {
+                    return Err(malformed());
+                }
+                let value = record.get_idx(field_index)?;
+                if let Value::Nullable(Some(inner)) = &value {
+                    validate_cell_value(&table.columns[index], inner)?;
+                }
+                let id = *mapping.columns.get(&table.columns[index].name).ok_or_else(malformed)?;
+                let value = self.authored_cell_to_physical(schema, extra.table(), index, value)?;
+                if cells.insert(id, value).is_some() {
+                    return Err(malformed());
+                }
+            }
+        }
+        Ok(cells)
     }
 }

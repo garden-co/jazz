@@ -1866,3 +1866,83 @@ fn older_schema_edit_of_a_dropped_column_keeps_both_layouts_columns() {
     write_todo(&mut bob, &mut core, target, 40, &[("done", Value::Bool(false))]);
     both(&mut core, "b", false);
 }
+
+/// #3838 at a receiver: Core's union image of the row reaches a client
+/// that knows both schema versions, which reads the row as Core's readers
+/// of each schema do: v1 keeps bob's `legacy`, v2 keeps alice's `dueDate`.
+#[test]
+fn receivers_read_a_union_image_as_core_does() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("legacy", PublicColumnType::Text),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let (v1_id, v2_id) = (v1.version_id(), v2.version_id());
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v1.clone(),
+        v2.clone(),
+        "todos",
+        vec![
+            LensOp::DropColumn {
+                column: "legacy".to_owned(),
+                backwards_default: v(""),
+            },
+            LensOp::AddColumn {
+                column: "dueDate".to_owned(),
+                default: v(""),
+            },
+        ],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2.clone());
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1.clone());
+    let target = row(0x92);
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("dueDate", v("10-01")),
+        ],
+    );
+    write_todo(
+        &mut bob,
+        &mut core,
+        target,
+        20,
+        &[("legacy", v("x")), ("done", Value::Bool(true))],
+    );
+
+    let v1_row = todo_row(&[
+        ("title", v("a")),
+        ("done", Value::Bool(true)),
+        ("legacy", v("x")),
+    ]);
+    let v2_row = todo_row(&[
+        ("title", v("a")),
+        ("done", Value::Bool(true)),
+        ("dueDate", v("10-01")),
+    ]);
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(3), v1);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
+    sync_table_rows_to(&mut core, &mut receiver, "todos");
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", v1_id)[&target],
+        v1_row,
+        "a v1 reader at the receiver keeps bob's legacy"
+    );
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", v2_id)[&target],
+        v2_row,
+        "a v2 reader at the receiver keeps alice's dueDate"
+    );
+}

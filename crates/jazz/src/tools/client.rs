@@ -4555,10 +4555,7 @@ mod tests {
     }
 
     fn tick_reconnect_error() -> CoreDbError {
-        CoreDbError {
-            code: CoreDbErrorCode::Protocol,
-            message: "websocket pump is closed".to_owned(),
-        }
+        CoreDbError::new(CoreDbErrorCode::Protocol, "websocket pump is closed")
     }
 
     fn make_native_context(name: &str) -> AppContext {
@@ -5714,10 +5711,10 @@ mod tests {
         ))
         .await
         .expect("connect offline client");
-        let error = CoreDbError {
-            code: CoreDbErrorCode::Storage,
-            message: "simulated local storage corruption".to_string(),
-        };
+        let error = CoreDbError::new(
+            CoreDbErrorCode::Storage,
+            "simulated local storage corruption",
+        );
 
         assert_eq!(
             classify_tick_driver_error(&error),

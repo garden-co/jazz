@@ -494,7 +494,16 @@ where
             )
             .await?;
         let actual = rows.first().map(|row| row.record().raw().to_vec());
-        let expected = owned_record_from_storage_values(&current_schema, expected_values)?
+        // A union row's current record carries its extras after the
+        // schema's own fields, as its write plan lays them out.
+        let descriptor = if version.union_extra_cells()?.is_empty() {
+            current_schema.record_schema()
+        } else {
+            self.prepared_physical_write_plan_for_row(version, PhysicalWriteTarget::GlobalCurrent)?
+                .logical_descriptor
+                .clone()
+        };
+        let expected = owned_record_from_storage_values_with_descriptor(descriptor, expected_values)?
             .raw()
             .to_vec();
         if actual.as_deref() != Some(expected.as_slice()) {

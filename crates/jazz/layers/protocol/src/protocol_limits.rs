@@ -146,6 +146,17 @@ pub fn commit_unit_limit_violation(versions: &[VersionRecord]) -> Option<String>
             MAX_COMMIT_UNIT_VERSIONS
         ));
     }
+    // Union cells belong to Core's row images; a commit unit's versions are
+    // authored writes, which carry only their own schema's cells.
+    if let Some(version) = versions
+        .iter()
+        .find(|version| !version.extra_cells().is_empty())
+    {
+        return Some(format!(
+            "row version for table '{}' is an authored write but carries union cells",
+            version.table()
+        ));
+    }
     None
 }
 
