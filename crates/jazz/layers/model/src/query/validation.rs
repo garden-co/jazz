@@ -1900,7 +1900,12 @@ fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), Query
     }
 }
 
-fn schema_table<'a>(schema: &'a RuntimeSchema, name: &str) -> Result<&'a TableSchema, QueryError> {
+/// Borrows the table: validation runs for every policy and subscription, and
+/// copying a table schema per lookup dominated its cost.
+fn schema_table<'a>(
+    schema: &'a RuntimeSchema,
+    name: &str,
+) -> Result<&'a TableSchema, QueryError> {
     schema
         .tables
         .iter()
