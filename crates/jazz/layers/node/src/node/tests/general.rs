@@ -1736,8 +1736,8 @@ fn a_touched_row_list_is_node_local_and_survives_batches_applied_before_its_tran
         .owned_record();
     assert_eq!(
         transaction.borrowed().descriptor().fields().len(),
-        TransactionRowRecord::FIELD_REJECTION_IDX + 1,
-        "the transaction record ends at its rejection; it carries no node-local list"
+        TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX + 1,
+        "the transaction record ends at its permission subject; it carries no node-local list"
     );
 
     // Forget the list and the transaction record, as if neither was written yet.

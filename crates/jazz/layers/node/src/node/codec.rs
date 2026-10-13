@@ -115,6 +115,7 @@ groove::define_record! {
         8 => durability: DurabilityTier,
         9 => user_metadata: Option<String>,
         10 => rejection: Option<OwnedRecord>,
+        11 => permission_subject: Option<AuthorSubject>,
     }
 }
 
@@ -125,7 +126,11 @@ pub(super) const TX_FLAG_VIEW_SCOPED_CARDINALITY: u8 = 0b01;
 /// `jazz_transactions.flags` bit: the transaction has a `jazz_tx_provenance`
 /// record.
 pub(super) const TX_FLAG_HAS_PROVENANCE: u8 = 0b10;
-const TX_KNOWN_FLAGS: u8 = TX_FLAG_VIEW_SCOPED_CARDINALITY | TX_FLAG_HAS_PROVENANCE;
+/// `jazz_transactions.flags` bit: the transaction's permission subject is its
+/// author, so the record does not repeat it.
+pub(super) const TX_FLAG_PERMISSION_SUBJECT_IS_AUTHOR: u8 = 0b100;
+const TX_KNOWN_FLAGS: u8 =
+    TX_FLAG_VIEW_SCOPED_CARDINALITY | TX_FLAG_HAS_PROVENANCE | TX_FLAG_PERMISSION_SUBJECT_IS_AUTHOR;
 
 /// Flags of a stored `jazz_transactions` record. Reserved bits fail closed.
 pub(super) fn transaction_flags(record: BorrowedRecord<'_>) -> Result<u8, Error> {
@@ -163,11 +168,10 @@ groove::define_record! {
     pub(super) struct PendingTransactionRowRecord {
         0 => time: TxTime,
         1 => node_id: NodeAlias,
-        2 => permission_subject: Option<AuthorSubject>,
-        3 => base_snapshot: Option<Value>,
-        4 => row_read_set: Option<Value>,
-        5 => absent_read_set: Option<Value>,
-        6 => predicate_read_set: Option<Value>,
+        2 => base_snapshot: Option<Value>,
+        3 => row_read_set: Option<Value>,
+        4 => absent_read_set: Option<Value>,
+        5 => predicate_read_set: Option<Value>,
     }
 }
 
@@ -3800,6 +3804,13 @@ pub(super) fn transaction_record_values(
     if tx.contribution_merge.is_some() {
         flags |= TX_FLAG_HAS_PROVENANCE;
     }
+    let permission_subject = match tx.permission_subject {
+        Some(subject) if subject == tx.made_by => {
+            flags |= TX_FLAG_PERMISSION_SUBJECT_IS_AUTHOR;
+            None
+        }
+        subject => subject,
+    };
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
         Value::U64(node_alias.0),
@@ -3825,7 +3836,29 @@ pub(super) fn transaction_record_values(
             }
             .map(|record| Box::new(Value::Record(record))),
         ),
+        Value::Nullable(permission_subject.map(|id| Box::new(id.to_value()))),
     ])
+}
+
+/// The permission subject a `jazz_transactions` record names, given its
+/// decoded author.
+pub(super) fn transaction_permission_subject(
+    record: BorrowedRecord<'_>,
+    made_by: AuthorSubject,
+) -> Result<Option<AuthorSubject>, Error> {
+    let stored = <Option<AuthorSubject> as records::RecordField>::read(
+        &record,
+        TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX,
+    )?;
+    if transaction_flags(record)? & TX_FLAG_PERMISSION_SUBJECT_IS_AUTHOR == 0 {
+        return Ok(stored);
+    }
+    if stored.is_some() {
+        return Err(Error::InvalidStoredValue(
+            "transaction record repeats a permission subject its flags name as the author",
+        ));
+    }
+    Ok(Some(made_by))
 }
 
 fn rejection_record(reason: &RejectionReason) -> Result<OwnedRecord, Error> {
@@ -3878,10 +3911,9 @@ pub(super) fn pending_transaction_values(
         tx,
         matches!(status.fate, Fate::Pending),
     )?;
-    if tx.permission_subject.is_none()
-        && evidence
-            .iter()
-            .all(|slot| matches!(slot, Value::Nullable(None)))
+    if evidence
+        .iter()
+        .all(|slot| matches!(slot, Value::Nullable(None)))
     {
         return Ok(None);
     }
@@ -3894,7 +3926,6 @@ pub(super) fn pending_transaction_values(
     Ok(Some(vec![
         Value::U64(tx.tx_id.time.0),
         Value::U64(node_alias.0),
-        Value::Nullable(tx.permission_subject.map(|id| Box::new(id.to_value()))),
         base_snapshot,
         row_read_set,
         absent_read_set,
@@ -3985,19 +4016,12 @@ pub(super) fn next_fate(current: &Fate, incoming: Fate) -> Result<Fate, Error> {
 }
 
 /// Compare a stored transaction with a redelivered one. The store drops a
-/// transaction's pending-only fields (read evidence and the permission hint)
-/// once it settles, so a stored copy without them still matches a
-/// redelivery that carries them.
+/// transaction's exclusive read evidence once it settles, so a stored copy
+/// without it still matches a redelivery that carries it.
 pub(super) fn known_transaction_payload_matches(
     existing: &Transaction,
     incoming: &Transaction,
 ) -> bool {
-    if existing.permission_subject.is_none() && incoming.permission_subject.is_some() {
-        return known_transaction_payload_matches(
-            existing,
-            &transaction_without_permission_subject(incoming),
-        );
-    }
     let mut redacted_existing = existing.clone();
     redacted_existing.base_snapshot = None;
     redacted_existing.row_read_set = None;
@@ -5244,7 +5268,7 @@ mod transaction_record_tests {
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
             hex(&bytes),
-            "020100000000000001000000000000000000030000000000000001010900000000000000022a0000000000"
+            "020100000000000001000000000000000000030000000000000001010900000000000000022e0000002f000000000000"
         );
         assert_eq!(
             pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
@@ -5266,7 +5290,7 @@ mod transaction_record_tests {
         let values = transaction_record_values(NodeAlias(1), AuthorCode(0), &tx, &status).unwrap();
         assert_eq!(
             hex(&encode("jazz_transactions", &values)),
-            "020100000000000001000000000000000000030000000000000002000000000000000000012a0000000001040100000000000001010808080808080808080808080808080800"
+            "020100000000000001000000000000000000030000000000000002000000000000000000012e0000004a000000000104010000000000000101080808080808080808080808080808080000"
         );
         assert_eq!(
             pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
@@ -5275,40 +5299,44 @@ mod transaction_record_tests {
         );
     }
 
-    /// A pending transaction authorized as another identity keeps that
-    /// identity in its pending record until it settles.
+    /// A transaction authorized as another identity keeps that identity in
+    /// its record for life, since replayed units carry it. A transaction
+    /// authorized as its author only sets a flag bit.
     #[test]
-    fn pending_transaction_record_bytes_are_pinned() {
+    fn permission_subject_bytes_are_pinned() {
         let mut tx = tx(TxKind::Mergeable);
         tx.permission_subject = Some(AuthorSubject::for_test_bytes([6; 16]));
         tx.user_metadata_json = Some("{}".to_owned());
         let status = TransactionRecordStatus::new(Fate::Pending, None, DurabilityTier::Local)
             .view_scoped(true);
         let values = transaction_record_values(NodeAlias(1), AuthorCode(0), &tx, &status).unwrap();
+        let bytes = encode("jazz_transactions", &values);
         assert_eq!(
-            hex(&encode("jazz_transactions", &values)),
-            "020100000000000001000000000000000001030000000000000000000000000000000000012d00000001027b7d00"
+            hex(&bytes),
+            "02010000000000000100000000000000000103000000000000000000000000000000000001310000003200000001027b7d0001019c6dbdef71c955b8a4d72db3a1e0c7d1120000000275726e3a6a617a7a3a746573740230363036303630362d303630362d303630362d303630362d303630363036303630363036"
         );
-        let pending = pending_transaction_values(NodeAlias(1), &tx, &status)
-            .unwrap()
-            .unwrap();
+        let record = OwnedRecord::new(bytes, descriptor("jazz_transactions"));
         assert_eq!(
-            hex(&encode(PENDING_TRANSACTIONS_TABLE, &pending)),
-            "02010000000000000100000000000000690000006a0000006b0000006c00000001019c6dbdef71c955b8a4d72db3a1e0c7d1120000000275726e3a6a617a7a3a746573740230363036303630362d303630362d303630362d303630362d30363036303630363036303600000000"
+            transaction_permission_subject(record.borrowed(), tx.made_by).unwrap(),
+            tx.permission_subject
         );
         assert_eq!(
-            pending_transaction_values(
-                NodeAlias(1),
-                &tx,
-                &TransactionRecordStatus::new(
-                    Fate::Accepted,
-                    Some(GlobalTime(1)),
-                    DurabilityTier::Global
-                )
-            )
-            .unwrap(),
+            pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
             None,
-            "settling drops the pending record"
+            "a mergeable transaction has nothing to keep until it settles"
+        );
+
+        tx.permission_subject = Some(tx.made_by);
+        let values = transaction_record_values(NodeAlias(1), AuthorCode(0), &tx, &status).unwrap();
+        let bytes = encode("jazz_transactions", &values);
+        assert_eq!(
+            hex(&bytes),
+            "02010000000000000100000000000000000503000000000000000000000000000000000001310000003200000001027b7d0000"
+        );
+        let record = OwnedRecord::new(bytes, descriptor("jazz_transactions"));
+        assert_eq!(
+            transaction_permission_subject(record.borrowed(), tx.made_by).unwrap(),
+            Some(tx.made_by)
         );
     }
 
@@ -5352,8 +5380,19 @@ mod transaction_record_tests {
         );
 
         let mut reserved = accepted.clone();
-        reserved[TransactionRowRecord::FIELD_FLAGS_IDX] = Value::U8(0b100);
+        reserved[TransactionRowRecord::FIELD_FLAGS_IDX] = Value::U8(0b1000);
         assert!(transaction_flags(record(&reserved).borrowed()).is_err());
+
+        // The author flag and a stored permission subject are two spellings.
+        let mut repeated_subject = accepted.clone();
+        repeated_subject[TransactionRowRecord::FIELD_FLAGS_IDX] =
+            Value::U8(TX_FLAG_PERMISSION_SUBJECT_IS_AUTHOR);
+        repeated_subject[TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX] =
+            Value::Nullable(Some(Box::new(tx.made_by.to_value())));
+        assert!(
+            transaction_permission_subject(record(&repeated_subject).borrowed(), tx.made_by)
+                .is_err()
+        );
 
         let mut accepted_with_reason = accepted.clone();
         accepted_with_reason[TransactionRowRecord::FIELD_REJECTION_IDX] =

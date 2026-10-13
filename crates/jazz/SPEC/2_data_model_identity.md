@@ -424,7 +424,8 @@ matters only while it is pending. Its fields are, in order: `(time: TxTime,
 node_id: NodeAlias, kind, flags: U8, n_total_writes: U32, made_by: U32, fate,
 global_time: Nullable<U64>, durability, user_metadata: Nullable<String>,
 rejection: Nullable<{reason, cascade_root: Nullable<(U64, Uuid)>, detail:
-Nullable<String>}>)`, keyed `(time, node_id)` with the `by_global_time` index.
+Nullable<String>}>, permission_subject: Nullable<AuthorSubject>)`, keyed
+`(time, node_id)` with the `by_global_time` index.
 `TxKind` is `Mergeable=0`, `Exclusive=1`; fate is `Pending=0`, `Accepted=1`,
 `Rejected=2`; durability is `None=0`, `Local=1`, `Global=2` in
 `jazz.transaction-durability.v2` (ch. 9); rejection reasons are
@@ -433,7 +434,12 @@ Nullable<String>}>)`, keyed `(time, node_id)` with the `by_global_time` index.
 
 - `flags` bit 0 says the stored `n_total_writes` is view-redacted; it is
   cleared when a complete payload arrives. Bit 1 says a `jazz_tx_provenance`
-  record exists. Other bits are reserved and refused on read.
+  record exists. Bit 2 says the permission subject is the author, and
+  `permission_subject` is then null. Other bits are reserved and refused on
+  read.
+- `permission_subject` is the identity the writes were authorized as when it
+  is not the author. Replayed and relayed units carry it, so a settled
+  transaction keeps it; a set bit 2 with a non-null field is refused.
 - `made_by` is the author's code in the node-local `jazz_authors` Groove
   dictionary table (`code: U32` key, `value: Bytes` with a unique index),
   whose value is the canonical `RowAuthor` record bytes. An entry is written
@@ -460,13 +466,12 @@ whatever the write count.
 
 **Pending record.** An unsettled transaction (no global time and not
 rejected) may have one `jazz_pending_transactions` record keyed like its
-transaction record: `(time, node_id, permission_subject:
-Nullable<AuthorSubject>, base_snapshot, row_read_set, absent_read_set,
-predicate_read_set)`, the last four nullable bytes. It exists only when one of
-those fields is non-null, and the batch that records the transaction's seq or
-rejection deletes it. A settled transaction therefore keeps neither its
-permission hint nor its read evidence; a stored copy without them still
-matches a redelivery that carries them.
+transaction record: `(time, node_id, base_snapshot, row_read_set,
+absent_read_set, predicate_read_set)`, the last four nullable bytes holding
+its exclusive read evidence. It exists only when one of those fields is
+non-null, and the batch that records the transaction's seq or rejection
+deletes it. A settled transaction therefore keeps no read evidence; a stored
+copy without it still matches a redelivery that carries it.
 
 **History horizon.** `jazz_history_horizon` holds at most one record, `(id: U8
 = 0, horizon: U64)`: the seq at or below which this store's history was

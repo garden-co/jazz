@@ -1499,8 +1499,9 @@ fn transactions_table() -> GrooveTableSchema {
             column("node_id", GrooveColumnType::U64),
             column("kind", tx_kind_column()),
             // Bit 0: `n_total_writes` is only the view-redacted cardinality.
-            // Bit 1: a `jazz_tx_provenance` record exists. Other bits are
-            // reserved and refused on read.
+            // Bit 1: a `jazz_tx_provenance` record exists.
+            // Bit 2: the permission subject is the author itself. Other bits
+            // are reserved and refused on read.
             column("flags", GrooveColumnType::U8),
             column("n_total_writes", GrooveColumnType::U32),
             // node-local-derived: the author's code in `jazz_authors`.
@@ -1514,6 +1515,13 @@ fn transactions_table() -> GrooveTableSchema {
             column("user_metadata", GrooveColumnType::String.nullable()),
             // upstream-decided: set exactly when `fate` is rejected.
             column("rejection", rejection_column().nullable()),
+            // The identity the writes were authorized as when it is not the
+            // author (flag bit 2 covers that case). Replayed units carry it,
+            // so it is kept for the transaction's whole life.
+            column(
+                "permission_subject",
+                crate::ids::AuthorSubject::value_type().nullable(),
+            ),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
@@ -1537,8 +1545,7 @@ fn rejection_column() -> GrooveColumnType {
 /// seq or a rejection, keyed `(time, node_id)` like its `jazz_transactions`
 /// record. A record exists only for an unsettled transaction that has
 /// something to keep here; the batch that stores its seq or rejection deletes
-/// it. `permission_subject` is the identity its writes were authorized as;
-/// slots 3 to 6 hold its exclusive read evidence
+/// it. Slots 2 to 5 hold its exclusive read evidence
 /// (`jazz.exclusive-read-evidence.v1`) while its fate is pending.
 fn pending_transactions_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
@@ -1546,10 +1553,6 @@ fn pending_transactions_table() -> GrooveTableSchema {
         [
             column("time", GrooveColumnType::U64),
             column("node_id", GrooveColumnType::U64),
-            column(
-                "permission_subject",
-                crate::ids::AuthorSubject::value_type().nullable(),
-            ),
             column("base_snapshot", GrooveColumnType::Bytes.nullable()),
             column("row_read_set", GrooveColumnType::Bytes.nullable()),
             column("absent_read_set", GrooveColumnType::Bytes.nullable()),

@@ -31,13 +31,13 @@ is every settled write.
 
 SPEC 2 §2.8 has the normative layout. In short:
 
-| table                       | key               | holds                                                                                                                                                          | lifetime                                          |
-| --------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| `jazz_transactions`         | `(time, node_id)` | time, node_id, kind, flags `U8`, n_total_writes, `made_by` as a `U32` author code, fate, global_time, durability, user_metadata, one nullable rejection record | forever                                           |
-| `jazz_tx_provenance`        | `(time, node_id)` | the contribution provenance record                                                                                                                             | forever, only when flag bit 1 is set              |
-| `jazz_pending_transactions` | `(time, node_id)` | permission_subject and the four read-evidence slots                                                                                                            | until the batch that records a seq or a rejection |
-| `jazz_authors`              | `code: U32`       | canonical `RowAuthor` bytes, unique value index                                                                                                                | forever, append-only                              |
-| `jazz_history_horizon`      | `id: U8 = 0`      | the seq at or below which history was truncated                                                                                                                | forever; this release requires 0                  |
+| table                       | key               | holds                                                                                                                                                                                                            | lifetime                                          |
+| --------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `jazz_transactions`         | `(time, node_id)` | time, node_id, kind, flags `U8`, n_total_writes, `made_by` as a `U32` author code, fate, global_time, durability, user_metadata, one nullable rejection record, the permission subject when it is not the author | forever                                           |
+| `jazz_tx_provenance`        | `(time, node_id)` | the contribution provenance record                                                                                                                                                                               | forever, only when flag bit 1 is set              |
+| `jazz_pending_transactions` | `(time, node_id)` | the four read-evidence slots                                                                                                                                                                                     | until the batch that records a seq or a rejection |
+| `jazz_authors`              | `code: U32`       | canonical `RowAuthor` bytes, unique value index                                                                                                                                                                  | forever, append-only                              |
+| `jazz_history_horizon`      | `id: U8 = 0`      | the seq at or below which history was truncated                                                                                                                                                                  | forever; this release requires 0                  |
 
 `base_pending` in history becomes a nullable `{time: U64, node: Uuid}` record.
 
@@ -73,9 +73,11 @@ complete.
 
 ## Decisions a reader should know
 
-- **Settled transactions keep no permission hint or read evidence.** Duplicate
-  detection treats a stored copy without the permission hint as matching a
-  redelivery that carries one, as it already did for read evidence.
+- **Settled transactions keep no read evidence, but keep their permission
+  subject.** Replayed and relayed units carry the permission subject, and
+  peers admit and deduplicate them by it, so it is not pending-only. It costs
+  a flag bit when it is the author. Duplicate detection treats a stored copy
+  without read evidence as matching a redelivery that carries it.
 - **Author codes are node-local and append-only.** An entry is written in the
   same batch as the first record that uses its code, so no durable record can
   name a code without an entry. A batch that is dropped before it applies
@@ -91,7 +93,8 @@ complete.
 - **An exclusive aggregate read after a write in the same transaction is
   refused** with `UnsupportedExclusiveRead` (#3768). The authority re-runs the
   aggregate over committed state, which does not include the transaction's
-  own writes, so such a result cannot be compared soundly.
+  own writes, so such a result cannot be compared soundly. Anselm accepted
+  this restriction for alpha.60 (2026-10-13).
 
 ## Measured size
 
@@ -102,10 +105,13 @@ per-transaction bytes:
 
 | per transaction                          | before (#3281, `tx-metadata` probe) |   after |
 | ---------------------------------------- | ----------------------------------: | ------: |
-| `jazz_transactions` record (key + value) |                                 287 |      83 |
+| `jazz_transactions` record (key + value) |                                 287 |      88 |
 | `by_global_time` index entry             |                                  30 |      30 |
 | `jazz_tx_touched_rows` record            |                                  97 |      97 |
-| **transaction metadata**                 |                             **414** | **210** |
+| **transaction metadata**                 |                             **414** | **215** |
+
+The run measured 83 bytes for the record; keeping the permission subject
+added its 5-byte null slot, which the pinned record bytes confirm.
 
 `jazz_authors` adds one entry and one index entry per distinct author (about
 180 bytes), not per transaction. History images are 20 bytes smaller from the

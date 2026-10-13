@@ -157,13 +157,24 @@ fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
     exclusive.base_snapshot = Some(snapshot);
     let [base, ..] =
         super::super::exclusive_read_evidence::evidence_slot_values(&exclusive, true).unwrap();
-    let mut values = pending_transaction_values(
-        stored.node_alias,
-        &stored.tx,
-        &TransactionRecordStatus::new(Fate::Pending, None, stored.durability),
-    )
-    .unwrap()
-    .expect("a locally authored transaction keeps its permission subject while pending");
+    assert_eq!(
+        pending_transaction_values(
+            stored.node_alias,
+            &stored.tx,
+            &TransactionRecordStatus::new(Fate::Pending, None, stored.durability),
+        )
+        .unwrap(),
+        None,
+        "a mergeable transaction writes no pending record"
+    );
+    let mut values = vec![
+        Value::U64(tx_id.time.0),
+        Value::U64(stored.node_alias.0),
+        Value::Nullable(None),
+        Value::Nullable(None),
+        Value::Nullable(None),
+        Value::Nullable(None),
+    ];
     values[PendingTransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX] = base;
     let mut batch = writer.database.open_batch();
     batch.update(PENDING_TRANSACTIONS_TABLE, values);

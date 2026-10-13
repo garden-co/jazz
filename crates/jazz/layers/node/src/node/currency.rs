@@ -1217,6 +1217,7 @@ where
             ))
             .await?
             .as_author_subject();
+        let permission_subject = transaction_permission_subject(record, made_by)?;
         let fate = fate_from_encoded_fields(record)?;
         let global_time = record
             .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
@@ -1229,7 +1230,7 @@ where
         } else {
             None
         };
-        let (permission_subject, evidence) = match &pending {
+        let evidence = match &pending {
             Some(raw) => {
                 let pending = raw.record();
                 let evidence_slot = |idx: usize| -> Result<Option<Vec<u8>>, Error> {
@@ -1262,23 +1263,14 @@ where
                         "settled transaction keeps exclusive read evidence",
                     ));
                 }
-                (
-                    <Option<AuthorSubject> as groove::records::RecordField>::read(
-                        &pending,
-                        PendingTransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX,
-                    )?,
-                    super::exclusive_read_evidence::decode_evidence_slots(
-                        slots[0].as_deref(),
-                        slots[1].as_deref(),
-                        slots[2].as_deref(),
-                        slots[3].as_deref(),
-                    )?,
-                )
+                super::exclusive_read_evidence::decode_evidence_slots(
+                    slots[0].as_deref(),
+                    slots[1].as_deref(),
+                    slots[2].as_deref(),
+                    slots[3].as_deref(),
+                )?
             }
-            None => (
-                None,
-                super::exclusive_read_evidence::decode_evidence_slots(None, None, None, None)?,
-            ),
+            None => super::exclusive_read_evidence::decode_evidence_slots(None, None, None, None)?,
         };
         let contribution_merge = if flags & TX_FLAG_HAS_PROVENANCE != 0 {
             let raw = self
