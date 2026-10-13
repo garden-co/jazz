@@ -256,6 +256,7 @@ fn ordinary_query_does_not_infer_flat_join_physical_id_alias() {
 #[test]
 fn join_read_tables_include_source_lookups_and_nested_joins() {
     let nested = crate::query::JoinVia {
+        requires_policy_provenance: false,
         table: "nested_junction".to_owned(),
         on_column: "target".to_owned(),
         target: Default::default(),
@@ -270,6 +271,7 @@ fn join_read_tables_include_source_lookups_and_nested_joins() {
         nested_joins: vec![],
     };
     let root = crate::query::JoinVia {
+        requires_policy_provenance: false,
         table: "root_junction".to_owned(),
         on_column: "target".to_owned(),
         target: Default::default(),

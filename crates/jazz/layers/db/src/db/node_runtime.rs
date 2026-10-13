@@ -2082,6 +2082,7 @@ where
                 request_id,
                 action,
                 session_claim_binding: None,
+                local_claim_revision: None,
                 delegated_session: None,
             },
         );
@@ -2108,6 +2109,7 @@ where
                 request_id,
                 action,
                 session_claim_binding: Some((session.identity, session.claims.clone())),
+                local_claim_revision: None,
                 delegated_session: Some(session),
             },
         );
@@ -2881,6 +2883,7 @@ where
                 pending_catalogue_subscriptions: BTreeMap::new(),
                 authority_scope_hydrations: BTreeMap::new(),
                 authority_scope_hydration_count: 0,
+                terminal_support_retirements: Vec::new(),
                 serve_dirty: true,
             }),
             last_resume_bytes: None,
@@ -3055,7 +3058,6 @@ where
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
         let mut reconnect_permission_advice = Vec::new();
         let mut terminal_permission_advice = Vec::new();
-        let current_session_claims = node.session_claims_with_revisions();
         let (authority, upstream_epoch, transferable_uploads, retired_relay_subscriptions) =
             match &mut connection_ref.link {
                 ConnectionLink::Upstream(UpstreamConnectionState {
@@ -3080,20 +3082,17 @@ where
                     for request in scope_lease_manager.requests.values() {
                         for request_id in &request.waiters {
                             if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
-                                let (identity, claims) = &request.session_claim_binding;
-                                let current_claims = current_session_claims
-                                    .iter()
-                                    .find_map(|(current_identity, current_claims, _)| {
-                                        (current_identity == identity).then_some(current_claims)
-                                    })
-                                    .cloned()
-                                    .unwrap_or_default();
-                                if request.delegated_session.is_some() || current_claims == *claims
-                                {
+                                if authorization_scope_claim_binding_is_current(
+                                    &node,
+                                    &request.session_claim_binding,
+                                    request.local_claim_revision,
+                                    request.delegated_session.is_some(),
+                                ) {
                                     reconnect_permission_advice.push((
                                         *request_id,
                                         request.action.clone(),
                                         Some(request.session_claim_binding.clone()),
+                                        request.local_claim_revision,
                                         request.delegated_session.clone(),
                                     ));
                                 } else {
@@ -3110,31 +3109,26 @@ where
                             request_id,
                             action,
                             session_claim_binding,
+                            local_claim_revision,
                             delegated_session,
                         } = command
                         else {
                             continue;
                         };
                         if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
-                            if delegated_session.is_some()
-                                || session_claim_binding.as_ref().is_none_or(
-                                    |(identity, claims)| {
-                                        current_session_claims
-                                            .iter()
-                                            .find_map(|(current_identity, current_claims, _)| {
-                                                (current_identity == identity)
-                                                    .then_some(current_claims)
-                                            })
-                                            .cloned()
-                                            .unwrap_or_default()
-                                            == *claims
-                                    },
+                            if session_claim_binding.as_ref().is_none_or(|binding| {
+                                authorization_scope_claim_binding_is_current(
+                                    &node,
+                                    binding,
+                                    *local_claim_revision,
+                                    delegated_session.is_some(),
                                 )
-                            {
+                            }) {
                                 reconnect_permission_advice.push((
                                     *request_id,
                                     action.clone(),
                                     session_claim_binding.clone(),
+                                    *local_claim_revision,
                                     delegated_session.clone(),
                                 ));
                             } else {
@@ -3158,11 +3152,19 @@ where
                     coverage_groups,
                     shape_registrations,
                     authority_scope_hydrations,
+                    terminal_support_retirements,
                     ..
                 }) => {
                     let retired = retire_relay_upstream_subscriptions_for_connection(
                         &self.relay_upstream_subscription_owners,
                         connection_epoch,
+                    );
+                    let mut terminal_retirements = std::mem::take(terminal_support_retirements);
+                    terminal_retirements
+                        .extend(peer.take_terminal_authorization_support_retirements());
+                    crate::peer::PeerState::retire_terminal_authorization_support_with_node(
+                        &mut node,
+                        terminal_retirements,
                     );
                     // A detached subscriber cannot later send a normal
                     // Unsubscribe. Retire its concrete served usage sites and the
@@ -3228,11 +3230,18 @@ where
         if !reconnect_permission_advice.is_empty() {
             self.upstream_subscriptions.borrow_mut().extend(
                 reconnect_permission_advice.into_iter().map(
-                    |(request_id, action, session_claim_binding, delegated_session)| {
+                    |(
+                        request_id,
+                        action,
+                        session_claim_binding,
+                        local_claim_revision,
+                        delegated_session,
+                    )| {
                         PendingUpstreamCommand::AuthorizationScopeIntent {
                             request_id,
                             action,
                             session_claim_binding,
+                            local_claim_revision,
                             delegated_session,
                         }
                     },

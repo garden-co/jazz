@@ -6,6 +6,8 @@ pub struct ValidatedQuery {
     params: BTreeMap<String, ColumnType>,
     canonical: Vec<u8>,
     shape_id: ShapeId,
+    #[serde(skip)]
+    policy_provenance: Option<crate::schema::PolicyRelationProvenance>,
 }
 
 impl ValidatedQuery {
@@ -32,6 +34,12 @@ impl ValidatedQuery {
     /// Original AST normalized into canonical order.
     pub fn query(&self) -> &Query {
         &self.query
+    }
+    #[doc(hidden)]
+    pub fn policy_provenance(
+        &self,
+    ) -> Option<&crate::schema::PolicyRelationProvenance> {
+        self.policy_provenance.as_ref()
     }
 
     /// Validate a binding against this shape.
@@ -385,7 +393,51 @@ fn validate_query_with_schema_version_as(
     schema_version: SchemaVersionId,
     role: RelationProjectionRole,
 ) -> Result<ValidatedQuery, QueryError> {
-    let (normalized, params, canonical) = validate_query_canonical_parts_as(query, schema, role)?;
+    validate_query_with_schema_version_as_and_provenance(
+        query,
+        schema,
+        schema_version,
+        role,
+        None,
+    )
+}
+
+fn validate_query_with_policy_provenance(
+    query: &Query,
+    schema: &RuntimeSchema,
+    provenance: crate::schema::PolicyRelationProvenance,
+) -> Result<ValidatedQuery, QueryError> {
+    validate_query_with_policy_provenance_version(query, schema, schema.version_id(), provenance)
+}
+
+fn validate_query_with_policy_provenance_version(
+    query: &Query,
+    schema: &RuntimeSchema,
+    schema_version: SchemaVersionId,
+    provenance: crate::schema::PolicyRelationProvenance,
+) -> Result<ValidatedQuery, QueryError> {
+    validate_query_with_schema_version_as_and_provenance(
+        query,
+        schema,
+        schema_version,
+        RelationProjectionRole::Result,
+        Some(provenance),
+    )
+}
+
+fn validate_query_with_schema_version_as_and_provenance(
+    query: &Query,
+    schema: &RuntimeSchema,
+    schema_version: SchemaVersionId,
+    role: RelationProjectionRole,
+    mut policy_provenance: Option<crate::schema::PolicyRelationProvenance>,
+) -> Result<ValidatedQuery, QueryError> {
+    let (normalized, params, canonical) = validate_query_canonical_parts_as_with_provenance(
+        query,
+        schema,
+        role,
+        policy_provenance.as_mut(),
+    )?;
     let mut shape_identity = canonical.clone();
     shape_identity.extend_from_slice(schema_version.as_bytes());
     let shape_id = ShapeId(uuid::Uuid::new_v5(&QUERY_NAMESPACE, &shape_identity));
@@ -395,6 +447,7 @@ fn validate_query_with_schema_version_as(
         params,
         canonical,
         shape_id,
+        policy_provenance,
     })
 }
 
@@ -1018,6 +1071,78 @@ fn validate_query_canonical_parts_as(
     schema: &RuntimeSchema,
     role: RelationProjectionRole,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    validate_query_canonical_parts_as_with_provenance(query, schema, role, None)
+}
+
+/// A converted compound join has lost secondary ON keys from its public
+/// traversal shape. Its derived marker prevents a missing side-map entry from
+/// turning that shape into an ordinary, less restrictive join.
+fn validate_required_policy_provenance(
+    query: &Query,
+    provenance: Option<&crate::schema::PolicyRelationProvenance>,
+) -> Result<(), QueryError> {
+    fn joins_required(
+        items: &[JoinVia],
+        annotations: Option<&[Option<crate::schema::PolicyJoinProvenance>]>,
+        groups: &[crate::schema::PolicyJoinGroup],
+    ) -> Result<(), QueryError> {
+        for (index, join) in items.iter().enumerate() {
+            let annotation = annotations
+                .and_then(|items| items.get(index))
+                .and_then(Option::as_ref);
+            if join.requires_policy_provenance
+                && !annotation.is_some_and(|annotation| {
+                    annotation.table == join.table
+                        && annotation.group.is_some_and(|id| {
+                            groups.iter().any(|group| {
+                                group.id == id && group.occurrences.contains(&annotation.occurrence)
+                            })
+                        })
+                })
+            {
+                return Err(QueryError::UnsupportedRelationQuery(format!(
+                    "compound policy join to '{}' requires paired policy provenance",
+                    join.table,
+                )));
+            }
+            joins_required(
+                &join.nested_joins,
+                annotation.map(|annotation| annotation.nested.as_slice()),
+                groups,
+            )?;
+        }
+        Ok(())
+    }
+    joins_required(
+        &query.joins,
+        provenance.map(|provenance| provenance.joins.as_slice()),
+        provenance.map_or(&[], |provenance| provenance.groups.as_slice()),
+    )?;
+    for (index, branch) in query.policy_branches.iter().enumerate() {
+        let provenance = provenance
+            .and_then(|provenance| provenance.branches.get(index))
+            .and_then(Option::as_ref);
+        joins_required(
+            &branch.joins,
+            provenance.map(|provenance| provenance.joins.as_slice()),
+            provenance.map_or(&[], |provenance| provenance.groups.as_slice()),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_query_canonical_parts_as_with_provenance(
+    query: &Query,
+    schema: &RuntimeSchema,
+    role: RelationProjectionRole,
+    policy_provenance: Option<&mut crate::schema::PolicyRelationProvenance>,
+) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    validate_required_policy_provenance(query, policy_provenance.as_deref())?;
+    if query.relation.is_some() && policy_provenance.is_some() {
+        return Err(QueryError::UnsupportedRelationQuery(
+            "policy provenance is unsupported on relation queries".to_owned(),
+        ));
+    }
     let root = schema_table(schema, &query.table)?;
     let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
@@ -1148,7 +1273,11 @@ fn validate_query_canonical_parts_as(
             planner_column_type(root, &order.column)?;
         }
     }
-    let normalized = normalize_query(&resolved_query);
+    let normalized = if let Some(provenance) = policy_provenance {
+        normalize_policy_query(&resolved_query, provenance)?
+    } else {
+        normalize_query(&resolved_query)
+    };
     let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
     Ok((normalized, params, canonical))
 }
@@ -2451,7 +2580,7 @@ fn is_orderable(column_type: &ColumnType) -> bool {
     )
 }
 
-fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
+pub(crate) fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
     let left = non_null_column_type(left);
     let right = non_null_column_type(right);
     left == right

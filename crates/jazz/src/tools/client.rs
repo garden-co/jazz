@@ -1747,6 +1747,58 @@ impl ClientDb {
     }
 }
 
+fn forward_subscription_rejection(
+    tx: &mpsc::UnboundedSender<SubscriptionStreamItem>,
+    reason: crate::protocol::SubscribeRejectReason,
+) -> bool {
+    let terminal = matches!(
+        reason,
+        crate::protocol::SubscribeRejectReason::ServerFailure {
+            code: crate::protocol::SubscribeServerFailureCode::QueryResultProtocol,
+        }
+    );
+    let reason = match reason {
+        crate::protocol::SubscribeRejectReason::UnsupportedShapeCapability { detail } => {
+            SubscriptionRejectReason::UnsupportedShapeCapability { detail }
+        }
+        crate::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
+            SubscriptionRejectReason::ShapeRegistrationPendingCatalogueAdmission
+        }
+        crate::protocol::SubscribeRejectReason::ServerFailure { code } => {
+            SubscriptionRejectReason::ServerFailure {
+                code: match code {
+                    crate::protocol::SubscribeServerFailureCode::TableNotFound => {
+                        SubscriptionServerFailureCode::TableNotFound
+                    }
+                    crate::protocol::SubscribeServerFailureCode::SchemaResolution => {
+                        SubscriptionServerFailureCode::SchemaResolution
+                    }
+                    crate::protocol::SubscribeServerFailureCode::QueryValidation => {
+                        SubscriptionServerFailureCode::QueryValidation
+                    }
+                    crate::protocol::SubscribeServerFailureCode::QueryLowering => {
+                        SubscriptionServerFailureCode::QueryLowering
+                    }
+                    crate::protocol::SubscribeServerFailureCode::PolicyEvaluation => {
+                        SubscriptionServerFailureCode::PolicyEvaluation
+                    }
+                    crate::protocol::SubscribeServerFailureCode::Internal => {
+                        SubscriptionServerFailureCode::Internal
+                    }
+                    crate::protocol::SubscribeServerFailureCode::QueryResultProtocol => {
+                        SubscriptionServerFailureCode::QueryResultProtocol
+                    }
+                },
+            }
+        }
+        crate::protocol::SubscribeRejectReason::InvalidAuthoritySourceClosure { transition } => {
+            SubscriptionRejectReason::InvalidAuthoritySourceClosure { transition }
+        }
+    };
+    let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
+    terminal
+}
+
 impl ClientDbInner {
     fn shutdown_error() -> JazzError {
         JazzError::Connection("client is shut down".to_string())
@@ -2571,44 +2623,9 @@ impl ClientDbInner {
                         let _ = tx.send(SubscriptionStreamItem::Delta(delta));
                     }
                     CoreSubscriptionEvent::Rejected { reason } => {
-                        let reason = match reason {
-                            crate::protocol::SubscribeRejectReason::UnsupportedShapeCapability {
-                                detail,
-                            } => SubscriptionRejectReason::UnsupportedShapeCapability { detail },
-                            crate::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
-                                SubscriptionRejectReason::ShapeRegistrationPendingCatalogueAdmission
-                            }
-                            crate::protocol::SubscribeRejectReason::ServerFailure { code } => {
-                                SubscriptionRejectReason::ServerFailure {
-                                    code: match code {
-                                        crate::protocol::SubscribeServerFailureCode::TableNotFound => {
-                                            SubscriptionServerFailureCode::TableNotFound
-                                        }
-                                        crate::protocol::SubscribeServerFailureCode::SchemaResolution => {
-                                            SubscriptionServerFailureCode::SchemaResolution
-                                        }
-                                        crate::protocol::SubscribeServerFailureCode::QueryValidation => {
-                                            SubscriptionServerFailureCode::QueryValidation
-                                        }
-                                        crate::protocol::SubscribeServerFailureCode::QueryLowering => {
-                                            SubscriptionServerFailureCode::QueryLowering
-                                        }
-                                        crate::protocol::SubscribeServerFailureCode::PolicyEvaluation => {
-                                            SubscriptionServerFailureCode::PolicyEvaluation
-                                        }
-                                        crate::protocol::SubscribeServerFailureCode::Internal => {
-                                            SubscriptionServerFailureCode::Internal
-                                        }
-                                    },
-                                }
-                            }
-                            crate::protocol::SubscribeRejectReason::InvalidAuthoritySourceClosure {
-                                transition,
-                            } => SubscriptionRejectReason::InvalidAuthoritySourceClosure {
-                                transition,
-                            },
-                        };
-                        let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
+                        if forward_subscription_rejection(&tx, reason) {
+                            break;
+                        }
                     }
                     CoreSubscriptionEvent::Closed => break,
                 }
@@ -4444,6 +4461,75 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
+
+    /// Alice receives the typed result-protocol rejection; only that new code
+    /// adds runtime teardown. Bob's existing reasons keep their delivery behaviour.
+    /// This private forwarding seam isolates reason conversion from transports.
+    #[test]
+    fn subscription_rejection_delivery_terminates_only_result_protocol() {
+        use crate::protocol::{SubscribeRejectReason, SubscribeServerFailureCode};
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(forward_subscription_rejection(
+            &tx,
+            SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::QueryResultProtocol,
+            },
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SubscriptionStreamItem::Rejected {
+                reason: SubscriptionRejectReason::ServerFailure {
+                    code: SubscriptionServerFailureCode::QueryResultProtocol,
+                }
+            })
+        ));
+        assert!(rx.try_recv().is_err());
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(!forward_subscription_rejection(
+            &tx,
+            SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::QueryValidation,
+            },
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SubscriptionStreamItem::Rejected {
+                reason: SubscriptionRejectReason::ServerFailure {
+                    code: SubscriptionServerFailureCode::QueryValidation,
+                }
+            })
+        ));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(!forward_subscription_rejection(
+            &tx,
+            SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            },
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SubscriptionStreamItem::Rejected {
+                reason: SubscriptionRejectReason::ServerFailure {
+                    code: SubscriptionServerFailureCode::Internal,
+                }
+            })
+        ));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(!forward_subscription_rejection(
+            &tx,
+            SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SubscriptionStreamItem::Rejected {
+                reason: SubscriptionRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+            })
+        ));
+    }
 
     struct ControlledNativeWireTransport;
 

@@ -371,11 +371,36 @@ pub(super) struct CurrentPayloadEncodePlan {
     descriptor: Vec<u8>,
 }
 
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static CORRUPT_NEXT_CURRENT_RESULT_SCHEMA: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn corrupt_next_current_result_schema_for_test() {
+    CORRUPT_NEXT_CURRENT_RESULT_SCHEMA.with(|next| next.set(true));
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn take_current_result_schema_corruption_for_test() -> bool {
+    CORRUPT_NEXT_CURRENT_RESULT_SCHEMA.with(|next| next.replace(false))
+}
+
 impl CurrentPayloadEncodePlan {
     pub(super) fn new(
         descriptor: RecordDescriptor,
         schema: &super::query_engine::ResultMembershipSchema,
     ) -> Result<Self, Error> {
+        #[cfg(any(test, feature = "testing"))]
+        let malformed_schema = take_current_result_schema_corruption_for_test().then(|| {
+            let mut malformed = schema.clone();
+            malformed.row_field = "__missing_current_result_row_uuid".to_owned();
+            malformed
+        });
+        #[cfg(any(test, feature = "testing"))]
+        let schema = malformed_schema.as_ref().unwrap_or(schema);
+
         let selected = std::iter::once(schema.row_field.as_str())
             .chain(
                 schema
@@ -404,22 +429,21 @@ impl CurrentPayloadEncodePlan {
                 .fields()
                 .iter()
                 .position(|field| field.name.as_deref() == Some(name))
-                .ok_or(Error::InvalidStoredValue(
-                    "result payload is missing its declared carrier",
-                ))?;
+                .ok_or(Error::QueryResultProtocol)?;
             if descriptor.fields()[index + 1..]
                 .iter()
                 .any(|field| field.name.as_deref() == Some(name))
             {
-                return Err(Error::InvalidStoredValue(
-                    "result payload carrier binding is ambiguous",
-                ));
+                return Err(Error::QueryResultProtocol);
             }
             mapping.push((index, mapping.len()));
             runtime_fields.push(descriptor.fields()[index].clone());
         }
         let runtime = RecordDescriptor::new_with_fields(runtime_fields);
-        let canonical = current_role_schema(schema)?;
+        let canonical = current_role_schema(schema).map_err(|error| match error {
+            Error::InvalidStoredValue(_) => Error::QueryResultProtocol,
+            error => error,
+        })?;
         // A complete named/type tree comparison precedes any byte-layout reuse.
         for (source, target) in runtime.fields().iter().zip(canonical.fields()) {
             let source_type = RecordDescriptor::new([("value", source.value_type.clone())]);
@@ -427,26 +451,45 @@ impl CurrentPayloadEncodePlan {
             if records::encode_persisted_record_descriptor(&source_type)?
                 != records::encode_persisted_record_descriptor(&target_type)?
             {
-                return Err(Error::InvalidStoredValue(
-                    "result payload type differs from its publication schema",
-                ));
+                return Err(Error::QueryResultProtocol);
             }
         }
         let projector =
-            records::RecordProjector::new_registry_rebound(descriptor, canonical, mapping)?;
+            records::RecordProjector::new_registry_rebound(descriptor, canonical, mapping)
+                .map_err(current_payload_projection_error)?;
         Ok(Self {
             projector,
-            descriptor: encode_result_descriptor(ResultDescriptorRole::Current, &canonical)?,
+            descriptor: encode_result_descriptor(ResultDescriptorRole::Current, &canonical)
+                .map_err(|error| match error {
+                    Error::InvalidStoredValue(_) => Error::QueryResultProtocol,
+                    error => error,
+                })?,
         })
     }
 
     pub(super) fn encode(&self, record: BorrowedRecord<'_>) -> Result<(Vec<u8>, Vec<u8>), Error> {
         // Both descriptors are trusted compiled schemas. Copy the selected
         // encoded fields; do not decode and re-encode our own encoder's output.
-        Ok((
-            self.descriptor.clone(),
-            self.projector.project(record)?.into_raw(),
-        ))
+        let projected = self
+            .projector
+            .project(record)
+            .map_err(current_payload_projection_error)?;
+        Ok((self.descriptor.clone(), projected.into_raw()))
+    }
+}
+
+// Classify only descriptor/field projection mismatches. Other record failures,
+// including size limits and future non-schema errors, keep their original type.
+fn current_payload_projection_error(error: records::Error) -> Error {
+    match error {
+        records::Error::FieldIndexOutOfBounds { .. }
+        | records::Error::ProjectDuplicateTarget { .. }
+        | records::Error::ProjectMissingTarget { .. }
+        | records::Error::ProjectTypeMismatch { .. }
+        | records::Error::ProjectSourceDescriptorMismatch
+        | records::Error::InvalidOffset
+        | records::Error::UnexpectedEof => Error::QueryResultProtocol,
+        error => Error::Record(error),
     }
 }
 
@@ -860,7 +903,52 @@ mod tests {
             ("row_uuid", ValueType::Uuid),
             ("payload", ValueType::String),
         ]);
-        assert!(plan.encode(wrong_source.bind(&[])).is_err());
+        assert!(matches!(
+            plan.encode(wrong_source.bind(&[])),
+            Err(crate::node::Error::QueryResultProtocol)
+        ));
+    }
+
+    /// Alice's compiled publication rejects malformed descriptor pairings, while
+    /// non-schema record errors retain their type. This lower-level seam is needed
+    /// because public queries cannot construct malformed compiled descriptors or
+    /// trigger a multi-gigabyte encoded-length overflow cheaply.
+    #[test]
+    fn current_payload_plan_classifies_schema_mismatches_without_hiding_other_errors() {
+        let schema = current_schema(1, "payload");
+        for source in [
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid)]),
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("payload", ValueType::Bool)]),
+            RecordDescriptor::new([
+                ("row_uuid", ValueType::Uuid),
+                ("payload", ValueType::String),
+                ("payload", ValueType::String),
+            ]),
+        ] {
+            assert!(matches!(
+                CurrentPayloadEncodePlan::new(source, &schema),
+                Err(Error::QueryResultProtocol)
+            ));
+        }
+        let source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("payload", ValueType::String),
+        ]);
+        let plan = CurrentPayloadEncodePlan::new(source, &schema).unwrap();
+        assert!(matches!(
+            plan.encode(source.bind(&[])),
+            Err(Error::QueryResultProtocol)
+        ));
+        let mut missing_publication = schema;
+        missing_publication.payload_publication_fields.clear();
+        assert!(matches!(
+            CurrentPayloadEncodePlan::new(source, &missing_publication),
+            Err(Error::QueryResultProtocol)
+        ));
+        assert!(matches!(
+            current_payload_projection_error(records::Error::LengthOverflow),
+            Error::Record(records::Error::LengthOverflow)
+        ));
     }
 
     // Malformed member/schema pairings cannot be authored through the public

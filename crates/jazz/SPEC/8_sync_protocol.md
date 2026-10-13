@@ -452,6 +452,10 @@ first non-pending update is a complete supporting snapshot. Ordinary successors
 carry physical additions/removals and an exact predecessor revision; they do not
 resend the complete scope. An independent recovery snapshot can replace a lost
 chain. Opening-pending is a lifecycle notification, not an empty dataset.
+An admitted subscription awaiting a published permissions head MUST still
+receive this pending progress through the ordinary retained delivery path,
+including when its first transport admission is backpressured. The notification
+MUST NOT establish settled coverage or replace the later complete opening.
 
 Each supporting row identifies its permanent physical table UUID, authored
 record table name, row UUID, transaction, concrete content or deletion layer,
@@ -585,6 +589,37 @@ lowering `CapabilityReport`. After `SubscribeRejected`, that subscription is not
 active, the requester must not expect `ViewUpdate`s for it, and `Unsubscribe`
 for the same key is a no-op. The connection and any other subscriptions on it
 remain live (`INV-SYNC-23`).
+
+Prepared current-result projection failures are terminal for only the affected
+served coverage group. The server queues one rejection for each usage-site key
+in that group, retires its served usages and maintained query ownership, and
+leaves unrelated groups and transaction fate processing unchanged. The
+rejection uses `SubscribeRejectReason::ServerFailure { code:
+SubscribeServerFailureCode::QueryResultProtocol }`, which appends discriminant
+`6` after the existing failure-code values and carries no diagnostic or row
+data. The public runtime client's `SubscriptionServerFailureCode` also appends
+this variant (a source-compatibility change for exhaustive Rust matches). This
+code is part of the base wire-v5 vocabulary and does not require an optional
+feature bit. Wire v5 is unreleased; the frozen v4 corpus is unchanged, and
+v5 peers reject older wire versions at `Hello` rather than decode or downgrade
+this code. The client delivers the typed rejection and terminates only that
+query stream; the application may issue a fresh `Subscribe` to recover the
+committed current result. At the low-level `Db::SubscriptionStream` interface,
+only `ServerFailure::QueryResultProtocol` adds rejection-driven termination.
+Other rejection reasons preserve their existing stream and remote-window
+fallback behaviour. Runtime-client and binding behaviour for other reasons is
+unchanged.
+
+`InvalidAuthoritySourceClosure` rejects the local authority frame atomically,
+not the live low-level `Db::SubscriptionStream`. A later valid authority frame
+may publish on that same stream. If a non-reset change was withheld before
+rejection, its publication baseline remains the last emitted result, so the
+valid completion's row and occurrence movements are relative to that result.
+A rejection releases a withheld `FirstLoad::WaitForRemote` local opening
+through the first-load gate as specified in ch. 13; the current local reset is
+published before the rejection. Pending catalogue admission keeps its existing
+first-load handling. This low-level continuity does not change
+runtime-client or binding teardown and does not promise relay recovery.
 
 `Unsubscribe` detaches one usage-site subscription. When the last usage-site
 subscription for a canonical program instance detaches, the serving side may drop

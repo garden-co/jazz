@@ -310,6 +310,17 @@ impl PeerState {
             | RelayTransportCapability::MultiplexedRelay => None,
         }
     }
+    /// The current per-attachment generation for this peer's admitted scope relay.
+    #[doc(hidden)]
+    pub fn admitted_scope_relay_admission_epoch(&self) -> Option<u64> {
+        match &self.transport_capability {
+            RelayTransportCapability::ScopeIsolatedClientRelay {
+                admission_epoch, ..
+            } => Some(*admission_epoch),
+            RelayTransportCapability::OrdinarySession
+            | RelayTransportCapability::MultiplexedRelay => None,
+        }
+    }
 
     /// Replace the per-attachment capability epoch after the server has
     /// detached and resumed this scope-isolated relay. The authenticated
@@ -648,7 +659,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        node.register_query_subscription_for_peer(
+        node.register_query_subscription_for_peer_with_policy_provenance(
             self.publication_owner,
             shape.shape_id(),
             ShapeAst::from_validated(shape),
@@ -664,6 +675,7 @@ impl PeerState {
                 policy_binding.0,
                 policy_binding.1.clone(),
             ),
+            shape.policy_provenance().cloned(),
         )?;
         Ok(())
     }

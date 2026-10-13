@@ -72,10 +72,17 @@ fn assert_lowered_write_policy_case(
             )
         }
     };
+    let slot = match operation {
+        WritePolicyOperation::Insert => crate::schema::PolicySlot::InsertWithCheck,
+        WritePolicyOperation::UpdateUsing => crate::schema::PolicySlot::UpdateUsing,
+        WritePolicyOperation::UpdateCheck => crate::schema::PolicySlot::UpdateWithCheck,
+        WritePolicyOperation::Delete => crate::schema::PolicySlot::DeleteUsing,
+    };
     let actual = core
         .write_policy_query_allows_candidate(
             table,
             policy,
+            slot,
             row_uuid,
             &cells,
             identity,
@@ -967,4 +974,239 @@ fn lowered_write_policy_does_not_restore_removed_grants_after_table_rename() {
             .unwrap(),
         "the actual v2 delete must deny an identity rejected by the pinned v1 delete clause"
     );
+}
+#[test]
+fn compound_exists_rel_uses_every_join_equality_in_write_policy_slots() {
+    use crate::model::public_api::relation_ir::{
+        ColumnRef as PublicRelColumnRef, JoinCondition as PublicRelJoinCondition,
+        JoinKind as PublicRelJoinKind, PredicateCmpOp as PublicRelPredicateCmpOp,
+        PredicateExpr as PublicRelPredicateExpr, RelExpr as PublicRelExpr,
+        RowIdRef as PublicRelRowIdRef, ValueRef as PublicRelValueRef,
+    };
+
+    let column = |scope: &str, column: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: column.to_owned(),
+    };
+    let equality = |left: (&str, &str), right: (&str, &str)| PublicRelJoinCondition {
+        left: column(left.0, left.1),
+        right: column(right.0, right.1),
+    };
+    let policy = PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::Join {
+                    left: Box::new(PublicRelExpr::TableScan {
+                        table: "left_facts".into(),
+                        alias: Some("left_fact".to_owned()),
+                    }),
+                    right: Box::new(PublicRelExpr::TableScan {
+                        table: "right_facts".into(),
+                        alias: Some("right_fact".to_owned()),
+                    }),
+                    on: vec![equality(
+                        ("left_fact", "resource_id"),
+                        ("right_fact", "resource_id"),
+                    )],
+                    join_kind: PublicRelJoinKind::Inner,
+                }),
+                right: Box::new(PublicRelExpr::TableScan {
+                    table: "evidence".into(),
+                    alias: Some("evidence".to_owned()),
+                }),
+                on: vec![
+                    equality(("left_fact", "left_key"), ("evidence", "left_key")),
+                    equality(("right_fact", "right_key"), ("evidence", "right_key")),
+                ],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: PublicRelPredicateExpr::Cmp {
+                left: column("left_fact", "resource_id"),
+                op: PublicRelPredicateCmpOp::Eq,
+                right: PublicRelValueRef::RowId(PublicRelRowIdRef::Outer),
+            },
+        },
+    };
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_insert(PublicPolicyExpr::And(vec![
+                                PublicPolicyExpr::True,
+                                policy.clone(),
+                            ]))
+                            .with_update(
+                                Some(PublicPolicyExpr::And(vec![
+                                    PublicPolicyExpr::True,
+                                    policy.clone(),
+                                ])),
+                                PublicPolicyExpr::Or(vec![
+                                    PublicPolicyExpr::False,
+                                    policy.clone(),
+                                ]),
+                            )
+                            .with_delete(PublicPolicyExpr::And(vec![
+                                PublicPolicyExpr::True,
+                                policy,
+                            ])),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("left_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .fk_column("resource_id", "resources")
+                    .column("right_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text),
+            )
+            .table(PublicTableSchemaBuilder::new("children").fk_column("resource_id", "resources")),
+    );
+    let (_core_dir, mut core) = open_node_with_schema(node(0x9a), schema);
+    let writer = user(0x9b);
+    let denied = row(0xd1);
+    let allowed = row(0xa1);
+    for (resource, left_key, right_key, left_fact, right_fact, left_time, right_time) in [
+        (
+            denied,
+            "left-denied",
+            "right-denied",
+            row(0xb1),
+            row(0xb2),
+            1,
+            2,
+        ),
+        (
+            allowed,
+            "left-allowed",
+            "right-allowed",
+            row(0xb3),
+            row(0xb4),
+            3,
+            4,
+        ),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("left_facts", left_fact, left_time).cells(BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("left_key".to_owned(), Value::String(left_key.to_owned())),
+            ])),
+        );
+        accept_global(
+            &mut core,
+            MergeableCommit::new("right_facts", right_fact, right_time).cells(BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(resource.0)),
+                ("right_key".to_owned(), Value::String(right_key.to_owned())),
+            ])),
+        );
+    }
+    for (id, left_key, right_key) in [
+        (row(0xc1), "left-denied", "not-right-denied"),
+        (row(0xc2), "left-allowed", "right-allowed"),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("evidence", id, 3).cells(BTreeMap::from([
+                ("left_key".to_owned(), Value::String(left_key.to_owned())),
+                ("right_key".to_owned(), Value::String(right_key.to_owned())),
+            ])),
+        );
+    }
+    for resource in [denied, allowed] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("resources", resource, 4)
+                .cells(BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("persisted".to_owned()),
+                )])),
+        );
+    }
+
+    let children = core.table("children").expect("compiled child table").clone();
+    let inherited = crate::query::Query::from("children").inherits_operation(
+        "resource_id",
+        crate::query::InheritsOperation::Insert,
+    );
+    for (resource, child, expected) in [(denied, row(0xd2), false), (allowed, row(0xd3), true)] {
+        let cells = BTreeMap::from([("resource_id".to_owned(), Value::Uuid(resource.0))]);
+        let actual = crate::local_executor::block_on(
+            core.write_policy_query_allows_candidate(
+                &children,
+                &inherited,
+                crate::schema::PolicySlot::InsertWithCheck,
+                child,
+                &cells,
+                writer,
+                true,
+            ),
+        )
+        .expect("inherited compound ExistsRel policy evaluates");
+        assert_eq!(
+            actual, expected,
+            "inherited insert must enforce the parent's complete witness policy"
+        );
+    }
+
+    let table = core
+        .table("resources")
+        .expect("compiled resource table")
+        .clone();
+    let candidate = BTreeMap::from([(
+        "label".to_owned(),
+        Value::String("candidate".to_owned()),
+    )]);
+    let cases = [
+        (
+            crate::schema::PolicySlot::InsertWithCheck,
+            table.write_policies.insert_check.as_ref(),
+            true,
+        ),
+        (
+            crate::schema::PolicySlot::UpdateUsing,
+            table.write_policies.update_using.as_ref(),
+            false,
+        ),
+        (
+            crate::schema::PolicySlot::UpdateWithCheck,
+            table.write_policies.update_check.as_ref(),
+            false,
+        ),
+        (
+            crate::schema::PolicySlot::DeleteUsing,
+            table.write_policies.delete_using.as_ref(),
+            false,
+        ),
+    ];
+    for (slot, policy, insert_candidate) in cases {
+        let policy = policy.expect("write policy slot is populated");
+        for (resource, expected) in [(denied, false), (allowed, true)] {
+            let actual = crate::local_executor::block_on(
+                core.write_policy_query_allows_candidate(
+                    &table,
+                    policy,
+                    slot,
+                    resource,
+                    &candidate,
+                    writer,
+                    insert_candidate,
+                ),
+            )
+            .expect("compound ExistsRel write policy evaluates");
+            assert_eq!(
+                actual, expected,
+                "slot {slot:?} must require both equalities for the same evidence row"
+            );
+        }
+    }
 }

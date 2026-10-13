@@ -72,10 +72,10 @@ pub fn open_update_support(node: &mut NodeState) -> usize {
         )
         .expect("release plan update support scope compiles");
     let mut peer = PeerState::client_link(editor);
-    for (shape, binding) in &scope.subscriptions {
+    for clause in &scope.subscriptions {
         let subscription = SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
+            shape_id: clause.shape.shape_id(),
+            binding_id: clause.binding.binding_id(),
             read_view: scope.options.read_view_key(),
         };
         block_on(peer.rehydrate_authorization_support_query_for_identity(
@@ -83,8 +83,8 @@ pub fn open_update_support(node: &mut NodeState) -> usize {
             editor,
             BTreeMap::new(),
             subscription,
-            shape,
-            binding,
+            &clause.shape,
+            &clause.binding,
             scope.options.clone(),
         ))
         .expect("release plan update support hydrates");

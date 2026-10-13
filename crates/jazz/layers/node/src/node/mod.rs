@@ -323,6 +323,11 @@ mod codec;
 mod currency;
 mod database_slot;
 mod descriptor_roles;
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn corrupt_next_current_result_schema_for_test() {
+    descriptor_roles::corrupt_next_current_result_schema_for_test();
+}
 mod eviction;
 mod exclusive_read_evidence;
 mod global_state;
@@ -810,17 +815,18 @@ impl ActiveSchema {
     }
 
     fn same_permissions(&self, other: &Self) -> bool {
-        self.compiled
-            .tables
-            .iter()
-            .map(|table| (&table.name, &table.read_policy, &table.write_policies))
-            .eq(other
+        self.compiled.policy_provenance == other.compiled.policy_provenance
+            && self
                 .compiled
                 .tables
                 .iter()
-                .map(|table| (&table.name, &table.read_policy, &table.write_policies)))
+                .map(|table| (&table.name, &table.read_policy, &table.write_policies))
+                .eq(other
+                    .compiled
+                    .tables
+                    .iter()
+                    .map(|table| (&table.name, &table.read_policy, &table.write_policies)))
     }
-
     fn new(pointer: CurrentWriteSchema, compiled: JazzSchema) -> Result<Self, Error> {
         if compiled.version_id() != pointer.schema {
             return Err(Error::InvalidCatalogueUpdate(
@@ -1481,6 +1487,7 @@ enum ParamBindingModeCacheKey {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct ReadPolicyAuthorizationRequestCacheKey {
     policy_schema_version: SchemaVersionId,
+    policy_provenance_digest: [u8; 32],
     table_name: String,
     identity: AuthorSubject,
     param_binding_mode: ParamBindingModeCacheKey,
@@ -3335,6 +3342,9 @@ pub enum Error {
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),
+    /// A maintained query result did not match its compiled publication schema.
+    #[error("maintained query result protocol mismatch")]
+    QueryResultProtocol,
     /// A live authority source-closure delta could not transition from the
     /// receiver's installed predecessor.  The usage handle is safe to expose
     /// to the subscription owner; row bodies and claims are deliberately not.
