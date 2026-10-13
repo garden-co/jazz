@@ -77,6 +77,9 @@ mod local_first_first_load_gate;
 #[cfg(feature = "testing")]
 #[path = "../local_first_server_wait.rs"]
 mod local_first_server_wait;
+#[cfg(feature = "testing")]
+#[path = "../mixed_nullable_uuid_claims.rs"]
+mod mixed_nullable_uuid_claims;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[cfg(feature = "testing")]
