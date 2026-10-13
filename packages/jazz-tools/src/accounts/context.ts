@@ -10,7 +10,13 @@ import {
   onAccountInvalidated,
 } from "./enrollment.js";
 import { accountAppId } from "./local-first.js";
-import { createDbWithRuntimeSource, type Db, type DbConfig } from "../runtime/db.js";
+import {
+  createDbWithRuntimeSource,
+  releaseUnusedLease,
+  startBrowserWorkerLease,
+  type Db,
+  type DbConfig,
+} from "../runtime/db.js";
 import type { RuntimeSource } from "../runtime/runtime-source.js";
 import {
   internalSessionFromVerifiedReservedJwtPayload,
@@ -122,10 +128,21 @@ export async function createAccountDbWithRuntimeSource(
     }
   });
   let stopBound: (() => void) | undefined;
+  let lease: ReturnType<typeof startBrowserWorkerLease>;
   try {
+    // The browser root is named by the account alone: boot its worker while
+    // the account's credential resolves.
+    const { account: _account, ...scope } = config;
+    lease = startBrowserWorkerLease(
+      { ...scope, accountId: account.id, accountRegistryAuthority: accountRegistry(account) },
+      runtimeSource,
+    );
     const resolved = await resolveAccountRuntimeConfig(config);
     const jwtToken = resolved.jwtToken;
-    db = await createDbWithRuntimeSource(resolved, runtimeSource);
+    // From here the runtime adopts the lease or returns it itself.
+    const opening = lease;
+    lease = undefined;
+    db = await createDbWithRuntimeSource(resolved, runtimeSource, opening);
     if (invalidated) {
       await db.shutdown();
       throw new AccountAuthError("account_logged_out");
@@ -195,6 +212,8 @@ export async function createAccountDbWithRuntimeSource(
     return opened;
   } catch (error) {
     stopBound?.();
+    // Return a lease the runtime never received before tearing it down.
+    await releaseUnusedLease(lease);
     unsubscribe();
     if (!db) await runtimeSource.shutdown();
     throw error;
