@@ -54,6 +54,55 @@ pub struct DatabaseSchema {
     /// planned, or maintained by the IVM runtime.
     #[serde(default)]
     pub direct_record_stores: Vec<DirectRecordStoreSchema>,
+    /// Groove dictionaries that interned columns (see
+    /// [`ValueType::interned`]) store codes into. Each is a Groove-owned
+    /// column family; see [`crate::dictionary`].
+    #[serde(default)]
+    pub dictionaries: Vec<DictionarySchema>,
+}
+
+/// A Groove dictionary: a durable mapping between values of one logical type
+/// and dense `u32` codes, shared by every interned column that names it.
+///
+/// ```
+/// use groove::records::ValueType;
+/// use groove::schema::{ColumnSchema, DatabaseSchema, DictionarySchema, TableSchema};
+///
+/// let schema = DatabaseSchema::new([TableSchema::new(
+///     "posts",
+///     [
+///         ColumnSchema::new("id", ValueType::U64),
+///         ColumnSchema::new("author", ValueType::interned("authors", ValueType::String)),
+///     ],
+/// )])
+/// .with_dictionary(DictionarySchema::new("authors", ValueType::String));
+///
+/// assert!(schema.column_families().contains(&"__groove_dictionary_authors"));
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct DictionarySchema {
+    pub name: String,
+    /// The logical type of every value in the dictionary.
+    pub value_type: ValueType,
+    /// The Groove-owned column family holding the dictionary's entries,
+    /// always [`crate::dictionary::dictionary_column_family`] of `name`.
+    column_family: String,
+}
+
+impl DictionarySchema {
+    pub fn new(name: impl Into<String>, value_type: ValueType) -> Self {
+        let name = name.into();
+        Self {
+            column_family: crate::dictionary::dictionary_column_family(&name),
+            name,
+            value_type,
+        }
+    }
+
+    /// The Groove-owned column family that stores this dictionary.
+    pub fn column_family(&self) -> &str {
+        &self.column_family
+    }
 }
 
 impl DatabaseSchema {
@@ -61,7 +110,20 @@ impl DatabaseSchema {
         Self {
             tables: tables.into_iter().collect(),
             direct_record_stores: Vec::new(),
+            dictionaries: Vec::new(),
         }
+    }
+
+    /// Declare a dictionary that interned columns may store codes into.
+    pub fn with_dictionary(mut self, dictionary: DictionarySchema) -> Self {
+        self.dictionaries.push(dictionary);
+        self
+    }
+
+    pub fn dictionary(&self, name: &str) -> Option<&DictionarySchema> {
+        self.dictionaries
+            .iter()
+            .find(|dictionary| dictionary.name == name)
     }
 
     /// Add a directly exposed typed record store column family to the schema.
@@ -111,7 +173,237 @@ impl DatabaseSchema {
             )
             .chain(index_family)
             .chain(std::iter::once(crate::db::LARGE_VALUE_METADATA_CF))
+            .chain(
+                self.dictionaries
+                    .iter()
+                    .map(|dictionary| dictionary.column_family()),
+            )
             .collect()
+    }
+}
+
+/// A schema that places an interned column (see [`ValueType::interned`])
+/// where Groove cannot maintain it.
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum InternedColumnError {
+    #[error(
+        "column {table}.{column} is interned into dictionary {dictionary}, which is not declared"
+    )]
+    UnknownDictionary {
+        table: String,
+        column: String,
+        dictionary: String,
+    },
+    #[error(
+        "column {table}.{column} interns a different value type than dictionary {dictionary} holds"
+    )]
+    ValueTypeMismatch {
+        table: String,
+        column: String,
+        dictionary: String,
+    },
+    #[error("Interning primary-key column {table}.{column} is not supported yet")]
+    PrimaryKey { table: String, column: String },
+    #[error("Interning column {table}.{column}, which index {index} covers, is not supported yet")]
+    Index {
+        table: String,
+        column: String,
+        index: String,
+    },
+    #[error(
+        "Interning column {table}.{column}, which foreign key {foreign_key} uses, is not supported yet"
+    )]
+    ForeignKey {
+        table: String,
+        column: String,
+        foreign_key: String,
+    },
+    #[error("Interning a field of direct record store {store} is not supported yet")]
+    DirectRecordStore { store: String },
+    #[error(
+        "Interning column {table}.{column} anywhere but at top level or directly under a top-level nullable is not supported yet"
+    )]
+    Nested { table: String, column: String },
+    #[error("Interning values of dictionary {dictionary} that {reason} is not supported yet")]
+    UnsupportedValueType {
+        dictionary: String,
+        reason: &'static str,
+    },
+    #[error("dictionary {0} is declared twice")]
+    DuplicateDictionary(String),
+}
+
+/// The dictionary and logical type of a column type that may be interned:
+/// `Interned` or `Nullable(Interned)`. `Err` when an interned marker sits
+/// anywhere else in the type.
+fn interned_column_parts(value_type: &ValueType) -> Result<Option<(&str, &ValueType)>, ()> {
+    let candidate = match value_type {
+        ValueType::Nullable(inner) => inner.as_ref(),
+        other => other,
+    };
+    match candidate.as_interned() {
+        Some((dictionary, logical)) if !logical.contains_interned() => {
+            Ok(Some((dictionary, logical)))
+        }
+        Some(_) => Err(()),
+        None if value_type.contains_interned() => Err(()),
+        None => Ok(None),
+    }
+}
+
+impl DatabaseSchema {
+    /// Check every dictionary declaration and every interned column.
+    pub fn validate_interned_columns(&self) -> Result<(), InternedColumnError> {
+        let mut names = std::collections::BTreeSet::new();
+        for dictionary in &self.dictionaries {
+            if !names.insert(dictionary.name.as_str()) {
+                return Err(InternedColumnError::DuplicateDictionary(
+                    dictionary.name.clone(),
+                ));
+            }
+            let unsupported = |reason| InternedColumnError::UnsupportedValueType {
+                dictionary: dictionary.name.clone(),
+                reason,
+            };
+            if dictionary.value_type.contains_internal_storage_type() {
+                // Covers nested interning, raw engine fields and explicit
+                // stored (indirect) scalars.
+                return Err(unsupported("contain an engine storage type"));
+            }
+            if dictionary.value_type.variant_registry_occurrence_count() != 0 {
+                // An enum registry can grow per column occurrence; a value
+                // shared by many columns has no single occurrence to grow.
+                return Err(unsupported("contain an enum"));
+            }
+        }
+        for store in &self.direct_record_stores {
+            if store
+                .key
+                .iter()
+                .chain(&store.value)
+                .any(|(_, value_type)| value_type.contains_interned())
+            {
+                return Err(InternedColumnError::DirectRecordStore {
+                    store: store.name.clone(),
+                });
+            }
+        }
+        for table in &self.tables {
+            self.validate_table_interning(table)?;
+        }
+        self.validate_foreign_keys_to_interned()
+    }
+
+    /// Check the interned columns of one table against this schema's
+    /// dictionaries.
+    pub fn validate_table_interning(&self, table: &TableSchema) -> Result<(), InternedColumnError> {
+        let fields = table
+            .columns
+            .iter()
+            .map(|column| {
+                (
+                    column.name.as_str(),
+                    &column.column_type,
+                    column.name.as_str(),
+                )
+            })
+            .chain(table.variants.iter().flat_map(|variant| {
+                variant.payload_fields.iter().map(|field| {
+                    (
+                        field.name.as_str(),
+                        &field.value_type,
+                        field
+                            .shared_column
+                            .as_deref()
+                            .unwrap_or(field.name.as_str()),
+                    )
+                })
+            }));
+        let mut interned_columns = std::collections::BTreeSet::new();
+        for (name, value_type, shared) in fields {
+            let parts =
+                interned_column_parts(value_type).map_err(|()| InternedColumnError::Nested {
+                    table: table.name.clone(),
+                    column: name.to_owned(),
+                })?;
+            let Some((dictionary, logical)) = parts else {
+                continue;
+            };
+            let declared = self.dictionary(dictionary).ok_or_else(|| {
+                InternedColumnError::UnknownDictionary {
+                    table: table.name.clone(),
+                    column: name.to_owned(),
+                    dictionary: dictionary.to_owned(),
+                }
+            })?;
+            if declared.value_type != *logical {
+                return Err(InternedColumnError::ValueTypeMismatch {
+                    table: table.name.clone(),
+                    column: name.to_owned(),
+                    dictionary: dictionary.to_owned(),
+                });
+            }
+            interned_columns.insert(shared.to_owned());
+        }
+        if interned_columns.is_empty() {
+            return Ok(());
+        }
+        if let Some(primary_key) = &table.primary_key {
+            for column in &primary_key.columns {
+                if interned_columns.contains(&column.column) {
+                    return Err(InternedColumnError::PrimaryKey {
+                        table: table.name.clone(),
+                        column: column.column.clone(),
+                    });
+                }
+            }
+        }
+        for index in &table.indices {
+            for column in &index.columns {
+                if interned_columns.contains(column) {
+                    return Err(InternedColumnError::Index {
+                        table: table.name.clone(),
+                        column: column.clone(),
+                        index: index.name.clone(),
+                    });
+                }
+            }
+        }
+        for foreign_key in &table.foreign_keys {
+            for column in &foreign_key.columns {
+                if interned_columns.contains(column) {
+                    return Err(InternedColumnError::ForeignKey {
+                        table: table.name.clone(),
+                        column: column.clone(),
+                        foreign_key: foreign_key.name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse foreign keys of any table that reference an interned column.
+    pub(crate) fn validate_foreign_keys_to_interned(&self) -> Result<(), InternedColumnError> {
+        for table in &self.tables {
+            for foreign_key in &table.foreign_keys {
+                let Some(referenced) = self.table(&foreign_key.referenced_table) else {
+                    continue;
+                };
+                for column in &foreign_key.referenced_columns {
+                    if referenced.columns.iter().any(|candidate| {
+                        candidate.name == *column && candidate.column_type.contains_interned()
+                    }) {
+                        return Err(InternedColumnError::ForeignKey {
+                            table: referenced.name.clone(),
+                            column: column.clone(),
+                            foreign_key: foreign_key.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -383,12 +675,40 @@ impl TableSchema {
         self.variants.iter().find(|variant| variant.tag == tag)
     }
 
-    /// Build the dense descriptor registered for one whole-row enum case.
+    /// Whether any column or variant payload field of this table is interned.
+    pub fn has_interned_columns(&self) -> bool {
+        self.columns
+            .iter()
+            .any(|column| column.column_type.contains_interned())
+            || self.variants.iter().any(|variant| {
+                variant
+                    .payload_fields
+                    .iter()
+                    .any(|field| field.value_type.contains_interned())
+            })
+    }
+
+    /// The logical descriptor of one whole-row enum case: what reads,
+    /// subscriptions and writes see. Interned fields have their logical type.
+    /// Stored bytes are laid out by [`Self::storage_record_schema_for_variant`].
     pub fn record_schema_for_variant(&self, tag: u32) -> Option<RecordDescriptor> {
+        self.storage_record_schema_for_variant(tag)
+            .map(|descriptor| crate::records::logical_record_descriptor(&descriptor))
+    }
+
+    /// The logical descriptor of this table's full column catalogue.
+    pub fn record_schema(&self) -> RecordDescriptor {
+        crate::records::logical_record_descriptor(&self.storage_record_schema())
+    }
+
+    /// The stored (physical) descriptor of one whole-row enum case: interned
+    /// fields hold their 4-byte codes. Only Groove's storage boundary reads
+    /// stored bytes with it.
+    pub fn storage_record_schema_for_variant(&self, tag: u32) -> Option<RecordDescriptor> {
         #[cfg(test)]
         VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(count.get() + 1));
         if self.variants.is_empty() {
-            return Some(self.record_schema());
+            return Some(self.storage_record_schema());
         }
         let variant = self.variant(tag)?;
         let fields = if variant.payload_fields.is_empty() {
@@ -413,7 +733,8 @@ impl TableSchema {
         Some(RecordDescriptor::new(fields))
     }
 
-    pub fn record_schema(&self) -> RecordDescriptor {
+    /// The stored (physical) descriptor of this table's full column catalogue.
+    pub fn storage_record_schema(&self) -> RecordDescriptor {
         RecordDescriptor::new(
             self.columns
                 .iter()

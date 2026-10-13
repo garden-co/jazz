@@ -1,304 +1,455 @@
-//! Dictionary tables: compact durable codes for values that repeat.
+//! Groove dictionaries: durable `u32` codes for column values that repeat.
 //!
-//! A dictionary maps each distinct byte string stored in it to a `u32` code,
-//! so a column that would repeat the same long value on many rows stores the
-//! 4-byte code instead. The mapping is an ordinary Groove table, created with
-//! [`table_schema`], keyed by code with a unique index on the value; it is
-//! append-only, so a code never changes meaning once it is durable.
+//! A column declared with [`ValueType::interned`] stores, in each row, the
+//! 4-byte code (`u32` LE) of its value in a named dictionary instead of the
+//! value itself. Groove owns the dictionary: it allocates codes while
+//! preparing a write, persists new entries in the same atomic storage write
+//! as the publication that first carries them, and resolves codes back to
+//! values on every read and in every IVM source, so callers above Groove's
+//! storage boundary only ever see logical values.
 //!
-//! [`Dictionary`] resolves values against one such table and stages new
-//! entries into the caller's batch, so an entry becomes durable atomically
-//! with the first row that stores its code. Until an entry is seen in
-//! storage it is provisional: a later batch that needs it stages it again
-//! under the same code, so a dropped batch never leaves a row naming a code
-//! without an entry.
+//! # Storage format (`groove.dictionary.v1`)
+//!
+//! Each dictionary declared by a [`DictionarySchema`] is its own Groove-owned
+//! column family, [`dictionary_column_family`] of the dictionary name. An
+//! entry's key is the code as a 4-byte big-endian `u32`, so a scan returns
+//! entries in code order; its value is the canonical Groove encoding of the
+//! logical value (the declared [`DictionarySchema::value_type`]), which may
+//! not hold an indirect large value. Codes are dense from 0: the entries of a
+//! dictionary are always exactly the codes `0..n`.
+//!
+//! # Allocation
+//!
+//! The whole dictionary is loaded into memory on open, validated (every key
+//! is 4 bytes, codes are dense, every value is canonical, no value appears
+//! twice) and kept in a [`DictionaryRegistry`] shared by the database and its
+//! IVM runtime, across schema rebuilds. Encoding a value that has no code yet
+//! allocates the next code in memory, synchronously. The allocation is never
+//! undone: when the batch that caused it is dropped, the code stays reserved
+//! for that value and its entry is written by the next publication, so a code
+//! is never handed to two values. Every publication carries every entry not
+//! yet known to be durable, so a row never names a code whose entry is
+//! missing after a crash, and durable codes stay dense.
+
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use thiserror::Error;
 
-use crate::db::{Database, DatabaseBatch, Error};
-use crate::records::Value;
-use crate::schema::{
-    ColumnSchema, ColumnType, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
-};
+use crate::records;
+use crate::schema::DictionarySchema;
+use crate::storage::{OrderedKvStorage, OwnedWriteOperation, ScanRequest};
 
-/// Field index of the code in a dictionary record.
-pub const FIELD_CODE_IDX: usize = 0;
-/// Field index of the value in a dictionary record.
-pub const FIELD_VALUE_IDX: usize = 1;
-/// Name of the unique value index of a dictionary table.
-pub const BY_VALUE_INDEX: &str = "by_value";
+/// Column-family name prefix of Groove dictionaries.
+pub const DICTIONARY_CF_PREFIX: &str = "__groove_dictionary_";
 
-/// Resident entries kept per direction before the cache is cleared.
-const RESIDENT_CACHE_MAX_ENTRIES: usize = 16 * 1024;
-
-/// The schema of a dictionary table named `name`.
-pub fn table_schema(name: impl Into<String>) -> TableSchema {
-    TableSchema::new(
-        name,
-        [
-            ColumnSchema::new("code", ColumnType::U32),
-            ColumnSchema::new("value", ColumnType::Bytes),
-        ],
-    )
-    .with_primary_key(PrimaryKey::new("code", IntegerKeyType::U32))
-    .with_index(IndexSchema::new(BY_VALUE_INDEX, ["value"]).unique())
+/// The column family that stores dictionary `name`.
+pub fn dictionary_column_family(name: &str) -> String {
+    format!("{DICTIONARY_CF_PREFIX}{name}")
 }
 
-/// Interns and resolves values of one dictionary table.
+/// The storage key of `code`: its 4-byte big-endian encoding.
+pub fn dictionary_entry_key(code: u32) -> [u8; 4] {
+    code.to_be_bytes()
+}
+
+/// A dictionary failure. Every variant names the dictionary.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum DictionaryError {
+    #[error("dictionary {0} is not declared")]
+    UnknownDictionary(String),
+    #[error("dictionary {dictionary} has no entry for code {code}")]
+    UnknownCode { dictionary: String, code: u32 },
+    #[error("dictionary {0} has no free code left")]
+    Exhausted(String),
+    #[error("invalid dictionary {dictionary}: {reason}")]
+    InvalidDictionary { dictionary: String, reason: String },
+    #[error("value for dictionary {dictionary} is not a canonical inline value: {source}")]
+    InvalidValue {
+        dictionary: String,
+        source: records::Error,
+    },
+    #[error(
+        "dictionary {0} is declared by the new schema but was not loaded when the database opened"
+    )]
+    NotLoaded(String),
+    #[error("dictionary {0} is redeclared with a different value type")]
+    ValueTypeMismatch(String),
+}
+
+/// Shared registry handle: the database, its IVM runtime and every rebuilt
+/// runtime share one registry, so a code handed out once is never handed out
+/// again for another value within this process.
+pub(crate) type SharedDictionaries = Rc<RefCell<DictionaryRegistry>>;
+
 #[derive(Debug)]
-pub struct Dictionary {
-    table: String,
-    codes: FxHashMap<Vec<u8>, u32>,
-    values: FxHashMap<u32, Vec<u8>>,
-    /// Codes handed out by [`Dictionary::stage`] whose entries were not yet
-    /// seen in storage.
-    provisional: FxHashMap<Vec<u8>, u32>,
+struct DictionaryState {
+    schema: DictionarySchema,
+    /// `values[code]`. Codes are dense from 0.
+    values: Vec<Arc<[u8]>>,
+    codes: FxHashMap<Arc<[u8]>, u32>,
+    /// The next code to allocate. Exceeds `u32::MAX` once exhausted.
+    next_code: u64,
+    /// Allocated codes whose entries are not yet known to be durable.
+    unpersisted: BTreeSet<u32>,
 }
 
-impl Dictionary {
-    /// A dictionary over the table `table`, which must use [`table_schema`].
-    pub fn new(table: impl Into<String>) -> Self {
+impl DictionaryState {
+    fn new(schema: DictionarySchema) -> Self {
         Self {
-            table: table.into(),
+            schema,
+            values: Vec::new(),
             codes: FxHashMap::default(),
-            values: FxHashMap::default(),
-            provisional: FxHashMap::default(),
+            next_code: 0,
+            unpersisted: BTreeSet::new(),
         }
     }
 
-    pub fn table(&self) -> &str {
-        &self.table
+    fn invalid(&self, reason: impl Into<String>) -> DictionaryError {
+        DictionaryError::InvalidDictionary {
+            dictionary: self.schema.name.clone(),
+            reason: reason.into(),
+        }
     }
 
-    /// The code of `value`, if it was ever interned.
-    pub async fn code(&mut self, database: &Database, value: &[u8]) -> Result<Option<u32>, Error> {
-        if let Some(code) = self.codes.get(value) {
-            return Ok(Some(*code));
-        }
-        let mut found = None;
-        for raw in database
-            .index_scan_raw(&self.table, BY_VALUE_INDEX, &[Value::Bytes(value.to_vec())])
-            .await?
-        {
-            let record = raw.record();
-            if record.get_bytes(FIELD_VALUE_IDX)? != value {
-                continue;
+    fn validate_value(&self, value: &[u8]) -> Result<(), DictionaryError> {
+        records::validate_dictionary_value(value, &self.schema.value_type).map_err(|source| {
+            DictionaryError::InvalidValue {
+                dictionary: self.schema.name.clone(),
+                source,
             }
-            if found.is_some() {
-                return Err(self.invalid("a value has two codes"));
-            }
-            found = Some(record.get_u32(FIELD_CODE_IDX)?);
-        }
-        if let Some(code) = found {
-            self.provisional.remove(value);
-            self.remember(code, value.to_vec());
-        }
-        Ok(found)
+        })
     }
 
-    /// The code of `value`, staging its entry into `batch` unless the entry
-    /// is already durable. A new value gets the next unused code.
-    pub async fn stage(
-        &mut self,
-        database: &Database,
-        batch: &mut DatabaseBatch,
-        value: &[u8],
-    ) -> Result<u32, Error> {
-        if let Some(code) = self.code(database, value).await? {
-            return Ok(code);
+    fn insert(&mut self, code: u32, value: Arc<[u8]>) {
+        debug_assert_eq!(code as usize, self.values.len());
+        self.codes.insert(Arc::clone(&value), code);
+        self.values.push(value);
+        self.next_code = u64::from(code) + 1;
+    }
+}
+
+/// In-memory image of every declared dictionary, plus which entries are not
+/// yet durable.
+#[derive(Debug, Default)]
+pub struct DictionaryRegistry {
+    dictionaries: BTreeMap<String, DictionaryState>,
+}
+
+/// The dictionary entries one publication must make durable, and what to
+/// mark once it has.
+#[derive(Debug, Default)]
+pub(crate) struct PendingDictionaryEntries {
+    operations: Vec<OwnedWriteOperation>,
+    entries: Vec<(String, u32)>,
+}
+
+impl PendingDictionaryEntries {
+    pub(crate) fn operations(&self) -> &[OwnedWriteOperation] {
+        &self.operations
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl DictionaryRegistry {
+    /// Empty dictionaries for `schemas`, for a runtime without storage.
+    pub(crate) fn declared<'a>(schemas: impl IntoIterator<Item = &'a DictionarySchema>) -> Self {
+        Self {
+            dictionaries: schemas
+                .into_iter()
+                .map(|schema| (schema.name.clone(), DictionaryState::new(schema.clone())))
+                .collect(),
         }
-        let code = match self.provisional.get(value) {
-            Some(code) => *code,
-            None => {
-                let last = match database.primary_key_last_raw(&self.table, &[]).await? {
-                    None => None,
-                    Some(raw) => Some(raw.record().get_u32(FIELD_CODE_IDX)?),
-                };
-                let code = match last.max(self.provisional.values().max().copied()) {
-                    None => 0,
-                    Some(code) => code
-                        .checked_add(1)
-                        .ok_or_else(|| Error::DictionaryExhausted(self.table.clone()))?,
-                };
-                self.provisional.insert(value.to_vec(), code);
-                code
+    }
+
+    /// Load and validate every dictionary in `schemas` from storage.
+    ///
+    /// Refuses, with [`DictionaryError::InvalidDictionary`], a malformed key,
+    /// codes that are not dense from 0, a value that is not the canonical
+    /// inline encoding of the declared type, and a value stored twice.
+    pub(crate) async fn load<S>(
+        storage: &S,
+        schemas: &[DictionarySchema],
+    ) -> Result<Self, crate::db::Error>
+    where
+        S: OrderedKvStorage + ?Sized,
+    {
+        let mut registry = Self::default();
+        for schema in schemas {
+            let mut state = DictionaryState::new(schema.clone());
+            if schema.column_family() != dictionary_column_family(&schema.name) {
+                return Err(state
+                    .invalid("column family does not match its name")
+                    .into());
             }
-        };
-        batch.update(
-            self.table.clone(),
-            vec![Value::U32(code), Value::Bytes(value.to_vec())],
-        );
+            let entries = crate::storage::collect_scan(
+                storage
+                    .scan(ScanRequest::prefix(
+                        schema.column_family().to_owned(),
+                        Vec::new(),
+                    ))
+                    .await?,
+            )
+            .await?;
+            for (key, value) in entries {
+                let key: [u8; 4] = key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| state.invalid("an entry key is not a 4-byte code"))?;
+                let code = u32::from_be_bytes(key);
+                if u64::from(code) != state.next_code {
+                    return Err(state
+                        .invalid(format!(
+                            "codes are not dense: expected code {}, found {code}",
+                            state.next_code
+                        ))
+                        .into());
+                }
+                state.validate_value(&value).map_err(|error| match error {
+                    DictionaryError::InvalidValue { source, .. } => {
+                        state.invalid(format!("entry {code} is not canonical: {source}"))
+                    }
+                    other => other,
+                })?;
+                let value: Arc<[u8]> = value.into();
+                if state.codes.contains_key(&value) {
+                    return Err(state
+                        .invalid(format!("entry {code} repeats an earlier value"))
+                        .into());
+                }
+                state.insert(code, value);
+            }
+            if registry
+                .dictionaries
+                .insert(schema.name.clone(), state)
+                .is_some()
+            {
+                return Err(DictionaryError::InvalidDictionary {
+                    dictionary: schema.name.clone(),
+                    reason: "declared twice".to_owned(),
+                }
+                .into());
+            }
+        }
+        Ok(registry)
+    }
+
+    /// Refuse a schema whose dictionaries this registry did not load, or
+    /// loaded with another value type.
+    pub(crate) fn check_declares(
+        &self,
+        schemas: &[DictionarySchema],
+    ) -> Result<(), DictionaryError> {
+        for schema in schemas {
+            let state = self
+                .dictionaries
+                .get(&schema.name)
+                .ok_or_else(|| DictionaryError::NotLoaded(schema.name.clone()))?;
+            if state.schema != *schema {
+                return Err(DictionaryError::ValueTypeMismatch(schema.name.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn state(&self, dictionary: &str) -> Result<&DictionaryState, DictionaryError> {
+        self.dictionaries
+            .get(dictionary)
+            .ok_or_else(|| DictionaryError::UnknownDictionary(dictionary.to_owned()))
+    }
+
+    /// The code of `value` (its canonical bytes) in `dictionary`, allocating
+    /// the next code when the value is new. A new value is validated first.
+    pub fn encode(&mut self, dictionary: &str, value: &[u8]) -> Result<u32, DictionaryError> {
+        let state = self
+            .dictionaries
+            .get_mut(dictionary)
+            .ok_or_else(|| DictionaryError::UnknownDictionary(dictionary.to_owned()))?;
+        if let Some(code) = state.codes.get(value) {
+            return Ok(*code);
+        }
+        state.validate_value(value)?;
+        let code = u32::try_from(state.next_code)
+            .map_err(|_| DictionaryError::Exhausted(dictionary.to_owned()))?;
+        state.insert(code, value.into());
+        state.unpersisted.insert(code);
         Ok(code)
     }
 
-    /// The value that `code` stands for. A code without an entry is refused:
-    /// an entry is durable no later than the first row that stores its code.
-    pub async fn value(&mut self, database: &Database, code: u32) -> Result<Vec<u8>, Error> {
-        if let Some(value) = self.values.get(&code) {
-            return Ok(value.clone());
-        }
-        let raw = database
-            .primary_key_get_raw(&self.table, &[Value::U32(code)])
-            .await?
-            .ok_or_else(|| self.invalid("a stored code has no entry"))?;
-        let value = raw.record().get_bytes(FIELD_VALUE_IDX)?.to_vec();
-        self.remember(code, value.clone());
-        Ok(value)
+    /// The canonical bytes of the value that `code` stands for.
+    pub fn decode(&self, dictionary: &str, code: u32) -> Result<&[u8], DictionaryError> {
+        self.state(dictionary)?
+            .values
+            .get(code as usize)
+            .map(|value| &**value)
+            .ok_or_else(|| DictionaryError::UnknownCode {
+                dictionary: dictionary.to_owned(),
+                code,
+            })
     }
 
-    /// Forget every resident entry, for instance after the storage under the
-    /// database was replaced.
-    pub fn clear(&mut self) {
-        self.codes.clear();
-        self.values.clear();
-        self.provisional.clear();
+    /// The code `value` already has, without allocating one.
+    pub fn code(&self, dictionary: &str, value: &[u8]) -> Option<u32> {
+        self.dictionaries.get(dictionary)?.codes.get(value).copied()
     }
 
-    fn remember(&mut self, code: u32, value: Vec<u8>) {
-        if self.codes.len() >= RESIDENT_CACHE_MAX_ENTRIES {
-            self.codes.clear();
-            self.values.clear();
-        }
-        self.codes.insert(value.clone(), code);
-        self.values.insert(code, value);
+    /// How many codes `dictionary` has allocated.
+    pub fn len(&self, dictionary: &str) -> Option<usize> {
+        Some(self.dictionaries.get(dictionary)?.values.len())
     }
 
-    fn invalid(&self, reason: &'static str) -> Error {
-        Error::InvalidDictionary {
-            table: self.table.clone(),
-            reason,
+    /// Entries allocated in memory and not yet known to be durable.
+    pub(crate) fn pending(&self) -> PendingDictionaryEntries {
+        let mut pending = PendingDictionaryEntries::default();
+        for (name, state) in &self.dictionaries {
+            for &code in &state.unpersisted {
+                pending.operations.push(OwnedWriteOperation::Set {
+                    cf: state.schema.column_family().to_owned(),
+                    key: dictionary_entry_key(code).to_vec(),
+                    value: state.values[code as usize].to_vec(),
+                });
+                pending.entries.push((name.clone(), code));
+            }
         }
+        pending
+    }
+
+    /// Record that `pending` is durable (or is part of a write whose failure
+    /// poisons the database instance).
+    pub(crate) fn mark_persisted(&mut self, pending: &PendingDictionaryEntries) {
+        for (name, code) in &pending.entries {
+            if let Some(state) = self.dictionaries.get_mut(name) {
+                state.unpersisted.remove(code);
+            }
+        }
+    }
+
+    /// Pretend `dictionary` already allocated every code below `next_code`.
+    #[cfg(test)]
+    pub(crate) fn set_next_code_for_test(&mut self, dictionary: &str, next_code: u64) {
+        self.dictionaries
+            .get_mut(dictionary)
+            .expect("declared dictionary")
+            .next_code = next_code;
     }
 }
 
+/// Transcode a stored record to its logical form, resolving codes through
+/// `dictionaries`.
+pub(crate) fn transcode_to_logical(
+    transcoder: &records::RecordTranscoder,
+    dictionaries: &DictionaryRegistry,
+    physical: &[u8],
+) -> Result<Vec<u8>, DictionaryTranscodeError> {
+    transcoder.to_logical(physical, |dictionary, code| {
+        dictionaries
+            .decode(dictionary, code)
+            .map_err(DictionaryTranscodeError::Dictionary)
+    })
+}
+
+/// Transcode a logical record to its stored form, allocating codes for new
+/// values in `dictionaries`.
+pub(crate) fn transcode_to_physical(
+    transcoder: &records::RecordTranscoder,
+    dictionaries: &mut DictionaryRegistry,
+    logical: &[u8],
+) -> Result<Vec<u8>, DictionaryTranscodeError> {
+    transcoder.to_physical(logical, |dictionary, value_type, value| {
+        let state = dictionaries.state(dictionary)?;
+        if state.schema.value_type != *value_type {
+            return Err(DictionaryError::ValueTypeMismatch(dictionary.to_owned()).into());
+        }
+        Ok(dictionaries.encode(dictionary, value)?)
+    })
+}
+
+/// A transcoding failure: malformed record bytes or a dictionary failure.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum DictionaryTranscodeError {
+    #[error(transparent)]
+    Record(#[from] records::Error),
+    #[error(transparent)]
+    Dictionary(#[from] DictionaryError),
+}
+
+// Registry-level tests: code exhaustion needs four billion allocations
+// through the public API, and the pending/persisted bookkeeping is not
+// observable apart from the storage writes the database tests cover.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::DatabaseSchema;
-    use crate::storage::MemoryStorage;
+    use crate::records::ValueType;
 
-    fn schema() -> DatabaseSchema {
-        DatabaseSchema::new([table_schema("authors")])
+    fn registry() -> DictionaryRegistry {
+        DictionaryRegistry::declared(&[DictionarySchema::new("names", ValueType::String)])
     }
 
-    async fn commit(database: &mut Database, batch: DatabaseBatch) {
-        let applied = database.apply_batch(batch).await.unwrap();
-        let persisted = database.persist_with_progress(&applied).await;
-        database.finish_persistence(persisted).unwrap();
+    fn name(value: &str) -> Vec<u8> {
+        crate::records::encode_single_field_value(
+            &crate::records::Value::String(value.into()),
+            &ValueType::String,
+        )
+        .unwrap()
     }
 
-    /// Actors: one database staging author strings into its batches, then a
-    /// reopen of the same storage with a fresh dictionary.
-    ///
-    /// Codes are dense from 0, staging a known value reuses its code, and a
-    /// reopened database resolves both directions from storage alone.
-    #[futures_test::test]
-    async fn codes_are_stable_across_reopen() {
-        let schema = schema();
-        let storage = MemoryStorage::new(&schema.column_families()).unwrap();
-        let mut database = Database::new(schema.clone(), storage.clone())
-            .await
-            .unwrap();
-        let mut dictionary = Dictionary::new("authors");
-        assert_eq!(dictionary.code(&database, b"alice").await.unwrap(), None);
-        let mut batch = database.open_batch();
-        assert_eq!(
-            dictionary
-                .stage(&database, &mut batch, b"alice")
-                .await
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            dictionary
-                .stage(&database, &mut batch, b"bob")
-                .await
-                .unwrap(),
-            1
-        );
-        commit(&mut database, batch).await;
-        let mut batch = database.open_batch();
-        assert_eq!(
-            dictionary
-                .stage(&database, &mut batch, b"alice")
-                .await
-                .unwrap(),
-            0
-        );
-        assert!(batch.is_empty(), "a durable entry is not staged again");
-        drop(database);
-
-        let reopened = Database::new(schema, storage).await.unwrap();
-        let mut dictionary = Dictionary::new("authors");
-        assert_eq!(dictionary.value(&reopened, 1).await.unwrap(), b"bob");
-        assert_eq!(dictionary.code(&reopened, b"alice").await.unwrap(), Some(0));
-        let mut batch = reopened.open_batch();
-        assert_eq!(
-            dictionary
-                .stage(&reopened, &mut batch, b"carol")
-                .await
-                .unwrap(),
-            2
-        );
+    /// Codes are dense from 0, a known value keeps its code, and an
+    /// allocation is pending until a publication marks it persisted.
+    #[test]
+    fn codes_are_dense_and_pending_until_persisted() {
+        let mut registry = registry();
+        assert_eq!(registry.encode("names", &name("alice")).unwrap(), 0);
+        assert_eq!(registry.encode("names", &name("bob")).unwrap(), 1);
+        assert_eq!(registry.encode("names", &name("alice")).unwrap(), 0);
+        assert_eq!(registry.decode("names", 1).unwrap(), name("bob"));
+        let pending = registry.pending();
+        assert_eq!(pending.operations().len(), 2);
+        registry.mark_persisted(&pending);
+        assert!(registry.pending().is_empty());
+        assert_eq!(registry.encode("names", &name("carol")).unwrap(), 2);
+        assert_eq!(registry.pending().operations().len(), 1);
     }
 
-    /// Actors: one database whose first batch naming a new value is dropped
-    /// before it is applied, then a second value and a retry of the first.
-    ///
-    /// The dropped value keeps its provisional code, so no code is handed to
-    /// two values, and the retry stages the entry again so it becomes durable
-    /// with the row that uses it.
-    #[futures_test::test]
-    async fn a_dropped_batch_keeps_codes_unique_and_restages_the_entry() {
-        let schema = schema();
-        let storage = MemoryStorage::new(&schema.column_families()).unwrap();
-        let mut database = Database::new(schema, storage).await.unwrap();
-        let mut dictionary = Dictionary::new("authors");
-        let mut dropped = database.open_batch();
+    /// The last code is `u32::MAX`; past it, allocation fails with a typed
+    /// error and known values still resolve.
+    #[test]
+    fn allocation_past_the_last_code_is_refused() {
+        let mut registry = registry();
+        assert_eq!(registry.encode("names", &name("alice")).unwrap(), 0);
+        registry.set_next_code_for_test("names", u64::from(u32::MAX) + 1);
         assert_eq!(
-            dictionary
-                .stage(&database, &mut dropped, b"alice")
-                .await
-                .unwrap(),
-            0
+            registry.encode("names", &name("bob")),
+            Err(DictionaryError::Exhausted("names".to_owned()))
         );
-        drop(dropped);
-
-        let mut batch = database.open_batch();
-        assert_eq!(
-            dictionary
-                .stage(&database, &mut batch, b"bob")
-                .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            dictionary
-                .stage(&database, &mut batch, b"alice")
-                .await
-                .unwrap(),
-            0
-        );
-        commit(&mut database, batch).await;
-        let mut fresh = Dictionary::new("authors");
-        assert_eq!(fresh.code(&database, b"alice").await.unwrap(), Some(0));
-        assert_eq!(fresh.code(&database, b"bob").await.unwrap(), Some(1));
+        assert_eq!(registry.encode("names", &name("alice")).unwrap(), 0);
     }
 
-    /// Actors: one database whose dictionary is asked for a code no row
-    /// could have stored.
-    ///
-    /// Entries are durable before their code is handed out, so a missing
-    /// entry is corruption and is refused rather than read as empty.
-    #[futures_test::test]
-    async fn an_unknown_code_is_refused() {
-        let schema = schema();
-        let storage = MemoryStorage::new(&schema.column_families()).unwrap();
-        let database = Database::new(schema, storage).await.unwrap();
-        let mut dictionary = Dictionary::new("authors");
+    /// A value that is not the canonical inline encoding of the dictionary's
+    /// type gets no code, and an undeclared dictionary is refused.
+    #[test]
+    fn invalid_values_and_unknown_dictionaries_are_refused() {
+        let mut registry = registry();
         assert!(matches!(
-            dictionary.value(&database, 7).await,
-            Err(Error::InvalidDictionary { .. })
+            registry.encode("names", &[0xff]),
+            Err(DictionaryError::InvalidValue { .. })
         ));
+        assert_eq!(
+            registry.encode("tags", &name("x")),
+            Err(DictionaryError::UnknownDictionary("tags".to_owned()))
+        );
+        assert_eq!(
+            registry.decode("names", 0),
+            Err(DictionaryError::UnknownCode {
+                dictionary: "names".to_owned(),
+                code: 0
+            })
+        );
     }
 }

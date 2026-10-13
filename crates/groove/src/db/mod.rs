@@ -1361,7 +1361,7 @@ pub struct Database {
     /// Dense record descriptors are invariant for one table variant. Keep the
     /// interned handles beside the database schema so scans do not rebuild and
     /// re-hash the same logical field list once per stored row.
-    stored_record_descriptors: RefCell<BTreeMap<String, BTreeMap<u32, RecordDescriptor>>>,
+    stored_record_descriptors: RefCell<BTreeMap<String, BTreeMap<u32, StoredRecordCodec>>>,
     next_publication_id: u64,
     immutable_batch_owner: Rc<()>,
     /// Rotated whenever physical record admission can change. Batches may be
@@ -1405,7 +1405,17 @@ pub struct Database {
 #[derive(Clone)]
 pub struct RuntimeRegistryCheckpoint {
     ivm_runtime: IvmRuntime,
-    stored_record_descriptors: BTreeMap<String, BTreeMap<u32, RecordDescriptor>>,
+    stored_record_descriptors: BTreeMap<String, BTreeMap<u32, StoredRecordCodec>>,
+}
+
+/// How one table variant's stored rows relate to its logical records.
+#[derive(Clone, Debug)]
+pub(crate) struct StoredRecordCodec {
+    /// The descriptor of the logical record.
+    pub(crate) logical: RecordDescriptor,
+    /// Rebuilds stored rows, which hold dictionary codes, as logical records.
+    /// `None` when the table interns nothing and stored bytes are logical.
+    pub(crate) transcoder: Option<Rc<records::RecordTranscoder>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1803,10 +1813,10 @@ pub enum Error {
     Storage(Box<crate::storage::Error>),
     #[error("table not found: {0}")]
     TableNotFound(String),
-    #[error("invalid dictionary {table}: {reason}")]
-    InvalidDictionary { table: String, reason: &'static str },
-    #[error("dictionary {0} has no free code left")]
-    DictionaryExhausted(String),
+    #[error(transparent)]
+    Dictionary(#[from] crate::dictionary::DictionaryError),
+    #[error(transparent)]
+    InvalidInternedColumn(#[from] crate::schema::InternedColumnError),
     #[error("table already exists: {0}")]
     TableAlreadyExists(String),
     #[error("field definition does not match the live catalogue: {table}.{field}")]
@@ -1839,6 +1849,19 @@ pub enum Error {
     UnknownTableVariant { table: String, version: u64 },
     #[error("unknown query parameter binding: {0}")]
     UnknownParameter(String),
+}
+
+impl From<crate::dictionary::DictionaryTranscodeError> for Error {
+    fn from(error: crate::dictionary::DictionaryTranscodeError) -> Self {
+        match error {
+            crate::dictionary::DictionaryTranscodeError::Record(error) => {
+                Self::RecordEncoding(error)
+            }
+            crate::dictionary::DictionaryTranscodeError::Dictionary(error) => {
+                Self::Dictionary(error)
+            }
+        }
+    }
 }
 
 impl From<crate::storage::Error> for Error {

@@ -7193,6 +7193,10 @@ async fn old_row_delta_descriptors_are_prepared_once_per_batch_variant() {
             ColumnSchema::new("label", ColumnType::String),
         ],
     )
+    .with_primary_key(crate::schema::PrimaryKey::new(
+        "id",
+        crate::schema::IntegerKeyType::U64,
+    ))
     .with_variant(1, ["id"])
     .with_variant(2, ["id", "label"]);
     let first = table.record_schema_for_variant(1).unwrap();
@@ -7230,8 +7234,14 @@ async fn old_row_delta_descriptors_are_prepared_once_per_batch_variant() {
         .iter()
         .map(|_| RecordStore::new(&storage, "variant_rows", &carrier))
         .collect::<Vec<_>>();
+    let database = Database::new(
+        schema,
+        MemoryStorage::new(&["variant_rows"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(0));
-    let deltas = compute_table_deltas(&writes, &stores, &schema)
+    let deltas = compute_table_deltas(&writes, &stores, &database)
         .await
         .unwrap();
     assert_eq!(
@@ -7269,7 +7279,7 @@ async fn old_row_delta_descriptors_are_prepared_once_per_batch_variant() {
         .await
         .unwrap();
     assert!(matches!(
-        compute_table_deltas(&writes[..1], &stores[..1], &schema).await,
+        compute_table_deltas(&writes[..1], &stores[..1], &database).await,
         Err(Error::UnknownTableVariant { version: 3, .. })
     ));
 }
