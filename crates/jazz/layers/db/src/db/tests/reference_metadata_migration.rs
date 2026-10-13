@@ -370,9 +370,7 @@ fn reference_migration_backfills_authority_settled_rows() {
             .all_for_identity(
                 &query,
                 crate::db::ReadOpts {
-                    tier: crate::tx::DurabilityTier::Global,
-                    local_updates: crate::db::LocalUpdates::Deferred,
-                    propagation: crate::db::Propagation::LocalOnly,
+                    tier: crate::db::ReadTier::Remote,
                     ..Default::default()
                 },
                 AuthorSubject::for_test_bytes([0x73; 16]),

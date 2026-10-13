@@ -35,7 +35,7 @@ fn detach_query_during_suspended_read_releases_coverage_without_reentry() {
         block_on(db.attach_query_with_opts_async(&prepared, ReadOpts::default(), None, None))
             .unwrap();
     let opts = ReadOpts {
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     storage.evict_all();
@@ -488,9 +488,7 @@ fn point_join_one_shot_uses_junction_index_and_tracks_deletion() {
             &block_on(db.all_for_identity(
                 prepared,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
-                    local_updates: LocalUpdates::Deferred,
-                    propagation: Propagation::LocalOnly,
+                    tier: crate::db::ReadTier::Remote,
                     include_deleted: false,
                     ..ReadOpts::default()
                 },
@@ -603,8 +601,7 @@ fn filtered_join_one_shot_uses_both_source_indexes() {
     let rows = block_on(db.all_for_identity(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         AuthorSubject::SYSTEM,
@@ -741,9 +738,11 @@ fn point_join_matches_unindexed_control(
 
 fn point_join_read_opts(tier: DurabilityTier, include_deleted: bool) -> ReadOpts {
     ReadOpts {
-        tier,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: if tier == DurabilityTier::Global {
+            ReadTier::Remote
+        } else {
+            ReadTier::LocalOnly
+        },
         include_deleted,
         ..ReadOpts::default()
     }
@@ -966,9 +965,11 @@ fn ordered_page_cells(bucket: &str, rank: i64, flag: bool) -> RowCells {
 /// bounded ordered-page probe, so it is the unbounded control.
 fn ordered_pages_match_unbounded_control(db: &Db, tier: DurabilityTier, label: &str) {
     let opts = ReadOpts {
-        tier,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: if tier == DurabilityTier::Global {
+            ReadTier::Remote
+        } else {
+            ReadTier::LocalOnly
+        },
         ..ReadOpts::default()
     };
     let read = |query: Query| {
@@ -1034,8 +1035,7 @@ fn ordered_composite_pages_match_unbounded_query() {
     let rows = block_on(db.all_for_identity(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         AuthorSubject::SYSTEM,
@@ -1106,8 +1106,7 @@ fn ordered_composite_pages_match_unbounded_query() {
     let rows = block_on(db.all_for_identity(
         &ascending,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         AuthorSubject::SYSTEM,
@@ -1205,9 +1204,11 @@ fn open_composite_equality_db() -> Db {
 /// control.
 fn composite_equality_reads_match_control(db: &Db, tier: DurabilityTier, label: &str) {
     let opts = ReadOpts {
-        tier,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: if tier == DurabilityTier::Global {
+            ReadTier::Remote
+        } else {
+            ReadTier::LocalOnly
+        },
         ..ReadOpts::default()
     };
     let read = |query: &Query| {
@@ -1336,8 +1337,7 @@ fn global_page_with_reads(db: &Db, query: Query) -> (Vec<RowUuid>, groove::db::S
     let rows = block_on(db.all_for_identity(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         AuthorSubject::SYSTEM,
@@ -1496,8 +1496,7 @@ fn first_result_join_filters_junction_keys_before_row_hydration() {
     let rows = block_on(db.all_for_identity(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         AuthorSubject::SYSTEM,
@@ -1822,9 +1821,7 @@ fn local_subscribe_uses_prepared_non_simple_plan() {
     let mut subscription = block_on(db.subscribe(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Local,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         },
@@ -1867,9 +1864,7 @@ fn subscription_reset_preserves_ordered_window_rank() {
         &db,
         &query,
         ReadOpts {
-            tier: DurabilityTier::Local,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         },
@@ -2120,9 +2115,7 @@ fn authoritative_global_bound_read_uses_the_declared_index() {
     let rows = block_on(db.all_for_identity(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::Remote,
             include_deleted: false,
             ..ReadOpts::default()
         },
@@ -5516,6 +5509,43 @@ fn db_at_reads_historical_cut_and_partial_requires_server() {
     assert_eq!(err.message, "historical read requires server evaluation");
 }
 
+/// Alice can use a UUID needle for array membership; a text needle is rejected
+/// before execution with both types. This public DB test checks user-visible
+/// query preparation.
+#[test]
+fn typed_uuid_array_contains_reports_expected_and_actual_types() {
+    let schema = build_public_db_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("items").column(
+            "tags",
+            PublicColumnType::Array {
+                element: Box::new(PublicColumnType::Uuid),
+            },
+        ),
+    ));
+    let db = open_db(0xd8, AuthorSubject::SYSTEM, &schema);
+    let tag = uuid::Uuid::from_bytes([0x31; 16]);
+    db.insert(
+        "items",
+        BTreeMap::from([("tags".to_owned(), Value::Array(vec![Value::Uuid(tag)]))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = Query::from("items").filter(contains(col("tags"), lit(Value::Uuid(tag))));
+    assert_eq!(row_ids(&prepared_read(&db, &query)), vec![row(1)]);
+
+    let mismatched = Query::from("items").filter(contains(col("tags"), lit("not-a-uuid")));
+    let error = db.prepare_query(&mismatched).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains("Uuid") && error.message.contains("String"),
+        "diagnostic must identify expected UUID member and actual String needle: {}",
+        error.message
+    );
+}
 #[test]
 fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
     let schema = issue_schema();
@@ -5822,41 +5852,33 @@ fn permission_introspection_magic_columns_fail_closed_on_prepare_query() {
 }
 
 #[test]
-fn read_opts_default_and_effective_tier_preserve_local_update_contract() {
+fn read_opts_resolve_product_tiers_to_coverage() {
     let opts = ReadOpts::default();
-    assert_eq!(opts.tier, DurabilityTier::Local);
-    assert_eq!(opts.local_updates, LocalUpdates::Immediate);
-    assert_eq!(opts.propagation, Propagation::Full);
+    assert_eq!(opts.tier, ReadTier::LocalFirst);
 
     assert_eq!(
-        effective_read_tier(&ReadOpts {
-            tier: DurabilityTier::None,
-            local_updates: LocalUpdates::Immediate,
-            propagation: Propagation::LocalOnly,
+        read_coverage_tier(&ReadOpts {
+            tier: crate::db::ReadTier::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         }),
         DurabilityTier::Local
     );
     assert_eq!(
-        effective_read_tier(&ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Immediate,
-            propagation: Propagation::LocalOnly,
+        read_coverage_tier(&ReadOpts {
+            tier: crate::db::ReadTier::Remote,
             include_deleted: false,
             ..ReadOpts::default()
         }),
         DurabilityTier::Global
     );
     assert_eq!(
-        effective_read_tier(&ReadOpts {
-            tier: DurabilityTier::None,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::Full,
+        read_coverage_tier(&ReadOpts {
+            tier: crate::db::ReadTier::LocalFirst,
             include_deleted: false,
             ..ReadOpts::default()
         }),
-        DurabilityTier::None
+        DurabilityTier::Local
     );
 }
 
@@ -5874,10 +5896,8 @@ fn global_read_and_wait_require_core_confirmation() {
     let prepared_query = prepared(&db, &query);
 
     assert_eq!(
-        effective_read_tier(&ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Immediate,
-            propagation: Propagation::LocalOnly,
+        read_coverage_tier(&ReadOpts {
+            tier: crate::db::ReadTier::Remote,
             include_deleted: false,
             ..ReadOpts::default()
         }),
@@ -5887,9 +5907,7 @@ fn global_read_and_wait_require_core_confirmation() {
         doctest_support::block_on(db.all_for_identity(
             &prepared_query,
             ReadOpts {
-                tier: DurabilityTier::Global,
-                local_updates: LocalUpdates::Immediate,
-                propagation: Propagation::LocalOnly,
+                tier: crate::db::ReadTier::Remote,
                 include_deleted: false,
                 ..ReadOpts::default()
             },
@@ -5922,9 +5940,7 @@ fn global_read_and_wait_require_core_confirmation() {
             &doctest_support::block_on(db.all_for_identity(
                 &prepared_query,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
-                    local_updates: LocalUpdates::Immediate,
-                    propagation: Propagation::LocalOnly,
+                    tier: crate::db::ReadTier::Remote,
                     include_deleted: false,
                     ..ReadOpts::default()
                 },
@@ -6105,7 +6121,7 @@ fn request_claims_survive_subscription_runtime_rebuild() {
         .clone()
         .with_identity_claims(alice, claims("team-a"));
     let opts = ReadOpts {
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     };
     db.set_identity_claims(alice, claims("team-b"));
@@ -6238,7 +6254,7 @@ fn prepared_request_claim_presence_keeps_policy_branches_isolated() {
         .into(),
     );
     let opts = ReadOpts {
-        propagation: Propagation::LocalOnly,
+        tier: crate::db::ReadTier::LocalOnly,
         ..Default::default()
     };
     assert!(
