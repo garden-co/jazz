@@ -479,6 +479,18 @@ impl ShellDb {
         }
     }
 
+    async fn shed_arrangement_memory(
+        &self,
+        bytes: usize,
+    ) -> ShellResult<crate::groove::ivm::ArrangementSpillReport> {
+        let db = match self {
+            Self::Memory(db) | Self::Durable(db) => db,
+        };
+        db.shed_arrangement_memory(bytes)
+            .await
+            .map_err(|error| ShellError::Db(error.to_string()))
+    }
+
     fn enable_authoritative_scalar_exit_refresh(&self) {
         match self {
             Self::Memory(db) => db.enable_authoritative_scalar_exit_refresh(),
@@ -891,9 +903,14 @@ impl InMemoryServerShell {
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
-                ShellDb::Durable(crate::local_executor::block_on(Db::open_history_complete(
-                    db_config,
-                ))?)
+                let db = crate::local_executor::block_on(Db::open_history_complete(db_config))?;
+                if let Some(spill) = factory
+                    .open_spill_storage(spill_storage_path(path))
+                    .map_err(db_storage_error)?
+                {
+                    db.set_arrangement_spill_storage(Rc::from(spill));
+                }
+                ShellDb::Durable(db)
             }
             StorageConfig::SQLite { .. } => {
                 return Err(ShellError::UnsupportedStorage {
@@ -1551,6 +1568,16 @@ impl InMemoryServerShell {
         self.db.evict_expired_staged_large_values().await
     }
 
+    /// Move query join state to the store's scratch storage until `bytes`
+    /// less of it stays in memory. Results are unchanged; a shell without
+    /// scratch storage (in-memory storage) keeps everything resident.
+    pub async fn shed_arrangement_memory(
+        &self,
+        bytes: usize,
+    ) -> ShellResult<crate::groove::ivm::ArrangementSpillReport> {
+        self.db.shed_arrangement_memory(bytes).await
+    }
+
     /// Drain encoded wire frames ready to send to the host for a session.
     pub fn take_frames(&mut self, session: ServerSession) -> ShellResult<Vec<AbiBytes>> {
         let state = self.session_state(session)?;
@@ -1797,6 +1824,14 @@ fn catalogue_acks_from_messages(messages: Vec<SyncMessage>) -> Vec<CatalogueAck>
             _ => None,
         })
         .collect()
+}
+
+/// Scratch storage for spilled query state lives beside the durable store,
+/// never inside it, so the durable layout stays the backend's own.
+fn spill_storage_path(store: &std::path::Path) -> PathBuf {
+    let mut name = store.file_name().unwrap_or_default().to_os_string();
+    name.push(".spill");
+    store.with_file_name(name)
 }
 
 fn db_storage_error(error: impl fmt::Display) -> ShellError {

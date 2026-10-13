@@ -1,6 +1,7 @@
 //! Native HTTP/WebSocket server adapter for Jazz's semantic runtime.
 
 pub mod loopback;
+pub mod memory_governor;
 pub mod middleware;
 pub mod profiling;
 pub mod resources;
@@ -106,6 +107,21 @@ pub async fn run(
             })))
         }
         None => None,
+    };
+    // Spilling needs scratch storage, which only durable storage provides.
+    let _memory_governor = match limits.memory_limit_bytes {
+        Some(limit) if !in_memory => {
+            let watermarks = memory_governor::MemoryWatermarks::for_limit(limit);
+            info!(
+                "Spilling query state to disk above {} MiB",
+                watermarks.high_bytes / (1024 * 1024)
+            );
+            Some(AbortOnDrop(tokio::spawn(memory_governor::run(
+                built.state.clone(),
+                limit,
+            ))))
+        }
+        _ => None,
     };
     let shutdown = built.state.shutdown.clone();
     let mut sigterm_task = install_signal_before_readiness(

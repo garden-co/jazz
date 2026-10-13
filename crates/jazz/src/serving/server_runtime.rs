@@ -1272,6 +1272,24 @@ impl ServerRuntimeHandle {
             .await
     }
 
+    /// Move query join state to scratch storage until `bytes` less of it
+    /// stays in memory. Results are unchanged; queries over spilled state
+    /// read it back from scratch storage.
+    pub async fn shed_arrangement_memory(
+        &self,
+        bytes: usize,
+    ) -> Result<crate::groove::ivm::ArrangementSpillReport, String> {
+        self.run_async(move |shell| {
+            Box::pin(async move {
+                shell
+                    .shed_arrangement_memory(bytes)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+        })
+        .await
+    }
+
     /// Start a core runtime over the selected storage configuration.
     pub fn start_with_storage(
         schema: JazzSchema,

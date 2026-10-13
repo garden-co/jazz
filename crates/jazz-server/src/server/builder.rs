@@ -1358,6 +1358,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn persistent_server_spills_query_state_beside_its_store() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
+            .table(jazz::tools::public_schema::TableSchema::builder("todos"))
+            .build();
+        let built = ServerBuilder::new(AppId::from_name("rocksdb-server-shell-spill"))
+            .with_schema(schema)
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("build RocksDB server");
+        let spill_dir = data_dir
+            .path()
+            .join(format!("{SERVER_SHELL_ROCKSDB_DIR}.spill"));
+        assert!(spill_dir.is_dir(), "scratch store opens with the shell");
+
+        let report = built
+            .state
+            .runtime()
+            .expect("server shell is running")
+            .shed_arrangement_memory(usize::MAX)
+            .await
+            .expect("shedding query memory succeeds");
+        assert_eq!(report.resident_bytes_after, 0);
+
+        assert_eq!(
+            built.shutdown().await,
+            crate::server::ShutdownPhase::StorageClosed
+        );
+        assert!(!spill_dir.exists(), "scratch store is removed on shutdown");
+    }
+
     #[test]
     fn persistent_adapter_shutdown_survives_initiating_runtime_drop() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");

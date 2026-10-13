@@ -394,6 +394,13 @@ impl super::IvmRuntime {
         self.spill_context = Some(Rc::new(SpillContext::new(storage)));
     }
 
+    /// Spill into the same storage as `other`, a runtime this one replaces.
+    /// Run ids keep counting up, so runs `other` still holds never collide
+    /// with this runtime's.
+    pub(crate) fn share_spill_storage_with(&mut self, other: &Self) {
+        self.spill_context = other.spill_context.clone();
+    }
+
     /// Encoded bytes of join arrangements held in memory, including buckets
     /// cached from spilled runs.
     pub fn resident_arrangement_bytes(&self) -> usize {

@@ -117,6 +117,25 @@ where
         self.node.set_large_value_staging_policy(policy);
     }
 
+    /// Give query join state scratch storage to spill to under memory
+    /// pressure (see [`Self::shed_arrangement_memory`]).
+    pub fn set_arrangement_spill_storage(
+        &self,
+        storage: std::rc::Rc<dyn groove::ivm::SpillStorage>,
+    ) {
+        self.node.set_arrangement_spill_storage(storage);
+    }
+
+    /// Spill query join state to the scratch storage until `bytes` less of
+    /// it stays in memory. Query results are unchanged; without scratch
+    /// storage nothing moves.
+    pub async fn shed_arrangement_memory(
+        &self,
+        bytes: usize,
+    ) -> Result<groove::ivm::ArrangementSpillReport, groove::ivm::IvmRuntimeError> {
+        self.node.shed_arrangement_memory(bytes).await
+    }
+
     /// Run one host-driven staging-expiry maintenance pass.
     pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
         self.node.evict_expired_staged_large_values().await

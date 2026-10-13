@@ -1089,6 +1089,28 @@ where
         self.database.last_tick_metrics()
     }
 
+    /// Give query join state scratch storage to spill to under memory
+    /// pressure. It survives catalogue rebuilds of the Groove runtime.
+    pub fn set_arrangement_spill_storage(
+        &mut self,
+        storage: std::rc::Rc<dyn groove::ivm::SpillStorage>,
+    ) {
+        self.database.set_arrangement_spill_storage(storage);
+    }
+
+    /// Spill query join state until `bytes` less of it stays in memory, or
+    /// none does.
+    pub fn shed_arrangement_memory(
+        &mut self,
+        bytes: usize,
+    ) -> Result<groove::ivm::ArrangementSpillReport, groove::ivm::IvmRuntimeError> {
+        let target = self
+            .database
+            .resident_arrangement_bytes()
+            .saturating_sub(bytes);
+        self.database.spill_arrangements(target)
+    }
+
     /// Test/bench-only runtime diagnostics used by performance receipts.
     #[cfg(any(test, feature = "testing"))]
     pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
