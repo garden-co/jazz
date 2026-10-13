@@ -265,7 +265,6 @@ describe("catalogue-api", () => {
             table: "todos",
             query: '{"table":"todos"}',
             branches: ["main"],
-            propagation: "full",
           },
         ],
       }),
