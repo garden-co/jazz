@@ -44,10 +44,7 @@ fn schema() -> JazzSchema {
     JazzSchema::new(&source.allow_all()).expect("fate replay public schema compiles")
 }
 
-async fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+async fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -62,7 +59,7 @@ async fn reopen_node(
     temp_dir: &tempfile::TempDir,
     node_uuid: NodeUuid,
     schema: JazzSchema,
-) -> NodeState<RocksDbStorage> {
+) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
@@ -79,7 +76,7 @@ fn task_cells(title: &str, count: i32) -> BTreeMap<String, Value> {
 }
 
 async fn commit(
-    client: &mut NodeState<RocksDbStorage>,
+    client: &mut NodeState,
     author: AuthorSubject,
     row_uuid: RowUuid,
     made_at: u64,
@@ -103,7 +100,7 @@ async fn commit(
     (tx_id, message)
 }
 
-async fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
+async fn relay_ingest(node: &mut NodeState, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -112,15 +109,12 @@ async fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessag
         .unwrap();
 }
 
-async fn core_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) -> SyncMessage {
+async fn core_ingest(node: &mut NodeState, message: &SyncMessage) -> SyncMessage {
     let [fate] = core_ingest_all(node, message).await.try_into().unwrap();
     fate
 }
 
-async fn core_ingest_all(
-    node: &mut NodeState<RocksDbStorage>,
-    message: &SyncMessage,
-) -> Vec<SyncMessage> {
+async fn core_ingest_all(node: &mut NodeState, message: &SyncMessage) -> Vec<SyncMessage> {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -131,15 +125,12 @@ async fn core_ingest_all(
     node.persist_and_settle_outcome(outcome).await.unwrap()
 }
 
-async fn apply_message(node: &mut NodeState<RocksDbStorage>, message: SyncMessage) {
+async fn apply_message(node: &mut NodeState, message: SyncMessage) {
     let outcome = node.apply_sync_message(message).await.unwrap();
     node.persist_and_settle_outcome(outcome).await.unwrap();
 }
 
-async fn task_rows(
-    node: &mut NodeState<RocksDbStorage>,
-    tier: DurabilityTier,
-) -> Vec<(RowUuid, Value, Value)> {
+async fn task_rows(node: &mut NodeState, tier: DurabilityTier) -> Vec<(RowUuid, Value, Value)> {
     let schema = schema();
     let table = &schema.tables[0];
     node.current_rows("tasks", tier)

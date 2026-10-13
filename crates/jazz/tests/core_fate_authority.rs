@@ -6,9 +6,7 @@ use std::rc::Rc;
 
 mod common;
 
-use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, WireTransportAdapter, block_on,
-};
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, WireTransportAdapter, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -81,7 +79,7 @@ fn write_only_schema() -> JazzSchema {
     )
 }
 
-fn open_db(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_db(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> Db {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
@@ -126,7 +124,7 @@ impl WireTransport for QueuedWireTransport {
 
 fn connect_client_to_core(
     core: &mut InMemoryServerShell,
-    client: &Db<TestStorage>,
+    client: &Db,
     client_wire: &QueuedWireTransport,
     identity: AuthorSubject,
 ) -> ServerSession {
@@ -137,7 +135,7 @@ fn connect_client_to_core(
 }
 
 fn pump_client_core(
-    client: &Db<TestStorage>,
+    client: &Db,
     wire: &QueuedWireTransport,
     core: &mut InMemoryServerShell,
     session: ServerSession,
@@ -151,15 +149,17 @@ fn pump_client_core(
     block_on(client.tick()).unwrap();
 }
 
-fn visible_titles(db: &Db<TestStorage>, tier: DurabilityTier) -> Vec<String> {
+fn visible_titles(db: &Db, tier: DurabilityTier) -> Vec<String> {
     let query = Query::from("todos");
     let prepared = db.prepare_query(&query).unwrap();
     block_on(db.all(
         &prepared,
         ReadOpts {
-            tier,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::Full,
+            tier: if tier == DurabilityTier::Global {
+                jazz::db::ReadTier::Remote
+            } else {
+                jazz::db::ReadTier::LocalFirst
+            },
             ..ReadOpts::default()
         },
     ))
@@ -200,9 +200,7 @@ fn core_shell_client_upload_still_reports_global_immediately() {
     let mut bob_global_subscription = block_on(bob.subscribe(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::Full,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -501,9 +499,7 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     let rows = block_on(alice.all(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::Full,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -546,7 +542,7 @@ fn many_writer_nodes_resolve_authors_and_merge_heads_at_the_core() {
     let _bob_subscription = block_on(bob.subscribe(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -565,7 +561,7 @@ fn many_writer_nodes_resolve_authors_and_merge_heads_at_the_core() {
         let subscription = block_on(db.subscribe(
             &prepared,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -628,9 +624,7 @@ fn many_writer_nodes_resolve_authors_and_merge_heads_at_the_core() {
     let rows = block_on(bob.all(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::Full,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))

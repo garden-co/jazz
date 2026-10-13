@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { DynamicCodeBlock } from "fumadocs-ui/components/dynamic-codeblock";
+import { Code } from "@/components/docs/mdx-client";
 import { getStoredApp, onAppGenerated, type GeneratedApp } from "@/lib/generated-app-store";
 
 export function DeployCommand() {
@@ -22,5 +22,5 @@ export function DeployCommand() {
     `  --admin-secret ${adminSecret}`,
   ].join("\n");
 
-  return <DynamicCodeBlock lang="bash" code={code} />;
+  return <Code language="bash" code={code} />;
 }

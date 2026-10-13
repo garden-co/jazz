@@ -44,7 +44,7 @@ impl FastResumeReceipt {
 /// the benchmark timing closure. `caught_up_fast_resume` measures only attaching
 /// a peer which has already observed that exact frontier.
 pub struct FastResumeFixture {
-    core: NodeState<MemoryStorage>,
+    core: NodeState,
     shape: jazz::query::ValidatedQuery,
     binding: jazz::query::Binding,
     subscription: SubscriptionKey,
@@ -182,7 +182,7 @@ fn schema() -> JazzSchema {
     JazzSchema::new(&source).expect("BandChat fast-resume schema compiles")
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState {
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(NodeState::new(

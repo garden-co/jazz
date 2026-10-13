@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Drift detector for the nine Jazz starters.
+// Drift detector for the Jazz starters.
 //
 // Verifies that files meant to be identical actually are, and that every
 // README follows the same section order. Runs in CI / lefthook and also
@@ -25,6 +25,7 @@ const STARTERS = {
   ],
   react: ["starters/react-betterauth", "starters/react-localfirst", "starters/react-hybrid"],
   ts: ["starters/ts-betterauth", "starters/ts-localfirst", "starters/ts-hybrid"],
+  effect: ["starters/ts-effect-betterauth", "starters/ts-effect-localfirst"],
 };
 
 // File → the relative path within each starter, keyed by framework.
@@ -35,6 +36,7 @@ const HORIZONTAL_FILES = {
   sveltekit: ["src/lib/schema.ts", "src/lib/permissions.ts", "src/lib/TodoWidget.svelte"],
   react: ["schema.ts", "permissions.ts", "src/todo-widget.tsx"],
   ts: ["schema.ts", "permissions.ts", "src/todo-widget.ts"],
+  effect: ["schema.ts", "permissions.ts", "src/todo-widget.ts"],
 };
 
 // Files that must be byte-identical across all starters regardless of
@@ -51,6 +53,7 @@ const CROSS_FRAMEWORK_FILES = [
     sveltekit: "src/lib/schema.ts",
     react: "schema.ts",
     ts: "schema.ts",
+    effect: "schema.ts",
   },
   {
     logical: "permissions",
@@ -58,6 +61,7 @@ const CROSS_FRAMEWORK_FILES = [
     sveltekit: "src/lib/permissions.ts",
     react: "permissions.ts",
     ts: "permissions.ts",
+    effect: "permissions.ts",
   },
 ];
 
@@ -203,7 +207,7 @@ function extractSectionBody(content, heading) {
 }
 
 function checkReadmeStructure() {
-  const allDirs = [...STARTERS.next, ...STARTERS.sveltekit, ...STARTERS.ts];
+  const allDirs = [...STARTERS.next, ...STARTERS.sveltekit, ...STARTERS.ts, ...STARTERS.effect];
   for (const dir of allDirs) {
     const content = read(`${dir}/README.md`);
     if (content === null) {
@@ -227,7 +231,7 @@ function checkReadmeStructure() {
   }
 }
 function checkSharedReadmeBlocks() {
-  const allDirs = [...STARTERS.next, ...STARTERS.sveltekit, ...STARTERS.ts];
+  const allDirs = [...STARTERS.next, ...STARTERS.sveltekit, ...STARTERS.ts, ...STARTERS.effect];
   for (const heading of SHARED_README_SECTIONS) {
     const hashes = new Map();
     for (const dir of allDirs) {
@@ -257,6 +261,7 @@ function checkSaveLifecycleContracts() {
       sveltekit: "src/lib/TodoWidget.svelte",
       react: "src/todo-widget.tsx",
       ts: "src/todo-widget.ts",
+      effect: "src/todo-widget.ts",
     }[framework];
     for (const dir of dirs) {
       const path = `${dir}/${widgetPath}`;
@@ -270,6 +275,17 @@ function checkSaveLifecycleContracts() {
       ]) {
         if (!pattern.test(content)) {
           errors.push(`${path}: missing ${description}`);
+        }
+      }
+      if (framework === "effect") {
+        for (const [description, pattern] of [
+          ["a local durability wait", /wait: "local"/],
+          ["an edge failure acknowledgement", /Saved locally; sync failed/],
+          ["a sync failure listener", /mutationErrors/],
+        ]) {
+          if (!pattern.test(content)) {
+            errors.push(`${path}: missing ${description}`);
+          }
         }
       }
       if (framework === "ts") {

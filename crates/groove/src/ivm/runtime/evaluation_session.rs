@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use crate::ivm::graph::NodeId;
+use crate::records::Value;
 use crate::schema::DatabaseSchema;
 use crate::storage::{KeyValue, OwnedStorage, ScanRequest, StorageFuture};
 use crate::{chunks::ChunkLease, chunks::ChunkRequest, chunks::OwnedChunkProvider};
@@ -50,6 +51,16 @@ pub(super) enum StorageRequestKey {
         prefix: Vec<u8>,
         intersections: Vec<(String, Vec<u8>)>,
     },
+    IndexedRowsCandidateFilter {
+        table: String,
+        index: String,
+        prefix: Vec<u8>,
+        candidate_table: String,
+        candidate_index: String,
+        candidate_prefix: Vec<u8>,
+        source_column: String,
+        candidate_column: String,
+    },
     IndexedRowsRange {
         table: String,
         index: String,
@@ -79,6 +90,19 @@ pub(super) enum EvaluationRequestOutput {
 #[derive(Debug)]
 pub(crate) struct LoadedChunk {
     bytes: LoadedChunkBytes,
+}
+
+impl LoadedChunk {
+    pub(crate) fn bytes(&self) -> &bytes::Bytes {
+        self.bytes.bytes()
+    }
+
+    pub(crate) fn verifies_object_hash(&self, expected: &[u8; 32]) -> bool {
+        match &self.bytes {
+            LoadedChunkBytes::Direct(_) => false,
+            LoadedChunkBytes::Leased(lease) => lease.verifies_object_hash(expected),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -164,6 +188,13 @@ impl EvaluationInputs {
         &mut self,
         request: ChunkRequest,
     ) -> Result<&bytes::Bytes, super::IvmRuntimeError> {
+        self.loaded_chunk(request).map(LoadedChunk::bytes)
+    }
+
+    pub(crate) fn loaded_chunk(
+        &mut self,
+        request: ChunkRequest,
+    ) -> Result<&LoadedChunk, super::IvmRuntimeError> {
         let key = EvaluationRequestKey::Chunk(request);
         if let Some(scope) = self.chunk_scope {
             self.chunk_owners
@@ -176,7 +207,7 @@ impl EvaluationInputs {
             return Err(super::IvmRuntimeError::EvaluationBlocked);
         }
         match self.loaded.get(&key).expect("loaded key checked") {
-            EvaluationRequestOutput::Chunk(chunk) => Ok(chunk.bytes.bytes()),
+            EvaluationRequestOutput::Chunk(chunk) => Ok(chunk),
             EvaluationRequestOutput::Storage(_) => Err(super::IvmRuntimeError::UnsupportedOperator),
         }
     }
@@ -208,6 +239,19 @@ impl EvaluationInputs {
 
     pub(super) fn take_missing(&mut self) -> BTreeSet<EvaluationRequestKey> {
         std::mem::take(&mut self.missing)
+    }
+
+    /// Move every loaded large-value chunk into `successor`, a session that
+    /// replaces this one (#3901). Chunks are immutable, so they stay valid
+    /// for any snapshot.
+    pub(super) fn hand_off_chunks(&mut self, successor: &mut Self) {
+        for (key, output) in std::mem::take(&mut self.loaded) {
+            if matches!(key, EvaluationRequestKey::Chunk(_)) {
+                successor.loaded.entry(key).or_insert(output);
+            } else {
+                self.loaded.insert(key, output);
+            }
+        }
     }
 }
 
@@ -449,6 +493,119 @@ impl<'a> EvaluationRequests<'a> {
                         .map_err(Into::into)
                 })
             }
+            EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsCandidateFilter {
+                table,
+                index,
+                prefix,
+                candidate_table,
+                candidate_index,
+                candidate_prefix,
+                source_column,
+                candidate_column,
+            }) => {
+                let table_schema = schema
+                    .table(table)
+                    .expect("compiled candidate-filtered source table exists")
+                    .clone();
+                let index_schema = table_schema
+                    .indices
+                    .iter()
+                    .find(|entry| entry.name == *index)
+                    .expect("compiled candidate-filtered source index exists")
+                    .clone();
+                let candidate_schema = schema
+                    .table(candidate_table)
+                    .expect("compiled candidate table exists")
+                    .clone();
+                let candidate_index_schema = candidate_schema
+                    .indices
+                    .iter()
+                    .find(|entry| entry.name == *candidate_index)
+                    .expect("compiled candidate index exists")
+                    .clone();
+                let index = index.clone();
+                let prefix = prefix.clone();
+                let candidate_index = candidate_index.clone();
+                let candidate_prefix = candidate_prefix.clone();
+                let source_column = source_column.clone();
+                let candidate_column = candidate_column.clone();
+                let storage = storage.clone();
+                Box::pin(async move {
+                    let entries = storage
+                        .scan(ScanRequest::prefix("indices".to_owned(), prefix))
+                        .await?;
+                    // An already-small source is cheaper to hydrate directly.
+                    // Cap the candidate probe so a broad candidate prefix
+                    // cannot scan thousands of keys to filter a small source.
+                    // Both fallbacks hydrate the complete, unfiltered source.
+                    if entries.len() < CANDIDATE_FILTER_MIN_SOURCE_ENTRIES {
+                        return load_indexed_rows(
+                            storage,
+                            table_schema,
+                            index_schema,
+                            index,
+                            entries,
+                        )
+                        .await
+                        .map(EvaluationRequestOutput::Storage)
+                        .map_err(Into::into);
+                    }
+                    let candidate_scan_limit = entries.len().div_ceil(2);
+                    let candidates = storage
+                        .scan(
+                            ScanRequest::prefix("indices".to_owned(), candidate_prefix)
+                                .with_max_items(candidate_scan_limit),
+                        )
+                        .await?;
+                    if candidates.len() == candidate_scan_limit {
+                        return load_indexed_rows(
+                            storage,
+                            table_schema,
+                            index_schema,
+                            index,
+                            entries,
+                        )
+                        .await
+                        .map(EvaluationRequestOutput::Storage)
+                        .map_err(Into::into);
+                    }
+                    let candidate_uuids = indexed_uuid_values(
+                        &candidate_schema,
+                        &candidate_index,
+                        &candidate_index_schema,
+                        &candidates,
+                        &candidate_column,
+                    )?
+                    .into_iter()
+                    .flatten()
+                    .collect::<HashSet<_>>();
+                    if candidate_uuids.is_empty() {
+                        return Ok(EvaluationRequestOutput::Storage(
+                            StorageRequestOutput::Rows(Vec::new()),
+                        ));
+                    }
+                    let source_uuids = indexed_uuid_values(
+                        &table_schema,
+                        &index,
+                        &index_schema,
+                        &entries,
+                        &source_column,
+                    )?;
+                    let entries = entries
+                        .into_iter()
+                        .zip(source_uuids)
+                        .filter_map(|(entry, row_uuid)| {
+                            row_uuid
+                                .filter(|uuid| candidate_uuids.contains(uuid))
+                                .map(|_| entry)
+                        })
+                        .collect();
+                    load_indexed_rows(storage, table_schema, index_schema, index, entries)
+                        .await
+                        .map(EvaluationRequestOutput::Storage)
+                        .map_err(Into::into)
+                })
+            }
             EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsRange {
                 table,
                 index,
@@ -570,6 +727,35 @@ impl<'a> EvaluationRequests<'a> {
         !self.pending.is_empty()
     }
 
+    /// Move every large-value chunk fetch, in flight or finished, into
+    /// `successor`, a session that replaces this one (#3901). The in-flight
+    /// future keeps its demand with the chunk provider, so the replacement
+    /// neither loses nor repeats the fetch: when it reaches the same chunk,
+    /// [`Self::request`] finds the future already registered.
+    pub(super) fn hand_off_chunks(&mut self, successor: &mut Self) {
+        for (key, request) in std::mem::take(&mut self.pending) {
+            if matches!(key, EvaluationRequestKey::Chunk(_)) {
+                successor.pending.entry(key).or_insert(request);
+            } else {
+                self.pending.insert(key, request);
+            }
+        }
+        for (key, result) in std::mem::take(&mut self.ready) {
+            if matches!(key, EvaluationRequestKey::Chunk(_)) {
+                successor.ready.entry(key).or_insert(result);
+            } else {
+                self.ready.insert(key, result);
+            }
+        }
+    }
+
+    /// Whether any in-flight request is a large-value chunk fetch.
+    pub(super) fn has_pending_chunk(&self) -> bool {
+        self.pending
+            .keys()
+            .any(|key| matches!(key, EvaluationRequestKey::Chunk(_)))
+    }
+
     pub(super) fn drain_ready(
         &mut self,
     ) -> Result<
@@ -591,6 +777,10 @@ impl<'a> EvaluationRequests<'a> {
         self.pending.len()
     }
 }
+
+/// Below this many source index entries, a candidate-filtered source hydrates
+/// its rows directly instead of scanning the candidate index first.
+const CANDIDATE_FILTER_MIN_SOURCE_ENTRIES: usize = 512;
 
 async fn load_indexed_rows(
     storage: OwnedStorage<'_>,
@@ -639,6 +829,45 @@ async fn load_indexed_rows(
     })
     .await?;
     Ok(StorageRequestOutput::Rows(rows))
+}
+
+fn indexed_uuid_values(
+    table: &crate::schema::TableSchema,
+    index_name: &str,
+    index_schema: &crate::schema::IndexSchema,
+    entries: &[KeyValue],
+    column: &str,
+) -> Result<Vec<Option<uuid::Uuid>>, super::IvmRuntimeError> {
+    let index_descriptor = crate::db::index_record_descriptor();
+    entries
+        .iter()
+        .map(|(storage_key, persisted_record)| {
+            let index_record = index_descriptor.bind(persisted_record);
+            let stored_value = index_record
+                .get("value")
+                .map_err(super::IvmRuntimeError::RecordEncoding)?;
+            let value = crate::db::persisted_index_column_value(
+                table,
+                index_name,
+                index_schema,
+                storage_key,
+                &stored_value,
+                column,
+            )
+            .map_err(|_| super::IvmRuntimeError::InvalidPersistedIndex(index_name.to_owned()))?;
+            let mut value = &value;
+            while let Value::Nullable(Some(inner)) = value {
+                value = inner;
+            }
+            match value {
+                Value::Uuid(uuid) => Ok(Some(*uuid)),
+                Value::Nullable(None) => Ok(None),
+                _ => Err(super::IvmRuntimeError::InvalidPersistedIndex(
+                    index_name.to_owned(),
+                )),
+            }
+        })
+        .collect()
 }
 
 fn indexed_primary_keys(

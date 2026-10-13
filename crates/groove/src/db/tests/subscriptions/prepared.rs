@@ -170,6 +170,43 @@ async fn failed_multisink_prepare_rolls_back_new_binding_source() {
     );
 }
 
+/// A disposable snapshot that keeps root values physical binds as a first
+/// result, so it delivers its snapshot instead of being refused as retained.
+#[futures_test::test]
+async fn physical_root_value_binding_delivers_its_first_result() {
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let string_descriptor = RecordDescriptor::new([("route", ColumnType::String.clone())]);
+    let shape = database
+        .prepare(
+            [RoutedMultisinkTerminal::new(
+                "rows",
+                GraphBuilder::binding_source("physical_source", string_descriptor),
+                ["route"],
+                ["route"],
+            )],
+            "physical_source",
+            string_descriptor,
+        )
+        .await
+        .unwrap();
+    let subscription = database
+        .bind_shape_with_root_values(
+            shape.id(),
+            &[Value::String("physical".to_owned())],
+            RootIndirectValues::Physical,
+        )
+        .await
+        .unwrap();
+    database.drive_progress().await.unwrap();
+
+    let deltas = subscription.try_recv().unwrap();
+    assert_eq!(
+        deltas.get("rows").unwrap().to_values().unwrap(),
+        [(vec![Value::String("physical".to_owned())], 1)]
+    );
+}
+
 #[futures_test::test]
 async fn failed_multisink_prepare_preserves_active_shared_binding_source() {
     let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");

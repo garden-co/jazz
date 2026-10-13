@@ -18,7 +18,7 @@ async function setup() {
   const pending = new Uint8Array(32).fill(4);
   const capability = new Uint8Array(32).fill(5);
   const native = {
-    abiVersion: 1,
+    abiVersion: 2,
     accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
     mintLocalFirstToken: vi.fn(() => jwt),
     beginAccountSession: vi.fn((_request: string) => pending),

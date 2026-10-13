@@ -14,7 +14,7 @@ use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 pub struct Fixture {
     db: BenchDb,

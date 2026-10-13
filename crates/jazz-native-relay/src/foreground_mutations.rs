@@ -4,7 +4,7 @@ use super::*;
 use jazz::db::{StreamingMutationKind, StreamingValueUpload, WriteHandle};
 use std::cell::{Cell, RefCell};
 
-type Writes = Rc<RefCell<BTreeMap<TransactionId, Rc<WriteHandle<MemoryStorage>>>>>;
+type Writes = Rc<RefCell<BTreeMap<TransactionId, Rc<WriteHandle>>>>;
 
 pub(super) struct MutationHandles {
     pub(super) writes: Writes,
@@ -18,7 +18,7 @@ impl MutationHandles {
         self.uploads.borrow().len()
     }
 
-    pub(super) fn new(db: &Db<MemoryStorage>) -> Self {
+    pub(super) fn new(db: &Db) -> Self {
         let errors = Rc::new(RefCell::new(Vec::new()));
         let captured = Rc::clone(&errors);
         db.on_mutation_error(Rc::new(move |event| {
@@ -31,7 +31,7 @@ impl MutationHandles {
         }
     }
 
-    pub(super) fn close(&mut self, db: &Db<MemoryStorage>) -> Result<(), RelayError> {
+    pub(super) fn close(&mut self, db: &Db) -> Result<(), RelayError> {
         db.clear_mutation_error_callback();
         // Unfinished uploads exist solely in this foreground's MemoryStorage.
         // Closing drops its pending operations and Db; no unfinished scalar is
@@ -77,7 +77,7 @@ fn poll_write_state_once(
     }
 }
 
-fn register_write(writes: &Writes, write: WriteHandle<MemoryStorage>) -> TransactionId {
+fn register_write(writes: &Writes, write: WriteHandle) -> TransactionId {
     let id = TransactionId::from_committed_tx(write.mergeable_tx_id());
     writes.borrow_mut().insert(id, Rc::new(write));
     id

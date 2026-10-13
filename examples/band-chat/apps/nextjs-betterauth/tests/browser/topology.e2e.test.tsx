@@ -97,18 +97,20 @@ describe("BandChat cross-topology recovery", () => {
               });
               roomId = room.id;
               await owner.db
-                .insert(app.roomMembers, { roomId, memberAuthor: owner.author })
+                .insert(app.roomMembers, {
+                  roomId,
+                  memberAuthor: owner.author,
+                  memberProfileId: owner.profileId,
+                })
                 .wait({ tier: "global" });
-              await owner.db
-                .insert(app.roomMembers, { roomId, memberAuthor: peer.author })
-                .wait({ tier: "global" });
+              await admitAfterRequest(owner, peer, roomId);
               await waitForQuery(
                 peer.db,
                 app.rooms.where({ id: roomId }),
                 (rooms) => rooms.length === 1,
                 "peer receives owner invitation",
                 15_000,
-                "global",
+                "remote",
               );
             },
           },
@@ -149,7 +151,7 @@ describe("BandChat cross-topology recovery", () => {
                 (messages) => messages.length === 1,
                 "peer observes the message before reacting to it",
                 15_000,
-                "global",
+                "remote",
               );
               await Promise.all([
                 owner!.db
@@ -187,7 +189,9 @@ describe("BandChat cross-topology recovery", () => {
               offlineMessageId = offline.value.id;
               expect(
                 (
-                  await owner!.db.all(app.messages.where({ roomId: roomId! }), { tier: "local" })
+                  await owner!.db.all(app.messages.where({ roomId: roomId! }), {
+                    tier: "local-first",
+                  })
                 ).some((message) => message.id === offlineMessageId),
               ).toBe(true);
             },
@@ -202,7 +206,7 @@ describe("BandChat cross-topology recovery", () => {
                 (rows) => rows.length === 4,
                 "peer receives concurrent and replayed messages exactly once",
                 20_000,
-                "global",
+                "remote",
               );
               expect(new Set(messages.map((message) => message.id))).toEqual(
                 new Set([ownerMessageId, peerMessageId, attachmentMessageId, offlineMessageId]),
@@ -217,7 +221,7 @@ describe("BandChat cross-topology recovery", () => {
                 (rows) => rows.length === 2,
                 "peer receives both member reactions",
                 15_000,
-                "global",
+                "remote",
               );
               expect(reactions.map((reaction) => reaction.emoji).sort()).toEqual(["🎸", "🔥"]);
             },
@@ -259,15 +263,16 @@ describe("BandChat cross-topology recovery", () => {
         ),
         owner.db.subscribe(app.profiles.where({ author: owner.author }), () => {}),
       );
-      void owner.db.insert(app.profiles, {
+      const ownerProfileId = owner.db.insert(app.profiles, {
         author: owner.author,
         displayName: "subscription-owner",
-      });
+      }).value.id;
       const ownerRoom = owner.db.insert(app.rooms, { name: "Owner subscription room" });
       const ownerRoomId = ownerRoom.value.id;
       void owner.db.insert(app.roomMembers, {
         roomId: ownerRoomId,
         memberAuthor: owner.author,
+        memberProfileId: ownerProfileId,
       });
       unsubscribers.push(owner.db.subscribe(app.rooms.where({ id: ownerRoomId }), () => {}));
 
@@ -285,14 +290,15 @@ describe("BandChat cross-topology recovery", () => {
         ),
         guest.db.subscribe(app.profiles.where({ author: guest.author }), () => {}),
       );
-      void guest.db.insert(app.profiles, {
+      const guestProfileId = guest.db.insert(app.profiles, {
         author: guest.author,
         displayName: "subscription-guest",
-      });
+      }).value.id;
       const guestRoom = guest.db.insert(app.rooms, { name: "Guest bootstrap room" });
       void guest.db.insert(app.roomMembers, {
         roomId: guestRoom.value.id,
         memberAuthor: guest.author,
+        memberProfileId: guestProfileId,
       });
       unsubscribers.push(guest.db.subscribe(app.rooms.where({ id: guestRoom.value.id }), () => {}));
 
@@ -371,12 +377,13 @@ describe("BandChat cross-topology recovery", () => {
               });
               roomId = room.id;
               await owner.db
-                .insert(app.roomMembers, { roomId, memberAuthor: owner.author })
+                .insert(app.roomMembers, {
+                  roomId,
+                  memberAuthor: owner.author,
+                  memberProfileId: owner.profileId,
+                })
                 .wait({ tier: "global" });
-              const membership = await owner.db
-                .insert(app.roomMembers, { roomId, memberAuthor: peer.author })
-                .wait({ tier: "global" });
-              peerMembershipId = membership.id;
+              peerMembershipId = await admitAfterRequest(owner, peer, roomId);
             },
           },
           {
@@ -394,7 +401,7 @@ describe("BandChat cross-topology recovery", () => {
                 (messages) => messages.length === 2,
                 "peer receives two newest projected messages",
                 15_000,
-                "global",
+                "remote",
               );
               expect(rows.map((message) => message.text)).toEqual(["third", "second"]);
               const reaction = await peer!.db
@@ -420,7 +427,7 @@ describe("BandChat cross-topology recovery", () => {
                 })
                 .wait({ tier: "global" });
               expect(
-                (await peer!.db.all(window(), { tier: "local" })).map((row) => row.text),
+                (await peer!.db.all(window(), { tier: "local-first" })).map((row) => row.text),
               ).toEqual(["third", "second"]);
             },
             faultsAfter: [{ kind: "reconnect", target: "peer" }],
@@ -434,7 +441,7 @@ describe("BandChat cross-topology recovery", () => {
                 (messages) => messages.length === 2 && messages[0]?.text === "z after reconnect",
                 "peer reconnects with its exact bounded projection",
                 15_000,
-                "global",
+                "remote",
               );
               expect(rows.map((message) => message.text)).toEqual(["z after reconnect", "third"]);
               await owner!.db.delete(app.roomMembers, peerMembershipId!).wait({ tier: "global" });
@@ -489,6 +496,28 @@ async function openMemberDb(
     }),
   );
   return { db, author: account.id };
+}
+
+/**
+ * Admission as the app does it: the peer asks to join with its own profile,
+ * then the creator admits that profile. Returns the membership id.
+ */
+async function admitAfterRequest(
+  owner: ClientIdentity,
+  peer: ClientIdentity,
+  roomId: string,
+): Promise<string> {
+  await peer.db
+    .insert(app.joinRequests, { roomId, requester: peer.author, profileId: peer.profileId })
+    .wait({ tier: "global" });
+  const membership = await owner.db
+    .insert(app.roomMembers, {
+      roomId,
+      memberAuthor: peer.author,
+      memberProfileId: peer.profileId,
+    })
+    .wait({ tier: "global" });
+  return membership.id;
 }
 
 async function openMember(

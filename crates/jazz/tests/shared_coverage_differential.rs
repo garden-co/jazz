@@ -1,3 +1,6 @@
+// Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
+#[path = "../../jazz-testkit/src/duplex_transport.rs"]
+mod duplex_transport;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::pin;
@@ -5,10 +8,8 @@ use std::task::{Context, Poll, Waker};
 
 mod common;
 
-use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent,
-};
+use duplex_transport::duplex;
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -16,7 +17,6 @@ use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
-use jazz_testkit::duplex_transport::duplex;
 
 use common::{compile_schema, session_eq};
 
@@ -88,7 +88,7 @@ fn schema() -> JazzSchema {
     compile_schema(&builder.build())
 }
 
-fn open_client(seed: u8, author: AuthorSubject, schema: JazzSchema) -> Db<TestStorage> {
+fn open_client(seed: u8, author: AuthorSubject, schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
@@ -105,7 +105,7 @@ fn open_client(seed: u8, author: AuthorSubject, schema: JazzSchema) -> Db<TestSt
     .expect("open client")
 }
 
-fn open_server(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
+fn open_server(seed: u8, schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(
@@ -124,9 +124,7 @@ fn open_server(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
 
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::Full,
+        tier: jazz::db::ReadTier::Remote,
         include_deleted: false,
         ..ReadOpts::default()
     }
@@ -142,11 +140,7 @@ fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     ])
 }
 
-fn seed_fixture(
-    server: &Db<TestStorage>,
-    visible_owner: AuthorSubject,
-    hidden_owner: AuthorSubject,
-) {
+fn seed_fixture(server: &Db, visible_owner: AuthorSubject, hidden_owner: AuthorSubject) {
     for (idx, table) in TABLES.iter().enumerate() {
         server
             .seed_settled_mergeable_for_bootstrap(
@@ -253,8 +247,8 @@ fn drain_events(
 }
 
 fn drive(
-    server: &Db<TestStorage>,
-    client: &Db<TestStorage>,
+    server: &Db,
+    client: &Db,
     streams: &mut BTreeMap<&'static str, jazz::db::SubscriptionStream>,
     table_schemas: &BTreeMap<&'static str, TableSchema>,
     traces: &mut BTreeMap<&'static str, Vec<EventTrace>>,
@@ -269,7 +263,7 @@ fn drive(
 }
 
 fn final_rows(
-    client: &Db<TestStorage>,
+    client: &Db,
     table_schemas: &BTreeMap<&'static str, TableSchema>,
 ) -> BTreeMap<&'static str, Vec<RowSummary>> {
     TABLES

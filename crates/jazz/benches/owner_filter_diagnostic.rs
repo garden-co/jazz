@@ -8,8 +8,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
-    SeededRowIdSource, block_on,
+    Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, ReadOpts, SeededRowIdSource, block_on,
 };
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
@@ -17,7 +16,6 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::{Map, json};
 
@@ -122,7 +120,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db(path: &Path, schema: JazzSchema) -> Db<RocksDbStorage> {
+fn open_db(path: &Path, schema: JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -143,7 +141,7 @@ fn open_db(path: &Path, schema: JazzSchema) -> Db<RocksDbStorage> {
     .expect("open owner-filter Jazz db")
 }
 
-fn seed_rows(db: &Db<RocksDbStorage>, table_rows: usize, owned_rows: usize, batch_rows: usize) {
+fn seed_rows(db: &Db, table_rows: usize, owned_rows: usize, batch_rows: usize) {
     for batch_start in (0..table_rows).step_by(batch_rows) {
         let batch_end = table_rows.min(batch_start + batch_rows);
         let tx = block_on(db.mergeable_tx()).expect("open owner-filter seed tx");
@@ -198,9 +196,7 @@ fn owner_predicate_query() -> Query {
 
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::Remote,
         include_deleted: false,
         ..ReadOpts::default()
     }

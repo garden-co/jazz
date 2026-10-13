@@ -931,6 +931,9 @@ struct ChunkLeaseStats {
 #[derive(Debug)]
 pub(crate) struct ChunkLease {
     bytes: Bytes,
+    // The provider checked this exact immutable allocation before leasing it.
+    // Carry that proof through evaluation so a decoder need not hash it again.
+    verified_object_hash: [u8; 32],
     stats: Rc<RefCell<ChunkLeaseStats>>,
 }
 
@@ -947,15 +950,26 @@ impl PartialEq<Bytes> for ChunkLease {
 }
 
 impl ChunkLease {
-    fn new(bytes: Bytes, stats: Rc<RefCell<ChunkLeaseStats>>) -> Self {
+    fn new(
+        bytes: Bytes,
+        verified_object_hash: [u8; 32],
+        stats: Rc<RefCell<ChunkLeaseStats>>,
+    ) -> Self {
         let mut counters = stats.borrow_mut();
         counters.active += 1;
         counters.bytes = counters.bytes.saturating_add(bytes.len());
         drop(counters);
-        Self { bytes, stats }
+        Self {
+            bytes,
+            verified_object_hash,
+            stats,
+        }
     }
     pub(crate) fn bytes(&self) -> &Bytes {
         &self.bytes
+    }
+    pub(crate) fn verifies_object_hash(&self, expected: &[u8; 32]) -> bool {
+        &self.verified_object_hash == expected
     }
 }
 
@@ -1200,7 +1214,11 @@ impl Future for CoalescedChunkGet {
             return Poll::Pending;
         };
         self.as_mut().get_mut().finish();
-        Poll::Ready(result.map(|bytes| ChunkLease::new(bytes, Rc::clone(&self.leases))))
+        Poll::Ready(
+            result.map(|bytes| {
+                ChunkLease::new(bytes, self.request.object_hash, Rc::clone(&self.leases))
+            }),
+        )
     }
 }
 
@@ -1383,7 +1401,7 @@ impl OwnedChunkProvider {
                 }
             };
             if let Some(bytes) = cached {
-                return Ok(ChunkLease::new(bytes, leases));
+                return Ok(ChunkLease::new(bytes, request.object_hash, leases));
             }
             let consumer_id = {
                 let mut entries = in_flight.borrow_mut();

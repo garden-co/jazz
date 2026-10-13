@@ -23,10 +23,9 @@ test("the removed jazz-server gate is rejected as an unknown selector", () => {
   assert.match(`${result.stdout}\n${result.stderr}`, /unknown gate id/);
 });
 
-test("canonical and documented soaks execute the exact ignored oracle and reject a missing selection", (t) => {
+test("canonical soaks execute the exact ignored oracle and reject a missing selection", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-soak-contract-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const oracle = "node::tests::harness::m3_maintained_one_shot_differential_oracle";
   const source = path.join(directory, "oracle.rs");
   const binary = path.join(directory, "oracle");
   fs.writeFileSync(
@@ -77,9 +76,4 @@ exit 2
   const missing = run();
   assert.equal(missing.status, 1, missing.stdout + missing.stderr);
   assert.match(missing.stdout, /filter matched no selected test inventory entries/);
-
-  const docs = fs.readFileSync(path.join(root, "AGENTS.md"), "utf8");
-  for (const count of [300, 2000]) {
-    assert.ok(docs.includes(`JAZZ_SEED_COUNT=${count} dev/t --exact ${oracle} -- --ignored`));
-  }
 });

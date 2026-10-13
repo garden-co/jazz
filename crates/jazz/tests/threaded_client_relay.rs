@@ -17,8 +17,7 @@ use jazz::tools::{
 };
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, TxId};
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, decode_frame,
-    decode_sync_message, encode_frame, encode_sync_message,
+    WIRE_PROTOCOL_VERSION, WireFrame, decode_frame, decode_sync_message, encode_sync_message,
 };
 use jazz_storage_rocksdb::RocksDbStorage;
 
@@ -38,26 +37,37 @@ enum Wire {
 impl Wire {
     fn encoded(message: SyncMessage) -> Self {
         let payload = encode_sync_message(&message).unwrap();
-        let frame = WireFrame::Message(WireEnvelope::new(
-            WIRE_PROTOCOL_VERSION,
-            FEATURE_SYNC_MESSAGE_PAYLOAD,
-            payload,
-        ));
-        Wire::Frame(encode_frame(&frame).unwrap())
+        let context = jazz::wire::WireInboundContext::new(WIRE_PROTOCOL_VERSION, 0, None);
+        let mut sender = jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
+        sender
+            .enqueue(0, 0, jazz::wire::channels::ChannelClass::Control, payload)
+            .unwrap();
+        let mut frames = Vec::new();
+        while let Some(frame) = sender.peek_outbound().unwrap() {
+            frames.push(frame);
+            sender.accept_outbound().unwrap();
+        }
+        Wire::Frame(postcard::to_allocvec(&frames).unwrap())
     }
 
     fn into_sync(self) -> Option<Box<SyncMessage>> {
         match self {
             Wire::Sync(sync) => Some(sync),
             Wire::Frame(bytes) => {
-                let frame = decode_frame(&bytes).unwrap();
-                let WireFrame::Message(envelope) = frame else {
-                    panic!("expected wire message frame");
-                };
-                assert_eq!(envelope.protocol_version, WIRE_PROTOCOL_VERSION);
-                assert_eq!(envelope.features, FEATURE_SYNC_MESSAGE_PAYLOAD);
-                assert!(envelope.session.is_none());
-                Some(Box::new(decode_sync_message(&envelope.payload).unwrap()))
+                let context = jazz::wire::WireInboundContext::new(WIRE_PROTOCOL_VERSION, 0, None);
+                let mut receiver =
+                    jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
+                let mut message = None;
+                for bytes in jazz::wire::decode_websocket_frame_batch(&bytes).unwrap() {
+                    let WireFrame::Channel(envelope) = decode_frame(&bytes).unwrap() else {
+                        panic!("expected channel frame");
+                    };
+                    if let Some(received) = receiver.receive(envelope, bytes.len()).unwrap() {
+                        assert!(message.is_none());
+                        message = Some(Box::new(decode_sync_message(&received.payload).unwrap()));
+                    }
+                }
+                Some(message.expect("complete message"))
             }
             Wire::Stop => None,
         }
@@ -122,10 +132,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -144,7 +151,7 @@ fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Val
     ])
 }
 
-fn install_session_claims(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
+fn install_session_claims(node: &mut NodeState, identity: AuthorSubject) {
     if identity != AuthorSubject::SYSTEM {
         node.admit_test_session_claims(identity, BTreeMap::new());
     }
@@ -157,17 +164,14 @@ fn peer_summary(peer: &PeerState) -> LinkSummary {
     }
 }
 
-fn apply_message(node: &mut NodeState<RocksDbStorage>, message: SyncMessage) -> Vec<SyncMessage> {
+fn apply_message(node: &mut NodeState, message: SyncMessage) -> Vec<SyncMessage> {
     block_on(async {
         let outcome = node.apply_sync_message(message).await.unwrap();
         node.persist_and_settle_outcome(outcome).await.unwrap()
     })
 }
 
-fn commit_unit(
-    node: &mut NodeState<RocksDbStorage>,
-    commit: MergeableCommit,
-) -> (TxId, SyncMessage) {
+fn commit_unit(node: &mut NodeState, commit: MergeableCommit) -> (TxId, SyncMessage) {
     block_on(async {
         let (published, unit) = node.commit_mergeable_unit(commit).await.unwrap();
         let tx_id = node
@@ -178,13 +182,13 @@ fn commit_unit(
     })
 }
 
-fn send_view(node: &mut NodeState<RocksDbStorage>, peer: &mut PeerState, tx: &Sender<Wire>) {
+fn send_view(node: &mut NodeState, peer: &mut PeerState, tx: &Sender<Wire>) {
     install_session_claims(node, peer.identity());
     let update = block_on(common::direct_query_update(node, peer, &schema(), TABLE));
     send_sync(tx, update);
 }
 
-fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
+fn relay_ingest(node: &mut NodeState, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -195,7 +199,7 @@ fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
 }
 
 fn process_downstream(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     message: Wire,
     downstream_tx: &Sender<Wire>,
     downstream_peer: &mut PeerState,
@@ -221,7 +225,7 @@ fn process_downstream(
 }
 
 fn finish_node(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     tx_ids: impl IntoIterator<Item = TxId>,
     downstream_peer: Option<LinkSummary>,
 ) -> ThreadResult {
@@ -344,7 +348,7 @@ fn relay_thread(
     }
 }
 
-fn drain_ui_downstream(node: &mut NodeState<RocksDbStorage>, rx: &Receiver<Wire>) {
+fn drain_ui_downstream(node: &mut NodeState, rx: &Receiver<Wire>) {
     while let Ok(message) = rx.try_recv() {
         match message {
             Wire::Sync(_) | Wire::Frame(_) => {
@@ -450,7 +454,7 @@ fn ui_thread(
     UiResult { tx_ids, receipt }
 }
 
-fn global_rows(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+fn global_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
     block_on(node.current_rows(TABLE, DurabilityTier::Global))
@@ -460,7 +464,7 @@ fn global_rows(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, BTreeM
         .collect()
 }
 
-fn local_rows(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+fn local_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
     block_on(node.current_rows(TABLE, DurabilityTier::Local))
@@ -470,9 +474,7 @@ fn local_rows(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, BTreeMa
         .collect()
 }
 
-fn subscription_rows(
-    node: &mut NodeState<RocksDbStorage>,
-) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+fn subscription_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
     block_on(node.subscription_current_rows(TABLE, DurabilityTier::Global))

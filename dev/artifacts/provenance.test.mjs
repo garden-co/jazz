@@ -16,6 +16,7 @@ import {
   expectedManifest,
   manifestPath,
   nativeArtifactFingerprint,
+  pathBatches,
   verifyManifest,
   verifyPublishedNapiManifest,
   workspaceDependencyInputs,
@@ -835,4 +836,17 @@ test("excluded vendored path dependencies remain source-bound", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("dirty-input path batches keep every path, in order, under the argument budget", () => {
+  const paths = Array.from(
+    { length: 800 },
+    (_, i) => `crates/jazz/layers/engine/src/module_${i}.rs`,
+  );
+  const batches = pathBatches(paths);
+  assert.ok(batches.length > 1);
+  assert.deepEqual(batches.flat(), paths);
+  for (const batch of batches) assert.ok(batch.reduce((n, p) => n + p.length + 1, 0) <= 8000);
+  assert.deepEqual(pathBatches(["a-very-long-path"], 4), [["a-very-long-path"]]);
+  assert.deepEqual(pathBatches([]), []);
 });

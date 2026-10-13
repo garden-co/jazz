@@ -735,7 +735,6 @@ export function WriteTierDiagram() {
 
   return (
     <Graph
-      eyebrow="Pick a tier"
       description={
         <>
           Each write picks a fresh colour. Choose how durable it must be before it's confirmed — it

@@ -46,7 +46,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Trigger release CI and preview workflows
+      - name: Trigger release CI, preview and release test workflows
         if: steps.changesets.outputs.hasChangesets == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -77,4 +77,12 @@ jobs:
           assert_release_head
           gh workflow run preview-jazz-tools-alpha-release.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
           assert_release_head
-          echo "Dispatched release CI and preview for ${RELEASE_BRANCH} at ${RELEASE_SHA} (PR #${PR_NUMBER})."
+          # The release test tier. publish-jazz-tools-alpha.yml refuses to
+          # publish unless each of these passed on this head (see
+          # dev/scripts/release-test-gate.mjs). Their pull_request runs on a
+          # bot-created PR stop at action_required, so dispatch them too.
+          gh workflow run starters-e2e.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
+          assert_release_head
+          gh workflow run rn-device-acceptance.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
+          assert_release_head
+          echo "Dispatched release CI, preview, starters E2E and RN device acceptance for ${RELEASE_BRANCH} at ${RELEASE_SHA} (PR #${PR_NUMBER})."

@@ -230,11 +230,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn assert_counts(
-    node: &mut NodeState<RocksDbStorage>,
-    schema: &JazzSchema,
-    expected: &BTreeMap<String, usize>,
-) {
+fn assert_counts(node: &mut NodeState, schema: &JazzSchema, expected: &BTreeMap<String, usize>) {
     for table in &schema.tables {
         let rows = jazz::db::block_on(node.current_rows(&table.name, DurabilityTier::Global))
             .expect("current rows");
@@ -247,7 +243,7 @@ fn assert_counts(
     }
 }
 
-fn final_state_hash(nodes: &mut [&mut NodeState<RocksDbStorage>], schema: &JazzSchema) -> u64 {
+fn final_state_hash(nodes: &mut [&mut NodeState], schema: &JazzSchema) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for (node_idx, node) in nodes.iter_mut().enumerate() {
         mix_str(&mut hash, &format!("node:{node_idx}"));
@@ -322,10 +318,7 @@ fn emit_object(fields: serde_json::Map<String, JsonValue>) {
     emit_json_line("fixture_smoke", &line);
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();

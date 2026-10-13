@@ -11,7 +11,7 @@ function fixture() {
     "crates/jazz-wasm/pkg",
     "packages/jazz-tools/src/types",
     "packages/jazz-tools/src/runtime/native-runtime",
-    "crates/jazz/src",
+    "crates/jazz/layers/protocol/src",
   ])
     mkdirSync(join(root, dir), { recursive: true });
   // Deliberately leave manifests absent: these tests exercise the bounded ABI
@@ -29,7 +29,7 @@ function fixture() {
     `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a, claims) {}\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames(max_frames, max_bytes) {}\n}\nexport class WasmWrite {\nget txId() { return wasm.wasmwrite_txId(); }\n}`,
   );
   writeFileSync(
-    join(root, "crates/jazz/src/wire.rs"),
+    join(root, "crates/jazz/layers/protocol/src/wire.rs"),
     "pub const WIRE_PROTOCOL_VERSION: u16 = 9;\n",
   );
   writeFileSync(

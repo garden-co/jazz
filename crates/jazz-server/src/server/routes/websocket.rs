@@ -23,14 +23,13 @@ use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::serving::ServerLinkAdmission;
 use jazz::tools::Session;
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame,
-    WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
+    WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
+    current_wire_features, encode_frame, negotiate_wire,
 };
 use tokio::sync::mpsc;
 
 use crate::server::ServerState;
 
-const WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
 const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
@@ -346,9 +345,7 @@ async fn ws_admission(
         state.jwt_verifier.as_deref(),
     )
     .await
-    .map_err(|error| {
-        serde_json::to_string(&error).unwrap_or_else(|_| "authentication failed".to_owned())
-    })?;
+    .map_err(super::accounts::AdmissionError::from)?;
 
     let Some(mut session) = session else {
         return Err("Session required. Provide JWT, backend secret, or admin secret.".into());
@@ -408,6 +405,38 @@ async fn account_still_admitted(
     } else {
         Err("account identity revoked".into())
     }
+}
+
+/// Per-message admission check for a live account socket.
+///
+/// Every registry mutation runs on the registry owner thread and bumps
+/// `changes` before it replies, so an assignment that has not changed since
+/// the last check cannot have been revoked. Only a changed (or closed)
+/// registry needs the owner-thread lookup; this keeps one thread off every
+/// connection's message path (#3387).
+///
+/// Contract: `changes` must have been subscribed *before* a full
+/// `account_still_admitted` check that succeeded (the route does this at
+/// admission). Otherwise a revocation that landed between the subscription
+/// and the first frame would already be marked seen and never re-checked.
+async fn account_admission_current(
+    state: &ServerState,
+    identity: Option<AuthorSubject>,
+    changes: &mut Option<tokio::sync::watch::Receiver<u64>>,
+) -> Result<(), super::accounts::AdmissionError> {
+    if identity.is_none() {
+        return Ok(());
+    }
+    if let Some(changes) = changes {
+        match changes.has_changed() {
+            Ok(false) => return Ok(()),
+            Ok(true) => {
+                changes.borrow_and_update();
+            }
+            Err(_) => {}
+        }
+    }
+    account_still_admitted(state, identity).await
 }
 
 fn session_claims(
@@ -666,20 +695,7 @@ async fn handle_ws_connection(
     };
 
     let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
-        Ok(negotiated) if negotiated.features & WS_REQUIRED_FEATURES != 0 => negotiated,
-        Ok(_) => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(
-                    WireErrorCode::UnsupportedFeature,
-                    WireRetry::Never,
-                    "websocket requires sync message payload frames",
-                ),
-            )
-            .await;
-            let _ = socket.close().await;
-            return;
-        }
+        Ok(negotiated) => negotiated,
         Err(error) => {
             send_ws_error(&mut socket, error).await;
             let _ = socket.close().await;
@@ -729,23 +745,20 @@ async fn handle_ws_connection(
     // client need not (and must not) self-assert one merely to learn which
     // authority issued its downstream fates.
     let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
-    let session_context = if negotiated.features
-        & (jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-            | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
-        != 0
-    {
-        // An authenticated client can request current rows without itself
-        // being an authority. Retain our receipt epoch and its admitted identity
-        // independently of whether it advertises a remote authority endpoint.
-        Some(ConnectionSessionContext {
-            local: server_endpoint,
-            remote: remote_hello.authority,
-            link_identity: admission.identity,
-            negotiated_features: negotiated.features,
-        })
-    } else {
-        None
-    };
+    let session_context =
+        if negotiated.features & jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0 {
+            // An authenticated client can request current rows without itself
+            // being an authority. Retain our receipt epoch and its admitted identity
+            // independently of whether it advertises a remote authority endpoint.
+            Some(ConnectionSessionContext {
+                local: server_endpoint,
+                remote: remote_hello.authority,
+                link_identity: admission.identity,
+                negotiated_features: negotiated.features,
+            })
+        } else {
+            None
+        };
     let link_admission =
         match ws_link_admission(&admission, negotiated.features, server_endpoint.epoch) {
             Ok(link_admission) => link_admission,
@@ -872,8 +885,11 @@ async fn handle_ws_connection(
             }
             eviction = admission_registration.evict_rx.recv() => {
                 if eviction.is_some() {
+                    // A newer connection for this identity superseded this
+                    // one. Retrying would only evict that newer connection in
+                    // turn, so this link is told not to come back.
                     queue_ws_error(&writer_tx, WireError::new(
-                        WireErrorCode::Backpressure, WireRetry::Later,
+                        WireErrorCode::Backpressure, WireRetry::Never,
                         "websocket peer_identity connection cap exceeded",
                     ));
                     let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
@@ -904,7 +920,7 @@ async fn handle_ws_connection(
                         break;
                     }
                 };
-                if let Err(error) = account_still_admitted(&state, account_identity).await {
+                if let Err(error) = account_admission_current(&state, account_identity, &mut account_changes).await {
                     drop(permit);
                     queue_ws_error(&writer_tx, error.into_wire());
                     break;
@@ -922,7 +938,7 @@ async fn handle_ws_connection(
             }
             msg = socket_reader.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => {
-                    if let Err(error) = account_still_admitted(&state, account_identity).await {
+                    if let Err(error) = account_admission_current(&state, account_identity, &mut account_changes).await {
                         queue_ws_error(&writer_tx, error.into_wire());
                         break;
                     }
@@ -1088,10 +1104,7 @@ mod tests {
     use jazz::schema::{JazzSchema, TableSchema};
     use jazz::tx::{DurabilityTier, Fate, TxId};
     use jazz::wire::decode_frame;
-    use jazz::wire::{
-        FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
-        WIRE_PROTOCOL_VERSION, WireMessageFragment, WireTransport,
-    };
+    use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireTransport};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
     use crate::middleware::AuthConfig;
@@ -1953,7 +1966,7 @@ mod tests {
             .attach_query_with_opts(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
+                    tier: jazz::db::ReadTier::Remote,
                     ..Default::default()
                 },
             )
@@ -2024,10 +2037,7 @@ mod tests {
             .expect("send Alice prelude");
         alice
             .send(WsMessage::Binary(
-                ws_client_hello_batch_with_features(
-                    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-                )
-                .into(),
+                ws_client_hello_batch_with_features(0).into(),
             ))
             .await
             .expect("send Alice hello");
@@ -2183,10 +2193,7 @@ mod tests {
         // reaches normal handshake admission and produces a server Hello.
         let _ = ws
             .send(WsMessage::Binary(
-                ws_client_hello_batch_with_features(
-                    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-                )
-                .into(),
+                ws_client_hello_batch_with_features(0).into(),
             ))
             .await;
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
@@ -2308,13 +2315,11 @@ mod tests {
                 WsMessage::Binary(json.into_bytes().into())
             };
             ws.send(message).await.expect("send writer prelude");
-            let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-                | FEATURE_STRUCTURED_ERRORS
-                | if entry["requested_link"] == "scope_isolated_client_relay" {
-                    jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
-                } else {
-                    0
-                };
+            let features = if entry["requested_link"] == "scope_isolated_client_relay" {
+                jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
+            } else {
+                0
+            };
             expect_ws_server_hello(&mut ws, features).await;
         }
     }
@@ -2343,10 +2348,7 @@ mod tests {
         .await
         .expect("send scope-isolated prelude");
         ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(
-                FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-            )
-            .into(),
+            ws_client_hello_batch_with_features(0).into(),
         ))
         .await
         .expect("send client hello without scope feature");
@@ -2385,11 +2387,7 @@ mod tests {
                 .await
                 .expect("connect websocket");
             ws.send(message).await.expect("send exact-cap prelude");
-            expect_ws_server_hello(
-                &mut ws,
-                FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-            )
-            .await;
+            expect_ws_server_hello(&mut ws, 0).await;
         }
 
         let oversized = padded_ws_prelude(identity, WS_MAX_MESSAGE_BYTES + 1);
@@ -2410,9 +2408,7 @@ mod tests {
         let state = make_ws_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorSubject::for_test_bytes([0x7a; 16]);
-        let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-            | FEATURE_STRUCTURED_ERRORS
-            | FEATURE_MESSAGE_FRAGMENTATION;
+        let features = 0;
         let mut ws = open_negotiated_ws_with_prelude_and_features(
             addr,
             &state,
@@ -2420,24 +2416,31 @@ mod tests {
             features,
         )
         .await;
-        let fragment_payload_len = 512 * 1024;
-        let logical_payload = vec![0x42; fragment_payload_len * 4];
-        let message_digest = [0; 32];
-        let encoded = (0..3)
+        let chunk_len = jazz::wire::channels::CHANNEL_CHUNK_BYTES;
+        let encoded = (0..24)
             .map(|index| {
-                let offset = index * fragment_payload_len;
-                let fragment = WireMessageFragment {
+                let envelope = jazz::wire::WireChannelEnvelope {
                     protocol_version: WIRE_PROTOCOL_VERSION,
                     features,
                     session: None,
-                    message_id: 1,
-                    message_digest,
-                    total_len: logical_payload.len() as u64,
-                    offset: offset as u64,
-                    payload: logical_payload[offset..offset + fragment_payload_len].to_vec(),
+                    extent: jazz::wire::channels::ChannelFrame {
+                        channel: 1,
+                        generation: 0,
+                        sequence: index,
+                        class: jazz::wire::channels::ChannelClass::Writes,
+                        first: index == 0,
+                        last: false,
+                        message_len: if index == 0 {
+                            (chunk_len * 32) as u32
+                        } else {
+                            0
+                        },
+                        decoded_len: chunk_len as u32,
+                        payload: vec![0x42; chunk_len],
+                    },
                 };
-                encode_frame(&WireFrame::MessageFragment(fragment))
-                    .expect("encode large websocket fragment")
+                encode_frame(&WireFrame::Channel(envelope))
+                    .expect("encode large websocket channel batch")
             })
             .collect::<Vec<_>>();
         let batch = postcard::to_allocvec(&encoded).expect("encode large websocket batch");
@@ -2592,13 +2595,7 @@ mod tests {
         prelude: Vec<u8>,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        open_negotiated_ws_with_prelude_and_features(
-            addr,
-            state,
-            prelude,
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        )
-        .await
+        open_negotiated_ws_with_prelude_and_features(addr, state, prelude, 0).await
     }
 
     async fn open_negotiated_ws_with_prelude_and_features(
@@ -2745,7 +2742,7 @@ mod tests {
     }
 
     struct TestClient {
-        db: Db<CoreMemoryStorage>,
+        db: Db,
         transport: TestWireTransport,
         todos_table: TableSchema,
         received: Rc<RefCell<Vec<SyncMessage>>>,
@@ -2797,7 +2794,7 @@ mod tests {
                 adapter: WireTransportAdapter::new(
                     transport.clone(),
                     WIRE_PROTOCOL_VERSION,
-                    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+                    0,
                     None,
                 ),
             }))
@@ -2810,7 +2807,7 @@ mod tests {
             }
         }
 
-        fn write_todo(&self, title: &str) -> WriteHandle<CoreMemoryStorage> {
+        fn write_todo(&self, title: &str) -> WriteHandle {
             jazz::db::block_on(self.db.insert(
                 "todos",
                 RowCells::from([
@@ -2864,7 +2861,7 @@ mod tests {
                 .attach_query_with_opts(
                     &query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2882,7 +2879,7 @@ mod tests {
                 .attach_query_with_opts(
                     &query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2903,7 +2900,7 @@ mod tests {
                 .all(
                     query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -2922,7 +2919,7 @@ mod tests {
                 .all(
                     query,
                     ReadOpts {
-                        tier: DurabilityTier::Global,
+                        tier: jazz::db::ReadTier::Remote,
                         ..Default::default()
                     },
                 )
@@ -3034,7 +3031,7 @@ mod tests {
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
-        write: &WriteHandle<CoreMemoryStorage>,
+        write: &WriteHandle,
     ) -> WriteState {
         let start = tokio::time::Instant::now();
         loop {
@@ -3244,6 +3241,544 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Alice holds a live account websocket. An unrelated registry change
+    /// (Bob enrolling) must not disconnect her, while revoking Alice's
+    /// identity must still close her socket promptly with an auth failure.
+    /// Guards #3387: the per-message registry lookup is skipped until the
+    /// registry reports a change, so revocation must arrive via that change.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test]
+    async fn revoking_an_account_closes_its_live_websocket_promptly() {
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+
+        let schema = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(public_table_policies()),
+            )
+            .build();
+        let core = JazzServer::start_with_schema(schema)
+            .await
+            .expect("start test server");
+        let client = reqwest::Client::new();
+        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
+        let alice = TestJwtIssuer::jwt_for_user("alice");
+        let registered: serde_json::Value = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(&alice)
+            .send()
+            .await
+            .expect("register Alice")
+            .json()
+            .await
+            .expect("Alice's account");
+        let account = jazz::account_registry::AccountId(
+            registered["account"]
+                .as_str()
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                .expect("account uuid"),
+        );
+        let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
+            .expect("Alice's principal")
+            .with_account(account);
+
+        let (mut ws, _) = connect_async(format!(
+            "ws://127.0.0.1:{}/apps/{}/ws",
+            core.port(),
+            core.app_id()
+        ))
+        .await
+        .expect("connect Alice");
+        let prelude = serde_json::json!({
+            "peer_identity": identity.canonical(),
+            "auth": { "jwt_token": alice },
+        });
+        ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
+            .await
+            .expect("send prelude");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(current_wire_features()).into(),
+        ))
+        .await
+        .expect("send hello");
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("server hello deadline")
+            .expect("server hello")
+            .expect("server hello message");
+        assert!(
+            matches!(
+                decode_ws_message(&first).as_slice(),
+                [WireFrame::Hello(_), ..]
+            ),
+            "Alice's account session must be admitted"
+        );
+
+        let bob = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(TestJwtIssuer::jwt_for_user("bob"))
+            .send()
+            .await
+            .expect("register Bob");
+        assert_eq!(bob.status(), axum::http::StatusCode::OK);
+        let quiet_until = tokio::time::Instant::now() + Duration::from_millis(300);
+        while let Ok(message) = tokio::time::timeout_at(quiet_until, ws.next()).await {
+            let message = message
+                .expect("Alice's socket stays open")
+                .expect("Alice's socket stays readable");
+            assert!(
+                !decode_ws_message(&message)
+                    .iter()
+                    .any(|frame| matches!(frame, WireFrame::Error(_))),
+                "an unrelated enrollment must not disconnect Alice"
+            );
+        }
+
+        let revoked = client
+            .post(format!("{accounts}/revoke"))
+            .bearer_auth(&alice)
+            .json(&serde_json::json!({
+                "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" }
+            }))
+            .send()
+            .await
+            .expect("revoke Alice");
+        assert_eq!(revoked.status(), axum::http::StatusCode::NO_CONTENT);
+        // No client traffic is needed: the registry change alone must close
+        // the socket. The per-message gate is pinned separately by
+        // `per_message_account_gate_refuses_the_first_frame_after_revocation`.
+        let rejected = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(Ok(message)) = ws.next().await {
+                if decode_ws_message(&message).iter().any(|frame| {
+                    matches!(
+                        frame,
+                        WireFrame::Error(WireError {
+                            code: WireErrorCode::AuthFailed,
+                            ..
+                        })
+                    )
+                }) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("revocation closes Alice's socket promptly");
+        assert!(
+            rejected,
+            "Alice must receive an auth failure after revocation"
+        );
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) | Some(Ok(WsMessage::Close(_))) => return,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "the revoked socket must close");
+        core.shutdown().await;
+    }
+
+    /// Wraps only the account registry root and fails its next durable flush on
+    /// demand, reproducing an ambiguous storage error after the journal append.
+    #[cfg(feature = "embedded-server")]
+    #[derive(Debug)]
+    struct FailNextAccountFlushFactory {
+        inner: jazz_storage_rocksdb::RocksDbStorageFactory,
+        fail_next_account_flush: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(feature = "embedded-server")]
+    struct FailNextFlushStorage {
+        inner: jazz::groove::storage::BoxedStorage,
+        fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(feature = "embedded-server")]
+    mod fail_next_flush_storage {
+        use super::FailNextFlushStorage;
+        use jazz::groove::storage::{
+            Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest,
+            StorageFuture, StorageScan, Value,
+        };
+        impl OrderedKvStorage for FailNextFlushStorage {
+            fn get(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+                self.inner.get(cf, key)
+            }
+            fn put_if_absent(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+                self.inner.put_if_absent(cf, key, value)
+            }
+            fn compare_and_delete(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                expected: Vec<u8>,
+            ) -> StorageFuture<'_, Result<bool, Error>> {
+                self.inner.compare_and_delete(cf, key, expected)
+            }
+            fn set(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.set(cf, key, value)
+            }
+            fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.delete(cf, key)
+            }
+            fn scan(
+                &self,
+                request: ScanRequest,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+                self.inner.scan(request)
+            }
+            fn write_many(
+                &self,
+                operations: Vec<OwnedWriteOperation>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.write_many(operations)
+            }
+            fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.close()
+            }
+            fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
+                if self.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    Box::pin(async {
+                        Err(Error::InvalidStorageLayout(
+                            "test: injected account registry flush failure".into(),
+                        ))
+                    })
+                } else {
+                    self.inner.flush_write_boundary()
+                }
+            }
+        }
+        impl ReopenableStorage for FailNextFlushStorage {
+            fn reopen(
+                self,
+                column_families: Vec<String>,
+            ) -> StorageFuture<'static, Result<Self, Error>> {
+                Box::pin(async move {
+                    Ok(Self {
+                        inner: self.inner.reopen(column_families).await?,
+                        fail: self.fail,
+                    })
+                })
+            }
+        }
+    }
+
+    #[cfg(feature = "embedded-server")]
+    impl jazz::groove::storage::StorageFactory for FailNextAccountFlushFactory {
+        fn open(
+            &self,
+            path: std::path::PathBuf,
+            column_families: Vec<String>,
+            codec_profile: jazz::groove::storage::StorageCodecProfile,
+        ) -> jazz::groove::storage::StorageFuture<
+            '_,
+            Result<jazz::groove::storage::BoxedStorage, jazz::groove::storage::Error>,
+        > {
+            let is_accounts = path.ends_with("accounts.rocksdb");
+            let fail = self.fail_next_account_flush.clone();
+            Box::pin(async move {
+                let inner = self
+                    .inner
+                    .open(path, column_families, codec_profile)
+                    .await?;
+                Ok(if is_accounts {
+                    jazz::groove::storage::BoxedStorage::new(FailNextFlushStorage { inner, fail })
+                } else {
+                    inner
+                })
+            })
+        }
+    }
+
+    /// A revoke whose journal append lands but whose durable flush fails
+    /// returns an error and poisons the registry; a restart replays the
+    /// revocation. The per-message gate must fail closed, exactly like a
+    /// fresh registry lookup, rather than keep trusting Alice's last
+    /// successful check. Guards the #3387 gate: the owner announces every
+    /// attempted mutation, not only successful ones.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test]
+    async fn failed_revoke_flush_still_closes_the_per_message_account_gate() {
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+
+        let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let schema = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(public_table_policies()),
+            )
+            .build();
+        let core = JazzServer::builder()
+            .with_schema(schema)
+            .with_storage_factory(std::sync::Arc::new(FailNextAccountFlushFactory {
+                inner: jazz_storage_rocksdb::RocksDbStorageFactory,
+                fail_next_account_flush: fail.clone(),
+            }))
+            .start()
+            .await
+            .expect("start test server");
+        let client = reqwest::Client::new();
+        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
+        let alice = TestJwtIssuer::jwt_for_user("alice");
+        let registered: serde_json::Value = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(&alice)
+            .send()
+            .await
+            .expect("register Alice")
+            .json()
+            .await
+            .expect("Alice's account");
+        let account = jazz::account_registry::AccountId(
+            uuid::Uuid::parse_str(registered["account"].as_str().expect("account")).expect("uuid"),
+        );
+        let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
+            .expect("principal")
+            .with_account(account);
+        let (mut ws, _) = connect_async(format!(
+            "ws://127.0.0.1:{}/apps/{}/ws",
+            core.port(),
+            core.app_id()
+        ))
+        .await
+        .expect("connect Alice");
+        let prelude = serde_json::json!({ "peer_identity": identity.canonical(), "auth": { "jwt_token": alice } });
+        ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
+            .await
+            .expect("prelude");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(current_wire_features()).into(),
+        ))
+        .await
+        .expect("hello");
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("hello deadline")
+            .expect("hello")
+            .expect("hello msg");
+        let frames = decode_ws_message(&first);
+        assert!(
+            matches!(frames.as_slice(), [WireFrame::Hello(_), ..]),
+            "{frames:?}"
+        );
+
+        let state = core.server_state();
+        let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let revoked = client
+            .post(format!("{accounts}/revoke"))
+            .bearer_auth(&alice)
+            .json(&serde_json::json!({ "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" } }))
+            .send().await.expect("revoke Alice");
+        assert!(
+            !revoked.status().is_success(),
+            "the injected flush failure surfaces as a failed revoke"
+        );
+        assert!(
+            !fail.load(std::sync::atomic::Ordering::SeqCst),
+            "the injected flush failure was consumed by the revoke"
+        );
+
+        // The failed revoke was announced; a failed lookup on the poisoned
+        // registry must be announced too.
+        let mut observer = state.accounts.as_ref().map(|registry| registry.subscribe());
+        // The poisoned registry now refuses every fresh lookup.
+        let lookup = super::super::accounts::resolve_assignment(
+            &core.server_state(),
+            jazz::account_registry::Principal {
+                issuer: TEST_JWT_ISSUER.into(),
+                subject: "alice".into(),
+            },
+        )
+        .await;
+        assert!(lookup.is_err());
+        assert!(
+            observer
+                .as_mut()
+                .expect("registry")
+                .has_changed()
+                .expect("owner alive"),
+            "a lookup on the poisoned registry is announced"
+        );
+
+        // The per-message decision the reader/outgoing branches make, on a
+        // receiver subscribed before the revoke (as the live socket's is).
+        let per_message_new = account_admission_current(&state, Some(identity), &mut changes).await;
+        let per_message_old = account_still_admitted(&state, Some(identity)).await;
+
+        assert!(
+            per_message_old.is_err(),
+            "a fresh registry lookup fails closed"
+        );
+        assert!(
+            per_message_new.is_err(),
+            "after a journaled revoke poisoned the registry, the per-message gate must not keep admitting Alice (fresh lookup: {per_message_old:?})"
+        );
+        core.shutdown().await;
+    }
+
+    /// Pins the per-message gate itself (#3387): the end-to-end revocation
+    /// test would still pass if `account_admission_current` always admitted,
+    /// because the watch-driven branch closes the socket anyway. An unrelated
+    /// enrollment keeps Alice admitted; the first frame checked after her
+    /// revocation completes is refused.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test]
+    async fn per_message_account_gate_refuses_the_first_frame_after_revocation() {
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+
+        let core = JazzServer::start().await.expect("start test server");
+        let client = reqwest::Client::new();
+        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
+        let alice = TestJwtIssuer::jwt_for_user("alice");
+        let registered: serde_json::Value = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(&alice)
+            .send()
+            .await
+            .expect("register Alice")
+            .json()
+            .await
+            .expect("Alice's account");
+        let account = jazz::account_registry::AccountId(
+            uuid::Uuid::parse_str(registered["account"].as_str().expect("account")).expect("uuid"),
+        );
+        let identity = Some(
+            AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
+                .expect("principal")
+                .with_account(account),
+        );
+        let state = core.server_state();
+        let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+        account_admission_current(&state, identity, &mut changes)
+            .await
+            .expect("admitted");
+
+        let bob = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(TestJwtIssuer::jwt_for_user("bob"))
+            .send()
+            .await
+            .expect("register Bob");
+        assert_eq!(bob.status(), axum::http::StatusCode::OK);
+        account_admission_current(&state, identity, &mut changes)
+            .await
+            .expect("an unrelated enrollment keeps Alice admitted");
+
+        let revoked = client
+            .post(format!("{accounts}/revoke"))
+            .bearer_auth(&alice)
+            .json(&serde_json::json!({ "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" } }))
+            .send().await.expect("revoke Alice");
+        assert_eq!(revoked.status(), axum::http::StatusCode::NO_CONTENT);
+        assert!(
+            account_admission_current(&state, identity, &mut changes)
+                .await
+                .is_err(),
+            "the first frame checked after revocation completes must be refused"
+        );
+        core.shutdown().await;
+    }
+
+    /// Timing receipt for #3387: the per-message admission cost of a live
+    /// account socket, before (a registry-thread lookup per message) and
+    /// after (a watch-version check). Run manually with `--ignored --nocapture`.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore = "#3387: timing probe, run manually with --ignored"]
+    async fn probe_3387_per_message_admission_cost() {
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+
+        const CHECKS_PER_SOCKET: usize = 2_000;
+        let core = JazzServer::builder()
+            .with_persistent_storage()
+            .with_storage_factory(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            ))
+            .start()
+            .await
+            .expect("start test server");
+        let client = reqwest::Client::new();
+        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
+        let registered: serde_json::Value = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(TestJwtIssuer::jwt_for_user("alice"))
+            .send()
+            .await
+            .expect("register Alice")
+            .json()
+            .await
+            .expect("Alice's account");
+        let account = jazz::account_registry::AccountId(
+            uuid::Uuid::parse_str(registered["account"].as_str().expect("account"))
+                .expect("account uuid"),
+        );
+        let identity = Some(
+            AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
+                .expect("Alice's principal")
+                .with_account(account),
+        );
+        let state = core.server_state();
+        for sockets in [1usize, 16, 64] {
+            for gated in [false, true] {
+                let started = std::time::Instant::now();
+                let mut tasks = Vec::new();
+                for _ in 0..sockets {
+                    let state = state.clone();
+                    tasks.push(tokio::spawn(async move {
+                        let mut changes =
+                            state.accounts.as_ref().map(|registry| registry.subscribe());
+                        for _ in 0..CHECKS_PER_SOCKET {
+                            let result = if gated {
+                                account_admission_current(&state, identity, &mut changes).await
+                            } else {
+                                account_still_admitted(&state, identity).await
+                            };
+                            result.expect("Alice stays admitted");
+                        }
+                    }));
+                }
+                for task in tasks {
+                    task.await.expect("probe task");
+                }
+                let elapsed = started.elapsed();
+                let checks = (sockets * CHECKS_PER_SOCKET) as f64;
+                println!(
+                    "probe_3387 sockets={sockets} path={} checks={checks} wall_ms={:.1} ns_per_check={:.0} checks_per_s={:.0}",
+                    if gated {
+                        "watch_gated"
+                    } else {
+                        "registry_lookup"
+                    },
+                    elapsed.as_secs_f64() * 1e3,
+                    elapsed.as_nanos() as f64 / checks,
+                    checks / elapsed.as_secs_f64(),
+                );
+            }
+        }
+        core.shutdown().await;
     }
 
     // Admission precedes context creation, so a forged authority claim is
@@ -3556,15 +4091,13 @@ mod tests {
             ],
         ));
         let response = reqwest::Client::new()
-            .post(format!(
-                "http://{addr}/apps/{}/admin/permissions",
-                state.app_id
-            ))
+            .post(format!("http://{addr}/apps/{}/admin/deploy", state.app_id))
             .header("X-Jazz-Admin-Secret", "admin-secret")
             .header("Content-Type", "application/json")
             .body(
                 serde_json::json!({
-                    "schemaHash": v2_hash.to_string(),
+                    "targetSchemaHash": v2_hash.to_string(),
+                    "schemas": [], "migrations": [],
                     "permissions": { "todos": policies },
                 })
                 .to_string(),
@@ -3574,7 +4107,7 @@ mod tests {
             .expect("publish permissions through admin route");
         let status = response.status();
         let body = response.text().await.expect("permissions response body");
-        assert_eq!(status, reqwest::StatusCode::CREATED, "{body}");
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
 
         let reader_identity = AuthorSubject::for_test_bytes([0xb2; 16]);
         let (_, visible_title) = issuer_and_subject(reader_identity);
@@ -3707,7 +4240,7 @@ mod tests {
                 for frame in decode_ws_message(&msg) {
                     if let WireFrame::Error(error) = frame {
                         saw_backpressure = error.code == WireErrorCode::Backpressure
-                            && error.retry == WireRetry::Later
+                            && error.retry == WireRetry::Never
                             && error.message.contains("connection cap exceeded");
                     }
                 }

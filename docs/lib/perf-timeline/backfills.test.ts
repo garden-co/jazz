@@ -2,7 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { historicalBackfills, type HistoricalBackfill } from "./backfills.ts";
 import { buildTimeline, type RawRun } from "./model.ts";
-import { getBenchmarkMetadata } from "../../../dev/benchmarks/metadata/index.ts";
+import {
+  formerBenchmarkNames,
+  getBenchmarkMetadata,
+} from "../../../dev/benchmarks/metadata/index.ts";
 
 const sha = /^[0-9a-f]{40}$/;
 const codspeedId = /^[0-9a-f]{24}$/;
@@ -37,9 +40,12 @@ test("registered backfills carry complete, explicit and non-duplicated provenanc
       assert.match(receipt.resultId, codspeedId);
       assert.ok(!resultIds.has(receipt.resultId), `duplicate result ${receipt.resultId}`);
       resultIds.add(receipt.resultId);
+      // Receipts keep the CodSpeed name they were recorded under, which may
+      // since have been renamed or retired.
       assert.ok(
-        getBenchmarkMetadata(receipt.benchmarkName),
-        `${receipt.benchmarkName} is a catalogued wallclock benchmark`,
+        getBenchmarkMetadata(receipt.benchmarkName) ||
+          formerBenchmarkNames.has(receipt.benchmarkName),
+        `${receipt.benchmarkName} is a catalogued or former wallclock benchmark`,
       );
     }
   }

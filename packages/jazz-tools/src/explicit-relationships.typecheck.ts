@@ -1,4 +1,4 @@
-import { schema as s } from "./index.js";
+import { schema as s, migration as m } from "./index.js";
 
 // @ts-expect-error Required explicit relationship map, even for empty tables.
 s.table({ name: s.string() });
@@ -75,8 +75,8 @@ const migrationTo = {
   posts: s.table({ owner: s.uuid() }, { author: s.rel("teams", "owner") }),
 };
 // @ts-expect-error Changing the effective stored reference target requires a supported migration, not an empty lens.
-s.defineMigration({ from: migrationFrom, to: migrationTo });
-s.defineMigration({
+m.defineMigration({ from: migrationFrom, to: migrationTo });
+m.defineMigration({
   from: migrationFrom,
   to: {
     ...migrationFrom,

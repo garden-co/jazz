@@ -18,7 +18,7 @@ Inclusive times overlap; do not sum parent and child totals or page and worker.
 | Page known-transaction ingestion             |       224 ms | 223 ms |          183 ms |
 | Worker transaction ingestion/current indexes |            — | 455 ms |               — |
 
-Known-transaction ingestion in `crates/jazz/src/node/ingest/commit_bundles.rs`
+Known-transaction ingestion in `crates/jazz/layers/node/src/node/ingest/commit_bundles.rs`
 loads stored versions and then performs a linear `find` for every incoming
 version. `view_version_key_for_ingest` reconstructs owned table/branch keys and
 reads row identity and deletion state for comparisons. Matching two wide copies

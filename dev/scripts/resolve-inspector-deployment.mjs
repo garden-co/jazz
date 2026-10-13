@@ -173,7 +173,8 @@ export async function resolveInspectorDeployment({
   throw new Error(
     [
       `No staged inspector production deployment found on ${branch}.`,
-      "Make sure the inspector Vercel project has a ready production deployment from the target branch and has auto-assign custom production domains disabled.",
+      "Vercel's Git integration does not build this branch; run Stage Inspector production for this SHA first, or pass its deployment URL to the promotion.",
+      "See packages/inspector/README.md, 'Staging a release on Vercel'.",
       lastDeployments.length > 0
         ? `Last matching deployments:\n${lastDeployments
             .map((deployment) => `- ${describeDeployment(deployment)}`)

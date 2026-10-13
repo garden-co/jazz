@@ -287,7 +287,7 @@ pub fn admit_static_bearer_with_claims(
         }
     }
     let subject = subject.into();
-    if !crate::tools::identity::principal_is_nonempty(&subject) {
+    if !crate::identity::principal_is_nonempty(&subject) {
         return Err(AuthAdmissionError::InvalidHandshake(
             "sub must be non-empty".to_owned(),
         ));
@@ -338,7 +338,7 @@ pub fn admit_bearer_jwt(
     validation.set_issuer(&[expected_issuer]);
     validation.set_audience(&[expected_audience]);
     let decoded = decode::<JwtClaims>(token, &key, &validation).map_err(jwt_error)?;
-    if !crate::tools::identity::principal_is_nonempty(&decoded.claims.sub) {
+    if !crate::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
     }
     let issuer = decoded.claims.iss;
@@ -393,7 +393,7 @@ pub fn admit_local_first_jwt(
         validation.validate_aud = false;
     }
     let decoded = decode::<LocalFirstJwtClaims>(token, &key, &validation).map_err(jwt_error)?;
-    if !crate::tools::identity::principal_is_nonempty(&decoded.claims.sub) {
+    if !crate::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
     }
     if let Some(expected_audience) = config.expected_audience.as_deref() {
@@ -445,7 +445,7 @@ pub fn admitted_session_claims(
         (author_issuer, author_subject),
         (issuer.to_owned(), subject.to_owned())
     );
-    crate::tools::policy_claims::canonical_policy_binding_claims(&author, claims)
+    crate::model::policy_claims::canonical_policy_binding_claims(&author, claims)
 }
 
 fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdmissionError> {
@@ -501,9 +501,9 @@ pub fn jwt_json_claims_to_policy_claims(
         ) {
             continue;
         }
-        if let Some(value) = crate::tools::policy_claims::json_value_to_policy_claim(
+        if let Some(value) = crate::model::policy_claims::json_value_to_policy_claim(
             value,
-            crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            crate::model::policy_claims::NumericClaimOrigin::ExactJson,
         )
         .map_err(AuthAdmissionError::InvalidJwt)?
         {

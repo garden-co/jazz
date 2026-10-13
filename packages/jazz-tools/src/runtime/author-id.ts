@@ -68,6 +68,12 @@ export function isUsableSubject(subject: string): boolean {
 
 /** Portable logical author identity. Rust interns this canonical string only internally. */
 export function canonicalAuthorSubject(issuer: string, subject: string, account?: string): string {
+  if (typeof issuer !== "string") {
+    throw new Error("Author identity is missing an issuer");
+  }
+  if (typeof subject !== "string") {
+    throw new Error("Author identity is missing a subject");
+  }
   if (!isPortableAuthorComponent(issuer) || !isPortableAuthorComponent(subject)) {
     throw new Error("Author issuer and subject must be portable and nonempty");
   }

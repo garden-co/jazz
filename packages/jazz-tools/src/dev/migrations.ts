@@ -218,36 +218,36 @@ function renderArrayElementExpression(columnType: WasmColumnType): string {
 function renderAddOperationExpression(column: ColumnDescriptor, defaultExpression: string): string {
   switch (column.column_type.type) {
     case "Text":
-      return `s.add.string({ default: ${defaultExpression} })`;
+      return `m.add.string({ default: ${defaultExpression} })`;
     case "Boolean":
-      return `s.add.boolean({ default: ${defaultExpression} })`;
+      return `m.add.boolean({ default: ${defaultExpression} })`;
     case "Integer":
-      return `s.add.int({ default: ${defaultExpression} })`;
+      return `m.add.int({ default: ${defaultExpression} })`;
     case "Double":
-      return `s.add.float({ default: ${defaultExpression} })`;
+      return `m.add.float({ default: ${defaultExpression} })`;
     case "Timestamp":
-      return `s.add.timestamp({ default: ${defaultExpression} })`;
+      return `m.add.timestamp({ default: ${defaultExpression} })`;
     case "Bytea":
-      return `s.add.bytes({ default: ${defaultExpression} })`;
+      return `m.add.bytes({ default: ${defaultExpression} })`;
     case "Json":
       return column.column_type.schema
-        ? `s.add.json({ default: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
-        : `s.add.json({ default: ${defaultExpression} })`;
+        ? `m.add.json({ default: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
+        : `m.add.json({ default: ${defaultExpression} })`;
     case "Enum":
-      return `s.add.enum(${column.column_type.variants
+      return `m.add.enum(${column.column_type.variants
         .map((variant) => JSON.stringify(variant))
         .join(", ")}, { default: ${defaultExpression} })`;
     case "EnumPayload":
       throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
       if (column.references) {
-        return `s.add.ref(${JSON.stringify(column.references)}, { default: ${defaultExpression} })`;
+        return `m.add.ref(${JSON.stringify(column.references)}, { default: ${defaultExpression} })`;
       }
-      return `s.add.ref("TODO_TABLE", { default: ${defaultExpression} })`;
+      return `m.add.ref("TODO_TABLE", { default: ${defaultExpression} })`;
     case "Array":
-      return `s.add.array({ of: ${renderArrayElementExpression(column.column_type.element)}, default: ${defaultExpression} })`;
+      return `m.add.array({ of: ${renderArrayElementExpression(column.column_type.element)}, default: ${defaultExpression} })`;
     case "BigInt":
-      return `s.add.bigint({ default: ${defaultExpression} })`;
+      return `m.add.bigint({ default: ${defaultExpression} })`;
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
   }
@@ -259,36 +259,36 @@ function renderDropOperationExpression(
 ): string {
   switch (column.column_type.type) {
     case "Text":
-      return `s.drop.string({ backwardsDefault: ${defaultExpression} })`;
+      return `m.drop.string({ backwardsDefault: ${defaultExpression} })`;
     case "Boolean":
-      return `s.drop.boolean({ backwardsDefault: ${defaultExpression} })`;
+      return `m.drop.boolean({ backwardsDefault: ${defaultExpression} })`;
     case "Integer":
-      return `s.drop.int({ backwardsDefault: ${defaultExpression} })`;
+      return `m.drop.int({ backwardsDefault: ${defaultExpression} })`;
     case "Double":
-      return `s.drop.float({ backwardsDefault: ${defaultExpression} })`;
+      return `m.drop.float({ backwardsDefault: ${defaultExpression} })`;
     case "Timestamp":
-      return `s.drop.timestamp({ backwardsDefault: ${defaultExpression} })`;
+      return `m.drop.timestamp({ backwardsDefault: ${defaultExpression} })`;
     case "Bytea":
-      return `s.drop.bytes({ backwardsDefault: ${defaultExpression} })`;
+      return `m.drop.bytes({ backwardsDefault: ${defaultExpression} })`;
     case "Json":
       return column.column_type.schema
-        ? `s.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
-        : `s.drop.json({ backwardsDefault: ${defaultExpression} })`;
+        ? `m.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
+        : `m.drop.json({ backwardsDefault: ${defaultExpression} })`;
     case "Enum":
-      return `s.drop.enum(${column.column_type.variants
+      return `m.drop.enum(${column.column_type.variants
         .map((variant) => JSON.stringify(variant))
         .join(", ")}, { backwardsDefault: ${defaultExpression} })`;
     case "EnumPayload":
       throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
       if (column.references) {
-        return `s.drop.ref(${JSON.stringify(column.references)}, { backwardsDefault: ${defaultExpression} })`;
+        return `m.drop.ref(${JSON.stringify(column.references)}, { backwardsDefault: ${defaultExpression} })`;
       }
-      return `s.drop.ref("TODO_TABLE", { backwardsDefault: ${defaultExpression} })`;
+      return `m.drop.ref("TODO_TABLE", { backwardsDefault: ${defaultExpression} })`;
     case "Array":
-      return `s.drop.array({ of: ${renderArrayElementExpression(column.column_type.element)}, backwardsDefault: ${defaultExpression} })`;
+      return `m.drop.array({ of: ${renderArrayElementExpression(column.column_type.element)}, backwardsDefault: ${defaultExpression} })`;
     case "BigInt":
-      return `s.drop.bigint({ backwardsDefault: ${defaultExpression} })`;
+      return `m.drop.bigint({ backwardsDefault: ${defaultExpression} })`;
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
   }
@@ -481,7 +481,7 @@ function renderMigrationBody(
         ? renameSuggestions
             .map(
               (renameSuggestion) =>
-                `${renameSuggestion.newTableName}: s.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`,
+                `${renameSuggestion.newTableName}: m.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`,
             )
             .join("\n")
         : undefined,
@@ -520,9 +520,9 @@ export function renderMigrationStub(input: {
   sections.push(`  from: ${renderSchemaWitness(rendered.witnessFrom)},`);
   sections.push(`  to: ${renderSchemaWitness(rendered.witnessTo)},`);
 
-  return `import { schema as s } from "jazz-tools";
+  return `import { schema as s, migration as m } from "jazz-tools";
 
-export default s.defineMigration({
+export default m.defineMigration({
 ${sections.join("\n")}
 });
 `;

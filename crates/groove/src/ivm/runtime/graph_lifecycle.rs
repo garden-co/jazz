@@ -121,16 +121,8 @@ impl IvmRuntime {
                 .sum(),
             arrangement_count: self.arrangement_states.len(),
             eval_memo_entries: self.eval_memo.len(),
-            hydration_memo_entries: self
-                .eval_memo
-                .keys()
-                .filter(|key| key.tick_epoch.is_none())
-                .count(),
-            eval_memo_bytes: self
-                .eval_memo
-                .values()
-                .map(|entry| entry.payload_bytes)
-                .sum(),
+            hydration_memo_entries: self.eval_memo.len() - self.eval_memo.tick_entries(),
+            eval_memo_bytes: self.tracked_eval_memo_bytes(),
             hydration_memo_hits: self.hydration_memo_hits,
             hydration_memo_computes: self.hydration_memo_computes,
             hydration_memo_distinct_computed_nodes: self.hydration_memo_computed_nodes.len(),
@@ -138,6 +130,19 @@ impl IvmRuntime {
             deduped_graph_nodes: self.graph.nodes().len(),
             ..RuntimeStats::default()
         }
+    }
+
+    /// `eval_memo_bytes` is maintained at every memo mutation; debug builds
+    /// check it against a full recount.
+    fn tracked_eval_memo_bytes(&self) -> usize {
+        debug_assert_eq!(
+            self.eval_memo_bytes,
+            self.eval_memo
+                .values()
+                .map(|entry| entry.payload_bytes)
+                .sum::<usize>()
+        );
+        self.eval_memo_bytes
     }
 
     pub(super) fn record_hydration_memo_metrics(&mut self, metrics: &TickMetrics) {
@@ -187,9 +192,8 @@ impl IvmRuntime {
             .unwrap_or(false)
     }
 
-    fn is_gc_root(&self, node: &crate::ivm::GraphNode, queued: &HashSet<NodeId>) -> bool {
+    fn is_retained_gc_root(&self, node: &crate::ivm::GraphNode) -> bool {
         node.is_durable()
-            || queued.contains(&node.id)
             || self
                 .node_meta
                 .get(&node.id)
@@ -224,7 +228,16 @@ impl IvmRuntime {
 
         // Decide consumers before their inputs: an iterative post-order over
         // `children`, restricted to the closure (the graph is acyclic).
-        let mut kept = HashMap::<NodeId, bool>::default();
+        // Queue membership is only a temporary root when no durable or
+        // retained consumer already keeps the node alive. Otherwise every
+        // cold-read wake would resweep the same live subscription graph.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Retention {
+            None,
+            Queued,
+            Retained,
+        }
+        let mut kept = HashMap::<NodeId, Retention>::default();
         let mut blocked_by_queue = false;
         for &start in &closure {
             if kept.contains_key(&start) {
@@ -245,20 +258,31 @@ impl IvmRuntime {
                     }
                     continue;
                 }
-                let root = self.is_gc_root(node, &queued);
-                blocked_by_queue |= queued.contains(&id);
-                let keep = root
+                let retention = if self.is_retained_gc_root(node)
                     || node
                         .children
                         .iter()
-                        .any(|child| !closure.contains(child) || kept[child]);
-                kept.insert(id, keep);
+                        .any(|child| !closure.contains(child) || kept[child] == Retention::Retained)
+                {
+                    Retention::Retained
+                } else if queued.contains(&id)
+                    || node
+                        .children
+                        .iter()
+                        .any(|child| kept[child] == Retention::Queued)
+                {
+                    Retention::Queued
+                } else {
+                    Retention::None
+                };
+                blocked_by_queue |= retention == Retention::Queued;
+                kept.insert(id, retention);
             }
         }
 
         let removable = kept
             .into_iter()
-            .filter_map(|(id, keep)| (!keep).then_some(id))
+            .filter_map(|(id, retention)| (retention == Retention::None).then_some(id))
             .collect::<Vec<_>>();
         for id in &removable {
             self.graph.remove_node(*id);
@@ -309,7 +333,7 @@ impl IvmRuntime {
                 .retain(|key, _| !removed.contains(&key.node));
             self.arrangement_states
                 .retain(|key, _| !removed.contains(&key.input));
-            self.eval_memo.retain(|key, _| !removed.contains(&key.node));
+            self.remove_retained_eval_memos_for_nodes(&removed);
             for node in removed {
                 self.arrangement_keys_by_input.remove(&node);
                 self.node_meta.remove(&node);

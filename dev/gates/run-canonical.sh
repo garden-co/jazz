@@ -96,7 +96,7 @@ run_gate() {
   fi
 }
 
-run_gate cargo-test-jazz cargo test -p jazz
+run_gate cargo-test-jazz cargo test -p jazz -p jazz-types -p jazz-model -p jazz-protocol -p jazz-engine -p jazz-node -p jazz-db
 run_gate cargo-test-groove cargo test -p groove
 run_gate cargo-test-jazz-no-default-features cargo test -p jazz --no-default-features --features testing,transport-compression-zstd
 run_gate cargo-check-jazz-sim-benches cargo check -p jazz-sim --benches

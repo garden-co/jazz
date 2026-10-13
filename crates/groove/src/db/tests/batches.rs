@@ -3242,6 +3242,556 @@ async fn first_cold_publication_persists_before_resolver_without_deadlock() {
     );
 }
 
+/// Poll `future` a bounded number of times. Every storage wait in
+/// [`TestStorage`] completes on its next poll, so a future still pending after
+/// this waits on something nothing will release.
+async fn within<T>(label: &str, future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    for _ in 0..1024 {
+        if let Poll::Ready(value) = futures::poll!(future.as_mut()) {
+            return value;
+        }
+    }
+    panic!("{label} did not complete");
+}
+
+/// #3901: an offline tab's local write must not wait on remote bytes.
+///
+/// A live `ids` subscription never reads the large `payload`. A second
+/// subscription opens over the whole table after row 1's payload has gone
+/// cold, so its hydration parks on a chunk fetch that nothing releases, as
+/// when the upstream link drops before the bytes arrive. A write of row 2 to
+/// the same table overlaps that parked hydration. It must still commit and
+/// reach `ids` while the chunk is missing; only the payload stays pending.
+#[futures_test::test]
+async fn local_write_does_not_wait_on_a_hydration_parked_on_a_remote_chunk() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+
+    let ids = within(
+        "the ids subscription",
+        database.subscribe_one_sink(GraphBuilder::table("objects").project(["id"])),
+    )
+    .await
+    .unwrap();
+    within("the ids hydration", database.drive_progress())
+        .await
+        .unwrap();
+    assert!(ids.try_recv().unwrap().is_empty());
+
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![9; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let staged = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    let mut first = database.open_batch();
+    first.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(Box::new(staged.value_ref))],
+    );
+    first.insert("objects", vec![Value::U64(3), Value::Bytes(vec![3; 8])]);
+    first.accept_large_value(staged.id);
+    let first = within("rows 1 and 3's write", database.apply_batch(first))
+        .await
+        .unwrap();
+    let persisted = within("rows 1 and 3's persistence", first.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+    let mut initial = ids.try_recv().unwrap().to_values().unwrap();
+    initial.sort_by_key(|(row, _)| sort_key(&row[0]));
+    assert_eq!(
+        initial,
+        vec![(vec![Value::U64(1)], 1), (vec![Value::U64(3)], 1)]
+    );
+
+    // Row 1's payload is now known only upstream, and upstream is gone.
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    crate::chunks::ChunkStorage::delete(&*chunks, root.node_ref.locator, root.node_ref.object_hash)
+        .await
+        .unwrap();
+    database
+        .storage
+        .delete(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&root.node_ref).unwrap(),
+        )
+        .await
+        .unwrap();
+    let resolver_ready = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(DeferredFixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            Bytes::from(root.encoded),
+        )])),
+        ready: Rc::clone(&resolver_ready),
+    }));
+
+    let payloads = within(
+        "the payload subscription",
+        database.subscribe_one_sink(GraphBuilder::table("objects")),
+    )
+    .await
+    .unwrap();
+    let mut cx = std::task::Context::from_waker(Waker::noop());
+    for _ in 0..64 {
+        assert!(
+            database.poll_progress(&mut cx).is_pending(),
+            "the payload hydration waits on the missing chunk"
+        );
+    }
+    assert!(payloads.try_recv().is_err());
+    assert!(database.subscription_has_pending_evaluation(payloads.id()));
+
+    // The write both inserts and retracts a row.
+    let mut second = database.open_batch();
+    second.insert("objects", vec![Value::U64(2), Value::Bytes(vec![2; 8])]);
+    second.delete("objects", PrimaryKeyValue::U64(3));
+    let second = within(
+        "a local write overlapping a hydration parked on a remote chunk",
+        database.apply_batch(second),
+    )
+    .await
+    .unwrap();
+    let persisted = within("row 2's persistence", second.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+
+    let mut published = Vec::new();
+    for _ in 0..64 {
+        while let Ok(update) = ids.try_recv() {
+            published.extend(update.to_values().unwrap());
+        }
+        if published.len() >= 2 {
+            break;
+        }
+        let _ = database.poll_progress(&mut cx);
+    }
+    published.sort_by_key(|(row, _)| sort_key(&row[0]));
+    assert_eq!(
+        published,
+        vec![(vec![Value::U64(2)], 1), (vec![Value::U64(3)], -1)],
+        "the committed write is visible while the chunk is still missing"
+    );
+    assert!(
+        payloads.try_recv().is_err(),
+        "only the subscription reading the missing payload stays pending"
+    );
+
+    // The link returns. The retained chunk demand completes the payload
+    // hydration, whose first result already includes the later write.
+    resolver_ready.set(true);
+    within("the payload hydration", database.drive_progress())
+        .await
+        .unwrap();
+    let mut rows = payloads
+        .try_recv()
+        .unwrap()
+        .to_values()
+        .unwrap()
+        .into_iter()
+        .map(|(row, weight)| (row[0].clone(), weight))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|(id, _)| sort_key(id));
+    assert_eq!(rows, vec![(Value::U64(1), 1), (Value::U64(2), 1)]);
+    // The first result already holds the write, so nothing repeats it.
+    for _ in 0..16 {
+        let _ = database.poll_progress(&mut cx);
+    }
+    assert!(
+        payloads.try_recv().is_err(),
+        "no delta follows the first result"
+    );
+    assert!(ids.try_recv().is_err());
+}
+
+fn sort_key(id: &Value) -> u64 {
+    match id {
+        Value::U64(id) => *id,
+        _ => u64::MAX,
+    }
+}
+
+/// The `id` field and weight of each delta, ordered by id.
+fn ids_with_weights(deltas: &RecordDeltas) -> Vec<(Value, i64)> {
+    let id = deltas
+        .descriptor
+        .field_index("id")
+        .expect("output carries an id field");
+    let mut rows = deltas
+        .to_values()
+        .unwrap()
+        .into_iter()
+        .map(|(row, weight)| (row[id].clone(), weight))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|(id, _)| sort_key(id));
+    rows
+}
+
+/// #3901 through a prepared, routed shape, as Jazz subscribes. A binding for
+/// owner 8 is live. A binding for owner 7 hydrates over row 1, whose payload
+/// is cold and never arrives, so it parks on the chunk. A write inserts row 2
+/// for owner 7, retracts row 3 for owner 7 and inserts row 4 for owner 8.
+/// Storage is evicted first, so the write's first frame may detach and route
+/// its barriers in a later frame, after owner 7's hydration has restarted.
+/// The write must reach owner 8 while the chunk is missing, and owner 7's
+/// first result must hold the write exactly once, with no later delta.
+#[futures_test::test]
+async fn routed_write_does_not_wait_on_or_repeat_into_a_hydration_parked_on_a_chunk() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("owner", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = TestStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage.clone()).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let binding = RecordDescriptor::new([("owner", ColumnType::U64)]);
+    let shape = within(
+        "the shape",
+        database.prepare_one_sink(
+            GraphBuilder::join(
+                GraphBuilder::binding_source("owner_params", binding.clone()),
+                GraphBuilder::table("objects"),
+                ["owner"],
+                ["owner"],
+            )
+            .project_fields([
+                ProjectField::renamed("left.owner", "owner"),
+                ProjectField::renamed("right.id", "id"),
+                ProjectField::renamed("right.payload", "payload"),
+            ]),
+            "owner_params",
+            binding,
+            ["owner"],
+        ),
+    )
+    .await
+    .unwrap();
+
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![9; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let staged = within(
+        "the large value",
+        database.stage_large_value_preparation(prepared.clone()),
+    )
+    .await
+    .unwrap();
+    let mut first = database.open_batch();
+    first.insert(
+        "objects",
+        vec![
+            Value::U64(1),
+            Value::U64(7),
+            Value::Large(Box::new(staged.value_ref)),
+        ],
+    );
+    first.insert(
+        "objects",
+        vec![Value::U64(3), Value::U64(7), Value::Bytes(vec![3; 8])],
+    );
+    first.accept_large_value(staged.id);
+    let first = within("the first write", database.apply_batch(first))
+        .await
+        .unwrap();
+    let persisted = within("the first persistence", first.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+
+    let observer = within(
+        "owner 8's binding",
+        database.bind_shape_one_sink(shape.id(), &[Value::U64(8)]),
+    )
+    .await
+    .unwrap();
+    within("owner 8's hydration", database.drive_progress())
+        .await
+        .unwrap();
+    assert!(observer.try_recv().unwrap().is_empty());
+
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    within(
+        "deleting the root chunk",
+        crate::chunks::ChunkStorage::delete(
+            &*chunks,
+            root.node_ref.locator,
+            root.node_ref.object_hash,
+        ),
+    )
+    .await
+    .unwrap();
+    within(
+        "deleting the root metadata",
+        database.storage.delete(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&root.node_ref).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    let resolver_ready = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(DeferredFixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            Bytes::from(root.encoded),
+        )])),
+        ready: Rc::clone(&resolver_ready),
+    }));
+
+    let parked = within(
+        "owner 7's binding",
+        database.bind_shape_one_sink(shape.id(), &[Value::U64(7)]),
+    )
+    .await
+    .unwrap();
+    let mut cx = std::task::Context::from_waker(Waker::noop());
+    for _ in 0..64 {
+        let _ = database.poll_progress(&mut cx);
+    }
+    assert!(parked.try_recv().is_err());
+    assert!(database.subscription_has_pending_evaluation(parked.id()));
+
+    storage.evict_all();
+    let mut second = database.open_batch();
+    second.insert(
+        "objects",
+        vec![Value::U64(2), Value::U64(7), Value::Bytes(vec![2; 8])],
+    );
+    second.delete("objects", PrimaryKeyValue::U64(3));
+    second.insert(
+        "objects",
+        vec![Value::U64(4), Value::U64(8), Value::Bytes(vec![4; 8])],
+    );
+    let second = within(
+        "a routed write overlapping a hydration parked on a chunk",
+        database.apply_batch(second),
+    )
+    .await
+    .unwrap();
+    let persisted = within("the second persistence", second.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+
+    let mut published = Vec::new();
+    for _ in 0..256 {
+        while let Ok(update) = observer.try_recv() {
+            published.extend(ids_with_weights(&update));
+        }
+        if !published.is_empty() {
+            break;
+        }
+        let _ = database.poll_progress(&mut cx);
+    }
+    assert_eq!(
+        published,
+        vec![(Value::U64(4), 1)],
+        "owner 8 sees the write while owner 7's chunk is missing"
+    );
+    for _ in 0..64 {
+        let _ = database.poll_progress(&mut cx);
+    }
+    assert!(
+        parked.try_recv().is_err(),
+        "owner 7 still waits only for the missing payload"
+    );
+
+    resolver_ready.set(true);
+    within("owner 7's hydration", database.drive_progress())
+        .await
+        .unwrap();
+    let rows = ids_with_weights(&parked.try_recv().unwrap());
+    assert_eq!(rows, vec![(Value::U64(1), 1), (Value::U64(2), 1)]);
+    for _ in 0..16 {
+        let _ = database.poll_progress(&mut cx);
+    }
+    assert!(
+        parked.try_recv().is_err(),
+        "no routed frame repeats the write into owner 7"
+    );
+    assert!(observer.try_recv().is_err());
+}
+
+/// #3815: A's cold root parks its evaluation, and A is persisted, so no
+/// resident publication holds the lifecycle mutex any more. When the root
+/// arrives, A's resumed install takes the mutex and waits for storage. Only an
+/// owner turn polls A again. B's own root needs the mutex, and B's write is
+/// that owner turn, so B must drive A to release the mutex rather than wait on
+/// it alone.
+///
+/// A ──park──► persisted ──root arrives──► install holds mutex ──storage──┐
+/// B ──apply──► needs mutex ──────────► drives A until it releases ◄──────┘
+#[futures_test::test]
+async fn publication_drives_a_suspended_chunk_install_holding_the_lifecycle_mutex() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    // Cold storage operations suspend once, as a browser store does.
+    let storage = TestStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let cold = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![5; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let cold_staged = database
+        .stage_large_value_preparation(cold.clone())
+        .await
+        .unwrap();
+    let warm_staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![6; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+    let root = cold
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == cold.value_ref.root)
+        .unwrap()
+        .clone();
+    crate::chunks::ChunkStorage::delete(&*chunks, root.node_ref.locator, root.node_ref.object_hash)
+        .await
+        .unwrap();
+    database
+        .storage
+        .delete(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&root.node_ref).unwrap(),
+        )
+        .await
+        .unwrap();
+    let resolver_ready = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(DeferredFixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            Bytes::from(root.encoded),
+        )])),
+        ready: Rc::clone(&resolver_ready),
+    }));
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("objects"))
+        .await
+        .unwrap();
+    // Hydration waits on storage here, and `recv` would block the thread.
+    within("initial hydration", database.drive_progress())
+        .await
+        .unwrap();
+    assert!(subscription.try_recv().unwrap().is_empty());
+
+    let mut first = database.open_batch();
+    first.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(Box::new(cold_staged.value_ref))],
+    );
+    first.accept_large_value(cold_staged.id);
+    let first = within("A's write", database.apply_batch(first))
+        .await
+        .unwrap();
+    assert!(subscription.try_recv().is_err(), "A's cold root parks it");
+    let persisted = within("A's persistence", first.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+    assert!(
+        database.large_value_publication_lifecycle_guard.is_none(),
+        "no publication holds the mutex for A's install"
+    );
+
+    // The root arrives. Owner turns resume A until its install waits for
+    // storage while it holds the mutex.
+    resolver_ready.set(true);
+    let mut cx = std::task::Context::from_waker(Waker::noop());
+    let mut install_holds_mutex = false;
+    for _ in 0..64 {
+        if database.large_value_lifecycle.try_lock().is_none() {
+            install_holds_mutex = true;
+            break;
+        }
+        assert!(
+            database.poll_progress(&mut cx).is_pending(),
+            "A's install waits for storage"
+        );
+    }
+    assert!(install_holds_mutex, "A's install holds the lifecycle mutex");
+
+    let mut second = database.open_batch();
+    second.insert(
+        "objects",
+        vec![Value::U64(2), Value::Large(Box::new(warm_staged.value_ref))],
+    );
+    second.accept_large_value(warm_staged.id);
+    let second = within(
+        "B's write, which needs the mutex that only A's suspended install can release",
+        database.apply_batch(second),
+    )
+    .await
+    .unwrap();
+    let persisted = within("B's persistence", second.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+    within("the final flush", database.flush()).await.unwrap();
+
+    let mut inserted = 0;
+    while let Ok(update) = subscription.try_recv_with_publication() {
+        inserted += update.deltas.to_values().unwrap().len();
+    }
+    assert_eq!(inserted, 2, "both rows are published");
+    assert!(
+        database
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                large_value_node_key(&root.node_ref).unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_some(),
+        "A's install finished"
+    );
+}
+
 /// A cold B evaluation may detach after its publication is assigned while its
 /// install observer remains pending. Once B's snapshot is durable, a resumed
 /// observer must commit its lifecycle writes as a durable follow-on operation.
@@ -3364,6 +3914,551 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
             .await
             .unwrap()
             .is_some()
+    );
+}
+
+/// Fixture for #3815: write B carries a cold large value, so its evaluation
+/// parks until the value's chunk is released. Write A is applied while B is
+/// parked. `setup` is committed before `sinks` are subscribed and their
+/// initial rows are consumed; `parked` writes B given the cold value;
+/// `concurrent` writes A.
+struct ParkedEvaluationFixture {
+    database: Database,
+    subscription: MultisinkSubscription,
+    resolver_ready: Rc<Cell<bool>>,
+    /// When set, B's chunk fetch fails once released instead of delivering.
+    resolver_fails: Rc<Cell<bool>>,
+    /// A second subscription over `observer_sinks`, opened before B.
+    observer: Option<MultisinkSubscription>,
+    parked: AppliedBatch,
+    concurrent: AppliedBatch,
+    /// Arrangement folds that copied a shared join index while B parked.
+    index_folds_while_parking: usize,
+}
+
+/// Resolves B's cold chunk once released, or fails the fetch.
+struct ParkedFixtureChunkResolver {
+    resolver: DeferredFixtureChunkResolver,
+    fails: Rc<Cell<bool>>,
+}
+
+impl crate::chunks::MissingChunkResolver for ParkedFixtureChunkResolver {
+    fn resolve(
+        &self,
+        request: crate::chunks::ChunkRequest,
+    ) -> crate::chunks::ChunkFuture<'_, Result<Bytes, crate::chunks::ChunkError>> {
+        let resolved = crate::chunks::MissingChunkResolver::resolve(&self.resolver, request);
+        let fails = Rc::clone(&self.fails);
+        Box::pin(async move {
+            let bytes = resolved.await?;
+            if fails.get() {
+                return Err(crate::chunks::ChunkError::Unavailable);
+            }
+            Ok(bytes)
+        })
+    }
+}
+
+async fn parked_evaluation_fixture(
+    tables: Vec<TableSchema>,
+    setup: impl FnOnce(&mut DatabaseBatch),
+    sinks: Vec<(&'static str, GraphBuilder)>,
+    parked: impl FnOnce(&mut DatabaseBatch, Value),
+    concurrent: impl FnOnce(&mut DatabaseBatch),
+) -> ParkedEvaluationFixture {
+    parked_evaluation_fixture_observed(tables, setup, sinks, Vec::new(), parked, concurrent).await
+}
+
+/// [`parked_evaluation_fixture`] with a second subscription over
+/// `observer_sinks`, which outlives a failure of the first.
+async fn parked_evaluation_fixture_observed(
+    tables: Vec<TableSchema>,
+    setup: impl FnOnce(&mut DatabaseBatch),
+    sinks: Vec<(&'static str, GraphBuilder)>,
+    observer_sinks: Vec<(&'static str, GraphBuilder)>,
+    parked: impl FnOnce(&mut DatabaseBatch, Value),
+    concurrent: impl FnOnce(&mut DatabaseBatch),
+) -> ParkedEvaluationFixture {
+    let schema = DatabaseSchema::new(tables);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![7; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let staged = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    crate::chunks::ChunkStorage::delete(&*chunks, root.node_ref.locator, root.node_ref.object_hash)
+        .await
+        .unwrap();
+    database
+        .storage
+        .delete(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&root.node_ref).unwrap(),
+        )
+        .await
+        .unwrap();
+    let resolver_ready = Rc::new(Cell::new(false));
+    let resolver_fails = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(ParkedFixtureChunkResolver {
+        resolver: DeferredFixtureChunkResolver {
+            chunks: Rc::new(std::collections::BTreeMap::from([(
+                crate::chunks::ChunkRequest {
+                    object_hash: root.node_ref.object_hash.0,
+                    locator: root.node_ref.locator,
+                },
+                Bytes::from(root.encoded),
+            )])),
+            ready: Rc::clone(&resolver_ready),
+        },
+        fails: Rc::clone(&resolver_fails),
+    }));
+
+    let mut setup_batch = database.open_batch();
+    setup(&mut setup_batch);
+    database.commit_batch(setup_batch).await.unwrap();
+
+    let subscription = database.subscribe(sinks).unwrap();
+    database
+        .next_multisink_subscription(&subscription)
+        .await
+        .unwrap();
+    let observer = if observer_sinks.is_empty() {
+        None
+    } else {
+        let observer = database.subscribe(observer_sinks).unwrap();
+        database
+            .next_multisink_subscription(&observer)
+            .await
+            .unwrap();
+        Some(observer)
+    };
+
+    let mut parked_batch = database.open_batch();
+    parked(&mut parked_batch, Value::Large(Box::new(staged.value_ref)));
+    parked_batch.accept_large_value(staged.id);
+    let folds_before = crate::ivm::runtime::shared_arrangement_index_folds();
+    let parked = database.apply_batch(parked_batch).await.unwrap();
+    let index_folds_while_parking =
+        crate::ivm::runtime::shared_arrangement_index_folds() - folds_before;
+    assert!(
+        subscription.try_recv().is_err(),
+        "the cold value must park B's publication"
+    );
+
+    let mut concurrent_batch = database.open_batch();
+    concurrent(&mut concurrent_batch);
+    let concurrent = database.apply_batch(concurrent_batch).await.unwrap();
+
+    ParkedEvaluationFixture {
+        database,
+        subscription,
+        resolver_ready,
+        resolver_fails,
+        observer,
+        parked,
+        concurrent,
+        index_folds_while_parking,
+    }
+}
+
+impl ParkedEvaluationFixture {
+    /// Persist both writes, release B's chunk and return every `sink` row
+    /// the subscription published meanwhile.
+    async fn settle(&mut self, sink: &str) -> Vec<(Vec<Value>, i64)> {
+        let parked = self.parked.persist().await;
+        self.database.finish_persistence(parked).unwrap();
+        let concurrent = self.concurrent.persist().await;
+        self.database.finish_persistence(concurrent).unwrap();
+        self.resolver_ready.set(true);
+        self.database.flush().await.unwrap();
+        self.drain(sink)
+    }
+
+    fn drain(&self, sink: &str) -> Vec<(Vec<Value>, i64)> {
+        drain_sink(&self.subscription, sink)
+    }
+
+    fn drain_observer(&self, sink: &str) -> Vec<(Vec<Value>, i64)> {
+        drain_sink(self.observer.as_ref().expect("observed fixture"), sink)
+    }
+}
+
+fn drain_sink(subscription: &MultisinkSubscription, sink: &str) -> Vec<(Vec<Value>, i64)> {
+    let mut rows = Vec::new();
+    while let Ok(update) = subscription.try_recv() {
+        if let Some(deltas) = update.sinks.get(sink) {
+            rows.extend(deltas.to_values().unwrap());
+        }
+    }
+    rows
+}
+
+fn rooms_and_messages_tables() -> Vec<TableSchema> {
+    vec![
+        TableSchema::new(
+            "rooms",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("name", ColumnType::String),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "messages",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("room_id", ColumnType::U64),
+                ColumnSchema::new("payload", ColumnType::Bytes),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ]
+}
+
+fn insert_rooms(batch: &mut DatabaseBatch) {
+    batch.insert(
+        "rooms",
+        vec![Value::U64(1), Value::String("general".to_owned())],
+    );
+    batch.insert(
+        "rooms",
+        vec![Value::U64(2), Value::String("random".to_owned())],
+    );
+}
+
+fn insert_inline_message(batch: &mut DatabaseBatch) {
+    batch.insert(
+        "messages",
+        vec![Value::U64(3), Value::U64(1), Value::Bytes(vec![3])],
+    );
+}
+
+/// A `rooms` semi-join over `messages.room_id` shares a subscription with a
+/// plain `messages` sink. Message B (id 2, in `parked_room`) carries the cold
+/// payload, so its evaluation parks while the `messages` sink materializes
+/// it, although every graph node (the semi-join included) has already
+/// completed. By default, message A (id 3, in room 1) is written meanwhile.
+async fn parked_semi_join_fixture(parked_room: u64) -> ParkedEvaluationFixture {
+    parked_semi_join_fixture_with(parked_room, insert_inline_message).await
+}
+
+async fn parked_semi_join_fixture_with(
+    parked_room: u64,
+    concurrent: impl FnOnce(&mut DatabaseBatch),
+) -> ParkedEvaluationFixture {
+    parked_evaluation_fixture(
+        rooms_and_messages_tables(),
+        insert_rooms,
+        vec![
+            (
+                "rooms",
+                GraphBuilder::semi_join(
+                    GraphBuilder::table("rooms"),
+                    GraphBuilder::table("messages"),
+                    ["id"],
+                    ["room_id"],
+                ),
+            ),
+            ("messages", GraphBuilder::table("messages")),
+        ],
+        |batch, payload| {
+            batch.insert(
+                "messages",
+                vec![Value::U64(2), Value::U64(parked_room), payload],
+            );
+        },
+        concurrent,
+    )
+    .await
+}
+
+/// #3815: a semi-join which completed inside a parked evaluation must hand its
+/// published keys to the next write. Otherwise that write evaluates against
+/// the pre-park state, sees the room's first match a second time and
+/// publishes a duplicate `+room`.
+#[futures_test::test]
+async fn parked_semi_join_does_not_republish_left_row_for_same_key() {
+    let mut fixture = parked_semi_join_fixture(1).await;
+    let rooms = fixture.settle("rooms").await;
+    assert_eq!(
+        rooms,
+        vec![(vec![Value::U64(1), Value::String("general".to_owned())], 1)],
+        "the room must become visible exactly once"
+    );
+}
+
+/// #3815: the parked evaluation must not install its pre-park semi-join
+/// state over the later write's. B's evaluation stages whole arrangements, so
+/// even with B in another room its install would drop message A's key. Then
+/// deleting A would not retract room 1.
+#[futures_test::test]
+async fn parked_semi_join_install_keeps_later_write_keys() {
+    let mut fixture = parked_semi_join_fixture(2).await;
+    let mut rooms = fixture.settle("rooms").await;
+    rooms.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        rooms,
+        vec![
+            (vec![Value::U64(1), Value::String("general".to_owned())], 1),
+            (vec![Value::U64(2), Value::String("random".to_owned())], 1),
+        ],
+    );
+
+    let mut delete = fixture.database.open_batch();
+    delete.delete("messages", PrimaryKeyValue::U64(3));
+    fixture.database.commit_batch(delete).await.unwrap();
+    fixture.database.flush().await.unwrap();
+    assert_eq!(
+        fixture.drain("rooms"),
+        vec![(vec![Value::U64(1), Value::String("general".to_owned())], -1)],
+        "deleting room 1's only message must retract it"
+    );
+}
+
+/// #3815/#3816: a write which retracts a left row made visible by a parked
+/// evaluation must retract it. Evaluated against pre-park state, renaming
+/// room 1 while B is parked emitted nothing, so subscribers kept the old name
+/// (a lost `-row`), and B later published the old row.
+///
+/// This asserts the net rows only. The rename's publication is delivered
+/// before the parked one's, a separate delivery-order issue (#3869).
+#[futures_test::test]
+async fn parked_semi_join_retracts_left_row_updated_meanwhile() {
+    let mut fixture = parked_semi_join_fixture_with(1, |batch| {
+        batch.update(
+            "rooms",
+            vec![Value::U64(1), Value::String("renamed".to_owned())],
+        );
+    })
+    .await;
+    let mut net = std::collections::BTreeMap::<String, i64>::new();
+    for (values, weight) in fixture.settle("rooms").await {
+        *net.entry(format!("{values:?}")).or_default() += weight;
+    }
+    net.retain(|_, weight| *weight != 0);
+    assert_eq!(
+        net,
+        std::collections::BTreeMap::from([(
+            format!("{:?}", [Value::U64(1), Value::String("renamed".to_owned())]),
+            1
+        )]),
+        "subscribers must end with only the renamed room"
+    );
+}
+
+/// #3815: here B parks inside the graph, on a filter that reads its cold
+/// payload, before the semi-join runs. A then waits temporally behind B's
+/// filter, so both evaluations are parked. When B resumes, its semi-join
+/// completes after the park, and A must evaluate from B's result rather than
+/// from the copy it staged when it began.
+#[futures_test::test]
+async fn parked_semi_join_hands_late_completion_to_waiting_write() {
+    let mut fixture = parked_evaluation_fixture(
+        rooms_and_messages_tables(),
+        insert_rooms,
+        vec![(
+            "rooms",
+            GraphBuilder::semi_join(
+                GraphBuilder::table("rooms"),
+                GraphBuilder::table("messages").filter(PredicateExpr::EqField {
+                    field: "payload".to_owned(),
+                    value_field: "payload".to_owned(),
+                }),
+                ["id"],
+                ["room_id"],
+            ),
+        )],
+        |batch, payload| {
+            batch.insert("messages", vec![Value::U64(2), Value::U64(1), payload]);
+        },
+        insert_inline_message,
+    )
+    .await;
+    assert!(
+        fixture.subscription.try_recv().is_err(),
+        "A must wait behind B's parked filter"
+    );
+    assert_eq!(
+        fixture.settle("rooms").await,
+        vec![(vec![Value::U64(1), Value::String("general".to_owned())], 1)],
+        "the room must become visible exactly once"
+    );
+}
+
+/// Scale canary for #3815: writing a parked evaluation's finished state back
+/// must not fold its overlays. Its staged copy still shares the arrangement's
+/// base index, so a fold there would copy the whole index on every parked
+/// write.
+#[futures_test::test]
+async fn parked_write_back_does_not_copy_arrangement_index() {
+    let fixture = parked_evaluation_fixture(
+        rooms_and_messages_tables(),
+        |batch| {
+            insert_rooms(batch);
+            for id in 100..356 {
+                batch.insert(
+                    "messages",
+                    vec![Value::U64(id), Value::U64(2), Value::Bytes(vec![1])],
+                );
+            }
+        },
+        vec![
+            (
+                "rooms",
+                GraphBuilder::semi_join(
+                    GraphBuilder::table("rooms"),
+                    GraphBuilder::table("messages"),
+                    ["id"],
+                    ["room_id"],
+                ),
+            ),
+            ("messages", GraphBuilder::table("messages")),
+        ],
+        |batch, payload| {
+            batch.insert("messages", vec![Value::U64(2), Value::U64(1), payload]);
+        },
+        insert_inline_message,
+    )
+    .await;
+    assert_eq!(fixture.index_folds_while_parking, 0);
+}
+
+fn edges_and_blobs_tables() -> Vec<TableSchema> {
+    vec![
+        TableSchema::new(
+            "edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "blobs",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("payload", ColumnType::Bytes),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ]
+}
+
+fn reach_graph() -> GraphBuilder {
+    let frontier = GraphBuilder::frontier_source(
+        "frontier",
+        RecordDescriptor::new([("src", ColumnType::U64), ("dst", ColumnType::U64)]),
+    );
+    let step = GraphBuilder::join(
+        frontier,
+        GraphBuilder::table("edges").project(["src", "dst"]),
+        ["dst"],
+        ["src"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    GraphBuilder::recursive(
+        GraphBuilder::table("edges").project(["src", "dst"]),
+        step,
+        "frontier",
+        16,
+    )
+}
+
+/// #3815: a recursive node keeps its body state in child scopes, so it is not
+/// handed over while its evaluation is parked. B adds edge 1->2 together
+/// with a cold blob and parks on the blob sink; A adds edge 2->3 through the
+/// same recursion. A must wait for B's recursion and then derive 1->3.
+#[futures_test::test]
+async fn parked_recursion_hands_its_closure_to_the_next_write() {
+    let edge = |id: u64, src: u64, dst: u64| vec![Value::U64(id), Value::U64(src), Value::U64(dst)];
+    let mut fixture = parked_evaluation_fixture(
+        edges_and_blobs_tables(),
+        |batch| batch.insert("edges", edge(10, 10, 11)),
+        vec![
+            ("reach", reach_graph()),
+            ("blobs", GraphBuilder::table("blobs")),
+        ],
+        |batch, payload| {
+            batch.insert("edges", edge(1, 1, 2));
+            batch.insert("blobs", vec![Value::U64(1), payload]);
+        },
+        |batch| batch.insert("edges", edge(2, 2, 3)),
+    )
+    .await;
+    let mut reach = fixture.settle("reach").await;
+    reach.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        reach,
+        vec![
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+        ],
+    );
+}
+
+/// #3815: a parked evaluation that fails holds its recursive nodes without
+/// installing them, while the nodes it wrote back carry its rows. B adds edge
+/// 1->2 with a cold blob whose chunk fetch then fails. Its recursion must be
+/// reset rather than left as of before B beside B's written-back edges, so
+/// later writes rehydrate it: C's edge 3->4 then derives 1->4.
+#[futures_test::test]
+async fn failed_parked_recursion_is_rehydrated_by_later_writes() {
+    let edge = |id: u64, src: u64, dst: u64| vec![Value::U64(id), Value::U64(src), Value::U64(dst)];
+    // Renamed, so this sink's output is not the recursive node itself.
+    let reach = reach_graph().project_fields([
+        ProjectField::renamed("src", "from"),
+        ProjectField::renamed("dst", "to"),
+    ]);
+    let mut fixture = parked_evaluation_fixture_observed(
+        edges_and_blobs_tables(),
+        |batch| batch.insert("edges", edge(10, 10, 11)),
+        vec![("blobs", GraphBuilder::table("blobs"))],
+        vec![("reach", reach)],
+        |batch, payload| {
+            batch.insert("edges", edge(1, 1, 2));
+            batch.insert("blobs", vec![Value::U64(1), payload]);
+        },
+        |batch| batch.insert("edges", edge(2, 2, 3)),
+    )
+    .await;
+    fixture.resolver_fails.set(true);
+    fixture.settle("blobs").await;
+    fixture.drain_observer("reach");
+
+    let mut later = fixture.database.open_batch();
+    later.insert("edges", edge(3, 3, 4));
+    let later = fixture.database.apply_batch(later).await.unwrap();
+    let persisted = later.persist().await;
+    fixture.database.finish_persistence(persisted).unwrap();
+    fixture.database.flush().await.unwrap();
+    let mut reach = fixture.drain_observer("reach");
+    reach.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        reach,
+        vec![
+            (vec![Value::U64(1), Value::U64(4)], 1),
+            (vec![Value::U64(2), Value::U64(4)], 1),
+            (vec![Value::U64(3), Value::U64(4)], 1),
+        ],
     );
 }
 
@@ -6237,5 +7332,62 @@ async fn direct_store_key_reads_validate_without_encoding_throwaway_records() {
             .get("value")
             .unwrap(),
         Value::U64(42)
+    );
+}
+
+#[futures_test::test]
+async fn derived_append_rejects_a_base_descriptor_that_misdescribes_its_active_root() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks);
+
+    let logical: Vec<u8> = (0..crate::large_values::INLINE_VALUE_MAX_BYTES * 9)
+        .map(|i| (i * 31 % 251) as u8)
+        .collect();
+    let staged = database
+        .prepare_and_stage_large_value(crate::large_values::LargeValueKind::Bytes, &logical)
+        .await
+        .unwrap();
+
+    // The root is active (it holds a staging receipt), but these base
+    // descriptors lie about it. A plain append reuses that root unchanged, so
+    // only the descriptor-to-root edge can catch the lie.
+    let mut longer = staged.value_ref.clone();
+    longer.byte_length += 4096;
+    let mut rehashed = staged.value_ref.clone();
+    rehashed.logical_hash.0[0] ^= 1;
+    for forged in [longer, rehashed] {
+        assert!(
+            database
+                .append_and_stage_large_value(forged, vec![1, 2, 3])
+                .await
+                .is_err(),
+            "a misdescribed base must not earn a staging receipt"
+        );
+    }
+
+    // Control: the honest descriptor still appends and reads back exactly.
+    let appended = database
+        .append_and_stage_large_value(staged.value_ref.clone(), vec![1, 2, 3])
+        .await
+        .unwrap();
+    let mut expected = logical;
+    expected.extend([1, 2, 3]);
+    assert_eq!(
+        database
+            .read_large_value_range(&appended.value_ref, 0..appended.value_ref.byte_length)
+            .await
+            .unwrap(),
+        expected
     );
 }

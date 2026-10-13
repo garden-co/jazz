@@ -1836,7 +1836,7 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
             vec![("title".to_string(), "Edited By Bob".into())],
         )
         .expect_err("Bob cannot update a row absent from his readable local data");
-    assert!(error.to_string().contains("read policy denied"), "{error}");
+    assert!(error.to_string().contains("not loaded locally"), "{error}");
     let rows_after_bob = wait_for_query(
         &admin,
         query,

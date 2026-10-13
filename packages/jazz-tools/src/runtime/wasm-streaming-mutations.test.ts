@@ -159,10 +159,44 @@ async function withWatchdog<T>(promise: Promise<T>, label: string, timeoutMs = 3
 }
 
 describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
+  it("reports a busy write state without blocking the WASM thread", async () => {
+    const { db, pageStore, author } = await createBrowserWasmFixture();
+    const write = db.insert(
+      "todos",
+      encodeCellsForRow(streamingApp.wasmSchema.todos!, {
+        title: { type: "Text", value: "settled" },
+        done: { type: "Boolean", value: false },
+      }),
+    );
+    await withWatchdog(write.wait("local"), "seed write settlement");
+    const gate = pageStore.armCommitGate();
+    const upload = db.beginStreamingMutation(
+      "todos",
+      uuidBytes("00000000-0000-4000-8000-000000000141"),
+      encodeCellsForRow(streamingApp.wasmSchema.todos!, {
+        done: { type: "Boolean", value: false },
+      }),
+      "title",
+      "insert",
+      author,
+    );
+    const push = upload.push(new TextEncoder().encode("pending"));
+    try {
+      await withWatchdog(gate.started, "streaming upload holds the node");
+      expect(() => write.writeState()).toThrow("write state is temporarily busy");
+    } finally {
+      gate.release();
+      await withWatchdog(push, "upload resumes");
+      await upload.abort();
+    }
+    expect(write.writeState()).toMatchObject({ durability: "Local" });
+    write.close();
+  });
+
   it("keeps real WASM reads pending while storage owns the node", async () => {
     const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
     const query = queryFromTable("todos");
-    const opts = { tier: "local", propagation: "local_only" };
+    const opts = { tier: "local-only" };
     const commitGate = pageStore.armCommitGate();
     const upload = db.beginStreamingMutation(
       "todos",
@@ -207,8 +241,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
       cancelSubscription = runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
         undefined,
-        "local",
-        JSON.stringify({ propagation: "local-only" }),
+        "local-only",
       );
       const opening = deferredVoid();
       let openingError: unknown;
@@ -364,7 +397,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
           app.wasmSchema,
         ),
         null,
-        "local",
+        "local-first",
       ),
     ).resolves.toEqual([
       {

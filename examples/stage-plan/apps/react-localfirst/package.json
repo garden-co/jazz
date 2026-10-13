@@ -1,0 +1,34 @@
+{
+  "name": "stage-plan-react-localfirst",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node ../../../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm run test:permissions && pnpm run test:browser",
+    "test:permissions": "vitest run --config vitest.config.ts",
+    "test:browser": "vitest run --config vitest.config.browser.ts"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
+    "jazz-tools": "workspace:*",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

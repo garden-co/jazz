@@ -111,13 +111,13 @@ it("tells Expo Go and old development builds that a native artifact is required"
 
 it("rejects an installed native build with an incompatible ABI before executing a command", async () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => 2,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1 + 1,
     execute: jest.fn(),
   };
   const relay = loadRelay(nativeRelay);
 
   await expect(relay.executeNativeRelayCommand("AA==")).rejects.toThrow(
-    "Jazz native relay ABI 2 is incompatible with JavaScript ABI 1..=1; install a matching native development or release build.",
+    `Jazz native relay ABI ${NATIVE_RELAY_ABI_V1 + 1} is incompatible with JavaScript ABI ${NATIVE_RELAY_ABI_V1}..=${NATIVE_RELAY_ABI_V1}; install a matching native development or release build.`,
   );
   expect(nativeRelay.execute).not.toHaveBeenCalled();
 });
@@ -215,7 +215,7 @@ it("rejects a missing, malformed, or ABI-incompatible bindings-installed JSI for
   for (const factory of [
     undefined,
     {},
-    { abiVersion: 2, openAttached: () => foregroundFixture() },
+    { abiVersion: NATIVE_RELAY_ABI_V1 + 1, openAttached: () => foregroundFixture() },
   ]) {
     const nativeRelay: FixtureNativeRelay = {
       getAbiVersion: () => NATIVE_RELAY_ABI_V1,
@@ -399,6 +399,32 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
   );
 });
 
+it("decodes a core operation error with its stable code beside the unchanged reason", () => {
+  const relay = loadRelay(null);
+  const code = Array.from("not_observed", (char) => char.charCodeAt(0));
+  const reason = Array.from("NotObserved: oops", (char) => char.charCodeAt(0));
+
+  expect(
+    relay.decodeNativeForegroundResponse(
+      Uint8Array.of(25, code.length, ...code, reason.length, ...reason),
+    ),
+  ).toEqual({ type: "operationError", code: "not_observed", reason: "NotObserved: oops" });
+  // An uncoded failure keeps response 8 and has no code.
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(8, 4, 111, 111, 112, 115))).toEqual({
+    type: "operationError",
+    reason: "oops",
+  });
+  for (const malformed of [
+    Uint8Array.of(25),
+    Uint8Array.of(25, 3, 110, 111),
+    Uint8Array.of(25, 1, 110),
+    Uint8Array.of(25, 1, 110, 4, 111, 111, 112),
+    Uint8Array.of(25, 1, 110, 1, 111, 0),
+  ]) {
+    expect(() => relay.decodeNativeForegroundResponse(malformed)).toThrow(/malformed/i);
+  }
+});
+
 it("decodes canonical foreground handles through the JavaScript safe integer limit", () => {
   const relay = loadRelay(null);
   const corpus = [
@@ -446,4 +472,78 @@ it("rejects trailing, nonminimal, truncated, and out-of-range foreground handles
       );
     }
   }
+});
+
+it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly otherwise", () => {
+  const relay = loadRelay(null);
+  // The RN TS lib does not declare TextEncoder; encode UTF-8 by hand.
+  const utf8 = (text: string) =>
+    Uint8Array.from(
+      unescape(encodeURIComponent(text))
+        .split("")
+        .map((char) => char.charCodeAt(0)),
+    );
+  const varint = (value: number) => {
+    const out: number[] = [];
+    do {
+      let byte = value & 0x7f;
+      value >>>= 7;
+      if (value > 0) byte |= 0x80;
+      out.push(byte);
+    } while (value > 0);
+    return out;
+  };
+  const deltaEvent = (json: Uint8Array) => {
+    const tier = utf8("Local");
+    return Uint8Array.from([
+      4, // subscription events
+      1, // one event
+      3, // delta with terminal operations
+      0,
+      1,
+      ...varint(tier.length),
+      ...tier,
+      ...varint(2),
+      9,
+      8,
+      ...varint(json.length),
+      ...json,
+    ]);
+  };
+  const payload = Array.from({ length: 20_000 }, (_, index) => (index * 37) & 0xff);
+  const operations = [
+    {
+      root_key: [1, 2, 3],
+      path: [{ Collection: "comments" }, { Key: [4, 5] }],
+      edit: { Insert: { index: 0, key: [6, 7], value: payload } },
+    },
+  ];
+  // Larger than one fast-path chunk, so chunk boundaries are covered.
+  const ascii = utf8(JSON.stringify(operations));
+  expect(ascii.length).toBeGreaterThan(8192 * 4);
+  const nonAscii = utf8(
+    JSON.stringify([{ ...operations[0], path: [{ Collection: "kommentäre 💬" }] }]),
+  );
+  for (const [json, expected] of [
+    [ascii, operations],
+    [nonAscii, [{ ...operations[0], path: [{ Collection: "kommentäre 💬" }] }]],
+  ] as const) {
+    expect(relay.decodeNativeForegroundResponse(deltaEvent(json))).toEqual({
+      type: "subscriptionEvents",
+      events: [
+        {
+          type: "delta",
+          reset: false,
+          settled: true,
+          tier: "Local",
+          delta: Uint8Array.of(9, 8),
+          terminalOperations: expected,
+        },
+      ],
+    });
+  }
+  const malformed = Uint8Array.from([...utf8('["'), 0xc3, 0x28, 34, 93]);
+  expect(() => relay.decodeNativeForegroundResponse(deltaEvent(malformed))).toThrow(
+    /malformed UTF-8 terminal operations/,
+  );
 });

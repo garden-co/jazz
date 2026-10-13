@@ -414,7 +414,7 @@ fn run_validation_entries(config: &Config) {
     );
 }
 
-fn seed_local_rows(node_: &mut NodeState<RocksDbStorage>, rows: usize) {
+fn seed_local_rows(node_: &mut NodeState, rows: usize) {
     for idx in 0..rows {
         let _ = commit_mergeable_unit_settled(
             node_,
@@ -461,7 +461,7 @@ fn commit_deletion_unit(
     .1
 }
 
-fn core_ingest(core: &mut NodeState<RocksDbStorage>, unit: &SyncMessage) -> SyncMessage {
+fn core_ingest(core: &mut NodeState, unit: &SyncMessage) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
@@ -525,20 +525,13 @@ fn table_schema() -> TableSchema {
     schema().tables()[0].clone()
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let node = open_node_at(temp_dir.path(), node_uuid, schema);
     (temp_dir, node)
 }
 
-fn open_node_at(
-    path: &std::path::Path,
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> NodeState<RocksDbStorage> {
+fn open_node_at(path: &std::path::Path, node_uuid: NodeUuid, schema: JazzSchema) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open_with_durability(path, &refs, Durability::WalNoSync)

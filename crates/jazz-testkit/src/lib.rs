@@ -8,6 +8,10 @@
 pub mod duplex_transport;
 
 #[cfg(feature = "scenarios")]
+mod transport_control;
+#[cfg(feature = "scenarios")]
+pub use transport_control::TransportControl;
+#[cfg(feature = "scenarios")]
 mod permissions;
 #[cfg(feature = "scenarios")]
 mod scenarios;

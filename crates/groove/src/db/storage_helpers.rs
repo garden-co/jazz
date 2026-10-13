@@ -141,6 +141,16 @@ impl DirectRecordStore<'_> {
     }
 
     pub async fn write_many(&self, operations: &[DirectRecordStoreWrite]) -> Result<(), Error> {
+        self.storage
+            .write_many(self.encode_writes(operations)?)
+            .await
+            .map_err(Error::from)
+    }
+
+    pub(super) fn encode_writes(
+        &self,
+        operations: &[DirectRecordStoreWrite],
+    ) -> Result<Vec<OwnedWriteOperation>, Error> {
         let mut encoded = Vec::with_capacity(operations.len());
         for operation in operations {
             match operation {
@@ -159,7 +169,7 @@ impl DirectRecordStore<'_> {
                 }
             }
         }
-        self.storage.write_many(encoded).await.map_err(Error::from)
+        Ok(encoded)
     }
 
     pub(super) fn key_bytes(&self, values: &[Value]) -> Result<Vec<u8>, Error> {
@@ -899,6 +909,10 @@ impl PendingTableWrite {
     }
 }
 
+#[cfg_attr(
+    feature = "cold-settle-attribution",
+    tracing::instrument(skip_all, name = "cold.phase.table_deltas")
+)]
 pub(super) async fn compute_table_deltas<S>(
     pending_writes: &[PendingTableWrite],
     stores: &[RecordStore<'_, S>],

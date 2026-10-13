@@ -4,8 +4,6 @@ description: Build a server-side to-do API with Jazz and Hono, step by step.
 reviewedAt: "b29b48d1a"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
-import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 import SchemaSetup from "../../partials/schema-setup.mdx";
 import ServerAuthConfig from "../../partials/server-auth-config.mdx";
 import QuickstartSchemaTypesSummary from "../../partials/schema-types-summary.mdx";
@@ -78,9 +76,18 @@ export JAZZ_APP_ID=019d0ba1-519a-7e01-b0eb-0059ee898e4d
 
 Create `src/index.ts`. This quickstart puts everything in one file; a real app would split across multiple modules.
 
-<include cwd lang="ts" meta='title="src/index.ts"'>
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-setup-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-setup-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#quickstart-server-setup-effect
+    </include>
+  </Tab>
+</Tabs>
 
 - `appId` identifies the app namespace for storage and sync.
 - `app` is your typed schema export.
@@ -119,17 +126,35 @@ Add each of the following snippets to `src/index.ts`, below the setup code.
 
 Use `db.insert` to create a new row.
 
-<include cwd lang="ts" meta='title="src/index.ts"'>
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-write-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-write-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#quickstart-server-write-effect
+    </include>
+  </Tab>
+</Tabs>
 
 ## Update and delete to-dos
 
 Use `db.update` and `db.delete` to modify existing rows.
 
-<include cwd lang="ts" meta='title="src/index.ts"'>
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-update-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-update-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#quickstart-server-update-effect
+    </include>
+  </Tab>
+</Tabs>
 
 Full mutation API: [Writing Data](/docs/writing/writing-data).
 
@@ -137,9 +162,18 @@ Full mutation API: [Writing Data](/docs/writing/writing-data).
 
 Use `db.all` to query rows. The query builder supports filtering, sorting, and pagination.
 
-<include cwd lang="ts" meta='title="src/index.ts"'>
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-read-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-read-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#quickstart-server-read-effect
+    </include>
+  </Tab>
+</Tabs>
 
 Full query API: [Reading Data](/docs/reading/queries).
 
@@ -147,9 +181,18 @@ Full query API: [Reading Data](/docs/reading/queries).
 
 Start the server at the bottom of `src/index.ts`:
 
-<include cwd lang="ts" meta='title="src/index.ts"'>
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-listen-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-listen-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#quickstart-server-listen-effect
+    </include>
+  </Tab>
+</Tabs>
 
 ```bash title="Terminal"
 npx tsx src/index.ts

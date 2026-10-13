@@ -371,7 +371,6 @@ export function TierSyncDiagram() {
 
   return (
     <Graph
-      eyebrow="Live sync"
       description={
         <>
           Click{" "}

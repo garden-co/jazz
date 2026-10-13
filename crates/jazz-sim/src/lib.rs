@@ -14,8 +14,7 @@ use jazz::protocol::{RegisterShapeOptions, ShapeAst};
 use jazz::query::{QUERY_NAMESPACE, Query, ShapeId};
 use jazz::schema::JazzSchema;
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, decode_frame,
-    decode_sync_message, encode_frame, encode_sync_message,
+    WIRE_PROTOCOL_VERSION, WireFrame, decode_frame, decode_sync_message, encode_sync_message,
 };
 use serde_json::{Map, Value, json};
 use std::cmp::Ordering;
@@ -901,58 +900,75 @@ pub fn loopback_transport_message(
             let encode_start = Instant::now();
             let encoded_payload =
                 encode_sync_message(&message).expect("simulator sync-message encode");
-            let encoded_frame = match codec {
-                SimulatorTransportCodec::WireFrames => {
-                    let envelope = WireEnvelope::new(
-                        WIRE_PROTOCOL_VERSION,
-                        FEATURE_SYNC_MESSAGE_PAYLOAD,
-                        encoded_payload.clone(),
-                    );
-                    Some(
-                        encode_frame(&WireFrame::Message(envelope))
-                            .expect("simulator frame encode"),
+            let encoded_len = encoded_payload.len();
+            let mut encode_time = encode_start.elapsed();
+            let mut decode_time = std::time::Duration::ZERO;
+            let payload = if codec == SimulatorTransportCodec::WireFrames {
+                let context = jazz::wire::WireInboundContext::new(WIRE_PROTOCOL_VERSION, 0, None);
+                let mut sender =
+                    jazz::wire::stream_backend::OrderedChannelBackend::new(context.clone())
+                        .unwrap();
+                let mut receiver =
+                    jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
+                sender
+                    .enqueue(
+                        1,
+                        0,
+                        jazz::wire::channels::ChannelClass::Writes,
+                        encoded_payload,
                     )
-                }
-                SimulatorTransportCodec::Native | SimulatorTransportCodec::WireBytes => None,
-            };
-            let encode_us = encode_start
-                .elapsed()
-                .as_micros()
-                .try_into()
-                .unwrap_or(u64::MAX);
-            metrics.incr("transport_codec_encode_count", 1);
-            metrics.incr("transport_codec_encode_total_us", encode_us);
-            metrics.incr(
-                "transport_codec_encoded_bytes",
-                encoded_payload.len() as u64,
-            );
-            if let Some(frame) = &encoded_frame {
-                metrics.incr("transport_codec_encoded_frame_bytes", frame.len() as u64);
-            }
-            metrics.record_latency("transport_codec_encode", encode_us);
-
-            let decode_start = Instant::now();
-            let payload = match encoded_frame {
-                Some(frame_bytes) => {
-                    match decode_frame(&frame_bytes).expect("simulator frame decode") {
-                        WireFrame::Message(envelope) => envelope.payload,
-                        WireFrame::Hello(_)
-                        | WireFrame::Error(_)
-                        | WireFrame::MessageFragment(_)
-                        | WireFrame::Channel(_)
-                        | WireFrame::ChannelCredit(_) => {
-                            panic!("simulator frame decode returned non-message frame")
-                        }
+                    .unwrap();
+                let mut payload = None;
+                let mut frame_bytes = 0;
+                while sender.has_pending() {
+                    let start = Instant::now();
+                    let frame = sender
+                        .peek_outbound()
+                        .unwrap()
+                        .expect("loopback returns credits every frame");
+                    sender.accept_outbound().unwrap();
+                    encode_time += start.elapsed();
+                    frame_bytes += frame.len() as u64;
+                    let start = Instant::now();
+                    let WireFrame::Channel(envelope) =
+                        decode_frame(&frame).expect("simulator frame decode")
+                    else {
+                        panic!("simulator expected channel frame");
+                    };
+                    if let Some(received) = receiver.receive(envelope, frame.len()).unwrap() {
+                        assert!(payload.is_none());
+                        payload = Some(received.payload);
+                    }
+                    decode_time += start.elapsed();
+                    let credits = receiver.channel_credits();
+                    let mut credits = credits.lock().unwrap();
+                    while let Some(grant) = credits.peek_grant().unwrap() {
+                        let WireFrame::ChannelCredit(grant) = decode_frame(&grant).unwrap() else {
+                            unreachable!()
+                        };
+                        sender
+                            .channel_credits()
+                            .lock()
+                            .unwrap()
+                            .receive_credit(grant)
+                            .unwrap();
+                        credits.accept_grant().unwrap();
                     }
                 }
-                None => encoded_payload,
+                metrics.incr("transport_codec_encoded_frame_bytes", frame_bytes);
+                payload.expect("simulator received complete message")
+            } else {
+                encoded_payload
             };
+            let start = Instant::now();
             let decoded = decode_sync_message(&payload).expect("simulator sync-message decode");
-            let decode_us = decode_start
-                .elapsed()
-                .as_micros()
-                .try_into()
-                .unwrap_or(u64::MAX);
+            decode_time += start.elapsed();
+            let encode_us = encode_time.as_micros().try_into().unwrap_or(u64::MAX);
+            let decode_us = decode_time.as_micros().try_into().unwrap_or(u64::MAX);
+            metrics.incr("transport_codec_encode_count", 1);
+            metrics.incr("transport_codec_encode_total_us", encode_us);
+            metrics.incr("transport_codec_encoded_bytes", encoded_len as u64);
+            metrics.record_latency("transport_codec_encode", encode_us);
             metrics.incr("transport_codec_decode_count", 1);
             metrics.incr("transport_codec_decode_total_us", decode_us);
             metrics.record_latency("transport_codec_decode", decode_us);
@@ -1077,14 +1093,44 @@ impl Lcg {
     }
 }
 
-fn git_output<const N: usize>(args: [&str; N]) -> String {
+fn git_output<const N: usize>(args: [&str; N]) -> Option<String> {
     Command::new("git")
         .args(args)
         .output()
         .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .unwrap_or_default()
+        .and_then(git_output_from_output)
+}
+
+fn git_output_from_output(output: std::process::Output) -> Option<String> {
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
+fn git_status() -> (bool, bool) {
+    match git_output(["status", "--porcelain"]) {
+        Some(status) => {
+            let dirty = if retain_result_dirty_ignored() {
+                status.lines().any(|line| {
+                    let path = line.get(3..).unwrap_or_default();
+                    !(path.starts_with("benchmarks/results/")
+                        || path.starts_with("\"benchmarks/results/"))
+                })
+            } else {
+                !status.is_empty()
+            };
+            (true, dirty)
+        }
+        None => (false, true),
+    }
+}
+
+#[cfg(test)]
+fn git_dirty() -> bool {
+    git_status().1
 }
 
 fn hostname() -> String {
@@ -1105,6 +1151,7 @@ fn hostname() -> String {
 struct ProcessMetadata {
     git_sha: String,
     git_dirty: bool,
+    git_status_available: bool,
     hostname: String,
     knobs: BTreeMap<String, String>,
 }
@@ -1112,22 +1159,15 @@ struct ProcessMetadata {
 static PROCESS_METADATA: OnceLock<ProcessMetadata> = OnceLock::new();
 
 fn process_metadata() -> &'static ProcessMetadata {
-    PROCESS_METADATA.get_or_init(|| ProcessMetadata {
-        git_sha: git_output(["rev-parse", "HEAD"]),
-        git_dirty: git_dirty(),
-        hostname: hostname(),
-        knobs: knob_env(),
-    })
-}
-
-fn git_dirty() -> bool {
-    let status = git_output(["status", "--porcelain"]);
-    if !retain_result_dirty_ignored() {
-        return !status.is_empty();
-    }
-    status.lines().any(|line| {
-        let path = line.get(3..).unwrap_or_default();
-        !(path.starts_with("benchmarks/results/") || path.starts_with("\"benchmarks/results/"))
+    PROCESS_METADATA.get_or_init(|| {
+        let (git_status_available, git_dirty) = git_status();
+        ProcessMetadata {
+            git_sha: git_output(["rev-parse", "HEAD"]).unwrap_or_default(),
+            git_dirty,
+            git_status_available,
+            hostname: hostname(),
+            knobs: knob_env(),
+        }
     })
 }
 
@@ -1142,6 +1182,10 @@ fn insert_process_metadata(fields: &mut Map<String, Value>) {
     let metadata = process_metadata();
     fields.insert("git_sha".to_owned(), json!(metadata.git_sha));
     fields.insert("git_dirty".to_owned(), json!(metadata.git_dirty));
+    fields.insert(
+        "git_status_available".to_owned(),
+        json!(metadata.git_status_available),
+    );
     fields.insert("hostname".to_owned(), json!(metadata.hostname));
     fields.insert("knobs".to_owned(), json!(metadata.knobs));
 }
@@ -1357,6 +1401,29 @@ mod tests {
         assert!(driver.metrics.counters["transport_codec_encoded_bytes"] > 0);
     }
 
+    /// Alice's simulated channel transfer returns credits while Bob consumes
+    /// extents, so a message larger than the physical window still completes.
+    /// This codec-level test is needed because the simulator owns its loopback.
+    #[test]
+    fn wire_frame_transport_codec_returns_credits_for_large_messages() {
+        let message = SyncMessage::SessionClaims {
+            identity: jazz::ids::AuthorSubject::for_test_bytes([0x42; 16]),
+            claims: BTreeMap::from([(
+                "data".to_owned(),
+                jazz::groove::records::Value::Bytes(vec![0x42; 5 * 1024 * 1024]),
+            )]),
+        };
+        let mut metrics = Metrics::default();
+        assert_eq!(
+            loopback_transport_message(
+                SimulatorTransportCodec::WireFrames,
+                message.clone(),
+                &mut metrics
+            ),
+            message
+        );
+    }
+
     #[test]
     fn deterministic_wire_frame_transport_codec_loopbacks_message() {
         let mut driver = DeterministicDriver::new(two_node_topology(), 42)
@@ -1567,6 +1634,139 @@ mod tests {
         }
 
         assert_eq!(run(), run());
+    }
+    #[test]
+    fn git_output_conversion_rejects_failed_exit_and_invalid_utf8() {
+        let failed = Command::new("git")
+            .arg("--definitely-not-a-git-option")
+            .output()
+            .unwrap();
+        assert!(!failed.status.success());
+        assert_eq!(git_output_from_output(failed), None);
+
+        let mut invalid_utf8 = Command::new("git").arg("--version").output().unwrap();
+        assert!(invalid_utf8.status.success());
+        invalid_utf8.stdout = vec![0xff];
+        assert_eq!(git_output_from_output(invalid_utf8), None);
+    }
+
+    #[test]
+    fn git_status_failure_is_reported_dirty() {
+        const CHILD: &str = "JAZZ_SIM_GIT_STATUS_FAILURE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(git_dirty(), "failed `git status` must be reported dirty");
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "jazz-sim-git-status-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp_dir).unwrap();
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        assert!(
+            !status.status.success(),
+            "temporary non-repository must make `git status` fail",
+        );
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::git_status_failure_is_reported_dirty"])
+            .env(CHILD, "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+        assert!(
+            result.status.success(),
+            "child test should observe failed git status as dirty:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+            "expected child harness to run this regression:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+        );
+    }
+
+    #[test]
+    fn successful_empty_git_status_is_available_without_a_commit() {
+        const CHILD: &str = "JAZZ_SIM_EMPTY_STATUS_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let fields = metadata_fields("test", "test", 0, "s");
+            assert_eq!(fields["git_dirty"], false);
+            assert_eq!(fields["git_status_available"], true);
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "jazz-sim-empty-git-status-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp_dir).unwrap();
+        let initialized = Command::new("git")
+            .args(["init", "--quiet"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .status()
+            .unwrap();
+        assert!(
+            initialized.success(),
+            "temporary repository should initialize"
+        );
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty());
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::successful_empty_git_status_is_available_without_a_commit",
+            ])
+            .env(CHILD, "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+
+        assert!(
+            result.status.success(),
+            "child test should distinguish successful empty status from missing HEAD:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
     }
 }
 

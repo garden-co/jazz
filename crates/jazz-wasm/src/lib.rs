@@ -19,12 +19,11 @@ use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
 use jazz::db::{
-    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, EmptyOpening, Error, ErrorCode,
-    InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MutationErrorCallback, PeerConnection,
-    PermissionAdvice, Propagation, ReadOpts, RemoteLinkHint, RowCells, SeededRowIdSource,
-    SerializedReadResult, SerializedSubscriptionAuthorization, StreamingMutationKind,
-    StreamingValueUpload, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
-    WriteHandle,
+    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error, ErrorCode, FirstLoad,
+    InitialSyncFlushCadence, LargeValueUpdate, MutationErrorCallback, PeerConnection,
+    PermissionAdvice, ReadOpts, RemoteLinkHint, RowCells, SeededRowIdSource, SerializedReadResult,
+    SerializedSubscriptionAuthorization, StreamingMutationKind, StreamingValueUpload,
+    SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::Value;
 #[cfg(target_arch = "wasm32")]
@@ -52,6 +51,12 @@ pub mod bench_probes;
 #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
 #[global_allocator]
 static TALC: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocator();
+
+/// Validate a schema and its embedded permissions without opening a database.
+#[wasm_bindgen(js_name = validateSchema)]
+pub fn validate_schema(schema: Vec<u8>) -> Result<(), JsValue> {
+    decode_public_schema(&schema).map(|_| ())
+}
 
 /// Initialize the WASM module.
 ///
@@ -121,6 +126,67 @@ pub fn subscribe_trace_entries(callback: js_sys::Function) -> js_sys::Function {
     wasm_tracing::subscribe_trace_entries(callback)
 }
 
+/// Install the JSON Schema validator for JSON columns.
+///
+/// The browser build leaves the Rust validator out to keep the binary small.
+/// `compile` takes a declared schema as JSON text and returns a check that
+/// takes a value as JSON text and returns why it does not match, or
+/// `undefined`. `compile` throws when the schema itself is invalid; a check
+/// that throws is reported as the validator failing, not as a mismatch.
+/// Until this is called, JSON column schemas are reported as unavailable.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[wasm_bindgen(js_name = setJsonSchemaValidator)]
+pub fn set_json_schema_validator(compile: js_sys::Function) {
+    jazz::model::json_schema::install_host_validator(Box::new(JsJsonSchemaValidator { compile }));
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+struct JsJsonSchemaValidator {
+    compile: js_sys::Function,
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+struct JsCompiledJsonSchema {
+    check: js_sys::Function,
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl jazz::model::json_schema::HostJsonSchemaValidator for JsJsonSchemaValidator {
+    fn compile(
+        &self,
+        schema_json: &str,
+    ) -> Result<Box<dyn jazz::model::json_schema::HostCompiledJsonSchema>, String> {
+        let check = self
+            .compile
+            .call1(&JsValue::NULL, &JsValue::from_str(schema_json))
+            .map_err(|error| js_error_message(&error))?;
+        let check = check
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| "the JSON Schema validator did not return a function".to_owned())?;
+        Ok(Box::new(JsCompiledJsonSchema { check }))
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl jazz::model::json_schema::HostCompiledJsonSchema for JsCompiledJsonSchema {
+    fn validate(&self, instance_json: &str) -> Result<Option<String>, String> {
+        let outcome = self
+            .check
+            .call1(&JsValue::NULL, &JsValue::from_str(instance_json))
+            .map_err(|error| js_error_message(&error))?;
+        Ok(outcome.as_string())
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn js_error_message(error: &JsValue) -> String {
+    error
+        .dyn_ref::<js_sys::Error>()
+        .map(|error| String::from(error.message()))
+        .or_else(|| error.as_string())
+        .unwrap_or_else(|| format!("{error:?}"))
+}
+
 /// Exact build/ABI fingerprint for this generated WASM artifact.
 #[wasm_bindgen(js_name = nativeArtifactFingerprint)]
 pub fn native_artifact_fingerprint() -> String {
@@ -137,23 +203,27 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
-/// Test-only direct execution of one frozen complete v1 frame through the
+/// Test-only execution of a frozen v5 frame batch through the
 /// generated WASM artifact. This reaches the production Rust frame, feature,
 /// compression, and semantic-payload decoders; it is not a browser transport
 /// API.
-#[wasm_bindgen(js_name = __testValidateWireFrameCorpus)]
-pub fn test_validate_wire_frame_corpus(
+#[wasm_bindgen(js_name = __testValidateWireFrameBatchCorpus)]
+pub fn test_validate_wire_frame_batch_corpus(
     frame: Vec<u8>,
     negotiated_features: String,
 ) -> Result<(), JsValue> {
     let negotiated_features = negotiated_features
         .parse()
         .map_err(|_| JsValue::from_str("test wire corpus features must be a u64 decimal"))?;
-    jazz::wire::validate_frame_for_artifact_corpus(&frame, negotiated_features)
+    jazz::wire::decode_websocket_frame_batch(&frame)
+        .map_err(|error| error.to_string())
+        .and_then(|frames| {
+            jazz::wire::validate_frames_for_artifact_corpus(&frames, negotiated_features)
+        })
         .map_err(|error| error.into())
 }
 
-/// Test-only feature inventory paired with [`test_validate_wire_frame_corpus`].
+/// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
 #[wasm_bindgen(js_name = __testWireFrameCorpusFeatures)]
 pub fn test_wire_frame_corpus_features() -> String {
     jazz::wire::current_wire_features().to_string()
@@ -602,14 +672,29 @@ impl WasmStreamingMutation {
 
 enum WasmWriteInner {
     MemoryTx {
-        db: Rc<Db<MemoryStorage>>,
-        write: WriteHandle<MemoryStorage>,
+        db: Rc<Db>,
+        write: WriteHandle,
     },
     #[cfg(target_arch = "wasm32")]
     BrowserTx {
-        db: Rc<Db<BrowserStorage>>,
-        write: WriteHandle<BrowserStorage>,
+        db: Rc<Db>,
+        write: WriteHandle,
     },
+}
+
+fn poll_write_state_once(
+    future: impl Future<Output = Result<jazz::db::WriteState, jazz::db::Error>>,
+) -> Result<JsValue, JsValue> {
+    let mut future = std::pin::pin!(future);
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(result) => write_state_to_js(result.map_err(to_js_error)?),
+        Poll::Pending => Err(JsValue::from_str(
+            "write state is temporarily busy; retry after the next WASM turn",
+        )),
+    }
 }
 
 #[wasm_bindgen]
@@ -633,11 +718,11 @@ impl WasmWrite {
     pub fn write_state(&self) -> Result<JsValue, JsValue> {
         match &self.inner {
             Some(WasmWriteInner::MemoryTx { write, .. }) => {
-                write_state_to_js(block_on(write.write_state()).map_err(to_js_error)?)
+                poll_write_state_once(write.write_state())
             }
             #[cfg(target_arch = "wasm32")]
             Some(WasmWriteInner::BrowserTx { write, .. }) => {
-                write_state_to_js(block_on(write.write_state()).map_err(to_js_error)?)
+                poll_write_state_once(write.write_state())
             }
             None => Err(JsValue::from_str("write state is unavailable")),
         }
@@ -687,9 +772,9 @@ pub struct WasmDb {
 }
 
 enum WasmDbInner {
-    Memory(Rc<Db<MemoryStorage>>),
+    Memory(Rc<Db>),
     #[cfg(target_arch = "wasm32")]
-    Browser(Rc<Db<BrowserStorage>>),
+    Browser(Rc<Db>),
     Closed,
 }
 
@@ -734,13 +819,13 @@ pub struct WasmTransport {
 
 enum WasmTransportInner {
     Memory {
-        db: Rc<Db<MemoryStorage>>,
-        connection: Option<Rc<LocalMutex<PeerConnection<MemoryStorage>>>>,
+        db: Rc<Db>,
+        connection: Option<Rc<LocalMutex<PeerConnection>>>,
     },
     #[cfg(target_arch = "wasm32")]
     Browser {
-        db: Rc<Db<BrowserStorage>>,
-        connection: Option<Rc<LocalMutex<PeerConnection<BrowserStorage>>>>,
+        db: Rc<Db>,
+        connection: Option<Rc<LocalMutex<PeerConnection>>>,
     },
 }
 
@@ -959,16 +1044,16 @@ impl WasmDbInner {
         })
     }
 
-    fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, String> {
+    fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, JsValue> {
         match self {
             Self::Memory(db) => Ok(Self::Memory(Rc::new(
-                block_on(db.register_schema_view(schema)).map_err(|error| error.to_string())?,
+                block_on(db.register_schema_view(schema)).map_err(to_js_error)?,
             ))),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => Ok(Self::Browser(Rc::new(
-                block_on(db.register_schema_view(schema)).map_err(|error| error.to_string())?,
+                block_on(db.register_schema_view(schema)).map_err(to_js_error)?,
             ))),
-            Self::Closed => Err("WasmDb is closed".to_owned()),
+            Self::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
 
@@ -987,7 +1072,16 @@ impl WasmDbInner {
             ($db:expr) => {{
                 let owner = Rc::clone($db);
                 let release_db = Rc::clone($db);
+                // The coverage budget runs from the first wait on the server.
+                // A Global read that first waits for its own preceding writes
+                // to go out has not asked yet (#3839).
+                let coverage_budget_ms = if coverage_deadline_ms.is_finite() {
+                    coverage_deadline_ms - js_sys::Date::now()
+                } else {
+                    coverage_deadline_ms
+                };
                 let future = async move {
+                    let coverage_started = std::cell::Cell::new(None::<f64>);
                     owner
                         .all_serialized_query(
                             &query,
@@ -996,7 +1090,14 @@ impl WasmDbInner {
                             request_scope,
                             author,
                             require_coverage,
-                            || js_sys::Date::now() >= coverage_deadline_ms,
+                            || {
+                                let started = coverage_started.get().unwrap_or_else(|| {
+                                    let now = js_sys::Date::now();
+                                    coverage_started.set(Some(now));
+                                    now
+                                });
+                                js_sys::Date::now() - started >= coverage_budget_ms
+                            },
                             move |attachment| release_db.detach_query(attachment),
                         )
                         .await
@@ -1307,6 +1408,60 @@ impl WasmDb {
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => db
                 .enqueue_transaction_update(open_transaction_id, table, row_id, patch, options)
+                .map_err(to_js_error)?,
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
+    /// Typed partial-value updates staged inside an open transaction. The
+    /// transaction's bound identity authors them.
+    #[wasm_bindgen(js_name = updateLargeValuesInTransaction)]
+    pub fn update_large_values_in_transaction(
+        &self,
+        open_transaction_id: String,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        mutations: JsValue,
+        updated_at_ms: Option<f64>,
+    ) -> Result<(), JsValue> {
+        let open_transaction_id = open_transaction_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let patch = decode_cells(&patch)?;
+        let mutations: Vec<LargeValueUpdate> =
+            serde_wasm_bindgen::from_value(mutations).map_err(|error| {
+                JsValue::from_str(&format!("invalid partial-value update descriptor: {error}"))
+            })?;
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_js_u64(value, "updatedAtMs"))
+            .transpose()?;
+        let inner = self.open_inner()?;
+        match &inner {
+            WasmDbInner::Memory(db) => {
+                db.enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
+                .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db
+                .enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
                 .map_err(to_js_error)?,
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         }
@@ -1699,9 +1854,7 @@ impl WasmDb {
         let schema = decode_public_schema(&schema)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(
-                self.open_inner()?
-                    .register_schema_view(schema)
-                    .map_err(to_js_error)?,
+                self.open_inner()?.register_schema_view(schema)?,
             ))),
             owns_runtime: false,
             non_durable_client: Rc::clone(&self.non_durable_client),
@@ -1826,9 +1979,7 @@ impl WasmDb {
                     .map_err(to_js_error)?;
             }
             let requires_coverage = tier_is_explicit
-                && (non_durable_client
-                    || (opts.tier >= DurabilityTier::Global
-                        && opts.propagation == Propagation::Full));
+                && (non_durable_client || (opts.tier == jazz::db::ReadTier::Remote));
             let result = inner
                 .all_serialized_query(
                     query,
@@ -2254,7 +2405,7 @@ impl WasmDb {
     /// Report what the host knows about the path to the authoritative server
     /// (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
     /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
-    /// Drives only `local-first-unless-empty` reads. The core timestamps each
+    /// Drives only local-first reads that wait for the server on first load. The core timestamps each
     /// `"attempting"` report as the start of a new attempt; until this is
     /// first called, reachability is derived from this runtime's own upstream.
     #[wasm_bindgen(js_name = setRemoteLinkHint)]
@@ -2272,15 +2423,23 @@ impl WasmDb {
 
     /// Internal foreground-lease handoff boundary. Values cross the JS ABI as
     /// BigInt, never lossy IEEE-754 numbers.
+    ///
+    /// The high-water is read under the node lock. Another native future can
+    /// hold that lock while it waits for a host callback (IndexedDB, timers), and
+    /// on wasm only the JS event loop can complete that callback. Blocking here
+    /// would spin forever, so this resolves as a Promise on the event loop.
     #[wasm_bindgen(js_name = foregroundTxTimeHighWater)]
-    pub fn foreground_tx_time_high_water(&self) -> Result<u64, JsValue> {
+    pub fn foreground_tx_time_high_water(&self) -> Result<js_sys::Promise, JsValue> {
         let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => Ok(block_on(db.foreground_tx_time_high_water()).0),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => Ok(block_on(db.foreground_tx_time_high_water()).0),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
+        Ok(future_to_promise(async move {
+            let high_water = match &inner {
+                WasmDbInner::Memory(db) => db.foreground_tx_time_high_water().await,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db.foreground_tx_time_high_water().await,
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            };
+            Ok(JsValue::from(high_water.0))
+        }))
     }
 
     /// Internal foreground-lease bootstrap boundary. The worker-owned lease
@@ -2311,9 +2470,7 @@ impl WasmDb {
                 queues: queues.clone(),
             },
             jazz::wire::WIRE_PROTOCOL_VERSION,
-            jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+            jazz::wire::current_wire_features() & !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
             None,
         ));
         let db_inner = self.open_inner()?;
@@ -2483,9 +2640,7 @@ impl WasmDb {
         let features = if context.is_some() {
             jazz::wire::current_wire_features()
         } else {
-            jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
+            jazz::wire::current_wire_features() & !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
         };
         let transport = Box::new(WireTransportAdapter::new_with_session_context(
             WasmWireTransport {
@@ -2917,7 +3072,7 @@ async fn open_db<S>(
     schema: JazzSchema,
     storage: S,
     config: WasmOpenDbConfig,
-) -> Result<Db<S>, jazz::db::Error>
+) -> Result<Db, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -2947,7 +3102,7 @@ async fn open_scope_isolated_relay_db(
     storage: BrowserStorage,
     config: WasmOpenDbConfig,
     storage_owner: String,
-) -> Result<Db<BrowserStorage>, jazz::db::Error> {
+) -> Result<Db, jazz::db::Error> {
     let mut db_config = DbConfig::new(schema, storage, config.identity.into());
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
@@ -2973,7 +3128,7 @@ async fn open_backend_db<S>(
     storage: S,
     config: WasmOpenDbConfig,
     identity: DbIdentity,
-) -> Result<Db<S>, jazz::db::Error>
+) -> Result<Db, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -3179,10 +3334,7 @@ fn claim_value_from_json(value: serde_json::Value) -> Result<Option<Value>, JsVa
     .map_err(to_js_error)
 }
 
-fn wasm_write_memory(
-    db: Rc<Db<MemoryStorage>>,
-    write: WriteHandle<MemoryStorage>,
-) -> Result<WasmWrite, JsValue> {
+fn wasm_write_memory(db: Rc<Db>, write: WriteHandle) -> Result<WasmWrite, JsValue> {
     let tx_id = write.mergeable_tx_id();
     let result = WasmWriteResult {
         row_id: write.row_uuid(),
@@ -3197,10 +3349,7 @@ fn wasm_write_memory(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn wasm_write_browser(
-    db: Rc<Db<BrowserStorage>>,
-    write: WriteHandle<BrowserStorage>,
-) -> Result<WasmWrite, JsValue> {
+fn wasm_write_browser(db: Rc<Db>, write: WriteHandle) -> Result<WasmWrite, JsValue> {
     let tx_id = write.mergeable_tx_id();
     let result = WasmWriteResult {
         row_id: write.row_uuid(),
@@ -3228,26 +3377,37 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
         }
     }
     if let Some(tier) = optional_string_prop(&value, "tier")? {
-        (opts.tier, opts.empty_opening) = read_tier_from_str(&tier)?;
-    }
-    if let Some(local_updates) = optional_string_prop(&value, "local_updates")? {
-        opts.local_updates = match local_updates.as_str() {
-            "Immediate" | "immediate" => LocalUpdates::Immediate,
-            "Deferred" | "deferred" => LocalUpdates::Deferred,
-            other => return Err(JsValue::from_str(&format!("unknown local_updates {other}"))),
-        };
-    }
-    if let Some(propagation) = optional_string_prop(&value, "propagation")? {
-        opts.propagation = match propagation.as_str() {
-            "Full" | "full" => Propagation::Full,
-            "LocalOnly" | "local_only" | "localOnly" => Propagation::LocalOnly,
-            other => return Err(JsValue::from_str(&format!("unknown propagation {other}"))),
-        };
+        opts.tier = read_tier_from_str(&tier)?;
     }
     if let Some(include_deleted) = optional_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
     }
+    if let Some(timeout_ms) = optional_wait_ms_prop(&value, "first_load_remote_wait_ms")? {
+        opts.first_load = local_first_server_wait(&opts, timeout_ms);
+    }
     Ok(opts)
+}
+
+/// A local-first read's server-wait timeout. `Remote` reads ignore it.
+fn local_first_server_wait(opts: &ReadOpts, timeout_ms: u64) -> FirstLoad {
+    if opts.tier == jazz::db::ReadTier::LocalFirst {
+        FirstLoad::WaitForRemote { timeout_ms }
+    } else {
+        opts.first_load
+    }
+}
+
+fn optional_wait_ms_prop(value: &JsValue, name: &str) -> Result<Option<u64>, JsValue> {
+    let prop = js_sys::Reflect::get(value, &JsValue::from_str(name))?;
+    if prop.is_undefined() || prop.is_null() {
+        return Ok(None);
+    }
+    match prop.as_f64() {
+        Some(ms) if ms.is_finite() && ms >= 0.0 => Ok(Some(ms.floor() as u64)),
+        _ => Err(JsValue::from_str(&format!(
+            "{name} must be a non-negative number of milliseconds"
+        ))),
+    }
 }
 
 fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
@@ -3263,26 +3423,13 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
 
 /// Read-only binding lowering. Write waits keep `durability_tier_from_str`, so
 /// a product read choice can never change write-settlement semantics.
-fn read_tier_from_str(tier: &str) -> Result<(DurabilityTier, EmptyOpening), JsValue> {
-    if let Some(message) = removed_read_tier(tier) {
-        return Err(JsValue::from_str(message));
-    }
+fn read_tier_from_str(tier: &str) -> Result<jazz::db::ReadTier, JsValue> {
     match tier {
-        "local-first" | "LocalFirst" => Ok((DurabilityTier::Local, EmptyOpening::Deliver)),
-        // The core owns the local-first-unless-empty gate.
-        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
-            Ok((DurabilityTier::Local, EmptyOpening::AwaitRemote))
-        }
-        "remote" | "Remote" => Ok((DurabilityTier::Global, EmptyOpening::Deliver)),
-        _ => durability_tier_from_str(tier).map(|tier| (tier, EmptyOpening::Deliver)),
+        "local-first" | "LocalFirst" => Ok(jazz::db::ReadTier::LocalFirst),
+        "remote" | "Remote" => Ok(jazz::db::ReadTier::Remote),
+        "local-only" | "LocalOnly" => Ok(jazz::db::ReadTier::LocalOnly),
+        other => Err(JsValue::from_str(&format!("unknown read tier {other}"))),
     }
-}
-
-/// Error message for a read tier name that was removed, if `tier` is one.
-fn removed_read_tier(tier: &str) -> Option<&'static str> {
-    matches!(tier, "remote-if-possible" | "RemoteIfPossible").then_some(
-        "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
-    )
 }
 
 fn write_state_to_js(state: jazz::db::WriteState) -> Result<JsValue, JsValue> {
@@ -3545,12 +3692,7 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             set_prop(
                 &object,
                 "terminalOperations",
-                jazz::binding_codec::terminal_operations_to_json(&terminal_operations)
-                    .map_err(to_js_error)?
-                    .serialize(
-                        &serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true),
-                    )
-                    .map_err(to_js_error)?,
+                terminal_operations_to_js(&terminal_operations)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
@@ -3605,6 +3747,71 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
         }
     };
     Ok(object.into())
+}
+
+/// Build terminal operations in the JavaScript object shape, with every key and
+/// payload as one `Uint8Array` rather than a JSON number per byte (#3369). The
+/// producer-only root descriptor is omitted, as on every binding.
+fn terminal_operations_to_js(
+    operations: &[jazz::groove::ivm::TerminalOperation],
+) -> Result<JsValue, JsValue> {
+    use jazz::groove::ivm::{TerminalEdit, TerminalPathSegment};
+
+    fn bytes(value: &[u8]) -> JsValue {
+        js_sys::Uint8Array::from(value).into()
+    }
+    fn object(fields: &[(&str, JsValue)]) -> Result<JsValue, JsValue> {
+        let object = js_sys::Object::new();
+        for (name, value) in fields {
+            set_prop(&object, name, value.clone())?;
+        }
+        Ok(object.into())
+    }
+
+    let encoded = js_sys::Array::new_with_length(operations.len() as u32);
+    for (index, operation) in operations.iter().enumerate() {
+        let path = js_sys::Array::new_with_length(operation.path.len() as u32);
+        for (segment_index, segment) in operation.path.iter().enumerate() {
+            let segment = match segment {
+                TerminalPathSegment::Collection(collection) => {
+                    object(&[("Collection", JsValue::from_str(collection))])?
+                }
+                TerminalPathSegment::Key(key) => object(&[("Key", bytes(key))])?,
+            };
+            path.set(segment_index as u32, segment);
+        }
+        let edit = match &operation.edit {
+            TerminalEdit::Insert { index, key, value } => object(&[(
+                "Insert",
+                object(&[
+                    ("index", JsValue::from_f64(*index as f64)),
+                    ("key", bytes(key)),
+                    ("value", bytes(value)),
+                ])?,
+            )])?,
+            TerminalEdit::Update { key, value } => object(&[(
+                "Update",
+                object(&[("key", bytes(key)), ("value", bytes(value))])?,
+            )])?,
+            TerminalEdit::Remove { key } => object(&[("Remove", object(&[("key", bytes(key))])?)])?,
+            TerminalEdit::Move { key, index } => object(&[(
+                "Move",
+                object(&[
+                    ("key", bytes(key)),
+                    ("index", JsValue::from_f64(*index as f64)),
+                ])?,
+            )])?,
+        };
+        encoded.set(
+            index as u32,
+            object(&[
+                ("root_key", bytes(&operation.root_key)),
+                ("path", path.into()),
+                ("edit", edit),
+            ])?,
+        );
+    }
+    Ok(encoded.into())
 }
 
 fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsValue> {
@@ -3710,8 +3917,28 @@ fn call_controller_method(
     Ok(())
 }
 
-fn to_js_error(error: impl std::fmt::Display) -> JsValue {
-    JsValue::from_str(&error.to_string())
+/// Convert a Rust error into the value a binding rejects or throws with.
+///
+/// A core [`Error`] becomes a real JavaScript `Error` whose `message` is the
+/// unchanged `Display` text and whose `code` is the stable
+/// [`ErrorCode::as_str`] string, so callers classify it without matching the
+/// message. Every other error keeps its historical bare-string form.
+fn to_js_error(error: impl std::fmt::Display + 'static) -> JsValue {
+    match (&error as &dyn std::any::Any).downcast_ref::<Error>() {
+        Some(core) => core_error_to_js(core),
+        None => JsValue::from_str(&error.to_string()),
+    }
+}
+
+fn core_error_to_js(error: &Error) -> JsValue {
+    let js_error = js_sys::Error::new(&error.to_string());
+    // Setting a data property on a fresh ordinary object cannot fail.
+    let _ = js_sys::Reflect::set(
+        &js_error,
+        &JsValue::from_str("code"),
+        &JsValue::from_str(error.code.as_str()),
+    );
+    js_error.into()
 }
 
 fn bytes_to_js(bytes: Vec<u8>) -> Result<JsValue, JsValue> {
@@ -3726,9 +3953,42 @@ fn unknown_transaction_kind_message(kind: &str) -> String {
 mod dynamic_schema_view_tests {
     use super::*;
     use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps};
+    use jazz::groove::records::{Error as RecordError, RecordDescriptor, ValueType};
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
     };
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn variable_array_add_overflow_returns_invalid_offset_through_public_decoder() {
+        let descriptor =
+            RecordDescriptor::new([("items", ValueType::Array(Box::new(ValueType::String)))]);
+        let mut encoded = descriptor
+            .create(&[Value::Array(vec![Value::String("item".to_owned())])])
+            .expect("valid variable array encodes");
+        encoded[0..4].copy_from_slice(&(1_u32 << 30).to_le_bytes());
+
+        assert_eq!(
+            descriptor.get_idx(&encoded, 0),
+            Err(RecordError::InvalidOffset)
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn variable_array_multiplication_overflow_returns_invalid_offset_through_public_decoder() {
+        let descriptor =
+            RecordDescriptor::new([("items", ValueType::Array(Box::new(ValueType::String)))]);
+        let mut encoded = descriptor
+            .create(&[Value::Array(vec![Value::String("item".to_owned())])])
+            .expect("valid variable array encodes");
+        encoded[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        assert_eq!(
+            descriptor.get_idx(&encoded, 0),
+            Err(RecordError::InvalidOffset)
+        );
+    }
 
     /// Every ordinary write option shares `write_timestamp_option`, so this
     /// boundary test protects insert, update, upsert, delete, and restore from
@@ -3979,30 +4239,44 @@ mod dynamic_schema_view_tests {
 
     /// Binding read choices lower to the existing core tiers.
     #[test]
-    fn read_tier_names_lower_to_existing_core_tiers() {
+    fn read_tier_names_are_separate_from_durability() {
         assert_eq!(
             read_tier_from_str("local-first").expect("local-first read tier"),
-            (DurabilityTier::Local, EmptyOpening::Deliver)
+            jazz::db::ReadTier::LocalFirst
         );
         assert_eq!(
             read_tier_from_str("remote").expect("strict remote read tier"),
-            (DurabilityTier::Global, EmptyOpening::Deliver)
+            jazz::db::ReadTier::Remote
         );
-        for name in ["remote-if-possible", "RemoteIfPossible"] {
-            assert!(removed_read_tier(name).is_some(), "{name} was removed");
-        }
-        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
-            assert_eq!(
-                read_tier_from_str(name).expect("local-first-unless-empty read tier"),
-                (DurabilityTier::Local, EmptyOpening::AwaitRemote),
-                "{name} reads local-first with the core empty-opening gate"
-            );
-        }
         assert_eq!(
             durability_tier_from_str("local").expect("legacy write tier"),
             DurabilityTier::Local,
             "the write parser remains the separate legacy durability boundary"
         );
+    }
+
+    /// The JS binding must reject unsupported names through its normal parser.
+    /// This runs in WASM because constructing JsValue errors needs a JS host.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn read_tiers_reject_unknown_names() {
+        for name in [
+            "remote-if-possible",
+            "RemoteIfPossible",
+            "local-first-unless-empty",
+            "LocalFirstUnlessEmpty",
+            "core",
+            "Core",
+            "local",
+            "global",
+            "none",
+            "invalid-tier",
+        ] {
+            assert_eq!(
+                read_tier_from_str(name).unwrap_err().as_string().unwrap(),
+                format!("unknown read tier {name}"),
+            );
+        }
     }
 
     #[test]
@@ -4140,7 +4414,7 @@ mod dynamic_schema_view_tests {
 
         let opts = read_opts_from_js(value.into()).expect("parse read options");
 
-        assert_eq!(opts.propagation, Propagation::Full);
+        assert_eq!(opts.tier, jazz::db::ReadTier::LocalFirst);
     }
 
     /// The host-visible transport boundary must honor both parts of its
@@ -4192,8 +4466,7 @@ mod dynamic_schema_view_tests {
         // The pump strips compression bits because each auxiliary payload is an
         // independently encoded complete envelope.
         let features = jazz::wire::current_wire_features()
-            & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+            & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
                 | jazz::wire::FEATURE_PAYLOAD_LZ4
                 | jazz::wire::FEATURE_PAYLOAD_ZSTD);
         let request = |request_id| jazz::protocol::ChunkRequestEntry {
@@ -4222,20 +4495,15 @@ mod dynamic_schema_view_tests {
                     result: jazz::protocol::ChunkResponse::Unavailable,
                 }],
             });
-        let one_response_bytes =
-            jazz::wire::encode_sync_message_for_features(&one_response, features)
-                .expect("encode expected auxiliary response");
-        let one_response_frame = jazz::wire::encode_frame(&jazz::wire::WireFrame::Message(
-            jazz::wire::WireEnvelope::new(
-                jazz::wire::WIRE_PROTOCOL_VERSION,
-                features,
-                one_response_bytes,
-            ),
-        ))
-        .expect("frame expected auxiliary response");
+        let context =
+            jazz::wire::WireInboundContext::new(jazz::wire::WIRE_PROTOCOL_VERSION, features, None);
+        let mut expected_sender = jazz::db::AuxiliaryChannelEndpoint::new(context.clone()).unwrap();
+        expected_sender.enqueue(one_response).unwrap();
+        let one_response_frame = expected_sender.peek_outbound().unwrap().unwrap();
         let byte_budget = one_response_frame.len() as u32;
+        let mut receiver = jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
 
-        let decode_ids = |frames: js_sys::Array| {
+        let mut decode_ids = |frames: js_sys::Array| {
             frames
                 .iter()
                 .map(|frame| {
@@ -4244,13 +4512,17 @@ mod dynamic_schema_view_tests {
                         bytes.len() <= byte_budget as usize,
                         "each actual WASM result stays within the requested byte budget"
                     );
-                    let jazz::wire::WireFrame::Message(envelope) = jazz::wire::decode_frame(&bytes)
+                    let jazz::wire::WireFrame::Channel(envelope) = jazz::wire::decode_frame(&bytes)
                         .expect("decode actual wasm response frame")
                     else {
-                        panic!("auxiliary output remains a complete message frame");
+                        panic!("auxiliary output uses channel framing");
                     };
+                    let received = receiver
+                        .receive(envelope, bytes.len())
+                        .unwrap()
+                        .expect("complete response");
                     let response =
-                        jazz::wire::decode_sync_message_for_features(&envelope.payload, features)
+                        jazz::wire::decode_sync_message_for_features(&received.payload, features)
                             .expect("decode actual wasm auxiliary response");
                     let jazz::protocol::SyncMessage::ChunkResponseBatch(batch) = response else {
                         panic!("subscriber sends a chunk response on the auxiliary lane");

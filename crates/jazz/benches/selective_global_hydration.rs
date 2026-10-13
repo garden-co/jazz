@@ -24,8 +24,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, PreparedQuery, Propagation, ReadOpts,
-    SeededRowIdSource, SubscriptionEvent, block_on,
+    Db, DbConfig, DbIdentity, MergeableTxOps, PreparedQuery, ReadOpts, SeededRowIdSource,
+    SubscriptionEvent, block_on,
 };
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
@@ -33,7 +33,6 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit, param};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::{Map, json};
 use sha2::{Digest, Sha256};
@@ -231,7 +230,7 @@ struct RungReceipt {
 /// constructs this once, outside Divan's timed closure.
 struct HydrationFixture {
     _temp: tempfile::TempDir,
-    db: Db<RocksDbStorage>,
+    db: Db,
     prepared: PreparedQuery,
     expected: Vec<RowUuid>,
     target_rows: usize,
@@ -547,7 +546,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db(path: &Path, schema: JazzSchema) -> (Db<RocksDbStorage>, u128, u128) {
+fn open_db(path: &Path, schema: JazzSchema) -> (Db, u128, u128) {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -573,7 +572,7 @@ fn open_db(path: &Path, schema: JazzSchema) -> (Db<RocksDbStorage>, u128, u128) 
     (db, storage_open_us, db_open_us)
 }
 
-fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
+fn seed_rows(db: &Db, config: ConfigRef, table_rows: usize) {
     for batch_start in (0..table_rows).step_by(config.batch_rows) {
         let batch_end = table_rows.min(batch_start + config.batch_rows);
         let tx = block_on(db.mergeable_tx()).expect("open selective-hydration seed transaction");
@@ -609,9 +608,7 @@ fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
 
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::Remote,
         include_deleted: false,
         ..ReadOpts::default()
     }
@@ -619,9 +616,7 @@ fn global_read_opts() -> ReadOpts {
 
 fn local_read_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }

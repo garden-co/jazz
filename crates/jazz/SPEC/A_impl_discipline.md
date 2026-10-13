@@ -142,7 +142,7 @@ different behavior.
 
 The canonical gate set is part of implementation discipline. Keep the gate list
 in one SPEC location: appendix D mirrors the operational source of truth in
-`.claude/CLAUDE.md`, including the ordinary full gate set, conditional benchmark
+`dev/gates/run-canonical.sh`, including the ordinary full gate set, conditional benchmark
 smoke, sensitive-data guard, and additional full-workspace gate for public
 `jazz` type changes.
 

@@ -550,6 +550,25 @@ they do not create a JSON-specific storage model. All fields in one `update`
 call, including `applyDiffs`, commit atomically. There is deliberately no page staleness/CAS promise in this
 API revision.
 
+Transactions accept the same `applyDiffs` option on `tx.update` (#2087).
+Coordinates address the value the transaction reads: its snapshot overlaid with
+its own earlier writes, including earlier diffs, so repeated appends in one
+transaction compose. Each diff stages only the Groove nodes it touches, exactly
+like the root-context update, and the open transaction retains the staged root
+as engine-private provenance; nothing is visible outside the transaction until
+it commits, and the commit publishes one ordinary row version per row. The row
+read counts as a transaction point read, so an exclusive transaction conflicts
+if the row changes before commit. In a mergeable transaction the diffed column
+is authored like any patched column and resolves last-writer-wins at commit.
+The diff is authored by the transaction's bound identity, so session and
+attributed transactions need no separate path. A staged root that outlives the
+staging TTL before commit fails the commit with a staging-expired error rather
+than publishing a partial value. Roots superseded inside the transaction are
+evicted at commit, and rolling the transaction back evicts every root it
+staged; the staging TTL only covers evictions that fail. Branch views still reject `applyDiffs`
+explicitly, as do React Native transactions until its foreground codec carries
+the descriptor.
+
 Object-form partial selections apply to the root query only in this revision.
 Included relations may project complete fields by name, but object-form partial
 selections in an include builder fail explicitly until per-terminal demand

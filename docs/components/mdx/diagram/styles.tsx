@@ -141,13 +141,6 @@ const DIAGRAM_STYLES_CSS = `
   background: color-mix(in srgb, var(--diagram-card) 30%, transparent);
   padding: 1.25rem;
 }
-.dg-frame-eyebrow {
-  margin: 0;
-  font-size: 0.75rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  color: var(--diagram-accent);
-}
 .dg-frame-desc {
   margin: 0 0 1.5rem;
   font-size: 0.875rem;

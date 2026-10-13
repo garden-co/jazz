@@ -30,7 +30,7 @@ describe("React Native account preparation", () => {
     vi.stubGlobal("crypto", undefined);
     const jwt = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.signature`;
     const native = {
-      abiVersion: 1,
+      abiVersion: 2,
       accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
       mintLocalFirstToken: vi.fn(() => jwt),
       openAttached: vi.fn(),
@@ -81,7 +81,7 @@ describe("React Native account preparation", () => {
   });
 
   it("rejects a native build without account crypto during preparation", async () => {
-    mocks.install.mockReturnValue({ abiVersion: 1, openAttached: vi.fn() });
+    mocks.install.mockReturnValue({ abiVersion: 2, openAttached: vi.fn() });
     await expect(
       createAccountManager({
         appId: "native-accounts",
@@ -97,7 +97,7 @@ describe("React Native account preparation", () => {
     const jwt = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: subject }))}.signature`;
     const capability = new Uint8Array(32).fill(9);
     const native = {
-      abiVersion: 1,
+      abiVersion: 2,
       accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
       mintLocalFirstToken: vi.fn(() => jwt),
       beginAccountSession: vi.fn((_request: string) => capability),

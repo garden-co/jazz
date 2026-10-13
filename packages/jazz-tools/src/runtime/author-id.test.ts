@@ -28,6 +28,16 @@ describe("canonical author subjects", () => {
     ).toBe(canonical);
   });
 
+  it("reports a missing issuer or subject clearly instead of a TypeError", () => {
+    const missing = undefined as unknown as string;
+    expect(() => canonicalAuthorSubject(missing, "alice")).toThrow(
+      new Error("Author identity is missing an issuer"),
+    );
+    expect(() => canonicalAuthorSubject("https://issuer.example", missing)).toThrow(
+      new Error("Author identity is missing a subject"),
+    );
+  });
+
   it("distinguishes the same subject issued by different authorities", () => {
     expect(canonicalAuthorSubject("issuer-a", "user")).not.toBe(
       canonicalAuthorSubject("issuer-b", "user"),

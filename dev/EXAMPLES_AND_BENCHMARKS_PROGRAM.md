@@ -36,19 +36,20 @@ question; GitHub is the inbox rather than a repository-local queue.
 
 ## Catalogue
 
-| App                   | Product slice                                            | Distinct Jazz feature/workload role                                                                                                                                                                                          |
-| --------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **BandChat**          | Band/fan chat with rooms, invites, images, and reactions | Small hello-world reference; identity and permission boundaries, attachments, fan-out, offline/reconnect.                                                                                                                    |
-| **WorldTour**         | Plan a tour with venues, dates, maps, and collaborators  | Relations, filtered/ordered queries, calendar/map views, shared planning.                                                                                                                                                    |
-| **RecordPlayer**      | Personal/shared music library and playlists              | Files and durable streams, large values, partial availability, playlist sharing.                                                                                                                                             |
-| **Jamazon**           | Music-instrument storefront                              | Offline-first cart, checkout workflow, Stripe sandbox integration, idempotent external effects.                                                                                                                              |
-| **Jamazon Warehouse** | Warehouse operations console for Jamazon                 | Recognizably TPC-C-shaped warehouses, districts, customers, stock, orders, order lines, and payments; multi-row exclusive transactions, stock contention, indexed status reads, batch delivery, and stock-level aggregation. |
-| **BandBinder**        | Notion-style workspace for running a band                | Deeply nested pages and blocks for songs, notes, tasks, calendars, attachments, and planning; block/page-scoped roles for band members, stage managers, and collaborators; draft/suggestion and branch flows.                |
-| **Wequencer**         | Collaborative step sequencer                             | High-frequency collaborative writes, hotspot behavior, presence, synchronization/reconnect; clock-perfect playback is an app aspiration, not a benchmark assertion until its contract exists.                                |
-| **PosterShop**        | Collaborative gig-poster design canvas                   | Real-time cursors/edits, canvas-shaped fan-out, history rewind, and branches.                                                                                                                                                |
-| **BigLabel**          | Multi-tenant record-label operations                     | SaaS-scale tenant filtering, organization/team policy graphs, indexed relational reads, migrations, and large synthetic datasets.                                                                                            |
-| **MusicAgent**        | LLM agent for a music agent                              | Streamed transcript turns, tool calls/results, attachments, conversation branches, durable server execution, and recovery after interrupted generation.                                                                      |
-| **EpicDrop**          | Web file browser plus native mounted folder              | Large binary values, streaming and range access, partial residency, local cache eviction, shared-folder permissions, filesystem events, and offline file conflicts.                                                          |
+| App                   | Product slice                                                            | Distinct Jazz feature/workload role                                                                                                                                                                                          |
+| --------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **StagePlan**         | Task board for putting on a show: tasks, activity, crews and departments | Local-first task CRUD and bulk updates, reopen, bounded activity pages, filtered live boards, many small permissioned subscriptions (crew dashboard), row-dependent policies, archive/restore, offline resume.               |
+| **BandChat**          | Band/fan chat with rooms, invites, images, and reactions                 | Small hello-world reference; identity and permission boundaries, attachments, fan-out, offline/reconnect.                                                                                                                    |
+| **WorldTour**         | Plan a tour with venues, dates, maps, and collaborators                  | Relations, filtered/ordered queries, calendar/map views, shared planning.                                                                                                                                                    |
+| **RecordPlayer**      | Personal/shared music library and playlists                              | Files and durable streams, large values, partial availability, playlist sharing.                                                                                                                                             |
+| **Jamazon**           | Music-instrument storefront                                              | Public catalogue with live search, offline-first cart, guest-cart claim on sign-in, idempotent checkout with backend authority, Stripe test-mode payments.                                                                   |
+| **Jamazon Warehouse** | Warehouse operations console for Jamazon                                 | Recognizably TPC-C-shaped warehouses, districts, customers, stock, orders, order lines, and payments; multi-row exclusive transactions, stock contention, indexed status reads, batch delivery, and stock-level aggregation. |
+| **BandBook**          | Notion clone with issues, for running a band                             | Nested pages and blocks plus issues for songs, notes, setlists and planning; owner/organization-scoped page policies over large workspaces, one-shot and live.                                                               |
+| **Wequencer**         | Collaborative step sequencer                                             | High-frequency collaborative writes, hotspot behavior, presence, synchronization/reconnect; clock-perfect playback is an app aspiration, not a benchmark assertion until its contract exists.                                |
+| **PosterShop**        | Collaborative gig-poster design canvas                                   | Real-time cursors/edits, canvas-shaped fan-out, history rewind, and branches.                                                                                                                                                |
+| **BigLabel**          | Multi-tenant record-label operations                                     | SaaS-scale tenant filtering, organization/team policy graphs, indexed relational reads, migrations, and large synthetic datasets.                                                                                            |
+| **MusicAgent**        | LLM agent for a music agent                                              | Streamed transcript turns, tool calls/results, attachments, conversation branches, durable server execution, and recovery after interrupted generation.                                                                      |
+| **EpicDrop**          | Web file browser plus native mounted folder                              | Large binary values, streaming and range access, partial residency, local cache eviction, shared-folder permissions, filesystem events, and offline file conflicts.                                                          |
 
 Jamazon and Jamazon Warehouse share branding and synthetic product assets, but
 remain separate schemas and scenarios. The warehouse schema stays close enough
@@ -77,23 +78,23 @@ remain supported until a catalogue scenario has equivalent assertions, a
 reproducible receipt, and a migration note. Retire only duplicated harnesses;
 keep independent microbenchmarks and core canaries.
 
-| Current material                                         | Destination app(s)                       | Migration intent                                                                                                                  |
-| -------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `examples/chat-react` and `examples/auth-*-chat`         | BandChat                                 | Preserve auth-specific teaching value as small shells; migrate product workflow, room policy, attachments, and fan-out scenarios. |
-| `examples/world-tour`                                    | WorldTour                                | Evolve it into the canonical WorldTour app rather than rebuild it elsewhere.                                                      |
-| `examples/branching-project-planner-ts`                  | BandBinder and PosterShop                | Split branch/history lessons by product flow; keep any minimal branch API example needed for reference.                           |
-| Todo local-first families                                | BandChat/Jamazon plus framework shells   | Retain framework-baseline starters/examples; adopt offline persistence and CRUD load shape only where it belongs.                 |
-| Realistic `W1`, `W3`, `W4`                               | BandChat, WorldTour, Jamazon             | Recast interactive, offline-reconnect, and cold-start behavior as app scenarios; retain shared runner plumbing.                   |
-| Realistic `B1`/`R1`, `B2`/`R2`, `B3`/`R3`                | BigLabel and Jamazon Warehouse           | Use for sustained CRUD, indexed reads, and cold-load scale profiles.                                                              |
-| Realistic `B4`/`R4`, `R9`                                | BandChat, PosterShop, Wequencer          | Adopt subscription fan-out and subscribed-write semantics.                                                                        |
-| Realistic `B5`/`R5`/`R6`                                 | BigLabel and BandBinder                  | Adopt recursive-policy, write-heavy, and permission-filtered resume scenarios.                                                    |
-| Realistic `B6`/`R7`, `R8`                                | PosterShop, BandBinder, Wequencer        | Adopt hotspot history and branch-view workloads.                                                                                  |
-| Realistic `B7`                                           | BigLabel and WorldTour                   | Adopt large relation-result hydration as an indexed relational-read profile.                                                      |
-| `jazz-sim` `s1_saas`, policy-graph, customer cold-start  | BigLabel                                 | Make BigLabel the product meaning of SaaS, policy-graph, and tenant cold-load shapes.                                             |
-| `jazz-sim` `s2_canvas`, `s8_branch_views`                | PosterShop (and BandBinder for branches) | Reuse canvas live/replay and branch-view workload semantics.                                                                      |
-| `jazz-sim` `s3_permissions`, `s7_migrations`             | BandBinder and BigLabel                  | Exercise deep permissions and multi-version migration/reconnect.                                                                  |
-| `jazz-sim` `s4_order_processing`, `s9_durable_execution` | Jamazon Warehouse, Jamazon, MusicAgent   | Keep order-processing/reference comparison and durable-workflow semantics, surfaced through their respective UIs.                 |
-| `jazz-sim` `s5_durable_stream`                           | RecordPlayer, EpicDrop, MusicAgent       | Adopt stream lifecycle, persistence, resume, and bounded-memory transfer behavior.                                                |
+| Current material                                         | Destination app(s)                     | Migration intent                                                                                                                  |
+| -------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `examples/chat-react` and `examples/auth-*-chat`         | BandChat                               | Preserve auth-specific teaching value as small shells; migrate product workflow, room policy, attachments, and fan-out scenarios. |
+| `examples/world-tour`                                    | WorldTour                              | Evolve it into the canonical WorldTour app rather than rebuild it elsewhere.                                                      |
+| `examples/branching-project-planner-ts`                  | BandBook and PosterShop                | Split branch/history lessons by product flow; keep any minimal branch API example needed for reference.                           |
+| Todo local-first families                                | StagePlan plus framework shells        | Retain framework-baseline starters/examples; adopt offline persistence and CRUD load shape only where it belongs.                 |
+| Realistic `W1`, `W3`, `W4`                               | StagePlan, WorldTour, Jamazon          | Recast interactive, offline-reconnect, and cold-start behavior as app scenarios; retain shared runner plumbing.                   |
+| Realistic `B1`/`R1`, `B2`/`R2`, `B3`/`R3`                | BigLabel and Jamazon Warehouse         | Use for sustained CRUD, indexed reads, and cold-load scale profiles.                                                              |
+| Realistic `B4`/`R4`, `R9`                                | BandChat, PosterShop, Wequencer        | Adopt subscription fan-out and subscribed-write semantics.                                                                        |
+| Realistic `B5`/`R5`/`R6`                                 | BigLabel and BandBook                  | Adopt recursive-policy, write-heavy, and permission-filtered resume scenarios.                                                    |
+| Realistic `B6`/`R7`, `R8`                                | PosterShop, BandBook, Wequencer        | Adopt hotspot history and branch-view workloads.                                                                                  |
+| Realistic `B7`                                           | BigLabel and WorldTour                 | Adopt large relation-result hydration as an indexed relational-read profile.                                                      |
+| `jazz-sim` `s1_saas`, policy-graph, customer cold-start  | BigLabel                               | Make BigLabel the product meaning of SaaS, policy-graph, and tenant cold-load shapes.                                             |
+| `jazz-sim` `s2_canvas`, `s8_branch_views`                | PosterShop (and BandBook for branches) | Reuse canvas live/replay and branch-view workload semantics.                                                                      |
+| `jazz-sim` `s3_permissions`, `s7_migrations`             | BandBook and BigLabel                  | Exercise deep permissions and multi-version migration/reconnect.                                                                  |
+| `jazz-sim` `s4_order_processing`, `s9_durable_execution` | Jamazon Warehouse, Jamazon, MusicAgent | Keep order-processing/reference comparison and durable-workflow semantics, surfaced through their respective UIs.                 |
+| `jazz-sim` `s5_durable_stream`                           | RecordPlayer, EpicDrop, MusicAgent     | Adopt stream lifecycle, persistence, resume, and bounded-memory transfer behavior.                                                |
 
 Server/runtime examples and framework/auth starters remain
 valuable focused references. They are out of catalogue scope unless a later
@@ -123,7 +124,13 @@ assertions; benchmark runs additionally record their environment and phases.
 ## Rust benchmark convention
 
 New Rust benchmark variants use the self-contained package convention in
-[Example benchmarks](../examples/benchmarks/README.md). The workspace-level
+[Example benchmarks](benchmarks/EXAMPLE_BENCHMARKS.md).
+
+Each measured area has exactly one owner example: the app where it is most
+semantically relevant. A new area gets new benchmarks in the app that owns it,
+not a copy in a second app. Only what no product owns (engine internals) and
+the anonymized adopter workload (`examples/permissioned-resources`) live
+outside the hero apps; the docs list them under "More benchmarks". The workspace-level
 Divan compatibility dependency and CodSpeed workflow provide only discovery,
 instrumentation, and hosted reporting; each app keeps its own schema, fixture,
 scenario construction, scale profiles, and topology metadata.
@@ -144,7 +151,11 @@ and should gain a focused correctness assertion when it reveals one.
 
 The current examples use [#1754](https://github.com/garden-co/jazz/issues/1754)
 (BandChat), [#1755](https://github.com/garden-co/jazz/issues/1755) (BigLabel),
-and [#1757](https://github.com/garden-co/jazz/issues/1757) (large values).
+and [#1757](https://github.com/garden-co/jazz/issues/1757) (large values; public
+streaming and range APIs exist since
+[#2088](https://github.com/garden-co/jazz/pull/2088), efficiency work is
+pending in [#2090](https://github.com/garden-co/jazz/issues/2090) and
+[#3471](https://github.com/garden-co/jazz/issues/3471)).
 Future catalogue apps and blockers are tracked as GitHub issues; this document
 remains the durable product/test contract rather than a staged work queue.
 

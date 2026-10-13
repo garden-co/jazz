@@ -35,9 +35,19 @@ impl NodeState {
                 prefix: Vec::new(),
             }),
             Some(StaticScanBounds::Prefix(prefix)) => {
-                Some(super::evaluation_session::StorageRequestKey::ScanPrefix {
-                    family: input.table.clone(),
-                    prefix,
+                Some(match scan_max_items(input.scan.as_ref()) {
+                    Some(max_items) => {
+                        super::evaluation_session::StorageRequestKey::ScanPrefixLimit {
+                            family: input.table.clone(),
+                            prefix,
+                            max_items,
+                            reversed: scan_reversed(input.scan.as_ref()),
+                        }
+                    }
+                    None => super::evaluation_session::StorageRequestKey::ScanPrefix {
+                        family: input.table.clone(),
+                        prefix,
+                    },
                 })
             }
             Some(StaticScanBounds::Range { start, end }) if start < end => {
@@ -54,7 +64,37 @@ impl NodeState {
     pub(super) fn index_source_request(
         input: &IndexSourceOp,
     ) -> Result<Option<super::evaluation_session::StorageRequestKey>, IvmRuntimeError> {
+        if input.candidate_filter.is_some() && input.row_projection.is_none() {
+            return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
+        }
         if input.row_projection.is_some() {
+            if let Some(filter) = &input.candidate_filter {
+                if !input.intersections.is_empty() {
+                    return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
+                }
+                let StaticScanBounds::Prefix(prefix) =
+                    persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
+                else {
+                    return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
+                };
+                let StaticScanBounds::Prefix(candidate_prefix) =
+                    persisted_index_scan_bounds(&filter.table, &filter.index, Some(&filter.scan))?
+                else {
+                    return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
+                };
+                return Ok(Some(
+                    super::evaluation_session::StorageRequestKey::IndexedRowsCandidateFilter {
+                        table: input.table.clone(),
+                        index: input.index.clone(),
+                        prefix,
+                        candidate_table: filter.table.clone(),
+                        candidate_index: filter.index.clone(),
+                        candidate_prefix,
+                        source_column: filter.source_column.clone(),
+                        candidate_column: filter.candidate_column.clone(),
+                    },
+                ));
+            }
             if !input.intersections.is_empty() {
                 let StaticScanBounds::Prefix(prefix) =
                     persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
@@ -643,7 +683,7 @@ impl NodeState {
         }
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_map_buffer(output.capacity(), output.len());
-        let output = output.freeze();
+        let output = super::freeze_batch_buffer(output);
         let deltas: Vec<_> = spans
             .into_iter()
             .map(|(span, weight)| RecordDelta {
@@ -806,7 +846,7 @@ impl NodeState {
                 spans.push((span, delta.weight));
             }
         }
-        let output = output.freeze();
+        let output = super::freeze_batch_buffer(output);
         let deltas = spans
             .into_iter()
             .map(|(span, weight)| RecordDelta {

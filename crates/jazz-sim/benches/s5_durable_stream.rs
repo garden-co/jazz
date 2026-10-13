@@ -670,10 +670,10 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
 }
 
 fn drain_db_route(
-    db: &Db<RocksDbStorage>,
+    db: &Db,
     outbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
 ) {
     block_on(db.tick()).unwrap();
     while let Some(unit) = outbound.borrow_mut().pop_front() {
@@ -688,7 +688,7 @@ fn drain_db_route(
     }
 }
 
-fn seed_stream(core: &mut NodeState<RocksDbStorage>, stream: usize, global_time: &mut u64) {
+fn seed_stream(core: &mut NodeState, stream: usize, global_time: &mut u64) {
     let tx = commit_mergeable_unit_settled(
         core,
         MergeableCommit::new(STREAMS, stream_row(stream), 1)
@@ -1002,7 +1002,7 @@ fn append_tokens(config: &Config, content: &mut Vec<u8>, stream: usize, seq: usi
     }
 }
 
-fn read_doc(node: &mut NodeState<RocksDbStorage>, stream: usize) -> Vec<u8> {
+fn read_doc(node: &mut NodeState, stream: usize) -> Vec<u8> {
     let schema = schema();
     let table = table_schema(&schema, STREAM_DOCS);
     block_on(node.current_rows(STREAM_DOCS, DurabilityTier::Local))
@@ -1029,14 +1029,11 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState) {
     open_node_with_history_class(node_uuid, schema, false)
 }
 
-fn open_history_complete_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (TempDir, NodeState<RocksDbStorage>) {
+fn open_history_complete_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState) {
     open_node_with_history_class(node_uuid, schema, true)
 }
 
@@ -1044,7 +1041,7 @@ fn open_node_with_history_class(
     node_uuid: NodeUuid,
     schema: JazzSchema,
     history_complete: bool,
-) -> (TempDir, NodeState<RocksDbStorage>) {
+) -> (TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1061,7 +1058,7 @@ fn open_node_with_history_class(
     (dir, node)
 }
 
-fn open_db(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, Db<RocksDbStorage>) {
+fn open_db(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();

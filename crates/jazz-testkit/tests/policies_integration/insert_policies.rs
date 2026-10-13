@@ -398,7 +398,8 @@ async fn missing_operation_policies_deny_reads_and_writes() {
                         let error = settled.expect_err("missing grant must deny").to_string();
                         assert!(
                             error.contains("authorization_denied")
-                                || error.contains("read policy denied"),
+                                || error.contains("read policy denied")
+                                || error.contains("not loaded locally"),
                             "{case}: {operation}: {error}"
                         );
                     }

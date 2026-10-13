@@ -18,7 +18,6 @@ use jazz::protocol::SyncMessage;
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::Schema;
-use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
 use jazz_sim::policy_graph_fixture::{
     MEMBER_SEED_ROWS_COMPACT_JSON, MEMBER_SEED_ROWS_JSON, MemberSeedDump, MemberSeedManifest,
@@ -72,7 +71,7 @@ fn assert_core_visibility(
     identity: BenchIdentity,
 ) {
     let read_opts = ReadOpts {
-        tier: DurabilityTier::Global,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     for table in seeded.subscription_tables() {
@@ -183,7 +182,7 @@ fn t105_access_debug(seeded: &Seeded, member: AuthorSubject) -> String {
     let rows = jazz::db::block_on(seeded.core.all_for_identity(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         AuthorSubject::SYSTEM,
@@ -235,7 +234,7 @@ fn visible_rows(seeded: &Seeded, table: &str, author: AuthorSubject) -> Vec<Curr
     jazz::db::block_on(seeded.core.all_for_identity(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         author,
@@ -428,7 +427,7 @@ impl BenchIdentity {
 
 struct Seeded {
     _core_dir: Rc<tempfile::TempDir>,
-    core: Db<RocksDbStorage>,
+    core: Db,
     schema: JazzSchema,
     member: AuthorSubject,
     claims: BTreeMap<String, Value>,
@@ -445,7 +444,7 @@ impl Seeded {
 
 struct DbNode {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<RocksDbStorage>,
+    db: Db,
 }
 
 struct OpenSubscription {
@@ -643,7 +642,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     }
 }
 
-fn write_seed_rows(core: &Node<RocksDbStorage>, schema: &JazzSchema, rows: &[SeedRow]) {
+fn write_seed_rows(core: &Node, schema: &JazzSchema, rows: &[SeedRow]) {
     let node = core.node();
     for (idx, row) in rows.iter().enumerate() {
         let table = find_table(schema, &row.table);
@@ -951,7 +950,7 @@ fn run_connect_and_subscribe(
     let subscribe_start = Instant::now();
     let mut subscriptions = Vec::new();
     let read_opts = ReadOpts {
-        tier: DurabilityTier::Global,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     for table in subscription_tables(&config.fixture) {
@@ -1333,15 +1332,11 @@ fn open_history_complete_db_at(
     schema: JazzSchema,
     node_uuid: NodeUuid,
     author: AuthorSubject,
-) -> Db<RocksDbStorage> {
+) -> Db {
     open_db_at(path, schema, node_uuid, author, true)
 }
 
-fn open_history_complete_node_at(
-    path: &Path,
-    schema: JazzSchema,
-    node_uuid: NodeUuid,
-) -> Node<RocksDbStorage> {
+fn open_history_complete_node_at(path: &Path, schema: JazzSchema, node_uuid: NodeUuid) -> Node {
     let storage = open_storage_at(path, &schema);
     let state = jazz::db::block_on(NodeState::new_history_complete(node_uuid, schema, storage))
         .expect("open seed node");
@@ -1354,7 +1349,7 @@ fn open_db_at(
     node_uuid: NodeUuid,
     author: AuthorSubject,
     history_complete: bool,
-) -> Db<RocksDbStorage> {
+) -> Db {
     let storage = open_storage_at(path, &schema);
     let config = DbConfig {
         schema,

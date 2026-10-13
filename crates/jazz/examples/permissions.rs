@@ -61,7 +61,7 @@ fn open_db(
     author: AuthorSubject,
     schema: JazzSchema,
     storage: MemoryStorage,
-) -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
+) -> Result<Db, Box<dyn std::error::Error>> {
     Ok(block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -74,7 +74,7 @@ fn open_db(
 }
 
 struct CoreDb {
-    server: Node<MemoryStorage>,
+    server: Node,
     author: AuthorSubject,
     next_now_ms: u64,
     id_source: SeededRowIdSource,
@@ -185,11 +185,7 @@ fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
     )
 }
 
-fn sync_client_to_core(
-    client: &Db<MemoryStorage>,
-    core: &CoreDb,
-    identity: AuthorSubject,
-) -> Result<(), Error> {
+fn sync_client_to_core(client: &Db, core: &CoreDb, identity: AuthorSubject) -> Result<(), Error> {
     let (client_transport, server_transport) = duplex();
     let _upstream = block_on(client.connect_upstream(client_transport));
     core.accept_subscriber(server_transport, identity);

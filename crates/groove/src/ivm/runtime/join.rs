@@ -202,6 +202,18 @@ impl JoinBucket {
 }
 type JoinIndex = HashMap<JoinKey, JoinBucket>;
 
+#[cfg(test)]
+thread_local! {
+    /// Folds that had to copy a join index still shared with another owner.
+    static SHARED_INDEX_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Folds on this thread that copied a shared join index, for scale canaries.
+#[cfg(test)]
+pub(super) fn shared_index_folds() -> usize {
+    SHARED_INDEX_FOLDS.with(std::cell::Cell::get)
+}
+
 pub(super) fn touched_join_keys(
     descriptor: &RecordDescriptor,
     fields: &[String],
@@ -375,7 +387,7 @@ impl JoinState {
                 )?;
             }
         }
-        let bytes = output.bytes.freeze();
+        let bytes = super::freeze_batch_buffer(output.bytes);
         Ok(consolidate_deltas(
             output
                 .deltas
@@ -669,6 +681,12 @@ impl ArrangementState {
                     .filter_map(|(key, bucket)| bucket.as_ref().map(|bucket| (key, bucket))),
             )
     }
+    /// Drop the producer's transition for its tick, keeping the overlay
+    /// layered on the shared base.
+    pub(super) fn release_changes(&mut self) {
+        self.changes = None;
+    }
+
     /// Fold only the touched buckets into the shared base at tick commit.
     /// Callers drop the previous live arrangement before invoking this method,
     /// making both COW maps uniquely owned in the common path.
@@ -679,6 +697,10 @@ impl ArrangementState {
         }
         let overlay = std::mem::take(&mut self.overlay);
         let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
+        #[cfg(test)]
+        if Rc::strong_count(&self.index) > 1 {
+            SHARED_INDEX_FOLDS.with(|folds| folds.set(folds.get() + 1));
+        }
         let index = Rc::make_mut(&mut self.index);
         for (key, bucket) in overlay {
             // Release the previous bucket's ownership before checking whether

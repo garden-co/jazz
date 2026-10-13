@@ -18,6 +18,13 @@ export async function readTodosOneshot(db: Db) {
 }
 // #endregion reading-oneshot-ts
 
+// #region reading-one-ts
+export async function readTodo(db: Db, id: string) {
+  // Resolves to the first matching row, or null if no row matches or you can't read it
+  return db.one(app.todos.where({ id }));
+}
+// #endregion reading-one-ts
+
 // #region reading-subscriptions-ts
 export function subscribeTodos(db: Db, onCount: (count: number) => void) {
   return db.subscribe(app.todos.where({ done: false }), (todos) => onCount(todos.length));
@@ -234,9 +241,9 @@ export function buildTodoLineageQuery() {
 
 // #region reading-seeding-ts
 export async function seedDefaultProject(db: Db) {
-  // Wait for the global core before reading — prevents duplicate seeding
+  // Read from the server before seeding — prevents duplicate seeding
   // from concurrent fresh clients on first visit.
-  const existing = await db.all(app.projects, { tier: "global" });
+  const existing = await db.all(app.projects, { tier: "remote" });
 
   if (existing.length === 0) {
     db.insert(app.projects, { name: "Default" });

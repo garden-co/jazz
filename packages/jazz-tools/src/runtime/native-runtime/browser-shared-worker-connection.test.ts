@@ -173,6 +173,7 @@ function runtimeBootstrapFixture(aliveDelayMs = 0) {
     {
       connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
       onPeerTransportWork: () => () => undefined,
+      onLocalSettlementChange: () => () => undefined,
       progressPeerTransport: async () => undefined,
       retirePeerTransport: async () => undefined,
       reportRemoteServerTransportError: vi.fn(),
@@ -351,6 +352,17 @@ describe("browser foreground lease terminal abandonment", () => {
     await expect(lease.retire()).rejects.toBe(error);
     expect(sent.filter((type) => type === "retire-foreground-node-lease")).toHaveLength(1);
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("releases a quiesced predecessor lease without returning its node through a dead port", async () => {
+    const { lease, sent, close } = await acquireLease();
+    const reason = new Error("worker owner was replaced");
+    lease.releaseAfterWorkerReplacement(reason);
+    expect(close).toHaveBeenCalledOnce();
+    expect(sent).not.toContain("return-foreground-node-lease");
+    expect(sent).not.toContain("retire-foreground-node-lease");
+    await expect(lease.returnWithHighWater(42n)).rejects.toBe(reason);
+    await expect(lease.retire()).rejects.toBe(reason);
   });
 });
 
@@ -596,6 +608,7 @@ describe("browser SharedWorker realm identity", () => {
     const runtime = {
       connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
       onPeerTransportWork: () => () => undefined,
+      onLocalSettlementChange: () => () => undefined,
       progressPeerTransport: async () => undefined,
       retirePeerTransport: async () => undefined,
       reportRemoteServerTransportError: vi.fn(),
@@ -807,6 +820,7 @@ describe("browser SharedWorker realm identity", () => {
     const runtime = {
       connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
       onPeerTransportWork: () => () => undefined,
+      onLocalSettlementChange: () => () => undefined,
       progressPeerTransport: async () => undefined,
       retirePeerTransport: async () => undefined,
       reportRemoteServerTransportError: vi.fn(),
@@ -998,5 +1012,45 @@ describe("browser SharedWorker realm identity", () => {
 
     expect(current).not.toBe(next);
     expect(current).toContain('"protocolVersion":"jazz-shared-runtime-v2"');
+  });
+});
+
+describe("broker SharedWorker construction", () => {
+  it("has exactly one bundler-visible broker worker construction site (#3801)", async () => {
+    // webpack 5 emits one worker chunk, with its own URL, per
+    // `new (Shared)Worker(new URL(..., import.meta.url))` expression. The
+    // foreground lease and the runtime connection must share one SharedWorker
+    // realm (keyed by URL + name), so a second construction site silently
+    // splits them and the runtime never starts under webpack.
+    const { readdir, readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const srcRoot = fileURLToPath(new URL("../..", import.meta.url));
+    const constructionSite = /new\s+(?:Shared)?Worker\s*\(\s*new\s+URL\s*\(\s*["'`]([^"'`]+)["'`]/g;
+
+    const sites: string[] = [];
+    // Walk by hand so dot-directories are never entered: concurrent tests
+    // create and delete scratch roots under src/.test-tmp, and a recursive
+    // readdir racing with them fails with ENOENT.
+    const pending = [srcRoot];
+    while (pending.length > 0) {
+      const dir = pending.pop()!;
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        if (entry.name.startsWith(".")) continue;
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          pending.push(path);
+          continue;
+        }
+        if (!entry.isFile() || !/\.(?:ts|tsx|js|mjs)$/.test(entry.name)) continue;
+        if (/\.test\.|\.spec\./.test(entry.name)) continue;
+        const source = await readFile(path, "utf8");
+        for (const match of source.matchAll(constructionSite)) {
+          if (match[1]!.includes("jazz-broker-worker")) sites.push(path);
+        }
+      }
+    }
+
+    expect(sites).toEqual([expect.stringMatching(/browser-shared-worker-connection\.ts$/)]);
   });
 });

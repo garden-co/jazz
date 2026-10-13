@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { RootProvider } from "fumadocs-ui/provider/next";
 import { Analytics } from "@vercel/analytics/next";
+import "@garden-co/design/jazz/fonts.css";
 import "./global.css";
 
 export const metadata: Metadata = {
@@ -26,7 +27,8 @@ export default function Layout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" suppressHydrationWarning>
       <body className="flex min-h-screen flex-col">
-        <RootProvider>{children}</RootProvider>
+        {/* Site search is the Astryx command palette in the top nav. */}
+        <RootProvider search={{ enabled: false }}>{children}</RootProvider>
         <Analytics />
       </body>
     </html>

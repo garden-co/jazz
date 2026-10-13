@@ -1,6 +1,6 @@
 //! Small active core realistic benchmark slice.
 //!
-//! This intentionally exercises `jazz::db::Db<MemoryStorage>` directly, without
+//! This intentionally exercises `jazz::db::Db` directly, without
 //! the legacy `RuntimeCore`, `SchemaManager`, or `SyncManager` stack.
 
 #![recursion_limit = "256"]
@@ -21,8 +21,8 @@ mod schema_fixture;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent, WireTransportAdapter, block_on,
+    Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent, WireTransportAdapter,
+    block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage};
@@ -34,15 +34,12 @@ use jazz::tools::{
     ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, Value as PublicValue,
 };
 use jazz::tx::DurabilityTier;
-use jazz::wire::{
-    FEATURE_SESSION_FRAME, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError,
-    WIRE_PROTOCOL_VERSION, WireSession, WireTransport,
-};
+use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireSession, WireTransport};
 use jazz_storage_rocksdb::RocksDbStorage;
 use tempfile::TempDir;
 
-type BenchDb = Db<MemoryStorage>;
-type RocksBenchDb = Db<RocksDbStorage>;
+type BenchDb = Db;
+type RocksBenchDb = Db;
 
 fn author() -> AuthorSubject {
     schema_fixture::account_author_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
@@ -251,7 +248,7 @@ fn open_db_with_storage<S>(
     schema: JazzSchema,
     storage: impl FnOnce(&[&str]) -> S,
     context: &str,
-) -> Db<S>
+) -> Db
 where
     S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
@@ -331,7 +328,7 @@ fn byte_duplex_with_session(
         epoch,
         identity: Some(identity),
     };
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME | FEATURE_STRUCTURED_ERRORS;
+    let features = 0;
     (
         Box::new(WireTransportAdapter::new(
             left_transport,
@@ -350,9 +347,7 @@ fn byte_duplex_with_session(
 
 fn global_subscribe_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::Full,
+        tier: jazz::db::ReadTier::Remote,
         include_deleted: false,
         ..ReadOpts::default()
     }
@@ -1273,7 +1268,6 @@ struct R3OpenBreakdown {
     validate_current_rows: Duration,
     recover_global_times: Duration,
     recover_pending_and_rejected: Duration,
-    recover_unclean_close: Duration,
     recover_known_state: Duration,
     rebuild_ahead_current: Duration,
     finalize_catalogue: Duration,
@@ -1429,7 +1423,6 @@ fn open_rocks_db_with_phases(
                 validate_current_rows: receipt.validate_current_rows,
                 recover_global_times: receipt.recover_global_times,
                 recover_pending_and_rejected: receipt.recover_pending_and_rejected,
-                recover_unclean_close: receipt.recover_unclean_close,
                 recover_known_state: receipt.recover_known_state,
                 rebuild_ahead_current: receipt.rebuild_ahead_current,
                 finalize_catalogue: receipt.finalize_catalogue,
@@ -1597,10 +1590,6 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
                     "recover_pending_and_rejected_p50_us": median_open_us(
                         &samples,
                         |receipt| receipt.recover_pending_and_rejected,
-                    ),
-                    "recover_unclean_close_p50_us": median_open_us(
-                        &samples,
-                        |receipt| receipt.recover_unclean_close,
                     ),
                     "recover_known_state_p50_us": median_open_us(
                         &samples,

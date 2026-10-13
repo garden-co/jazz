@@ -44,12 +44,15 @@ export function normalizeRuntimeSchema(schema: unknown): WasmSchema {
  * Uint8Array defaults become regular arrays, and BigInt defaults become
  * decimal strings.
  */
-export function runtimeSchemaJsonReplacer(_key: string, value: unknown): unknown {
+export function runtimeSchemaJsonReplacer(key: string, value: unknown): unknown {
   if (value instanceof Uint8Array) {
     return Array.from(value);
   }
   if (typeof value === "bigint") {
     return value.toString();
+  }
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    throw new Error(`Cannot serialize non-finite number in schema JSON (key "${key}"): ${value}.`);
   }
   return value;
 }

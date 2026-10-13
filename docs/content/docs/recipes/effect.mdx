@@ -1,0 +1,119 @@
+---
+title: Effect
+description: Use Jazz from Effect v4 programs, in the browser and on the server.
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+`jazz-tools/effect` exposes Jazz as an [Effect](https://effect.website) v4 service. Reads and writes are
+Effects with typed errors, live queries are Streams, and transactions commit or roll back together with
+the Effect that runs inside them.
+
+<Callout type="info">
+  The bindings target Effect v4 (`effect@4.0.0-rc.118` or later). Install it next to Jazz: `pnpm add
+  effect@rc`.
+</Callout>
+
+## The `Jazz` service
+
+`Jazz.layer(config)` opens a database for the lifetime of the layer and shuts it down when the layer's
+scope closes. It takes the same config as `createDb`. If you already own a `Db`, use
+`Jazz.layerDb(db)` instead.
+
+```ts
+import { Effect, Stream } from "effect";
+import { Jazz } from "jazz-tools/effect";
+import { app } from "./schema";
+
+const program = Effect.gen(function* () {
+  const jazz = yield* Jazz;
+
+  const todo = yield* jazz.insert(app.todos, { title: "Buy milk", done: false });
+  yield* jazz.update(app.todos, todo.id, { done: true });
+
+  const open = yield* jazz.all(app.todos.where({ done: false }));
+  const first = yield* jazz.one(app.todos); // Option<Todo>
+});
+
+program.pipe(Effect.provide(Jazz.layer(config)), Effect.runPromise);
+```
+
+## Writes and durability
+
+A write Effect completes once the write is applied locally, like the core API. Pass `wait` to also wait
+until the write is durable at a tier:
+
+```ts
+const shipIt = Effect.gen(function* () {
+  const jazz = yield* Jazz;
+  yield* jazz.insert(app.todos, { title: "Ship it", done: false }, { wait: "global" });
+});
+```
+
+Waiting writes fail with `JazzWriteRejected` if the server rejects them, for example because of
+permissions. Every other failure is a `JazzError`. Rejections of writes nobody waited for arrive on
+`jazz.mutationErrors`, a Stream.
+
+## Live queries
+
+`jazz.stream(query)` emits the complete result when it starts and again whenever it changes. Every
+emission is a full snapshot, so a slow consumer only sees the newest one. The subscription is removed when
+the Stream ends or its fiber is interrupted.
+
+```ts
+const logOpenCount = Effect.gen(function* () {
+  const jazz = yield* Jazz;
+  yield* jazz
+    .stream(app.todos.where({ done: false }))
+    .pipe(Stream.runForEach((todos) => Effect.log(`${todos.length} open`)));
+});
+```
+
+## Transactions
+
+`jazz.transaction(tx => ...)` commits when the inner Effect succeeds and rolls back when it fails, dies
+or is interrupted. Its typed errors pass through unchanged. Once the inner Effect has succeeded the commit
+is kept, even if the fiber is interrupted while it waits for durability.
+
+```ts
+const addGroceries = Effect.gen(function* () {
+  const jazz = yield* Jazz;
+  yield* jazz.transaction((tx) =>
+    Effect.gen(function* () {
+      const project = yield* tx.insert(app.projects, { name: "Groceries" });
+      yield* tx.insert(app.todos, { title: "Milk", done: false, projectId: project.id });
+    }),
+  );
+});
+```
+
+`jazz.exclusiveTransaction` also waits for the authority's verdict and fails with `JazzWriteRejected` on a
+conflict, so it composes with `Effect.retry`.
+
+## On the server
+
+`jazz-tools/effect/backend` wraps `createJazzSession`. `JazzBackend` does not provide `Jazz` on its own:
+each handler chooses whose permissions it acts with, usually the requesting user's.
+
+```ts
+import { Effect } from "effect";
+import { Jazz, JazzBackend } from "jazz-tools/effect/backend";
+
+const listTodos = Effect.gen(function* () {
+  const jazz = yield* Jazz;
+  return yield* jazz.all(app.todos);
+});
+
+// With a request object that carries the user's Authorization header:
+listTodos.pipe(JazzBackend.forRequest(request));
+
+// Inside an `effect/http` handler, from the current HttpServerRequest:
+listTodos.pipe(JazzBackend.forCurrentRequest());
+
+// With the backend's own authority:
+listTodos.pipe(JazzBackend.asAuthority);
+```
+
+Provide `JazzBackend.layer(sessionConfig)` once for the whole server. Because handlers only depend on
+`Jazz`, the same code runs in the browser against `Jazz.layer`, and in tests against an in-memory
+database.

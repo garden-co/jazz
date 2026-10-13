@@ -136,6 +136,8 @@ function encodeBranchViewBase(base: BranchViewBase | undefined): WireBranchViewB
  *
  * Works with common server frameworks (Express, Fastify, Hono, Web Request wrappers)
  * as long as Authorization headers are exposed through `header(name)` or `headers`.
+ * Plain-record `headers` keys are matched case-insensitively; conflicting case variants
+ * are rejected. Web `Headers` objects retain their native lookup behavior.
  */
 export interface RequestLike {
   header?: (name: string) => string | undefined;
@@ -349,59 +351,68 @@ export interface AuthConfig {
  * - `global`: Authorized and durably accepted by Core
  */
 export type DurabilityTier = "local" | "global";
-/** Product-facing policy for reads. It deliberately does not change write durability. */
+/**
+ * Product-facing policy for reads. It deliberately does not change write durability.
+ *
+ * There are two tiers: `LocalFirst` and `Remote`. A local-first read can also
+ * wait a bounded time for the server on its initial load; see
+ * {@link QueryExecutionOptions.firstLoadRemoteWaitMs}.
+ */
 export const ReadTier = {
-  /** Cached local knowledge and pending writes; still syncs while connected. */
+  /**
+   * Cached local knowledge and pending writes; still syncs while connected.
+   * Set `firstLoadRemoteWaitMs` to let the initial load wait for the server first.
+   */
   LocalFirst: "local-first",
   /** Current remote query scope, without pending local writes; waits offline. */
   Remote: "remote",
-  /**
-   * Local knowledge and pending writes, delivered immediately. Only when the
-   * local result is empty while the server is reachable (or still connecting)
-   * does the first delivery wait for the first remote answer. Offline,
-   * unconfigured, and failed connections deliver the local result at once.
-   */
-  LocalFirstUnlessEmpty: "local-first-unless-empty",
 } as const;
 export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
 
-/** @internal True for the local-first-unless-empty tier. */
-export function isLocalFirstUnlessEmptyTier(
-  tier: unknown,
-): tier is typeof ReadTier.LocalFirstUnlessEmpty {
-  return tier === ReadTier.LocalFirstUnlessEmpty;
-}
-
-const REMOVED_REMOTE_IF_POSSIBLE =
-  'The "remote-if-possible" tier was removed. Use ReadTier.LocalFirstUnlessEmpty, or ReadTier.Remote for server-confirmed reads.';
-
-function rejectRemovedReadTier(tier: unknown): void {
-  if (tier === "edge") {
-    throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
+/**
+ * @internal A local-first read's server wait, or `undefined` for none.
+ * Throws for a value that is not a non-negative number of milliseconds.
+ */
+export function normalizeFirstLoadRemoteWaitMs(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error("firstLoadRemoteWaitMs must be a non-negative number of milliseconds.");
   }
-  if (tier === "remote-if-possible") throw new Error(REMOVED_REMOTE_IF_POSSIBLE);
+  const ms = Math.floor(value);
+  return ms > 0 ? ms : undefined;
 }
-/** @deprecated Read APIs also accept these legacy durability names unchanged. */
-export type LegacyReadDurabilityTier = DurabilityTier;
-export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;
-/** @internal Inspector-only tier that never subscribes upstream. */
-type InternalQueryReadTier = QueryReadTier | "local-only";
+
+// Keep removed names here solely to provide migration guidance at the public API boundary.
+const REMOVED_READ_TIERS: Readonly<Record<string, string>> = {
+  edge: 'The "edge" tier was removed. Use ReadTier.Remote ("remote") for server-confirmed reads.',
+  "remote-if-possible":
+    'The "remote-if-possible" tier was removed. Use ReadTier.LocalFirst with firstLoadRemoteWaitMs, or ReadTier.Remote for server-confirmed reads.',
+  "local-first-unless-empty":
+    'The "local-first-unless-empty" tier was removed. Use ReadTier.LocalFirst with firstLoadRemoteWaitMs.',
+  local:
+    'The "local" read tier was removed. Use ReadTier.LocalFirst ("local-first"); write waits keep "local".',
+  global:
+    'The "global" read tier was removed. Use ReadTier.Remote ("remote"); write waits keep "global".',
+  core: 'The "core" read tier was removed. Use ReadTier.Remote ("remote").',
+};
+
 /**
- * Controls when a write is visible to subscriptions.
- *
- * - With `"immediate"`, your own local writes appear in the subscription while it's still waiting for
- * the tier to confirm the initial snapshot (only once the subscription has settled at least once).
- * - With `"deferred"`, all delivery is held until the tier confirms.
- * Default is `"immediate"`.
+ * @internal Throw for anything but a product read tier. Read options accept
+ * only `ReadTier.LocalFirst` and `ReadTier.Remote`; removed names get a
+ * migration message.
  */
-export type LocalUpdatesMode = "immediate" | "deferred";
+export function rejectRemovedReadTier(tier: unknown): void {
+  if (tier === undefined || tier === null || isPublicQueryReadTier(tier)) return;
+  const removed = typeof tier === "string" ? REMOVED_READ_TIERS[tier] : undefined;
+  throw new Error(
+    removed ?? `Unknown read tier ${JSON.stringify(tier)}; expected "local-first" or "remote".`,
+  );
+}
 /**
- * Controls where the subscription reads data from.
- *
- * - With `"full"`, the subscription is sent to upstream servers, which push matching data back.
- * - With `"local-only"`, only local storage is queried and no server communication happens.
+ * @internal Tiers internal callers may pass: the product tiers and the
+ * inspector-only tier that never subscribes upstream.
  */
-export type QueryPropagation = "full" | "local-only";
+export type InternalReadTier = ReadTier | "local-only";
 /**
  * Whether this query should be shown in the inspector.
  * Useful for helpers and framework internals that create subscriptions
@@ -426,12 +437,47 @@ export interface BranchView {
   base?: BranchViewBase;
 }
 
-export interface QueryExecutionOptions {
-  /** Product read tier. @deprecated DurabilityTier values remain accepted with their old meaning. */
-  tier?: QueryReadTier;
+/**
+ * The read tier and the options only that tier accepts: `tier` discriminates
+ * the shape, so a first-load wait on a `ReadTier.Remote` read does not type-check.
+ */
+export type ReadTierOptions =
+  | {
+      /**
+       * Read tier: {@link ReadTier.LocalFirst} or {@link ReadTier.Remote}.
+       *
+       * Reads default to local-first in browsers and React Native, and without a
+       * configured server; other environments with a server default to remote.
+       */
+      tier?: typeof ReadTier.LocalFirst;
+      /**
+       * How long the initial load may wait for the server's answer, in
+       * milliseconds. Defaults to `0`, which shows local data at once.
+       *
+       * While the client is online (connected, or its connection attempt is still
+       * young), a subscription's first callback, or a one-shot read, waits up to
+       * this long for the server's answer and then shows it; if the server has not
+       * answered in time, it shows the local result. Offline, without a server,
+       * or after `db.disconnect()` it never waits. Later changes behave as usual
+       * for local-first: local writes show immediately and remote changes as
+       * they arrive.
+       */
+      firstLoadRemoteWaitMs?: number;
+    }
+  | {
+      /** Read tier: `ReadTier.LocalFirst` or `ReadTier.Remote`. */
+      tier: typeof ReadTier.Remote;
+      /**
+       * Only local-first reads wait for the server on their first load; a
+       * remote read always waits for the server. Ignored at runtime if given.
+       */
+      firstLoadRemoteWaitMs?: never;
+    };
+
+export type QueryExecutionOptions = ReadTierOptions & {
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
-}
+};
 
 /**
  * Copy the product-facing subset of query options before crossing a public
@@ -448,37 +494,33 @@ export function publicQueryExecutionOptions(
   if (!options) return undefined;
   const candidate = options as { tier?: unknown; branch?: unknown };
   rejectRemovedReadTier(candidate.tier);
-  const result: QueryExecutionOptions = {};
+  const result: InternalQueryExecutionOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) result.tier = candidate.tier;
+  const firstLoadRemoteWaitMs = normalizeFirstLoadRemoteWaitMs(
+    (candidate as { firstLoadRemoteWaitMs?: unknown }).firstLoadRemoteWaitMs,
+  );
+  if (firstLoadRemoteWaitMs !== undefined) result.firstLoadRemoteWaitMs = firstLoadRemoteWaitMs;
   if (candidate.branch !== undefined) result.branch = candidate.branch as BranchView;
-  return result;
+  // The runtime ignores a Remote read's wait; the types reject it.
+  return result as QueryExecutionOptions;
 }
 
 /** @internal `local-only` is deliberately excluded from the product surface. */
-export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
-  return (
-    value === ReadTier.LocalFirst ||
-    value === ReadTier.Remote ||
-    value === ReadTier.LocalFirstUnlessEmpty ||
-    value === "local" ||
-    value === "global"
-  );
+export function isPublicQueryReadTier(value: unknown): value is ReadTier {
+  return value === ReadTier.LocalFirst || value === ReadTier.Remote;
 }
 
 /** @internal Low-level read controls that are not part of the product-facing query API. */
 export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> & {
-  tier?: InternalQueryReadTier;
-  localUpdates?: LocalUpdatesMode;
-  propagation?: QueryPropagation;
+  tier?: InternalReadTier;
   visibility?: QueryVisibility;
   openTransactionId?: OpenTransactionId;
-  runtimeSettledTier?: DurabilityTier | null;
 };
 
 export interface ResolvedQueryExecutionOptions {
-  tier: RuntimeReadTier;
-  localUpdates: LocalUpdatesMode;
-  propagation: QueryPropagation;
+  tier: InternalReadTier;
+  /** Server wait of a local-first read; absent when it does not wait. */
+  firstLoadRemoteWaitMs?: number;
   visibility: QueryVisibility;
   branch?: BranchView;
 }
@@ -604,56 +646,36 @@ export interface ConnectRuntimeOptions {
 
 type QueryExecutionDefaultsContext = {
   serverUrl?: string;
-  defaultDurabilityTier?: DurabilityTier;
 };
-
-export function resolveDefaultDurabilityTier(
-  context: QueryExecutionDefaultsContext,
-): DurabilityTier {
-  if (context.defaultDurabilityTier) {
-    return context.defaultDurabilityTier;
-  }
-
-  if (isBrowserRuntime()) {
-    return "local";
-  }
-
-  // In non-browser environments, default to Core confirmation when connected to a server.
-  // For local/in-memory runtimes without a server, keep local semantics.
-  return context.serverUrl ? "global" : "local";
-}
 
 export function resolveEffectiveQueryExecutionOptions(
   context: QueryExecutionDefaultsContext,
   options?: InternalQueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
-  const selectedTier = options?.tier ?? resolveDefaultDurabilityTier(context);
+  const tier =
+    options?.tier ??
+    (context.serverUrl && !isBrowserRuntime() && !isReactNativeRuntime()
+      ? ReadTier.Remote
+      : ReadTier.LocalFirst);
+  if (tier !== "local-only") rejectRemovedReadTier(tier);
+  const firstLoadRemoteWaitMs =
+    tier === ReadTier.LocalFirst
+      ? normalizeFirstLoadRemoteWaitMs(options?.firstLoadRemoteWaitMs)
+      : undefined;
   return {
-    tier: resolveReadTier(selectedTier),
-    localUpdates:
-      options?.localUpdates ?? (selectedTier === ReadTier.Remote ? "deferred" : "immediate"),
-    propagation: selectedTier === "local-only" ? "local-only" : (options?.propagation ?? "full"),
+    tier,
+    ...(firstLoadRemoteWaitMs !== undefined ? { firstLoadRemoteWaitMs } : {}),
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
   };
 }
 
-/**
- * @internal Tier names the runtime bindings accept for reads. The core Db owns
- * the local-first-unless-empty opening gate, so that tier passes through.
- */
-export type RuntimeReadTier = DurabilityTier | "local-first-unless-empty";
-
-/** @internal Lower product read choices to the runtime's read tiers. */
-export function resolveReadTier(tier: InternalQueryReadTier): RuntimeReadTier {
-  rejectRemovedReadTier(tier);
-  if (tier === "local-only") return "local";
-  if (isLocalFirstUnlessEmptyTier(tier)) return "local-first-unless-empty";
-  return tier === ReadTier.LocalFirst ? "local" : tier === ReadTier.Remote ? "global" : tier;
-}
-
 function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof document !== "undefined";
+}
+
+function isReactNativeRuntime(): boolean {
+  return typeof navigator !== "undefined" && navigator.product === "ReactNative";
 }
 
 function getScheduler(): (task: () => void) => void {
@@ -670,10 +692,11 @@ function getScheduler(): (task: () => void) => void {
   return (task: () => void) => queueMicrotask(task);
 }
 
-function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): string | undefined {
+function encodeQueryExecutionOptions(
+  options: ResolvedInternalQueryExecutionOptions,
+): string | undefined {
   const payload: {
-    propagation?: QueryPropagation;
-    local_updates?: LocalUpdatesMode;
+    first_load_remote_wait_ms?: number;
     transaction_id?: string;
     read_view?: {
       source: {
@@ -686,14 +709,11 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
       };
     };
   } = {};
-  if ((options.propagation ?? "full") !== "full") {
-    payload.propagation = options.propagation;
-  }
-  if ((options.localUpdates ?? "immediate") !== "immediate") {
-    payload.local_updates = options.localUpdates;
-  }
   if (options.openTransactionId) {
     payload.transaction_id = options.openTransactionId;
+  }
+  if (options.firstLoadRemoteWaitMs !== undefined && options.firstLoadRemoteWaitMs > 0) {
+    payload.first_load_remote_wait_ms = options.firstLoadRemoteWaitMs;
   }
   if (options.branch) {
     const base = options.branch.base;
@@ -707,12 +727,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     };
   }
 
-  if (
-    !payload.propagation &&
-    !payload.local_updates &&
-    !payload.transaction_id &&
-    !payload.read_view
-  ) {
+  if (!payload.transaction_id && !payload.first_load_remote_wait_ms && !payload.read_view) {
     return undefined;
   }
 
@@ -818,6 +833,18 @@ function copyWriteWaitReadiness<T extends WriteHandle<unknown, unknown>>(
   return target;
 }
 
+/** Validate JavaScript callers before passing a wait tier to the runtime. */
+function resolveWriteWaitTier(tier: unknown): DurabilityTier {
+  if (tier === "local" || tier === "global") return tier;
+  const message =
+    tier === "edge"
+      ? 'The "edge" write tier was removed. Use wait({ tier: "global" }) instead.'
+      : `Unknown wait tier ${JSON.stringify(tier)}; expected "local" or "global".`;
+  // Choosing a wait tier happens after applying the write. Rejecting the wait
+  // must not be mistaken for a rejected write and prompt a duplicate insert.
+  throw new TypeError(`${message} The write was already applied: do not retry it.`);
+}
+
 /**
  * Returned by upsert, update, delete, and transaction operations.
  * Allows waiting for the write to be persisted at a given durability tier.
@@ -842,8 +869,9 @@ export class WriteHandle<T = void, WaitResult = void> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<WaitResult> {
-    const ready = writeWaitReadiness.get(this)?.(options.tier);
-    return this.#client.waitForTransaction(this.txId, options.tier, ready) as Promise<WaitResult>;
+    const tier = resolveWriteWaitTier(options.tier);
+    const ready = writeWaitReadiness.get(this)?.(tier);
+    return this.#client.waitForTransaction(this.txId, tier, ready) as Promise<WaitResult>;
   }
 
   protected client(): JazzClient {
@@ -948,7 +976,6 @@ export class JazzClient {
   private scheduler: (task: () => void) => void;
   private context: AppContext;
   private resolvedSession: Session | null;
-  private defaultDurabilityTier: DurabilityTier;
   private shutdownPromise: Promise<void> | null = null;
   private discarded = false;
   /** Facade-owned subscription releases, fenced against terminal reentrancy. */
@@ -1007,13 +1034,11 @@ export class JazzClient {
   private constructor(
     runtime: Runtime,
     context: AppContext,
-    defaultDurabilityTier: DurabilityTier,
     runtimeOptions?: ConnectRuntimeOptions,
   ) {
     this.runtime = runtime;
     this.scheduler = getScheduler();
     this.context = context;
-    this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = this.resolveSessionFromContext();
 
     if (runtimeOptions?.onAuthFailure) {
@@ -1042,7 +1067,7 @@ export class JazzClient {
     context: AppContext,
     runtimeOptions?: ConnectRuntimeOptions,
   ): JazzClient {
-    return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
+    return new JazzClient(runtime, context, runtimeOptions);
   }
 
   beginTransaction(
@@ -1275,7 +1300,7 @@ export class JazzClient {
     return this;
   }
 
-  private updateAuthSnapshot(update: AuthUpdate): void {
+  private updateAuthSnapshot(update: AuthUpdate, updateRuntime = true): void {
     const previousJwtToken = this.context.jwtToken;
     const previousCookieSession = this.context.cookieSession;
     const previousTrustedReservedSession = getTrustedReservedSession(this.context);
@@ -1293,7 +1318,9 @@ export class JazzClient {
 
     try {
       this.resolvedSession = this.resolveSessionFromContext();
-      this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+      if (updateRuntime) {
+        this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+      }
     } catch (error) {
       this.context.jwtToken = previousJwtToken;
       this.context.cookieSession = previousCookieSession;
@@ -1305,6 +1332,11 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.updateAuthSnapshot({ mode: "bearer", jwtToken });
+  }
+
+  /** @internal Accept an auth update already applied by the owning connection. */
+  acceptAuthUpdate(update: AuthUpdate): void {
+    this.updateAuthSnapshot(update, false);
   }
 
   /** @internal Update a token minted by a dedicated first-party reserved auth flow. */
@@ -1323,10 +1355,7 @@ export class JazzClient {
   private normalizeQueryExecutionOptions(
     options?: InternalQueryExecutionOptions,
   ): ResolvedInternalQueryExecutionOptions {
-    const resolved = resolveEffectiveQueryExecutionOptions(
-      { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
-      options,
-    );
+    const resolved = resolveEffectiveQueryExecutionOptions(this.context, options);
     if (!options?.openTransactionId) {
       return resolved;
     }
@@ -1675,9 +1704,7 @@ export class JazzClient {
     const results = await this.runtime.query(
       query,
       sessionJson,
-      options?.runtimeSettledTier === null
-        ? undefined
-        : (options?.runtimeSettledTier ?? normalizedOptions.tier),
+      normalizedOptions.tier,
       optionsJson,
     );
     return results as Row[];
@@ -1743,16 +1770,14 @@ export class JazzClient {
     openTransactionId?: OpenTransactionId,
     branch?: BranchView,
   ): MutationResult {
-    if (openTransactionId || branch) {
-      throw new Error(
-        "Partial-value updates are not yet supported inside transactions or branch views.",
-      );
+    if (branch) {
+      throw new Error("Partial-value updates are not yet supported in branch views.");
     }
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      undefined,
+      openTransactionId,
       updatedAt,
     );
     if (!this.runtime.updateLargeValues) {

@@ -59,7 +59,10 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
   await openBackup(page);
   await page.getByLabel("Restore from recovery phrase").fill("not a recovery phrase");
   await page.getByRole("button", { name: "Restore", exact: true }).click();
-  await expect(page.getByRole("alert")).toBeVisible({ timeout: TIMEOUT });
+  // The session error above the backup panel is also an .alert-error, so match inside the panel only.
+  await expect(page.locator(".auth-backup").getByRole("alert")).toBeVisible({
+    timeout: TIMEOUT,
+  });
   expect(await retainedInput.evaluate((input) => input.isConnected)).toBe(true);
   await waitForApp(page);
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });

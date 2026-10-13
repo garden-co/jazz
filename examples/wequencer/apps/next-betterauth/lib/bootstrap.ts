@@ -7,7 +7,11 @@ export async function ensureProfile(accountId: string, displayName: string) {
   const author = accountId;
   const db = (await authJazzClient()).db;
   const existing = await db.one(app.profiles.where({ author }));
-  if (existing) return existing;
+  if (existing) {
+    if (existing.displayName !== displayName)
+      await db.update(app.profiles, existing.id, { displayName }).wait({ tier: "global" });
+    return existing;
+  }
   try {
     return await db
       .insert(app.profiles, { author, displayName }, { id: profileId(author) })

@@ -1,3 +1,4 @@
+import { DbAccessContext } from "./db-access-context.js";
 import { describe, expect, it, vi } from "vitest";
 import { Db, type DbConfig, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -28,7 +29,7 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
 class TestDb extends Db {
   constructor(
     private readonly testClient: JazzClient,
-    private readonly context: { session?: Session; attribution?: string } | null = null,
+    private readonly context: DbAccessContext | null = null,
   ) {
     super({ appId: "persisted-db-test" }, new TestRuntimeSource(testClient));
   }
@@ -37,10 +38,7 @@ class TestDb extends Db {
     return this.testClient;
   }
 
-  protected override getRuntimeOperationContext(): {
-    session?: Session;
-    attribution?: string;
-  } | null {
+  protected override getAccessContext(): DbAccessContext | null {
     return this.context;
   }
 }
@@ -237,10 +235,10 @@ describe("Db write handles", () => {
       delete: deleteRow,
     };
 
-    const db = new TestDb(runtimeClient as unknown as JazzClient, {
-      session,
-      attribution: "alice@writer",
-    });
+    const db = new TestDb(
+      runtimeClient as unknown as JazzClient,
+      DbAccessContext.forAttribution("alice@writer", session),
+    );
 
     const inserted = db.insert(table, { title: "With session", done: true });
     const updated = db.update(table, "todo-2", { done: false });

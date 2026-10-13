@@ -4,6 +4,7 @@ import {
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
 import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
+import { installJsonSchemaValidator } from "./json-schema-validator.js";
 
 /** WASM-only loader, deliberately outside the shared client implementation. */
 export type WasmModule = typeof import("jazz-wasm");
@@ -34,6 +35,7 @@ async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
 }
 
 let wasmInitializationTail: Promise<void> = Promise.resolve();
+let initializedWasmUrl: string | undefined;
 
 /** Load and initialize the browser/Node WASM runtime. */
 export function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
@@ -50,8 +52,7 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
   const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);
   if (syncInitInput) {
     wasmModule.initSync(syncInitInput);
-    assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
-    return wasmModule;
+    return readyWasmModule(wasmModule);
   }
 
   let nodeInitDone = false;
@@ -75,11 +76,24 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
     else await wasmModule.default();
   }
 
-  assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
+  return readyWasmModule(wasmModule);
+}
+
+function readyWasmModule(wasmModule: any): WasmModule {
+  assertNativeArtifactCompatibility(wasmModule, "WASM", [
+    "initSync",
+    "WasmDb",
+    "setJsonSchemaValidator",
+  ]);
+  installJsonSchemaValidator(wasmModule);
   return wasmModule;
 }
 
 async function initializeWasmFromUrl(wasmModule: any, wasmUrl: string): Promise<void> {
+  // The initialization tail serializes callers within this realm. Reuse a
+  // successful URL load across account-manager and database initialization.
+  if (initializedWasmUrl === wasmUrl) return;
+
   const response = await fetch(wasmUrl);
   if (!response.ok) {
     throw new Error(
@@ -100,4 +114,5 @@ async function initializeWasmFromUrl(wasmModule: any, wasmUrl: string): Promise<
     );
   }
   await wasmModule.default({ module_or_path: bytes });
+  initializedWasmUrl = wasmUrl;
 }

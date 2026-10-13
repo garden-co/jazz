@@ -17,6 +17,11 @@ on:
         required: false
         default: "release"
         type: string
+      deployment-url:
+        description: "Staged deployment URL from Stage Inspector production (empty: resolve by branch and SHA)"
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       deploy-branch:
@@ -26,6 +31,11 @@ on:
       deploy-sha:
         description: "GitHub source commit SHA to promote"
         required: true
+        type: string
+      deployment-url:
+        description: "Staged deployment to promote. Empty resolves it from Vercel by branch and SHA."
+        required: false
+        default: ""
         type: string
 jobs:
   promote-inspector-production:
@@ -61,10 +71,11 @@ jobs:
 
       - name: Resolve staged inspector deployment
         id: inspector-deployment
+        if: inputs.deployment-url == ''
         run: GITHUB_SHA="${DEPLOY_SHA}" node dev/scripts/resolve-inspector-deployment.mjs
 
       - name: Verify or promote staged inspector deployment
         env:
-          DEPLOYMENT_URL: ${{ steps.inspector-deployment.outputs.deployment_url }}
+          DEPLOYMENT_URL: ${{ inputs.deployment-url || steps.inspector-deployment.outputs.deployment_url }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || false }}
         run: node dev/scripts/promote-inspector-deployment.mjs

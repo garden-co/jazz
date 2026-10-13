@@ -15,7 +15,7 @@ export const pricingMeters = [
     name: "Compute",
     price: "$0.039",
     unit: "per hour of 2GB RAM instance",
-    note: "Auto-scaling available soon",
+    note: "Auto-scaling available soon.",
     included: "1GB RAM instance always included",
   },
   {

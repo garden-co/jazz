@@ -394,6 +394,91 @@ async fn user_enum_nested_in_layout_enum_normalizes_immediately()
     Ok(())
 }
 
+/// Registering the cases of a new projection target cannot change what any
+/// existing reader of the table produced, so it must keep their retained
+/// hydration results. Queries that each register their own target used to
+/// throw away every memo over the table on each registration (#3797).
+#[futures_test::test]
+async fn registering_a_new_projection_target_keeps_hydration_memos_over_the_table()
+-> Result<(), Box<dyn std::error::Error>> {
+    let schema = enum_schema();
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let mut database = Database::new(schema, storage).await?;
+    let label = |source: &str| {
+        [
+            ProjectField::named("id"),
+            ProjectField::renamed(source, "label"),
+        ]
+    };
+    database.define_variant_projection(
+        "entries",
+        "labels",
+        RecordDescriptor::new([("id", ColumnType::U64), ("label", ColumnType::String)]),
+    )?;
+    for (tag, source) in [(1, "body"), (2, "url"), (3, "body"), (4, "url")] {
+        database.register_variant_case("entries", "labels", tag, label(source))?;
+    }
+    let mut batch = database.open_batch();
+    batch.insert(
+        "entries",
+        variant_row(
+            1,
+            &[Value::U64(1), Value::U64(7), Value::String("draft".into())],
+        ),
+    );
+    batch.insert(
+        "entries",
+        variant_row(
+            2,
+            &[
+                Value::U64(2),
+                Value::U64(7),
+                Value::String("/cover.png".into()),
+            ],
+        ),
+    );
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
+
+    let labels = GraphBuilder::variant_source("entries", "labels");
+    let first = database.subscribe_one_sink(labels.clone()).await?;
+    let expected = first.recv()?;
+    assert_eq!(expected.deltas.len(), 2);
+    let hydrated = database.runtime_stats();
+
+    database.define_variant_projection(
+        "entries",
+        "owners",
+        RecordDescriptor::new([("id", ColumnType::U64), ("owner", ColumnType::U64)]),
+    )?;
+    for tag in 1..=4 {
+        database.register_variant_case(
+            "entries",
+            "owners",
+            tag,
+            [ProjectField::named("id"), ProjectField::named("owner")],
+        )?;
+    }
+
+    let second = database.subscribe_one_sink(labels).await?;
+    assert_eq!(second.recv()?, expected);
+    let reused = database.runtime_stats();
+    assert_eq!(
+        reused.hydration_memo_computes, hydrated.hydration_memo_computes,
+        "a new projection target must not invalidate existing readers of the table"
+    );
+    assert!(reused.hydration_memo_hits > hydrated.hydration_memo_hits);
+
+    let owners = database
+        .subscribe_one_sink(GraphBuilder::variant_source("entries", "owners"))
+        .await?;
+    assert_eq!(owners.recv()?.deltas.len(), 2);
+    Ok(())
+}
+
 #[test]
 fn table_variant_tags_use_canonical_bounded_varints() {
     for (tag, expected_header_len) in [(0, 1), (127, 1), (128, 2), (16_383, 2), (16_384, 3)] {

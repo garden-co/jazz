@@ -4,8 +4,6 @@ description: Hosted and self-hosted database server configuration, app provision
 reviewedAt: "b29b48d1a"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
-
 ## Hosted database server
 
 Your app ID namespaces your data for storage and sync. Click below to generate one on the Jazz hosted cloud&hairsp;—&hairsp;you'll also get the secrets you need to deploy your schema and permissions later. Generated apps are unclaimed until you claim them in the dashboard, and unclaimed apps are automatically deleted after 14 days.
@@ -20,19 +18,30 @@ Your app ID namespaces your data for storage and sync. Click below to generate o
 
 `jazz-tools@alpha server <APP_ID>` currently supports:
 
-| Option                                  | Purpose                                                                                                                | Environment variable          | Default                   |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------- |
-| `<APP_ID>` (positional)                 | App namespace identifier (required)                                                                                    | -                             | -                         |
-| `-p, --port <PORT>`                     | Listen port                                                                                                            | -                             | `1625`                    |
-| `-d, --data-dir <DATA_DIR>`             | Persistent storage directory                                                                                           | -                             | `./data`                  |
-| `--in-memory`                           | Use in-memory storage instead of files; data is lost when the process exits                                            | -                             | off                       |
-| `--jwks-url <JWKS_URL>`                 | JWKS endpoint for external JWT validation                                                                              | `JAZZ_JWKS_URL`               | unset                     |
-| `--jwt-public-key <JWT_PUBLIC_KEY>`     | Single JWK JSON object or PEM public key for external JWT validation. Accepts inline contents or a path to a key file. | `JAZZ_JWT_PUBLIC_KEY`         | unset                     |
-| `--auth-cookie-name <AUTH_COOKIE_NAME>` | Cookie name to read for browser authentication during WebSocket upgrades                                               | `JAZZ_AUTH_COOKIE_NAME`       | unset                     |
-| `--allow-local-first-auth`              | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
-| `--backend-secret <BACKEND_SECRET>`     | Enable backend session impersonation                                                                                   | `JAZZ_BACKEND_SECRET`         | unset                     |
-| `--admin-secret <ADMIN_SECRET>`         | Required for `deploy` and schema catalogue reads. In development mode, structural schema auto-sync works without it.   | `JAZZ_ADMIN_SECRET`           | unset                     |
-| `--shutdown-timeout-secs <SECONDS>`     | Graceful shutdown network-drain timeout in seconds                                                                     | `JAZZ_SHUTDOWN_TIMEOUT_SECS`  | `30`                      |
+| Option                                  | Purpose                                                                                                                                         | Environment variable          | Default                   |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------- |
+| `<APP_ID>` (positional)                 | App namespace identifier (required)                                                                                                             | -                             | -                         |
+| `-p, --port <PORT>`                     | Listen port                                                                                                                                     | -                             | `1625`                    |
+| `-d, --data-dir <DATA_DIR>`             | Persistent storage directory                                                                                                                    | -                             | `./data`                  |
+| `--in-memory`                           | Use in-memory storage instead of files; data is lost when the process exits                                                                     | -                             | off                       |
+| `--jwks-url <JWKS_URL>`                 | JWKS endpoint for external JWT validation                                                                                                       | `JAZZ_JWKS_URL`               | unset                     |
+| `--jwt-public-key <JWT_PUBLIC_KEY>`     | Single JWK JSON object or PEM public key for external JWT validation. Accepts inline contents or a path to a key file.                          | `JAZZ_JWT_PUBLIC_KEY`         | unset                     |
+| `--auth-cookie-name <AUTH_COOKIE_NAME>` | Cookie name to read for browser authentication during WebSocket upgrades                                                                        | `JAZZ_AUTH_COOKIE_NAME`       | unset                     |
+| `--allow-local-first-auth`              | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                         | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
+| `--backend-secret <BACKEND_SECRET>`     | Enable backend session impersonation                                                                                                            | `JAZZ_BACKEND_SECRET`         | unset                     |
+| `--admin-secret <ADMIN_SECRET>`         | Required for `deploy` and schema catalogue reads. In development mode, structural schema auto-sync works without it.                            | `JAZZ_ADMIN_SECRET`           | unset                     |
+| `--shutdown-timeout-secs <SECONDS>`     | Graceful shutdown network-drain timeout in seconds                                                                                              | `JAZZ_SHUTDOWN_TIMEOUT_SECS`  | `30`                      |
+| `--diagnostics-listen <ADDR>`           | Address of a listener serving `/debug/pprof/heap`, e.g. `0.0.0.0:6060`. Non-loopback addresses require `--diagnostics-token`.                   | `JAZZ_DIAGNOSTICS_LISTEN`     | unset                     |
+| `--diagnostics-token <TOKEN>`           | Bearer token the diagnostics listener requires (`Authorization: Bearer <TOKEN>`); a read-only scrape credential separate from the admin secret. | `JAZZ_DIAGNOSTICS_TOKEN`      | unset                     |
+
+On Linux, the server samples its heap, about once per 512 KiB allocated; set
+`JAZZ_HEAP_PROFILE_SAMPLE_BYTES` to change that mean, or to `0` to turn sampling off.
+`GET /debug/pprof/heap` returns the sampled in-use memory as a gzipped pprof profile with function
+names, for `go tool pprof` or a continuous profiler. The profile records the binary's build ID, so
+tools can add source lines from a matching unstripped build. Send the admin secret in
+`X-Jazz-Admin-Secret`, or scrape it from the diagnostics listener with its token. The profile
+covers memory the server allocates from Rust, not memory RocksDB allocates internally.
+With sampling off the route answers `404 Not Found`; other platforms answer `501 Not Implemented`.
 
 Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
 The server runs Core directly. It owns the account registry, permission checks,
@@ -97,10 +106,15 @@ Use `await client.withAttribution(account)` or `await client.withAttributionForR
 
 Pass `req` to run queries as the authenticated user, with all permission policies applied.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="request-context.ts"'>
       ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="request-context.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#backend-request-handler-effect
     </include>
   </Tab>
   <Tab value="Rust">

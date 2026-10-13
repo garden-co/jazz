@@ -5,8 +5,8 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts, RowCells,
-    SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
+    Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, RowCells, SeededRowIdSource,
+    SubscriptionEvent, SubscriptionStream,
 };
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -460,9 +460,7 @@ fn db_read_receipt(config: &Config) {
             let global_rows = block_on(db.all_for_identity(
                 &prepared,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
-                    local_updates: LocalUpdates::Deferred,
-                    propagation: Propagation::LocalOnly,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
                 AuthorSubject::for_test_uuid(plan.user.0),
@@ -1362,8 +1360,8 @@ fn high_fan_out_schema() -> JazzSchema {
 
 fn commit_hydration_row(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     table: &str,
     row_uuid: RowUuid,
     cells: BTreeMap<String, Value>,
@@ -1393,7 +1391,7 @@ fn high_fan_out_child(idx: usize) -> RowUuid {
 
 fn register_binding(
     ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     client_name: &str,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -1430,7 +1428,7 @@ fn register_binding(
     apply_sync_message_settled(core, delivered.message).expect("binding delta");
 }
 
-fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, binding: &Binding) {
+fn apply_binding(node: &mut NodeState, shape: &ValidatedQuery, binding: &Binding) {
     apply_sync_message_settled(
         node,
         SyncMessage::RegisterShape {
@@ -1464,8 +1462,8 @@ fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, b
 
 fn hydrate_client(
     ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
-    client: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
+    client: &mut NodeState,
     peer: &mut PeerState,
     client_name: &str,
     subscriptions: &[(&ValidatedQuery, &Binding)],
@@ -1533,8 +1531,8 @@ fn apply_one_issue_edit(
     ctx: &mut dyn DriverContext,
     config: &Config,
     fixture: &Fixture,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     now_ms: u64,
     idx: usize,
 ) {
@@ -1570,8 +1568,8 @@ fn apply_one_issue_edit(
 
 fn apply_issue_edit_to_user(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     issue: RowUuid,
     user: RowUuid,
     now_ms: u64,
@@ -1607,8 +1605,8 @@ fn apply_write_stream(
     ctx: &mut dyn DriverContext,
     config: &Config,
     fixture: &Fixture,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
 ) {
     let issues = fixture.rows_by_set.get("issues").expect("issues");
     let users = fixture.rows_by_set.get("users").expect("users");
@@ -1641,8 +1639,8 @@ fn apply_write_stream(
 }
 
 fn assert_client_correct(
-    client: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    client: &mut NodeState,
+    core: &mut NodeState,
     schema: &JazzSchema,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -1677,7 +1675,7 @@ fn assert_client_correct(
 }
 
 fn assert_no_outside_closure(
-    client: &mut NodeState<RocksDbStorage>,
+    client: &mut NodeState,
     schema: &JazzSchema,
     allowed: &BTreeSet<(String, RowUuid)>,
 ) {
@@ -2230,10 +2228,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2251,7 +2246,7 @@ fn open_db(
     node_uuid: NodeUuid,
     author: AuthorSubject,
     schema: JazzSchema,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+) -> (tempfile::TempDir, Db) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2391,7 +2386,7 @@ fn cell_uuid_from_cells(cells: &RowCells, column: &str) -> Option<RowUuid> {
 }
 
 fn assert_db_query_matches_oracle(
-    db: &Db<RocksDbStorage>,
+    db: &Db,
     schema: &JazzSchema,
     query: &Query,
     oracle: BTreeSet<(String, RowUuid)>,

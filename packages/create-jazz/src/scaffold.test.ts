@@ -18,6 +18,8 @@ const tsHybridStarterPath = path.join(repoRoot, "starters/ts-hybrid");
 const reactBetterauthStarterPath = path.join(repoRoot, "starters/react-betterauth");
 const reactLocalfirstStarterPath = path.join(repoRoot, "starters/react-localfirst");
 const reactHybridStarterPath = path.join(repoRoot, "starters/react-hybrid");
+const tsEffectLocalfirstStarterPath = path.join(repoRoot, "starters/ts-effect-localfirst");
+const tsEffectBetterauthStarterPath = path.join(repoRoot, "starters/ts-effect-betterauth");
 
 // CI runners have no global git identity configured, so inject fallbacks
 // via the env vars git honours. Production code still fails loudly when a
@@ -698,6 +700,55 @@ describe("scaffold() — react-betterauth e2e via JAZZ_STARTER_PATH", () => {
     expect(allDeps).toHaveProperty("better-auth");
   });
 });
+
+for (const { starter, starterPath, files } of [
+  {
+    starter: "ts-effect-localfirst",
+    starterPath: tsEffectLocalfirstStarterPath,
+    files: ["src/todo-widget.ts", "src/auth-backup.ts"],
+  },
+  {
+    starter: "ts-effect-betterauth",
+    starterPath: tsEffectBetterauthStarterPath,
+    files: ["src/todo-widget.ts", "server/jazz-api.ts", "server/auth.ts", "server/dev.ts"],
+  },
+] as const) {
+  describe(`scaffold() — ${starter} e2e via JAZZ_STARTER_PATH`, () => {
+    withLocalStarter(starterPath);
+    let tmpDir: string;
+
+    afterEach(() => {
+      if (tmpDir && fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it(`scaffolds a complete ${starter} project`, { timeout: 30_000 }, async () => {
+      tmpDir = path.join(os.tmpdir(), `scaffold-${starter}-${Date.now()}`);
+
+      await scaffold({ appName: `alice-${starter}`, targetDir: tmpDir, pm: null, starter });
+
+      const pkgJson = JSON.parse(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8")) as {
+        name?: string;
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+      };
+
+      expect(pkgJson.name).toBe(`alice-${starter}`);
+      for (const file of files) expect(fs.existsSync(path.join(tmpDir, file))).toBe(true);
+      expect(pkgJson.dependencies).toHaveProperty("effect");
+      expect(pkgJson.dependencies).toHaveProperty("jazz-tools");
+      const allDepValues = [
+        ...Object.values(pkgJson.dependencies ?? {}),
+        ...Object.values(pkgJson.devDependencies ?? {}),
+      ];
+      for (const value of allDepValues) {
+        expect(value).not.toMatch(/^workspace:/);
+        expect(value).not.toMatch(/^catalog:/);
+      }
+    });
+  });
+}
 
 describe("scaffold() — unknown starter", () => {
   let tmpDir: string;

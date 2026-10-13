@@ -11,9 +11,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::app_id::AppId;
 use crate::db::ConnectionSessionContext;
 use crate::ids::AuthorSubject;
-use crate::tools::AppId;
 use crate::tools::websocket_prelude_auth::AuthConfig;
 use crate::wire::WireTransport;
 

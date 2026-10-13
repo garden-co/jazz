@@ -314,21 +314,23 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 serde_json::from_value::<ResultKey>(serde_json::json!(unsupported)).is_err(),
                 "unknown ResultKey wire versions fail closed"
             );
-            let tx = client.begin_transaction().expect("begin joined read-your-writes tx");
+            let tx = client.begin_transaction().expect("begin exclusive tx");
             tx.insert(
                 "todos",
                 row_input!("title" => "staged", "bucket" => "shared", "done" => true),
             )
             .expect("stage joined-side insert");
-            let staged_results = tx
+            let Err(error) = tx
                 .query(joined_query.clone(), jazz::tools::ReadTier::LocalFirst)
                 .await
-                .expect("joined query reads its staged write");
-            assert_eq!(
-                key_for_joined_title(&staged_results, "staged")
-                    .row_id(),
-                None,
-                "a joined transaction result cannot collapse to a source row id"
+            else {
+                panic!("exclusive transactions reject flat join reads");
+            };
+            assert!(
+                error.to_string().contains(
+                    "Reading a flat join of `todos` with `todos` is not supported in exclusive transactions yet"
+                ),
+                "unexpected error: {error}"
             );
             tx.rollback().expect("roll back staged joined-side insert");
 

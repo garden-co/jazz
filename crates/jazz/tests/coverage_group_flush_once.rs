@@ -1,21 +1,20 @@
+// Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
+#[path = "../../jazz-testkit/src/duplex_transport.rs"]
+mod duplex_transport;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 mod common;
 
+use duplex_transport::duplex;
 use jazz::block_on;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, QueryAttachment, ReadOpts,
-    SeededRowIdSource,
-};
+use jazz::db::{Db, DbConfig, DbIdentity, QueryAttachment, ReadOpts, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
-use jazz_testkit::duplex_transport::duplex;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -32,7 +31,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_client(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
+fn open_client(seed: u8, schema: JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -52,7 +51,7 @@ fn open_client(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
     .expect("open client")
 }
 
-fn open_server(schema: JazzSchema) -> Db<TestStorage> {
+fn open_server(schema: JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -74,9 +73,7 @@ fn open_server(schema: JazzSchema) -> Db<TestStorage> {
 
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::Full,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     }
 }
@@ -89,8 +86,8 @@ fn row(seed: u64) -> RowUuid {
 }
 
 struct CoverageGroupFixture {
-    _client: Db<TestStorage>,
-    server: Db<TestStorage>,
+    _client: Db,
+    server: Db,
     _attachments: Vec<QueryAttachment>,
     next_row: u64,
 }

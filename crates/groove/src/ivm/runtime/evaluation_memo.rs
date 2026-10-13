@@ -15,6 +15,9 @@ pub(super) struct EvaluationMemo {
     slots: Vec<Option<(EvalMemoKey, EvalMemoEntry)>>,
     occupied: usize,
     overflow: HashMap<EvalMemoKey, EvalMemoEntry>,
+    /// Entries keyed to one tick (`tick_epoch.is_some()`). Kept so callers can
+    /// ask whether any exist without scanning every entry.
+    tick_entries: usize,
 }
 
 impl EvaluationMemo {
@@ -44,8 +47,11 @@ impl EvaluationMemo {
         self.slots.get(slot)?.as_ref()
     }
 
-    pub(super) fn slot_mut(&mut self, slot: usize) -> Option<&mut (EvalMemoKey, EvalMemoEntry)> {
-        self.slots.get_mut(slot)?.as_mut()
+    pub(super) fn slot_mut(&mut self, slot: usize) -> Option<(&EvalMemoKey, &mut EvalMemoEntry)> {
+        self.slots
+            .get_mut(slot)?
+            .as_mut()
+            .map(|(key, entry)| (&*key, entry))
     }
 
     pub(super) fn get(&self, key: &EvalMemoKey) -> Option<&EvalMemoEntry> {
@@ -74,6 +80,16 @@ impl EvaluationMemo {
         key: EvalMemoKey,
         entry: EvalMemoEntry,
     ) -> Option<EvalMemoEntry> {
+        let tick_keyed = key.tick_epoch.is_some();
+        let previous = self.insert_entry(key, entry);
+        if tick_keyed && previous.is_none() {
+            self.tick_entries += 1;
+        }
+        previous
+    }
+
+    /// Returns the previous entry for exactly this key, if any.
+    fn insert_entry(&mut self, key: EvalMemoKey, entry: EvalMemoEntry) -> Option<EvalMemoEntry> {
         let Some(slot) = self.slot_for(&key) else {
             return self.overflow.insert(key, entry);
         };
@@ -99,6 +115,14 @@ impl EvaluationMemo {
     }
 
     pub(super) fn remove(&mut self, key: &EvalMemoKey) -> Option<EvalMemoEntry> {
+        let removed = self.remove_entry(key);
+        if removed.is_some() && key.tick_epoch.is_some() {
+            self.tick_entries -= 1;
+        }
+        removed
+    }
+
+    fn remove_entry(&mut self, key: &EvalMemoKey) -> Option<EvalMemoEntry> {
         if let Some(slot) = self.slot_for(key)
             && self.slots[slot]
                 .as_ref()
@@ -114,15 +138,31 @@ impl EvaluationMemo {
         &mut self,
         mut keep: impl FnMut(&EvalMemoKey, &mut EvalMemoEntry) -> bool,
     ) {
+        let mut removed_tick_entries = 0;
         for slot in &mut self.slots {
             if let Some((key, entry)) = slot
                 && !keep(key, entry)
             {
+                removed_tick_entries += usize::from(key.tick_epoch.is_some());
                 *slot = None;
                 self.occupied -= 1;
             }
         }
-        self.overflow.retain(keep);
+        self.overflow.retain(|key, entry| {
+            let kept = keep(key, entry);
+            removed_tick_entries += usize::from(!kept && key.tick_epoch.is_some());
+            kept
+        });
+        self.tick_entries -= removed_tick_entries;
+    }
+
+    /// Number of entries keyed to a single tick.
+    pub(super) fn tick_entries(&self) -> usize {
+        debug_assert_eq!(
+            self.tick_entries,
+            self.keys().filter(|key| key.tick_epoch.is_some()).count()
+        );
+        self.tick_entries
     }
 
     pub(super) fn iter(&self) -> impl Iterator<Item = (&EvalMemoKey, &EvalMemoEntry)> {
