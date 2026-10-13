@@ -653,180 +653,27 @@ fn canonical_binding_bytes(
     put_len(&mut bytes, values.len());
     for (name, value) in values {
         put_str(&mut bytes, name);
-        put_binding_value(&mut bytes, value)?;
+        validate_binding_value(value)?;
+        put_value(&mut bytes, value);
     }
     Ok(bytes)
 }
 
-fn put_binding_value(bytes: &mut Vec<u8>, value: &Value) -> Result<(), QueryError> {
+/// Binding identities encode with the same tags as query literals, but only
+/// accept values a public caller can supply.
+fn validate_binding_value(value: &Value) -> Result<(), QueryError> {
     match value {
-        Value::U8(value) => {
-            bytes.push(1);
-            bytes.push(*value);
-        }
-        Value::U16(value) => {
-            bytes.push(2);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::U32(value) => {
-            bytes.push(3);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::U64(value) => {
-            bytes.push(4);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::I32(value) => {
-            bytes.push(15);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::I64(value) => {
-            bytes.push(14);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::F64(value) => {
-            bytes.push(5);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        Value::Bool(value) => {
-            bytes.push(6);
-            bytes.push(u8::from(*value));
-        }
-        Value::String(value) => {
-            bytes.push(7);
-            put_str(bytes, value);
-        }
-        Value::Bytes(value) => {
-            bytes.push(8);
-            put_bytes(bytes, value);
-        }
-        Value::Uuid(value) => {
-            bytes.push(9);
-            bytes.extend_from_slice(value.as_bytes());
-        }
-        Value::EnumTag(value) => {
-            bytes.push(10);
-            bytes.push(*value);
-        }
-        Value::Tuple(values) => {
-            bytes.push(11);
-            put_len(bytes, values.len());
+        Value::Tuple(values) | Value::Array(values) => {
             for value in values {
-                put_binding_value(bytes, value)?;
+                validate_binding_value(value)?;
             }
         }
-        Value::Array(values) => {
-            bytes.push(12);
-            put_len(bytes, values.len());
-            for value in values {
-                put_binding_value(bytes, value)?;
-            }
-        }
-        Value::Nullable(None) => {
-            bytes.push(13);
-            bytes.push(0);
-        }
-        Value::Nullable(Some(value)) => {
-            bytes.push(13);
-            bytes.push(1);
-            put_binding_value(bytes, value)?;
-        }
-        Value::Record(record) => {
-            bytes.push(16);
-            put_binding_column_type(
-                bytes,
-                &ColumnType::Record(Box::new(record.descriptor().clone())),
-            )?;
-            put_bytes(bytes, record.raw());
-        }
+        Value::Nullable(Some(value)) => validate_binding_value(value)?,
+        Value::Record(record) => validate_public_column_type(&ColumnType::Record(Box::new(
+            record.descriptor().clone(),
+        )))?,
         Value::Enum(_) | Value::Large(_) => return Err(QueryError::OperandTypeMismatch),
-    }
-    Ok(())
-}
-
-fn put_binding_column_type(
-    bytes: &mut Vec<u8>,
-    ty: &ColumnType,
-) -> Result<(), QueryError> {
-    match ty {
-        ColumnType::U8 => bytes.push(0),
-        ColumnType::U16 => bytes.push(1),
-        ColumnType::U32 => bytes.push(2),
-        ColumnType::U64 => bytes.push(3),
-        ColumnType::I32 => bytes.push(4),
-        ColumnType::I64 => bytes.push(5),
-        ColumnType::F64 => bytes.push(6),
-        ColumnType::Bool => bytes.push(7),
-        ColumnType::String => bytes.push(8),
-        ColumnType::Bytes => bytes.push(9),
-        ColumnType::Uuid => bytes.push(10),
-        ColumnType::EnumTag(schema) => {
-            bytes.push(11);
-            put_str(bytes, &schema.name);
-            put_len(bytes, schema.variants.len());
-            for variant in &schema.variants {
-                put_str(bytes, variant);
-            }
-        }
-        ColumnType::Tuple(types) => {
-            bytes.push(12);
-            put_len(bytes, types.len());
-            for ty in types {
-                put_binding_column_type(bytes, ty)?;
-            }
-        }
-        ColumnType::Array(member) => {
-            bytes.push(13);
-            put_binding_column_type(bytes, member)?;
-        }
-        ColumnType::Nullable(inner) => {
-            bytes.push(14);
-            put_binding_column_type(bytes, inner)?;
-        }
-        ColumnType::Record(descriptor) => {
-            bytes.push(15);
-            put_len(bytes, descriptor.fields().len());
-            for field in descriptor.fields() {
-                match &field.name {
-                    Some(name) => {
-                        bytes.push(1);
-                        put_str(bytes, name);
-                    }
-                    None => bytes.push(0),
-                }
-                match &field.identity {
-                    None => bytes.push(0),
-                    Some(groove::records::FieldIdentity::Name(name)) => {
-                        bytes.push(1);
-                        put_str(bytes, name);
-                    }
-                    Some(groove::records::FieldIdentity::Slot(slot)) => {
-                        bytes.push(2);
-                        bytes.extend_from_slice(&slot.to_be_bytes());
-                    }
-                    Some(groove::records::FieldIdentity::NamedSlot { name, slot }) => {
-                        bytes.push(3);
-                        put_str(bytes, name);
-                        bytes.extend_from_slice(&slot.to_be_bytes());
-                    }
-                }
-                put_binding_column_type(bytes, &field.value_type)?;
-            }
-        }
-        ColumnType::Enum(schema) => {
-            bytes.push(16);
-            bytes.extend_from_slice(&schema.registry_id.to_be_bytes());
-            put_str(bytes, &schema.name);
-            put_len(bytes, schema.cases.len());
-            for case in &schema.cases {
-                put_str(bytes, &case.name);
-                put_binding_column_type(
-                    bytes,
-                    &ColumnType::Record(Box::new(case.payload.clone())),
-                )?;
-            }
-        }
-        ColumnType::Internal(_) => return Err(QueryError::OperandTypeMismatch),
+        _ => {}
     }
     Ok(())
 }
