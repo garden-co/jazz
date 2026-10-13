@@ -1232,7 +1232,7 @@ pub(crate) fn consolidate_appends_attempt(
     mut fresh_locator: impl FnMut(ContentHash) -> Locator,
 ) -> Result<PreparedLargeValue, IvmRuntimeError> {
     validate_descriptor_shape(value)?;
-    let base_byte_length = base_length(value.byte_length, &value.edit_tail)?;
+    let base_byte_length = base_length(value.byte_length, &value.edit_tail, RangeUnit::Bytes)?;
     let mut cursor = base_byte_length;
     let mut appended = Vec::new();
     for edit in &value.edit_tail {
@@ -1325,7 +1325,7 @@ pub(crate) fn consolidate_single_edit_attempt(
     let [edit] = value.edit_tail.as_slice() else {
         return Err(Error::MalformedScalar.into());
     };
-    let base_len = base_length(value.byte_length, &value.edit_tail)?;
+    let base_len = base_length(value.byte_length, &value.edit_tail, RangeUnit::Bytes)?;
     let edit_end = edit
         .offset
         .checked_add(edit.delete_length)
@@ -4361,34 +4361,90 @@ enum RangePiece {
     Inserted(Vec<u8>),
 }
 
-#[derive(Clone, Debug)]
-enum Utf16RangePiece {
-    Base(std::ops::Range<u64>),
-    Inserted(Vec<u8>),
+/// The coordinates a range read is expressed in.
+#[derive(Clone, Copy, Debug)]
+enum RangeUnit {
+    Bytes,
+    Utf16,
 }
 
+impl RangeUnit {
+    /// An edit's `(offset, inserted length, deleted length)` in this unit.
+    fn edit_span(self, edit: &ReplaceEdit) -> Result<(u64, u64, u64), Error> {
+        Ok(match self {
+            Self::Bytes => (
+                edit.offset,
+                u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?,
+                edit.delete_length,
+            ),
+            Self::Utf16 => (
+                edit.utf16_offset,
+                edit.insert_utf16_length,
+                edit.delete_utf16_length,
+            ),
+        })
+    }
+
+    fn child_length(self, metrics: &NodeMetrics) -> Result<u64, Error> {
+        match self {
+            Self::Bytes => Ok(metrics.byte_length),
+            Self::Utf16 => metrics.utf16_length.ok_or(Error::DescriptorMismatch),
+        }
+    }
+
+    fn slice(self, bytes: &[u8], range: std::ops::Range<u64>) -> Result<Vec<u8>, Error> {
+        match self {
+            Self::Bytes => {
+                let start = usize::try_from(range.start).map_err(|_| Error::MetricOverflow)?;
+                let end = usize::try_from(range.end).map_err(|_| Error::MetricOverflow)?;
+                Ok(bytes[start..end].to_vec())
+            }
+            Self::Utf16 => slice_utf16(bytes, range),
+        }
+    }
+}
+
+/// Read a byte range from the final logical value. Edit-tail insertions are
+/// served directly and only intersecting base-tree paths are requested.
+pub(crate) fn byte_range_attempt(
+    value: &LargeValueRef,
+    range: std::ops::Range<u64>,
+    inputs: &mut EvaluationInputs,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    range_attempt(value, range, RangeUnit::Bytes, inputs)
+}
+
+/// [`byte_range_attempt`] in UTF-16 code-unit coordinates.
 pub(crate) fn utf16_range_attempt(
     value: &LargeValueRef,
     range: std::ops::Range<u64>,
     inputs: &mut EvaluationInputs,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
-    let length = value.utf16_length.ok_or(Error::MalformedScalar)?;
+    range_attempt(value, range, RangeUnit::Utf16, inputs)
+}
+
+fn range_attempt(
+    value: &LargeValueRef,
+    range: std::ops::Range<u64>,
+    unit: RangeUnit,
+    inputs: &mut EvaluationInputs,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let length = match unit {
+        RangeUnit::Bytes => value.byte_length,
+        RangeUnit::Utf16 => value.utf16_length.ok_or(Error::MalformedScalar)?,
+    };
     if range.start > range.end || range.end > length {
         return Err(Error::MalformedScalar.into());
     }
-    let pieces = map_final_utf16_range_to_base(range, &value.edit_tail)?;
-    let base_utf16 = value.edit_tail.iter().rev().try_fold(length, |n, edit| {
-        n.checked_sub(edit.insert_utf16_length)
-            .and_then(|n| n.checked_add(edit.delete_utf16_length))
-            .ok_or(Error::MetricOverflow)
-    })?;
+    let pieces = map_final_range_to_base(range, &value.edit_tail, unit)?;
+    let base_length = base_length(length, &value.edit_tail, unit)?;
     let mut outputs = Vec::with_capacity(pieces.len());
     let mut blocked = false;
     for piece in pieces {
         match piece {
-            Utf16RangePiece::Inserted(bytes) => outputs.push(bytes),
-            Utf16RangePiece::Base(range) => {
-                match base_utf16_range_attempt(value, base_utf16, range, inputs) {
+            RangePiece::Inserted(bytes) => outputs.push(bytes),
+            RangePiece::Base(range) => {
+                match base_range_attempt(value, base_length, range, unit, inputs) {
                     Ok(bytes) => outputs.push(bytes),
                     Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
                     Err(error) => return Err(error),
@@ -4397,10 +4453,9 @@ pub(crate) fn utf16_range_attempt(
         }
     }
     if blocked {
-        Err(IvmRuntimeError::EvaluationBlocked)
-    } else {
-        Ok(outputs.into_iter().flatten().collect())
+        return Err(IvmRuntimeError::EvaluationBlocked);
     }
+    Ok(outputs.into_iter().flatten().collect())
 }
 
 /// Resolve a final logical UTF-16 boundary to its final logical byte offset
@@ -4489,51 +4544,6 @@ fn utf8_next_boundary_attempt(
     Ok(next)
 }
 
-fn map_final_utf16_range_to_base(
-    range: std::ops::Range<u64>,
-    edits: &[ReplaceEdit],
-) -> Result<Vec<Utf16RangePiece>, Error> {
-    let mut pieces = vec![Utf16RangePiece::Base(range)];
-    for edit in edits.iter().rev() {
-        let inserted_end = edit
-            .utf16_offset
-            .checked_add(edit.insert_utf16_length)
-            .ok_or(Error::MetricOverflow)?;
-        let mut previous = Vec::new();
-        for piece in pieces {
-            let Utf16RangePiece::Base(range) = piece else {
-                previous.push(piece);
-                continue;
-            };
-            if range.start < edit.utf16_offset {
-                previous.push(Utf16RangePiece::Base(
-                    range.start..range.end.min(edit.utf16_offset),
-                ));
-            }
-            let overlap_start = range.start.max(edit.utf16_offset);
-            let overlap_end = range.end.min(inserted_end);
-            if overlap_start < overlap_end {
-                previous.push(Utf16RangePiece::Inserted(slice_utf16(
-                    &edit.insert_bytes,
-                    (overlap_start - edit.utf16_offset)..(overlap_end - edit.utf16_offset),
-                )?));
-            }
-            if range.end > inserted_end {
-                let start = range.start.max(inserted_end);
-                let map = |position: u64| {
-                    position
-                        .checked_sub(edit.insert_utf16_length)
-                        .and_then(|n| n.checked_add(edit.delete_utf16_length))
-                        .ok_or(Error::MetricOverflow)
-                };
-                previous.push(Utf16RangePiece::Base(map(start)?..map(range.end)?));
-            }
-        }
-        pieces = previous;
-    }
-    Ok(pieces)
-}
-
 fn slice_utf16(bytes: &[u8], range: std::ops::Range<u64>) -> Result<Vec<u8>, Error> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?;
     let mut units = 0_u64;
@@ -4564,125 +4574,6 @@ fn slice_utf16(bytes: &[u8], range: std::ops::Range<u64>) -> Result<Vec<u8>, Err
     Ok(bytes[start..end].to_vec())
 }
 
-fn base_utf16_range_attempt(
-    value: &LargeValueRef,
-    base_utf16: u64,
-    range: std::ops::Range<u64>,
-    inputs: &mut EvaluationInputs,
-) -> Result<Vec<u8>, IvmRuntimeError> {
-    if range.end > base_utf16 {
-        return Err(Error::MalformedScalar.into());
-    }
-    if range.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut pending = vec![(
-        value.root.clone(),
-        value.logical_hash,
-        0_u64,
-        base_utf16,
-        0_usize,
-    )];
-    let mut slices = Vec::new();
-    let mut blocked = false;
-    let mut budget = LogicalTraversalBudget::new();
-    while let Some((node_ref, hash, start, length, depth)) = pending.pop() {
-        budget.consume()?;
-        if depth > MAX_TREE_DEPTH {
-            return Err(Error::InvalidTree.into());
-        }
-        let end = start.checked_add(length).ok_or(Error::MetricOverflow)?;
-        if range.start >= end || range.end <= start {
-            continue;
-        }
-        let node = match load_authenticated_node_attempt(
-            value.format_version,
-            value.kind,
-            &node_ref,
-            hash,
-            inputs,
-        ) {
-            Ok(node) => node,
-            Err(IvmRuntimeError::EvaluationBlocked) => {
-                blocked = true;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        match node {
-            ChunkNode::Leaf { bytes, .. } => {
-                let part = slice_utf16(
-                    &bytes,
-                    (range.start.max(start) - start)..(range.end.min(end) - start),
-                )?;
-                slices.push((start, part));
-            }
-            ChunkNode::Branch { children, .. } => {
-                budget.consume_many(children.len())?;
-                let mut child_start = start;
-                let mut next = Vec::with_capacity(children.len());
-                for child in children {
-                    let child_length = child
-                        .metrics
-                        .utf16_length
-                        .ok_or(Error::DescriptorMismatch)?;
-                    next.push((
-                        child.node_ref,
-                        child.logical_hash,
-                        child_start,
-                        child_length,
-                        depth + 1,
-                    ));
-                    child_start = child_start
-                        .checked_add(child_length)
-                        .ok_or(Error::MetricOverflow)?;
-                }
-                if child_start != end {
-                    return Err(Error::DescriptorMismatch.into());
-                }
-                pending.extend(next.into_iter().rev());
-            }
-        }
-    }
-    if blocked {
-        return Err(IvmRuntimeError::EvaluationBlocked);
-    }
-    slices.sort_by_key(|(start, _)| *start);
-    Ok(slices.into_iter().flat_map(|(_, bytes)| bytes).collect())
-}
-
-/// Read a byte range from the final logical value. Edit-tail insertions are
-/// served directly and only intersecting base-tree paths are requested.
-pub(crate) fn byte_range_attempt(
-    value: &LargeValueRef,
-    range: std::ops::Range<u64>,
-    inputs: &mut EvaluationInputs,
-) -> Result<Vec<u8>, IvmRuntimeError> {
-    if range.start > range.end || range.end > value.byte_length {
-        return Err(Error::MalformedScalar.into());
-    }
-    let pieces = map_final_range_to_base(range, &value.edit_tail)?;
-    let base_length = base_length(value.byte_length, &value.edit_tail)?;
-    let mut outputs = Vec::with_capacity(pieces.len());
-    let mut blocked = false;
-    for piece in pieces {
-        match piece {
-            RangePiece::Inserted(bytes) => outputs.push(bytes),
-            RangePiece::Base(range) => {
-                match base_range_attempt(value, base_length, range, inputs) {
-                    Ok(bytes) => outputs.push(bytes),
-                    Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-    }
-    if blocked {
-        return Err(IvmRuntimeError::EvaluationBlocked);
-    }
-    Ok(outputs.into_iter().flatten().collect())
-}
-
 /// Count UTF-16 units in a byte-coordinate range without hydrating complete
 /// subtrees. Fully covered children contribute their authenticated aggregate
 /// metric; only boundary leaves are decoded.
@@ -4697,8 +4588,8 @@ fn utf16_length_for_byte_range_attempt(
     {
         return Err(Error::MalformedScalar.into());
     }
-    let pieces = map_final_range_to_base(range, &value.edit_tail)?;
-    let base_length = base_length(value.byte_length, &value.edit_tail)?;
+    let pieces = map_final_range_to_base(range, &value.edit_tail, RangeUnit::Bytes)?;
+    let base_length = base_length(value.byte_length, &value.edit_tail, RangeUnit::Bytes)?;
     let mut total = 0_u64;
     let mut blocked = false;
     for piece in pieces {
@@ -4968,12 +4859,12 @@ fn decode_json_pointer_component(component: &str) -> Result<String, Error> {
     Ok(decoded)
 }
 
-fn base_length(final_length: u64, edits: &[ReplaceEdit]) -> Result<u64, Error> {
+fn base_length(final_length: u64, edits: &[ReplaceEdit], unit: RangeUnit) -> Result<u64, Error> {
     edits.iter().rev().try_fold(final_length, |length, edit| {
-        let inserted = u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
+        let (_, inserted, deleted) = unit.edit_span(edit)?;
         length
             .checked_sub(inserted)
-            .and_then(|length| length.checked_add(edit.delete_length))
+            .and_then(|length| length.checked_add(deleted))
             .ok_or(Error::MetricOverflow)
     })
 }
@@ -4981,50 +4872,36 @@ fn base_length(final_length: u64, edits: &[ReplaceEdit]) -> Result<u64, Error> {
 fn map_final_range_to_base(
     range: std::ops::Range<u64>,
     edits: &[ReplaceEdit],
+    unit: RangeUnit,
 ) -> Result<Vec<RangePiece>, Error> {
     let mut pieces = vec![RangePiece::Base(range)];
     for edit in edits.iter().rev() {
-        let inserted_length =
-            u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
-        let inserted_end = edit
-            .offset
-            .checked_add(inserted_length)
-            .ok_or(Error::MetricOverflow)?;
-        let shift_after = if edit.delete_length >= inserted_length {
-            (true, edit.delete_length - inserted_length)
-        } else {
-            (false, inserted_length - edit.delete_length)
-        };
+        let (offset, inserted, deleted) = unit.edit_span(edit)?;
+        let inserted_end = offset.checked_add(inserted).ok_or(Error::MetricOverflow)?;
         let mut previous = Vec::new();
         for piece in pieces {
             let RangePiece::Base(range) = piece else {
                 previous.push(piece);
                 continue;
             };
-            if range.start < edit.offset {
-                previous.push(RangePiece::Base(range.start..range.end.min(edit.offset)));
+            if range.start < offset {
+                previous.push(RangePiece::Base(range.start..range.end.min(offset)));
             }
-            let overlap_start = range.start.max(edit.offset);
+            let overlap_start = range.start.max(offset);
             let overlap_end = range.end.min(inserted_end);
             if overlap_start < overlap_end {
-                let start = usize::try_from(overlap_start - edit.offset)
-                    .map_err(|_| Error::MetricOverflow)?;
-                let end = usize::try_from(overlap_end - edit.offset)
-                    .map_err(|_| Error::MetricOverflow)?;
-                previous.push(RangePiece::Inserted(edit.insert_bytes[start..end].to_vec()));
+                previous.push(RangePiece::Inserted(unit.slice(
+                    &edit.insert_bytes,
+                    (overlap_start - offset)..(overlap_end - offset),
+                )?));
             }
             if range.end > inserted_end {
                 let start = range.start.max(inserted_end);
-                let map = |position: u64| -> Result<u64, Error> {
-                    if shift_after.0 {
-                        position
-                            .checked_add(shift_after.1)
-                            .ok_or(Error::MetricOverflow)
-                    } else {
-                        position
-                            .checked_sub(shift_after.1)
-                            .ok_or(Error::MetricOverflow)
-                    }
+                let map = |position: u64| {
+                    position
+                        .checked_sub(inserted)
+                        .and_then(|n| n.checked_add(deleted))
+                        .ok_or(Error::MetricOverflow)
                 };
                 previous.push(RangePiece::Base(map(start)?..map(range.end)?));
             }
@@ -5038,6 +4915,7 @@ fn base_range_attempt(
     value: &LargeValueRef,
     base_length: u64,
     range: std::ops::Range<u64>,
+    unit: RangeUnit,
     inputs: &mut EvaluationInputs,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
     if range.end > base_length {
@@ -5081,40 +4959,39 @@ fn base_range_attempt(
         };
         match node {
             ChunkNode::Leaf { bytes, .. } => {
-                if u64::try_from(bytes.len()).map_err(|_| Error::MetricOverflow)? != length {
+                // UTF-16 slicing fails on its own past the end of the leaf.
+                if matches!(unit, RangeUnit::Bytes)
+                    && u64::try_from(bytes.len()).map_err(|_| Error::MetricOverflow)? != length
+                {
                     return Err(Error::DescriptorMismatch.into());
                 }
-                let slice_start = usize::try_from(range.start.max(start) - start)
-                    .map_err(|_| Error::MetricOverflow)?;
-                let slice_end = usize::try_from(range.end.min(end) - start)
-                    .map_err(|_| Error::MetricOverflow)?;
-                slices.push((start, bytes[slice_start..slice_end].to_vec()));
+                let part = unit.slice(
+                    &bytes,
+                    (range.start.max(start) - start)..(range.end.min(end) - start),
+                )?;
+                slices.push((start, part));
             }
             ChunkNode::Branch { children, .. } => {
-                let total = children.iter().try_fold(0_u64, |total, child| {
-                    total
-                        .checked_add(child.metrics.byte_length)
-                        .ok_or(Error::MetricOverflow)
-                })?;
-                if total != length {
-                    return Err(Error::DescriptorMismatch.into());
-                }
                 budget.consume_many(children.len())?;
                 let mut child_start = start;
-                let mut children_with_offsets = Vec::with_capacity(children.len());
+                let mut next = Vec::with_capacity(children.len());
                 for child in children {
-                    children_with_offsets.push((
+                    let child_length = unit.child_length(&child.metrics)?;
+                    next.push((
                         child.node_ref,
                         child.logical_hash,
                         child_start,
-                        child.metrics.byte_length,
+                        child_length,
                         depth + 1,
                     ));
                     child_start = child_start
-                        .checked_add(child.metrics.byte_length)
+                        .checked_add(child_length)
                         .ok_or(Error::MetricOverflow)?;
                 }
-                pending.extend(children_with_offsets.into_iter().rev());
+                if child_start != end {
+                    return Err(Error::DescriptorMismatch.into());
+                }
+                pending.extend(next.into_iter().rev());
             }
         }
     }
@@ -9255,8 +9132,12 @@ mod tests {
                 let left = state as usize % (logical.len() + 1);
                 let right = (state >> 19) as usize % (logical.len() + 1);
                 let range = left.min(right)..left.max(right);
-                let pieces =
-                    map_final_range_to_base(range.start as u64..range.end as u64, &edits).unwrap();
+                let pieces = map_final_range_to_base(
+                    range.start as u64..range.end as u64,
+                    &edits,
+                    RangeUnit::Bytes,
+                )
+                .unwrap();
                 let mapped = pieces
                     .into_iter()
                     .flat_map(|piece| match piece {
