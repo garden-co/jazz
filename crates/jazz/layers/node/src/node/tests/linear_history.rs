@@ -912,19 +912,17 @@ fn counter_schema_with_notes() -> JazzSchema {
     compile_public_test_schema(&source)
 }
 
-/// A merge-column write whose schema differs from the schema the row's
-/// current image is stored under. Core cannot apply the op yet: across
-/// layouts the row is still whole-row last-writer-wins (#3899), which would
-/// store the counter's delta as its value, or drop it when the write loses.
-/// Core refuses the write with an explicit reason instead, and the row keeps
-/// its value.
+/// #3899: a merge-column write whose schema differs from the schema the
+/// row's current image was written under. Core merges per physical column,
+/// so bob's +5 applies to the counter alice's v1 write set, and the column
+/// v2 added reads its lens default until someone writes it.
 ///
 /// ```text
-/// alice (v1) ──count=1──► core            row stored under v1
-/// bob   (v2) ──count +5──► core ──✗ Rejected("… not supported yet …")
+/// alice (v1) ──count=1──► core            count=1
+/// bob   (v2) ──count +5──► core            count=6, notes=""
 /// ```
 #[test]
-fn merge_column_write_over_a_row_of_another_schema_is_refused() {
+fn merge_column_write_over_a_row_of_another_schema_applies_its_op() {
     let base = counter_schema();
     let evolved_schema = counter_schema_with_notes();
     let evolved = SchemaVersion::new(evolved_schema.clone());
@@ -966,19 +964,31 @@ fn merge_column_write_over_a_row_of_another_schema_is_refused() {
                 .cells(BTreeMap::from([("count".to_owned(), Value::I32(5))])),
         )
         .unwrap();
-    let fate = core_fate(&mut core, bob_unit);
-    let SyncMessage::FateUpdate {
-        fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
-        ..
-    } = &fate
-    else {
-        panic!("Core must refuse a cross-schema merge op, got {fate:?}");
-    };
-    assert!(reason.contains("not supported yet"), "{reason}");
+    assert_accepted(&core_fate(&mut core, bob_unit));
     assert_eq!(
         rows_at(&mut core, "counters", DurabilityTier::Global),
-        BTreeMap::from([(target, counter_cells(1, "base"))])
+        BTreeMap::from([(target, counter_cells(6, "base"))])
     );
+    let mut evolved_row = counter_cells(6, "base");
+    evolved_row.insert("notes".to_owned(), v(""));
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "counters", evolved.id),
+        BTreeMap::from([(target, evolved_row)])
+    );
+}
+
+/// Core's current rows of `table` as a reader of `schema` sees them.
+fn rows_for_schema_at_core(
+    core: &mut NodeState,
+    table: &str,
+    schema: SchemaVersionId,
+) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+    core.current_rows_for_schema(table, schema, DurabilityTier::Global)
+        .resolve()
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect()
 }
 
 /// A Core with `base` as its schema and `evolved` published as a descendant
@@ -986,6 +996,17 @@ fn merge_column_write_over_a_row_of_another_schema_is_refused() {
 fn core_with_descendant_schema(
     base: JazzSchema,
     evolved: JazzSchema,
+    ops: Vec<LensOp>,
+) -> (tempfile::TempDir, NodeState) {
+    core_with_descendant_table_schema(base, evolved, "counters", ops)
+}
+
+/// A Core with `base` as its schema and `evolved` published as a descendant
+/// through `ops` on `table`.
+fn core_with_descendant_table_schema(
+    base: JazzSchema,
+    evolved: JazzSchema,
+    table: &str,
     ops: Vec<LensOp>,
 ) -> (tempfile::TempDir, NodeState) {
     let evolved_version = SchemaVersion::new(evolved);
@@ -997,8 +1018,8 @@ fn core_with_descendant_schema(
             base.version_id(),
             evolved_version.id,
             vec![TableLens {
-                source_table: "counters".to_owned(),
-                target_table: "counters".to_owned(),
+                source_table: table.to_owned(),
+                target_table: table.to_owned(),
                 ops,
             }],
         )
@@ -1032,9 +1053,9 @@ fn assert_accepted(fate: &SyncMessage) {
 
 /// INV-HIST-10 across schema versions: a plain-column write made under a
 /// descendant schema must not carry its stale snapshot of a merge column over
-/// ops Core already accepted. Across layouts the row is whole-row
-/// last-writer-wins (#3899), and bob's patch holds the counter he saw as an
-/// absolute value; Core keeps the counter's settled value instead.
+/// ops Core already accepted. bob's patch holds the counter he saw as an
+/// absolute value, but he does not author it, so Core's per-column merge
+/// keeps the counter's settled value (#3899).
 ///
 /// ```text
 /// base  (v1) ──count=1──────────► core   count=1
@@ -1161,10 +1182,11 @@ fn plain_column_write_across_schemas_keeps_accepted_gset_additions() {
 }
 
 /// A cross-schema plain write whose schema maps the merge column to another
-/// name cannot carry the settled value without guessing: Core refuses it
-/// with the explicit not-supported-yet reason, and the row keeps its counter.
+/// name. The rename keeps the column's physical id, so bob's write, which
+/// does not author the counter, leaves its settled value in place under
+/// both names.
 #[test]
-fn plain_column_write_across_schemas_with_a_renamed_merge_column_is_refused() {
+fn plain_column_write_across_schemas_with_a_renamed_merge_column_keeps_the_counter() {
     let base = counter_schema();
     let evolved = {
         let source = [(
@@ -1186,6 +1208,7 @@ fn plain_column_write_across_schemas_with_a_renamed_merge_column_is_refused() {
     }];
     ops.extend(add_notes_lens());
     let (_core_dir, mut core) = core_with_descendant_schema(base.clone(), evolved.clone(), ops);
+    let evolved_id = evolved.version_id();
     let (_base_dir, mut base_writer) = open_node_with_schema(node(1), base);
     let (_bob_dir, mut bob) = open_node_with_schema(node(3), evolved);
     let target = row(0x74);
@@ -1206,18 +1229,21 @@ fn plain_column_write_across_schemas_with_a_renamed_merge_column_is_refused() {
                 .authored_columns(BTreeSet::from(["notes".to_owned()])),
         )
         .unwrap();
-    let fate = core_fate(&mut core, bob_unit);
-    let SyncMessage::FateUpdate {
-        fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
-        ..
-    } = &fate
-    else {
-        panic!("Core must refuse the write, got {fate:?}");
-    };
-    assert!(reason.contains("not supported yet (#3899)"), "{reason}");
+    assert_accepted(&core_fate(&mut core, bob_unit));
     assert_eq!(
         rows_at(&mut core, "counters", DurabilityTier::Global),
         BTreeMap::from([(target, counter_cells(6, "base"))])
+    );
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "counters", evolved_id),
+        BTreeMap::from([(
+            target,
+            BTreeMap::from([
+                ("total".to_owned(), Value::I32(6)),
+                ("title".to_owned(), v("base")),
+                ("notes".to_owned(), v("bob")),
+            ])
+        )])
     );
 }
 
@@ -1430,16 +1456,17 @@ fn likes_row_at_core(core: &mut NodeState, target: RowUuid) -> BTreeMap<String, 
     .1
 }
 
-fn assert_refused_across_schemas(fate: &Fate) {
-    let Fate::Rejected(RejectionReason::MalformedCommit(reason)) = fate else {
-        panic!("Core must refuse the older-schema write, got {fate:?}");
-    };
-    assert!(reason.contains("not supported yet (#3899)"), "{reason}");
-}
-
-/// After the refusal, bob's next v2 write (notes only) leaves his accepted
-/// +5 in place.
-fn assert_bob_keeps_likes(core: &mut NodeState, bob: &mut NodeState, target: RowUuid) {
+/// The older-schema write was accepted and set the title, and the row still
+/// holds bob's accepted +5; bob's next v2 write (notes only) keeps both.
+fn assert_bob_keeps_likes(
+    core: &mut NodeState,
+    bob: &mut NodeState,
+    target: RowUuid,
+    title: &str,
+) {
+    let row = likes_row_at_core(core, target);
+    assert_eq!(row.get("likes"), Some(&Value::I32(5)), "{row:?}");
+    assert_eq!(row.get("title"), Some(&v(title)), "{row:?}");
     let (_bob_tx, bob_unit) = bob
         .commit_mergeable_unit_settled(
             MergeableCommit::new("counters", target, 40)
@@ -1452,22 +1479,22 @@ fn assert_bob_keeps_likes(core: &mut NodeState, bob: &mut NodeState, target: Row
     bob.apply_sync_message_settled(fate).unwrap();
     let row = likes_row_at_core(core, target);
     assert_eq!(row.get("likes"), Some(&Value::I32(5)), "{row:?}");
-    assert_eq!(row.get("title"), Some(&v("t")), "{row:?}");
+    assert_eq!(row.get("title"), Some(&v(title)), "{row:?}");
     assert_eq!(row.get("notes"), Some(&v("bob")), "{row:?}");
 }
 
-/// INV-HIST-10: a write under an older schema that lacks a merge column the
-/// row's current image holds would win the row whole and drop the column;
-/// the next newer-schema write would then take the lens default (0) and
-/// silently lose bob's accepted +5. Core refuses the older write instead.
+/// INV-HIST-10, #3899: a write under an older schema that lacks a merge
+/// column the row's current image holds. Core merges it per physical
+/// column into the row's union layout, so the counter it does not author
+/// keeps bob's accepted +5 instead of falling back to the lens default (0).
 ///
 /// ```text
-/// bob   (v2) ──likes=5───────► core   image v2, likes=5
-/// alice (v1) ──title="alice"─► core ──✗ Rejected("… not supported yet (#3899)")
+/// bob   (v2) ──likes=5───────► core   likes=5
+/// alice (v1) ──title="alice"─► core   title="alice", likes=5
 /// bob   (v2) ──notes="bob"───► core   likes=5
 /// ```
 #[test]
-fn older_schema_write_without_a_merge_column_is_refused_for_a_foreign_unit() {
+fn older_schema_write_without_a_merge_column_keeps_it_for_a_foreign_unit() {
     let target = row(0x78);
     let (_core_dir, mut core, _bob_dir, mut bob) = core_with_accepted_likes(target);
     let (_alice_dir, mut alice) = open_node_with_schema(node(1), likes_schema(false));
@@ -1478,17 +1505,14 @@ fn older_schema_write_without_a_merge_column_is_refused_for_a_foreign_unit() {
                 .authored_columns(BTreeSet::from(["title".to_owned()])),
         )
         .unwrap();
-    let SyncMessage::FateUpdate { fate, .. } = core_fate(&mut core, alice_unit) else {
-        unreachable!()
-    };
-    assert_refused_across_schemas(&fate);
-    assert_bob_keeps_likes(&mut core, &mut bob, target);
+    assert_accepted(&core_fate(&mut core, alice_unit));
+    assert_bob_keeps_likes(&mut core, &mut bob, target, "alice");
 }
 
-/// The same refusal when Core itself writes under the older schema and
+/// The same merge when Core itself writes under the older schema and
 /// self-finalizes the mergeable commit.
 #[test]
-fn older_schema_write_without_a_merge_column_is_refused_for_a_local_mergeable_commit() {
+fn older_schema_write_without_a_merge_column_keeps_it_for_a_local_mergeable_commit() {
     let target = row(0x79);
     let (_core_dir, mut core, _bob_dir, mut bob) = core_with_accepted_likes(target);
     let tx_id = core
@@ -1500,13 +1524,13 @@ fn older_schema_write_without_a_merge_column_is_refused_for_a_local_mergeable_co
         .unwrap();
     core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
     let fate = core.query_transaction(tx_id).resolve().unwrap().unwrap().fate;
-    assert_refused_across_schemas(&fate);
-    assert_bob_keeps_likes(&mut core, &mut bob, target);
+    assert_eq!(fate, Fate::Accepted);
+    assert_bob_keeps_likes(&mut core, &mut bob, target, "core");
 }
 
-/// The same refusal for Core's own exclusive commit under the older schema.
+/// The same merge for Core's own exclusive commit under the older schema.
 #[test]
-fn older_schema_write_without_a_merge_column_is_refused_for_a_local_exclusive_commit() {
+fn older_schema_write_without_a_merge_column_keeps_it_for_a_local_exclusive_commit() {
     let target = row(0x7a);
     let (_core_dir, mut core, _bob_dir, mut bob) = core_with_accepted_likes(target);
     let open = OpenTransactionId::new();
@@ -1529,8 +1553,8 @@ fn older_schema_write_without_a_merge_column_is_refused_for_a_local_exclusive_co
         crate::local_executor::block_on(core.finalize_local_exclusive_commit(tx, versions))
             .unwrap();
     let fate = crate::local_executor::block_on(core.persist_and_settle_outcome(outcome)).unwrap();
-    assert_refused_across_schemas(&fate);
-    assert_bob_keeps_likes(&mut core, &mut bob, target);
+    assert_eq!(fate, Fate::Accepted);
+    assert_bob_keeps_likes(&mut core, &mut bob, target, "core");
 }
 
 /// An originator settles its own accepted write when the fate arrives by
@@ -1638,4 +1662,207 @@ fn originator_late_accepted_fate_does_not_count_its_op_twice() {
         rows_at(&mut alice, "counters", DurabilityTier::Global)[&target].get("count"),
         Some(&Value::I32(6))
     );
+}
+
+/// `todos` with the given text and boolean columns, in order.
+fn todos_schema(columns: &[(&str, PublicColumnType)]) -> JazzSchema {
+    let source = [(
+        PublicTableName::new("todos"),
+        PublicTableSchema::new(PublicRowDescriptor::new(
+            columns
+                .iter()
+                .map(|(name, column_type)| PublicColumnDescriptor::new(*name, column_type.clone()))
+                .collect(),
+        )),
+    )]
+    .into_iter()
+    .collect::<PublicSchema>();
+    compile_public_test_schema(&source)
+}
+
+fn todo_row(cells: &[(&str, Value)]) -> BTreeMap<String, Value> {
+    cells
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), value.clone()))
+        .collect()
+}
+
+/// One write of `cells` to `todos`, authoring exactly those cells, decided
+/// by Core.
+fn write_todo(
+    writer: &mut NodeState,
+    core: &mut NodeState,
+    target: RowUuid,
+    time: u64,
+    cells: &[(&str, Value)],
+) {
+    let cells = todo_row(cells);
+    let authored = cells.keys().cloned().collect::<BTreeSet<_>>();
+    let (_tx, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, time)
+                .cells(cells)
+                .authored_columns(authored),
+        )
+        .unwrap();
+    assert_accepted(&core_fate(core, unit));
+}
+
+/// #3562: v2 adds `dueDate`. A v1 client's partial update must not reset
+/// it for v2 readers: Core merges the write into the row per physical
+/// column, and `dueDate` keeps the value alice's v2 write set.
+///
+/// ```text
+/// alice (v2) ──{a, done=false, dueDate=10-01}──► core
+/// bob   (v1) ──done=true──────────────────────► core   v2 reads {a, true, 10-01}
+/// alice (v2) ──title=b────────────────────────► core   v2 reads {b, true, 10-01}
+/// ```
+#[test]
+fn older_schema_partial_update_keeps_a_column_added_later() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let (v1_id, v2_id) = (v1.version_id(), v2.version_id());
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v1.clone(),
+        v2.clone(),
+        "todos",
+        vec![LensOp::AddColumn {
+            column: "dueDate".to_owned(),
+            default: v(""),
+        }],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2);
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1);
+    let target = row(0x90);
+
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("dueDate", v("10-01")),
+        ],
+    );
+    write_todo(&mut bob, &mut core, target, 20, &[("done", Value::Bool(true))]);
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", v2_id)[&target],
+        todo_row(&[
+            ("title", v("a")),
+            ("done", Value::Bool(true)),
+            ("dueDate", v("10-01")),
+        ]),
+        "bob's v1 update must keep alice's dueDate"
+    );
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", v1_id)[&target],
+        todo_row(&[("title", v("a")), ("done", Value::Bool(true))]),
+    );
+
+    write_todo(&mut alice, &mut core, target, 30, &[("title", v("b"))]);
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", v2_id)[&target],
+        todo_row(&[
+            ("title", v("b")),
+            ("done", Value::Bool(true)),
+            ("dueDate", v("10-01")),
+        ]),
+    );
+}
+
+/// #3838: v2 drops `legacy` and adds `dueDate`. A v1 client edits `legacy`
+/// and `done` over alice's v2 row. Core keeps `legacy` as a column of the
+/// row's union layout, so v1 readers see bob's value, v2 readers keep
+/// `dueDate`, and later v2 writes keep `legacy` for v1 readers.
+///
+/// ```text
+/// alice (v2) ──{a, false, dueDate=10-01}──► core
+/// bob   (v1) ──legacy=x, done=true────────► core   v1 {a, true, x}; v2 {a, true, 10-01}
+/// alice (v2) ──title=b────────────────────► core   v1 {b, true, x}; v2 {b, true, 10-01}
+/// bob   (v1) ──done=false─────────────────► core   v1 {b, false, x}; v2 {b, false, 10-01}
+/// ```
+#[test]
+fn older_schema_edit_of_a_dropped_column_keeps_both_layouts_columns() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("legacy", PublicColumnType::Text),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let (v1_id, v2_id) = (v1.version_id(), v2.version_id());
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v1.clone(),
+        v2.clone(),
+        "todos",
+        vec![
+            LensOp::DropColumn {
+                column: "legacy".to_owned(),
+                backwards_default: v(""),
+            },
+            LensOp::AddColumn {
+                column: "dueDate".to_owned(),
+                default: v(""),
+            },
+        ],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2);
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1);
+    let target = row(0x91);
+    let both = |core: &mut NodeState, title: &str, done: bool| {
+        assert_eq!(
+            rows_for_schema_at_core(core, "todos", v1_id)[&target],
+            todo_row(&[
+                ("title", v(title)),
+                ("done", Value::Bool(done)),
+                ("legacy", v("x")),
+            ]),
+            "v1 readers keep bob's legacy"
+        );
+        assert_eq!(
+            rows_for_schema_at_core(core, "todos", v2_id)[&target],
+            todo_row(&[
+                ("title", v(title)),
+                ("done", Value::Bool(done)),
+                ("dueDate", v("10-01")),
+            ]),
+            "v2 readers keep alice's dueDate"
+        );
+    };
+
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("dueDate", v("10-01")),
+        ],
+    );
+    write_todo(
+        &mut bob,
+        &mut core,
+        target,
+        20,
+        &[("legacy", v("x")), ("done", Value::Bool(true))],
+    );
+    both(&mut core, "a", true);
+    write_todo(&mut alice, &mut core, target, 30, &[("title", v("b"))]);
+    both(&mut core, "b", true);
+    write_todo(&mut bob, &mut core, target, 40, &[("done", Value::Bool(false))]);
+    both(&mut core, "b", false);
 }

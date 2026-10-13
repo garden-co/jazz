@@ -736,7 +736,10 @@ struct SchemaCatalogue {
         SchemaVersionId,
         BTreeMap<
             String,
-            BTreeMap<physical::PhysicalWriteTarget, Arc<physical::PreparedPhysicalWritePlan>>,
+            BTreeMap<
+                (physical::PhysicalWriteTarget, bool),
+                Arc<physical::PreparedPhysicalWritePlan>,
+            >,
         >,
     >,
     /// Schema version currently used for newly authored writes.

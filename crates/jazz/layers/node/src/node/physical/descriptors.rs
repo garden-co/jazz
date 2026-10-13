@@ -151,7 +151,7 @@ fn remap_authored_payload_enum_value(
     }
 }
 
-fn remap_nested_enum_value(
+pub(super) fn remap_nested_enum_value(
     value: Value,
     authored: &records::ValueType,
     physical: &records::ValueType,
@@ -968,6 +968,33 @@ pub(super) fn physical_version_storage_tables(
                 let rejected =
                     physical_rejected_version_field_names_for_case(logical_table, mapping, fields)?;
                 if rejected_layouts_by_tag.insert(tag, rejected).is_some() {
+                    return Err(Error::InvalidStoredValue(
+                        "physical table variant tag collision",
+                    ));
+                }
+            }
+            // The schema's union case: its own cells, then every other
+            // column of the lineage it may have to carry. Rejected versions
+            // are authored writes and never use it.
+            let extras = union_extra_columns(
+                physical_mappings,
+                schema_version_aliases,
+                *schema_version,
+                &logical_table.name,
+            )?;
+            if !extras.is_empty() {
+                let tag = union_variant_tag(alias)?;
+                let extra_names = extras
+                    .iter()
+                    .map(|column_id| physical_user_column_field(*column_id))
+                    .collect::<Vec<_>>();
+                let mut history = physical_history_field_names(logical_table, mapping)?;
+                history.extend(extra_names.iter().cloned());
+                let mut current = physical_current_field_names(logical_table, mapping)?;
+                current.extend(extra_names);
+                if layouts_by_tag.insert(tag, history).is_some()
+                    || current_layouts_by_tag.insert(tag, current).is_some()
+                {
                     return Err(Error::InvalidStoredValue(
                         "physical table variant tag collision",
                     ));

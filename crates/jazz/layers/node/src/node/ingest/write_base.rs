@@ -1,13 +1,3 @@
-/// Plain cells of an image keyed by physical column id: each cell's column
-/// type and value (`None` is null). `_deletion` is keyed by
-/// `DELETION_COLUMN_ID`.
-pub(super) type PhysicalCells = BTreeMap<PhysicalColumnId, (ValueType, Option<Value>)>;
-
-/// The `_deletion` cell's type: the same in every layout.
-fn deletion_cell_type() -> ValueType {
-    ValueType::Nullable(Box::new(ValueType::Bool))
-}
-
 /// What a node's accepted history says about one accepted write (SPEC 4
 /// §4.6, "Maybe conflicting"). Derived on demand; nothing of it is stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -316,40 +306,5 @@ where
             }
         }
         Ok(newest.map(|time| TxId::new(time, self.node_uuid)))
-    }
-
-    /// Every plain cell and `_deletion` of a row image, keyed by physical
-    /// column id.
-    pub(super) fn image_physical_cells(&self, image: &VersionRow) -> Result<PhysicalCells, Error> {
-        let schema_version = self
-            .schema_version_for_alias(image.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "history schema version alias must exist",
-            ))?;
-        let table = self.table_in_schema_ref(image.table(), schema_version)?;
-        let mapping = self
-            .catalogue
-            .physical_mappings
-            .get(&schema_version)
-            .and_then(|mapping| mapping.tables.get(image.table()))
-            .map(|mapping| &mapping.columns)
-            .ok_or(Error::InvalidStoredValue(
-                "history physical table mapping missing",
-            ))?;
-        let record = image.record.borrowed();
-        let mut cells = PhysicalCells::new();
-        for (index, column) in table.columns.iter().enumerate() {
-            if table.merge_strategy(&column.name) != crate::schema::MergeStrategy::Lww {
-                continue;
-            }
-            let id = *mapping.get(&column.name).ok_or(Error::InvalidStoredValue(
-                "history column physical mapping missing",
-            ))?;
-            let value = nullable_value(record.get_idx(HistoryRowRecord::USER_CELLS + index)?)?;
-            cells.insert(id, (column.column_type.clone(), value));
-        }
-        let deletion = nullable_value(record.get_idx(HistoryRowRecord::FIELD__DELETION_IDX)?)?;
-        cells.insert(DELETION_COLUMN_ID, (deletion_cell_type(), deletion));
-        Ok(cells)
     }
 }
