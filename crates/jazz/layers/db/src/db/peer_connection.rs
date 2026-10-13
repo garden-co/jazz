@@ -3963,6 +3963,30 @@ where
                                 }
                                 Err(error) => return Err(transport_error(error)),
                                 Ok(None) => {
+                                    // Input ran out with requests held: answer
+                                    // the writes ingested so far now, so the
+                                    // requests behind them are served in this
+                                    // same turn (SPEC 8 §8.2.1).
+                                    if read_barrier.is_holding() {
+                                        queue_local_acknowledgements(
+                                            &self.local_fate_routes,
+                                            &self.node,
+                                        )
+                                        .await;
+                                        if !flush_downstream_fates(
+                                            &self.node,
+                                            peer,
+                                            self.transport.as_mut(),
+                                            &self.downstream_fates,
+                                            read_barrier,
+                                            &self.scheduler,
+                                        )? {
+                                            return Ok(true);
+                                        }
+                                        if read_barrier.has_released() {
+                                            continue;
+                                        }
+                                    }
                                     let ready = pending_catalogue_subscriptions.iter().find_map(
                                         |(key, pending)| {
                                             self.node

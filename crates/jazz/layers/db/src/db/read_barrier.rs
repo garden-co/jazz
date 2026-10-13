@@ -175,6 +175,16 @@ impl ReadBarrierReceiver {
         self.released.pop_front()
     }
 
+    /// Whether a request waits behind an unanswered barrier.
+    pub(super) fn is_holding(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// Whether a satisfied barrier released requests not yet served.
+    pub(super) fn has_released(&self) -> bool {
+        !self.released.is_empty()
+    }
+
     #[cfg(test)]
     pub(super) fn held_len(&self) -> usize {
         self.held.len()
