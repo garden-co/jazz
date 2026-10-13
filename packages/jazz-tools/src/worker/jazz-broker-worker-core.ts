@@ -811,6 +811,7 @@ async function acquireForegroundNodeLease(
     recordWorkerLifecycle("lease-admitted", request.dbName, null);
     post(port, {
       type: "foreground-node-lease-ready",
+      workerRealmId,
       leaseId: lease.leaseId,
       node: lease.node,
       confirmedTxTime: lease.confirmedTxTime.toString(),
@@ -1640,6 +1641,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           post(peer.port, { type: "remote-link", state: activeRuntime.remoteLinkState() });
           result(peer, message.id, undefined, {
             peerAuthority,
+            workerRealmId,
             ...(peer.inspectorAttachment
               ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
               : {}),
@@ -1890,6 +1892,7 @@ function result(
   receipt?: {
     inspectorAttachmentPhysicalDbName?: string;
     peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
+    workerRealmId?: string;
   },
 ): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
