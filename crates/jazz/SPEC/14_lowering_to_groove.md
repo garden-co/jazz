@@ -92,7 +92,12 @@ source for it lies below. Then:
   every route its right input depends on;
 - aggregates, arg-max/min, windows and collect-by group on every route their
   input depends on;
-- recursive and template operators depend on no route.
+- a lookup keyed by binding values is only a mask: a join must pair its rows
+  with the route before they are delivered;
+- recursive operators depend on no route.
+
+A typed query template is checked as the declarative operators it was compiled
+from; one that cannot be expanded must depend on no route.
 
 A program that breaks a rule is not shared: its binding source is renamed to a
 per-session, per-binding name, so it behaves exactly as a private preparation.
