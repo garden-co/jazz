@@ -253,13 +253,13 @@ async fn an_empty_server_answer_releases_the_opening() {
 }
 
 /// Without a configured server nothing can answer, so both reads are plain
-/// local-first at once. (A serverless native client publishes a subscription
-/// only from local changes, as for any local-first read, so the subscription
-/// is observed through its first local write.)
+/// local-first at once: the empty local opening is published immediately,
+/// still pending (nothing has settled it, exactly as with a disconnected
+/// server), and the first local write follows as an ordinary change.
 ///
 /// ```text
 /// alice (no server): one-shot (wait 60 s) ─► [] at once
-/// alice: subscribe (wait 60 s) ─ insert x ─► delta x at once
+/// alice: subscribe (wait 60 s) ─► empty pending opening at once ─ insert x ─► delta x
 /// ```
 #[tokio::test(flavor = "current_thread")]
 async fn a_reader_without_a_server_does_not_wait() {
@@ -279,6 +279,10 @@ async fn a_reader_without_a_server_does_not_wait() {
                 .subscribe_local_first(Query::from("items"), WAIT)
                 .await
                 .expect("subscribe");
+            let opening = first_delta(&mut stream, IMMEDIATE).await;
+            assert!(opening.is_empty(), "{opening:?}");
+            assert!(opening.pending, "{opening:?}");
+
             let (id, _, _) = alice
                 .insert("items", row_input!("label" => "offline"))
                 .expect("insert local row");

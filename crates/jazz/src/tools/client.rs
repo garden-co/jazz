@@ -39,7 +39,7 @@ use crate::model::public_schema::{Schema, validate_json_value};
 use crate::model::transaction::OpenTransactionId;
 use crate::model::transaction::TransactionId;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
-use crate::storage_codec_profile::epoch_1_storage_codec_profile;
+use crate::storage_codec_profile::node_storage_codec_profile;
 use crate::tools::native_transport_connector::{
     ConnectedNativeTransport, NativeTransportConnector, NativeTransportRequest,
     NativeTransportTerminal, NativeTransportTerminalFuture,
@@ -615,9 +615,12 @@ impl Backend {
         } else {
             StackSafeFuture::new(CoreDb::open(config)).await
         };
-        Ok(Self(Rc::new(db.map_err(|error| {
-            JazzError::Connection(error.to_string())
-        })?)))
+        let db = db.map_err(|error| JazzError::Connection(error.to_string()))?;
+        // Application writes carry wall-clock physical milliseconds, exactly
+        // as the TypeScript runtime passes `Date.now()`: linear history
+        // resolves plain columns last-writer-wins by that time.
+        db.use_wall_clock_for_writes();
+        Ok(Self(Rc::new(db)))
     }
 
     fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
@@ -808,7 +811,7 @@ impl Backend {
         &self,
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
-        self.0.prepare_query_for_open_schema_async(query).await
+        StackSafeFuture::new(self.0.prepare_query_for_open_schema_async(query)).await
     }
 
     async fn row_provenance_for_subscription(
@@ -2908,7 +2911,7 @@ async fn core_storage(
                 .open(
                     context.data_dir.join("jazz-core.rocksdb"),
                     column_families,
-                    epoch_1_storage_codec_profile()
+                    node_storage_codec_profile()
                         .map_err(|error| JazzError::Connection(error.to_string()))?,
                 )
                 .await
@@ -3112,8 +3115,10 @@ fn core_row_provenance_to_public(
 /// Current rows already expose public provenance in Unix milliseconds. Packed
 /// HLC values remain internal version and transaction-ordering state.
 fn public_subscription_record(row: &crate::node::CurrentRow) -> Result<Vec<u8>> {
-    let (descriptor, raw) = row.encoded_record();
-    let mut values = BorrowedRecord::new(raw, descriptor)
+    let published = crate::binding_codec::published_record(row)
+        .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
+    let descriptor = &published.descriptor;
+    let mut values = BorrowedRecord::new(&published.raw, descriptor)
         .to_values()
         .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
     normalize_public_subscription_record_values(descriptor, &mut values)?;

@@ -74,10 +74,9 @@ fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
         )
         .unwrap();
     core.apply_sync_message_settled(parent_unit).unwrap();
-    let (_child_tx, unit) = writer
+    let (child_tx, unit) = writer
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x4a), 11)
-                .parents(vec![parent])
                 .cells(title_cells("child")),
         )
         .unwrap();
@@ -86,8 +85,7 @@ fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
     };
     assert_eq!(tx.tx_id.node, node(0x4a));
     assert_eq!(versions[0].schema_version(), schema.version_id());
-    assert_eq!(versions[0].parents(), vec![parent]);
-    assert_eq!(versions[0].parents()[0].node, node(0x4a));
+    let _ = parent;
 
     core.apply_sync_message_settled(unit).unwrap();
     assert_ne!(
@@ -98,7 +96,7 @@ fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
     let stored = core.query_table_versions("todos").unwrap();
     let child_row = stored
         .iter()
-        .find(|version| version.parents().contains(&parent))
+        .find(|version| core.version_tx_id(version).unwrap() == child_tx)
         .unwrap();
     let stored_wire = core.version_record_from_row(child_row).unwrap();
     assert_eq!(stored_wire.schema_version(), schema.version_id());

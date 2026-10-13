@@ -596,7 +596,6 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     let update_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("roots", row(0xd2), 40)
-                .parents(vec![TxId::new(TxTime(10), node(9))])
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v("updated visible root")),
                     ("project".to_owned(), Value::Uuid(row(0xc2).0)),

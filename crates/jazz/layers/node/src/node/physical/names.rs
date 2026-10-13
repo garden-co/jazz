@@ -37,6 +37,10 @@ fn physical_current_projection_target_for_enum_columns(
 pub(super) enum PhysicalCurrentClass {
     Global,
     Ahead,
+    /// The synced image of each row that has a pending overlay, indexed like
+    /// global current, so a Local index read can drop overlaid settled rows
+    /// without scanning the whole overlay.
+    AheadShadow,
 }
 
 #[derive(Clone, Copy)]
