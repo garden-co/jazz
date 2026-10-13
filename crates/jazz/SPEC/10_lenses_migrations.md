@@ -592,6 +592,34 @@ installs the authority UUID manifest, and reconciles ancestors and descendants
 around the local anchor. Pending local rows therefore remain addressable while
 cross-node semantic identity converges.
 
+**Union row cases.** Besides one Groove case per schema version (tag = the
+schema's local alias), every physical history, global current, ahead current
+and ahead shadow table has a **union case** per schema version `G` whose
+lineage has columns `G` does not map: tag = `alias(G) | 1 << 31`, fields =
+`G`'s own case followed by those columns ("extras"), in physical column id
+order. The extras of `G` are the columns of the same physical table mapped by
+any schema version whose local alias is no greater than `G`'s; aliases are
+allocated in activation order, so the case is fixed once `G` is registered,
+and old union cases never change. Rejected-version tables have no union
+case. A union row reads exactly like a `G` row to code that only knows `G`.
+
+Core stores each post-image in the union case of the newest schema version
+mapping the table (ch. 4 §4.6, "Across schema versions"). An extra is
+**stored** when no lens path from `G` derives it from one of `G`'s own
+columns; an extra the path does derive (a column `G` carries on under a new
+physical id, or copies) stays null, and readers derive it from `G`'s cell as
+for any `G` row. Reading a union row as schema `R`: a column of `R` that is a
+stored extra reads that field; any other column takes the `G` → `R`
+projection.
+
+On the wire a Core image keeps `G`'s cells and descriptor; its stored extras
+travel as `UnionExtraCells`, one entry per schema version defining them, each
+a record of that schema's authored cells (`_app_<column>`, nullable). The
+row and its entries use the `JVRR` v3 envelope; every row without entries
+keeps the v2 bytes. A receiver validates each cell against its schema and
+stores the image in its own newest union case, deriving the cells the image
+lacks through the lens as a reader would. Commit units carry no union cells.
+
 ### 10.4 Writes: authored schema variants
 
 New local writes carry the schema selected by `current_write_schema` as their
