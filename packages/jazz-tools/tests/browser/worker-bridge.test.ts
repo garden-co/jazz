@@ -191,7 +191,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
     });
     let write: Promise<unknown> | undefined;
     try {
-      const initialHighWater = runtime.foregroundTxTimeHighWater();
+      const initialHighWater = await runtime.foregroundTxTimeHighWater();
       const oldBatch = createOpenTransactionId();
       runtime.beginTransaction("mergeable", oldBatch);
       write = runtime.streamingMutation(
@@ -254,7 +254,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
         await vi.waitFor(() => expect(fixture.close).toHaveBeenCalledOnce());
         await expect(lease.returnWithHighWater(highWater + 1n)).rejects.toBe(failure);
         await expect(lease.retire()).rejects.toBe(failure);
-        expect(runtime.foregroundTxTimeHighWater()).toBe(highWater);
+        expect(await runtime.foregroundTxTimeHighWater()).toBe(highWater);
         await reopened.returnForegroundNodeLease(successor.leaseId, highWater);
       } finally {
         reopened.close();

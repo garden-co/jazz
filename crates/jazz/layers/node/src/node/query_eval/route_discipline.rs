@@ -266,7 +266,11 @@ where
 
     /// The route a join key stands for: the key's own route name, or the
     /// route an earlier join pinned that field to.
-    fn key_route(&mut self, input: &GraphBuilder, field: &FieldRef) -> Result<String, RouteViolation> {
+    fn key_route(
+        &mut self,
+        input: &GraphBuilder,
+        field: &FieldRef,
+    ) -> Result<String, RouteViolation> {
         let name = self.raw_field_name(input, field)?;
         let equivalents = self.equivalents(input)?;
         Ok(equivalents
@@ -302,23 +306,19 @@ where
                 }
                 let left_carried = self.carried(left)?;
                 let right_carried = self.carried(right)?;
-                if std::env::var_os("JAZZ_ROUTE_DEBUG").is_some() {
-                    let keys = left_on
-                        .iter()
-                        .zip(right_on)
-                        .map(|(l, r)| (self.raw_field_name(left, l), self.raw_field_name(right, r)))
-                        .collect::<Vec<_>>();
-                    eprintln!("ROUTEDBG-EQ keys {keys:?} sketch {} lc {left_carried:?} rc {right_carried:?}", sketch(node, 3));
-                }
                 for (left_key, right_key) in left_on.iter().zip(right_on) {
                     let left_name = self.raw_field_name(left, left_key)?;
                     let right_name = self.raw_field_name(right, right_key)?;
                     let left_route = self.key_route(left, left_key)?;
                     let right_route = self.key_route(right, right_key)?;
-                    if right_carried.contains(&right_route) || self.routes.contains(&right_route) && right_route != right_name {
+                    if right_carried.contains(&right_route)
+                        || self.routes.contains(&right_route) && right_route != right_name
+                    {
                         equivalents.insert(format!("left.{left_name}"), right_route.clone());
                     }
-                    if left_carried.contains(&left_route) || self.routes.contains(&left_route) && left_route != left_name {
+                    if left_carried.contains(&left_route)
+                        || self.routes.contains(&left_route) && left_route != left_name
+                    {
                         equivalents.insert(format!("right.{right_name}"), left_route.clone());
                     }
                 }
@@ -365,7 +365,11 @@ where
         Ok(self.route_name(name))
     }
 
-    fn raw_field_name(&self, input: &GraphBuilder, field: &FieldRef) -> Result<String, RouteViolation> {
+    fn raw_field_name(
+        &self,
+        input: &GraphBuilder,
+        field: &FieldRef,
+    ) -> Result<String, RouteViolation> {
         Ok(match field {
             FieldRef::Name(name) | FieldRef::StoredName(name) => name.clone(),
             FieldRef::Resolved(index) => self
@@ -413,14 +417,6 @@ where
             } => {
                 let left_depends = self.depends(left);
                 let right_depends = self.depends(right);
-                if std::env::var_os("JAZZ_ROUTE_DEBUG").is_some() {
-                    let keys = left_on
-                        .iter()
-                        .zip(right_on)
-                        .map(|(l, r)| (self.raw_field_name(left, l), self.raw_field_name(right, r)))
-                        .collect::<Vec<_>>();
-                    eprintln!("ROUTEDBG {} keys {keys:?} sketch {} out {:?}", operator_name(node), sketch(node, 3), self.output_names(node));
-                }
                 if left_depends.is_empty() && right_depends.is_empty() {
                     return Ok(());
                 }
@@ -575,7 +571,11 @@ where
 
 fn sketch(node: &GraphBuilder, depth: usize) -> String {
     let name = format!("{node:?}");
-    let name = name.split([' ', '{', '(']).next().unwrap_or_default().to_owned();
+    let name = name
+        .split([' ', '{', '('])
+        .next()
+        .unwrap_or_default()
+        .to_owned();
     if depth == 0 {
         return name;
     }

@@ -130,7 +130,7 @@ impl TickEvaluator<'_> {
             return Ok(LookupLayout {
                 prefix,
                 probe: LookupProbe::Index {
-                    storage_base: durable_index_key_prefix(&index.table, &index.index),
+                    storage_base: durable_index_key_prefix(index.durable_ids.index),
                     envelopes,
                 },
             });
@@ -292,11 +292,11 @@ impl TickEvaluator<'_> {
             prefix.extend_from_slice(key);
             match (&lookup.index, &layout.probe) {
                 (Some(index), LookupProbe::Index { storage_base, .. }) => {
-                    // The same storage envelope `persisted_index_scan_bounds`
-                    // puts around a static index prefix.
+                    // The same storage key `persisted_index_scan_bounds` builds
+                    // for a static index prefix: the logical key follows the
+                    // index's durable id directly.
                     let mut storage_key = storage_base.clone();
-                    storage_key.push(7);
-                    encode_ordered_bytes_without_terminal(&mut storage_key, &prefix);
+                    storage_key.extend_from_slice(&prefix);
                     super::super::evaluation_session::StorageRequestKey::IndexedRowsPrefix {
                         table: index.table.clone(),
                         index: index.index.clone(),

@@ -872,17 +872,12 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
         core.catalogue.physical_mappings[&renamed.id].tables["tasks"].table_id,
         table_id
     );
+    // Both schema generations' rows land in one physical current table.
     let changes = core
         .database
-        .primary_key_scan_raw("jazz_global_changes", &[])
+        .primary_key_scan_raw(&physical_global_current_table_name(table_id), &[])
         .unwrap();
     assert_eq!(changes.len(), 2);
-    assert!(changes.iter().all(|raw| {
-        raw.record()
-            .get_u64(GlobalChangeRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)
-            .unwrap()
-            == table_id.0
-    }));
 
     assert!(matches!(
         core.commit_exclusive_settled(exclusive, AuthorSubject::SYSTEM, 12),

@@ -316,6 +316,9 @@ fn direct_supporting_manifest_preserves_owned_reference_wire_bytes() {
                 adds: current.difference(&previous).cloned().collect(),
                 removes: previous.difference(&current).cloned().collect(),
             },
+            crate::protocol::SupportingRowsUpdate::CatchUp { .. } => {
+                panic!("a live publication never answers with a catch-up")
+            }
         };
         assert_eq!(
             payload.supporting_rows, expected_update,
@@ -389,15 +392,11 @@ fn supporting_rows_deduplicate_same_table_self_join_source_roles() {
     else {
         panic!("expected self-join deletion snapshot")
     };
-    assert!(
-        payload
-            .supporting_rows
-            .added_rows()
-            .iter()
-            .any(|input| input.row == shared
-                && input.version.tx == deletion_tx
-                && input.version.layer == crate::protocol::ResultRowLayer::Deletion)
-    );
+    assert!(carriers_ship_deleted_image(
+        &payload.version_carriers,
+        shared,
+        deletion_tx
+    ));
     assert!(
         !payload
             .supporting_rows
@@ -671,20 +670,22 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
         )
         .unwrap();
     accept_global(&mut core, deleted_tx, 2);
-    fresh.declare_known_state(subscription, known(2, 1));
+    // The reader last settled at 1, before the deletion; its stale
+    // authorization proof forces a full resend, and the row that left since
+    // its watermark ships its deleted image.
+    fresh.declare_known_state(subscription, known(1, 1));
     let revoke_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        supporting_rows, ..
+        version_carriers, ..
     }) = revoke_update
     else {
         panic!("expected view update");
     };
-    assert!(
-        supporting_rows
-            .added_rows()
-            .iter()
-            .any(|input| input.row == live && input.version.tx == deleted_tx)
-    );
+    assert!(carriers_ship_deleted_image(
+        &version_carriers,
+        live,
+        deleted_tx
+    ));
 }
 
 #[test]
@@ -1605,6 +1606,23 @@ fn register_whole_table_receiver(node: &mut NodeState, table: &str) {
     register_shape_binding_for_receiver(node, &shape, &binding);
 }
 
+/// A deleted row leaves the result; the update ships its deleted image.
+fn carriers_ship_deleted_image(
+    carriers: &[crate::protocol::VersionCarrier],
+    row: RowUuid,
+    tx: TxId,
+) -> bool {
+    crate::protocol::expand_version_carriers(carriers)
+        .expect("test update carriers should expand")
+        .iter()
+        .any(|bundle| {
+            bundle.tx.tx_id == tx
+                && bundle.versions.iter().any(|version| {
+                    version.row_uuid() == row && version.deletion() == Some(DeletionEvent::Deleted)
+                })
+        })
+}
+
 fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -2339,7 +2357,6 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let restored_content_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_002)
-                .parents(vec![original_tx])
                 .cells(title_cells("restored")),
         )
         .unwrap();
@@ -2347,7 +2364,6 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let restore_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_003)
-                .parents(vec![delete_tx])
                 .deletion(DeletionEvent::Restored),
         )
         .unwrap();
@@ -2362,16 +2378,16 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     assert_view_update_rows(
         &mut expected_snapshots,
         update.clone(),
-        vec![("todos", row_uuid, restored_content_tx)],
+        vec![("todos", row_uuid, restore_tx)],
         vec![],
     );
     assert!(
         version_bundles.iter().any(|bundle| {
-            bundle.tx.tx_id == restored_content_tx
+            bundle.tx.tx_id == restore_tx
                 && bundle.versions.iter().any(|version| {
                     version.table() == "todos"
                         && version.row_uuid() == row_uuid
-                        && version.deletion().is_none()
+                        && version.deletion() == Some(DeletionEvent::Restored)
                         && wire_version_cells(version, core.table("todos").unwrap())
                             == title_cells("restored")
                 })
@@ -2401,7 +2417,7 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
         Some(BTreeSet::from([(
             "todos".to_owned().into(),
             row_uuid,
-            restored_content_tx
+            restore_tx
         )]))
     );
 }
@@ -2427,7 +2443,6 @@ fn local_rehydrate_after_core_restore_ships_restored_row() {
     let restored_content_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_002)
-                .parents(vec![original_tx])
                 .cells(title_cells("restored")),
         )
         .unwrap();
@@ -2435,85 +2450,8 @@ fn local_rehydrate_after_core_restore_ships_restored_row() {
     let restore_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_003)
-                .parents(vec![delete_tx])
                 .deletion(DeletionEvent::Restored),
         )
-        .unwrap();
-    accept_confirmed(&mut core, restore_tx);
-    let (shape, binding) = title_shape_binding("restored");
-    let opts = RegisterShapeOptions {
-        tier: DurabilityTier::Local,
-        ..RegisterShapeOptions::default()
-    };
-    let subscription = subscription_key_with_opts(&shape, &binding, &opts);
-    register_shape_binding_for_receiver_with_opts(&mut reader, &shape, &binding, opts.clone());
-    let mut peer = PeerState::new();
-
-    let update = peer
-        .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
-        .unwrap();
-
-    let version_bundles = version_bundles_for_update(&update);
-    assert_view_update_rows(
-        &mut expected_snapshots,
-        update.clone(),
-        vec![("todos", row_uuid, restored_content_tx)],
-        vec![],
-    );
-    assert!(version_bundles.iter().any(|bundle| {
-        bundle.tx.tx_id == restore_tx
-            && bundle
-                .versions
-                .iter()
-                .any(|version| version.deletion() == Some(DeletionEvent::Restored))
-    }));
-    reader.apply_sync_message_settled(update).unwrap();
-    assert_eq!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Local)
-            .unwrap()
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row_uuid, title_cells("restored"))])
-    );
-    assert_eq!(
-        row_result_set(&peer, subscription),
-        Some(BTreeSet::from([(
-            "todos".to_owned().into(),
-            row_uuid,
-            restored_content_tx
-        )]))
-    );
-}
-
-#[test]
-fn local_rehydrate_after_core_restore_transaction_ships_restored_row() {
-    let mut expected_snapshots = ExpectedSupportingSnapshots::new();
-    let (_core_dir, mut core) = open_node_with_uuid(node(0x96));
-    let (_reader_dir, mut reader) = open_node_with_uuid(node(0x97));
-    let row_uuid = row_from_u64(10);
-    let original_tx = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")),
-        )
-        .unwrap();
-    accept_confirmed(&mut core, original_tx);
-    let delete_tx = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 1_001).deletion(DeletionEvent::Deleted),
-        )
-        .unwrap();
-    accept_confirmed(&mut core, delete_tx);
-    let restore_tx = core
-        .commit_mergeable_many_settled(vec![
-            MergeableCommit::new("todos", row_uuid, 1_002)
-                .parents(vec![original_tx])
-                .cells(title_cells("restored")),
-            MergeableCommit::new("todos", row_uuid, 1_003)
-                .parents(vec![delete_tx])
-                .deletion(DeletionEvent::Restored),
-        ])
         .unwrap();
     accept_confirmed(&mut core, restore_tx);
     let (shape, binding) = title_shape_binding("restored");
@@ -2542,10 +2480,82 @@ fn local_rehydrate_after_core_restore_transaction_ships_restored_row() {
                 .versions
                 .iter()
                 .any(|version| version.deletion() == Some(DeletionEvent::Restored))
-            && bundle
-                .versions
-                .iter()
-                .any(|version| version.deletion().is_none())
+    }));
+    reader.apply_sync_message_settled(update).unwrap();
+    assert_eq!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("restored"))])
+    );
+    assert_eq!(
+        row_result_set(&peer, subscription),
+        Some(BTreeSet::from([(
+            "todos".to_owned().into(),
+            row_uuid,
+            restore_tx
+        )]))
+    );
+}
+
+#[test]
+fn local_rehydrate_after_core_restore_transaction_ships_restored_row() {
+    let mut expected_snapshots = ExpectedSupportingSnapshots::new();
+    let (_core_dir, mut core) = open_node_with_uuid(node(0x96));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(0x97));
+    let row_uuid = row_from_u64(10);
+    let original_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")),
+        )
+        .unwrap();
+    accept_confirmed(&mut core, original_tx);
+    let delete_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 1_001).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_confirmed(&mut core, delete_tx);
+    let restore_tx = core
+        .commit_mergeable_many_settled(vec![
+            MergeableCommit::new("todos", row_uuid, 1_002)
+                .cells(title_cells("restored")),
+            MergeableCommit::new("todos", row_uuid, 1_003)
+                .deletion(DeletionEvent::Restored),
+        ])
+        .unwrap();
+    accept_confirmed(&mut core, restore_tx);
+    let (shape, binding) = title_shape_binding("restored");
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Local,
+        ..RegisterShapeOptions::default()
+    };
+    let subscription = subscription_key_with_opts(&shape, &binding, &opts);
+    register_shape_binding_for_receiver_with_opts(&mut reader, &shape, &binding, opts.clone());
+    let mut peer = PeerState::new();
+
+    let update = peer
+        .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
+        .unwrap();
+
+    let version_bundles = version_bundles_for_update(&update);
+    assert_view_update_rows(
+        &mut expected_snapshots,
+        update.clone(),
+        vec![("todos", row_uuid, restore_tx)],
+        vec![],
+    );
+    // Content and restoration in one transaction are one row image.
+    assert!(version_bundles.iter().any(|bundle| {
+        bundle.tx.tx_id == restore_tx
+            && bundle.versions.iter().any(|version| {
+                version.deletion() == Some(DeletionEvent::Restored)
+                    && wire_version_cells(version, core.table("todos").unwrap())
+                        == title_cells("restored")
+            })
     }));
     reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
@@ -2605,6 +2615,7 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         supporting_rows: program_fact_adds,
+        version_carriers,
         ..
     }) = update.clone()
     else {
@@ -2624,16 +2635,10 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
         }
     }));
     assert!(
-        program_fact_adds.added_rows().iter().any(|fact| {
-            {
-                let input = fact;
-                input.row == first_row
-                    && input.version.tx == delete_first_tx
-                    && input.version.layer == crate::protocol::ResultRowLayer::Deletion
-            }
-        }),
-        "the authorized deletion witness clears cached state without restoring the deleted content input"
+        carriers_ship_deleted_image(&version_carriers, first_row, delete_first_tx),
+        "the deleted row leaves the result and ships its deleted image"
     );
+
     assert!(
         !program_fact_adds.added_rows().iter().any(|fact| {
             {
@@ -3720,8 +3725,8 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     assert!(footprint.structured_app_rows_bytes > 0);
 
     // The storage-backed path never needs to read a newer content winner to
-    // retract a deleted row. A restore re-enters through its exact original
-    // content transaction and is shipped from immutable storage.
+    // retract a deleted row. A restore is a complete row image, so the row
+    // re-enters through the restoring transaction and ships from storage.
     let deleted_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x51), 1_003).deletion(DeletionEvent::Deleted),
@@ -3743,7 +3748,7 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     assert_view_update_rows(
         &mut expected_snapshots,
         peer.query_update(&mut core, &shape, &binding).unwrap(),
-        vec![("todos", row(0x51), restored_tx)],
+        vec![("todos", row(0x51), re_restored_tx)],
         vec![],
     );
 }
@@ -5041,14 +5046,11 @@ fn policy_visible_delete_carries_tombstone_and_clears_receiver_current_row() {
     let SyncMessage::ViewUpdate(payload) = &delete else {
         panic!("expected view update");
     };
-    assert!(payload.supporting_rows.added_rows().iter().any(|fact| {
-        {
-            let input = fact;
-            input.row == doc
-                && input.version.tx == delete_tx
-                && input.version.layer == crate::protocol::ResultRowLayer::Deletion
-        }
-    }));
+    assert!(carriers_ship_deleted_image(
+        &payload.version_carriers,
+        doc,
+        delete_tx
+    ));
     reader.apply_sync_message_settled(delete).unwrap();
     assert!(
         reader
@@ -5127,14 +5129,11 @@ fn concurrent_policy_revoke_cannot_cross_authorize_another_rows_tombstone() {
     let SyncMessage::ViewUpdate(payload) = &mixed else {
         panic!("expected view update");
     };
-    assert!(payload.supporting_rows.added_rows().iter().any(|fact| {
-        {
-            let input = fact;
-            input.row == deleted_doc
-                && input.version.tx == delete_tx
-                && input.version.layer == crate::protocol::ResultRowLayer::Deletion
-        }
-    }));
+    assert!(carriers_ship_deleted_image(
+        &payload.version_carriers,
+        deleted_doc,
+        delete_tx
+    ));
     assert!(payload.supporting_rows.added_rows().iter().all(|fact| {
         !{
             let input = fact;
@@ -5631,7 +5630,7 @@ fn whole_table_incremental_delta_ships_restore_register_witness() {
     assert_view_update_rows(
         &mut expected_snapshots,
         restored.clone(),
-        vec![("todos", row, content_tx)],
+        vec![("todos", row, restore_tx)],
         vec![],
     );
     let version_bundles = version_bundles_for_update(&restored);
@@ -5752,7 +5751,6 @@ fn incremental_query_result_set_drops_enter_then_leave_same_drain_cycle() {
     let unmatch_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 11)
-                .parents(vec![match_tx])
                 .cells(title_cells("other")),
         )
         .unwrap();
@@ -5802,7 +5800,6 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
     let unmatch_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 11)
-                .parents(vec![first_tx])
                 .cells(title_cells("other")),
         )
         .unwrap();
@@ -5810,7 +5807,6 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
     let second_match_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 12)
-                .parents(vec![unmatch_tx])
                 .cells(title_cells("match")),
         )
         .unwrap();
@@ -5903,7 +5899,6 @@ fn incremental_query_result_set_rebuilds_stale_closure_rows() {
     let stock_v2 = core
         .commit_mergeable_settled(
             MergeableCommit::new("stock", stock_row, 12)
-                .parents(vec![stock_v1])
                 .cells(BTreeMap::from([("quantity".to_owned(), Value::U64(9))])),
         )
         .unwrap();
@@ -6095,26 +6090,19 @@ fn duplicate_usage_reconciles_canonical_membership_after_deletion_witness() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         supporting_rows,
+        version_carriers,
         ..
     }) = canonical_update
     else {
         panic!("expected canonical view update");
     };
     assert_eq!(*subscription, canonical);
+    // The deleted row leaves the supporting set; its deleted image ships so
+    // the receiver's copy stops matching.
+    assert!(supporting_rows.added_rows().is_empty());
     assert!(
-        supporting_rows
-            .added_rows()
-            .iter()
-            .any(|input| input.row == live
-                && input.version.tx == deleted_tx
-                && input.version.layer == crate::protocol::ResultRowLayer::Deletion),
-        "the supporting snapshot carries the deletion that makes the result empty"
-    );
-    assert!(
-        supporting_rows
-            .added_rows()
-            .iter()
-            .all(|input| input.row == live)
+        carriers_ship_deleted_image(version_carriers, live, deleted_tx),
+        "the update carries the deletion that makes the result empty"
     );
 
     // The clone is a distinct concrete receiver. Production subscription

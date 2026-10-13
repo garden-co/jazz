@@ -61,7 +61,7 @@ describe("wire frame artifact corpus", () => {
     "executes every complete v1 frame and rejects malformed input through NAPI and WASM",
     async () => {
       const corpus = artifactCorpus();
-      expect(corpus.format).toBe("jazz-wire-frame-artifact-corpus-v5");
+      expect(corpus.format).toBe("jazz-wire-frame-artifact-corpus-v6");
       const accepted = [
         ...[...rustHelloFixtures(), ...corpus.error_frames].map((frame) => ({
           name: frame.name,
@@ -117,16 +117,16 @@ describe("wire frame artifact corpus", () => {
 });
 
 function artifactCorpus(): ArtifactCorpus {
-  return readJson("wire_frame_artifact_corpus_v5.json") as ArtifactCorpus;
+  return readJson("wire_frame_artifact_corpus_v6.json") as ArtifactCorpus;
 }
 
 function rustHelloFixtures(): FrameFixture[] {
-  return (readJson("wire_hello_frames_v5.json") as { fixtures: FrameFixture[] }).fixtures;
+  return (readJson("wire_hello_frames_v6.json") as { fixtures: FrameFixture[] }).fixtures;
 }
 
 function rustMessageFixtures(): Array<{ name: string; batch_hex: string }> {
   return (
-    readJson("wire_message_frames_v5.json") as {
+    readJson("wire_message_frames_v6.json") as {
       fixtures: Array<{ name: string; batch_hex: string }>;
     }
   ).fixtures;

@@ -35,6 +35,7 @@ impl NodeAliases {
         self.by_node.get(node)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn contains_key(&self, node: &NodeUuid) -> bool {
         self.by_node.contains_key(node)
