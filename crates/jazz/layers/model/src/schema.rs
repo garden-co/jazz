@@ -500,8 +500,11 @@ impl RuntimeSchema {
             catalogue_table(),
             catalogue_pointer_table(),
             transactions_table(),
+            pending_transactions_table(),
+            tx_provenance_table(),
             tx_touched_rows_table(),
             rejected_transactions_table(),
+            history_horizon_table(),
         ]
     }
 
@@ -1448,6 +1451,19 @@ fn nodes_table() -> GrooveTableSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
 }
 
+/// `jazz_transactions` (`jazz.tx-record.v2`): the permanent record of one
+/// transaction, keyed `(time, node_id)`. It holds only what every node needs
+/// for as long as it keeps the transaction: its identity, kind, author,
+/// cardinality, fate, seq and durability. Everything else lives beside it
+/// (SPEC 2 §2.8):
+///
+/// - fields needed only until the transaction has a seq or a rejection
+///   (`permission_subject` and the exclusive read evidence) in
+///   `jazz_pending_transactions`, deleted by the batch that settles it;
+/// - calculated-merge and branch-write provenance, which grows with the number
+///   of writes, in `jazz_tx_provenance`, so status reads never copy it;
+/// - the rejection reason in one nullable record that costs a byte on every
+///   transaction that was not rejected.
 fn transactions_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_transactions",
@@ -1455,31 +1471,21 @@ fn transactions_table() -> GrooveTableSchema {
             column("time", GrooveColumnType::U64),
             column("node_id", GrooveColumnType::U64),
             column("kind", tx_kind_column()),
+            // Bit 0: `n_total_writes` is only the view-redacted cardinality.
+            // Bit 1: a `jazz_tx_provenance` record exists. Other bits are
+            // reserved and refused on read.
+            column("flags", GrooveColumnType::U8),
             column("n_total_writes", GrooveColumnType::U32),
             column("made_by", crate::ids::RowAuthor::value_type()),
-            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
-            column("row_read_set", GrooveColumnType::Bytes.nullable()),
-            column("absent_read_set", GrooveColumnType::Bytes.nullable()),
-            column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
-            column("user_metadata", GrooveColumnType::String.nullable()),
-            column("contribution_merge", contribution_merge_column()),
-            column(
-                "permission_subject",
-                crate::ids::AuthorSubject::value_type().nullable(),
-            ),
-            column("merge_strategy", GrooveColumnType::String.nullable()),
             // upstream-decided: written only by fate/state application.
             column("fate", fate_column()),
             // upstream-decided: written only by fate/state application.
             column("global_time", GrooveColumnType::U64.nullable()),
-            // upstream-decided: written only by rejection/state application.
-            column("rejection_reason", rejection_reason_column().nullable()),
-            // upstream-decided: written only by rejection/state application.
-            column("cascade_root", tx_id_column().nullable()),
-            // upstream-decided: written only by rejection/state application.
-            column("reason_detail", GrooveColumnType::String.nullable()),
             // node-local-derived: updated when the node learns stronger durability.
             column("durability", durability_column()),
+            column("user_metadata", GrooveColumnType::String.nullable()),
+            // upstream-decided: set exactly when `fate` is rejected.
+            column("rejection", rejection_column().nullable()),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
@@ -1487,6 +1493,83 @@ fn transactions_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
+}
+
+/// The rejection reason of a rejected transaction: its reason tag, the
+/// transaction whose rejection cascaded to it, and a diagnostic detail.
+fn rejection_column() -> GrooveColumnType {
+    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+        ("reason", rejection_reason_column()),
+        ("cascade_root", tx_id_column().nullable()),
+        ("detail", ValueType::String.nullable()),
+    ])))
+}
+
+/// `jazz_pending_transactions`: what a transaction needs only until it has a
+/// seq or a rejection, keyed `(time, node_id)` like its `jazz_transactions`
+/// record. A record exists only for an unsettled transaction that has
+/// something to keep here; the batch that stores its seq or rejection deletes
+/// it. `permission_subject` is the identity its writes were authorized as;
+/// slots 3 to 6 hold its exclusive read evidence
+/// (`jazz.exclusive-read-evidence.v1`) while its fate is pending.
+fn pending_transactions_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        "jazz_pending_transactions",
+        [
+            column("time", GrooveColumnType::U64),
+            column("node_id", GrooveColumnType::U64),
+            column(
+                "permission_subject",
+                crate::ids::AuthorSubject::value_type().nullable(),
+            ),
+            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
+            column("row_read_set", GrooveColumnType::Bytes.nullable()),
+            column("absent_read_set", GrooveColumnType::Bytes.nullable()),
+            column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
+    ]))
+}
+
+/// `jazz_tx_provenance`: a transaction's calculated-merge and branch-write
+/// provenance (`ContributionMergeProvenance`), keyed `(time, node_id)`. It
+/// grows with the transaction's writes, so it is kept apart from the
+/// `jazz_transactions` record that fate, seq and durability reads load; a
+/// record exists exactly when that record's flags say so (garden-co/jazz#4012).
+fn tx_provenance_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        TX_PROVENANCE_TABLE,
+        [
+            column("time", GrooveColumnType::U64),
+            column("node_id", GrooveColumnType::U64),
+            column("contribution_merge", contribution_merge_column()),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
+    ]))
+}
+
+const TX_PROVENANCE_TABLE: &str = "jazz_tx_provenance";
+
+/// `jazz_history_horizon`: the seq at or below which this node may have
+/// truncated history (SPEC 2 §2.8). At most one record, keyed `id = 0`; no
+/// record means the horizon is 0 and history is complete. This release never
+/// truncates and refuses to open a store whose horizon is above 0, so a later
+/// release can truncate below a horizon without another format change.
+fn history_horizon_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        "jazz_history_horizon",
+        [
+            column("id", GrooveColumnType::U8),
+            column("horizon", GrooveColumnType::U64),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U8))
 }
 
 /// `jazz_tx_touched_rows`: node-local bookkeeping, one record per transaction
@@ -1686,15 +1769,25 @@ fn contribution_merge_column() -> GrooveColumnType {
             .array_of(),
         ),
     ])))
-    .nullable()
+}
+
+/// Bound physical type of `jazz_transactions.rejection`, with the registry
+/// paths of the real column.
+pub fn transaction_rejection_storage_type() -> GrooveColumnType {
+    transactions_table()
+        .columns
+        .into_iter()
+        .find(|column| column.name == "rejection")
+        .expect("transaction rejection storage column")
+        .column_type
 }
 
 /// Bound physical type used by the transaction codec. Constructing the
 /// single-column table applies the same durable registry paths as the real
-/// `jazz_transactions.contribution_merge` column.
+/// `jazz_tx_provenance.contribution_merge` column.
 pub fn contribution_merge_storage_type() -> GrooveColumnType {
     GrooveTableSchema::new(
-        "jazz_transactions",
+        TX_PROVENANCE_TABLE,
         [column("contribution_merge", contribution_merge_column())],
     )
     .columns
@@ -2253,16 +2346,22 @@ mod tests {
     fn contribution_merge_uses_native_nested_records_and_groove_enums() {
         // Internal storage-shape coverage is necessary here because the public
         // transaction API intentionally hides Groove's durable descriptor.
-        let transactions = transactions_table();
-        let column = transactions
+        // Provenance lives beside the transaction record (garden-co/jazz#4012):
+        // a `jazz_tx_provenance` record exists exactly when there is some, so
+        // its column is not nullable and the transaction record has none.
+        assert!(
+            transactions_table()
+                .columns
+                .iter()
+                .all(|column| column.name != "contribution_merge")
+        );
+        let provenance_table = tx_provenance_table();
+        let column = provenance_table
             .columns
             .iter()
             .find(|column| column.name == "contribution_merge")
             .unwrap();
-        let GrooveColumnType::Nullable(provenance) = &column.column_type else {
-            panic!("contribution provenance must be nullable");
-        };
-        let GrooveColumnType::Record(provenance) = provenance.as_ref() else {
+        let GrooveColumnType::Record(provenance) = &column.column_type else {
             panic!("contribution provenance must be a native record");
         };
         assert_eq!(

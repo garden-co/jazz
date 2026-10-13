@@ -971,10 +971,20 @@ where
         &mut self,
         tx_id: TxId,
     ) -> Result<Option<StoredTransaction>, Error> {
-        self.query_transaction_fields(tx_id, |state, alias, record| {
-            state.stored_transaction_from_record(tx_id, alias, record)
-        })
-        .await
+        let Some((alias, header)) = self
+            .query_transaction_fields(tx_id, |_, alias, record| {
+                Ok((
+                    alias,
+                    OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+                ))
+            })
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.stored_transaction_from_header(tx_id, alias, header.borrowed())
+            .await
+            .map(Some)
     }
 
     pub(super) async fn query_transaction_state(
@@ -1123,7 +1133,9 @@ where
                     continue;
                 }
                 let tx_id = TxId::new(time, node);
-                let tx = self.stored_transaction_from_record(tx_id, alias, record)?;
+                let tx = self
+                    .stored_transaction_from_header(tx_id, alias, record)
+                    .await?;
                 context.tx_rows.insert(tx_id, Some(tx));
             }
         }
@@ -1135,10 +1147,20 @@ where
         tx_id: TxId,
         expected_alias: NodeAlias,
     ) -> Result<Option<StoredTransaction>, Error> {
-        self.query_transaction_fields_by_alias(tx_id, expected_alias, &|state, alias, record| {
-            state.stored_transaction_from_record(tx_id, alias, record)
-        })
-        .await
+        let Some((alias, header)) = self
+            .query_transaction_fields_by_alias(tx_id, expected_alias, &|_, alias, record| {
+                Ok((
+                    alias,
+                    OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+                ))
+            })
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.stored_transaction_from_header(tx_id, alias, header.borrowed())
+            .await
+            .map(Some)
     }
 
     async fn query_transaction_fields_by_alias<T>(
@@ -1167,7 +1189,11 @@ where
         decode(self, expected_alias, record).map(Some)
     }
 
-    fn stored_transaction_from_record(
+    /// Assemble a stored transaction from its `jazz_transactions` record and
+    /// the records beside it: its `jazz_pending_transactions` record while it
+    /// is unsettled, and its `jazz_tx_provenance` record when its flags say it
+    /// has one (SPEC 2 §2.8).
+    async fn stored_transaction_from_header(
         &self,
         tx_id: TxId,
         expected_alias: NodeAlias,
@@ -1177,37 +1203,88 @@ where
         TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(count.get() + 1));
         let kind =
             tx_kind_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?)?;
-        let evidence_slot = |idx: usize| -> Result<Option<Vec<u8>>, Error> {
-            match record.get_idx(idx)? {
-                Value::Nullable(None) => Ok(None),
-                Value::Nullable(Some(value)) => match *value {
-                    Value::Bytes(bytes) => Ok(Some(bytes)),
-                    _ => Err(Error::InvalidStoredValue(
-                        "exclusive read evidence slot is not bytes",
-                    )),
-                },
-                _ => Err(Error::InvalidStoredValue(
-                    "exclusive read evidence slot is not nullable",
-                )),
-            }
+        let flags = transaction_flags(record)?;
+        let fate = fate_from_encoded_fields(record)?;
+        let global_time = record
+            .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+            .map(GlobalTime);
+        let key = [Value::U64(tx_id.time.0), Value::U64(expected_alias.0)];
+        let pending = if global_time.is_none() && !matches!(fate, Fate::Rejected(_)) {
+            self.database
+                .primary_key_get_raw(PENDING_TRANSACTIONS_TABLE, &key)
+                .await?
+        } else {
+            None
         };
-        let slots = [
-            evidence_slot(TransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX)?,
-            evidence_slot(TransactionRowRecord::FIELD_ROW_READ_SET_IDX)?,
-            evidence_slot(TransactionRowRecord::FIELD_ABSENT_READ_SET_IDX)?,
-            evidence_slot(TransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX)?,
-        ];
-        if kind != TxKind::Exclusive && slots.iter().any(Option::is_some) {
-            return Err(Error::InvalidStoredValue(
-                "mergeable transaction carries exclusive read evidence",
-            ));
-        }
-        let evidence = super::exclusive_read_evidence::decode_evidence_slots(
-            slots[0].as_deref(),
-            slots[1].as_deref(),
-            slots[2].as_deref(),
-            slots[3].as_deref(),
-        )?;
+        let (permission_subject, evidence) = match &pending {
+            Some(raw) => {
+                let pending = raw.record();
+                let evidence_slot = |idx: usize| -> Result<Option<Vec<u8>>, Error> {
+                    match pending.get_idx(idx)? {
+                        Value::Nullable(None) => Ok(None),
+                        Value::Nullable(Some(value)) => match *value {
+                            Value::Bytes(bytes) => Ok(Some(bytes)),
+                            _ => Err(Error::InvalidStoredValue(
+                                "exclusive read evidence slot is not bytes",
+                            )),
+                        },
+                        _ => Err(Error::InvalidStoredValue(
+                            "exclusive read evidence slot is not nullable",
+                        )),
+                    }
+                };
+                let slots = [
+                    evidence_slot(PendingTransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX)?,
+                    evidence_slot(PendingTransactionRowRecord::FIELD_ROW_READ_SET_IDX)?,
+                    evidence_slot(PendingTransactionRowRecord::FIELD_ABSENT_READ_SET_IDX)?,
+                    evidence_slot(PendingTransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX)?,
+                ];
+                if kind != TxKind::Exclusive && slots.iter().any(Option::is_some) {
+                    return Err(Error::InvalidStoredValue(
+                        "mergeable transaction carries exclusive read evidence",
+                    ));
+                }
+                if !matches!(fate, Fate::Pending) && slots.iter().any(Option::is_some) {
+                    return Err(Error::InvalidStoredValue(
+                        "settled transaction keeps exclusive read evidence",
+                    ));
+                }
+                (
+                    <Option<AuthorSubject> as groove::records::RecordField>::read(
+                        &pending,
+                        PendingTransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX,
+                    )?,
+                    super::exclusive_read_evidence::decode_evidence_slots(
+                        slots[0].as_deref(),
+                        slots[1].as_deref(),
+                        slots[2].as_deref(),
+                        slots[3].as_deref(),
+                    )?,
+                )
+            }
+            None => (
+                None,
+                super::exclusive_read_evidence::decode_evidence_slots(None, None, None, None)?,
+            ),
+        };
+        let contribution_merge = if flags & TX_FLAG_HAS_PROVENANCE != 0 {
+            let raw = self
+                .database
+                .primary_key_get_raw(TX_PROVENANCE_TABLE, &key)
+                .await?
+                .ok_or(Error::InvalidStoredValue(
+                    "transaction flags name a missing provenance record",
+                ))?;
+            let provenance = raw.record();
+            Some(self.contribution_merge_from_storage_record(
+                <OwnedRecord as records::RecordField>::read(
+                    &provenance,
+                    TxProvenanceRowRecord::FIELD_CONTRIBUTION_MERGE_IDX,
+                )?,
+            )?)
+        } else {
+            None
+        };
         let tx = Transaction {
             tx_id,
             kind,
@@ -1217,10 +1294,7 @@ where
             )
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?
             .as_author_subject(),
-            permission_subject: <Option<AuthorSubject> as groove::records::RecordField>::read(
-                &record,
-                TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX,
-            )?,
+            permission_subject,
             base_snapshot: evidence.base_snapshot,
             row_read_set: evidence.row_read_set,
             absent_read_set: evidence.absent_read_set,
@@ -1228,31 +1302,21 @@ where
             user_metadata_json: record
                 .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
                 .map(str::to_owned),
-            contribution_merge: <Option<OwnedRecord> as records::RecordField>::read(
-                &record,
-                TransactionRowRecord::FIELD_CONTRIBUTION_MERGE_IDX,
-            )?
-            .map(|record| self.contribution_merge_from_storage_record(record))
-            .transpose()?,
+            contribution_merge,
         };
         // Recovery and ordinary durable reads must fail closed on malformed
         // strategy-defined contribution identities before they can influence
         // a later merge calculation.
         self.validate_contribution_merge_operation_identities(&tx)?;
-        let fate = fate_from_encoded_fields(record)?;
         Ok(StoredTransaction {
             tx,
             node_alias: expected_alias,
             fate,
-            global_time: record
-                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
-                .map(GlobalTime),
+            global_time,
             durability: durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?,
-            view_scoped_cardinality: record
-                .get_nullable_string(TransactionRowRecord::FIELD_MERGE_STRATEGY_IDX)?
-                .is_some_and(|value| value == "view-scoped-cardinality"),
+            view_scoped_cardinality: flags & TX_FLAG_VIEW_SCOPED_CARDINALITY != 0,
         })
     }
 

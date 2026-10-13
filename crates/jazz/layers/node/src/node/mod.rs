@@ -3174,6 +3174,15 @@ pub enum Error {
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),
+    /// The store's history was truncated at or below a horizon, which this
+    /// build cannot read (SPEC 2 §2.8, `jazz_history_horizon`).
+    #[error(
+        "Opening a store whose history is truncated at or below seq {horizon} is not supported by this build yet"
+    )]
+    TruncatedHistoryUnsupported {
+        /// The store's history horizon.
+        horizon: u64,
+    },
     /// A live authority source-closure delta could not transition from the
     /// receiver's installed predecessor.  The usage handle is safe to expose
     /// to the subscription owner; row bodies and claims are deliberately not.

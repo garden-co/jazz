@@ -254,12 +254,7 @@ fn branch_view_copy_evidence_uses_versioned_groove_records_and_round_trips() {
     let stored = core
         .contribution_merge_storage_value(Some(&provenance))
         .unwrap();
-    let Value::Nullable(Some(record)) = stored else {
-        panic!("branch-view evidence must use the optional contribution record");
-    };
-    let Value::Record(record) = *record else {
-        panic!("contribution provenance must be a normal Groove record");
-    };
+    let record = stored.expect("branch-view evidence must use the contribution record");
     let decoded = core.contribution_merge_from_storage_record(record).unwrap();
     assert_eq!(decoded, provenance);
     assert!(decoded.substitutions.is_empty());
@@ -456,12 +451,7 @@ fn unknown_durable_contribution_component_tag_is_rejected_by_the_storage_decoder
             node(1),
         ))))
         .unwrap();
-    let Value::Nullable(Some(record)) = stored else {
-        panic!("fixture stores contribution provenance")
-    };
-    let Value::Record(record) = *record else {
-        panic!("fixture contribution provenance is a record")
-    };
+    let record = stored.expect("fixture stores contribution provenance");
     let merge = ContributionMergeStorageRecord::new(record);
     let Value::Record(substitution) = merge.substitutions().unwrap().remove(0) else {
         panic!("fixture substitution is a record")
@@ -509,13 +499,8 @@ fn contribution_operation_schema() -> JazzSchema {
     .with_column_merge_strategy("count", MergeStrategy::Counter)])
 }
 
-fn stored_contribution_operation_payloads(value: Value) -> Vec<(u64, Vec<u8>)> {
-    let Value::Nullable(Some(record)) = value else {
-        panic!("fixture stores contribution provenance")
-    };
-    let Value::Record(record) = *record else {
-        panic!("fixture contribution provenance is a record")
-    };
+fn stored_contribution_operation_payloads(value: Option<OwnedRecord>) -> Vec<(u64, Vec<u8>)> {
+    let record = value.expect("fixture stores contribution provenance");
     let record = ContributionMergeStorageRecord::new(record);
     record
         .substitutions()
@@ -642,13 +627,8 @@ fn assert_operation_rejection_retains_only_the_terminal_fate(
     );
 }
 
-fn stored_contribution_coordinate_ids(value: Value) -> Vec<(u64, u64)> {
-    let Value::Nullable(Some(record)) = value else {
-        panic!("fixture stores contribution provenance")
-    };
-    let Value::Record(record) = *record else {
-        panic!("fixture contribution provenance is a record")
-    };
+fn stored_contribution_coordinate_ids(value: Option<OwnedRecord>) -> Vec<(u64, u64)> {
+    let record = value.expect("fixture stores contribution provenance");
     let record = ContributionMergeStorageRecord::new(record);
     record
         .substitutions()
@@ -838,19 +818,14 @@ fn mark_accepted_without_ahead_cleanup<S>(
     stored.durability = DurabilityTier::Global;
     let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
     let mut batch = node.database.open_batch();
-    batch.update(
-        "jazz_transactions",
-        transaction_values(
-            stored.node_alias,
-            &stored.tx,
-            stored.fate.clone(),
-            stored.global_time,
-            stored.durability,
-            node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
-                .unwrap(),
-        )
-        .unwrap(),
-    );
+    stage_transaction_record(
+        &mut batch,
+        TransactionRecordWrite::Update,
+        stored.node_alias,
+        &stored.tx,
+        &TransactionRecordStatus::new(stored.fate.clone(), stored.global_time, stored.durability),
+    )
+    .unwrap();
     node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
     let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
@@ -1002,19 +977,14 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
             .unwrap();
         let stored = node.query_transaction(tx_id).unwrap().unwrap();
         let mut batch = node.database.open_batch();
-        batch.update(
-            "jazz_transactions",
-            transaction_values(
-                stored.node_alias,
-                &stored.tx,
-                Fate::Accepted,
-                Some(GlobalTime(7)),
-                DurabilityTier::Local,
-                node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
-                    .unwrap(),
-            )
-            .unwrap(),
-        );
+        stage_transaction_record(
+            &mut batch,
+            TransactionRecordWrite::Update,
+            stored.node_alias,
+            &stored.tx,
+            &TransactionRecordStatus::new(Fate::Accepted, Some(GlobalTime(7)), DurabilityTier::Local),
+        )
+        .unwrap();
         let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
         let persisted = crate::local_executor::block_on(applied.persist());
         node.database.finish_persistence(persisted).unwrap();
@@ -1031,6 +1001,48 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
         error,
         Error::InvalidStoredValue("global timestamp requires Global durability")
     ));
+}
+
+/// Actors: one node whose store a later release has truncated.
+///
+/// A store records the horizon below which its history was truncated. This
+/// build reads every transaction's history as complete, so it must refuse a
+/// truncated store with a typed error, and must open one whose horizon is 0.
+#[test]
+fn reopen_refuses_a_store_with_truncated_history() {
+    let schema = schema();
+    for (horizon, refused) in [(0, false), (7, true)] {
+        let temp_dir = tempfile::tempdir().unwrap();
+        {
+            let mut node = open_node_at(&temp_dir, schema.clone());
+            node.commit_mergeable_settled(
+                MergeableCommit::new("todos", row(3), 10).cells(title_cells("before truncation")),
+            )
+            .unwrap();
+            let mut batch = node.database.open_batch();
+            batch.update(
+                HISTORY_HORIZON_TABLE,
+                vec![Value::U8(0), Value::U64(horizon)],
+            );
+            let applied =
+                crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+            let persisted = crate::local_executor::block_on(applied.persist());
+            node.database.finish_persistence(persisted).unwrap();
+        }
+
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+        let opened = NodeState::new(node(1), schema.clone(), storage).resolve();
+        if refused {
+            assert!(matches!(
+                opened.err(),
+                Some(Error::TruncatedHistoryUnsupported { horizon: 7 })
+            ));
+        } else {
+            assert!(opened.is_ok(), "a store with horizon 0 is complete");
+        }
+    }
 }
 
 // This is necessarily an internal mechanism regression test: the public API
@@ -2171,13 +2183,10 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         for tag in [0, 1, 2] {
             let durability = DurabilityTier::from_discriminant(tag).unwrap();
             for global_time in [None, Some(GlobalTime(42))] {
-                let mut values = transaction_values(
+                let mut values = transaction_record_values(
                     stored.node_alias,
                     &stored.tx,
-                    fate.clone(),
-                    global_time,
-                    durability,
-                    core.contribution_merge_storage_value(None).unwrap(),
+                    &TransactionRecordStatus::new(fate.clone(), global_time, durability),
                 )
                 .unwrap();
                 values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(tag);
@@ -2209,19 +2218,32 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         let mut provenance = canonical_contribution_provenance(tx_id);
         let duplicate = provenance.substitutions[0].sources[0].clone();
         provenance.substitutions[0].sources.push(duplicate);
+        let provenance_record = core
+            .contribution_merge_storage_value(Some(&provenance))
+            .unwrap()
+            .unwrap();
         stored.tx.contribution_merge = Some(provenance);
-        let values = transaction_values(
+        let values = transaction_record_values(
             stored.node_alias,
             &stored.tx,
-            stored.fate.clone(),
-            stored.global_time,
-            stored.durability,
-            core.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
-                .unwrap(),
+            &TransactionRecordStatus::new(
+                stored.fate.clone(),
+                stored.global_time,
+                stored.durability,
+            ),
         )
         .unwrap();
         let mut batch = core.database.open_batch();
         batch.update("jazz_transactions", values.clone());
+        // The payload lives beside the record: status reads never load it.
+        batch.update(
+            TX_PROVENANCE_TABLE,
+            vec![
+                Value::U64(tx_id.time.0),
+                Value::U64(stored.node_alias.0),
+                Value::Record(provenance_record),
+            ],
+        );
         let applied = crate::local_executor::block_on(core.database.apply_batch(batch)).unwrap();
         let persisted = crate::local_executor::block_on(applied.persist());
         core.database.finish_persistence(persisted).unwrap();
@@ -2245,12 +2267,32 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         assert!(core.transaction_record(tx_id).is_none());
 
         // Valid record framing does not make an incomplete rejected fate valid.
-        for reason in [None, Some("cascade")] {
+        let groove::records::ValueType::Nullable(rejection) =
+            crate::schema::transaction_rejection_storage_type()
+        else {
+            unreachable!("the rejection column is nullable")
+        };
+        let groove::records::ValueType::Record(rejection) = *rejection else {
+            unreachable!("the rejection column is a record")
+        };
+        for reason in [None, Some(4u8)] {
             let mut invalid_state = values.clone();
             invalid_state[TransactionRowRecord::FIELD_FATE_IDX] =
                 Value::String("rejected".to_owned());
-            invalid_state[TransactionRowRecord::FIELD_REJECTION_REASON_IDX] =
-                Value::Nullable(reason.map(|reason| Box::new(Value::String(reason.to_owned()))));
+            // No reason, or a cascade without its root.
+            invalid_state[TransactionRowRecord::FIELD_REJECTION_IDX] =
+                Value::Nullable(reason.map(|tag| {
+                    Box::new(Value::Record(OwnedRecord::new(
+                        rejection
+                            .create(&[
+                                Value::EnumTag(tag),
+                                Value::Nullable(None),
+                                Value::Nullable(None),
+                            ])
+                            .unwrap(),
+                        (*rejection).clone(),
+                    )))
+                }));
             let mut batch = core.database.open_batch();
             batch.update("jazz_transactions", invalid_state);
             let applied =

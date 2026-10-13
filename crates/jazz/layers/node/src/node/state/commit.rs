@@ -319,17 +319,15 @@ where
                 batch.accept_large_value(*staged_id);
             }
         }
-        batch.insert(
-            "jazz_transactions",
-            transaction_values(
-                tx_node_alias,
-                &tx,
-                Fate::Pending,
-                None,
-                self.authored_commit_durability,
-                contribution_merge,
-            )?,
-        );
+        stage_transaction_record(
+            &mut batch,
+            TransactionRecordWrite::Insert {
+                provenance: contribution_merge,
+            },
+            tx_node_alias,
+            &tx,
+            &TransactionRecordStatus::new(Fate::Pending, None, self.authored_commit_durability),
+        )?;
         let mut stored_versions = Vec::new();
         for (write_schema_version, commit) in commits {
             let provenance_at = TxTime::from_physical_ms(commit.now_ms).map_err(|_| {

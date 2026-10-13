@@ -287,7 +287,7 @@ where
     pub(super) fn contribution_merge_storage_value(
         &self,
         provenance: Option<&ContributionMergeProvenance>,
-    ) -> Result<Value, Error> {
+    ) -> Result<Option<OwnedRecord>, Error> {
         super::codec::contribution_merge_storage_value(
             provenance,
             |table| self.contribution_table_id_for_storage(table),

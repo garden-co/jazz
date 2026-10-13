@@ -88,21 +88,18 @@ where
                 .global_current_updates_for_versions(&batch, tx_id, global_time, &tx_versions)
                 .await?;
         }
-        let contribution_merge = self.contribution_merge_storage_value(
-            stored.tx.contribution_merge.as_ref(),
-        )?;
-        batch.update(
-            "jazz_transactions",
-            transaction_values_with_cardinality_scope(
-                stored.node_alias,
-                &stored.tx,
+        stage_transaction_record(
+            &mut batch,
+            TransactionRecordWrite::Update,
+            stored.node_alias,
+            &stored.tx,
+            &TransactionRecordStatus::new(
                 stored.fate.clone(),
                 stored.global_time,
                 stored.durability,
-                stored.view_scoped_cardinality,
-                contribution_merge,
-            )?,
-        );
+            )
+            .view_scoped(stored.view_scoped_cardinality),
+        )?;
         if let Some(global_time) = stored.global_time {
             for version in &global_current_updates {
                 self.write_global_current_update(&mut batch, version, global_time)?;

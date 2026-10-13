@@ -100,28 +100,89 @@ groove::define_record! {
 }
 
 groove::define_record! {
+    /// `jazz.tx-record.v2`: the permanent `jazz_transactions` record. Fields
+    /// needed only until settlement live in [`PendingTransactionRowRecord`],
+    /// provenance in [`TxProvenanceRowRecord`] (SPEC 2 §2.8).
     pub(super) struct TransactionRowRecord {
         0 => time: TxTime,
         1 => node_id: NodeAlias,
         2 => kind: TxKind,
-        3 => n_total_writes: u32,
-        4 => made_by: RowAuthor,
-        5 => base_snapshot: Option<Value>,
-        6 => row_read_set: Option<Value>,
-        7 => absent_read_set: Option<Value>,
-        8 => predicate_read_set: Option<Value>,
+        3 => flags: u8,
+        4 => n_total_writes: u32,
+        5 => made_by: RowAuthor,
+        6 => fate: FateTag,
+        7 => global_time: Option<GlobalTime>,
+        8 => durability: DurabilityTier,
         9 => user_metadata: Option<String>,
-        10 => contribution_merge: Option<OwnedRecord>,
-        11 => permission_subject: Option<AuthorSubject>,
-        // Retained physical slot, now used internally to mark redacted
-        // view-scoped transaction cardinality without changing row alignment.
-        12 => merge_strategy: Option<String>,
-        13 => fate: FateTag,
-        14 => global_time: Option<GlobalTime>,
-        15 => rejection_reason: Option<RejectionReasonTag>,
-        16 => cascade_root: Option<Value>,
-        17 => reason_detail: Option<String>,
-        18 => durability: DurabilityTier,
+        10 => rejection: Option<OwnedRecord>,
+    }
+}
+
+/// `jazz_transactions.flags` bit: the stored `n_total_writes` is only the
+/// locally known, view-redacted cardinality. Cleared when a complete payload
+/// arrives.
+pub(super) const TX_FLAG_VIEW_SCOPED_CARDINALITY: u8 = 0b01;
+/// `jazz_transactions.flags` bit: the transaction has a `jazz_tx_provenance`
+/// record.
+pub(super) const TX_FLAG_HAS_PROVENANCE: u8 = 0b10;
+const TX_KNOWN_FLAGS: u8 = TX_FLAG_VIEW_SCOPED_CARDINALITY | TX_FLAG_HAS_PROVENANCE;
+
+/// Flags of a stored `jazz_transactions` record. Reserved bits fail closed.
+pub(super) fn transaction_flags(record: BorrowedRecord<'_>) -> Result<u8, Error> {
+    let flags = record.get_u8(TransactionRowRecord::FIELD_FLAGS_IDX)?;
+    if flags & !TX_KNOWN_FLAGS != 0 {
+        return Err(Error::InvalidStoredValue(
+            "transaction record sets reserved flags",
+        ));
+    }
+    Ok(flags)
+}
+
+groove::define_record! {
+    /// The rejection reason inside a rejected `jazz_transactions` record.
+    pub(super) struct TxRejectionRecord {
+        0 => reason: RejectionReasonTag,
+        1 => cascade_root: Option<Value>,
+        2 => detail: Option<String>,
+    }
+}
+
+/// `jazz_pending_transactions`: what a transaction needs only until it has a
+/// seq or a rejection (SPEC 2 §2.8).
+pub(super) const PENDING_TRANSACTIONS_TABLE: &str = "jazz_pending_transactions";
+
+groove::define_record! {
+    pub(super) struct PendingTransactionRowRecord {
+        0 => time: TxTime,
+        1 => node_id: NodeAlias,
+        2 => permission_subject: Option<AuthorSubject>,
+        3 => base_snapshot: Option<Value>,
+        4 => row_read_set: Option<Value>,
+        5 => absent_read_set: Option<Value>,
+        6 => predicate_read_set: Option<Value>,
+    }
+}
+
+/// `jazz_history_horizon`: the seq at or below which history may be truncated
+/// (SPEC 2 §2.8). Its single record is keyed `id = 0`.
+pub(super) const HISTORY_HORIZON_TABLE: &str = "jazz_history_horizon";
+
+groove::define_record! {
+    pub(super) struct HistoryHorizonRowRecord {
+        0 => id: u8,
+        1 => horizon: u64,
+    }
+}
+
+/// `jazz_tx_provenance`: a transaction's calculated-merge and branch-write
+/// provenance, apart from its record (garden-co/jazz#4012).
+pub(super) const TX_PROVENANCE_TABLE: &str = "jazz_tx_provenance";
+
+groove::define_record! {
+    pub(super) struct TxProvenanceRowRecord {
+        0 => time: TxTime,
+        1 => node_id: NodeAlias,
+        2 => contribution_merge: OwnedRecord,
     }
 }
 
@@ -2150,6 +2211,24 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
             .expect("transactions table")
             .record_schema();
         TransactionRowRecord::assert_layout(&tx_descriptor);
+        for (table, assert_layout) in [
+            (
+                PENDING_TRANSACTIONS_TABLE,
+                PendingTransactionRowRecord::assert_layout as fn(&records::RecordDescriptor),
+            ),
+            (TX_PROVENANCE_TABLE, TxProvenanceRowRecord::assert_layout),
+            (
+                HISTORY_HORIZON_TABLE,
+                HistoryHorizonRowRecord::assert_layout,
+            ),
+        ] {
+            assert_layout(
+                &groove_schema
+                    .table(table)
+                    .expect("transaction side table")
+                    .record_schema(),
+            );
+        }
 
         let schema_version_descriptor = groove_schema
             .table("jazz_schema_versions")
@@ -2889,10 +2968,7 @@ impl VersionRow {
 fn contribution_merge_descriptor() -> &'static records::RecordDescriptor {
     static DESCRIPTOR: std::sync::LazyLock<records::RecordDescriptor> =
         std::sync::LazyLock::new(|| {
-            let records::ValueType::Nullable(inner) = contribution_merge_storage_type() else {
-                unreachable!("contribution merge storage column is nullable")
-            };
-            let records::ValueType::Record(descriptor) = *inner else {
+            let records::ValueType::Record(descriptor) = contribution_merge_storage_type() else {
                 unreachable!("contribution merge storage column contains a record")
             };
             *descriptor
@@ -3330,9 +3406,9 @@ pub(super) fn contribution_merge_storage_value(
     provenance: Option<&ContributionMergeProvenance>,
     mut resolve_table_id: impl FnMut(&str) -> Result<PhysicalTableId, Error>,
     mut resolve_column_id: impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
-) -> Result<Value, Error> {
+) -> Result<Option<OwnedRecord>, Error> {
     let descriptor = contribution_merge_descriptor();
-    let record = provenance
+    provenance
         .map(|provenance| -> Result<OwnedRecord, Error> {
             let substitution =
                 nested_record_descriptor(array_element_type(record_field_type(descriptor, 2)));
@@ -3377,8 +3453,7 @@ pub(super) fn contribution_merge_storage_value(
             .record()
             .clone())
         })
-        .transpose()?;
-    Ok(records::RecordField::to_value(&record))
+        .transpose()
 }
 
 pub(super) fn contribution_component_from_storage(
@@ -3603,43 +3678,116 @@ pub(super) fn runtime_result_identity_bytes(
     Ok(encoded)
 }
 
-/// Values of a `jazz_transactions` record.
-pub(super) fn transaction_values(
-    node_alias: NodeAlias,
-    tx: &Transaction,
-    fate: Fate,
-    global_time: Option<GlobalTime>,
-    durability: DurabilityTier,
-    contribution_merge: Value,
-) -> Result<Vec<Value>, Error> {
-    transaction_values_with_cardinality_scope(
-        node_alias,
-        tx,
-        fate,
-        global_time,
-        durability,
-        false,
-        contribution_merge,
-    )
+/// The status a `jazz_transactions` write records.
+#[derive(Clone, Debug)]
+pub(super) struct TransactionRecordStatus {
+    pub(super) fate: Fate,
+    pub(super) global_time: Option<GlobalTime>,
+    pub(super) durability: DurabilityTier,
+    /// True when `n_total_writes` is only the locally known view cardinality.
+    pub(super) view_scoped_cardinality: bool,
 }
 
-pub(super) fn transaction_values_with_cardinality_scope(
+impl TransactionRecordStatus {
+    pub(super) fn new(
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+    ) -> Self {
+        Self {
+            fate,
+            global_time,
+            durability,
+            view_scoped_cardinality: false,
+        }
+    }
+
+    pub(super) fn view_scoped(mut self, view_scoped_cardinality: bool) -> Self {
+        self.view_scoped_cardinality = view_scoped_cardinality;
+        self
+    }
+
+    /// Whether the transaction still waits for a seq or a rejection, and so
+    /// may keep a `jazz_pending_transactions` record.
+    pub(super) fn is_unsettled(&self) -> bool {
+        self.global_time.is_none() && !matches!(self.fate, Fate::Rejected(_))
+    }
+}
+
+/// How a transaction record write lands in its batch.
+pub(super) enum TransactionRecordWrite {
+    /// The transaction is new on this node. `provenance` is its admitted
+    /// provenance record ([`NodeState::admit_contribution_merge_for_storage`]).
+    Insert { provenance: Option<OwnedRecord> },
+    /// The transaction is stored. Its immutable payload (author, kind,
+    /// metadata, provenance) is unchanged; only its status, cardinality scope
+    /// and pending-only fields are rewritten.
+    Update,
+}
+
+/// Stage one transaction's `jazz.tx-record.v2` records: its
+/// `jazz_transactions` record, its `jazz_pending_transactions` record while it
+/// is unsettled and has one, and on insert its `jazz_tx_provenance` record.
+/// The batch that settles a transaction deletes its pending record.
+pub(super) fn stage_transaction_record(
+    batch: &mut DatabaseBatch,
+    write: TransactionRecordWrite,
     node_alias: NodeAlias,
     tx: &Transaction,
-    fate: Fate,
-    global_time: Option<GlobalTime>,
-    durability: DurabilityTier,
-    view_scoped_cardinality: bool,
-    contribution_merge: Value,
+    status: &TransactionRecordStatus,
+) -> Result<(), Error> {
+    let header = transaction_record_values(node_alias, tx, status)?;
+    let key = || {
+        PrimaryKeyValue::Composite(vec![
+            PrimaryKeyValue::U64(tx.tx_id.time.0),
+            PrimaryKeyValue::U64(node_alias.0),
+        ])
+    };
+    let updating = matches!(write, TransactionRecordWrite::Update);
+    match write {
+        TransactionRecordWrite::Insert { provenance } => {
+            if provenance.is_some() != tx.contribution_merge.is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "transaction provenance record does not match its payload",
+                ));
+            }
+            batch.insert("jazz_transactions", header);
+            if let Some(provenance) = provenance {
+                batch.insert(
+                    TX_PROVENANCE_TABLE,
+                    vec![
+                        Value::U64(tx.tx_id.time.0),
+                        Value::U64(node_alias.0),
+                        Value::Record(provenance),
+                    ],
+                );
+            }
+        }
+        TransactionRecordWrite::Update => batch.update("jazz_transactions", header),
+    }
+    match pending_transaction_values(node_alias, tx, status)? {
+        Some(values) => batch.update(PENDING_TRANSACTIONS_TABLE, values),
+        None if updating => {
+            batch.delete(PENDING_TRANSACTIONS_TABLE, key());
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// Values of a `jazz_transactions` record (`jazz.tx-record.v2`).
+pub(super) fn transaction_record_values(
+    node_alias: NodeAlias,
+    tx: &Transaction,
+    status: &TransactionRecordStatus,
 ) -> Result<Vec<Value>, Error> {
-    // Slots 5-8: `jazz.exclusive-read-evidence.v1` while an exclusive fate is
-    // pending, null otherwise (SPEC 2 §2.8).
-    let [
-        base_snapshot,
-        row_read_set,
-        absent_read_set,
-        predicate_read_set,
-    ] = super::exclusive_read_evidence::evidence_slot_values(tx, matches!(fate, Fate::Pending))?;
+    let mut flags = 0;
+    if status.view_scoped_cardinality {
+        flags |= TX_FLAG_VIEW_SCOPED_CARDINALITY;
+    }
+    if tx.contribution_merge.is_some() {
+        flags |= TX_FLAG_HAS_PROVENANCE;
+    }
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
         Value::U64(node_alias.0),
@@ -3647,36 +3795,101 @@ pub(super) fn transaction_values_with_cardinality_scope(
             TxKind::Mergeable => "mergeable".to_owned(),
             TxKind::Exclusive => "exclusive".to_owned(),
         }),
+        Value::U8(flags),
         Value::U32(tx.n_total_writes),
         RowAuthor::from_persisted_subject(tx.made_by)
             .map_err(|_| Error::UnadmittedWriteAuthor)?
             .to_value(),
-        base_snapshot,
-        row_read_set,
-        absent_read_set,
-        predicate_read_set,
+        Value::String(fate_string(&status.fate)),
+        Value::Nullable(status.global_time.map(|time| Box::new(Value::U64(time.0)))),
+        Value::String(durability_string(status.durability).to_owned()),
         Value::Nullable(
             tx.user_metadata_json
                 .clone()
                 .map(|value| Box::new(Value::String(value))),
         ),
-        contribution_merge,
-        Value::Nullable(tx.permission_subject.map(|id| Box::new(id.to_value()))),
         Value::Nullable(
-            view_scoped_cardinality
-                .then(|| Box::new(Value::String("view-scoped-cardinality".to_owned()))),
+            match &status.fate {
+                Fate::Rejected(reason) => Some(rejection_record(reason)?),
+                Fate::Pending | Fate::Accepted => None,
+            }
+            .map(|record| Box::new(Value::Record(record))),
         ),
-        Value::String(fate_string(&fate)),
-        Value::Nullable(global_time.map(|time| Box::new(Value::U64(time.0)))),
-        Value::Nullable(rejection_reason_tag(&fate).map(|reason| Box::new(Value::String(reason)))),
-        Value::Nullable(
-            rejection_reason_cascade_root(&fate).map(|root| Box::new(tx_id_value(root))),
-        ),
-        Value::Nullable(
-            rejection_reason_detail(&fate).map(|detail| Box::new(Value::String(detail))),
-        ),
-        Value::String(durability_string(durability).to_owned()),
     ])
+}
+
+fn rejection_record(reason: &RejectionReason) -> Result<OwnedRecord, Error> {
+    static DESCRIPTOR: std::sync::LazyLock<records::RecordDescriptor> =
+        std::sync::LazyLock::new(|| {
+            let records::ValueType::Nullable(inner) =
+                crate::schema::transaction_rejection_storage_type()
+            else {
+                unreachable!("transaction rejection column is nullable")
+            };
+            let records::ValueType::Record(descriptor) = *inner else {
+                unreachable!("transaction rejection column is a record")
+            };
+            *descriptor
+        });
+    Ok(TxRejectionRecord::encode(
+        &DESCRIPTOR,
+        rejection_reason_tag_value(reason),
+        rejection_reason_cascade_root_for_reason(reason).map(tx_id_value),
+        rejection_reason_detail_for_reason(reason),
+    )?
+    .record()
+    .clone())
+}
+
+fn rejection_reason_tag_value(reason: &RejectionReason) -> RejectionReasonTag {
+    match reason {
+        RejectionReason::ClientClockTooFarAhead => RejectionReasonTag::ClientClockTooFarAhead,
+        RejectionReason::AuthorizationDenied => RejectionReasonTag::AuthorizationDenied,
+        RejectionReason::ExclusiveConflict => RejectionReasonTag::ExclusiveConflict,
+        RejectionReason::CausalityViolation => RejectionReasonTag::CausalityViolation,
+        RejectionReason::Cascade { .. } => RejectionReasonTag::Cascade,
+        RejectionReason::MalformedCommit(_) => RejectionReasonTag::MalformedCommit,
+    }
+}
+
+/// Values of the `jazz_pending_transactions` record of an unsettled
+/// transaction, or `None` when it is settled or has nothing to keep there.
+/// Exclusive read evidence is kept only while the fate is pending
+/// (`jazz.exclusive-read-evidence.v1`).
+pub(super) fn pending_transaction_values(
+    node_alias: NodeAlias,
+    tx: &Transaction,
+    status: &TransactionRecordStatus,
+) -> Result<Option<Vec<Value>>, Error> {
+    if !status.is_unsettled() {
+        return Ok(None);
+    }
+    let evidence = super::exclusive_read_evidence::evidence_slot_values(
+        tx,
+        matches!(status.fate, Fate::Pending),
+    )?;
+    if tx.permission_subject.is_none()
+        && evidence
+            .iter()
+            .all(|slot| matches!(slot, Value::Nullable(None)))
+    {
+        return Ok(None);
+    }
+    let [
+        base_snapshot,
+        row_read_set,
+        absent_read_set,
+        predicate_read_set,
+    ] = evidence;
+    Ok(Some(vec![
+        Value::U64(tx.tx_id.time.0),
+        Value::U64(node_alias.0),
+        Value::Nullable(tx.permission_subject.map(|id| Box::new(id.to_value()))),
+        base_snapshot,
+        row_read_set,
+        absent_read_set,
+        predicate_read_set,
+    ]))
 }
 
 pub(super) fn rejected_transaction_values(
@@ -3761,10 +3974,20 @@ pub(super) fn next_fate(current: &Fate, incoming: Fate) -> Result<Fate, Error> {
     }
 }
 
+/// Compare a stored transaction with a redelivered one. The store drops a
+/// transaction's pending-only fields (read evidence and the permission hint)
+/// once it settles, so a stored copy without them still matches a
+/// redelivery that carries them.
 pub(super) fn known_transaction_payload_matches(
     existing: &Transaction,
     incoming: &Transaction,
 ) -> bool {
+    if existing.permission_subject.is_none() && incoming.permission_subject.is_some() {
+        return known_transaction_payload_matches(
+            existing,
+            &transaction_without_permission_subject(incoming),
+        );
+    }
     let mut redacted_existing = existing.clone();
     redacted_existing.base_snapshot = None;
     redacted_existing.row_read_set = None;
@@ -3814,13 +4037,6 @@ pub(super) fn known_transaction_payload_matches_redacted_cardinality(
     known_transaction_payload_matches(&existing, &incoming)
 }
 
-pub(super) fn rejection_reason_tag(fate: &Fate) -> Option<String> {
-    match fate {
-        Fate::Rejected(reason) => Some(rejection_reason_tag_for_reason(reason)),
-        Fate::Pending | Fate::Accepted => None,
-    }
-}
-
 pub(super) fn rejection_reason_tag_for_reason(reason: &RejectionReason) -> String {
     match reason {
         RejectionReason::ClientClockTooFarAhead => "client_clock_too_far_ahead".to_owned(),
@@ -3832,24 +4048,10 @@ pub(super) fn rejection_reason_tag_for_reason(reason: &RejectionReason) -> Strin
     }
 }
 
-pub(super) fn rejection_reason_cascade_root(fate: &Fate) -> Option<TxId> {
-    match fate {
-        Fate::Rejected(reason) => rejection_reason_cascade_root_for_reason(reason),
-        Fate::Pending | Fate::Accepted => None,
-    }
-}
-
 pub(super) fn rejection_reason_cascade_root_for_reason(reason: &RejectionReason) -> Option<TxId> {
     match reason {
         RejectionReason::Cascade { root } => Some(*root),
         _ => None,
-    }
-}
-
-pub(super) fn rejection_reason_detail(fate: &Fate) -> Option<String> {
-    match fate {
-        Fate::Rejected(reason) => rejection_reason_detail_for_reason(reason),
-        Fate::Pending | Fate::Accepted => None,
     }
 }
 
@@ -4615,44 +4817,60 @@ pub(super) fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, Error> {
     }
 }
 
+/// The fate of a stored `jazz_transactions` record. A rejected record carries
+/// exactly one rejection reason and any other record none.
 pub(super) fn fate_from_encoded_fields(record: BorrowedRecord<'_>) -> Result<Fate, Error> {
-    match record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)? {
-        0 => Ok(Fate::Pending),
-        1 => Ok(Fate::Accepted),
-        2 => Ok(Fate::Rejected(rejection_reason_from_encoded_fields(
-            record,
+    let rejection = <Option<OwnedRecord> as records::RecordField>::read(
+        &record,
+        TransactionRowRecord::FIELD_REJECTION_IDX,
+    )?;
+    match (
+        record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?,
+        rejection,
+    ) {
+        (0, None) => Ok(Fate::Pending),
+        (1, None) => Ok(Fate::Accepted),
+        (2, Some(rejection)) => Ok(Fate::Rejected(rejection_reason_from_record(
+            rejection.borrowed(),
         )?)),
+        (2, None) => Err(Error::InvalidStoredValue(
+            "rejected transaction missing reason",
+        )),
+        (0 | 1, Some(_)) => Err(Error::InvalidStoredValue(
+            "unrejected transaction carries a rejection reason",
+        )),
         _ => Err(Error::InvalidStoredValue("unknown fate")),
     }
 }
 
-pub(super) fn rejection_reason_from_encoded_fields(
-    record: BorrowedRecord<'_>,
-) -> Result<RejectionReason, Error> {
-    let tag = record
-        .get_nullable_enum(TransactionRowRecord::FIELD_REJECTION_REASON_IDX)?
-        .ok_or(Error::InvalidStoredValue(
-            "rejected transaction missing reason",
-        ))?;
-    match tag {
-        0 => Ok(RejectionReason::ClientClockTooFarAhead),
-        1 => Ok(RejectionReason::AuthorizationDenied),
-        2 => Ok(RejectionReason::ExclusiveConflict),
-        3 => Ok(RejectionReason::CausalityViolation),
-        4 => Ok(RejectionReason::Cascade {
-            root: nullable_tx_id_value(
-                record.get_idx(TransactionRowRecord::FIELD_CASCADE_ROOT_IDX)?,
-            )?
-            .ok_or(Error::InvalidStoredValue("cascade rejection missing root"))?,
-        }),
-        5 => Ok(RejectionReason::MalformedCommit(
-            record
-                .get_nullable_string(TransactionRowRecord::FIELD_REASON_DETAIL_IDX)?
-                .unwrap_or_default()
-                .to_owned(),
-        )),
-        _ => Err(Error::InvalidStoredValue("unknown rejection reason")),
+fn rejection_reason_from_record(record: BorrowedRecord<'_>) -> Result<RejectionReason, Error> {
+    let cascade_root =
+        nullable_tx_id_value(record.get_idx(TxRejectionRecord::FIELD_CASCADE_ROOT_IDX)?)?;
+    let detail = record
+        .get_nullable_string(TxRejectionRecord::FIELD_DETAIL_IDX)?
+        .map(str::to_owned);
+    let reason = match record.get_enum(TxRejectionRecord::FIELD_REASON_IDX)? {
+        0 => RejectionReason::ClientClockTooFarAhead,
+        1 => RejectionReason::AuthorizationDenied,
+        2 => RejectionReason::ExclusiveConflict,
+        3 => RejectionReason::CausalityViolation,
+        4 => RejectionReason::Cascade {
+            root: cascade_root
+                .ok_or(Error::InvalidStoredValue("cascade rejection missing root"))?,
+        },
+        5 => RejectionReason::MalformedCommit(detail.clone().unwrap_or_default()),
+        _ => return Err(Error::InvalidStoredValue("unknown rejection reason")),
+    };
+    // One spelling per reason: the encoder writes a root only for a cascade
+    // and a detail only for a malformed commit.
+    if rejection_reason_cascade_root_for_reason(&reason) != cascade_root
+        || rejection_reason_detail_for_reason(&reason) != detail
+    {
+        return Err(Error::InvalidStoredValue(
+            "transaction rejection reason is not canonical",
+        ));
     }
+    Ok(reason)
 }
 
 pub(super) fn nullable_tx_id_value(value: Value) -> Result<Option<TxId>, Error> {
@@ -4927,5 +5145,203 @@ mod active_schema_tests {
         let mut unsupported = golden.clone();
         unsupported[0] = 2;
         assert!(decode_active_schema(&unsupported).is_err());
+    }
+}
+
+/// Byte-level fixtures for the transaction record layout (SPEC 2 §2.8). These
+/// sit below the public API on purpose: the contract is the durable bytes,
+/// which no public call exposes.
+#[cfg(test)]
+mod transaction_record_tests {
+    use super::*;
+    use crate::schema::RuntimeSchema;
+
+    fn descriptor(table: &str) -> records::RecordDescriptor {
+        RuntimeSchema::new(Vec::<TableSchema>::new())
+            .lower_to_groove()
+            .table(table)
+            .unwrap()
+            .record_schema()
+    }
+
+    fn tx(kind: TxKind) -> Transaction {
+        Transaction {
+            tx_id: TxId::new(TxTime(0x0102), NodeUuid::from_bytes([7; 16])),
+            kind,
+            n_total_writes: 3,
+            made_by: AuthorSubject::for_test_bytes([5; 16]),
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn encode(table: &str, values: &[Value]) -> Vec<u8> {
+        descriptor(table).create(values).unwrap()
+    }
+
+    /// The settled record of an accepted transaction carries no pending-only,
+    /// provenance or rejection fields: the null rejection costs one byte, and
+    /// no `jazz_pending_transactions` record is written.
+    #[test]
+    fn accepted_transaction_record_bytes_are_pinned() {
+        let tx = tx(TxKind::Mergeable);
+        let status = TransactionRecordStatus::new(
+            Fate::Accepted,
+            Some(GlobalTime(9)),
+            DurabilityTier::Global,
+        );
+        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
+        let bytes = encode("jazz_transactions", &values);
+        assert_eq!(
+            hex(&bytes),
+            "02010000000000000100000000000000000003000000010109000000000000000270000000710000008103d55b28c35ac986bb8ea21b1b2425120000000275726e3a6a617a7a3a746573740230353035303530352d303530352d303530352d303530352d3035303530353035303530350000"
+        );
+        assert_eq!(
+            pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
+            None
+        );
+    }
+
+    /// A rejected record holds its reason in the one nullable rejection
+    /// record: tag, cascade root and detail.
+    #[test]
+    fn rejected_transaction_record_bytes_are_pinned() {
+        let tx = tx(TxKind::Mergeable);
+        let root = TxId::new(TxTime(0x0101), NodeUuid::from_bytes([8; 16]));
+        let status = TransactionRecordStatus::new(
+            Fate::Rejected(RejectionReason::Cascade { root }),
+            None,
+            DurabilityTier::Local,
+        );
+        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
+        assert_eq!(
+            hex(&encode("jazz_transactions", &values)),
+            "02010000000000000100000000000000000003000000020000000000000000000170000000710000008103d55b28c35ac986bb8ea21b1b2425120000000275726e3a6a617a7a3a746573740230353035303530352d303530352d303530352d303530352d3035303530353035303530350001040100000000000001010808080808080808080808080808080800"
+        );
+        assert_eq!(
+            pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
+            None,
+            "a rejected transaction keeps no pending record"
+        );
+    }
+
+    /// A pending transaction authorized as another identity keeps that
+    /// identity in its pending record until it settles.
+    #[test]
+    fn pending_transaction_record_bytes_are_pinned() {
+        let mut tx = tx(TxKind::Mergeable);
+        tx.permission_subject = Some(AuthorSubject::for_test_bytes([6; 16]));
+        tx.user_metadata_json = Some("{}".to_owned());
+        let status = TransactionRecordStatus::new(Fate::Pending, None, DurabilityTier::Local)
+            .view_scoped(true);
+        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
+        assert_eq!(
+            hex(&encode("jazz_transactions", &values)),
+            "02010000000000000100000000000000000103000000000000000000000000000170000000740000008103d55b28c35ac986bb8ea21b1b2425120000000275726e3a6a617a7a3a746573740230353035303530352d303530352d303530352d303530352d30353035303530353035303501027b7d00"
+        );
+        let pending = pending_transaction_values(NodeAlias(1), &tx, &status)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            hex(&encode(PENDING_TRANSACTIONS_TABLE, &pending)),
+            "02010000000000000100000000000000690000006a0000006b0000006c00000001019c6dbdef71c955b8a4d72db3a1e0c7d1120000000275726e3a6a617a7a3a746573740230363036303630362d303630362d303630362d303630362d30363036303630363036303600000000"
+        );
+        assert_eq!(
+            pending_transaction_values(
+                NodeAlias(1),
+                &tx,
+                &TransactionRecordStatus::new(
+                    Fate::Accepted,
+                    Some(GlobalTime(1)),
+                    DurabilityTier::Global
+                )
+            )
+            .unwrap(),
+            None,
+            "settling drops the pending record"
+        );
+    }
+
+    /// Decoding fails closed on reserved flag bits and on a rejection field
+    /// that does not match the fate or is not the reason's one spelling.
+    #[test]
+    fn malformed_transaction_records_are_refused() {
+        let tx = tx(TxKind::Mergeable);
+        let record = |values: &[Value]| {
+            OwnedRecord::new(
+                encode("jazz_transactions", values),
+                descriptor("jazz_transactions"),
+            )
+        };
+        let accepted = transaction_record_values(
+            NodeAlias(1),
+            &tx,
+            &TransactionRecordStatus::new(
+                Fate::Accepted,
+                Some(GlobalTime(9)),
+                DurabilityTier::Global,
+            ),
+        )
+        .unwrap();
+        let rejected = transaction_record_values(
+            NodeAlias(1),
+            &tx,
+            &TransactionRecordStatus::new(
+                Fate::Rejected(RejectionReason::MalformedCommit("bad".to_owned())),
+                None,
+                DurabilityTier::Local,
+            ),
+        )
+        .unwrap();
+        assert!(fate_from_encoded_fields(record(&accepted).borrowed()).is_ok());
+        assert_eq!(
+            fate_from_encoded_fields(record(&rejected).borrowed()).unwrap(),
+            Fate::Rejected(RejectionReason::MalformedCommit("bad".to_owned()))
+        );
+
+        let mut reserved = accepted.clone();
+        reserved[TransactionRowRecord::FIELD_FLAGS_IDX] = Value::U8(0b100);
+        assert!(transaction_flags(record(&reserved).borrowed()).is_err());
+
+        let mut accepted_with_reason = accepted.clone();
+        accepted_with_reason[TransactionRowRecord::FIELD_REJECTION_IDX] =
+            rejected[TransactionRowRecord::FIELD_REJECTION_IDX].clone();
+        assert!(fate_from_encoded_fields(record(&accepted_with_reason).borrowed()).is_err());
+
+        let mut rejected_without_reason = rejected.clone();
+        rejected_without_reason[TransactionRowRecord::FIELD_REJECTION_IDX] = Value::Nullable(None);
+        assert!(fate_from_encoded_fields(record(&rejected_without_reason).borrowed()).is_err());
+
+        // A detail on a reason that has none is a second spelling.
+        let records::ValueType::Nullable(rejection) =
+            crate::schema::transaction_rejection_storage_type()
+        else {
+            unreachable!()
+        };
+        let records::ValueType::Record(rejection) = *rejection else {
+            unreachable!()
+        };
+        let mut noncanonical = rejected.clone();
+        noncanonical[TransactionRowRecord::FIELD_REJECTION_IDX] =
+            Value::Nullable(Some(Box::new(Value::Record(OwnedRecord::new(
+                rejection
+                    .create(&[
+                        Value::EnumTag(1),
+                        Value::Nullable(None),
+                        Value::Nullable(Some(Box::new(Value::String("why".to_owned())))),
+                    ])
+                    .unwrap(),
+                (*rejection).clone(),
+            )))));
+        assert!(fate_from_encoded_fields(record(&noncanonical).borrowed()).is_err());
     }
 }

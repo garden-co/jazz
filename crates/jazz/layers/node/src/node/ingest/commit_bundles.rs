@@ -914,22 +914,24 @@ where
             let contribution_merge = self.contribution_merge_storage_value(
                 tx.contribution_merge.as_ref(),
             )?;
-            batch.insert(
-                "jazz_transactions",
-                // A reset may bulk-load only the view-authorized rows of an
-                // exclusive transaction. Preserve that scope marker even when
-                // the redacted write count equals this fragment's length, so a
-                // later sibling view can extend the same local projection.
-                transaction_values_with_cardinality_scope(
-                    tx_node_alias,
-                    tx,
+            // A reset may bulk-load only the view-authorized rows of an
+            // exclusive transaction. Preserve that scope marker even when
+            // the redacted write count equals this fragment's length, so a
+            // later sibling view can extend the same local projection.
+            stage_transaction_record(
+                &mut batch,
+                TransactionRecordWrite::Insert {
+                    provenance: contribution_merge,
+                },
+                tx_node_alias,
+                tx,
+                &TransactionRecordStatus::new(
                     (*first.fate).clone(),
                     first.global_time,
                     first.durability,
-                    view_scoped,
-                    contribution_merge,
-                )?,
-            );
+                )
+                .view_scoped(view_scoped),
+            )?;
 
             let mut unique_versions = BTreeMap::<
                 (String, BranchKey, RowUuid, crate::ids::SchemaVersionId),
