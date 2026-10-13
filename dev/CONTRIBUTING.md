@@ -55,12 +55,27 @@ own explicit gates. Run `pnpm test:tooling:real` for the slower real-Cargo
 probe of that fallback. Direct invocations of
 `node dev/scripts/clippy-staged.mjs` remain available for local debugging.
 
+### CLI integration tests
+
+CLI integration scenarios are partitioned by behavior across focused test files;
+keep every scenario in exactly one suite. Shared helpers live in the private
+`tests/cli/fixtures.ts` factory, which creates isolated temporary roots per file
+and cleans up temporary files and stubbed globals after each test.
+
 ### Running tests
 
 ```sh
 pnpm test          # everything (via turbo)
 cargo test -p jazz --no-default-features --features testing,transport-compression-zstd   # rust core only
 ```
+
+### Better Auth adapter test fixtures
+
+Reuse the generated fixture schema and permissions when testing adapter
+behaviour. Each case still owns a fresh server, client context and rows, and
+publishes its catalogue through the real deployment interface. Keep filesystem
+schema-loading coverage in the CLI and loader suites rather than repeating it
+in adapter setup.
 
 ### Focus one Rust test safely
 

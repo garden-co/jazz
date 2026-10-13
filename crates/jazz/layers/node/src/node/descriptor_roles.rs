@@ -129,10 +129,71 @@ fn aggregate_role_schema(schema: &AggregateResultSchema) -> Result<RecordDescrip
     )?)
 }
 
+pub(super) struct PreparedAggregatePayload {
+    pub descriptor: Vec<u8>,
+    pub record: Vec<u8>,
+    pub row_identity: Vec<u8>,
+    pub replacement_identity: Vec<u8>,
+}
+
+fn aggregate_row_identity(
+    schema: &AggregateResultSchema,
+    canonical: &RecordDescriptor,
+    values: &[records::Value],
+) -> Result<Vec<u8>, Error> {
+    match schema.group_key_fields.as_slice() {
+        [] => super::codec::runtime_result_identity_bytes(
+            &records::Value::String("global".to_owned()),
+            &records::ValueType::String,
+        ),
+        [_] => super::codec::runtime_result_identity_bytes(
+            &values[0],
+            &canonical.fields()[0].value_type,
+        ),
+        _ => Err(Error::InvalidStoredValue(
+            "aggregate payload has unsupported group identity",
+        )),
+    }
+}
+
+fn aggregate_replacement_identity(
+    schema: &AggregateResultSchema,
+    canonical: &RecordDescriptor,
+    values: &[records::Value],
+    descriptor: &[u8],
+    record: &[u8],
+) -> Result<Vec<u8>, Error> {
+    match schema.value_fields.len() {
+        0 => super::codec::runtime_result_identity_bytes(
+            &records::Value::String("empty".to_owned()),
+            &records::ValueType::String,
+        ),
+        1 => {
+            let index = schema.group_key_fields.len();
+            super::codec::runtime_result_identity_bytes(
+                &values[index],
+                &canonical.fields()[index].value_type,
+            )
+        }
+        _ => {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"jazz aggregate replacement v1");
+            hasher.update(&(descriptor.len() as u64).to_le_bytes());
+            hasher.update(descriptor);
+            hasher.update(&(record.len() as u64).to_le_bytes());
+            hasher.update(record);
+            super::codec::runtime_result_identity_bytes(
+                &records::Value::Bytes(hasher.finalize().as_bytes().to_vec()),
+                &records::ValueType::Bytes,
+            )
+        }
+    }
+}
+
 pub(super) fn encode_aggregate_payload_record(
     record: BorrowedRecord<'_>,
     schema: &AggregateResultSchema,
-) -> Result<(Vec<u8>, Vec<u8>), Error> {
+) -> Result<PreparedAggregatePayload, Error> {
     let runtime_fields = schema.group_key_fields.iter().chain(&schema.value_fields);
     let values = runtime_fields
         .clone()
@@ -162,10 +223,16 @@ pub(super) fn encode_aggregate_payload_record(
             "aggregate payload row is not canonical",
         ));
     }
-    Ok((
-        encode_result_descriptor(ResultDescriptorRole::Aggregate, &canonical)?,
-        raw,
-    ))
+    let descriptor = encode_result_descriptor(ResultDescriptorRole::Aggregate, &canonical)?;
+    let row_identity = aggregate_row_identity(schema, &canonical, &canonical_values)?;
+    let replacement_identity =
+        aggregate_replacement_identity(schema, &canonical, &canonical_values, &descriptor, &raw)?;
+    Ok(PreparedAggregatePayload {
+        descriptor,
+        record: raw,
+        row_identity,
+        replacement_identity,
+    })
 }
 
 pub(super) fn decode_aggregate_payload_record(
@@ -193,33 +260,14 @@ pub(super) fn decode_aggregate_payload_record(
             "aggregate payload has no synthetic member identity",
         ));
     };
-    let (group_value, group_type) = match schema.group_key_fields.as_slice() {
-        [] => (
-            records::Value::String("global".to_owned()),
-            records::ValueType::String,
-        ),
-        [_group] => (values[0].clone(), canonical.fields()[0].value_type.clone()),
-        _ => {
-            return Err(Error::InvalidStoredValue(
-                "aggregate payload has unsupported group identity",
-            ));
-        }
-    };
-    let (replacement_value, replacement_type) = match schema.value_fields.first() {
-        Some(_field) => (
-            values[schema.group_key_fields.len()].clone(),
-            canonical.fields()[schema.group_key_fields.len()]
-                .value_type
-                .clone(),
-        ),
-        None => (
-            records::Value::String("empty".to_owned()),
-            records::ValueType::String,
-        ),
-    };
-    if super::codec::runtime_result_identity_bytes(&group_value, &group_type)? != *row
-        || super::codec::runtime_result_identity_bytes(&replacement_value, &replacement_type)?
-            != replacement.encoded_record()
+    if aggregate_row_identity(schema, &canonical, &values)? != *row
+        || aggregate_replacement_identity(
+            schema,
+            &canonical,
+            &values,
+            &payload.descriptor,
+            &payload.record,
+        )? != replacement.encoded_record()
     {
         return Err(Error::InvalidStoredValue(
             "aggregate payload differs from its member identity",
@@ -570,6 +618,140 @@ mod tests {
         }
     }
 
+    /// Alice's canonical multi-value publication distinguishes non-first changes
+    /// and rejects mismatched members after Bob relocates execution bindings.
+    /// Internal because public builders cannot select nested execution identities.
+    #[test]
+    fn complete_aggregate_identity_validates_non_first_nested_values_after_rebinding() {
+        use groove::records::{EnumCase, EnumSchema, EnumValue};
+
+        let schema = |slot| {
+            let mut schema = aggregate_schema(slot, slot + 1);
+            let child = RecordDescriptor::new_with_fields([DescriptorField::new(
+                "label",
+                ValueType::String,
+            )
+            .with_identity(FieldIdentity::Slot(slot + 3))]);
+            let event = EnumSchema::new("event", [EnumCase::new("value", child)])
+                .unwrap()
+                .with_registry_id(987);
+            schema.value_fields.push(
+                DescriptorField::new("private_event", ValueType::Enum(Box::new(event)))
+                    .with_identity(FieldIdentity::Slot(slot + 2)),
+            );
+            schema.value_names.push("event".to_owned());
+            schema
+        };
+        let prepare = |schema: &AggregateResultSchema, label: &str| {
+            let ValueType::Enum(event) = &schema.value_fields[1].value_type else {
+                unreachable!()
+            };
+            let value = Value::Enum(
+                EnumValue::create(
+                    0,
+                    event.cases[0].payload,
+                    &[Value::String(label.to_owned())],
+                )
+                .unwrap(),
+            );
+            let runtime = RecordDescriptor::new_with_fields(
+                schema
+                    .group_key_fields
+                    .iter()
+                    .chain(&schema.value_fields)
+                    .cloned(),
+            );
+            let raw = runtime
+                .create(&[Value::U64(1), Value::U64(2), value])
+                .unwrap();
+            encode_aggregate_payload_record(runtime.bind(&raw), schema).unwrap()
+        };
+        let original = schema(10);
+        let before = prepare(&original, "before");
+        let after = prepare(&original, "after");
+        assert_eq!(before.row_identity, after.row_identity);
+        assert_ne!(before.replacement_identity, after.replacement_identity);
+        let relocated = schema(800);
+        let rebound = prepare(&relocated, "after");
+        assert_eq!(after.descriptor, rebound.descriptor);
+        assert_eq!(after.record, rebound.record);
+        assert_eq!(after.replacement_identity, rebound.replacement_identity);
+        let mut payload = ResultMemberPayloadEntry {
+            member: ResultMemberEntry::Synthetic {
+                table: "aggregate_result".to_owned(),
+                row: after.row_identity,
+                replacement: SyntheticReplacementToken::from_encoded_record(
+                    after.replacement_identity,
+                ),
+            },
+            descriptor: after.descriptor,
+            record: after.record,
+        };
+        let decoded = decode_aggregate_payload_record(&payload, &relocated).unwrap();
+        let Value::Enum(event) = decoded.get_idx(2).unwrap() else {
+            panic!("typed nested event");
+        };
+        assert_eq!(
+            event.record().get_idx(0),
+            Ok(Value::String("after".to_owned()))
+        );
+        assert_eq!(
+            decoded.descriptor().fields()[2].identity,
+            relocated.value_fields[1].identity
+        );
+        let mut wrong_name = relocated.clone();
+        wrong_name.value_names[1] = "another_event".to_owned();
+        assert!(decode_aggregate_payload_record(&payload, &wrong_name).is_err());
+        let mut wrong_registry = relocated.clone();
+        let ValueType::Enum(event) = &mut wrong_registry.value_fields[1].value_type else {
+            unreachable!()
+        };
+        **event = event.clone().with_registry_id(988);
+        assert!(decode_aggregate_payload_record(&payload, &wrong_registry).is_err());
+        payload.record = before.record;
+        assert!(decode_aggregate_payload_record(&payload, &relocated).is_err());
+    }
+
+    /// Alice's empty and single-value totals keep their scalar identity bytes
+    /// and scalar size bound independently of the complete-summary digest.
+    /// Internal because these opaque byte contracts are not public row cells.
+    #[test]
+    fn empty_and_single_aggregate_identities_preserve_scalar_framing_and_limit() {
+        let mut schema = aggregate_schema(1, 2);
+        schema.group_key_fields.clear();
+        schema.group_names.clear();
+        let runtime = RecordDescriptor::new_with_fields(schema.value_fields.clone());
+        let raw = runtime.create(&[Value::U64(2)]).unwrap();
+        let prepared = encode_aggregate_payload_record(runtime.bind(&raw), &schema).unwrap();
+        assert_eq!(
+            prepared.replacement_identity,
+            super::super::codec::runtime_result_identity_bytes(&Value::U64(2), &ValueType::U64)
+                .unwrap(),
+        );
+        schema.value_fields.clear();
+        schema.value_names.clear();
+        let empty = RecordDescriptor::new_with_fields([]);
+        let raw = empty.create(&[]).unwrap();
+        let prepared = encode_aggregate_payload_record(empty.bind(&raw), &schema).unwrap();
+        assert_eq!(
+            prepared.replacement_identity,
+            super::super::codec::runtime_result_identity_bytes(
+                &Value::String("empty".to_owned()),
+                &ValueType::String,
+            )
+            .unwrap(),
+        );
+        schema.value_fields.push(
+            DescriptorField::new("large", ValueType::String).with_identity(FieldIdentity::Slot(3)),
+        );
+        schema.value_names.push("large".to_owned());
+        let runtime = RecordDescriptor::new_with_fields(schema.value_fields.clone());
+        let raw = runtime
+            .create(&[Value::String("x".repeat(1024 * 1024))])
+            .unwrap();
+        assert!(encode_aggregate_payload_record(runtime.bind(&raw), &schema).is_err());
+    }
+
     fn current_schema(
         local_id: u64,
         carrier: &str,
@@ -867,6 +1049,12 @@ mod tests {
         assert!(decode_current_payload_record("items", &wrong_member, &relocated).is_err());
     }
 
+    /// Alice's aggregate payload distinguishes group and value roles with the
+    /// same logical name; Bob's reader validates roles, names, types and row
+    /// bytes before rebinding its execution slots.
+    ///
+    /// Internal codec test: public queries cannot inject malformed role
+    /// descriptors or choose the receiving compiler's execution bindings.
     #[test]
     fn aggregate_roles_preserve_duplicate_names_and_validate_before_rebinding() {
         let schema = aggregate_schema(7, 9);
@@ -878,8 +1066,7 @@ mod tests {
                 .cloned(),
         );
         let raw = descriptor.create(&[Value::U64(1), Value::U64(2)]).unwrap();
-        let (descriptor_bytes, row_bytes) =
-            encode_aggregate_payload_record(descriptor.bind(&raw), &schema).unwrap();
+        let prepared = encode_aggregate_payload_record(descriptor.bind(&raw), &schema).unwrap();
         let payload = ResultMemberPayloadEntry {
             member: ResultMemberEntry::Synthetic {
                 table: "aggregate_result".to_owned(),
@@ -896,8 +1083,8 @@ mod tests {
                     .unwrap(),
                 ),
             },
-            descriptor: descriptor_bytes,
-            record: row_bytes,
+            descriptor: prepared.descriptor,
+            record: prepared.record,
         };
         assert_eq!(
             blake3::hash(&payload.descriptor).to_hex().as_str(),
@@ -915,9 +1102,9 @@ mod tests {
             rebound.descriptor().fields()[0].identity,
             rebound_schema.group_key_fields[0].identity
         );
-        let (reencoded, _) =
+        let reencoded =
             encode_aggregate_payload_record(rebound.borrowed(), &rebound_schema).unwrap();
-        assert_eq!(reencoded, payload.descriptor);
+        assert_eq!(reencoded.descriptor, payload.descriptor);
 
         let mut wrong_name = rebound_schema.clone();
         wrong_name.group_names[0] = "another_group".to_owned();
@@ -933,8 +1120,16 @@ mod tests {
         assert!(decode_aggregate_payload_record(&trailing, &rebound_schema).is_err());
     }
 
-    // Internal fixture: public queries cannot independently choose nested
-    // execution slots while keeping the authoritative result-role schema fixed.
+    /// Alice's nested aggregate payload retains its canonical schema and values
+    /// when Bob's reader relocates execution bindings, rejecting substitutions
+    /// in nested names, types and member identity.
+    ///
+    /// Internal codec test: public queries cannot independently choose nested
+    /// execution slots while keeping the authoritative result-role schema fixed.
+    ///
+    /// ```text
+    /// alice's canonical payload --> bob's relocated reader --> same values
+    /// ```
     #[test]
     fn review_nested_role_equality_and_runtime_rebinding() {
         fn nested_schema(slot: u64, name: &str, ty: ValueType) -> AggregateResultSchema {
@@ -965,8 +1160,7 @@ mod tests {
                 .cloned(),
         );
         let raw = runtime.create(&[Value::U64(1), nested.clone()]).unwrap();
-        let (descriptor, record) =
-            encode_aggregate_payload_record(runtime.bind(&raw), &schema).unwrap();
+        let prepared = encode_aggregate_payload_record(runtime.bind(&raw), &schema).unwrap();
         let payload = ResultMemberPayloadEntry {
             member: ResultMemberEntry::Synthetic {
                 table: "aggregate_result".to_owned(),
@@ -983,15 +1177,14 @@ mod tests {
                     .unwrap(),
                 ),
             },
-            descriptor,
-            record,
+            descriptor: prepared.descriptor,
+            record: prepared.record,
         };
         let relocated = nested_schema(800, "literal/name", ValueType::U64);
         let decoded = decode_aggregate_payload_record(&payload, &relocated).unwrap();
-        let (descriptor, record) =
-            encode_aggregate_payload_record(decoded.borrowed(), &relocated).unwrap();
-        assert_eq!(descriptor, payload.descriptor);
-        assert_eq!(record, payload.record);
+        let reencoded = encode_aggregate_payload_record(decoded.borrowed(), &relocated).unwrap();
+        assert_eq!(reencoded.descriptor, payload.descriptor);
+        assert_eq!(reencoded.record, payload.record);
         assert!(
             decode_aggregate_payload_record(
                 &payload,
