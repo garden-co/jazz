@@ -565,10 +565,9 @@ by a relation that stays exact under that narrowing (`INV-REF-3`):
   lower candidates, not the layer. Under an index the local delta masks
   origin this way (a pending edit that moved a row out of the prefix still
   hides its origin image), and a branch view masks its base by the head's
-  presence. Inside a recursive step a lookup cannot run (Groove evaluates
-  the step without storage reads), so there the presence is the masking
-  layer's rows read whole: still exact, and it costs that layer (the local
-  delta, or the head), never the layers below.
+  presence. Inside a recursive step the presence is the masking layer's
+  rows read whole (see below): still exact, and it costs that layer (the
+  local delta, or the head), never the layers below.
 
 Under an index prefix each content layer of a branch view therefore reads
 only that prefix, and the base's content costs its index matches. The
@@ -581,6 +580,13 @@ per row id, so narrowing each layer to the candidates' ids before stacking is
 exact (`INV-BVIEW-10`). A lookup stays live: a key entering or leaving the
 candidates, and any write to a looked-up row, updates it. A row-id read
 bounds every layer by its row-id prefix instead.
+
+A lookup cannot run inside a recursive step: Groove evaluates the step
+without storage reads. Only a trusted include-deleted read hands an index
+path to a step's source; there every presence and every deletion-register
+layer is read whole, as without the lookup. That is exact (ids no candidate
+holds hide or delete nothing); a presence costs its masking layer, and a
+branch view's deletion registers cost the branches' rows outside the prefix.
 
 **Peers (out of scope).** A peer remote would be one more sparse delta, read
 as `[local, peer, origin]`. Merging all peers into one delta keeps the stack

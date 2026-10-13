@@ -3030,6 +3030,13 @@ where
     ///
     /// A primary-key path bounds every layer, deletion registers included,
     /// by the same prefix.
+    ///
+    /// A source inside a recursive step cannot look rows up (see
+    /// [`source_in_recursive_step`]). There every presence (see
+    /// [`Self::presence`]) and every deletion-register layer is read whole,
+    /// as without the lookup: exact, at the cost of the branches' rows
+    /// outside the prefix. Only the trusted include-deleted read hands an
+    /// index path to a step source.
     async fn live_branch_view_registers(
         &mut self,
         request: &SourceRequest,
@@ -3049,12 +3056,15 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))
         };
         let indexed = matches!(access, BranchLayerAccess::Index { .. });
+        // Narrow the deletion registers to the candidates' row ids only where
+        // a lookup can run.
+        let narrow = indexed && !source_in_recursive_step(request);
         let head_keys = stored_keys(self, head)?;
         let head_content = self
             .projected_branch_content_source_graph(request, table, tier, &head_keys, &access)
             .await?;
         let Some(base) = base else {
-            let candidates = indexed.then(|| head_content.clone().project(["row_uuid"]));
+            let candidates = narrow.then(|| head_content.clone().project(["row_uuid"]));
             let head_deletions = self
                 .projected_branch_deletion_source_graph(
                     request,
@@ -3070,7 +3080,7 @@ where
         let base_content = self
             .projected_branch_content_source_graph(request, table, tier, &base_keys, &access)
             .await?;
-        let candidates = indexed.then(|| {
+        let candidates = narrow.then(|| {
             GraphBuilder::union([
                 head_content.clone().project(["row_uuid"]),
                 base_content.clone().project(["row_uuid"]),
@@ -3121,10 +3131,9 @@ where
     /// base (`refs` = the head's ref stack), or the local delta's over origin
     /// (`refs` = `[Local]`).
     ///
-    /// A source inside a recursive step cannot look rows up: Groove
-    /// evaluates the step without storage reads, so a lookup there is a
-    /// typed `UnsupportedLookup`. There the presence is the refs' rows read
-    /// whole. That is exact (the extra ids match no candidate, so they hide
+    /// A source inside a recursive step cannot look rows up
+    /// ([`source_in_recursive_step`]). There the presence is the refs' rows
+    /// read whole. That is exact (the extra ids match no candidate, so they hide
     /// nothing) and costs the masking layer's rows, never the layers below:
     /// the local delta (this node's pending rows, which an unindexed `Local`
     /// read reads whole anyway) or a branch view's head.
@@ -3135,12 +3144,7 @@ where
         stored_keys: &BTreeSet<BranchKey>,
         row_ids: GraphBuilder,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let in_recursive_step = request.source.path.components.iter().any(|role| {
-            matches!(
-                role,
-                crate::node::query_engine::SourceRole::RecursiveStep(_)
-            )
-        });
+        let in_recursive_step = source_in_recursive_step(request);
         let mut rows = Vec::new();
         for r in refs {
             for branch_key in stored_keys {
@@ -3889,6 +3893,19 @@ fn lookup_by_row_id(rows: GraphBuilder, row_ids: GraphBuilder) -> Result<GraphBu
     GraphBuilder::lookup(rows, row_ids, ["row_uuid"]).ok_or(Error::InvalidStoredValue(
         "a keyed lookup needs a physical current table source",
     ))
+}
+
+/// Whether `request`'s source sits inside a recursive step. Groove
+/// evaluates a step without storage reads, so a keyed lookup there is a
+/// typed `UnsupportedLookup`; a source there reads what it would look up
+/// whole instead.
+fn source_in_recursive_step(request: &SourceRequest) -> bool {
+    request.source.path.components.iter().any(|role| {
+        matches!(
+            role,
+            crate::node::query_engine::SourceRole::RecursiveStep(_)
+        )
+    })
 }
 
 /// A scan of every key under a row-id prefix, whatever the table's key
