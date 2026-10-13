@@ -540,10 +540,13 @@ pub(super) fn bind_query_params_with_mode(
             })
             .collect::<Result<Vec<_>, _>>()?
     } else {
-        std::mem::take(&mut query.filters)
-            .into_iter()
-            .map(|predicate| bind_query_predicate(predicate, binding, schema, &root_source, mode))
-            .collect::<Result<Vec<_>, _>>()?
+        bind_predicates(
+            std::mem::take(&mut query.filters),
+            binding,
+            schema,
+            &root_source,
+            mode,
+        )?
     };
     query.joins = query
         .joins
@@ -553,39 +556,7 @@ pub(super) fn bind_query_params_with_mode(
     query.reachable = query
         .reachable
         .into_iter()
-        .map(|mut reachable| {
-            if should_inline_reachable_seed(&reachable.from, mode) {
-                reachable.from = bind_query_operand(reachable.from, binding, mode)?;
-            }
-            reachable.access_filters = reachable
-                .access_filters
-                .into_iter()
-                .map(|predicate| {
-                    bind_query_predicate(
-                        predicate,
-                        binding,
-                        schema,
-                        &bind_source_for_table(&reachable.access_table),
-                        mode,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            reachable.edge_filters = reachable
-                .edge_filters
-                .into_iter()
-                .map(|predicate| {
-                    bind_query_predicate(
-                        predicate,
-                        binding,
-                        schema,
-                        &bind_source_for_table(&reachable.edge_table),
-                        mode,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            bind_reachable_seed_filters(&mut reachable, binding, schema, mode)?;
-            Ok(reachable)
-        })
+        .map(|reachable| bind_reachable(reachable, binding, schema, mode))
         .collect::<Result<Vec<_>, Error>>()?;
     query.array_subqueries = query
         .array_subqueries
@@ -596,13 +567,7 @@ pub(super) fn bind_query_params_with_mode(
         .policy_branches
         .into_iter()
         .map(|mut branch| {
-            branch.filters = branch
-                .filters
-                .into_iter()
-                .map(|predicate| {
-                    bind_query_predicate(predicate, binding, schema, &root_source, mode)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            branch.filters = bind_predicates(branch.filters, binding, schema, &root_source, mode)?;
             branch.joins = branch
                 .joins
                 .into_iter()
@@ -611,39 +576,7 @@ pub(super) fn bind_query_params_with_mode(
             branch.reachable = branch
                 .reachable
                 .into_iter()
-                .map(|mut reachable| {
-                    if should_inline_reachable_seed(&reachable.from, mode) {
-                        reachable.from = bind_query_operand(reachable.from, binding, mode)?;
-                    }
-                    reachable.access_filters = reachable
-                        .access_filters
-                        .into_iter()
-                        .map(|predicate| {
-                            bind_query_predicate(
-                                predicate,
-                                binding,
-                                schema,
-                                &bind_source_for_table(&reachable.access_table),
-                                mode,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    reachable.edge_filters = reachable
-                        .edge_filters
-                        .into_iter()
-                        .map(|predicate| {
-                            bind_query_predicate(
-                                predicate,
-                                binding,
-                                schema,
-                                &bind_source_for_table(&reachable.edge_table),
-                                mode,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    bind_reachable_seed_filters(&mut reachable, binding, schema, mode)?;
-                    Ok(reachable)
-                })
+                .map(|reachable| bind_reachable(reachable, binding, schema, mode))
                 .collect::<Result<Vec<_>, Error>>()?;
             Ok(branch)
         })
@@ -711,11 +644,7 @@ fn bind_array_subquery_filter_literals(
     mode: ParamBindingMode,
 ) -> Result<ArraySubquery, Error> {
     let source = bind_source_for_table(&subquery.table);
-    subquery.filters = subquery
-        .filters
-        .into_iter()
-        .map(|predicate| bind_query_predicate(predicate, binding, schema, &source, mode))
-        .collect::<Result<Vec<_>, _>>()?;
+    subquery.filters = bind_predicates(subquery.filters, binding, schema, &source, mode)?;
     subquery.nested_arrays = subquery
         .nested_arrays
         .into_iter()
@@ -981,18 +910,12 @@ fn bind_query_predicate(
     mode: ParamBindingMode,
 ) -> Result<Predicate, Error> {
     Ok(match predicate {
-        Predicate::All(predicates) => Predicate::All(
-            predicates
-                .into_iter()
-                .map(|predicate| bind_query_predicate(predicate, binding, schema, source, mode))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Predicate::Any(predicates) => Predicate::Any(
-            predicates
-                .into_iter()
-                .map(|predicate| bind_query_predicate(predicate, binding, schema, source, mode))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
+        Predicate::All(predicates) => {
+            Predicate::All(bind_predicates(predicates, binding, schema, source, mode)?)
+        }
+        Predicate::Any(predicates) => {
+            Predicate::Any(bind_predicates(predicates, binding, schema, source, mode)?)
+        }
         Predicate::Not(predicate) => Predicate::Not(Box::new(bind_query_predicate(
             *predicate, binding, schema, source, mode,
         )?)),
@@ -1078,6 +1001,46 @@ fn bind_query_predicate(
     })
 }
 
+fn bind_predicates(
+    predicates: Vec<Predicate>,
+    binding: &Binding,
+    schema: &RuntimeSchema,
+    source: &SourceId,
+    mode: ParamBindingMode,
+) -> Result<Vec<Predicate>, Error> {
+    predicates
+        .into_iter()
+        .map(|predicate| bind_query_predicate(predicate, binding, schema, source, mode))
+        .collect()
+}
+
+fn bind_reachable(
+    mut reachable: crate::query::ReachableVia,
+    binding: &Binding,
+    schema: &RuntimeSchema,
+    mode: ParamBindingMode,
+) -> Result<crate::query::ReachableVia, Error> {
+    if should_inline_reachable_seed(&reachable.from, mode) {
+        reachable.from = bind_query_operand(reachable.from, binding, mode)?;
+    }
+    reachable.access_filters = bind_predicates(
+        std::mem::take(&mut reachable.access_filters),
+        binding,
+        schema,
+        &bind_source_for_table(&reachable.access_table),
+        mode,
+    )?;
+    reachable.edge_filters = bind_predicates(
+        std::mem::take(&mut reachable.edge_filters),
+        binding,
+        schema,
+        &bind_source_for_table(&reachable.edge_table),
+        mode,
+    )?;
+    bind_reachable_seed_filters(&mut reachable, binding, schema, mode)?;
+    Ok(reachable)
+}
+
 fn bind_reachable_seed_filters(
     reachable: &mut crate::query::ReachableVia,
     binding: &Binding,
@@ -1086,10 +1049,13 @@ fn bind_reachable_seed_filters(
 ) -> Result<(), Error> {
     if let Some(seed) = &mut reachable.seed {
         let source = bind_source_for_table(&seed.table);
-        seed.filters = std::mem::take(&mut seed.filters)
-            .into_iter()
-            .map(|predicate| bind_query_predicate(predicate, binding, schema, &source, mode))
-            .collect::<Result<Vec<_>, _>>()?;
+        seed.filters = bind_predicates(
+            std::mem::take(&mut seed.filters),
+            binding,
+            schema,
+            &source,
+            mode,
+        )?;
     }
     Ok(())
 }
@@ -1101,11 +1067,7 @@ fn bind_join_filter_literals(
     mode: ParamBindingMode,
 ) -> Result<JoinVia, Error> {
     let source = bind_source_for_table(&join.table);
-    join.filters = join
-        .filters
-        .into_iter()
-        .map(|predicate| bind_query_predicate(predicate, binding, schema, &source, mode))
-        .collect::<Result<Vec<_>, _>>()?;
+    join.filters = bind_predicates(join.filters, binding, schema, &source, mode)?;
     join.nested_joins = join
         .nested_joins
         .into_iter()
