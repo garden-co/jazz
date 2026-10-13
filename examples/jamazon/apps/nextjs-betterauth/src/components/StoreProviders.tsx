@@ -102,8 +102,17 @@ function ShopperProvider({ children }: { children: ReactNode }) {
   // Deliberately keyed on the auth state only: `db`, `account` and `actions`
   // change identity as a consequence of the switch this effect starts, and
   // re-running on them would start a second switch.
+  // A signed-in account reopened after a reload has no credential yet, so it
+  // does not sync until it logs in again: revalidate it once per user.
+  const revalidated = useRef<string | null>(null);
   useEffect(() => {
-    if (isPending || !auth?.user || isSignedIn || restoring.current || changingAccount) return;
+    if (isPending || !auth?.user || restoring.current || changingAccount) return;
+    if (isSignedIn) {
+      if (revalidated.current === auth.user.id) return;
+      revalidated.current = auth.user.id;
+      void actions.loginOrRegisterJWT({ getToken });
+      return;
+    }
     restoring.current = true;
     void switchToAccount(db, account, () => actions.loginOrRegisterJWT({ getToken })).finally(
       () => (restoring.current = false),
