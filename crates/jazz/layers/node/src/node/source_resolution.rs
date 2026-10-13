@@ -598,6 +598,7 @@ where
         }
         let read_table = self.table_in_schema(table, read_schema_version)?;
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
+        let mut tx_ids = BTreeMap::<RowUuid, TxId>::new();
         for version in self.query_table_versions(table).await? {
             let tx_id = self.version_tx_id(&version)?;
             let Some(tx) = self.query_transaction(tx_id).await? else {
@@ -615,75 +616,9 @@ where
             if !visible_at_tier {
                 continue;
             }
-            let target = &mut content;
-            let replace = target.get(&version.row_uuid()).is_none_or(|existing| {
-                version.tx_time().sort_key(tx_id.node)
-                    > existing.tx_time().sort_key(
-                        self.version_tx_id(existing)
-                            .expect("valid version tx id")
-                            .node,
-                    )
-            });
-            if replace {
-                target.insert(version.row_uuid(), version);
-            }
+            keep_latest_version(&mut content, &mut tx_ids, tx_id, version);
         }
-        let deletions = deletion_marker_winners(&content);
-        let mut rows = Vec::new();
-        for (row_uuid, version) in content {
-            if deletions
-                .get(&row_uuid)
-                .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted))
-            {
-                continue;
-            }
-            let source_schema = self
-                .schema_version_for_alias(version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "history schema version alias must exist",
-                ))?;
-            let source_table = self.table_in_schema_ref(version.table(), source_schema)?;
-            let mut cells = self.materialized_cells_for_version(source_table, &version)?;
-            let Some(projected_table) = self.translate_cells(
-                source_schema,
-                read_schema_version,
-                version.table(),
-                &mut cells,
-            )?
-            else {
-                continue;
-            };
-            if projected_table == table {
-                let updated = match deletions.get(&row_uuid) {
-                    Some(deletion)
-                        if self
-                            .version_tx_id(deletion)?
-                            .time
-                            .sort_key(self.version_tx_id(deletion)?.node)
-                            > self
-                                .version_tx_id(&version)?
-                                .time
-                                .sort_key(self.version_tx_id(&version)?.node) =>
-                    {
-                        deletion
-                    }
-                    _ => &version,
-                };
-                match current_row_from_materialized_cells_with_layer_provenance(
-                    &read_table,
-                    &version,
-                    &version,
-                    updated,
-                    &cells,
-                ) {
-                    Ok(row) => rows.push(row),
-                    Err(error) if is_unrepresentable_enum_projection(&error) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        sort_current_rows(&mut rows);
-        Ok(rows)
+        self.project_version_winners(table, read_schema_version, &read_table, content)
     }
 
     pub(super) async fn projected_historical_current_rows(
@@ -710,77 +645,9 @@ where
             {
                 continue;
             }
-            let target = &mut content;
-            let key = version.row_uuid();
-            let replace = tx_ids.get(&key).is_none_or(|existing_tx_id| {
-                version.tx_time().sort_key(tx_id.node)
-                    > target
-                        .get(&version.row_uuid())
-                        .expect("tracked version exists")
-                        .tx_time()
-                        .sort_key(existing_tx_id.node)
-            });
-            if replace {
-                tx_ids.insert(key, tx_id);
-                target.insert(version.row_uuid(), version);
-            }
+            keep_latest_version(&mut content, &mut tx_ids, tx_id, version);
         }
-        let deletions = deletion_marker_winners(&content);
-        let mut rows = Vec::new();
-        for (row_uuid, content) in content {
-            if deletions
-                .get(&row_uuid)
-                .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted))
-            {
-                continue;
-            }
-            let source_schema = self
-                .schema_version_for_alias(content.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "history schema version alias must exist",
-                ))?;
-            let source_table = self.table_in_schema_ref(content.table(), source_schema)?;
-            let mut cells = self.materialized_cells_for_version(source_table, &content)?;
-            let Some(projected_table) = self.translate_cells(
-                source_schema,
-                read_schema_version,
-                content.table(),
-                &mut cells,
-            )?
-            else {
-                continue;
-            };
-            if projected_table == table {
-                let updated = match deletions.get(&row_uuid) {
-                    Some(deletion)
-                        if self
-                            .version_tx_id(deletion)?
-                            .time
-                            .sort_key(self.version_tx_id(deletion)?.node)
-                            > self
-                                .version_tx_id(&content)?
-                                .time
-                                .sort_key(self.version_tx_id(&content)?.node) =>
-                    {
-                        deletion
-                    }
-                    _ => &content,
-                };
-                match current_row_from_materialized_cells_with_layer_provenance(
-                    &read_table,
-                    &content,
-                    &content,
-                    updated,
-                    &cells,
-                ) {
-                    Ok(row) => rows.push(row),
-                    Err(error) if is_unrepresentable_enum_projection(&error) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        sort_current_rows(&mut rows);
-        Ok(rows)
+        self.project_version_winners(table, read_schema_version, &read_table, content)
     }
 
     pub(super) async fn projected_snapshot_current_rows(
@@ -799,21 +666,20 @@ where
             if !self.snapshot_covers(tx_id, snapshot).await {
                 continue;
             }
-            let target = &mut content;
-            let key = version.row_uuid();
-            let replace = tx_ids.get(&key).is_none_or(|existing_tx_id| {
-                version.tx_time().sort_key(tx_id.node)
-                    > target
-                        .get(&version.row_uuid())
-                        .expect("tracked version exists")
-                        .tx_time()
-                        .sort_key(existing_tx_id.node)
-            });
-            if replace {
-                tx_ids.insert(key, tx_id);
-                target.insert(version.row_uuid(), version);
-            }
+            keep_latest_version(&mut content, &mut tx_ids, tx_id, version);
         }
+        self.project_version_winners(table, read_schema_version, &read_table, content)
+    }
+
+    /// Project each row's winning version into `read_schema_version`,
+    /// dropping deleted rows and rows that migrate to another table.
+    fn project_version_winners(
+        &mut self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        read_table: &TableSchema,
+        content: BTreeMap<RowUuid, VersionRow>,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let deletions = deletion_marker_winners(&content);
         let mut rows = Vec::new();
         for (row_uuid, content) in content {
@@ -856,11 +722,7 @@ where
                     _ => &content,
                 };
                 match current_row_from_materialized_cells_with_layer_provenance(
-                    &read_table,
-                    &content,
-                    &content,
-                    updated,
-                    &cells,
+                    read_table, &content, &content, updated, &cells,
                 ) {
                     Ok(row) => rows.push(row),
                     Err(error) if is_unrepresentable_enum_projection(&error) => {}
@@ -901,4 +763,23 @@ fn deletion_marker_winners(
         .filter(|(_, version)| version.deletion().is_some())
         .map(|(row_uuid, version)| (*row_uuid, version.clone()))
         .collect()
+}
+
+/// Keep `version` as its row's winner if its transaction sorts after the
+/// winner seen so far.
+fn keep_latest_version(
+    content: &mut BTreeMap<RowUuid, VersionRow>,
+    tx_ids: &mut BTreeMap<RowUuid, TxId>,
+    tx_id: TxId,
+    version: VersionRow,
+) {
+    let key = version.row_uuid();
+    let replace = tx_ids.get(&key).is_none_or(|existing_tx_id| {
+        version.tx_time().sort_key(tx_id.node)
+            > content[&key].tx_time().sort_key(existing_tx_id.node)
+    });
+    if replace {
+        tx_ids.insert(key, tx_id);
+        content.insert(key, version);
+    }
 }
