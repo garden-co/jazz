@@ -3147,6 +3147,172 @@ fn include_deleted_one_shot_read_reachable_matches_deleted_roots_through_visible
     assert!(rows[0].is_deleted());
 }
 
+/// A trusted include-deleted read of the documents team `t1` reaches
+/// through `kind = unit` edges, over alice's draft branch of the edge table
+/// on top of main, selects the edge table's `kind` index inside the
+/// recursive step. The step must still mask main by the draft's presence
+/// (the draft's edit that changed `t2 -> t3`'s kind hides main's image) and
+/// apply main's deletion registers (main deleted `t1 -> t4`), although a
+/// keyed lookup cannot run inside a recursive step. Internal because only
+/// the node's trusted include-deleted read hands an index access path to a
+/// recursive step source.
+///
+/// ```text
+/// main (settled): t1 -unit-> t2 -unit-> t3 ; t1 -unit-> t4 (deleted)
+///                 d1@t1 d2@t2 d3@t3 d4@t4
+/// draft:          edge t2->t3 kind -> other
+/// read reachable from t1 via unit edges, draft over main ──► {d1, d2}
+/// ```
+#[test]
+fn include_deleted_reachable_indexed_step_over_branch_view_masks_base() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("team_access")
+                    .fk_column("doc", "docs")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_edges")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams")
+                    .column("kind", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .index_only(["kind"]),
+            ),
+    );
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x0a), schema.clone());
+    let branch = |byte: u8| {
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    };
+    let (main, draft) = (branch(0xe0), branch(0xe1));
+    let mut tx_time = 10;
+    let mut settle = |node: &mut NodeState, commit: MergeableCommit| {
+        tx_time += 1;
+        let tx_id = node
+            .commit_mergeable_settled(MergeableCommit { now_ms: tx_time, ..commit })
+            .unwrap();
+        let global_time = node.allocate_global_time_for_test();
+        node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(global_time),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+    };
+    let text = |value: &str| Value::String(value.to_owned());
+    let (t1, t2, t3, t4) = (row(0x71), row(0x72), row(0x73), row(0x74));
+    let (d1, d2, d3, d4) = (row(0x81), row(0x82), row(0x83), row(0x84));
+    let (edge_23, edge_14) = (row(0x92), row(0x93));
+    for team in [t1, t2, t3, t4] {
+        settle(
+            &mut node,
+            MergeableCommit::new("teams", team, 0)
+                .cells(BTreeMap::from([("name".to_owned(), text("team"))])),
+        );
+    }
+    for (doc, team, access) in [
+        (d1, t1, row(0xa1)),
+        (d2, t2, row(0xa2)),
+        (d3, t3, row(0xa3)),
+        (d4, t4, row(0xa4)),
+    ] {
+        settle(
+            &mut node,
+            MergeableCommit::new("docs", doc, 0)
+                .cells(BTreeMap::from([("title".to_owned(), text("doc"))])),
+        );
+        settle(
+            &mut node,
+            MergeableCommit::new("team_access", access, 0).cells(BTreeMap::from([
+                ("doc".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ])),
+        );
+    }
+    for (edge, member, parent) in [(row(0x91), t1, t2), (edge_23, t2, t3), (edge_14, t1, t4)] {
+        settle(
+            &mut node,
+            MergeableCommit::new("team_edges", edge, 0)
+                .branch(main.clone())
+                .cells(BTreeMap::from([
+                    ("member".to_owned(), Value::Uuid(member.0)),
+                    ("parent".to_owned(), Value::Uuid(parent.0)),
+                    ("kind".to_owned(), text("unit")),
+                ])),
+        );
+    }
+    settle(
+        &mut node,
+        MergeableCommit::new("team_edges", edge_14, 0)
+            .branch(main.clone())
+            .deletion(DeletionEvent::Deleted),
+    );
+    node.commit_mergeable_settled(
+        MergeableCommit::new("team_edges", edge_23, 100)
+            .branch(draft.clone())
+            .cells(BTreeMap::from([
+                ("member".to_owned(), Value::Uuid(t2.0)),
+                ("parent".to_owned(), Value::Uuid(t3.0)),
+                ("kind".to_owned(), text("other")),
+            ])),
+    )
+    .unwrap();
+    let shape = Query::from("docs")
+        .reachable_via(
+            "team_access",
+            "doc",
+            "team",
+            lit(Value::Uuid(t1.0)),
+            "team_edges",
+            "member",
+            "parent",
+            [eq(col("kind"), lit("unit"))],
+        )
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let read_view = crate::protocol::ReadViewSpec {
+        source: crate::protocol::ReadViewSourceSpec::BranchView {
+            head: draft,
+            base: Some(crate::protocol::BranchViewBase::Current(main)),
+        },
+    };
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
+        node.reset_query_engine_read_metrics();
+        let rows = node
+            .query_rows_including_deleted_with_query_engine(
+                &shape,
+                &binding,
+                tier,
+                AuthorSubject::SYSTEM,
+                QueryAuthorizationMode::TrustedServing,
+                &read_view,
+            )
+            .unwrap();
+        assert!(
+            node.query_engine_read_metrics().source_index_probes > 0,
+            "the step's edge source reads its `kind` index prefix"
+        );
+        let rows = rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        let expected = if tier == DurabilityTier::Local {
+            BTreeSet::from([d1, d2])
+        } else {
+            // The draft's edit is not settled, so at Global main's image
+            // stands.
+            BTreeSet::from([d1, d2, d3])
+        };
+        assert_eq!(rows, expected, "{tier:?}");
+    }
+}
+
 #[test]
 fn include_deleted_one_shot_read_reachable_ignores_deleted_edge_rows() {
     let schema = include_deleted_reachable_schema();

@@ -653,7 +653,9 @@ fn declared_node_fields(
                     fields
                 })
         }
-        GraphBuilder::Table { .. } | GraphBuilder::Index { .. } => None,
+        GraphBuilder::Table { .. } | GraphBuilder::Index { .. } | GraphBuilder::Lookup { .. } => {
+            None
+        }
     }
 }
 
@@ -1038,7 +1040,8 @@ fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
             | GraphBuilder::ArgMinBy { input, .. }
             | GraphBuilder::TopBy { input, .. }
             | GraphBuilder::CollectBy { input, .. }
-            | GraphBuilder::Aggregate { input, .. } => pending.push((input, false)),
+            | GraphBuilder::Aggregate { input, .. }
+            | GraphBuilder::Lookup { keys: input, .. } => pending.push((input, false)),
             GraphBuilder::Union { inputs } => {
                 pending.extend(inputs.iter().rev().map(|input| (input.as_ref(), false)));
             }
