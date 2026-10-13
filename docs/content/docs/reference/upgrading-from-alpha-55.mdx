@@ -138,9 +138,9 @@ sure your HTML isn't cached: a cached `index.html` keeps loading the old client.
 ### `remote-if-possible` read tier removed
 
 `ReadTier.RemoteIfPossible` (`"remote-if-possible"`) was removed, and passing it now throws. Use
-`ReadTier.LocalFirstUnlessEmpty` (`"local-first-unless-empty"`) to show local results at once but
-wait for the server when there's nothing local yet, or `ReadTier.Remote` for server-confirmed
-results. See [Durability Tiers](/docs/reference/durability-tiers).
+`ReadTier.LocalFirst` (`"local-first"`) with a `firstLoadRemoteWaitMs` of a few seconds to give the
+server a bounded chance to answer a first load, or `ReadTier.Remote` for server-confirmed results.
+See [Durability Tiers](/docs/reference/durability-tiers).
 
 ### Server edges removed
 

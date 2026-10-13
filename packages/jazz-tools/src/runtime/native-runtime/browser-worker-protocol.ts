@@ -556,8 +556,8 @@ export type BrowserFollowerPortEvent =
   | { type: "transport-state"; explicitlyDisconnected: boolean }
   /**
    * Live reachability of the worker's upstream server. Tabs use it only to
-   * decide whether an empty local-first-unless-empty opening may wait for a
-   * remote answer; older tabs ignore it.
+   * decide whether a local-first read's first load may wait for a remote
+   * answer; older tabs ignore it.
    */
   | { type: "remote-link"; state: RemoteLinkState }
   | {

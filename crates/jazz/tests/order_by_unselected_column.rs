@@ -9,8 +9,7 @@ mod common;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
-    SubscriptionEvent,
+    Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, ReadOpts, SubscriptionEvent,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -19,7 +18,6 @@ use jazz::node::CurrentRow;
 use jazz::query::{ArraySubquery, OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -59,9 +57,7 @@ fn open_db() -> Db {
 
 fn local() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }
