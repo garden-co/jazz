@@ -898,10 +898,11 @@ where
             "a history image without updated_by needs its transaction record",
         ))?;
         self.remember_history_tx_seq(key.0, key.1, raw.record())?;
-        let author = encode_history_updated_by(
+        let code = AuthorCode(
             raw.record()
-                .get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
-        )?;
+                .get_u32(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+        );
+        let author = encode_history_updated_by(self.row_author_for_code(code).await?.to_value())?;
         if self.history_tx_authors.len() >= HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES {
             self.history_tx_authors.clear();
         }
@@ -1117,6 +1118,7 @@ where
             for time in &times {
                 context.tx_rows.insert(TxId::new(*time, node), None);
             }
+            let mut headers = Vec::new();
             for raw in self
                 .database
                 .primary_key_scan_range_raw(
@@ -1132,9 +1134,14 @@ where
                 if row_alias != alias || !times.contains(&time) {
                     continue;
                 }
-                let tx_id = TxId::new(time, node);
+                headers.push((
+                    TxId::new(time, node),
+                    OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+                ));
+            }
+            for (tx_id, header) in headers {
                 let tx = self
-                    .stored_transaction_from_header(tx_id, alias, record)
+                    .stored_transaction_from_header(tx_id, alias, header.borrowed())
                     .await?;
                 context.tx_rows.insert(tx_id, Some(tx));
             }
@@ -1143,7 +1150,7 @@ where
     }
 
     async fn query_transaction_by_alias(
-        &self,
+        &mut self,
         tx_id: TxId,
         expected_alias: NodeAlias,
     ) -> Result<Option<StoredTransaction>, Error> {
@@ -1194,7 +1201,7 @@ where
     /// is unsettled, and its `jazz_tx_provenance` record when its flags say it
     /// has one (SPEC 2 §2.8).
     async fn stored_transaction_from_header(
-        &self,
+        &mut self,
         tx_id: TxId,
         expected_alias: NodeAlias,
         record: BorrowedRecord<'_>,
@@ -1204,6 +1211,12 @@ where
         let kind =
             tx_kind_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?)?;
         let flags = transaction_flags(record)?;
+        let made_by = self
+            .row_author_for_code(AuthorCode(
+                record.get_u32(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+            ))
+            .await?
+            .as_author_subject();
         let fate = fate_from_encoded_fields(record)?;
         let global_time = record
             .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
@@ -1289,11 +1302,7 @@ where
             tx_id,
             kind,
             n_total_writes: record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
-            made_by: RowAuthor::from_record(
-                record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
-            )
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-            .as_author_subject(),
+            made_by,
             permission_subject,
             base_snapshot: evidence.base_snapshot,
             row_read_set: evidence.row_read_set,

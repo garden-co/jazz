@@ -109,7 +109,7 @@ groove::define_record! {
         2 => kind: TxKind,
         3 => flags: u8,
         4 => n_total_writes: u32,
-        5 => made_by: RowAuthor,
+        5 => made_by: u32,
         6 => fate: FateTag,
         7 => global_time: Option<GlobalTime>,
         8 => durability: DurabilityTier,
@@ -3743,10 +3743,11 @@ pub(super) fn stage_transaction_record(
     batch: &mut DatabaseBatch,
     write: TransactionRecordWrite,
     node_alias: NodeAlias,
+    made_by: AuthorCode,
     tx: &Transaction,
     status: &TransactionRecordStatus,
 ) -> Result<(), Error> {
-    let header = transaction_record_values(node_alias, tx, status)?;
+    let header = transaction_record_values(node_alias, made_by, tx, status)?;
     let key = || {
         PrimaryKeyValue::Composite(vec![
             PrimaryKeyValue::U64(tx.tx_id.time.0),
@@ -3788,6 +3789,7 @@ pub(super) fn stage_transaction_record(
 /// Values of a `jazz_transactions` record (`jazz.tx-record.v2`).
 pub(super) fn transaction_record_values(
     node_alias: NodeAlias,
+    made_by: AuthorCode,
     tx: &Transaction,
     status: &TransactionRecordStatus,
 ) -> Result<Vec<Value>, Error> {
@@ -3807,9 +3809,7 @@ pub(super) fn transaction_record_values(
         }),
         Value::U8(flags),
         Value::U32(tx.n_total_writes),
-        RowAuthor::from_persisted_subject(tx.made_by)
-            .map_err(|_| Error::UnadmittedWriteAuthor)?
-            .to_value(),
+        Value::U32(made_by.0),
         Value::String(fate_string(&status.fate)),
         Value::Nullable(status.global_time.map(|time| Box::new(Value::U64(time.0)))),
         Value::String(durability_string(status.durability).to_owned()),
@@ -5240,11 +5240,11 @@ mod transaction_record_tests {
             Some(GlobalTime(9)),
             DurabilityTier::Global,
         );
-        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
+        let values = transaction_record_values(NodeAlias(1), AuthorCode(0), &tx, &status).unwrap();
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
             hex(&bytes),
-            "02010000000000000100000000000000000003000000010109000000000000000270000000710000008103d55b28c35ac986bb8ea21b1b2425120000000275726e3a6a617a7a3a746573740230353035303530352d303530352d303530352d303530352d3035303530353035303530350000"
+            "020100000000000001000000000000000000030000000000000001010900000000000000022a0000000000"
         );
         assert_eq!(
             pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
@@ -5263,10 +5263,10 @@ mod transaction_record_tests {
             None,
             DurabilityTier::Local,
         );
-        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
+        let values = transaction_record_values(NodeAlias(1), AuthorCode(0), &tx, &status).unwrap();
         assert_eq!(
             hex(&encode("jazz_transactions", &values)),
-            "02010000000000000100000000000000000003000000020000000000000000000170000000710000008103d55b28c35ac986bb8ea21b1b2425120000000275726e3a6a617a7a3a746573740230353035303530352d303530352d303530352d303530352d3035303530353035303530350001040100000000000001010808080808080808080808080808080800"
+            "020100000000000001000000000000000000030000000000000002000000000000000000012a0000000001040100000000000001010808080808080808080808080808080800"
         );
         assert_eq!(
             pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
@@ -5284,10 +5284,10 @@ mod transaction_record_tests {
         tx.user_metadata_json = Some("{}".to_owned());
         let status = TransactionRecordStatus::new(Fate::Pending, None, DurabilityTier::Local)
             .view_scoped(true);
-        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
+        let values = transaction_record_values(NodeAlias(1), AuthorCode(0), &tx, &status).unwrap();
         assert_eq!(
             hex(&encode("jazz_transactions", &values)),
-            "02010000000000000100000000000000000103000000000000000000000000000170000000740000008103d55b28c35ac986bb8ea21b1b2425120000000275726e3a6a617a7a3a746573740230353035303530352d303530352d303530352d303530352d30353035303530353035303501027b7d00"
+            "020100000000000001000000000000000001030000000000000000000000000000000000012d00000001027b7d00"
         );
         let pending = pending_transaction_values(NodeAlias(1), &tx, &status)
             .unwrap()
@@ -5325,6 +5325,7 @@ mod transaction_record_tests {
         };
         let accepted = transaction_record_values(
             NodeAlias(1),
+            AuthorCode(0),
             &tx,
             &TransactionRecordStatus::new(
                 Fate::Accepted,
@@ -5335,6 +5336,7 @@ mod transaction_record_tests {
         .unwrap();
         let rejected = transaction_record_values(
             NodeAlias(1),
+            AuthorCode(0),
             &tx,
             &TransactionRecordStatus::new(
                 Fate::Rejected(RejectionReason::MalformedCommit("bad".to_owned())),

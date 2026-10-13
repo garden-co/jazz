@@ -304,10 +304,12 @@ where
                 provenance: contribution_merge,
             }
         };
+        let tx_made_by = self.stage_author_code(batch, storage_tx.made_by).await?;
         stage_transaction_record(
             batch,
             write,
             tx_node_alias,
+            tx_made_by,
             storage_tx,
             &TransactionRecordStatus::new(fate.clone(), global_time, durability)
                 .view_scoped(view_scoped_cardinality && !preserve_authoritative_cardinality),
@@ -734,12 +736,14 @@ where
         }
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
         let mut batch = self.database.open_batch();
+        let tx_made_by = self.stage_author_code(&mut batch, tx.made_by).await?;
         stage_transaction_record(
             &mut batch,
             TransactionRecordWrite::Insert {
                 provenance: contribution_merge,
             },
             tx_node_alias,
+            tx_made_by,
             &tx,
             &TransactionRecordStatus::new(fate.clone(), None, DurabilityTier::Local),
         )?;

@@ -918,12 +918,14 @@ where
             // exclusive transaction. Preserve that scope marker even when
             // the redacted write count equals this fragment's length, so a
             // later sibling view can extend the same local projection.
+            let tx_made_by = self.stage_author_code(&mut batch, tx.made_by).await?;
             stage_transaction_record(
                 &mut batch,
                 TransactionRecordWrite::Insert {
                     provenance: contribution_merge,
                 },
                 tx_node_alias,
+                tx_made_by,
                 tx,
                 &TransactionRecordStatus::new(
                     (*first.fate).clone(),

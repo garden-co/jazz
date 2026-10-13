@@ -88,10 +88,12 @@ where
                 .global_current_updates_for_versions(&batch, tx_id, global_time, &tx_versions)
                 .await?;
         }
+        let tx_made_by = self.stage_author_code(&mut batch, stored.tx.made_by).await?;
         stage_transaction_record(
             &mut batch,
             TransactionRecordWrite::Update,
             stored.node_alias,
+            tx_made_by,
             &stored.tx,
             &TransactionRecordStatus::new(
                 stored.fate.clone(),

@@ -1308,6 +1308,9 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
         &mut batch,
         TransactionRecordWrite::Update,
         stored.node_alias,
+        crate::local_executor::block_on(node.author_code(stored.tx.made_by))
+            .unwrap()
+            .unwrap(),
         &stored.tx,
         &TransactionRecordStatus::new(Fate::Accepted, Some(global_time), DurabilityTier::Global),
     )

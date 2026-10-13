@@ -319,12 +319,14 @@ where
                 batch.accept_large_value(*staged_id);
             }
         }
+        let tx_made_by = self.stage_author_code(&mut batch, tx.made_by).await?;
         stage_transaction_record(
             &mut batch,
             TransactionRecordWrite::Insert {
                 provenance: contribution_merge,
             },
             tx_node_alias,
+            tx_made_by,
             &tx,
             &TransactionRecordStatus::new(Fate::Pending, None, self.authored_commit_durability),
         )?;

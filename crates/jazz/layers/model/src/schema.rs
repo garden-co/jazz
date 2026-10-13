@@ -505,6 +505,7 @@ impl RuntimeSchema {
             tx_touched_rows_table(),
             rejected_transactions_table(),
             history_horizon_table(),
+            authors_table(),
         ]
     }
 
@@ -1454,6 +1455,17 @@ pub fn global_current_composite_index_name(columns: &[String]) -> String {
     )
 }
 
+/// `jazz_authors`: node-local codes for the authors that transaction records
+/// name, a Groove dictionary table. A transaction record stores its author's
+/// 4-byte code instead of the full author, which is the largest field of the
+/// record and repeats across an author's transactions.
+#[doc(hidden)]
+pub const AUTHORS_TABLE: &str = "jazz_authors";
+
+fn authors_table() -> GrooveTableSchema {
+    groove::dictionary::table_schema(AUTHORS_TABLE)
+}
+
 fn nodes_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_nodes",
@@ -1491,7 +1503,8 @@ fn transactions_table() -> GrooveTableSchema {
             // reserved and refused on read.
             column("flags", GrooveColumnType::U8),
             column("n_total_writes", GrooveColumnType::U32),
-            column("made_by", crate::ids::RowAuthor::value_type()),
+            // node-local-derived: the author's code in `jazz_authors`.
+            column("made_by", GrooveColumnType::U32),
             // upstream-decided: written only by fate/state application.
             column("fate", fate_column()),
             // upstream-decided: written only by fate/state application.

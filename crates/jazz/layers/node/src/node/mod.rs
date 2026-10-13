@@ -317,6 +317,7 @@ fn hydrate_nested_payload_enum_cases(
 }
 
 pub mod api_error;
+mod authors;
 mod catalogue_ingest;
 mod codec;
 mod currency;
@@ -368,6 +369,7 @@ pub use query_eval::{
 pub use views::MaintainedViewBundleInputs;
 pub use views::{simple_scalar_exit_query, single_table_scalar_query};
 
+use authors::AuthorCode;
 use codec::*;
 use database_slot::DatabaseSlot;
 use open_tx::*;
@@ -614,6 +616,8 @@ pub struct NodeState<S = BoxedStorage> {
     /// change, so entries never go stale.
     /// Each entry is the encoded field, ready to splice into an image.
     history_tx_authors: BTreeMap<(TxTime, NodeAlias), Rc<[u8]>>,
+    /// Codes of the authors that transaction records name (`jazz_authors`).
+    authors: groove::dictionary::Dictionary,
     /// Global times of transactions read from storage, which key their
     /// history records (`history_tx_seq`). Bounded like
     /// `history_tx_authors`; a transaction's global time never changes once

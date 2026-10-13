@@ -1803,6 +1803,10 @@ pub enum Error {
     Storage(Box<crate::storage::Error>),
     #[error("table not found: {0}")]
     TableNotFound(String),
+    #[error("invalid dictionary {table}: {reason}")]
+    InvalidDictionary { table: String, reason: &'static str },
+    #[error("dictionary {0} has no free code left")]
+    DictionaryExhausted(String),
     #[error("table already exists: {0}")]
     TableAlreadyExists(String),
     #[error("field definition does not match the live catalogue: {table}.{field}")]

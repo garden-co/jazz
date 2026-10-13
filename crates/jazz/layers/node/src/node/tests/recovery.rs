@@ -822,6 +822,7 @@ fn mark_accepted_without_ahead_cleanup<S>(
         &mut batch,
         TransactionRecordWrite::Update,
         stored.node_alias,
+        crate::local_executor::block_on(node.author_code(stored.tx.made_by)).unwrap().unwrap(),
         &stored.tx,
         &TransactionRecordStatus::new(stored.fate.clone(), stored.global_time, stored.durability),
     )
@@ -981,6 +982,7 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
             &mut batch,
             TransactionRecordWrite::Update,
             stored.node_alias,
+            crate::local_executor::block_on(node.author_code(stored.tx.made_by)).unwrap().unwrap(),
             &stored.tx,
             &TransactionRecordStatus::new(Fate::Accepted, Some(GlobalTime(7)), DurabilityTier::Local),
         )
@@ -2185,6 +2187,7 @@ fn transaction_status_projects_state_without_decoding_payloads() {
             for global_time in [None, Some(GlobalTime(42))] {
                 let mut values = transaction_record_values(
                     stored.node_alias,
+                    crate::local_executor::block_on(core.author_code(stored.tx.made_by)).unwrap().unwrap(),
                     &stored.tx,
                     &TransactionRecordStatus::new(fate.clone(), global_time, durability),
                 )
@@ -2225,6 +2228,7 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         stored.tx.contribution_merge = Some(provenance);
         let values = transaction_record_values(
             stored.node_alias,
+            crate::local_executor::block_on(core.author_code(stored.tx.made_by)).unwrap().unwrap(),
             &stored.tx,
             &TransactionRecordStatus::new(
                 stored.fate.clone(),
@@ -2401,4 +2405,44 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
         .collect::<Vec<_>>();
     assert_eq!(indexes, expected_indexes);
     storage.close().unwrap();
+}
+
+/// Actors: one writer committing as two authors, then a reopen.
+///
+/// A transaction record names its author by a `jazz_authors` code: one entry
+/// per distinct author however many transactions name it, written in the
+/// same batch as the first record that uses it, and resolved back to the
+/// full author after a reopen.
+#[test]
+fn transaction_records_name_authors_by_dictionary_code() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let mut committed = Vec::new();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        for (index, author) in [alice, bob, alice, alice].into_iter().enumerate() {
+            let tx_id = node
+                .commit_mergeable_settled(
+                    MergeableCommit::new("todos", row(0x40 + index as u8), 10)
+                        .made_by(author)
+                        .cells(title_cells("coded")),
+                )
+                .unwrap();
+            committed.push((tx_id, author));
+        }
+        let entries = crate::local_executor::block_on(
+            node.database
+                .primary_key_scan_raw(crate::schema::AUTHORS_TABLE, &[]),
+        )
+        .unwrap()
+        .len();
+        assert_eq!(entries, 2, "one dictionary entry per distinct author");
+    }
+
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    for (tx_id, author) in committed {
+        assert_eq!(reopened.query_transaction(tx_id).unwrap().unwrap().tx.made_by, author);
+    }
 }
