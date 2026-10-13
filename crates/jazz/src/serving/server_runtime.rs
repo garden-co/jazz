@@ -1994,7 +1994,7 @@ fn inbound_frame_phase(frame: &[u8]) -> String {
             WireFrame::Message(_) => unreachable!("message handled above"),
         };
     };
-    match postcard::from_bytes::<SyncMessage>(&envelope.payload) {
+    match crate::wire::decode_sync_message_trusted(&envelope.payload) {
         Ok(message) => sync_message_name(&message).to_owned(),
         Err(_) => "malformed SyncMessage".to_owned(),
     }
