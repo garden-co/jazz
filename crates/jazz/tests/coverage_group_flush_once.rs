@@ -8,17 +8,13 @@ mod common;
 
 use duplex_transport::duplex;
 use jazz::block_on;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, QueryAttachment, ReadOpts,
-    SeededRowIdSource,
-};
+use jazz::db::{Db, DbConfig, DbIdentity, QueryAttachment, ReadOpts, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -77,9 +73,7 @@ fn open_server(schema: JazzSchema) -> Db {
 
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Global,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::Full,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     }
 }

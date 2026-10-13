@@ -3,8 +3,8 @@ import { appScopedUrl, httpUrlToWs } from "./url.js";
 
 describe("appScopedUrl", () => {
   it("trims the server url, preserves any base path, and normalizes the app-scoped path", () => {
-    expect(appScopedUrl(" https://api.example.com/base/ ", "my app", "/admin/schemas")).toBe(
-      "https://api.example.com/base/apps/my%20app/admin/schemas",
+    expect(appScopedUrl(" https://api.example.com/base/ ", "my app", "/admin/deploy")).toBe(
+      "https://api.example.com/base/apps/my%20app/admin/deploy",
     );
   });
 

@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   resolveLocalDeps,
   resolveRemoteDeps,
@@ -259,20 +259,106 @@ export async function scaffold(
     });
   }
 
-  // Install is not transactional for the same reason — failure leaves the
-  // project intact so the user can retry `npm install` by hand. `execFileSync`
-  // with an argv array means no shell interpretation of `pm`.
+  // Install is not transactional — a failure leaves the project intact so the
+  // user can inspect it or retry manually. Stream both pipes to avoid buffering
+  // an install's full output while keeping successful output hidden.
   if (options.pm) {
     options.onStep?.("Installing dependencies");
     try {
-      execFileSync(options.pm, ["install"], { cwd: options.targetDir, stdio: "pipe" });
+      await runPackageManagerInstall(options.pm, options.targetDir);
     } catch (err) {
-      const output = getProcessOutput(err);
       throw new Error(
-        `${options.pm} install failed: ${output || (err instanceof Error ? err.message : String(err))}`,
+        `${options.pm} install failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
+}
+
+const INSTALL_OUTPUT_SAMPLE_BYTES = 8 * 1024;
+const INSTALL_OUTPUT_HALF_SAMPLE_BYTES = INSTALL_OUTPUT_SAMPLE_BYTES / 2;
+
+interface OutputCapture {
+  head: Buffer;
+  tail: Buffer;
+  totalBytes: number;
+}
+
+function createOutputCapture(): OutputCapture {
+  return { head: Buffer.alloc(0), tail: Buffer.alloc(0), totalBytes: 0 };
+}
+
+function captureOutput(capture: OutputCapture, chunk: Buffer): void {
+  capture.totalBytes += chunk.length;
+
+  const headBytes = Math.max(0, INSTALL_OUTPUT_HALF_SAMPLE_BYTES - capture.head.length);
+  if (headBytes > 0) {
+    capture.head = Buffer.concat([capture.head, chunk.subarray(0, headBytes)]);
+  }
+
+  const tail = Buffer.concat([capture.tail, chunk]);
+  const tailStart = Math.max(0, tail.length - INSTALL_OUTPUT_HALF_SAMPLE_BYTES);
+  capture.tail = Buffer.from(tail.subarray(tailStart));
+}
+
+function formatOutputCapture(capture: OutputCapture): string {
+  if (capture.totalBytes <= INSTALL_OUTPUT_SAMPLE_BYTES) {
+    const overlap = Math.max(0, capture.head.length + capture.tail.length - capture.totalBytes);
+    return Buffer.concat([capture.head, capture.tail.subarray(overlap)])
+      .toString("utf8")
+      .trim();
+  }
+
+  return [
+    capture.head.toString("utf8"),
+    "[... output truncated ...]",
+    capture.tail.toString("utf8"),
+  ]
+    .join("")
+    .trim();
+}
+
+function formatInstallDiagnostics(stdout: OutputCapture, stderr: OutputCapture): string {
+  return [
+    ["stdout", formatOutputCapture(stdout)],
+    ["stderr", formatOutputCapture(stderr)],
+  ]
+    .filter(([, output]) => output)
+    .map(([stream, output]) => `${stream}:\n${output}`)
+    .join("\n");
+}
+
+function runPackageManagerInstall(pm: string, cwd: string): Promise<void> {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const stdout = createOutputCapture();
+  const stderr = createOutputCapture();
+  const child = spawn(pm, ["install"], {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let spawnError: Error | undefined;
+
+  child.stdout.on("data", (chunk: Buffer) => captureOutput(stdout, chunk));
+  child.stderr.on("data", (chunk: Buffer) => captureOutput(stderr, chunk));
+  child.on("error", (err) => {
+    spawnError = err;
+  });
+  child.on("close", (code, signal) => {
+    if (!spawnError && code === 0) {
+      resolve();
+      return;
+    }
+
+    const diagnostics = formatInstallDiagnostics(stdout, stderr);
+    reject(
+      new Error(
+        diagnostics ||
+          spawnError?.message ||
+          (signal ? `terminated by signal ${signal}` : `exited with code ${code}`),
+      ),
+    );
+  });
+
+  return promise;
 }
 
 function runGitInit(cwd: string): void {
@@ -302,15 +388,4 @@ function getStderr(err: unknown): string {
   return err instanceof Error && "stderr" in err
     ? String((err as { stderr: Buffer | string }).stderr)
     : "";
-}
-
-function getProcessOutput(err: unknown): string {
-  if (!(err instanceof Error)) return "";
-  return ["stdout", "stderr"]
-    .flatMap((key) => {
-      const value = (err as unknown as Record<string, unknown>)[key];
-      return typeof value === "string" || Buffer.isBuffer(value) ? [String(value).trim()] : [];
-    })
-    .filter(Boolean)
-    .join("\n");
 }

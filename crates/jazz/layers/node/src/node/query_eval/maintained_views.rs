@@ -1168,13 +1168,16 @@ where
         // publication reloads the original record rather than treating the
         // logical projection as a synthetic version in the read schema.
         let schema_alias = version.schema_version_alias();
-        Ok(Some(super::read_sources::covered_input_record(
+        let record = super::read_sources::covered_input_record(
             &source_table,
             &runtime_source.descriptor,
             &row,
             schema_alias,
             &version.branch_key(),
-        )?))
+        )?;
+        #[cfg(feature = "cold-settle-attribution")]
+        version.record_conversion("covered_input_record", record.len());
+        Ok(Some(record))
     }
 
     fn project_covered_input_row_in_read_view(

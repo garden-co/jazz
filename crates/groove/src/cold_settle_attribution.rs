@@ -157,3 +157,103 @@ pub fn record_map_node(
 pub fn map_node_work() -> Vec<MapNodeWork> {
     MAP_NODES.lock().unwrap().values().cloned().collect()
 }
+
+/// Row representation conversions on the cold path, keyed by site. `calls`
+/// counts conversions; `distinct` counts the distinct physical versions they
+/// converted, so `calls - distinct` is repeated work for the same version.
+/// The benchmark driver sets the role around each node tick.
+pub mod conversions {
+    use std::cell::{Cell, RefCell};
+    use std::collections::{BTreeMap, HashSet};
+
+    #[derive(Clone, Debug, Default)]
+    pub struct SiteWork {
+        pub calls: u64,
+        pub distinct: u64,
+        pub bytes: u64,
+    }
+
+    /// `(role, column family)`.
+    pub type TableWriteKey = (&'static str, String);
+    /// `(writes, bytes)`.
+    pub type TableWrite = (u64, u64);
+
+    #[derive(Default)]
+    struct Site {
+        calls: u64,
+        bytes: u64,
+        seen: HashSet<u64>,
+    }
+
+    thread_local! {
+        static ROLE: Cell<&'static str> = const { Cell::new("outside_node_ticks") };
+        static SITES: RefCell<BTreeMap<(&'static str, &'static str), Site>> =
+            const { RefCell::new(BTreeMap::new()) };
+        static TABLE_WRITES: RefCell<BTreeMap<TableWriteKey, TableWrite>> =
+            const { RefCell::new(BTreeMap::new()) };
+    }
+
+    /// Physical record writes per column family: `(writes, bytes)`.
+    pub fn record_table_write(table: &str, bytes: usize) {
+        let role = ROLE.with(Cell::get);
+        TABLE_WRITES.with(|tables| {
+            let mut tables = tables.borrow_mut();
+            let entry = tables.entry((role, table.to_owned())).or_default();
+            entry.0 += 1;
+            entry.1 += bytes as u64;
+        });
+    }
+
+    pub fn table_writes() -> Vec<(TableWriteKey, TableWrite)> {
+        TABLE_WRITES.with(|tables| {
+            tables
+                .borrow()
+                .iter()
+                .map(|(key, value)| (key.clone(), *value))
+                .collect()
+        })
+    }
+
+    pub fn set_role(role: &'static str) {
+        ROLE.with(|current| current.set(role));
+    }
+
+    pub fn reset() {
+        SITES.with(|sites| sites.borrow_mut().clear());
+        TABLE_WRITES.with(|tables| tables.borrow_mut().clear());
+    }
+
+    /// `identity` is a hash of the physical version (table, row, branch,
+    /// transaction, layer); `bytes` is the size of the produced representation
+    /// when it has one.
+    pub fn record(site: &'static str, identity: u64, bytes: usize) {
+        let role = ROLE.with(Cell::get);
+        SITES.with(|sites| {
+            let mut sites = sites.borrow_mut();
+            let entry = sites.entry((role, site)).or_default();
+            entry.calls += 1;
+            entry.bytes += bytes as u64;
+            entry.seen.insert(identity);
+        });
+    }
+
+    /// `(role, site) -> work`, sorted.
+    pub fn snapshot() -> Vec<((&'static str, &'static str), SiteWork)> {
+        SITES.with(|sites| {
+            sites
+                .borrow()
+                .iter()
+                .map(|(key, site)| {
+                    (
+                        *key,
+                        SiteWork {
+                            calls: site.calls,
+                            distinct: site.seen.len() as u64,
+                            bytes: site.bytes,
+                        },
+                    )
+                })
+                .collect()
+        })
+    }
+}

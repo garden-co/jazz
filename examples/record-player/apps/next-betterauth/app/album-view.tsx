@@ -5,9 +5,11 @@ import { useAll, useDb } from "jazz-tools/react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
+import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
+import { Spinner } from "@astryxdesign/core/Spinner";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Table, pixel, proportional } from "@astryxdesign/core/Table";
 import { Text } from "@astryxdesign/core/Text";
@@ -15,7 +17,7 @@ import { app } from "../schema";
 import type { PlayableTrack } from "../src/audio-stream";
 import { ALBUM_TRACK_LIMIT, positionBetween } from "../src/record-player";
 import { CoverArt } from "./cover-art";
-import { formatBytes, formatDuration } from "./format";
+import { albumSummary, albumTracksState, formatBytes, formatDuration } from "./format";
 import { FIRST_READ, useStore, usePlaylists, type Album } from "./library-data";
 import { usePlayer } from "./player";
 
@@ -46,10 +48,20 @@ export function useAlbumTracks(album: Album | undefined): TrackRow[] | undefined
   }));
 }
 
-export function AlbumView({ album, onAddTracks }: { album: Album; onAddTracks(): void }) {
+export function AlbumView({
+  album,
+  isReceivingTracks = false,
+  onAddTracks,
+}: {
+  album: Album;
+  /** True while this client is streaming tracks into the album. */
+  isReceivingTracks?: boolean;
+  onAddTracks(): void;
+}) {
   const tracks = useAlbumTracks(album);
   const player = usePlayer();
   const totalMs = tracks?.reduce((sum, track) => sum + track.durationMs, 0) ?? 0;
+  const state = albumTracksState(tracks, isReceivingTracks);
 
   return (
     <VStack gap={4}>
@@ -64,7 +76,7 @@ export function AlbumView({ album, onAddTracks }: { album: Album; onAddTracks():
           <VStack gap={0.5}>
             <Heading level={2}>{album.title}</Heading>
             <Text color="secondary">
-              {album.artist} · {tracks?.length ?? 0} tracks · {formatDuration(totalMs)}
+              {album.artist} · {albumSummary(state, tracks?.length ?? 0, totalMs)}
             </Text>
           </VStack>
           <HStack gap={2} wrap="wrap">
@@ -79,79 +91,92 @@ export function AlbumView({ album, onAddTracks }: { album: Album; onAddTracks():
               label="Add tracks"
               variant="secondary"
               icon={<Icon icon={Upload} size="sm" />}
+              isDisabled={isReceivingTracks}
               onClick={onAddTracks}
             />
           </HStack>
         </VStack>
       </HStack>
-      <Table<TrackRow>
-        data={tracks ?? []}
-        idKey="id"
-        density="compact"
-        hasHover
-        columns={[
-          {
-            key: "ordinal",
-            header: "#",
-            width: pixel(48),
-            renderCell: (track) => (
-              <Text color="secondary" hasTabularNumbers>
-                {track.ordinal}
-              </Text>
-            ),
-          },
-          {
-            key: "title",
-            header: "Title",
-            width: proportional(3, { minWidth: 140 }),
-            renderCell: (track) => (
-              <HStack gap={2} vAlign="center">
-                <Text maxLines={1}>{track.title}</Text>
-                {player.current?.id === track.id && <Badge variant="info" label="Playing" />}
-              </HStack>
-            ),
-          },
-          {
-            key: "size",
-            header: "Size",
-            width: pixel(88),
-            renderCell: (track) => (
-              <Text color="secondary" hasTabularNumbers>
-                {track.byteLength ? formatBytes(track.byteLength) : "–"}
-              </Text>
-            ),
-          },
-          {
-            key: "duration",
-            header: "Length",
-            width: pixel(72),
-            align: "end",
-            renderCell: (track) => (
-              <Text color="secondary" hasTabularNumbers>
-                {formatDuration(track.durationMs)}
-              </Text>
-            ),
-          },
-          {
-            key: "actions",
-            header: "",
-            width: pixel(96),
-            align: "end",
-            renderCell: (track) => (
-              <HStack gap={0.5} justify="end">
-                <IconButton
-                  label={`Play ${track.title}`}
-                  variant="ghost"
-                  size="sm"
-                  icon={<Icon icon={Play} size="sm" />}
-                  onClick={() => tracks && player.playQueue(tracks, tracks.indexOf(track))}
-                />
-                <AddToPlaylist trackId={track.id} trackTitle={track.title} />
-              </HStack>
-            ),
-          },
-        ]}
-      />
+      {state === "loading" || state === "receiving" ? (
+        <HStack justify="center">
+          <Spinner label={state === "loading" ? "Loading tracks" : "Uploading tracks"} />
+        </HStack>
+      ) : state === "empty" ? (
+        <EmptyState
+          isCompact
+          title="No tracks yet"
+          description="Tracks appear here once their audio has finished uploading."
+        />
+      ) : (
+        <Table<TrackRow>
+          data={tracks ?? []}
+          idKey="id"
+          density="compact"
+          hasHover
+          columns={[
+            {
+              key: "ordinal",
+              header: "#",
+              width: pixel(48),
+              renderCell: (track) => (
+                <Text color="secondary" hasTabularNumbers>
+                  {track.ordinal}
+                </Text>
+              ),
+            },
+            {
+              key: "title",
+              header: "Title",
+              width: proportional(3, { minWidth: 140 }),
+              renderCell: (track) => (
+                <HStack gap={2} vAlign="center">
+                  <Text maxLines={1}>{track.title}</Text>
+                  {player.current?.id === track.id && <Badge variant="info" label="Playing" />}
+                </HStack>
+              ),
+            },
+            {
+              key: "size",
+              header: "Size",
+              width: pixel(88),
+              renderCell: (track) => (
+                <Text color="secondary" hasTabularNumbers>
+                  {track.byteLength ? formatBytes(track.byteLength) : "–"}
+                </Text>
+              ),
+            },
+            {
+              key: "duration",
+              header: "Length",
+              width: pixel(72),
+              align: "end",
+              renderCell: (track) => (
+                <Text color="secondary" hasTabularNumbers>
+                  {formatDuration(track.durationMs)}
+                </Text>
+              ),
+            },
+            {
+              key: "actions",
+              header: "",
+              width: pixel(96),
+              align: "end",
+              renderCell: (track) => (
+                <HStack gap={0.5} justify="end">
+                  <IconButton
+                    label={`Play ${track.title}`}
+                    variant="ghost"
+                    size="sm"
+                    icon={<Icon icon={Play} size="sm" />}
+                    onClick={() => tracks && player.playQueue(tracks, tracks.indexOf(track))}
+                  />
+                  <AddToPlaylist trackId={track.id} trackTitle={track.title} />
+                </HStack>
+              ),
+            },
+          ]}
+        />
+      )}
     </VStack>
   );
 }

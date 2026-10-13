@@ -57,8 +57,15 @@ impl TerminalRecordState {
             return Err(invalid("terminal update changed its retained descriptor"));
         }
         let mut replacement = Self::new(record)?;
-        for index in self.collections.keys() {
-            replacement.values[*index] = Value::Array(Vec::new());
+        for (index, field) in self.descriptor.fields().iter().enumerate() {
+            if matches!(&field.value_type, ValueType::Array(element) if matches!(element.as_ref(), ValueType::Record(_)))
+            {
+                // Untouched terminal collections still live in `values`; after
+                // their first child edit, they live in `collections` and this
+                // slot is empty. Preserve both representations without copying
+                // descendants. Other arrays are scalar payload and do update.
+                std::mem::swap(&mut replacement.values[index], &mut self.values[index]);
+            }
         }
         self.values = replacement.values;
         Ok(())

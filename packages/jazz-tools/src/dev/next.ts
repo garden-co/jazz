@@ -1,5 +1,8 @@
+import { realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import {
@@ -44,6 +47,34 @@ const PUBLIC_TELEMETRY_COLLECTOR_URL_ENV = "NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR
 const SCHEMA_HASH_STUB_SUBPATH = join("node_modules", ".cache", "jazz", "schema-hash.js");
 const SCHEMA_HASH_ALIAS = "jazz-tools/_dev/schema-hash";
 const WASM_PACKAGE_ALIAS = "jazz-wasm";
+const NAPI_PACKAGE = "jazz-napi";
+
+/** Turbopack reads absolute alias targets as server-relative paths; spell a
+ * file relative to the project instead. */
+function turbopackProjectPath(file: string): string {
+  const fromProject = relative(process.cwd(), file);
+  return fromProject === "" ? "." : fromProject.startsWith(".") ? fromProject : `./${fromProject}`;
+}
+
+/**
+ * Turbopack honours `serverExternalPackages` only for packages that resolve
+ * into a `node_modules` directory. A workspace-linked `jazz-napi` (as in this
+ * monorepo) resolves outside one, so Turbopack bundles its native loader and
+ * the route fails at runtime. In that case, alias `jazz-napi` to a module that
+ * loads it through Node at runtime. Installed packages keep the plain external,
+ * which output tracing can follow.
+ */
+function workspaceNapiTurbopackAlias(): Record<string, string> {
+  let entry: string;
+  try {
+    entry = realpathSync(createRequire(import.meta.url).resolve(NAPI_PACKAGE));
+  } catch {
+    return {};
+  }
+  if (entry.split(sep).includes("node_modules")) return {};
+  const runtimeModule = fileURLToPath(new URL("./napi-runtime.js", import.meta.url));
+  return { [NAPI_PACKAGE]: turbopackProjectPath(runtimeModule) };
+}
 
 function sealedWasmAliases() {
   const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
@@ -52,15 +83,9 @@ function sealedWasmAliases() {
   if (!sealedWasmPackage) return undefined;
 
   const entry = resolve(sealedWasmPackage, "jazz_wasm.js");
-  // Turbopack interprets absolute alias targets as server-relative paths. Its
-  // project-relative spelling and Webpack's absolute spelling name the same
-  // immutable snapshot for every Next runtime import.
-  const fromProject = relative(process.cwd(), entry);
-  return {
-    webpack: entry,
-    turbopack:
-      fromProject === "" ? "." : fromProject.startsWith(".") ? fromProject : `./${fromProject}`,
-  };
+  // Turbopack's project-relative spelling and Webpack's absolute spelling name
+  // the same immutable snapshot for every Next runtime import.
+  return { webpack: entry, turbopack: turbopackProjectPath(entry) };
 }
 
 async function writeSchemaHashStub(appRoot: string, hash: string): Promise<void> {
@@ -82,7 +107,7 @@ type NextRewrites =
   | { beforeFiles?: NextRewrite[]; afterFiles?: NextRewrite[]; fallback?: NextRewrite[] };
 
 function mergeServerExternalPackages(existing: string[] | undefined): string[] {
-  return Array.from(new Set([...(existing ?? []), "jazz-napi"]));
+  return Array.from(new Set([...(existing ?? []), NAPI_PACKAGE]));
 }
 
 async function resolveConfig(
@@ -106,9 +131,19 @@ export function withJazz(
   return async (phase, context) => {
     const resolved = await resolveConfig(nextConfig, phase, context);
     const sealedWasm = sealedWasmAliases();
+    const resolvedTurbopack = resolved.turbopack as TurbopackConfig | undefined;
+    const napiAlias = workspaceNapiTurbopackAlias();
     const merged: NextConfigLike = {
       ...resolved,
       serverExternalPackages: mergeServerExternalPackages(resolved.serverExternalPackages),
+      ...(Object.keys(napiAlias).length > 0
+        ? {
+            turbopack: {
+              ...resolvedTurbopack,
+              resolveAlias: { ...napiAlias, ...resolvedTurbopack?.resolveAlias },
+            },
+          }
+        : {}),
     };
 
     const previousWebpack = merged.webpack as

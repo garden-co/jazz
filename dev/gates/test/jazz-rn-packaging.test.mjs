@@ -1008,6 +1008,11 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
             name: "Jazz RN fresh install receipt",
             slug: "jazz-rn-fresh-install-receipt",
             version: "1.0.0",
+            // Explicit identifiers keep `expo prebuild` non-interactive:
+            // without them Expo derives `com.anonymous.<slug>` and prompts
+            // when that id is already taken on the Play Store.
+            android: { package: "dev.jazz.rnfreshinstallreceipt" },
+            ios: { bundleIdentifier: "dev.jazz.rnfreshinstallreceipt" },
             plugins: ["jazz-rn"],
           },
         },

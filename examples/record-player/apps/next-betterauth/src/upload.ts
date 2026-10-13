@@ -79,6 +79,7 @@ export async function uploadTracks(
 export async function seedDemoLibrary(
   store: JazzRecordPlayerStore,
   onProgress: (progress: UploadProgress) => void,
+  onAlbumReceiving: (albumId: string, isReceiving: boolean) => void = () => {},
 ): Promise<void> {
   const tracks = DEMO_LIBRARY.flatMap((album) => album.tracks);
   const totalBytes = tracks.reduce(
@@ -88,17 +89,22 @@ export async function seedDemoLibrary(
   let done = 0;
   for (const album of DEMO_LIBRARY) {
     const albumId = store.createAlbum({ title: album.title, artist: album.artist });
-    for (const [ordinal, track] of album.tracks.entries()) {
-      const wav = synthesizeWav(track);
-      const before = done;
-      await store.createTrackWithAudio(
-        { albumId, title: track.title, ordinal: ordinal + 1, durationMs: track.durationMs },
-        countingStream(new Blob([wav as BlobPart]), (sent) =>
-          onProgress({ label: track.title, sentBytes: before + sent, totalBytes }),
-        ),
-        { mimeType: "audio/wav", byteLength: wav.byteLength },
-      );
-      done += wav.byteLength;
+    onAlbumReceiving(albumId, true);
+    try {
+      for (const [ordinal, track] of album.tracks.entries()) {
+        const wav = synthesizeWav(track);
+        const before = done;
+        await store.createTrackWithAudio(
+          { albumId, title: track.title, ordinal: ordinal + 1, durationMs: track.durationMs },
+          countingStream(new Blob([wav as BlobPart]), (sent) =>
+            onProgress({ label: track.title, sentBytes: before + sent, totalBytes }),
+          ),
+          { mimeType: "audio/wav", byteLength: wav.byteLength },
+        );
+        done += wav.byteLength;
+      }
+    } finally {
+      onAlbumReceiving(albumId, false);
     }
   }
 }

@@ -141,6 +141,19 @@ not a fallback to one-shot sorting. Prepared graph lowering MUST preserve the
 semantics of every accepted predicate shape and explicitly reject unsupported
 predicate shapes (`INV-LOWER-11`).
 
+Accepted non-null scalar-double predicates (`eq`, `ne`, `lt`, `lte`, `gt`,
+`gte`) MUST use numeric partial ordering, including when both operands are
+literals. Bare doubles and doubles wrapped in `Nullable(Some(...))` have the
+same comparison semantics: negative values retain numeric order and `-0.0`
+equals `+0.0`. A direct unordered comparison (a NaN operand) is false for every
+operator, including `ne`. Fully resolved constant `Not` and `Not(In)` predicates
+MUST complement the folded boolean result, so negating an unordered constant
+comparison is true rather than another false comparison with an inverted
+operator. This does not change row-dependent NaN or SQL-null negation semantics.
+The scalar predicate rule does not change structural literal identity
+(`Eq`/`Hash`/`Ord`), canonical raw-bit encodings, null semantics, or comparisons
+of composite values.
+
 The engine-owned `RowUuid` is distinct from a declared `id` user column. Its
 public query spelling is intentionally not standardized yet; see the linked
 open question below rather than treating any current partial alias as API.
@@ -850,8 +863,8 @@ resolved read identity from the semantic read view plus tier; callers do not
 supply the key as independent identity. The wire vocabulary is `RegisterShape`,
 `Subscribe`, `Unsubscribe`, and `ViewUpdate` (ch. 8).
 
-The permanent `JRVK` V1 preimage for that resolved identity is `magic "JRVK" |
-version 1 | tier:u8 | propagate_upstream:u8 | binding_source:u8 | source`. A
+The `JRVK` V2 preimage for that resolved identity is `magic "JRVK" |
+version 2 | tier:u8 | binding_source:u8 | source`. A
 snapshot source encodes `owner:uuid | global_base:u64le | local_base:u64le |
 dot_count:u32le | dots`, where every dot is `tx_time:u64le | node:uuid`. Dots
 are a set: the encoder sorts `TxId` by `(time, node)` and removes duplicates

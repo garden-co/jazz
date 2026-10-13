@@ -60,20 +60,26 @@ this runner's lease:
 const write = await db.exclusiveTransaction(async (tx) => {
   const turn = await tx.one(app.turns.where({ id: turnId }));
   if (turn?.runnerId !== lease.id || turn.status !== "streaming") return false;
-  tx.update(app.turns, turnId, { body: turn.body + batch, heartbeatAt: new Date() });
+  const end = turn.body.length;
+  tx.update(
+    app.turns,
+    turnId,
+    { heartbeatAt: new Date() },
+    {
+      applyDiffs: {
+        body: { within: { from: end, to: end }, splices: [{ at: 0, delete: 0, insert: batch }] },
+      },
+    },
+  );
   return true;
 });
 await write.wait();
 ```
 
-Every subscribed client sees the reply grow. A transaction can't take
-`applyDiffs`, so each batch writes the whole body instead of a page-relative
-splice; the library in `apps/ts-localfirst` shows the splice form, which fits
-a writer that doesn't need the ownership check. Once transactions accept
-`applyDiffs` ([#2087](https://github.com/garden-co/jazz/issues/2087)), each batch becomes a splice at the end of the body. Until
-then, every batch adds the whole reply so far to the row's history, so a long
-reply costs far more than its length: a 20 KB reply streamed over 30 seconds
-leaves roughly 1 to 2 MB of history. Tool calls are rows of their
+Every subscribed client sees the reply grow. Each batch is a page-relative
+splice at the end of the body, applied inside the lease transaction, so a
+write carries only the new text however long the reply gets, and it commits
+together with the ownership check. Tool calls are rows of their
 own, written as `running` and then updated with their result (in the same
 kind of lease transaction), so they show up in `ChatToolCalls` while they run.
 

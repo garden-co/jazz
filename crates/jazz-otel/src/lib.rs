@@ -262,6 +262,33 @@ where
         .build()
 }
 
+/// Metric name for the memory RocksDB holds outside Rust's allocator.
+const ROCKSDB_MEMORY_METRIC: &str = "jazz.server.rocksdb.memory";
+
+/// Register an observable gauge that samples `usage` on each metric
+/// collection and reports each `(component, bytes)` pair as
+/// `jazz.server.rocksdb.memory{component=...}`. The heap profile only covers
+/// Rust allocations, so this is where RocksDB's block cache, memtables and
+/// table readers show up. Nothing is reported when `usage` returns `None`.
+pub fn register_rocksdb_memory_gauge<F>(meter: &Meter, usage: F) -> ObservableGauge<u64>
+where
+    F: Fn() -> Option<Vec<(&'static str, u64)>> + Send + Sync + 'static,
+{
+    meter
+        .u64_observable_gauge(ROCKSDB_MEMORY_METRIC)
+        .with_description("Memory RocksDB holds outside Rust's allocator, by component")
+        .with_unit("By")
+        .with_callback(move |observer| {
+            for (component, bytes) in usage().into_iter().flatten() {
+                observer.observe(
+                    bytes,
+                    &[opentelemetry::KeyValue::new("component", component)],
+                );
+            }
+        })
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +326,55 @@ mod tests {
             })
             .expect("active_websockets gauge datapoint present");
         assert_eq!(observed, 1);
+    }
+
+    #[tokio::test]
+    async fn rocksdb_memory_gauge_reports_each_component() {
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_periodic_exporter(exporter.clone())
+            .build();
+        let meter = provider.meter("test");
+
+        let _gauge = register_rocksdb_memory_gauge(&meter, || {
+            Some(vec![("block_cache", 4096), ("memtables", 1024)])
+        });
+        provider.force_flush().expect("flush collects the gauge");
+
+        let mut observed = exporter
+            .get_finished_metrics()
+            .expect("metrics collected")
+            .iter()
+            .flat_map(|rm| rm.scope_metrics())
+            .flat_map(|sm| sm.metrics())
+            .filter(|m| m.name() == "jazz.server.rocksdb.memory")
+            .flat_map(|m| match m.data() {
+                AggregatedMetrics::U64(MetricData::Gauge(g)) => g
+                    .data_points()
+                    .map(|dp| {
+                        let component = dp
+                            .attributes()
+                            .find(|kv| kv.key.as_str() == "component")
+                            .map(|kv| kv.value.to_string())
+                            .unwrap_or_default();
+                        (component, dp.value())
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        observed.sort();
+        observed.dedup();
+        assert_eq!(
+            observed,
+            [
+                ("block_cache".to_owned(), 4096),
+                ("memtables".to_owned(), 1024)
+            ]
+        );
     }
 }

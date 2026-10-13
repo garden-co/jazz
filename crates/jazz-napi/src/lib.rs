@@ -66,12 +66,11 @@ use jazz::db::LargeValueUpdate as CoreLargeValueUpdate;
 use jazz::db::StreamingMutationKind as CoreStreamingMutationKind;
 use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
-    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, EmptyOpening as CoreEmptyOpening,
-    InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
+    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, FirstLoad as CoreFirstLoad,
+    InitialSyncFlushCadence as CoreInitialSyncFlushCadence,
     MutationErrorCallback as CoreMutationErrorCallback, PeerConnection as CorePeerConnection,
-    Propagation as CorePropagation, ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint,
-    RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
-    SerializedReadResult as CoreSerializedReadResult,
+    ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint, RowCells as CoreRowCells,
+    SeededRowIdSource as CoreSeededRowIdSource, SerializedReadResult as CoreSerializedReadResult,
     SerializedSubscriptionAuthorization as CoreSerializedSubscriptionAuthorization,
     StreamingValueUpload as CoreStreamingValueUpload,
     StreamingValueUploadCleanupTicket as CoreStreamingValueUploadCleanupTicket,
@@ -112,6 +111,12 @@ use jazz_storage_rocksdb::{
     Durability as CoreRocksDbDurability, RocksDbStorage as CoreRocksDbStorage,
 };
 
+/// Validate a schema and its embedded permissions without opening a database.
+#[napi(js_name = "validateSchema")]
+pub fn validate_schema(schema: Uint8Array) -> napi::Result<()> {
+    decode_public_schema(&schema).map(|_| ())
+}
+
 /// Exact build/ABI fingerprint for the generated native artifact.
 #[napi]
 pub fn native_artifact_fingerprint() -> String {
@@ -128,19 +133,26 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
-/// Test-only direct execution of one frozen complete v1 frame through the
+/// Test-only execution of a frozen v5 frame batch through the
 /// generated NAPI artifact. This reaches the production Rust frame, feature,
 /// compression, and semantic-payload decoders; it is not a host wire API.
-#[napi(js_name = "__testValidateWireFrameCorpus", skip_typescript)]
-pub fn test_validate_wire_frame_corpus(frame: Buffer, negotiated_features: String) -> Result<()> {
+#[napi(js_name = "__testValidateWireFrameBatchCorpus", skip_typescript)]
+pub fn test_validate_wire_frame_batch_corpus(
+    frame: Buffer,
+    negotiated_features: String,
+) -> Result<()> {
     let negotiated_features = negotiated_features
         .parse()
         .map_err(|_| napi::Error::from_reason("test wire corpus features must be a u64 decimal"))?;
-    jazz::wire::validate_frame_for_artifact_corpus(&frame, negotiated_features)
+    jazz::wire::decode_websocket_frame_batch(&frame)
+        .map_err(|error| error.to_string())
+        .and_then(|frames| {
+            jazz::wire::validate_frames_for_artifact_corpus(&frames, negotiated_features)
+        })
         .map_err(napi::Error::from_reason)
 }
 
-/// Test-only feature inventory paired with [`test_validate_wire_frame_corpus`].
+/// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
 #[napi(js_name = "__testWireFrameCorpusFeatures", skip_typescript)]
 pub fn test_wire_frame_corpus_features() -> String {
     jazz::wire::current_wire_features().to_string()
@@ -2357,6 +2369,64 @@ impl NapiDb {
         Ok(())
     }
 
+    /// Binding-only entrypoint for typed partial-value updates staged inside
+    /// an open transaction. The transaction's bound identity authors them.
+    #[napi(js_name = "updateLargeValuesInTransaction")]
+    pub fn update_large_values_in_transaction(
+        &self,
+        open_transaction_id: String,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        mutations: JsonValue,
+        updated_at_ms: Option<f64>,
+    ) -> js::Result<()> {
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
+            .map_err(napi::Error::from_reason)?;
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let mutations: Vec<CoreLargeValueUpdate> =
+            serde_json::from_value(mutations).map_err(|error| {
+                napi::Error::from_reason(format!(
+                    "invalid partial-value update descriptor: {error}"
+                ))
+            })?;
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                db.enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
+                .map_err(napi_error)?;
+                db.drive_queued_mutation_once();
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                db.enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
+                .map_err(napi_error)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Binding-only entrypoint for typed partial-value updates. The public
     /// TypeScript API validates column-kind-specific descriptors before they
     /// reach this encoded boundary.
@@ -3107,7 +3177,7 @@ impl NapiDb {
         &self,
         query: Uint8Array,
         #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null"
+            ts_arg_type = "{ tier?: string; include_deleted?: boolean; sync?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
         open_transaction_id: Option<String>,
@@ -3160,10 +3230,12 @@ impl NapiDb {
                             })?
                             .map_err(napi_error)?;
                     }
-                    let requires_coverage = non_durable_client
-                        || (opts.tier >= jazz::tx::DurabilityTier::Global
-                            && opts.propagation == CorePropagation::Full);
-                    let coverage_deadline = Instant::now() + Duration::from_secs(15);
+                    let requires_coverage =
+                        non_durable_client || (opts.tier == jazz::db::ReadTier::Remote);
+                    // The coverage budget runs from the first wait on the
+                    // server. A Global read that first waits for its own
+                    // preceding writes to go out has not asked yet (#3839).
+                    let coverage_started = std::cell::Cell::new(None::<Instant>);
                     let result = db
                         .all_serialized_query(
                             &query,
@@ -3172,7 +3244,14 @@ impl NapiDb {
                             admission,
                             author,
                             !synchronous && requires_coverage,
-                            || Instant::now() >= coverage_deadline,
+                            || {
+                                let started = coverage_started.get().unwrap_or_else(|| {
+                                    let now = Instant::now();
+                                    coverage_started.set(Some(now));
+                                    now
+                                });
+                                started.elapsed() >= Duration::from_secs(15)
+                            },
                             move |attachment| release_db.detach_query(attachment),
                         )
                         .await
@@ -3288,9 +3367,7 @@ impl NapiDb {
     pub fn subscribe(
         &self,
         query: Uint8Array,
-        #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
-        )]
+        #[napi(ts_arg_type = "{ tier?: string; include_deleted?: boolean } | undefined | null")]
         opts: Option<JsonValue>,
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
@@ -3439,7 +3516,7 @@ impl NapiDb {
     /// Report what the host knows about the path to the authoritative server
     /// (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
     /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
-    /// Drives only `local-first-unless-empty` reads. The core timestamps each
+    /// Drives only local-first reads that wait for the server on first load. The core timestamps each
     /// `"attempting"` report as the start of a new attempt; until this is
     /// first called, reachability is derived from this runtime's own upstream.
     #[napi(js_name = "setRemoteLinkHint")]
@@ -3475,8 +3552,7 @@ impl NapiDb {
                 },
                 jazz::wire::WIRE_PROTOCOL_VERSION,
                 jazz::wire::current_wire_features()
-                    & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                        | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+                    & !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
                 None,
                 None,
                 self.trusted_backend,
@@ -3523,12 +3599,6 @@ impl NapiDb {
             return Err(napi::Error::from_reason(format!(
                 "server negotiated wire features {features:#x}, but this native binding was not compiled with {unsupported:#x}"
             )).into());
-        }
-        if features & jazz::wire::FEATURE_SYNC_MESSAGE_PAYLOAD == 0 {
-            return Err(napi::Error::from_reason(
-                "server did not negotiate required sync message payload frames",
-            )
-            .into());
         }
         let remote_node: [u8; 16] = remote_node.as_ref().try_into().map_err(|_| {
             napi::Error::from_reason("server hello authority node must be 16 bytes")
@@ -4245,32 +4315,16 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
         return Ok(opts);
     }
     if let Some(tier) = optional_json_string_prop(&value, "tier")? {
-        (opts.tier, opts.empty_opening) = core_read_tier_from_str(&tier)?;
-    }
-    if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
-        opts.local_updates = match local_updates.as_str() {
-            "Immediate" | "immediate" => CoreLocalUpdates::Immediate,
-            "Deferred" | "deferred" => CoreLocalUpdates::Deferred,
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "unknown local_updates {other}"
-                )));
-            }
-        };
-    }
-    if let Some(propagation) = optional_json_string_prop(&value, "propagation")? {
-        opts.propagation = match propagation.as_str() {
-            "Full" | "full" => CorePropagation::Full,
-            "LocalOnly" | "local_only" | "localOnly" | "local-only" => CorePropagation::LocalOnly,
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "unknown propagation {other}"
-                )));
-            }
-        };
+        opts.tier = core_read_tier_from_str(&tier)?;
     }
     if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
+    }
+    // A local-first read's server-wait timeout. `Remote` reads ignore it.
+    if let Some(timeout_ms) = optional_json_wait_ms_prop(&value, "first_load_remote_wait_ms")?
+        && opts.tier == jazz::db::ReadTier::LocalFirst
+    {
+        opts.first_load = CoreFirstLoad::WaitForRemote { timeout_ms };
     }
     if let Some(read_view) = value
         .get("read_view")
@@ -4537,18 +4591,14 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
 
 /// Read-only binding lowering. Write waits keep the durability-tier parser so
 /// `remote` names cannot accidentally become a write settlement tier.
-fn core_read_tier_from_str(tier: &str) -> napi::Result<(CoreDurabilityTier, CoreEmptyOpening)> {
+fn core_read_tier_from_str(tier: &str) -> napi::Result<jazz::db::ReadTier> {
     match tier {
-        "local-first" | "LocalFirst" => Ok((CoreDurabilityTier::Local, CoreEmptyOpening::Deliver)),
-        // The core owns the local-first-unless-empty gate.
-        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
-            Ok((CoreDurabilityTier::Local, CoreEmptyOpening::AwaitRemote))
-        }
-        "remote-if-possible" | "RemoteIfPossible" => Err(napi::Error::from_reason(
-            "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
-        )),
-        "remote" | "Remote" => Ok((CoreDurabilityTier::Global, CoreEmptyOpening::Deliver)),
-        _ => core_durability_tier_from_str(tier).map(|tier| (tier, CoreEmptyOpening::Deliver)),
+        "local-first" | "LocalFirst" => Ok(jazz::db::ReadTier::LocalFirst),
+        "remote" | "Remote" => Ok(jazz::db::ReadTier::Remote),
+        "local-only" | "LocalOnly" => Ok(jazz::db::ReadTier::LocalOnly),
+        other => Err(napi::Error::from_reason(format!(
+            "unknown read tier {other}"
+        ))),
     }
 }
 
@@ -4557,6 +4607,21 @@ fn optional_json_string_prop(value: &JsonValue, name: &str) -> napi::Result<Opti
         Some(JsonValue::String(value)) => Ok(Some(value.clone())),
         Some(JsonValue::Null) | None => Ok(None),
         Some(_) => Err(napi::Error::from_reason(format!("{name} must be a string"))),
+    }
+}
+
+fn optional_json_wait_ms_prop(value: &JsonValue, name: &str) -> napi::Result<Option<u64>> {
+    match value.get(name) {
+        Some(JsonValue::Null) | None => Ok(None),
+        Some(JsonValue::Number(ms)) => match ms.as_f64() {
+            Some(ms) if ms.is_finite() && ms >= 0.0 => Ok(Some(ms.floor() as u64)),
+            _ => Err(napi::Error::from_reason(format!(
+                "{name} must be a non-negative number of milliseconds"
+            ))),
+        },
+        Some(_) => Err(napi::Error::from_reason(format!(
+            "{name} must be a non-negative number of milliseconds"
+        ))),
     }
 }
 
@@ -5526,32 +5591,30 @@ mod tests {
 
     /// Binding read choices lower without widening the write durability parser.
     #[test]
-    fn read_tier_names_lower_to_existing_core_tiers() {
+    fn read_tier_names_are_separate_from_durability() {
         assert_eq!(
             core_read_tier_from_str("local-first").expect("local-first read tier"),
-            (
-                jazz::tx::DurabilityTier::Local,
-                jazz::db::EmptyOpening::Deliver
-            )
+            jazz::db::ReadTier::LocalFirst
         );
         assert_eq!(
             core_read_tier_from_str("remote").expect("strict remote read tier"),
-            (
-                jazz::tx::DurabilityTier::Global,
-                jazz::db::EmptyOpening::Deliver
-            )
+            jazz::db::ReadTier::Remote
         );
-        for name in ["remote-if-possible", "RemoteIfPossible"] {
-            assert!(core_read_tier_from_str(name).is_err(), "{name} was removed");
-        }
-        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
+        for name in [
+            "remote-if-possible",
+            "RemoteIfPossible",
+            "local-first-unless-empty",
+            "LocalFirstUnlessEmpty",
+            "core",
+            "Core",
+            "local",
+            "global",
+            "none",
+            "invalid-tier",
+        ] {
             assert_eq!(
-                core_read_tier_from_str(name).expect("local-first-unless-empty read tier"),
-                (
-                    jazz::tx::DurabilityTier::Local,
-                    jazz::db::EmptyOpening::AwaitRemote
-                ),
-                "{name} reads local-first with the core empty-opening gate"
+                core_read_tier_from_str(name).unwrap_err().reason,
+                format!("unknown read tier {name}"),
             );
         }
         assert!(
@@ -5685,7 +5748,7 @@ mod tests {
     use jazz::account_registry::AccountId;
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
-        MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
+        MergeableTxOps, SubscriptionEvent as CoreSubscriptionEvent,
     };
     use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
@@ -7449,10 +7512,10 @@ mod tests {
 
     #[test]
     fn core_read_opts_accept_public_local_only_spelling() {
-        let opts = core_read_opts_from_json(Some(json!({ "propagation": "local-only" })))
+        let opts = core_read_opts_from_json(Some(json!({ "tier": "local-only" })))
             .expect("parse read opts");
 
-        assert_eq!(opts.propagation, CorePropagation::LocalOnly);
+        assert_eq!(opts.tier, jazz::db::ReadTier::LocalOnly);
     }
 
     #[test]
@@ -7460,7 +7523,7 @@ mod tests {
         let opts =
             core_read_opts_from_json(Some(json!({ "propagate": false }))).expect("parse read opts");
 
-        assert_eq!(opts.propagation, CorePropagation::Full);
+        assert_eq!(opts.tier, jazz::db::ReadTier::LocalFirst);
     }
 
     #[test]

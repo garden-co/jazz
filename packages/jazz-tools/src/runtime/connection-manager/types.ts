@@ -2,8 +2,9 @@ import { copyAccountConfigAdmission } from "../../accounts/config-capability.js"
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
-import type { AuthUpdate, DurabilityTier, JazzClient, MutationErrorEvent } from "../client.js";
+import type { AuthUpdate, JazzClient, MutationErrorEvent } from "../client.js";
 import type { DbConfig } from "../db.js";
+import type { Session } from "../context.js";
 import type { ForegroundNodeLease, RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
 import type { AuthFailureReason } from "../auth-state.js";
@@ -36,6 +37,12 @@ function getPolicyStrippedSchema(schema: WasmSchema): WasmSchema {
   policyStrippedSchemaCache.set(schema, strippedSchema);
   return strippedSchema;
 }
+
+/** Readiness required by an operation, independent of read or write tiers.
+ * `runtime` admits local work, including browser worker initialization.
+ * `server` also waits for the configured server transport to be available.
+ */
+export type ConnectionRequirement = "runtime" | "server";
 
 export interface ConnectionManagerClientInput {
   schemaKey: string;
@@ -138,9 +145,9 @@ export abstract class ConnectionManager {
 
   protected onClientCreated(_input: ConnectionManagerClientInput): void {}
 
-  abstract ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void>;
+  abstract ensureReady(requirement: ConnectionRequirement, signal?: AbortSignal): Promise<void>;
 
-  abstract shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean;
+  abstract shouldDeferSubscriptionStart(requirement: ConnectionRequirement): boolean;
 
   /** True only after the application explicitly called Db.disconnect(). */
   abstract isExplicitlyOffline(): boolean;
@@ -164,9 +171,9 @@ export abstract class ConnectionManager {
   abstract waitForReconnect(signal?: AbortSignal): Promise<void>;
 
   /**
-   * Live reachability of the configured server. Only
-   * `ReadTier.LocalFirstUnlessEmpty` consults it, to decide whether an empty
-   * local opening may wait for a remote answer.
+   * Live reachability of the configured server. Only `ReadTier.LocalFirst`
+   * reads with a `firstLoadRemoteWaitMs` consult it, to decide whether their
+   * first load may wait (bounded by that timeout) for a remote answer.
    */
   remoteLinkState(): RemoteLinkState {
     const { config, runtimeSource } = this.host;
@@ -200,7 +207,7 @@ export abstract class ConnectionManager {
 
   /**
    * Keep the runtime's core read gate informed of {@link remoteLinkState}. The
-   * core decides whether an empty local-first-unless-empty opening may wait;
+   * core decides whether a local-first read's first load may wait;
    * this host only reports whether the server is being reached, reachable, or
    * not.
    */
@@ -238,6 +245,19 @@ export abstract class ConnectionManager {
   abstract disconnect(): Promise<void>;
 
   abstract reconnect(): Promise<void>;
+
+  /** Renew account credentials and synchronize the client before Db publishes them. */
+  refreshAccountAuth(jwtToken: string, trustedReservedSession?: Session): void {
+    const auth: AuthUpdate = { mode: "bearer", jwtToken, trustedReservedSession };
+    if (this.host.runtimeSource.refreshAccountToken(jwtToken)) {
+      // The account capability owns transport auth; only the JS snapshot remains.
+      this.client?.acceptAuthUpdate(auth);
+    } else {
+      this.host.runtimeSource.assertAuthUpdateAllowed();
+      this.updateAuth(auth);
+    }
+  }
+
   updateAuth(auth: AuthUpdate): void {
     if (auth.mode === "bearer") {
       if (auth.jwtToken && auth.trustedReservedSession) {

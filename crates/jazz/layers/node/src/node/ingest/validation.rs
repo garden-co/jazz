@@ -634,7 +634,7 @@ where
         .await?;
         batch.deliver_notifications(groove::db::NotificationTiming::AfterPersistence);
         let applied = self.database.apply_batch(batch).await?;
-        let persisted = applied.persist().await;
+        let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
         if let Some(rejected) = rejected_payload {
             self.rejections.rejected_transactions.insert(tx_id, rejected);
@@ -758,6 +758,13 @@ where
             batch.update("jazz_transactions", tx_values);
         } else {
             batch.insert("jazz_transactions", tx_values);
+        }
+        if tx.tx_id.node != self.node_uuid {
+            if matches!(fate, Fate::Pending) && global_time.is_none() {
+                self.open_tx.pending_foreign_transactions.insert(tx.tx_id);
+            } else {
+                self.open_tx.pending_foreign_transactions.remove(&tx.tx_id);
+            }
         }
 
         let mut parent_edges = BTreeSet::new();
@@ -1216,7 +1223,7 @@ where
             )?,
         );
         let applied = self.database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
+let persisted = self.database.persist_with_progress(&applied).await;
 self.database.finish_persistence(persisted)?;
         Ok(())
     }

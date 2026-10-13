@@ -3783,3 +3783,135 @@ fn join_consumers_retain_only_required_columns_without_mutating_shared_sources()
         Value::String("retained".into())
     );
 }
+
+/// Three inline relations joined as a flattened chain, the shape Jazz lowers
+/// a policy's correlated `exists` chain to: each join output is renamed back
+/// to plain names before the next join, and a final projection keeps two.
+fn flattened_join_chain(filter_between_joins: bool) -> GraphBuilder {
+    let base = RecordDescriptor::new([("id", ValueType::U64), ("payload", ValueType::String)]);
+    let grant = RecordDescriptor::new([
+        ("target", ValueType::U64),
+        ("member", ValueType::String),
+        ("note", ValueType::String),
+    ]);
+    let base_rows = [(1, "a"), (2, "b"), (3, "c")].map(|(id, payload)| {
+        base.create(&[Value::U64(id), Value::String(payload.into())])
+            .unwrap()
+    });
+    let grant_rows = |rows: [(u64, &str, &str); 3]| {
+        rows.map(|(target, member, note)| {
+            grant
+                .create(&[
+                    Value::U64(target),
+                    Value::String(member.into()),
+                    Value::String(note.into()),
+                ])
+                .unwrap()
+        })
+    };
+    // Two first-hop grants for row 1 give it multiplicity 2 downstream.
+    let first_grants = grant_rows([(1, "x", "n1"), (1, "y", "n2"), (2, "x", "n3")]);
+    let second_grants = grant_rows([(1, "x", "m1"), (2, "z", "m2"), (3, "x", "m3")]);
+    let first = GraphBuilder::join(
+        GraphBuilder::inline_records(base, base_rows),
+        GraphBuilder::inline_records(grant, first_grants),
+        ["id"],
+        ["target"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.id", "id"),
+        ProjectField::renamed("left.payload", "payload"),
+        ProjectField::renamed("right.target", "first_target"),
+        ProjectField::renamed("right.member", "first_member"),
+        ProjectField::renamed("right.note", "first_note"),
+    ]);
+    let first = if filter_between_joins {
+        first.filter(PredicateExpr::eq("first_member", Value::String("x".into())))
+    } else {
+        first
+    };
+    GraphBuilder::join(
+        first,
+        GraphBuilder::inline_records(grant, second_grants),
+        ["id"],
+        ["target"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.id", "id"),
+        ProjectField::renamed("right.member", "second_member"),
+    ])
+}
+
+/// The projection between the two joins of [`flattened_join_chain`].
+fn inner_chain_projection(graph: &GraphBuilder) -> &[ProjectField] {
+    let GraphBuilder::Project { input, .. } = graph else {
+        panic!("final projection")
+    };
+    let GraphBuilder::Join { left, .. } = input.as_ref() else {
+        panic!("second join")
+    };
+    let left = match left.as_ref() {
+        GraphBuilder::Filter { input, .. } => input.as_ref(),
+        left => left,
+    };
+    let GraphBuilder::Project { fields, .. } = left else {
+        panic!("flattened projection")
+    };
+    fields
+}
+
+#[futures_test::test]
+async fn narrowed_join_chains_keep_only_consumed_fields_and_the_same_rows() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    for filter_between_joins in [false, true] {
+        let chain = flattened_join_chain(filter_between_joins);
+        let narrowed = chain.clone().narrow_projected_join_chain();
+        let kept = inner_chain_projection(&narrowed)
+            .iter()
+            .map(|field| field.output_name.as_str())
+            .collect::<Vec<_>>();
+        // The final projection reads `id` from the flattened record and the
+        // next join keys on it; a filter between the joins reads its field.
+        let expected = if filter_between_joins {
+            vec!["id", "first_member"]
+        } else {
+            vec!["id"]
+        };
+        assert_eq!(kept, expected);
+
+        let mut original = runtime
+            .query_snapshot(chain, &storage)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap();
+        let mut narrowed = runtime
+            .query_snapshot(narrowed, &storage)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap();
+        original.sort_by_key(|row| format!("{row:?}"));
+        narrowed.sort_by_key(|row| format!("{row:?}"));
+        assert_eq!(narrowed, original);
+        let row_one_weight = if filter_between_joins { 1 } else { 2 };
+        assert!(original.contains(&(
+            vec![Value::U64(1), Value::String("x".into())],
+            row_one_weight
+        )));
+    }
+}
+
+#[test]
+fn join_chain_narrowing_stops_at_positional_references() {
+    let chain = flattened_join_chain(false);
+    let GraphBuilder::Project { input, .. } = &chain else {
+        panic!("final projection")
+    };
+    let positional = GraphBuilder::Project {
+        input: input.clone(),
+        fields: vec![ProjectField::renamed_resolved(0, "id")],
+    };
+    assert_eq!(positional.clone().narrow_projected_join_chain(), positional);
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Upload } from "lucide-react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Banner } from "@astryxdesign/core/Banner";
@@ -66,6 +66,18 @@ function Library() {
   const [upload, setUpload] = useState<"new" | "add">();
   const [seeding, setSeeding] = useState<UploadProgress>();
   const [seedError, setSeedError] = useState<string>();
+  // Albums this client is streaming tracks into. Their tracks appear only once
+  // each file is fully written, so an empty list here means "still uploading".
+  const [receiving, setReceiving] = useState<ReadonlySet<string>>(() => new Set());
+  const setAlbumReceiving = useCallback((albumId: string, isReceiving: boolean) => {
+    setReceiving((current) => {
+      if (current.has(albumId) === isReceiving) return current;
+      const next = new Set(current);
+      if (isReceiving) next.add(albumId);
+      else next.delete(albumId);
+      return next;
+    });
+  }, []);
   const list = albums.data ?? [];
   const selected = list.find((album) => album.id === selectedId) ?? list[0];
   const selectedTracks = useAlbumTracks(selected);
@@ -75,7 +87,7 @@ function Library() {
     setSeedError(undefined);
     setSeeding({ label: "demo library", sentBytes: 0, totalBytes: 1 });
     try {
-      await seedDemoLibrary(store, setSeeding);
+      await seedDemoLibrary(store, setSeeding, setAlbumReceiving);
     } catch (cause) {
       setSeedError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -110,6 +122,7 @@ function Library() {
         setUpload(undefined);
         setSelectedId(albumId);
       }}
+      onAlbumReceiving={setAlbumReceiving}
     />
   );
 
@@ -173,7 +186,13 @@ function Library() {
         />
       </HStack>
       <AlbumShelf albums={list} selectedId={selected?.id} onSelect={setSelectedId} />
-      {selected && <AlbumView album={selected} onAddTracks={() => setUpload("add")} />}
+      {selected && (
+        <AlbumView
+          album={selected}
+          isReceivingTracks={receiving.has(selected.id)}
+          onAddTracks={() => setUpload("add")}
+        />
+      )}
       {dialog}
     </VStack>
   );

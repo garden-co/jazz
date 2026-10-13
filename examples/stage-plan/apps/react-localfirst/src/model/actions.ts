@@ -1,4 +1,4 @@
-import type { Db, WriteResult } from "jazz-tools";
+import type { Db, TransactionScope, WriteResult } from "jazz-tools";
 import {
   app,
   type ActivityKind,
@@ -35,8 +35,8 @@ function activityEntry(
   };
 }
 
-/** Local rows and unsynced writes; asks the server only when there are none. */
-const LOCAL_OR_SERVER = "local-first-unless-empty";
+/** Local rows and unsynced writes, after waiting up to 5 s for the server while online. */
+const LOCAL_OR_SERVER = { tier: "local-first", firstLoadRemoteWaitMs: 5_000 } as const;
 
 export function newInviteCode() {
   // Full UUID entropy: the link is a reusable bearer capability.
@@ -57,29 +57,32 @@ export function firstInviteId(showId: string) {
   return nameBasedId(`stage-plan/first-invite/${showId}`);
 }
 
+/** A mergeable transaction that the helpers below stage their rows into. */
+export type Tx = TransactionScope<"mergeable">;
+
 /**
- * Creates a show with the creator as crew chief and a first invite code.
- *
- * The show is its own write, before the membership and invite: their
- * policies look up the show, and the server checks a transaction's rows
- * against data from before that transaction, so they can't share one with
- * the show (https://github.com/garden-co/jazz/issues/3755).
+ * Creates a show with the creator as crew chief and a first invite code, in
+ * one transaction: the membership's and invite's policies look up the show,
+ * and they see the show inserted earlier in the same transaction.
  *
  * Everything applies locally at once, offline too. The returned writes let a
  * caller wait for the server to accept them.
  */
 export async function createShow(db: Db, me: Me, input: ShowInput) {
-  const showWrite = db.insert(app.shows, { ...input, chiefAccount: me.account });
-  const show = showWrite.value;
+  const created = await db.transaction((tx) => stageShow(tx, me, input));
+  return { show: created.value, writes: [created] as WriteResult<unknown>[] };
+}
+
+/** Stages a show with its crew chief and first invite into `tx`. */
+export async function stageShow(tx: Tx, me: Me, input: ShowInput) {
+  const show = tx.insert(app.shows, { ...input, chiefAccount: me.account });
   const [membershipId, inviteId] = await Promise.all([
     chiefMembershipId(show.id, me.account),
     firstInviteId(show.id),
   ]);
-  const setup = await db.transaction((tx) => {
-    tx.upsert(app.showCrew, membershipId, chiefMembership(show.id, me));
-    tx.upsert(app.showInvites, inviteId, { showId: show.id, code: newInviteCode() });
-  });
-  return { show, writes: [showWrite, setup] as WriteResult<unknown>[] };
+  tx.upsert(app.showCrew, membershipId, chiefMembership(show.id, me));
+  tx.upsert(app.showInvites, inviteId, { showId: show.id, code: newInviteCode() });
+  return show;
 }
 
 function chiefMembership(showId: string, me: Me) {
@@ -93,8 +96,8 @@ function chiefMembership(showId: string, me: Me) {
  */
 export async function ensureChiefSetup(db: Db, me: Me, showId: string) {
   const [membership, invites] = await Promise.all([
-    db.one(app.showCrew.where({ showId, account: me.account }), { tier: LOCAL_OR_SERVER }),
-    db.all(app.showInvites.where({ showId }), { tier: LOCAL_OR_SERVER }),
+    db.one(app.showCrew.where({ showId, account: me.account }), LOCAL_OR_SERVER),
+    db.all(app.showInvites.where({ showId }), LOCAL_OR_SERVER),
   ]);
   if (membership && invites.length > 0) return [];
   // The invite code may already be out in a copied link, and an upsert would
@@ -204,14 +207,17 @@ export function deleteTask(db: Db, me: Me, task: Task) {
 }
 
 export function addComment(db: Db, me: Me, task: Task, body: string) {
-  return db.transaction((tx) => {
-    tx.insert(app.comments, {
-      taskId: task.id,
-      authorId: me.profile.id,
-      body,
-    });
-    tx.insert(app.activity, activityEntry(me, task, "commented"));
+  return db.transaction((tx) => stageComment(tx, me, task, body));
+}
+
+/** Stages a comment and its activity entry into `tx`. */
+export function stageComment(tx: Tx, me: Me, task: Pick<Task, "id" | "showId">, body: string) {
+  tx.insert(app.comments, {
+    taskId: task.id,
+    authorId: me.profile.id,
+    body,
   });
+  tx.insert(app.activity, activityEntry(me, task, "commented"));
 }
 
 /** Replaces the show's invite code; links built from the old code stop working. */

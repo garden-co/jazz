@@ -1,5 +1,5 @@
 import { accountRegistryUrl } from "jazz-tools";
-import { resolveRequestSession } from "jazz-tools/backend";
+import { resolveRequestSession } from "@/lib/auth-jazz-client";
 import { ensureProfile } from "@/lib/bootstrap";
 import { APP_ORIGIN } from "@/lib/app-origin";
 

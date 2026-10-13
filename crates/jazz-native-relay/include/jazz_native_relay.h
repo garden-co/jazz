@@ -22,6 +22,7 @@ typedef struct jazz_native_relay_bytes {
   size_t len;
 } jazz_native_relay_bytes;
 
+/* Stable C ABI status classes: append values; never renumber existing codes. */
 typedef enum jazz_native_relay_status {
   JAZZ_NATIVE_RELAY_OK = 0,
   JAZZ_NATIVE_RELAY_INVALID_ARGUMENT = 1,
@@ -32,6 +33,7 @@ typedef enum jazz_native_relay_status {
   JAZZ_NATIVE_RELAY_INVALID_ABI_RANGE = 6,
   JAZZ_NATIVE_RELAY_INCOMPATIBLE_ABI = 7,
   JAZZ_NATIVE_RELAY_BACKPRESSURE = 8,
+  JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT = 9,
 } jazz_native_relay_status;
 
 /* Stateless account crypto. No database or network is opened. Secret output

@@ -30,7 +30,15 @@ const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const commands = {
   wasm: {
     fast: ["wasm-pack", ["build", "crates/jazz-wasm", "--target", "web", "--dev"]],
-    release: ["wasm-pack", ["build", "crates/jazz-wasm", "--target", "web", "--release"]],
+    // Browser releases link the whole engine with fat LTO in one codegen unit.
+    // That removes duplicate generic instantiations across crates: about 28%
+    // smaller raw and 22% smaller gzip, at unchanged opt-level 3 and no
+    // measured read/write slowdown. Native release builds are unaffected.
+    release: [
+      "wasm-pack",
+      ["build", "crates/jazz-wasm", "--target", "web", "--release"],
+      ["--config", 'profile.release.lto="fat"', "--config", "profile.release.codegen-units=1"],
+    ],
     profiling: ["wasm-pack", ["build", "crates/jazz-wasm", "--target", "web", "--profiling"]],
   },
   napi: {
@@ -475,7 +483,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
     throw new Error("usage: build.mjs <wasm fast|release|profiling | napi debug|release>");
   if (kind !== "napi" && extraArgs.length)
     throw new Error("only napi builds accept extra napi CLI arguments");
-  const [command, selectedArgs] = selected;
+  const [command, selectedArgs, cargoArgs = []] = selected;
   const targetIndex = extraArgs.indexOf("--target");
   const target = targetIndex === -1 ? undefined : extraArgs[targetIndex + 1];
   const resolvedNapiTarget = target ?? hostTarget;
@@ -501,6 +509,8 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
     ...extraArgs,
     ...(wasmStage ? ["--out-dir", wasmStage.outDir] : []),
     ...(napiStage ? ["--output-dir", napiStage] : []),
+    // wasm-pack forwards everything after `--` to cargo, so this goes last.
+    ...(cargoArgs.length ? ["--", ...cargoArgs] : []),
   ];
   try {
     if (kind === "napi" && process.env.JAZZ_NAPI_BUILD_FAULT === "producer")

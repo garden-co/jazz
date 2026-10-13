@@ -102,6 +102,12 @@ impl ScopeId {
         scope.push(recursive_node);
         Self(crate::Intern::new(ScopePath(scope)))
     }
+
+    /// The outermost recursive node whose body this scope belongs to, or
+    /// `None` for the root scope.
+    pub(super) fn outermost(self) -> Option<NodeId> {
+        self.0.0.first().copied()
+    }
 }
 
 impl Default for ScopeId {

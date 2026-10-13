@@ -178,9 +178,23 @@ struct ControlState {
     poll_counts: BTreeMap<TestStorageOperation, usize>,
     point_read_count: usize,
     waiters: Vec<Waker>,
+    /// With `wake_latest_poller_only`, each pending suspension point keeps
+    /// only the waker of its most recent poll, as coalesced chunk requests
+    /// and most executors' leaf futures do.
+    wake_latest_poller_only: bool,
+    next_waiter_id: u64,
+    latest_waiters: BTreeMap<u64, Waker>,
     failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
     definitely_uncommitted_failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
     lost_write_many_acknowledgements: usize,
+}
+
+impl ControlState {
+    fn take_waiters(&mut self) -> Vec<Waker> {
+        let mut waiters = std::mem::take(&mut self.waiters);
+        waiters.extend(std::mem::take(&mut self.latest_waiters).into_values());
+        waiters
+    }
 }
 
 impl Default for ControlState {
@@ -194,6 +208,9 @@ impl Default for ControlState {
             poll_counts: BTreeMap::new(),
             point_read_count: 0,
             waiters: Vec::new(),
+            wake_latest_poller_only: false,
+            next_waiter_id: 0,
+            latest_waiters: BTreeMap::new(),
             failures: BTreeMap::new(),
             definitely_uncommitted_failures: BTreeMap::new(),
             lost_write_many_acknowledgements: 0,
@@ -239,6 +256,14 @@ impl TestStorageControl {
         self.state.borrow_mut().lost_write_many_acknowledgements += 1;
     }
 
+    /// Keep only the most recent poll's waker for each pending suspension
+    /// point instead of accumulating every distinct waker that polled it.
+    /// A caller that polls last therefore owns the wake-up, which exposes
+    /// pollers that replace a runtime owner's continuation.
+    pub fn wake_latest_poller_only(&self) {
+        self.state.borrow_mut().wake_latest_poller_only = true;
+    }
+
     /// Make subsequent storage progress require explicit permits.
     pub fn pause(&self) {
         self.state.borrow_mut().paused = true;
@@ -254,7 +279,7 @@ impl TestStorageControl {
         let waiters = {
             let mut state = self.state.borrow_mut();
             state.paused_operations.remove(&operation);
-            std::mem::take(&mut state.waiters)
+            state.take_waiters()
         };
         for waiter in waiters {
             waiter.wake();
@@ -271,7 +296,7 @@ impl TestStorageControl {
         let waiters = {
             let mut state = self.state.borrow_mut();
             state.permits = state.permits.saturating_add(count);
-            std::mem::take(&mut state.waiters)
+            state.take_waiters()
         };
         for waiter in waiters {
             waiter.wake();
@@ -285,7 +310,7 @@ impl TestStorageControl {
             state.paused = false;
             state.paused_operations.clear();
             state.permits = 0;
-            std::mem::take(&mut state.waiters)
+            state.take_waiters()
         };
         for waiter in waiters {
             waiter.wake();
@@ -353,6 +378,7 @@ impl TestStorageControl {
     async fn before(&self, operation: TestStorageOperation) -> Result<(), Error> {
         let mut recorded = false;
         let mut yielded = false;
+        let mut waiter_id = None;
         poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
             *state.poll_counts.entry(operation).or_default() += 1;
@@ -372,7 +398,13 @@ impl TestStorageControl {
                 state.permits -= 1;
                 return Poll::Ready(());
             }
-            if !state
+            if state.wake_latest_poller_only {
+                let id = *waiter_id.get_or_insert_with(|| {
+                    state.next_waiter_id += 1;
+                    state.next_waiter_id
+                });
+                state.latest_waiters.insert(id, cx.waker().clone());
+            } else if !state
                 .waiters
                 .iter()
                 .any(|waiter| waiter.will_wake(cx.waker()))

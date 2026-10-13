@@ -394,6 +394,107 @@ async fn cold_subscription_open_retains_the_supplied_owner_waker() {
     );
 }
 
+/// A later direct opening (a one-shot read or an authorization check in a
+/// worker) polls the runtime with its own transient waker. Leaf futures keep
+/// only their latest poller's waker, so without the owner bridge that poll
+/// took over an older cold hydration's continuation: once storage became
+/// ready nobody was woken and every later owner turn queued behind the stalled
+/// hydration (#3816).
+#[futures_test::test]
+async fn direct_opening_keeps_the_owner_wake_of_an_earlier_cold_hydration() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let (storage, control) = TestStorage::controlled(&["albums", "artists"]);
+    control.wake_latest_poller_only();
+    let mut database = Database::new(albums_artists_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::U64(1),
+            Value::String("owner wake album".to_owned()),
+        ],
+    );
+    batch.insert(
+        "artists",
+        vec![Value::U64(1), Value::String("direct artist".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    storage.evict_all();
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    let albums = database
+        .subscribe_with_waker(
+            [("albums", GraphBuilder::table("albums"))],
+            Some(&owner_waker),
+        )
+        .unwrap();
+    for _ in 0..8 {
+        if control.observed().contains(&TestStorageOperation::ScanOpen) {
+            break;
+        }
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+    }
+    // One more owner turn attaches the owner's waker to the paused scan.
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+
+    let artists = database
+        .subscribe_one_sink(GraphBuilder::table("artists"))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+
+    let wakes_before_resume = wakes.0.load(Ordering::Acquire);
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    assert!(
+        wakes.0.load(Ordering::Acquire) > wakes_before_resume,
+        "the resumed cold hydration still wakes its runtime owner after a direct opening polled it"
+    );
+
+    for _ in 0..32 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+    assert!(albums.try_recv().is_ok(), "the cold hydration completes");
+    assert_eq!(
+        expect_try_recv_vals(&artists),
+        [(
+            vec![Value::U64(1), Value::String("direct artist".to_owned())],
+            1
+        )]
+    );
+}
+
 /// A cold hydration cannot monopolize the IVM worklist while a second
 /// subscription is being registered. The owner must return after the first
 /// pending evaluation, leaving storage to wake it before any later work is

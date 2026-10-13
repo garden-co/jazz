@@ -493,6 +493,13 @@ function conditionToRelPredicate(
     };
     return cond.op === "notIn" ? { Not: membership } : membership;
   }
+  const isNullValue = cond.value === undefined ? true : cond.value;
+  if (cond.op === "isNull") {
+    if (typeof isNullValue !== "boolean") {
+      throw new Error('"isNull" operator requires a boolean value.');
+    }
+    return isNullValue ? { IsNull: { column: columnRef } } : { IsNotNull: { column: columnRef } };
+  }
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
   const rightLiteral =
@@ -501,7 +508,6 @@ function conditionToRelPredicate(
       : {
           Literal: toRuntimeValue(cond.value, valueTypeForCondition),
         };
-  const isNullValue = cond.value === undefined ? true : cond.value;
   if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
     throw new Error(`BYTEA column "${column}" only supports eq/ne operators.`);
   }
@@ -560,11 +566,6 @@ function conditionToRelPredicate(
           right: rightLiteral,
         },
       };
-    case "isNull":
-      if (typeof isNullValue !== "boolean") {
-        throw new Error('"isNull" operator requires a boolean value.');
-      }
-      return isNullValue ? { IsNull: { column: columnRef } } : { IsNotNull: { column: columnRef } };
     case "contains":
       return { Contains: { left: columnRef, right: rightLiteral } };
     default:

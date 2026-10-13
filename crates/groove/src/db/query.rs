@@ -340,6 +340,7 @@ impl Database {
     ) -> Result<(), Error> {
         let progress = match progress_waker {
             Some(progress_waker) => {
+                self.ivm_runtime.retain_owner_progress_waker(progress_waker);
                 std::future::poll_fn(|_| {
                     let mut progress_cx = std::task::Context::from_waker(progress_waker);
                     std::task::Poll::Ready(self.poll_progress(&mut progress_cx))
@@ -892,6 +893,10 @@ impl Database {
     /// columns. Binding appends ordinary filter/project graph nodes for each
     /// sink, so callers with one-sink needs should treat [`Database::prepare_one_sink`]
     /// and [`Database::prepare_one_sink_with_routing`] as thin convenience wrappers.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_prepare")
+    )]
     pub async fn prepare(
         &mut self,
         terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,
@@ -915,6 +920,10 @@ impl Database {
     /// Prepare a routed shape that callers with identical terminals share.
     /// The shape retires itself when its last retained binding unsubscribes;
     /// see [`crate::ivm::IvmRuntime::prepare_shared`].
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_prepare")
+    )]
     pub async fn prepare_shared(
         &mut self,
         terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,
@@ -1161,6 +1170,33 @@ impl Database {
                 live,
             )
             .map_err(Error::IvmRuntime)
+    }
+
+    /// Bind a retained subscription and transfer the shape's ownership to
+    /// its bindings. The last unsubscribe or receiver cleanup retires it.
+    ///
+    /// An error or cancellation does not transfer caller ownership. A successful
+    /// handle may already carry a terminal hydration error; its unreferenced
+    /// shape is retired before returning. Ordinary [`Self::bind_shape`] does
+    /// not transfer ownership.
+    pub async fn bind_shape_owned_with_root_values(
+        &mut self,
+        shape: PreparedShapeId,
+        binding_values: &[Value],
+        root_indirect_values: RootIndirectValues,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error> {
+        let subscription = self
+            .bind_shape_with_lifetime_and_root_values(
+                shape,
+                binding_values,
+                SubscriptionLifetime::Retained,
+                root_indirect_values,
+                progress_waker,
+            )
+            .await?;
+        self.ivm_runtime.transfer_prepared_shape_to_bindings(shape);
+        Ok(subscription)
     }
 
     /// Run a one-shot SQL-ish query against the current storage snapshot.

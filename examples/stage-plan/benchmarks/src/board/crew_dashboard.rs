@@ -358,7 +358,7 @@ impl FanoutFixture {
             .finalize_local_mergeable_commit_for_test(revoke.mergeable_tx_id())
             .unwrap();
         block_on(revoke.wait(DurabilityTier::Global)).unwrap();
-        if self.read_opts.tier == DurabilityTier::Local {
+        if self.read_opts.tier == ReadTier::LocalFirst {
             // SPEC 16 §16.1.1: withdrawal is not deletion. Local-first may
             // retain learned rows; strict remote must not.
             for _ in 0..32 {
@@ -401,13 +401,10 @@ mod tests {
     /// remote rows but does not delete already learned local-first data.
     #[test]
     fn fanout_preserves_exact_membership_updates_and_revocation() {
-        for tier in [DurabilityTier::Local, DurabilityTier::Global] {
+        for tier in [ReadTier::LocalFirst, ReadTier::Remote] {
             for keyed_lists in [0, 3, GROUPS] {
                 let mut fixture = FanoutFixture::new(120, keyed_lists);
                 fixture.read_opts.tier = tier;
-                if tier == DurabilityTier::Global {
-                    fixture.read_opts.local_updates = LocalUpdates::Deferred;
-                }
                 fixture.hydrate();
                 fixture.assert_initial_results();
                 fixture.assert_live_update_and_revocation();

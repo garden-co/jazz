@@ -67,9 +67,10 @@ and are enforced by the server.
   as someone else. The activity log is append-only. Authors may delete their
   own comments, though the app doesn't offer that yet.
 - The server doesn't check that an activity entry's task belongs to its show.
-  That check would look up the task, and a new task and its "created" entry
-  are written in one transaction, where policies can't see each other's rows
-  ([#3755](https://github.com/garden-co/jazz/issues/3755)).
+  A policy could now look up the task, since a transaction's policy checks
+  see the rows it wrote earlier
+  ([#3755](https://github.com/garden-co/jazz/issues/3755)), but the example
+  doesn't do that yet.
 - Checklist items are private to their owner.
 - Crew profiles (display names) are readable by every signed-in account, like
   the chat examples' profiles.

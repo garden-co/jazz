@@ -132,40 +132,34 @@ function submit() {
   addStop().catch(reportWriteError);
 }
 
+// A new venue, the stop and its note are one transaction: the stop's policy
+// checks that its venue belongs to the band and the note's that its stop does,
+// and both see rows written earlier in the same transaction.
 async function addStop() {
   const date = fromDateInput(show.date);
   date.setHours(20);
-
-  // A new venue, the stop and its note can't share one transaction: the stop's
-  // policy checks that its venue belongs to the band, the note's that its stop
-  // does, and permission `exists` checks only see committed rows (INV-RLS-9).
-  // Whether they should see a transaction's own writes is an open question for
-  // the core team; until then each row waits for the one it depends on.
-  let venueId = existingVenueId.value;
-  if (venueMode.value === "new") {
-    const created = db.insert(app.venues, {
-      ...venue,
-      capacity: venue.capacity || undefined,
-      ownerId: props.userId,
-      bandId: props.bandId,
-    });
-    venueId = created.value.id;
-    await created.wait({ tier: "global" });
-  }
-
-  const stop = db.insert(app.stops, {
-    bandId: props.bandId,
-    venueId,
-    date,
-    status: show.status,
-    publicDescription: show.description,
-  });
-  emit("created", stop.value.id);
-
   const body = show.notes.trim();
-  if (body) {
-    await stop.wait({ tier: "global" });
-    db.insert(app.stopNotes, { stopId: stop.value.id, bandId: props.bandId, body });
-  }
+
+  const written = await db.transaction((tx) => {
+    const venueId =
+      venueMode.value === "new"
+        ? tx.insert(app.venues, {
+            ...venue,
+            capacity: venue.capacity || undefined,
+            ownerId: props.userId,
+            bandId: props.bandId,
+          }).id
+        : existingVenueId.value;
+    const stop = tx.insert(app.stops, {
+      bandId: props.bandId,
+      venueId,
+      date,
+      status: show.status,
+      publicDescription: show.description,
+    });
+    if (body) tx.insert(app.stopNotes, { stopId: stop.id, bandId: props.bandId, body });
+    return stop;
+  });
+  emit("created", written.value.id);
 }
 </script>
