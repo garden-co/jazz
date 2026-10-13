@@ -317,6 +317,24 @@ where
         .with_merge_fields(global_time, incoming.base()?)
     }
 
+    /// The local overlay image of a pending `patch` merged over `base`: the
+    /// patch's identity, unsettled, laid out like `union_post_image`.
+    fn union_pending_image(
+        &mut self,
+        patch: &VersionRow,
+        base: &VersionRow,
+        merge: UnionMerge,
+    ) -> Result<VersionRow, Error> {
+        self.union_image_row(
+            merge.layout,
+            &merge.layout_table,
+            &merge.cells,
+            merge.deletion,
+            patch,
+            base,
+        )
+    }
+
     /// A row image in `layout`'s union layout: `identity`'s prefix and
     /// merge fields, `created`'s creation provenance, `deletion`, and each
     /// union column's cell from `cells` (physical spelling; missing cells

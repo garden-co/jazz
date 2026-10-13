@@ -797,7 +797,18 @@ where
                 Some(base) if base.schema_version_alias() == patch.schema_version_alias() => {
                     self.fold_pending_patch(&table_schema, &base, &patch)?
                 }
-                _ => patch,
+                // An image of another layout: the patch merges into it per
+                // physical column, as Core will merge it (SPEC 4 §4.6,
+                // "Across schema versions"). A patch that cannot be merged
+                // over this image shows whole until Core's image arrives.
+                Some(base) => match self
+                    .union_merge(schema_version, &table_schema, &patch, &base)
+                    .await?
+                {
+                    Ok(merge) => self.union_pending_image(&patch, &base, merge)?,
+                    Err(_) => patch,
+                },
+                None => patch,
             });
         }
         if let Some(image) = image {
