@@ -1092,6 +1092,7 @@ where
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
+            &self.catalogue_ranks(),
         )?;
         for desired in desired_tables {
             let existing = match self.database.table_schema(&desired.name) {
@@ -1204,7 +1205,7 @@ where
         // takes the lens path from the case's schema, as its own case does.
         let union_case = !union_extra_columns(
             &self.catalogue.physical_mappings,
-            &self.catalogue.schema_version_aliases,
+            &self.catalogue_ranks(),
             source_schema,
             source_table_name,
         )?

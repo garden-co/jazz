@@ -415,7 +415,7 @@ where
         let extras = if union {
             let extras = union_extra_columns(
                 &self.catalogue.physical_mappings,
-                &self.catalogue.schema_version_aliases,
+                &self.catalogue_ranks(),
                 schema_version,
                 logical_table,
             )?;

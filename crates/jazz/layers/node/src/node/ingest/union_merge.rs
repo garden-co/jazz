@@ -3,8 +3,9 @@
 // one physical column at a time, whatever schema version it was authored
 // under: the cells it authored take its value (merge columns apply its op),
 // and every other column of the table's lineage keeps the row's value. The
-// post-image is laid out in the lineage's newest schema version, followed by
-// the lineage's columns that schema does not map.
+// post-image is laid out in the lineage's newest schema version (ranked last
+// in the catalogue), followed by the lineage's columns that schema does not
+// map.
 
 /// A write merged into a row image, one cell per union column, nullable as
 /// stored and in physical spelling.
@@ -33,18 +34,20 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// The newest schema version (by local alias, which follows activation
-    /// order) that maps the physical table `table` has under
-    /// `schema_version`, and its name for the table.
+    /// The schema version ranked last in the catalogue (`catalogue_ranks`)
+    /// that maps the physical table `table` has under `schema_version`, and
+    /// its name for the table; `schema_version` itself when no published
+    /// schema maps it.
     fn union_layout_schema(
         &self,
         schema_version: SchemaVersionId,
         table: &str,
     ) -> Result<(SchemaVersionId, String), Error> {
         let table_id = self.physical_table_id_for_schema(schema_version, table)?;
-        let mut newest: Option<(SchemaVersionAlias, SchemaVersionId, String)> = None;
+        let ranks = self.catalogue_ranks();
+        let mut newest: Option<(u64, SchemaVersionId, String)> = None;
         for (candidate, mapping) in &self.catalogue.physical_mappings {
-            let Some(alias) = self.catalogue.schema_version_aliases.get(candidate).copied() else {
+            let Some(rank) = ranks.get(candidate).copied() else {
                 continue;
             };
             let Some((name, _)) = mapping
@@ -54,13 +57,13 @@ where
             else {
                 continue;
             };
-            if newest.as_ref().is_none_or(|(newest, _, _)| alias > *newest) {
-                newest = Some((alias, *candidate, name.clone()));
+            if newest.as_ref().is_none_or(|(newest, _, _)| rank > *newest) {
+                newest = Some((rank, *candidate, name.clone()));
             }
         }
-        newest
+        Ok(newest
             .map(|(_, schema, name)| (schema, name))
-            .ok_or(Error::InvalidStoredValue("union layout schema missing"))
+            .unwrap_or_else(|| (schema_version, table.to_owned())))
     }
 
     /// `image`'s cells by physical column, nullable as stored and in physical
@@ -360,7 +363,7 @@ where
         // row derives from its own cells stay null (`union_stored_extras`).
         let extras = union_extra_columns(
             &self.catalogue.physical_mappings,
-            &self.catalogue.schema_version_aliases,
+            &self.catalogue_ranks(),
             layout,
             layout_table,
         )?;
@@ -414,9 +417,11 @@ where
 
     /// A received version's row (`VersionRow::from_wire_with_schema_version`)
     /// as this node stores it: unchanged, or for a Core image with union
-    /// cells, laid out in this node's own union layout of the table (its
-    /// newest schema version mapping it), deriving the cells the image lacks
-    /// as a reader of each column would.
+    /// cells, in the union case of the image's own schema version. Union
+    /// cases are ordered by the catalogue (`catalogue_ranks`), so that case
+    /// holds exactly the extras the sender's does, and the image keeps its
+    /// identity here: what this node later serves or compares is the
+    /// sender's record.
     pub(super) fn with_wire_union_cells(
         &mut self,
         row: VersionRow,
@@ -425,25 +430,23 @@ where
         if version.extra_cells().is_empty() {
             return Ok(row);
         }
-        let schema_version = version.schema_version();
-        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
+        let layout = version.schema_version();
+        let layout_table = version.table().to_owned();
+        let table_id = self.physical_table_id_for_schema(layout, &layout_table)?;
         let (_, mut cells) = self.image_union_cells(&row)?;
-        for (id, value) in self.union_cells_from_wire(version, table_id)? {
+        let wire = self.union_cells_from_wire(version, table_id)?;
+        let stored = self.union_stored_extras(layout, &layout_table)?;
+        if wire.len() != stored.len() || stored.iter().any(|id| !wire.contains_key(id)) {
+            return Err(Error::MalformedViewUpdate(
+                "row version union cells are not its schema's union extras",
+            ));
+        }
+        for (id, value) in wire {
             if cells.insert(id, value).is_some() {
                 return Err(Error::MalformedViewUpdate(
                     "row version union cells repeat a column of its schema",
                 ));
             }
-        }
-        let (layout, layout_table) = self.union_layout_schema(schema_version, version.table())?;
-        let columns = self.union_columns(layout, &layout_table)?;
-        if self
-            .complete_union_cells(schema_version, version.table(), &mut cells, &columns)?
-            .is_err()
-        {
-            return Err(Error::MalformedViewUpdate(
-                "row version union cells cannot be laid out on this node",
-            ));
         }
         let deletion = row.record.borrowed().get_idx(HistoryRowRecord::FIELD__DELETION_IDX)?;
         self.union_image_row(layout, &layout_table, &cells, deletion, &row, &row)

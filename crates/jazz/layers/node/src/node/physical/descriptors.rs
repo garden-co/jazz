@@ -355,6 +355,7 @@ pub(super) fn physical_version_storage_tables(
     catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
     schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
     physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    catalogue_ranks: &BTreeMap<SchemaVersionId, u64>,
 ) -> Result<Vec<GrooveTableSchema>, Error> {
     let mut lineages = BTreeMap::<
         PhysicalTableId,
@@ -978,7 +979,7 @@ pub(super) fn physical_version_storage_tables(
             // are authored writes and never use it.
             let extras = union_extra_columns(
                 physical_mappings,
-                schema_version_aliases,
+                catalogue_ranks,
                 *schema_version,
                 &logical_table.name,
             )?;

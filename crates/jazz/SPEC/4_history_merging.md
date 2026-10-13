@@ -413,7 +413,8 @@ surface carries them yet.
 physical column at a time, whatever schema version it was authored under
 ([#3899](https://github.com/garden-co/jazz/issues/3899)). The post-image is
 laid out in the row's **union layout** (ch. 10 §10.3, "Union row cases"): the
-columns of the newest schema version on Core that maps the table, followed
+columns of the schema version that maps the table and ranks last in the
+catalogue order every node shares, followed
 by every other column of the table's lineage that no lens path derives from
 one of those (a column a newer schema dropped, or one a sibling schema
 added). For each column of that layout:

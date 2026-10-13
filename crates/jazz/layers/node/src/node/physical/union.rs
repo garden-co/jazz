@@ -17,7 +17,8 @@ pub(super) enum LensCellSource {
 #[derive(Clone, Debug)]
 pub(super) struct UnionColumn {
     pub(super) id: PhysicalColumnId,
-    /// The newest schema version (no newer than the layout) mapping it.
+    /// The schema version ranked last in the catalogue, no later than the
+    /// layout, mapping it.
     pub(super) schema: SchemaVersionId,
     pub(super) table: String,
     pub(super) name: String,
@@ -107,9 +108,9 @@ where
         Ok(derived.remove(target_name))
     }
 
-    /// The newest schema version, no newer than `layout`, that maps the
-    /// lineage column `id` of `layout`'s `layout_table`, with its name for
-    /// the table and the column.
+    /// The schema version ranked last in the catalogue, no later than
+    /// `layout`, that maps the lineage column `id` of `layout`'s
+    /// `layout_table`, with its name for the table and the column.
     fn union_column_definer(
         &self,
         layout: SchemaVersionId,
@@ -117,18 +118,17 @@ where
         id: PhysicalColumnId,
     ) -> Result<(SchemaVersionId, String, String), Error> {
         let table_id = self.physical_table_id_for_schema(layout, layout_table)?;
-        let layout_alias = self
-            .catalogue
-            .schema_version_aliases
+        let ranks = self.catalogue_ranks();
+        let layout_rank = ranks
             .get(&layout)
             .copied()
-            .ok_or(Error::InvalidStoredValue("union layout schema alias missing"))?;
-        let mut definer: Option<(SchemaVersionAlias, SchemaVersionId, String, String)> = None;
+            .ok_or(Error::InvalidStoredValue("union layout schema is not published"))?;
+        let mut definer: Option<(u64, SchemaVersionId, String, String)> = None;
         for (candidate, mapping) in &self.catalogue.physical_mappings {
-            let Some(alias) = self.catalogue.schema_version_aliases.get(candidate).copied() else {
+            let Some(rank) = ranks.get(candidate).copied() else {
                 continue;
             };
-            if alias > layout_alias {
+            if rank > layout_rank {
                 continue;
             }
             for (table_name, table_mapping) in &mapping.tables {
@@ -142,14 +142,26 @@ where
                 else {
                     continue;
                 };
-                if definer.as_ref().is_none_or(|(newest, ..)| alias > *newest) {
-                    definer = Some((alias, *candidate, table_name.clone(), column.clone()));
+                if definer.as_ref().is_none_or(|(newest, ..)| rank > *newest) {
+                    definer = Some((rank, *candidate, table_name.clone(), column.clone()));
                 }
             }
         }
         definer
             .map(|(_, schema, table, column)| (schema, table, column))
             .ok_or(Error::InvalidStoredValue("union column has no schema"))
+    }
+
+    /// Each published schema version's place in the catalogue order
+    /// (`catalogue_ranks`), from the lineages this node has staged or
+    /// activated.
+    pub(in crate::node) fn catalogue_ranks(&self) -> BTreeMap<SchemaVersionId, u64> {
+        catalogue_ranks(
+            self.catalogue
+                .active_lineages_by_target
+                .values()
+                .chain(self.catalogue.staged_lineages.values()),
+        )
     }
 
     /// The union extras of `layout`'s `layout_table` whose cells a union row
@@ -166,7 +178,7 @@ where
     ) -> Result<Vec<PhysicalColumnId>, Error> {
         let extras = union_extra_columns(
             &self.catalogue.physical_mappings,
-            &self.catalogue.schema_version_aliases,
+            &self.catalogue_ranks(),
             layout,
             layout_table,
         )?;

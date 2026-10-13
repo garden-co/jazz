@@ -24,16 +24,44 @@ pub(super) fn schema_alias_for_variant_tag(tag: u32) -> SchemaVersionAlias {
     SchemaVersionAlias(u64::from(tag & !UNION_VARIANT_TAG_BIT))
 }
 
+/// Each published schema version's place in the catalogue order that every
+/// node replicates from its Core: a lineage's target at its catalogue
+/// position, and the authority genesis (a lineage source that is no
+/// lineage's target) before them all. Local aliases follow the order a node
+/// happened to learn schemas in (a client's own schema first), so they cannot
+/// order union layouts. A schema version only this node knows has no rank.
+pub(super) fn catalogue_ranks<'a>(
+    lineages: impl IntoIterator<Item = &'a StagedSchemaLineage>,
+) -> BTreeMap<SchemaVersionId, u64> {
+    let mut ranks = BTreeMap::new();
+    let mut sources = BTreeSet::new();
+    for lineage in lineages {
+        ranks.insert(lineage.publication.schema.id, lineage.catalogue_seq);
+        sources.extend(
+            lineage
+                .publication
+                .predecessors
+                .iter()
+                .map(|predecessor| predecessor.lens.source),
+        );
+    }
+    for source in sources {
+        ranks.entry(source).or_insert(0);
+    }
+    ranks
+}
+
 /// The physical columns a union row of `schema_version`'s table carries
 /// beyond that schema's own columns: every column of the same physical table
-/// that a schema version registered no later than it maps (aliases are
-/// allocated in activation order, so the set is fixed once the schema is
-/// registered). Sorted by physical column id, the order of the union case's
-/// trailing fields. Empty when the schema maps every such column, in which
+/// that a schema version ranked before it in the catalogue maps
+/// (`catalogue_ranks`), so every node that knows the schema derives the same
+/// set and it is fixed once the schema is published. Sorted by physical
+/// column id, the order of the union case's trailing fields. Empty for an
+/// unpublished schema, and when the schema maps every such column, in which
 /// case the schema's own case is the union layout and no union case exists.
 pub(super) fn union_extra_columns(
     physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
-    schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+    ranks: &BTreeMap<SchemaVersionId, u64>,
     schema_version: SchemaVersionId,
     logical_table: &str,
 ) -> Result<Vec<PhysicalColumnId>, Error> {
@@ -41,17 +69,13 @@ pub(super) fn union_extra_columns(
         .get(&schema_version)
         .and_then(|mapping| mapping.tables.get(logical_table))
         .ok_or(Error::InvalidStoredValue("union layout table mapping missing"))?;
-    let alias = schema_version_aliases
-        .get(&schema_version)
-        .copied()
-        .ok_or(Error::InvalidStoredValue("union layout schema alias missing"))?;
+    let Some(rank) = ranks.get(&schema_version).copied() else {
+        return Ok(Vec::new());
+    };
     let own_columns = own.columns.values().copied().collect::<BTreeSet<_>>();
     let mut extras = BTreeSet::new();
     for (candidate, mapping) in physical_mappings {
-        let Some(candidate_alias) = schema_version_aliases.get(candidate) else {
-            continue;
-        };
-        if *candidate_alias > alias {
+        if ranks.get(candidate).is_none_or(|candidate_rank| *candidate_rank > rank) {
             continue;
         }
         for table in mapping.tables.values() {

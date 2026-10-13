@@ -1946,3 +1946,155 @@ fn receivers_read_a_union_image_as_core_does() {
         "a v2 reader at the receiver keeps alice's dueDate"
     );
 }
+
+/// The lineage's schemas need not be registered in lens order: here v1 is
+/// published as a descendant of v2, so v1 is the newest schema on every node
+/// and Core lays images out in v1's union case, carrying v2's `dueDate` as an
+/// extra. Readers of each schema still see what writers of it wrote.
+#[test]
+fn union_image_laid_out_in_a_schema_older_than_the_readers_reads_as_written() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("legacy", PublicColumnType::Text),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let (v1_id, v2_id) = (v1.version_id(), v2.version_id());
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v2.clone(),
+        v1.clone(),
+        "todos",
+        vec![
+            LensOp::DropColumn {
+                column: "dueDate".to_owned(),
+                backwards_default: v(""),
+            },
+            LensOp::AddColumn {
+                column: "legacy".to_owned(),
+                default: v(""),
+            },
+        ],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2.clone());
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1.clone());
+    let target = row(0x93);
+    write_todo(
+        &mut bob,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("legacy", v("x")),
+        ],
+    );
+    write_todo(&mut alice, &mut core, target, 20, &[("dueDate", v("10-01"))]);
+    let v1_row = todo_row(&[
+        ("title", v("a")),
+        ("done", Value::Bool(false)),
+        ("legacy", v("x")),
+    ]);
+    let v2_row = todo_row(&[
+        ("title", v("a")),
+        ("done", Value::Bool(false)),
+        ("dueDate", v("10-01")),
+    ]);
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", v2_id)[&target], v2_row);
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", v1_id)[&target], v1_row);
+
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(3), v2);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
+    sync_table_rows_to(&mut core, &mut receiver, "todos");
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", v2_id)[&target],
+        v2_row,
+        "a v2 reader at the receiver sees alice's dueDate"
+    );
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", v1_id)[&target],
+        v1_row,
+        "a v1 reader at the receiver keeps bob's legacy"
+    );
+}
+
+/// The originator of a write whose own schema is not the one Core lays the
+/// row out in: v1 is published as a descendant of v2, so Core's image is in
+/// v1's union case. Alice (v2) updates bob's v1-era row; once Core's fate
+/// and image reach her, she reads her own write.
+#[test]
+fn originator_reads_its_write_from_a_union_image_in_another_schema() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("legacy", PublicColumnType::Text),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let v2_id = v2.version_id();
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v2.clone(),
+        v1.clone(),
+        "todos",
+        vec![
+            LensOp::DropColumn {
+                column: "dueDate".to_owned(),
+                backwards_default: v(""),
+            },
+            LensOp::AddColumn {
+                column: "legacy".to_owned(),
+                default: v(""),
+            },
+        ],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2.clone());
+    alice
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1.clone());
+    let target = row(0x94);
+    write_todo(
+        &mut bob,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("legacy", v("x")),
+        ],
+    );
+    sync_table_rows_to(&mut core, &mut alice, "todos");
+
+    let cells = todo_row(&[("dueDate", v("10-01"))]);
+    let authored = cells.keys().cloned().collect::<BTreeSet<_>>();
+    let (_tx, unit) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 20)
+                .cells(cells)
+                .authored_columns(authored),
+        )
+        .unwrap();
+    let fate = core_fate(&mut core, unit);
+    assert_accepted(&fate);
+    alice.apply_sync_message_settled(fate).unwrap();
+    sync_table_rows_to(&mut core, &mut alice, "todos");
+    assert_eq!(
+        rows_for_schema_at_core(&mut alice, "todos", v2_id)[&target],
+        todo_row(&[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("dueDate", v("10-01")),
+        ]),
+        "alice reads her own dueDate from Core's image"
+    );
+}

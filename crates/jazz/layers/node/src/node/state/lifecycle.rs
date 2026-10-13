@@ -712,11 +712,15 @@ impl NodeState {
         }
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
+        let registration_ranks = catalogue_ranks(
+            active_lineages_by_target.values().chain(staged_lineages.values()),
+        );
         let mut database = Self::open_full_database(
             &schema,
             &registration_schemas,
             &registration_aliases,
             &registration_mappings,
+            &registration_ranks,
             storage,
         )
         .await?;
@@ -996,6 +1000,7 @@ impl NodeState {
         catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
         schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
         physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+        catalogue_ranks: &BTreeMap<SchemaVersionId, u64>,
         storage: BoxedStorage,
     ) -> Result<Database, Error> {
         debug_assert_lowered_layouts(schema);
@@ -1004,6 +1009,7 @@ impl NodeState {
             catalogue_schemas,
             schema_version_aliases,
             physical_mappings,
+            catalogue_ranks,
         )?;
         lowered.tables.extend(current_tables);
         let layout = StorageLayout::jazz_class_v2();
@@ -1909,6 +1915,7 @@ where
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
+            &self.catalogue_ranks(),
         )?);
         self.database.rebuild(lowered)?;
         self.database.set_missing_chunk_resolver(self.chunk_resolver.clone());

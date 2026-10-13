@@ -114,12 +114,25 @@ where
             if matches!(stored.fate, Fate::Accepted) {
                 // Every pending record of an accepted write moves to its
                 // seq, also when the row's image here did not change.
+                // A post-image may be laid out in another schema version than
+                // the write, naming a renamed table differently: match rows
+                // by physical table.
+                let updated_rows = global_current_updates
+                    .iter()
+                    .map(|update| {
+                        Ok((
+                            self.physical_table_id_for_version(update)?,
+                            update.branch_key(),
+                            update.row_uuid(),
+                        ))
+                    })
+                    .collect::<Result<BTreeSet<_>, Error>>()?;
                 for version in &tx_versions {
-                    let updated = global_current_updates.iter().any(|update| {
-                        update.table() == version.table()
-                            && update.branch_key() == version.branch_key()
-                            && update.row_uuid() == version.row_uuid()
-                    });
+                    let updated = updated_rows.contains(&(
+                        self.physical_table_id_for_version(version)?,
+                        version.branch_key(),
+                        version.row_uuid(),
+                    ));
                     if !updated && version.seq()? == GlobalTime(0) {
                         let at_seq = version.with_seq(global_time)?;
                         self.write_history_post_image(&mut batch, &at_seq, stored.tx.made_by)?;

@@ -598,13 +598,21 @@ and ahead shadow table has a **union case** per schema version `G` whose
 lineage has columns `G` does not map: tag = `alias(G) | 1 << 31`, fields =
 `G`'s own case followed by those columns ("extras"), in physical column id
 order. The extras of `G` are the columns of the same physical table mapped by
-any schema version whose local alias is no greater than `G`'s; aliases are
-allocated in activation order, so the case is fixed once `G` is registered,
-and old union cases never change. Rejected-version tables have no union
-case. A union row reads exactly like a `G` row to code that only knows `G`.
+any schema version ranked no later than `G` in the catalogue: a lineage's
+target ranks at its catalogue position and the authority genesis before them
+all. Every node replicates that order from its Core, so every node that knows
+`G` derives the same extras, fixed once `G` is published; old union cases
+never change. Local aliases cannot order them: a client allocates its own
+schema's alias first and learns older schemas later. A schema version only
+the node knows (not yet published) has no union case. Rejected-version tables
+have no union case. A union row reads exactly like a `G` row to code that only
+knows `G`.
 
-Core stores each post-image in the union case of the newest schema version
-mapping the table (ch. 4 §4.6, "Across schema versions"). An extra is
+Core stores each post-image in the union case of the schema version ranked
+last among those mapping the table (ch. 4 §4.6, "Across schema versions").
+That need not be the write's own schema, nor name the table as the write
+does, so a post-image replaces the write's pending record by its physical
+row (table, branch, row), not by its name or schema. An extra is
 **stored** when no lens path from `G` derives it from one of `G`'s own
 columns; an extra the path does derive (a column `G` carries on under a new
 physical id, or copies) stays null, and readers derive it from `G`'s cell as
@@ -617,8 +625,10 @@ travel as `UnionExtraCells`, one entry per schema version defining them, each
 a record of that schema's authored cells (`_app_<column>`, nullable). The
 row and its entries use the `JVRR` v3 envelope; every row without entries
 keeps the v2 bytes. A receiver validates each cell against its schema and
-stores the image in its own newest union case, deriving the cells the image
-lacks through the lens as a reader would. Commit units carry no union cells.
+stores the image unchanged, in `G`'s union case: its entries must be exactly
+`G`'s stored extras there, as the shared catalogue order guarantees. The image
+keeps its identity, so what the receiver serves or compares later is Core's
+record. Commit units carry no union cells.
 
 ### 10.4 Writes: authored schema variants
 
