@@ -2,27 +2,51 @@
 //!
 //! These receipts open real committed roots through the public adapter entry
 //! point with the node profile, exactly as the server shell, the native
-//! client, NAPI and the native relay do. They are adapter-level rather than
+//! client, NAPI and the native relay do. Most are adapter-level rather than
 //! `JazzServer` tests because the refusal happens at manifest admission,
-//! before any node state exists; the public client path reports the same
-//! typed error through its display text.
+//! before any node state exists. The last two follow the same refusal out
+//! through the public surfaces applications match on: the native tools
+//! client's `JazzError::UnsupportedStorageCodecs` and the binding-facing
+//! `jazz::db::Error` code `unsupported_storage_codecs`.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use groove::storage::Error as StorageError;
+use jazz::db::{ErrorCode, StorageCodecMismatch};
 use jazz::schema::JazzSchema;
 use jazz::storage_codec_profile::node_storage_codec_profile;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    AppContext, ClientStorage, ColumnType, JazzClient, JazzError, Schema, SchemaBuilder,
+    TableSchemaBuilder,
+};
 use sha2::{Digest, Sha256};
 
 const DURABLE_INDEX_V2: &str = "groove.durable-index.v2";
 const ROW_HISTORY: &str = "jazz.history-version-current.v4";
 const DURABILITY_V2: &str = "jazz.transaction-durability.v2";
 
-fn notes_schema() -> JazzSchema {
-    let source = SchemaBuilder::new()
+fn notes_source_schema() -> Schema {
+    SchemaBuilder::new()
         .table(TableSchemaBuilder::new("notes").column("body", ColumnType::Text))
-        .build();
-    JazzSchema::new(&source).expect("notes schema compiles")
+        .build()
+}
+
+fn notes_schema() -> JazzSchema {
+    JazzSchema::new(&notes_source_schema()).expect("notes schema compiles")
+}
+
+fn published_alpha54_archive() -> Vec<u8> {
+    checked_fixture(
+        include_str!("../fixtures/published-alpha54-native-rocksdb.tar.gz.base64"),
+        "10d139b12fd21530fd553ee148e975d4e2f55d11b43bf3bd90d00179f5703575",
+    )
+}
+
+fn alpha54_missing() -> Vec<String> {
+    vec![
+        DURABLE_INDEX_V2.to_owned(),
+        ROW_HISTORY.to_owned(),
+        DURABILITY_V2.to_owned(),
+    ]
 }
 
 fn checked_fixture(base64: &str, sha256: &str) -> Vec<u8> {
@@ -88,15 +112,7 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
             unknown,
         }) => {
             assert_eq!(epoch, 1, "{store}");
-            assert_eq!(
-                missing,
-                vec![
-                    DURABLE_INDEX_V2.to_owned(),
-                    ROW_HISTORY.to_owned(),
-                    DURABILITY_V2.to_owned(),
-                ],
-                "{store}"
-            );
+            assert_eq!(missing, alpha54_missing(), "{store}");
             assert_eq!(unknown, expected_unknown, "{store}");
         }
         Err(other) => panic!("{store}: expected a typed format refusal, got {other}"),
@@ -120,11 +136,7 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 #[test]
 fn published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error() {
     let directory = tempfile::tempdir().unwrap();
-    let archive = checked_fixture(
-        include_str!("../fixtures/published-alpha54-native-rocksdb.tar.gz.base64"),
-        "10d139b12fd21530fd553ee148e975d4e2f55d11b43bf3bd90d00179f5703575",
-    );
-    let path = unpack_rocksdb(directory.path(), &archive);
+    let path = unpack_rocksdb(directory.path(), &published_alpha54_archive());
     assert_refused(open_rocksdb(&path), &[], "published alpha.54 RocksDB");
     // Refusal is stable: the first attempt admitted nothing.
     assert_refused(
@@ -306,4 +318,89 @@ fn linear_history_root_without_the_durability_v2_family_is_refused() {
         Ok(()) => panic!("a root without the durability-v2 family must not open"),
     }
     assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
+}
+
+/// The native tools client refuses a published alpha.54 data directory with
+/// the typed `JazzError::UnsupportedStorageCodecs`, carrying the same epoch
+/// and codec lists as the adapter error, so an application can match the
+/// variant, delete its data directory and resync from Core. The refused
+/// store is not opened, so a second connect is refused the same way.
+///
+/// Actors: `alice` upgrades her native app from alpha.54 and reconnects over
+/// the same data directory.
+///
+/// ```text
+/// alice ──JazzClient::connect(data_dir with alpha.54 jazz-core.rocksdb)
+///                 └──✗ JazzError::UnsupportedStorageCodecs { epoch: 1, missing, unknown: [] }
+/// ```
+#[tokio::test]
+async fn native_client_reports_an_old_store_as_a_typed_unsupported_storage_codecs_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let unpacked = unpack_rocksdb(directory.path(), &published_alpha54_archive());
+    let data_dir = directory.path().join("alice");
+    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::rename(&unpacked, data_dir.join("jazz-core.rocksdb")).unwrap();
+
+    let mut context = AppContext::test(notes_source_schema());
+    context.data_dir = data_dir;
+    context.storage = ClientStorage::Persistent;
+    context.storage_factory = Some(std::sync::Arc::new(
+        jazz_storage_rocksdb::RocksDbStorageFactory,
+    ));
+
+    for attempt in ["first connect", "second connect"] {
+        match JazzClient::connect(context.clone()).await {
+            Err(JazzError::UnsupportedStorageCodecs {
+                epoch,
+                missing,
+                unknown,
+            }) => {
+                assert_eq!(epoch, 1, "{attempt}");
+                assert_eq!(missing, alpha54_missing(), "{attempt}");
+                assert!(unknown.is_empty(), "{attempt}");
+            }
+            Err(other) => panic!("{attempt}: expected a typed format refusal, got {other}"),
+            Ok(_) => panic!("{attempt}: an alpha.54 store must not open"),
+        }
+    }
+}
+
+/// The binding-facing `jazz::db::Error` that NAPI, WASM and the native relay
+/// build from an adapter refusal carries the stable code
+/// `unsupported_storage_codecs` and the codec lists as structured fields,
+/// not only in its message.
+///
+/// White-box at the conversion rather than through a binding: the bindings
+/// throw into a JavaScript engine, which a Rust test cannot host. Their
+/// TypeScript tests cover the thrown object.
+///
+/// ```text
+/// alice's alpha.54 root ──open──✗ storage::Error::UnsupportedStorageCodecs
+///                                   └─► db::Error { code: "unsupported_storage_codecs",
+///                                                   storage_codecs: { epoch, missing, unknown } }
+/// ```
+#[test]
+fn binding_error_for_an_old_store_has_the_unsupported_storage_codecs_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = unpack_rocksdb(directory.path(), &published_alpha54_archive());
+    let refusal = open_rocksdb(&path).expect_err("an alpha.54 root must not open");
+    let display = refusal.to_string();
+
+    let error = jazz::db::Error::from(refusal);
+
+    assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs);
+    assert_eq!(error.code.as_str(), "unsupported_storage_codecs");
+    assert_eq!(error.message, display, "the adapter's text is kept");
+    assert_eq!(
+        error.storage_codecs,
+        Some(StorageCodecMismatch {
+            epoch: 1,
+            missing: alpha54_missing(),
+            unknown: Vec::new(),
+        })
+    );
+
+    let other = jazz::db::Error::from(StorageError::InvalidStorageLayout("bad".to_owned()));
+    assert_eq!(other.code, ErrorCode::Storage);
+    assert_eq!(other.storage_codecs, None);
 }

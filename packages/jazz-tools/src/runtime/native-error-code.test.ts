@@ -1,9 +1,18 @@
 import { NapiDb } from "jazz-napi";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
 import { nativeCoreErrorCode, nativeErrorCode } from "./native-runtime/native-error-code.js";
+import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/schema-codec.js";
+import {
+  UnsupportedStorageCodecsError,
+  isUnsupportedStorageCodecsError,
+} from "./unsupported-storage-codecs-error.js";
 import { testAuthorBytes } from "./testing/account-fixtures.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
@@ -83,4 +92,84 @@ describe("native core error codes", () => {
       }
     },
   );
+});
+
+// A store written by an older Jazz storage format is refused at open with the
+// stable code `unsupported_storage_codecs` and its codec lists (#3728).
+
+/** The published alpha.54 native client root, unpacked into a fresh directory. */
+function unpackPublishedAlpha54Root(): { dir: string; root: string } {
+  const base64 = readFileSync(
+    new URL(
+      "../../../../crates/jazz/fixtures/published-alpha54-native-rocksdb.tar.gz.base64",
+      import.meta.url,
+    ),
+    "utf8",
+  ).replace(/\s+/g, "");
+  const dir = mkdtempSync(join(tmpdir(), "jazz-old-store-"));
+  const archive = join(dir, "root.tar.gz");
+  writeFileSync(archive, Buffer.from(base64, "base64"));
+  execFileSync("tar", ["-xzf", archive, "-C", dir]);
+  return { dir, root: join(dir, "rocksdb-epoch-1") };
+}
+
+const ALPHA54_MISSING = [
+  "groove.durable-index.v2",
+  "jazz.history-version-current.v4",
+  "jazz.transaction-durability.v2",
+];
+
+describe("storage-format refusal", () => {
+  it("NAPI throws an old store as an Error with the stable code and codec lists", () => {
+    const { dir, root } = unpackPublishedAlpha54Root();
+    try {
+      let error: unknown;
+      try {
+        NapiDb.openPersistent(root, encodeSchema(app.wasmSchema), config("napi-old-store"));
+      } catch (thrown) {
+        error = thrown;
+      }
+
+      expect(error).toBeInstanceOf(Error);
+      expect(nativeCoreErrorCode(error)).toBe("unsupported_storage_codecs");
+      expect(isUnsupportedStorageCodecsError(error)).toBe(true);
+      expect(error).toMatchObject({ epoch: 1, missing: ALPHA54_MISSING, unknown: [] });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the native runtime rethrows the refusal as UnsupportedStorageCodecsError", () => {
+    const { dir, root } = unpackPublishedAlpha54Root();
+    try {
+      let error: unknown;
+      try {
+        new NativeRuntimeAdapter(
+          {
+            openMemory: (schema, configBytes) => NapiDb.openMemory(schema, configBytes) as never,
+            openPersistent: (path, schema, configBytes) =>
+              NapiDb.openPersistent(path, schema, configBytes) as never,
+          },
+          app.wasmSchema,
+          new Uint8Array(16).fill(32),
+          testAuthorBytes("runtime-old-store"),
+          1,
+          false,
+          { persistentPath: root },
+        );
+      } catch (thrown) {
+        error = thrown;
+      }
+
+      expect(error).toBeInstanceOf(UnsupportedStorageCodecsError);
+      expect(error).toMatchObject({
+        name: "UnsupportedStorageCodecsError",
+        code: "unsupported_storage_codecs",
+        missing: ALPHA54_MISSING,
+        unknown: [],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

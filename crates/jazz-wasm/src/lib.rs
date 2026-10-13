@@ -1110,10 +1110,7 @@ impl WasmDbInner {
             Self::Memory(db) => read!(db),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => read!(db),
-            Self::Closed => Err(Error {
-                code: ErrorCode::Protocol,
-                message: "WasmDb is closed".into(),
-            }),
+            Self::Closed => Err(Error::new(ErrorCode::Protocol, "WasmDb is closed")),
         }
     }
 
@@ -1251,10 +1248,10 @@ impl WasmDbInner {
 }
 
 fn transaction_read_cancelled(_: oneshot::Canceled) -> Error {
-    Error {
-        code: ErrorCode::Protocol,
-        message: "transaction read owner operation was cancelled".into(),
-    }
+    Error::new(
+        ErrorCode::Protocol,
+        "transaction read owner operation was cancelled",
+    )
 }
 
 #[wasm_bindgen]
@@ -3914,12 +3911,31 @@ fn call_controller_method(
 /// A core [`Error`] becomes a real JavaScript `Error` whose `message` is the
 /// unchanged `Display` text and whose `code` is the stable
 /// [`ErrorCode::as_str`] string, so callers classify it without matching the
-/// message. Every other error keeps its historical bare-string form.
+/// message. A storage-format refusal from opening a store becomes that core
+/// error too (code `unsupported_storage_codecs`, with `epoch`, `missing` and
+/// `unknown`). Every other error keeps its historical bare-string form.
 fn to_js_error(error: impl std::fmt::Display + 'static) -> JsValue {
-    match (&error as &dyn std::any::Any).downcast_ref::<Error>() {
-        Some(core) => core_error_to_js(core),
-        None => JsValue::from_str(&error.to_string()),
+    let any = &error as &dyn std::any::Any;
+    if let Some(core) = any.downcast_ref::<Error>() {
+        return core_error_to_js(core);
     }
+    if let Some(
+        storage @ jazz::groove::storage::Error::UnsupportedStorageCodecs {
+            epoch,
+            missing,
+            unknown,
+        },
+    ) = any.downcast_ref::<jazz::groove::storage::Error>()
+    {
+        let mut core = Error::new(ErrorCode::UnsupportedStorageCodecs, storage.to_string());
+        core.storage_codecs = Some(jazz::db::StorageCodecMismatch {
+            epoch: *epoch,
+            missing: missing.clone(),
+            unknown: unknown.clone(),
+        });
+        return core_error_to_js(&core);
+    }
+    JsValue::from_str(&error.to_string())
 }
 
 fn core_error_to_js(error: &Error) -> JsValue {
@@ -3930,6 +3946,29 @@ fn core_error_to_js(error: &Error) -> JsValue {
         &JsValue::from_str("code"),
         &JsValue::from_str(error.code.as_str()),
     );
+    if let Some(mismatch) = &error.storage_codecs {
+        let strings = |codecs: &[String]| {
+            codecs
+                .iter()
+                .map(|codec| JsValue::from_str(codec))
+                .collect::<js_sys::Array>()
+        };
+        let _ = js_sys::Reflect::set(
+            &js_error,
+            &JsValue::from_str("epoch"),
+            &JsValue::from(mismatch.epoch),
+        );
+        let _ = js_sys::Reflect::set(
+            &js_error,
+            &JsValue::from_str("missing"),
+            &strings(&mismatch.missing),
+        );
+        let _ = js_sys::Reflect::set(
+            &js_error,
+            &JsValue::from_str("unknown"),
+            &strings(&mismatch.unknown),
+        );
+    }
     js_error.into()
 }
 

@@ -3,9 +3,10 @@ title: Upgrading from alpha.55
 description: The breaking changes between alpha.55 and alpha.60, what to change in your app, and what happens to clients that haven't upgraded yet.
 ---
 
-This page covers moving an app from `jazz-tools@2.0.0-alpha.55` or `alpha.56` to alpha.60. Stored
-data needs nothing: server data directories and browser storage from alpha.55 open in place, with
-no reset or conversion step. Your code and deployment do need changes.
+This page covers moving an app from `jazz-tools@2.0.0-alpha.55` or `alpha.56` to alpha.60. Your
+code and deployment need changes. Local client stores written by alpha.59 and earlier don't open in
+alpha.60: clients wipe them and resync from Core, as described in
+[Old local stores are refused](#old-local-stores-are-refused).
 
 The changes are grouped by the release that introduced them. If your app is on alpha.56, skip to
 [From alpha.56](#from-alpha56); on alpha.57, read [In alpha.58](#in-alpha58); on alpha.58 or
@@ -176,6 +177,27 @@ If your app uses exclusive transactions, ship the alpha.58 client build together
 upgrade. Other writes and reads from alpha.56 and alpha.57 clients keep working.
 
 ## In alpha.60
+
+### Old local stores are refused
+
+alpha.60 changes the local storage format. A client store written by alpha.59 or earlier is refused
+when it is opened, on every platform, before anything in it is read or changed. The error is an
+`UnsupportedStorageCodecsError` with `code` set to `"unsupported_storage_codecs"`. Its `missing` and
+`unknown` fields list the storage formats the store lacks and the ones this build doesn't read.
+React Native reports the code and message only.
+
+There is no migration. To recover, delete the local store and let the client resync from Core:
+
+- In the browser, call `await db.deleteClientStorage()` (see
+  [Storage reset](/docs/auth/lifecycle#storage-reset)).
+- In Node, close the client and delete its data directory.
+
+Writes that were still pending in the old store, and never reached Core, are lost.
+
+The error class does not survive every native binding or worker boundary, so detect the refusal by
+its code with `isUnsupportedStorageCodecsError(error)`, exported from `jazz-tools` and
+`jazz-tools/react-native`. In the Rust client, `JazzClient::connect` returns
+`JazzError::UnsupportedStorageCodecs`.
 
 ### Import migration builders from `migration`
 

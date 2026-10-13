@@ -2798,13 +2798,14 @@ impl NapiDb {
 
     #[napi(factory, js_name = "openPersistent")]
     pub fn open_persistent(
+        env: Env,
         data_path: String,
         schema: Uint8Array,
         config: Uint8Array,
     ) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
-        let storage = open_persistent_core_storage(data_path, &schema)?;
+        let storage = open_persistent_core_storage(&env, data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, false)?;
         let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
@@ -2824,13 +2825,14 @@ impl NapiDb {
     /// distinct ABI from the public raw-open entrypoint.
     #[napi(factory, js_name = "openPersistentAsBackend")]
     pub fn open_persistent_as_backend(
+        env: Env,
         data_path: String,
         schema: Uint8Array,
         config: Uint8Array,
     ) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_backend_identity(&config)?;
-        let storage = open_persistent_core_storage(data_path, &schema)?;
+        let storage = open_persistent_core_storage(&env, data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, true)?;
         let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
@@ -2848,6 +2850,7 @@ impl NapiDb {
 
     #[napi(factory, js_name = "openPersistentWithSelfSignedProof")]
     pub fn open_persistent_with_self_signed_proof(
+        env: Env,
         data_path: String,
         schema: Uint8Array,
         config: Uint8Array,
@@ -2862,7 +2865,7 @@ impl NapiDb {
             claimed_author,
         };
         let identity = core_open_identity(&config, Some(&proof))?;
-        let storage = open_persistent_core_storage(data_path, &schema)?;
+        let storage = open_persistent_core_storage(&env, data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, false)?;
         let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
@@ -3823,10 +3826,14 @@ fn decode_public_schema(schema: &[u8]) -> napi::Result<JazzSchema> {
 /// Groove-only convenience open: the runtime can persist every Jazz codec
 /// family in `node_storage_codec_profile`, so its root must declare all of
 /// them before any bytes are admitted.
+///
+/// A root written in a storage format this build does not read is thrown as
+/// the typed refusal described at [`throw_unsupported_storage_codecs`].
 fn open_persistent_core_storage(
+    env: &Env,
     data_path: String,
     schema: &JazzSchema,
-) -> napi::Result<CoreRocksDbStorage> {
+) -> js::Result<CoreRocksDbStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     let codec_profile = node_storage_codec_profile().map_err(napi_error)?;
@@ -3836,7 +3843,43 @@ fn open_persistent_core_storage(
         CoreRocksDbDurability::WalNoSync,
         &codec_profile,
     )
-    .map_err(napi_error)
+    .map_err(|error| match error {
+        error @ jazz::groove::storage::Error::UnsupportedStorageCodecs { .. } => {
+            throw_unsupported_storage_codecs(env, &jazz::db::Error::from(error))
+        }
+        other => BindingError::from(napi_error(other)),
+    })
+}
+
+/// Throw a storage-format refusal as a JavaScript `Error` whose `message` is
+/// the core display text, whose `code` is `"unsupported_storage_codecs"`, and
+/// which carries `epoch`, `missing` and `unknown` (the codec-family lists) as
+/// own properties, so callers can detect it and wipe the store without parsing
+/// the message.
+///
+/// napi-rs builds a thrown error from only a code and a message, so this
+/// throws the complete object itself and returns the pending-exception status,
+/// which the generated wrapper leaves in place.
+fn throw_unsupported_storage_codecs(env: &Env, error: &jazz::db::Error) -> BindingError {
+    let Some(mismatch) = error.storage_codecs.as_ref() else {
+        return BindingError::from(napi_core_error(error));
+    };
+    let thrown = env
+        .create_error(napi::Error::new(
+            napi::Status::GenericFailure,
+            error.to_string(),
+        ))
+        .and_then(|mut object| {
+            object.set_named_property("code", error.code.as_str())?;
+            object.set_named_property("epoch", u32::from(mismatch.epoch))?;
+            object.set_named_property("missing", mismatch.missing.clone())?;
+            object.set_named_property("unknown", mismatch.unknown.clone())?;
+            env.throw(object)
+        });
+    match thrown {
+        Ok(()) => BindingError::from(napi::Error::from_status(napi::Status::PendingException)),
+        Err(_) => BindingError::from(napi_core_error(error)),
+    }
 }
 
 fn open_core_db<S>(

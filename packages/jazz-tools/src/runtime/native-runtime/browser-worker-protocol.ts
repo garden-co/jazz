@@ -3,6 +3,10 @@ import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
 import type { NativeSelfSignedClientProof } from "./native-codec.js";
+import {
+  UNSUPPORTED_STORAGE_CODECS_ERROR_CODE,
+  UnsupportedStorageCodecsError,
+} from "../unsupported-storage-codecs-error.js";
 
 /** Local lifecycle classification, never inferred from a relayed error's name or message. */
 export class BrowserWorkerUnresponsiveError extends Error {
@@ -20,6 +24,14 @@ export interface BrowserRelayError {
   stack?: string;
   /** Stable causal code when the originating error exposes a bounded string code. */
   code?: string;
+  /**
+   * Codec families of an `unsupported_storage_codecs` refusal: formats the
+   * build requires that the store lacks (`missing`) and formats the store
+   * declares that the build does not read (`unknown`). Present together, and
+   * only with that code.
+   */
+  missing?: string[];
+  unknown?: string[];
   cause?: unknown;
 }
 
@@ -27,6 +39,9 @@ export interface BrowserRelayError {
 export const BROWSER_RELAY_ERROR_MAX_CAUSE_DEPTH = 32;
 export const BROWSER_RELAY_ERROR_MAX_TOTAL_CHARS = 64 * 1024;
 export const BROWSER_RELAY_ERROR_MAX_CODE_CHARS = 128;
+/** Bounds on each codec list of a relayed storage-format refusal. */
+export const BROWSER_RELAY_ERROR_MAX_CODECS = 64;
+export const BROWSER_RELAY_ERROR_MAX_CODEC_CHARS = 128;
 
 const BROWSER_RELAY_ERROR_MAX_NAME_CHARS = 256;
 const BROWSER_RELAY_ERROR_MAX_MESSAGE_CHARS = 8 * 1024;
@@ -121,6 +136,22 @@ function serializeBrowserRelayErrorNode(
   if (code !== undefined && code.length <= budget.remaining) {
     serialized.code = consumeBrowserRelayString(code, BROWSER_RELAY_ERROR_MAX_CODE_CHARS, budget);
   }
+  // A storage-format refusal keeps its codec lists so the page can rebuild the
+  // typed error. Both lists travel whole or not at all; the code alone still
+  // identifies the refusal.
+  if (serialized.code === UNSUPPORTED_STORAGE_CODECS_ERROR_CODE) {
+    const missing = validBrowserRelayCodecs(readErrorProperty(value, "missing"));
+    const unknown = validBrowserRelayCodecs(readErrorProperty(value, "unknown"));
+    if (
+      missing !== undefined &&
+      unknown !== undefined &&
+      codecsLength(missing) + codecsLength(unknown) <= budget.remaining
+    ) {
+      budget.remaining -= codecsLength(missing) + codecsLength(unknown);
+      serialized.missing = [...missing];
+      serialized.unknown = [...unknown];
+    }
+  }
   return serialized;
 }
 
@@ -134,36 +165,67 @@ function deserializeBrowserRelayErrorNode(
   const stack = readErrorProperty(value, "stack");
   const code = readErrorProperty(value, "code");
   const validCode = validBrowserRelayCode(code);
+  const rawMissing = readErrorProperty(value, "missing");
+  const rawUnknown = readErrorProperty(value, "unknown");
+  const missing = validBrowserRelayCodecs(rawMissing);
+  const unknown = validBrowserRelayCodecs(rawUnknown);
+  const hasCodecs = rawMissing !== undefined || rawUnknown !== undefined;
   if (
     typeof name !== "string" ||
     typeof message !== "string" ||
     (stack !== undefined && typeof stack !== "string") ||
     (code !== undefined && validCode === undefined) ||
+    (hasCodecs &&
+      (validCode !== UNSUPPORTED_STORAGE_CODECS_ERROR_CODE ||
+        missing === undefined ||
+        unknown === undefined)) ||
     name.length > BROWSER_RELAY_ERROR_MAX_NAME_CHARS ||
     message.length > BROWSER_RELAY_ERROR_MAX_MESSAGE_CHARS ||
     (typeof stack === "string" && stack.length > BROWSER_RELAY_ERROR_MAX_STACK_CHARS) ||
     name.length +
       message.length +
       (typeof stack === "string" ? stack.length : 0) +
-      (typeof code === "string" ? code.length : 0) >
+      (typeof code === "string" ? code.length : 0) +
+      (missing === undefined ? 0 : codecsLength(missing)) +
+      (unknown === undefined ? 0 : codecsLength(unknown)) >
       budget.remaining
   ) {
     return null;
   }
-  const error = new Error(
-    consumeBrowserRelayString(message, BROWSER_RELAY_ERROR_MAX_MESSAGE_CHARS, budget),
+  const relayedMessage = consumeBrowserRelayString(
+    message,
+    BROWSER_RELAY_ERROR_MAX_MESSAGE_CHARS,
+    budget,
   );
-  error.name = consumeBrowserRelayString(name, BROWSER_RELAY_ERROR_MAX_NAME_CHARS, budget);
+  const relayedName = consumeBrowserRelayString(name, BROWSER_RELAY_ERROR_MAX_NAME_CHARS, budget);
+  let error: Error;
+  if (missing !== undefined && unknown !== undefined) {
+    // Class identity does not cross the MessagePort: rebuild the typed
+    // refusal from its stable code and codec lists. Its name and code are the
+    // class's own.
+    budget.remaining -= codecsLength(missing) + codecsLength(unknown);
+    error = new UnsupportedStorageCodecsError([...missing], [...unknown], relayedMessage);
+  } else {
+    error = new Error(relayedMessage);
+    error.name = relayedName;
+  }
   if (stack !== undefined) {
     error.stack = consumeBrowserRelayString(stack, BROWSER_RELAY_ERROR_MAX_STACK_CHARS, budget);
   }
   if (validCode !== undefined) {
-    Object.defineProperty(error, "code", {
-      configurable: true,
-      enumerable: true,
-      value: consumeBrowserRelayString(validCode, BROWSER_RELAY_ERROR_MAX_CODE_CHARS, budget),
-      writable: true,
-    });
+    const relayedCode = consumeBrowserRelayString(
+      validCode,
+      BROWSER_RELAY_ERROR_MAX_CODE_CHARS,
+      budget,
+    );
+    if (!(error instanceof UnsupportedStorageCodecsError)) {
+      Object.defineProperty(error, "code", {
+        configurable: true,
+        enumerable: true,
+        value: relayedCode,
+        writable: true,
+      });
+    }
   }
   return error;
 }
@@ -182,6 +244,23 @@ function validBrowserRelayCode(value: unknown): string | undefined {
     value.length <= BROWSER_RELAY_ERROR_MAX_CODE_CHARS
     ? value
     : undefined;
+}
+
+function validBrowserRelayCodecs(value: unknown): readonly string[] | undefined {
+  return Array.isArray(value) &&
+    value.length <= BROWSER_RELAY_ERROR_MAX_CODECS &&
+    value.every(
+      (codec) =>
+        typeof codec === "string" &&
+        codec.length > 0 &&
+        codec.length <= BROWSER_RELAY_ERROR_MAX_CODEC_CHARS,
+    )
+    ? (value as readonly string[])
+    : undefined;
+}
+
+function codecsLength(codecs: readonly string[]): number {
+  return codecs.reduce((total, codec) => total + codec.length, 0);
 }
 
 function readErrorProperty(value: unknown, property: string): unknown {
