@@ -56,7 +56,7 @@ function accountAuthErrorCode(error: unknown): string | undefined {
 
 /** Load a turn the user may read; any other turn is simply not found. */
 export async function requireTurn(db: Db, turnId: string) {
-  const turn = await db.one(app.turns.where({ id: turnId }), { tier: "global" });
+  const turn = await db.one(app.turns.where({ id: turnId }), { tier: "remote" });
   if (!turn) throw new AccessError("turn not found", 404);
   return turn;
 }

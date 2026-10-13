@@ -509,7 +509,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           TEST_SCHEMA,
         ),
         null,
-        "local",
+        "local-first",
       ),
     ).resolves.toEqual([
       {
@@ -982,7 +982,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const manager = new SubscriptionManager<WasmRow>();
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local-first",
+    );
     runtime.executeSubscription(handle, (delta: unknown) => {
       if (delta instanceof Error) throw delta;
       updates.push(
@@ -1040,7 +1044,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.unsubscribe(handle);
   });
 
-  it("publishes an empty local snapshot after initial evaluation for both propagation modes", async () => {
+  it("publishes an empty local snapshot after initial evaluation for local-first and local-only tiers", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
@@ -1056,7 +1060,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const defaultFull = runtime.createSubscription(
       JSON.stringify({ table: "todos" }),
       null,
-      "local",
+      "local-first",
     );
     runtime.executeSubscription(defaultFull, (delta: unknown) => defaultFullUpdates.push(delta));
     await waitFor(async () => defaultFullUpdates.length > 0 || undefined, "initial full snapshot");
@@ -1066,8 +1070,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const localOnly = runtime.createSubscription(
       JSON.stringify({ table: "todos" }),
       null,
-      "local",
-      JSON.stringify({ propagation: "local-only" }),
+      "local-only",
     );
     runtime.executeSubscription(localOnly, (delta: unknown) => localOnlyUpdates.push(delta));
     await waitFor(
@@ -1156,7 +1159,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const manager = new SubscriptionManager<WasmRow>();
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "blobs" }), null, "local");
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "blobs" }),
+      null,
+      "local-first",
+    );
     runtime.executeSubscription(handle, (delta: unknown) => {
       if (delta instanceof Error) throw delta;
       updates.push(
@@ -1314,7 +1321,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         const handle = runtime.createSubscription(
           JSON.stringify({ table: "todos" }),
           null,
-          "local",
+          "local-first",
         );
         runtime.executeSubscription(handle, (...args: unknown[]) => notifications.push(args));
         expect(notifications).toHaveLength(1);
@@ -1387,7 +1394,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const manager = new SubscriptionManager<WasmRow>();
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local-first",
+    );
     runtime.executeSubscription(handle, (delta: unknown) => {
       updates.push(
         manager.handleDelta(
@@ -1463,7 +1474,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceRows = await runtime.query(
       JSON.stringify({ table: "todos" }),
       aliceSession,
-      "local",
+      "local-first",
     );
     expect(aliceRows).toHaveLength(1);
     expect(aliceRows).toEqual([
@@ -1492,7 +1503,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceRowsAfterForeignOwnerInsert = await runtime.query(
       JSON.stringify({ table: "todos" }),
       aliceSession,
-      "local",
+      "local-first",
     );
     expect(aliceRowsAfterForeignOwnerInsert).toEqual(
       expect.arrayContaining([
@@ -1515,7 +1526,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceRowsAfterBobInsert = await runtime.query(
       JSON.stringify({ table: "todos" }),
       aliceSession,
-      "local",
+      "local-first",
     );
     expect(aliceRowsAfterBobInsert).toEqual(
       expect.arrayContaining([
@@ -1554,7 +1565,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       );
     const aliceDecodedUpdates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
 
-    const aliceHandle = runtime.createSubscription(query, aliceSession, "local");
+    const aliceHandle = runtime.createSubscription(query, aliceSession, "local-first");
     runtime.executeSubscription(aliceHandle, (delta: unknown) => {
       aliceUpdates.push(delta);
       aliceDecodedUpdates.push(decodeAliceDelta(delta));
@@ -1590,13 +1601,13 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
     ]);
 
-    await expect(runtime.query(query, aliceSession, "local")).resolves.toEqual(
+    await expect(runtime.query(query, aliceSession, "local-first")).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: aliceTodo.id }),
         expect.objectContaining({ id: bobTodo.id }),
       ]),
     );
-    await expect(runtime.query(query, bobSession, "local")).resolves.toEqual(
+    await expect(runtime.query(query, bobSession, "local-first")).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: aliceTodo.id }),
         expect.objectContaining({ id: bobTodo.id }),
@@ -1672,10 +1683,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     ]);
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local-first"),
     ).resolves.toEqual([expect.objectContaining({ id: aliceTodo.id })]);
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local-first"),
     ).resolves.toEqual([expect.objectContaining({ id: bobTodo.id })]);
 
     // This adapter's direct writes are advisory: capture both cross-identity
@@ -1688,10 +1699,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     ]);
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local-first"),
     ).resolves.toEqual([]);
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local-first"),
     ).resolves.toEqual([]);
   });
 
@@ -1747,7 +1758,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const rows = (await runtime.query(
       JSON.stringify({ table: "todos" }),
       bobSession,
-      "local",
+      "local-first",
       JSON.stringify({ transaction_id: transactionId }),
     )) as Array<{ id: string }>;
     expect(rows.map((row) => row.id).sort()).toEqual([aliceTodo.id, staged.id].sort());
@@ -1940,7 +1951,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
     ]);
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local-first"),
     ).resolves.toHaveLength(2);
 
     const aliceDenied = runtime.waitForTransaction(await committedTxId(aliceTodo), "global");
@@ -2026,7 +2037,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
       ]);
       await expect(
-        runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+        runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local-first"),
       ).resolves.toHaveLength(2);
 
       await expect(
@@ -2166,7 +2177,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const reader = openRuntime("reader", 32);
     const queryJson = JSON.stringify({ table: "todos" });
 
-    expect(await reader.query(queryJson, null, "local")).toEqual([]);
+    expect(await reader.query(queryJson, null, "local-first")).toEqual([]);
 
     const inserted = writer.insert("todos", {
       title: { type: "Text", value: "direct napi propagated edge row" },
@@ -2178,7 +2189,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     const propagatedRow = await waitFor(async () => {
-      const rows = (await reader.query(queryJson, null, "global")) as Array<{
+      const rows = (await reader.query(queryJson, null, "remote")) as Array<{
         id: string;
         table: string;
         values: unknown[];
@@ -2257,7 +2268,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       // not resolve with the reader's empty local state while the restarted
       // server is still delivering that receipt; callers should receive the
       // persisted row from this one read.
-      const rows = (await reader.query(queryJson, null, "global")) as Array<{
+      const rows = (await reader.query(queryJson, null, "remote")) as Array<{
         id: string;
         table: string;
         values: unknown[];
@@ -2331,7 +2342,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       const rows = (await reader.query(
         JSON.stringify({ table: "chats" }),
         bobSession,
-        "global",
+        "remote",
       )) as Array<{
         id: string;
         table: string;
@@ -2363,7 +2374,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       const rows = (await reader.query(
         JSON.stringify({ table: "messages" }),
         bobSession,
-        "global",
+        "remote",
       )) as Array<{
         id: string;
         table: string;

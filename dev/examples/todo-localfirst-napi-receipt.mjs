@@ -114,19 +114,19 @@ try {
     .wait({ tier: "global" });
 
   await waitFor(
-    async () => backend.one(app.todos.where({ id: inserted.id }), { tier: "global" }),
+    async () => backend.one(app.todos.where({ id: inserted.id }), { tier: "remote" }),
     "backend read after insert",
   );
 
   await db.update(app.todos, inserted.id, { done: true }).wait({ tier: "global" });
   await waitFor(async () => {
-    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "global" });
+    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "remote" });
     return row?.done === true ? row : null;
   }, "backend read after update");
 
   await db.delete(app.todos, inserted.id).wait({ tier: "global" });
   await waitFor(async () => {
-    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "global" });
+    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "remote" });
     return row === null ? true : null;
   }, "backend read after delete");
 
