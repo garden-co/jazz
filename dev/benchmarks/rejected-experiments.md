@@ -78,6 +78,23 @@ hosted or general product-performance receipt. Preserve the caller-owned
 discovery tradeoff for a separately justified performance change rather than
 coupling crypto lifecycle changes to correctness-fixture execution budgets.
 
+## E2EE group delivery observations (2026-10-13)
+
+Replacing the separate globally accepted delivery-observation transaction with
+one accepted-only local snapshot preserved remote preparation and the final
+authority/publication transaction. Against E15 at `af67f1e7fc`, two local
+repeats reduced five group files' summed test time from 121.14s to 113.02s
+(-6.7%); all 49 selected tests passed.
+
+The full TypeScript trial also included Better Auth fixture schema reuse.
+Both full runs passed 3,366 Node tests and 395 browser tests. Node changed from
+291.04s to 288.31s (-0.94%), while the consumer stage changed from 480.1s to
+485.2s (+1.06%). This did not establish a useful overall benefit, so the
+runtime change was removed; the simpler auth fixture change was retained
+separately. Fewer observation commits alone do not justify repeating this
+trial. These are local correctness-suite measurements, not hosted product
+performance evidence.
+
 ## Before building another trial
 
 1. Identify the actual allocation/copy/work site with a current profile and code walk.
