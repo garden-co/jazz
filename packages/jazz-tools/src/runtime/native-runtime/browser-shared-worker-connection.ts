@@ -9,6 +9,7 @@ import {
   type BrowserSharedWorkerConnectRequest,
   type BrowserSharedWorkerConnectResponse,
   type BrowserSharedWorkerBootstrapCancelRequest,
+  type BrowserForegroundNodeLeaseProbeRequest,
   type BrowserForegroundNodeLeaseAcquireResponse,
   type BrowserForegroundNodeLeasePortEvent,
   type BrowserForegroundNodeLeasePortRequest,
@@ -84,6 +85,18 @@ type ForegroundNodeLeaseAttemptOutcome =
 const pendingForegroundLeaseCleanups = new Map<string, symbol>();
 
 /**
+ * Ask a newly started worker to fetch, compile and instantiate its WASM while the lease,
+ * IndexedDB admission and the page's own setup run. Only URL-addressed assets
+ * are prefetched: in-memory modules are never cloned twice.
+ */
+function workerWasmPrefetch(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): BrowserForegroundNodeLeaseProbeRequest["wasmPrefetch"] {
+  if (runtimeSources?.wasmModule || runtimeSources?.wasmSource) return undefined;
+  return { runtimeSources };
+}
+
+/**
  * The one physical SharedWorker realm that may own a browser persistence root.
  *
  * Authentication is intentionally not a part of this name. An explicitly
@@ -122,6 +135,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     readonly node: Uint8Array,
     readonly confirmedTxTime: bigint,
     private readonly leaseId: string,
+    readonly workerRealmId?: string,
   ) {}
 
   static async acquire(
@@ -164,6 +178,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
           cleanupKey,
           crypto.randomUUID(),
           remainingAdmissionMs,
+          workerWasmPrefetch(runtimeSources),
         );
         if (outcome.type === "ready") return outcome.lease;
         if (outcome.type === "worker-closing") {
@@ -214,6 +229,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     cleanupKey: string,
     attemptId: string,
     timeoutMs: number,
+    wasmPrefetch?: BrowserForegroundNodeLeaseProbeRequest["wasmPrefetch"],
   ): Promise<ForegroundNodeLeaseAttemptOutcome> {
     const port = worker.port;
     return new Promise<ForegroundNodeLeaseAttemptOutcome>((resolve, reject) => {
@@ -315,6 +331,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
           message.node.slice(),
           BigInt(message.confirmedTxTime),
           message.leaseId,
+          message.workerRealmId,
         );
         lease.worker = worker;
         lease.port = port;
@@ -333,7 +350,8 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
       port.postMessage({
         type: "probe-foreground-node-lease-worker",
         attemptId,
-      });
+        ...(wasmPrefetch ? { wasmPrefetch } : {}),
+      } satisfies BrowserForegroundNodeLeaseProbeRequest);
     });
   }
 
@@ -373,6 +391,12 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
   }
 
   releaseAfterStorageReset(reason: Error): void {
+    this.failFinish(reason);
+  }
+
+  releaseAfterWorkerReplacement(reason: Error): void {
+    // The foreground has quiesced and the fenced successor owns persistence.
+    // Never return this identity as reusable through a dead predecessor port.
     this.failFinish(reason);
   }
 
@@ -722,6 +746,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         });
       }
     });
+  }
+
+  getWorkerRealmId(): string | undefined {
+    return this.connection?.getWorkerRealmId();
   }
 
   ready(): Promise<void> {

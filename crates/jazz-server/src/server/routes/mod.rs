@@ -148,10 +148,7 @@ mod tests {
     use crate::server::{
         MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerBuilder, ServerState, StorageBackend,
     };
-    use jazz::wire::{
-        FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello,
-        WirePeerRole, decode_frame, encode_frame,
-    };
+    use jazz::wire::{WireFrame, WireHello, WirePeerRole, decode_frame, encode_frame};
 
     use crate::server::catalogue::ConnectionSchemaDiagnostics;
     use axum::body;
@@ -1577,10 +1574,7 @@ mod tests {
         ))
         .await
         .expect("send ws auth prelude");
-        let hello = WireFrame::Hello(WireHello::current(
-            WirePeerRole::Client,
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        ));
+        let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, 0));
         let encoded = vec![encode_frame(&hello).expect("encode hello")];
         let batch = postcard::to_allocvec(&encoded).expect("encode ws batch");
         ws.send(WsMessage::Binary(batch.into()))
@@ -1602,10 +1596,7 @@ mod tests {
             panic!("expected server hello");
         };
         assert_eq!(server_hello.role, WirePeerRole::Core);
-        assert_eq!(
-            server_hello.features,
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS
-        );
+        assert_eq!(server_hello.features, 0);
 
         let _ = ws.close(None).await;
         server_task.abort();

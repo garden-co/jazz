@@ -648,8 +648,6 @@ pub(super) struct UpstreamConnectionState {
     /// this receiver no longer holds. A second such update for the same view
     /// before it settles is a protocol error rather than a resend loop.
     pub(super) missing_body_resends: BTreeSet<SubscriptionKey>,
-    pub(super) scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalTime>,
-    pub(super) scope_receipts: BTreeMap<SubscriptionKey, AuthorizationScopeReceipt>,
     pub(super) expected_scope_authority: Option<AuthorityContext>,
     pub(super) scope_lease_manager: AuthorizationScopeLeaseManager,
     /// Commit units sent on this link, named by the read barrier ahead of
@@ -809,9 +807,6 @@ pub(super) struct SubscriberConnectionState {
     pub(super) deferred_subscribe_rejections: VecDeque<PendingSubscriberControlResponse>,
     pub(super) pending_catalogue_subscriptions:
         BTreeMap<SubscriptionKey, PendingCatalogueSubscription>,
-    pub(super) scope_purposes: BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
-    pub(super) scope_aggregates:
-        BTreeMap<crate::protocol::AuthorizationSupportScopeKey, AuthorityScopeAggregate>,
     pub(super) authority_scope_hydrations:
         BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ServedAuthorizationScopeHydration>,
     pub(super) authority_scope_hydration_count: u64,
@@ -986,12 +981,9 @@ where
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<bool, Error> {
         let connection_epoch = self.connection_epoch;
-        let identity = match &self.link {
-            ConnectionLink::Subscriber(SubscriberConnectionState { ingest_context, .. }) => {
-                ingest_context.identity
-            }
-            ConnectionLink::Upstream(_) => return Ok(false),
-        };
+        if !matches!(&self.link, ConnectionLink::Subscriber(_)) {
+            return Ok(false);
+        }
         let session_claim_binding = self.subscriber_session_claim_binding();
         let current_revision = self.subscriber_session_claim_revision();
         if self.observed_session_claim_revision.get() == current_revision {
@@ -1003,8 +995,6 @@ where
             served,
             coverage_groups,
             upstream_subscriptions,
-            scope_purposes,
-            scope_aggregates,
             serve_dirty,
             ..
         }) = &mut self.link
@@ -1408,47 +1398,6 @@ where
                     maintained_subscription,
                     &mut update,
                 );
-                let prior_scope = scope_purposes.get(&subscription).cloned();
-                let refreshed_scope = (binding_origin
-                    == CoveragePolicyBindingOrigin::DirectAdmitted)
-                    .then(|| {
-                        prior_scope.as_ref().and_then(|prior| {
-                            refresh_authorized_scope_purpose(
-                                &self.node.borrow(),
-                                identity,
-                                &session_claim_binding.as_ref().expect("subscriber claims").1,
-                                subscription,
-                                &shape,
-                                &binding,
-                                &prior,
-                            )
-                        })
-                    })
-                    .flatten();
-                if let Some(refreshed) = &refreshed_scope {
-                    move_scope_aggregate_member(
-                        scope_aggregates,
-                        prior_scope.as_ref(),
-                        refreshed,
-                        subscription,
-                    );
-                    scope_purposes.insert(subscription, refreshed.clone());
-                } else if binding_origin == CoveragePolicyBindingOrigin::DirectAdmitted
-                    && let Some(prior) = scope_purposes.remove(&subscription)
-                {
-                    remove_scope_aggregate_member(scope_aggregates, &prior.key, subscription);
-                }
-                let receipt = refreshed_scope.as_ref().and_then(|purpose| {
-                    aggregate_authorization_scope_receipt_for_view(
-                        scope_aggregates,
-                        &self.node.borrow(),
-                        peer,
-                        identity,
-                        connection_epoch,
-                        purpose,
-                        &update,
-                    )
-                });
                 send_subscriber_with_sync_context(
                     &self.node,
                     peer,
@@ -1462,15 +1411,6 @@ where
                     .expect("claim-refresh coverage group remains registered")
                     .pending_initial_subscribers
                     .remove(&subscription);
-                if let Some((subscription, receipt)) = receipt {
-                    queue_direct_control(
-                        &mut self.pending_control_responses,
-                        SyncMessage::AuthorizationScopeReceipt {
-                            subscription,
-                            receipt,
-                        },
-                    );
-                }
             }
             // This rehydrate is the replacement opening snapshot for every
             // successfully sent usage in the group. In particular, a claim
@@ -1548,20 +1488,6 @@ where
         peer.scope_relay_binding_for_test()
     }
 
-    /// Return a receipt only after this connection applied its matching
-    /// authorization-support view. A reconnect creates a new connection and
-    /// therefore has no receipt to reuse.
-    pub fn authorization_scope_receipt(
-        &self,
-        subscription: SubscriptionKey,
-    ) -> Option<&AuthorizationScopeReceipt> {
-        let ConnectionLink::Upstream(UpstreamConnectionState { scope_receipts, .. }) = &self.link
-        else {
-            return None;
-        };
-        scope_receipts.get(&subscription)
-    }
-
     /// Extract this subscriber connection's resume cursor for a reconnect.
     pub fn take_resume_cursor(&mut self) -> Option<ResumeCursor> {
         let ConnectionLink::Subscriber(SubscriberConnectionState {
@@ -1597,13 +1523,9 @@ where
             &self.query_runtime_waker,
         );
         let session_claim_binding = self.subscriber_session_claim_binding();
-        let connection_epoch = self.connection_epoch;
         let ConnectionLink::Subscriber(SubscriberConnectionState {
             peer,
             coverage_groups,
-            ingest_context,
-            scope_purposes,
-            scope_aggregates,
             serve_dirty,
             ..
         }) = &mut self.link
@@ -1708,40 +1630,6 @@ where
                     &mut update,
                 );
                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
-                let prior_scope = scope_purposes.get(&subscription).cloned();
-                let refreshed_scope = prior_scope.as_ref().and_then(|prior| {
-                    refresh_authorized_scope_purpose(
-                        &self.node.borrow(),
-                        ingest_context.identity,
-                        &session_claim_binding.as_ref().expect("subscriber claims").1,
-                        subscription,
-                        &shape,
-                        &binding,
-                        &prior,
-                    )
-                });
-                if let Some(refreshed) = &refreshed_scope {
-                    move_scope_aggregate_member(
-                        scope_aggregates,
-                        prior_scope.as_ref(),
-                        refreshed,
-                        subscription,
-                    );
-                    scope_purposes.insert(subscription, refreshed.clone());
-                } else if let Some(prior) = scope_purposes.remove(&subscription) {
-                    remove_scope_aggregate_member(scope_aggregates, &prior.key, subscription);
-                }
-                let receipt = refreshed_scope.as_ref().and_then(|purpose| {
-                    aggregate_authorization_scope_receipt_for_view(
-                        scope_aggregates,
-                        &self.node.borrow(),
-                        peer,
-                        ingest_context.identity,
-                        connection_epoch,
-                        purpose,
-                        &update,
-                    )
-                });
                 send_subscriber_with_sync_context(
                     &self.node,
                     peer,
@@ -1750,15 +1638,6 @@ where
                     &self.downstream_fates,
                     update,
                 )?;
-                if let Some((subscription, receipt)) = receipt {
-                    queue_direct_control(
-                        &mut self.pending_control_responses,
-                        SyncMessage::AuthorizationScopeReceipt {
-                            subscription,
-                            receipt,
-                        },
-                    );
-                }
             }
         }
         *serve_dirty = true;
@@ -1945,8 +1824,6 @@ where
                 deferred_uploads,
                 retry_later_attempts,
                 missing_body_resends,
-                scope_view_cuts,
-                scope_receipts,
                 expected_scope_authority,
                 scope_lease_manager,
                 read_barrier,
@@ -2856,7 +2733,6 @@ where
                                     }
                                     awaiting_support_snapshots.remove(&subscription);
                                 }
-                                scope_receipts.remove(&subscription);
                                 #[cfg(not(feature = "sync-autopsy"))]
                                 let _ = subscription;
                                 let missing = {
@@ -2902,7 +2778,6 @@ where
                                         message,
                                         authority_receipt_eligible,
                                     )?;
-                                    scope_view_cuts.insert(subscription, settled_through);
                                     #[cfg(feature = "sync-autopsy")]
                                     sync_autopsy::record(format!(
                                         "upstream applied view update {}",
@@ -2974,13 +2849,6 @@ where
                                         reason,
                                     );
                                 }
-                            }
-                            SyncMessage::PermissionAdviceResponse { request_id, advice } => {
-                                // Direct answers were the pre-Phase-3 protocol.
-                                // They have no receipt-bound evidence and must
-                                // never influence a modern client.
-                                let _ = (request_id, advice);
-                                drop_peer_request(&self.node);
                             }
                             SyncMessage::AuthorizationScopeView {
                                 request_id,
@@ -3109,7 +2977,6 @@ where
                                     view.into_view_update(),
                                     authority_receipt_eligible,
                                 )?;
-                                scope_view_cuts.insert(subscription, settled_through);
                                 request.applied_clauses.insert(
                                     clause_index,
                                     (subscription, settled_through, authorization_progress),
@@ -3422,25 +3289,6 @@ where
                                         }
                                     }
                                 }
-                            }
-                            SyncMessage::AuthorizationScopeReceipt {
-                                subscription,
-                                receipt,
-                            } => {
-                                let Some(expected) = expected_scope_authority else {
-                                    drop_peer_request(&self.node);
-                                    continue;
-                                };
-                                if !authorization_scope_receipt_matches_transport_context(
-                                    &receipt,
-                                    *expected,
-                                    expected.link,
-                                    scope_view_cuts.get(&subscription).copied(),
-                                ) {
-                                    drop_peer_request(&self.node);
-                                    continue;
-                                }
-                                scope_receipts.insert(subscription, receipt);
                             }
                             SyncMessage::RetryLater { tx_id, awaiting } => {
                                 // The authority stored nothing for this write
@@ -3780,8 +3628,6 @@ where
                 shape_registrations,
                 deferred_subscribe_rejections,
                 pending_catalogue_subscriptions,
-                scope_purposes,
-                scope_aggregates,
                 authority_scope_hydrations,
                 authority_scope_hydration_count,
                 serve_dirty,
@@ -3883,13 +3729,6 @@ where
                                 peer.forget_subscription_with_node(&mut node, subscription);
                             }
                             served.remove(&subscription);
-                            if let Some(purpose) = scope_purposes.remove(&subscription) {
-                                remove_scope_aggregate_member(
-                                    scope_aggregates,
-                                    &purpose.key,
-                                    subscription,
-                                );
-                            }
                         }
                     }
                 }
@@ -4033,10 +3872,6 @@ where
                         (message, lease, receipts_validated)
                     };
                     if let Some(lease)=&lease { received_leases.push(lease.clone()); }
-                    // Authorization support is authority-owned in Phase 3.
-                    // A subscriber must never be able to smuggle a support
-                    // purpose alongside its own shape/binding subscription.
-                    let scope_purpose: Option<crate::protocol::AuthorizationScopePurpose> = None;
                     if subscriber_inbound_message_is_authority_only(
                         &message,
                         *ingest_context,
@@ -4196,13 +4031,8 @@ where
                             }
                             continue;
                         }
-                        // Legacy direct answers and caller-authored support
-                        // subscriptions are deliberately fail-closed.
-                        SyncMessage::PermissionAdviceRequest { .. }
-                        | SyncMessage::PermissionAdviceResponse { .. }
-                        | SyncMessage::AuthorizationScopeSubscribe { .. }
-                        | SyncMessage::AuthorizationScopeReceipt { .. }
-                        | SyncMessage::AuthorizationScopeView { .. }
+                        // Authority-only messages from subscribers are rejected.
+                        SyncMessage::AuthorizationScopeView { .. }
                         | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
                         | SyncMessage::AuthorizationScopeUnavailable { .. }
                         | SyncMessage::AuthorizationScopeDecision { .. } => {
@@ -4612,71 +4442,6 @@ where
                                     SubscriberShapeRegistration::Registered(opts.clone()),
                                 );
                             }
-                            let scope_purpose = if let Some(purpose) = scope_purpose {
-                                let expected_result = self
-                                    .node
-                                    .borrow()
-                                    .authorization_support_scope_for_session(
-                                        ingest_context.identity,
-                                        Some(&session_claim_binding
-                                            .as_ref()
-                                            .expect("subscriber claims")
-                                            .1),
-                                        &purpose.action,
-                                    );
-                                let expected = match expected_result {
-                                    Ok(expected) => expected,
-                                    Err(_) => {
-                                        #[cfg(any(test, feature = "testing"))]
-                                        crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                        drop_peer_request(&self.node);
-                                        return Ok::<bool, Error>(true);
-                                    }
-                                };
-                                let exact_support = subscription.shape_id == shape.shape_id()
-                                    && subscription.binding_id == binding.binding_id()
-                                    && authorization_scope_support_options_match(
-                                        &expected.options,
-                                        &opts,
-                                        subscription,
-                                    )
-                                    && expected.subscriptions.iter().any(
-                                        |(expected_shape, expected_binding)| {
-                                            expected_shape.shape_id() == shape.shape_id()
-                                                && expected_binding.binding_id()
-                                                    == binding.binding_id()
-                                        },
-                                    );
-                                if !exact_support {
-                                    #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                    drop_peer_request(&self.node);
-                                    return Ok::<bool, Error>(true);
-                                }
-                                Some(AuthorizedScopePurpose {
-                                    key: expected.key,
-                                    operation: expected.operation,
-                                    action: purpose.action,
-                                    expected_support: expected
-                                        .subscriptions
-                                        .iter()
-                                        .map(|(shape, binding)| {
-                                            (shape.shape_id(), binding.binding_id())
-                                        })
-                                        .collect(),
-                                })
-                            } else {
-                                None
-                            };
-                            if let Some(purpose) = &scope_purpose
-                                && let Some(existing) = scope_purposes.get(&subscription)
-                                && existing != purpose
-                            {
-                                #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                drop_peer_request(&self.node);
-                                return Ok::<bool, Error>(true);
-                            }
                             let supported = {
                                 let mut node = self.node.lock().await;
                                 let mut node = node.scoped_active_session_claims(
@@ -4945,27 +4710,6 @@ where
                                             node.has_settled_authority_result(&key)
                                         })
                                     };
-                            if let Some(purpose) = scope_purpose {
-                                let aggregate = scope_aggregates
-                                    .entry(purpose.key.clone())
-                                    .or_insert_with(|| {
-                                        AuthorityScopeAggregate::new(
-                                            purpose.expected_support.clone(),
-                                        )
-                                    });
-                                if aggregate.expected_support() != &purpose.expected_support
-                                    || !aggregate.register(
-                                        subscription,
-                                        (shape.shape_id(), binding.binding_id()),
-                                    )
-                                {
-                                    #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                    drop_peer_request(&self.node);
-                                    return Ok::<bool, Error>(true);
-                                }
-                                scope_purposes.insert(subscription, purpose);
-                            }
                             let group =
                                 coverage_groups.entry(coverage.clone()).or_insert_with(|| {
                                     CoverageGroup {
@@ -5048,18 +4792,6 @@ where
                                     summarize_sync_message(&update)
                                 ));
                                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
-                                let receipt =
-                                    scope_purposes.get(&subscription).and_then(|purpose| {
-                                        aggregate_authorization_scope_receipt_for_view(
-                                            scope_aggregates,
-                                            &self.node.borrow(),
-                                            peer,
-                                            ingest_context.identity,
-                                            connection_epoch,
-                                            purpose,
-                                            &update,
-                                        )
-                                    });
                                 send_subscriber_with_sync_context(
                                     &self.node,
                                     peer,
@@ -5068,16 +4800,6 @@ where
                                     &self.downstream_fates,
                                     update,
                                 )?;
-                                if let Some((subscription, receipt)) = receipt {
-                                    queue_direct_control(&mut self.pending_control_responses,
-                                        SyncMessage::AuthorizationScopeReceipt {
-                                            subscription,
-                                            receipt,
-                                        },
-                                    );
-                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                    return Ok(true);
-                                }
                                 sent_view_update = true;
                             }
                             if first_subscriber {
@@ -5130,13 +4852,6 @@ where
                                 node.apply_unsubscribe(subscription);
                             }
                             drop(node);
-                            if let Some(purpose) = scope_purposes.remove(&subscription) {
-                                remove_scope_aggregate_member(
-                                    scope_aggregates,
-                                    &purpose.key,
-                                    subscription,
-                                );
-                            }
                             if let Some(coverage) = served.remove(&subscription) {
                                 if let Some(group) = coverage_groups.get_mut(&coverage) {
                                     group.subscribers.remove(&subscription);
@@ -5573,8 +5288,6 @@ where
                                             peer,
                                             served,
                                             coverage_groups,
-                                            scope_purposes,
-                                            scope_aggregates,
                                             &self.relay_upstream_subscription_owners,
                                             upstream_subscriptions,
                                             connection_epoch,
@@ -5596,8 +5309,6 @@ where
                                             peer,
                                             served,
                                             coverage_groups,
-                                            scope_purposes,
-                                            scope_aggregates,
                                             &self.relay_upstream_subscription_owners,
                                             upstream_subscriptions,
                                             connection_epoch,
@@ -5637,19 +5348,7 @@ where
                                     stamp_subscriber_opening_state(&self.node, peer, &mut sibling_update);
                                     group.pending_incremental_updates.push_back((sibling, sibling_update));
                                 }
-                                while let Some((sibling, sibling_update)) = group.pending_incremental_updates.front().cloned() {
-                                    let receipt =
-                                        scope_purposes.get(&sibling).and_then(|purpose| {
-                                            aggregate_authorization_scope_receipt_for_view(
-                                                scope_aggregates,
-                                                &self.node.borrow(),
-                                                peer,
-                                                ingest_context.identity,
-                                                connection_epoch,
-                                                purpose,
-                                                &sibling_update,
-                                            )
-                                        });
+                                while let Some((_, sibling_update)) = group.pending_incremental_updates.front().cloned() {
                                     if let Err(error) = send_prepared_subscriber_with_sync_context(
                                         &self.node,
                                         peer,
@@ -5665,15 +5364,6 @@ where
                                         return Err(error);
                                     }
                                     group.pending_incremental_updates.pop_front();
-                                    if let Some((subscription, receipt)) = receipt {
-                                        queue_direct_control(
-                                            &mut self.pending_control_responses,
-                                            SyncMessage::AuthorizationScopeReceipt {
-                                                subscription,
-                                                receipt,
-                                            },
-                                        );
-                                    }
                                     sent_view_update = true;
                                 }
                             }
@@ -5739,8 +5429,6 @@ where
                                         peer,
                                         served,
                                         coverage_groups,
-                                        scope_purposes,
-                                        scope_aggregates,
                                         &self.relay_upstream_subscription_owners,
                                         upstream_subscriptions,
                                         connection_epoch,
@@ -5761,8 +5449,6 @@ where
                                         peer,
                                         served,
                                         coverage_groups,
-                                        scope_purposes,
-                                        scope_aggregates,
                                         &self.relay_upstream_subscription_owners,
                                         upstream_subscriptions,
                                         connection_epoch,
@@ -5789,17 +5475,6 @@ where
                             };
                             self.last_resume_bytes =
                                 Some(serialized_sync_message_len(&update));
-                            let receipt = scope_purposes.get(&subscription).and_then(|purpose| {
-                                aggregate_authorization_scope_receipt_for_view(
-                                    scope_aggregates,
-                                    &self.node.borrow(),
-                                    peer,
-                                    ingest_context.identity,
-                                    connection_epoch,
-                                    purpose,
-                                    &update,
-                                )
-                            });
                             // Keep the exact generated opening until the semantic transport
                             // accepts it. Rehydrating on retry would advance its receipt.
                             // Backpressure hands the opening back, so no copy is held
@@ -5818,16 +5493,6 @@ where
                             }
                             group.pending_initial_update = None;
                             group.pending_initial_subscribers.remove(&subscription);
-                            if let Some((subscription, receipt)) = receipt {
-                                queue_direct_control(&mut self.pending_control_responses,
-                                    SyncMessage::AuthorizationScopeReceipt {
-                                        subscription,
-                                        receipt,
-                                    },
-                                );
-                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                return Ok(true);
-                            }
                             sent_view_update = true;
                             established_subscribers.insert(subscription);
                         }
@@ -5946,19 +5611,8 @@ where
                             }
                         }
                         }
-                        while let Some((subscription, update)) = group.pending_incremental_updates.front().cloned() {
-                                let receipt =
-                                    scope_purposes.get(&subscription).and_then(|purpose| {
-                                        aggregate_authorization_scope_receipt_for_view(
-                                            scope_aggregates,
-                                            &self.node.borrow(),
-                                            peer,
-                                            ingest_context.identity,
-                                            connection_epoch,
-                                            purpose,
-                                            &update,
-                                        )
-                                    });
+                        while let Some((_, update)) = group.pending_incremental_updates.front().cloned() {
+
                                 #[cfg(feature = "sync-autopsy")]
                                 sync_autopsy::record(format!(
                                     "subscriber send group delta {}",
@@ -5979,16 +5633,6 @@ where
                                     return Err(error);
                                 }
                                 group.pending_incremental_updates.pop_front();
-                                if let Some((subscription, receipt)) = receipt {
-                                    queue_direct_control(&mut self.pending_control_responses,
-                                        SyncMessage::AuthorizationScopeReceipt {
-                                            subscription,
-                                            receipt,
-                                        },
-                                    );
-                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                    return Ok(true);
-                                }
                                 sent_view_update = true;
                         }
                     }
@@ -6746,90 +6390,6 @@ where
     Ok(())
 }
 
-pub(super) fn authorization_progress_for_view_receipt(
-    peer_payload_inventory: &crate::protocol::PeerPayloadInventory,
-    usage_site_progress: u64,
-) -> u64 {
-    peer_payload_inventory
-        .authorization_progress
-        .unwrap_or(usage_site_progress)
-}
-
-fn authorization_scope_receipt_for_view<S>(
-    node: &NodeState<S>,
-    peer: &PeerState,
-    link_identity: AuthorSubject,
-    connection_epoch: u64,
-    purpose: &AuthorizedScopePurpose,
-    update: &SyncMessage,
-) -> Option<(SubscriptionKey, AuthorizationScopeReceipt)>
-where
-    S: OrderedKvStorage,
-{
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        subscription,
-        settled_through,
-        peer_payload_inventory,
-        ..
-    }) = update
-    else {
-        return None;
-    };
-    Some((
-        *subscription,
-        AuthorizationScopeReceipt {
-            key: purpose.key.clone(),
-            authority: *node.node_uuid().as_bytes(),
-            link: link_identity,
-            authority_epoch: connection_epoch,
-            claims_revision: node.session_claim_revision(link_identity),
-            policy_epoch: node.active_catalogue_seq(),
-            settled_through: *settled_through,
-            authorization_progress: authorization_progress_for_view_receipt(
-                peer_payload_inventory,
-                peer.authorization_progress_for_subscription(*subscription),
-            ),
-        },
-    ))
-}
-
-fn aggregate_authorization_scope_receipt_for_view<S>(
-    aggregates: &mut BTreeMap<
-        crate::protocol::AuthorizationSupportScopeKey,
-        AuthorityScopeAggregate,
-    >,
-    node: &NodeState<S>,
-    peer: &PeerState,
-    link_identity: AuthorSubject,
-    connection_epoch: u64,
-    purpose: &AuthorizedScopePurpose,
-    update: &SyncMessage,
-) -> Option<(SubscriptionKey, AuthorizationScopeReceipt)>
-where
-    S: OrderedKvStorage,
-{
-    let (subscription, mut receipt) = authorization_scope_receipt_for_view(
-        node,
-        peer,
-        link_identity,
-        connection_epoch,
-        purpose,
-        update,
-    )?;
-    let aggregate = aggregates.get_mut(&purpose.key)?;
-    if aggregate.expected_support() != &purpose.expected_support {
-        return None;
-    }
-    let (settled_through, authorization_progress) = aggregate.apply(
-        subscription,
-        receipt.settled_through,
-        receipt.authorization_progress,
-    )?;
-    receipt.settled_through = settled_through;
-    receipt.authorization_progress = authorization_progress;
-    Some((subscription, receipt))
-}
-
 /// Every support clause must be current in both dimensions.  They deliberately
 /// have independent lower bounds: cuts and authorization generations do not
 /// form a lexicographically ordered capability.
@@ -6865,69 +6425,6 @@ pub(super) fn authorization_scope_receipt_matches_transport_context(
         && applied_cut.is_some_and(|cut| cut >= receipt.settled_through)
 }
 
-/// Scope support is authority-current.  Keep this separate from generic shape
-/// admission so a matching query identity cannot silently substitute a branch,
-/// snapshot, or local-tier view for the support proof it is meant to hydrate.
-pub(super) fn authorization_scope_support_options_match(
-    expected: &RegisterShapeOptions,
-    actual: &RegisterShapeOptions,
-    subscription: SubscriptionKey,
-) -> bool {
-    actual == expected && subscription.read_view == expected.read_view_key()
-}
-
-fn move_scope_aggregate_member(
-    aggregates: &mut BTreeMap<
-        crate::protocol::AuthorizationSupportScopeKey,
-        AuthorityScopeAggregate,
-    >,
-    prior: Option<&AuthorizedScopePurpose>,
-    refreshed: &AuthorizedScopePurpose,
-    subscription: SubscriptionKey,
-) {
-    if let Some(prior) = prior
-        && prior.key != refreshed.key
-        && let Some(previous) = aggregates.get_mut(&prior.key)
-    {
-        previous.forget(subscription);
-        if previous.has_no_members() {
-            aggregates.remove(&prior.key);
-        }
-    }
-    let aggregate = aggregates
-        .entry(refreshed.key.clone())
-        .or_insert_with(|| AuthorityScopeAggregate::new(refreshed.expected_support.clone()));
-    if aggregate.expected_support() == &refreshed.expected_support {
-        // A changed scope identity must never reuse the old support cut.
-        let _ = aggregate.register(
-            subscription,
-            (subscription.shape_id, subscription.binding_id),
-        );
-    }
-}
-
-/// Forget a support subscription when its authority-derived purpose ceases to
-/// exist.  In particular, do not retain an applied cut across a policy/claims
-/// transition that later returns to the same scope key.
-pub(super) fn remove_scope_aggregate_member(
-    aggregates: &mut BTreeMap<
-        crate::protocol::AuthorizationSupportScopeKey,
-        AuthorityScopeAggregate,
-    >,
-    key: &crate::protocol::AuthorizationSupportScopeKey,
-    subscription: SubscriptionKey,
-) {
-    let empty = if let Some(aggregate) = aggregates.get_mut(key) {
-        aggregate.forget(subscription);
-        aggregate.has_no_members()
-    } else {
-        false
-    };
-    if empty {
-        aggregates.remove(key);
-    }
-}
-
 /// Undo a served usage-site admission that failed before its opening reset was
 /// accepted. A coverage group owns shared canonical state, so preserve it for
 /// siblings while removing every per-usage registration. If this was the last
@@ -6937,11 +6434,6 @@ fn rollback_rejected_subscriber_admission<S>(
     peer: &mut PeerState,
     served: &mut BTreeMap<SubscriptionKey, CoverageKey>,
     coverage_groups: &mut BTreeMap<CoverageKey, CoverageGroup>,
-    scope_purposes: &mut BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
-    scope_aggregates: &mut BTreeMap<
-        crate::protocol::AuthorizationSupportScopeKey,
-        AuthorityScopeAggregate,
-    >,
     relay_upstream_subscription_owners: &RelayUpstreamSubscriptionOwners,
     upstream_subscriptions: &PendingUpstreamCommands,
     connection_epoch: u64,
@@ -6952,9 +6444,6 @@ fn rollback_rejected_subscriber_admission<S>(
     let Some(coverage) = served.remove(&subscription) else {
         return;
     };
-    if let Some(purpose) = scope_purposes.remove(&subscription) {
-        remove_scope_aggregate_member(scope_aggregates, &purpose.key, subscription);
-    }
 
     let Some(group) = coverage_groups.get_mut(&coverage) else {
         // Admission always installs the group before `served`; avoid retaining
@@ -7030,43 +6519,6 @@ fn rollback_rejected_subscriber_admission<S>(
     if !open_was_pending {
         pending.push(PendingUpstreamCommand::Unsubscribe(upstream_subscription));
     }
-}
-
-fn refresh_authorized_scope_purpose<S>(
-    node: &NodeState<S>,
-    link_identity: AuthorSubject,
-    session_claims: &BTreeMap<String, Value>,
-    subscription: SubscriptionKey,
-    shape: &ValidatedQuery,
-    binding: &Binding,
-    prior: &AuthorizedScopePurpose,
-) -> Option<AuthorizedScopePurpose>
-where
-    S: OrderedKvStorage,
-{
-    let expected = node
-        .authorization_support_scope_for_session(link_identity, Some(session_claims), &prior.action)
-        .ok()?;
-    let exact_support = subscription.shape_id == shape.shape_id()
-        && subscription.binding_id == binding.binding_id()
-        && subscription.read_view == expected.options.read_view_key()
-        && expected
-            .subscriptions
-            .iter()
-            .any(|(expected_shape, expected_binding)| {
-                expected_shape.shape_id() == shape.shape_id()
-                    && expected_binding.binding_id() == binding.binding_id()
-            });
-    exact_support.then_some(AuthorizedScopePurpose {
-        key: expected.key,
-        operation: expected.operation,
-        action: prior.action.clone(),
-        expected_support: expected
-            .subscriptions
-            .iter()
-            .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
-            .collect(),
-    })
 }
 
 fn query_root_filters_reference_id(query: &Query) -> bool {
@@ -7220,18 +6672,6 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
         SyncMessage::CommitUnit { tx, .. } => format!("CommitUnit tx={:?}", tx.tx_id),
         SyncMessage::FateUpdate { tx_id, fate, .. } => {
             format!("FateUpdate tx={tx_id:?} fate={fate:?}")
-        }
-        SyncMessage::PermissionAdviceRequest { request_id, action } => {
-            let (kind, table) = match action {
-                PermissionAdviceAction::Insert { table, .. } => ("insert", table),
-                PermissionAdviceAction::Read { table, .. } => ("read", table),
-                PermissionAdviceAction::Update { table, .. } => ("update", table),
-                PermissionAdviceAction::Delete { table, .. } => ("delete", table),
-            };
-            format!("PermissionAdviceRequest id={request_id:?} action={kind} table={table}")
-        }
-        SyncMessage::PermissionAdviceResponse { request_id, advice } => {
-            format!("PermissionAdviceResponse id={request_id:?} advice={advice:?}")
         }
         other => format!("{other:?}"),
     }

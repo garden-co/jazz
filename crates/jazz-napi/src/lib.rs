@@ -24,6 +24,7 @@
 //! If a future zero-copy shim is added, hand the host a Rust-defined finalizer
 //! callback that frees through mimalloc instead.
 
+mod e2ee_crypto;
 #[cfg(feature = "rn-test-bridge")]
 mod rn_test_bridge;
 
@@ -48,7 +49,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -76,7 +77,7 @@ use jazz::db::{
     StreamingValueUploadCleanupTicket as CoreStreamingValueUploadCleanupTicket,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionStream,
     TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
-    WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
+    WireTransportAdapter as CoreWireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::Value as CoreValue;
 use jazz::groove::storage::{
@@ -133,19 +134,26 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
-/// Test-only direct execution of one frozen complete v1 frame through the
+/// Test-only execution of a frozen v5 frame batch through the
 /// generated NAPI artifact. This reaches the production Rust frame, feature,
 /// compression, and semantic-payload decoders; it is not a host wire API.
-#[napi(js_name = "__testValidateWireFrameCorpus", skip_typescript)]
-pub fn test_validate_wire_frame_corpus(frame: Buffer, negotiated_features: String) -> Result<()> {
+#[napi(js_name = "__testValidateWireFrameBatchCorpus", skip_typescript)]
+pub fn test_validate_wire_frame_batch_corpus(
+    frame: Buffer,
+    negotiated_features: String,
+) -> Result<()> {
     let negotiated_features = negotiated_features
         .parse()
         .map_err(|_| napi::Error::from_reason("test wire corpus features must be a u64 decimal"))?;
-    jazz::wire::validate_frame_for_artifact_corpus(&frame, negotiated_features)
+    jazz::wire::decode_websocket_frame_batch(&frame)
+        .map_err(|error| error.to_string())
+        .and_then(|frames| {
+            jazz::wire::validate_frames_for_artifact_corpus(&frames, negotiated_features)
+        })
         .map_err(napi::Error::from_reason)
 }
 
-/// Test-only feature inventory paired with [`test_validate_wire_frame_corpus`].
+/// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
 #[napi(js_name = "__testWireFrameCorpusFeatures", skip_typescript)]
 pub fn test_wire_frame_corpus_features() -> String {
     jazz::wire::current_wire_features().to_string()
@@ -838,8 +846,93 @@ type NativeReadCleanup = Rc<RefCell<Option<Box<dyn FnOnce()>>>>;
 /// of blocking Node.
 #[napi]
 pub struct PendingNativeRead {
-    future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>>,
+    state: Rc<PendingReadState>,
+}
+
+struct PendingReadState {
+    future: RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>,
     cleanup: NativeReadCleanup,
+    /// A result reached while another host call advanced this read.
+    ready: RefCell<Option<napi::Result<Uint8Array>>>,
+}
+
+impl PendingReadState {
+    /// Poll once with the host's no-op waker. `None` once the read is complete.
+    fn poll(&self) -> Option<Poll<napi::Result<Uint8Array>>> {
+        let mut future = self.future.borrow_mut().take()?;
+        let mut context = Context::from_waker(Waker::noop());
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => {
+                if let Some(cleanup) = self.cleanup.borrow_mut().take() {
+                    cleanup();
+                }
+                Some(Poll::Ready(result))
+            }
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Some(Poll::Pending)
+            }
+        }
+    }
+}
+
+thread_local! {
+    /// Reads the host is driving that returned `Pending`. A parked read can
+    /// hold thread-affine owner state (the node lock) across a cooperative
+    /// yield; only another poll on this thread lets it finish and release it.
+    static PARKED_NATIVE_READS: RefCell<Vec<Weak<PendingReadState>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn park_native_read(state: &Rc<PendingReadState>) {
+    PARKED_NATIVE_READS.with(|parked| {
+        let mut parked = parked.borrow_mut();
+        parked.retain(|read| read.strong_count() > 0);
+        if !parked
+            .iter()
+            .any(|read| std::ptr::eq(read.as_ptr(), Rc::as_ptr(state)))
+        {
+            parked.push(Rc::downgrade(state));
+        }
+    });
+}
+
+/// Advance every parked read once, keeping any result for the host's next poll.
+fn advance_parked_native_reads() {
+    let parked: Vec<_> = PARKED_NATIVE_READS
+        .with(|parked| parked.borrow().iter().filter_map(Weak::upgrade).collect());
+    for read in &parked {
+        if read.ready.borrow().is_some() {
+            continue;
+        }
+        if let Some(Poll::Ready(result)) = read.poll() {
+            *read.ready.borrow_mut() = Some(result);
+        }
+    }
+    PARKED_NATIVE_READS.with(|parked| {
+        parked.borrow_mut().retain(|read| {
+            read.upgrade()
+                .is_some_and(|read| read.future.borrow().is_some())
+        })
+    });
+}
+
+/// Drive a synchronous host call on the JavaScript thread.
+///
+/// The call can wait for owner state that a parked read holds, for example a
+/// first upstream connection installed while a one-shot hydration is
+/// suspended between evaluation turns. The host re-polls that read only after
+/// this call returns, so it is advanced here instead of spinning forever.
+fn core_block_on<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        advance_parked_native_reads();
+        std::thread::yield_now();
+    }
 }
 
 /// Thread-affine subscription opening waiting for the core owner.
@@ -1008,39 +1101,40 @@ impl PendingNativeSubscriptionBatch {
 
 impl PendingNativeRead {
     fn new(future: LocalBoxFuture<'static, napi::Result<Uint8Array>>) -> Self {
-        Self {
-            future: Rc::new(RefCell::new(Some(future))),
-            cleanup: Rc::new(RefCell::new(None)),
-        }
+        Self::from_parts(future, None)
     }
 
     fn with_cleanup(
         future: LocalBoxFuture<'static, napi::Result<Uint8Array>>,
         cleanup: Box<dyn FnOnce()>,
     ) -> Self {
+        Self::from_parts(future, Some(cleanup))
+    }
+
+    fn from_parts(
+        future: LocalBoxFuture<'static, napi::Result<Uint8Array>>,
+        cleanup: Option<Box<dyn FnOnce()>>,
+    ) -> Self {
         Self {
-            future: Rc::new(RefCell::new(Some(future))),
-            cleanup: Rc::new(RefCell::new(Some(cleanup))),
+            state: Rc::new(PendingReadState {
+                future: RefCell::new(Some(future)),
+                cleanup: Rc::new(RefCell::new(cleanup)),
+                ready: RefCell::new(None),
+            }),
         }
     }
 
     fn poll_once(&self) -> napi::Result<Option<Uint8Array>> {
-        let Some(mut future) = self.future.borrow_mut().take() else {
-            return Err(napi::Error::from_reason(
+        if let Some(result) = self.state.ready.borrow_mut().take() {
+            return result.map(Some);
+        }
+        match self.state.poll() {
+            None => Err(napi::Error::from_reason(
                 "native pending read is already complete",
-            ));
-        };
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
-        match Pin::new(&mut future).poll(&mut context) {
-            Poll::Ready(result) => {
-                if let Some(cleanup) = self.cleanup.borrow_mut().take() {
-                    cleanup();
-                }
-                result.map(Some)
-            }
-            Poll::Pending => {
-                *self.future.borrow_mut() = Some(future);
+            )),
+            Some(Poll::Ready(result)) => result.map(Some),
+            Some(Poll::Pending) => {
+                park_native_read(&self.state);
                 Ok(None)
             }
         }
@@ -1103,8 +1197,9 @@ impl PendingNativeRead {
 
     #[napi]
     pub fn cancel(&self) {
-        self.future.borrow_mut().take();
-        if let Some(cleanup) = self.cleanup.borrow_mut().take() {
+        self.state.future.borrow_mut().take();
+        self.state.ready.borrow_mut().take();
+        if let Some(cleanup) = self.state.cleanup.borrow_mut().take() {
             cleanup();
         }
     }
@@ -3458,8 +3553,7 @@ impl NapiDb {
                 },
                 jazz::wire::WIRE_PROTOCOL_VERSION,
                 jazz::wire::current_wire_features()
-                    & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                        | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+                    & !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
                 None,
                 None,
                 self.trusted_backend,
@@ -3468,11 +3562,11 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
+                connection: Some(core_block_on(db.connect_upstream(transport))),
             },
             NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
                 db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
+                connection: Some(core_block_on(db.connect_upstream(transport))),
             },
         };
         let auxiliary_pump = inner.auxiliary_pump();
@@ -3506,12 +3600,6 @@ impl NapiDb {
             return Err(napi::Error::from_reason(format!(
                 "server negotiated wire features {features:#x}, but this native binding was not compiled with {unsupported:#x}"
             )).into());
-        }
-        if features & jazz::wire::FEATURE_SYNC_MESSAGE_PAYLOAD == 0 {
-            return Err(napi::Error::from_reason(
-                "server did not negotiate required sync message payload frames",
-            )
-            .into());
         }
         let remote_node: [u8; 16] = remote_node.as_ref().try_into().map_err(|_| {
             napi::Error::from_reason("server hello authority node must be 16 bytes")
@@ -3558,11 +3646,11 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
+                connection: Some(core_block_on(db.connect_upstream(transport))),
             },
             NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
                 db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
+                connection: Some(core_block_on(db.connect_upstream(transport))),
             },
         };
         let auxiliary_pump = inner.auxiliary_pump();
@@ -5411,6 +5499,42 @@ mod tests {
             pending.poll_once().is_err(),
             "completed reads cannot be replayed or double-encoded"
         );
+    }
+
+    #[test]
+    fn host_waits_advance_a_parked_read_that_holds_owner_state() {
+        // A one-shot read suspended between evaluation turns keeps the owner
+        // lock until the host polls it again. A synchronous host call that
+        // needs the lock runs on the same thread, so it must advance the read
+        // instead of spinning forever.
+        let owner = Rc::new(futures::lock::Mutex::new(()));
+        let held = Rc::clone(&owner);
+        let pending = PendingNativeRead::new(Box::pin(async move {
+            let _guard = held.lock().await;
+            let mut yielded = false;
+            std::future::poll_fn(|context| {
+                if std::mem::replace(&mut yielded, true) {
+                    Poll::Ready(())
+                } else {
+                    context.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            Ok(Uint8Array::new(vec![3]))
+        }));
+
+        assert!(
+            pending.poll_once().unwrap().is_none(),
+            "the read parks while holding the owner lock"
+        );
+        drop(crate::core_block_on(owner.lock()));
+        assert_eq!(
+            pending.poll_once().unwrap().unwrap().to_vec(),
+            vec![3],
+            "the host's next poll still receives the read's result"
+        );
+        assert!(pending.poll_once().is_err(), "the result is delivered once");
     }
 
     // Internal because this asserts the NAPI object's one-turn retry marker;
