@@ -136,3 +136,124 @@ that materialises each user's query a second time.
 - `scripts/sizes.mjs`: builds both pages with Vite, reports every emitted asset
   (marking assets nothing references), attributes the lite bundle by module, and
   measures the projections.
+
+## Follow-up: start on lite, hot-swap to full local-first Jazz
+
+Question: can an app start on Jazz Lite, lazy-load full Jazz, and swap over
+while keeping subscriptions alive? Yes. `src/upgrade.ts` does it, and it is
+seamless in the measured runs: zero extra renders, no empty or shrinking
+results.
+
+### How the swap works
+
+`createUpgradableDb({ lite, loadFull })` is one facade over both backends.
+`loadFull` is the app's `() => import("jazz-tools").then(...createDb...)`, so
+the WASM, workers and full client stay out of the initial bundle.
+`upgrade()` then:
+
+1. Loads full Jazz for the same account (same JWT). From that moment, new
+   reads, writes and subscriptions use full Jazz.
+2. Re-opens every live lite subscription on full Jazz, with the app's own
+   options. Lite keeps delivering results while full Jazz syncs.
+3. Switches each subscription on the first full result that equals the latest
+   lite result. The switch is one synchronous step, followed by unsubscribing
+   lite. Because the two views agree, the app sees no render at the swap. A
+   cold store's first full results are partial (often empty) and are never
+   shown. If the views never agree within `handoverServerWaitMs` (default
+   10 s), the swap is forced, accepting one visible jump.
+4. Lite writes and interactive transactions already in flight finish on lite;
+   the server orders them and full Jazz receives them by sync. The lite socket
+   closes once nothing uses it, and the proxy frees its subscriptions.
+
+Why step 3 matches results instead of trusting the first full result: in
+Node, a fresh full client's first local-first result was empty even with
+`firstLoadRemoteWaitMs` set (alpha.59). I did not dig further; matching makes
+the swap independent of that.
+
+Tests: `tests/upgrade.test.ts` (Node, 4 passing). Subscriptions keep running
+with no re-render, no empty result and no shrink, and the proxy ends with no
+subscriptions or connections. Writes after the swap reach the same
+subscriptions, and writes from another client are seen. A change made while
+full Jazz is loading is delivered, and a subscription opened mid-upgrade also
+moves. A lite transaction that is open when the upgrade starts commits.
+`tests/browser-upgrade.test.ts` runs in real Chromium with brotli assets
+(`JAZZ_LITE_BROWSER=1`, after `npm run sizes`).
+
+### Bundle
+
+| Upgrade demo (`index-upgrade.html`)   |    gzip |  brotli |
+| ------------------------------------- | ------: | ------: |
+| Initial (lite + app + schema DSL)     | 27.8 KB | 24.5 KB |
+| Lazy: full client JS + workers + WASM | 6.63 MB | 4.46 MB |
+
+### What the upgrade costs in a browser
+
+Chromium, 20-row subscription. Times run from calling `upgrade()` until every
+subscription has moved. Cold means a first visit; warm means a reload, with
+the HTTP cache and IndexedDB already filled.
+
+| Profile                             | lite first result | upgrade, cold | upgrade, warm | renders at swap |
+| ----------------------------------- | ----------------: | ------------: | ------------: | --------------: |
+| desktop, unthrottled                |            103 ms |         1.3 s |         0.7 s |               0 |
+| fast 4G (9 Mbps, 60 ms)             |            140 ms |         5.7 s |         0.6 s |               0 |
+| slow 4G (1.6 Mbps, 150 ms) + 4x CPU |            268 ms |        25.1 s |         1.8 s |               0 |
+
+On cold runs, almost all of the time is fetching and compiling the 4.1 MB
+(brotli) WASM: 4.6 s on fast 4G and 22 s on slow 4G. The handover itself takes
+0.3 to 2.2 s. A full-only app pays that same download before its _first_
+result, so starting on lite moves first data from about 5 s to 140 ms on
+fast 4G, and from about 25 s to 270 ms on slow 4G.
+
+### When to lazy-load full Jazz
+
+The trade: lite has no offline mode, no optimistic writes (each write is one
+round trip), and no large-value streaming, and the proxy holds about 1.25 MiB
+per live subscription. Full Jazz costs a 4.5 MB download plus compile once,
+and almost nothing on later visits.
+
+Signals, in order of precedence:
+
+1. **Returning visitor** (full Jazz loaded before, so the cache and store are
+   warm; a localStorage flag set after the first upgrade): start the upgrade
+   right after the first lite paint. It costs 0.6 to 1.8 s and nothing on the
+   network.
+2. **Intent to write continuously**: focus in an editor or composer,
+   pointerdown on a canvas, sequencer or board, or the second write within a
+   few seconds. Upgrade at once. Lite keeps working until the swap, at one
+   round trip per write.
+3. **Needs a full-only feature**: opening an upload dialog (streaming large
+   values is not in lite), an explicit offline toggle, or installing the PWA.
+   Upgrade at once. Going offline is too late, so apps that promise offline
+   use rule 4 eagerly.
+4. **Idle prefetch for signed-in or engaged sessions**: after first paint and
+   `load`, in `requestIdleCallback`, but only on a good connection
+   (`effectiveType` 4g, no Save-Data, `deviceMemory` > 2). A sign-in screen is
+   a free prefetch window: start loading during sign-in.
+5. **Many live subscriptions** (about 10 or more) or long dwell (about 30 s
+   active): upgrade. This moves per-subscription cost off the proxy, and the
+   download is amortised.
+6. **Otherwise stay lite**: anonymous, read-mostly visitors on constrained
+   connections never pay the 4.5 MB.
+
+Applied to the example apps (from a survey of their queries and writes):
+
+| App                                          | Entry / pattern                                                             | Start              | Upgrade when                                                                                    |
+| -------------------------------------------- | --------------------------------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------- |
+| jamazon                                      | public catalogue browsing; guest cart works offline                         | lite               | add-to-cart or sign-in (cart must work offline); idle prefetch only on good connections         |
+| world-tour                                   | public fan page, read-mostly, narrow queries                                | lite               | a band member opens an edit form; fans never upgrade                                            |
+| todo-client-localfirst-\*, nextjs-csr-ssr    | 1 small subscription, rare writes                                           | lite               | idle prefetch on good connections; returning visitors at once                                   |
+| chat-react                                   | anonymous; 8 to 12 subscriptions incl. per-message; strokes on pointer move | lite (paint)       | composer focus or canvas pointerdown; idle prefetch right after paint (many subscriptions)      |
+| stage-plan                                   | anonymous, offline-first by design (offline switch), transactional          | lite (paint)       | immediately after first paint (offline is the product)                                          |
+| text-editor                                  | public doc; continuous Yjs byte splices                                     | lite (paint)       | first focus or keystroke in the editor                                                          |
+| band-chat, wequencer, poster-shop, band-book | sign-in first; frequent or continuous writes; streaming uploads             | lite after sign-in | prefetch during sign-in; swap as soon as loaded                                                 |
+| record-player, epic-drop                     | metadata browsing; large uploads and range reads                            | lite               | upload dialog opens or playback/preview starts (byte ranges need full); otherwise idle prefetch |
+
+### Not covered yet
+
+- Anonymous local-first accounts (chat-react, stage-plan, epic-drop) would
+  need the lite client to present a local-first bearer token without WASM.
+  The proxy accepts local-first JWTs via `forRequest()`, but minting one in
+  plain JS in the browser was not tried.
+- Writes made through lite are not optimistic, so a write issued just before
+  the swap shows up after its round trip, as on lite.
+- Framework hooks (`useAll`) would subscribe through the facade; not built.

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
-import { createAccountManager } from "jazz-tools";
+import { createAccountManager, createDb, type Db } from "jazz-tools";
 import { createJazzSession, type JazzClient } from "jazz-tools/backend";
 import {
   deploy,
@@ -60,6 +60,8 @@ export interface Harness {
   /** Register a user with the upstream server and return their bearer token. */
   identity(userId: string): Promise<string>;
   lite(token: string): LiteDb;
+  /** Open full Jazz (in-memory storage) for an already registered token. */
+  fullDb(token: string): Promise<Db>;
   stop(): Promise<void>;
 }
 
@@ -100,6 +102,7 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
   await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
   const proxyUrl = `ws://127.0.0.1:${(httpServer.address() as AddressInfo).port}/lite`;
   const clients: LiteDb[] = [];
+  const fullDbs: Db[] = [];
 
   return {
     upstream,
@@ -130,8 +133,36 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
       clients.push(db);
       return db;
     },
+    async fullDb(token) {
+      let stored: string | null = null;
+      const env = `jazz-lite-full-${crypto.randomUUID()}`;
+      const accounts = await createAccountManager({
+        appId: upstream.appId,
+        serverUrl: upstream.url,
+        env,
+        store: {
+          async read() {
+            return stored;
+          },
+          async update(transform) {
+            stored = transform(stored);
+          },
+        },
+      });
+      const account = await accounts.loginJWT(token);
+      const db = await createDb({
+        appId: upstream.appId,
+        serverUrl: upstream.url,
+        env,
+        account,
+        driver: { type: "memory" },
+      });
+      fullDbs.push(db);
+      return db;
+    },
     async stop() {
       for (const db of clients) db.close();
+      for (const db of fullDbs) await db.shutdown().catch(() => {});
       wss.close();
       await new Promise((resolve) => httpServer.close(resolve));
       await session.close();

@@ -48,14 +48,17 @@ function reachable(dir, html) {
 function report(label, dir, html) {
   const rows = [];
   const loadable = reachable(dir, html);
+  const htmlText = fs.readFileSync(path.join(dir, html), "utf8");
   for (const f of fs.readdirSync(dir, { recursive: true })) {
     const p = path.join(dir, f);
     if (!fs.statSync(p).isFile() || /\.(map|html)$/.test(f)) continue;
-    rows.push({
-      f: loadable.has(f) ? f : `${f}  (emitted, never referenced)`,
-      loadable: loadable.has(f),
-      ...sizes(p),
-    });
+    const initial = htmlText.includes(path.basename(f));
+    const note = !loadable.has(f)
+      ? "  (emitted, never referenced)"
+      : initial
+        ? "  [initial]"
+        : "  [lazy]";
+    rows.push({ f: f + note, loadable: loadable.has(f), initial, ...sizes(p) });
   }
   rows.sort((a, b) => b.raw - a.raw);
   const total = rows
@@ -70,13 +73,26 @@ function report(label, dir, html) {
   );
   for (const r of rows) console.log(`${kib(r.raw)} ${kib(r.gz)} ${kib(r.br)}  ${r.f}`);
   console.log(`${kib(total.raw)} ${kib(total.gz)} ${kib(total.br)}  TOTAL loadable by the page`);
+  const initial = rows
+    .filter((r) => r.initial)
+    .reduce((t, r) => ({ raw: t.raw + r.raw, gz: t.gz + r.gz, br: t.br + r.br }), {
+      raw: 0,
+      gz: 0,
+      br: 0,
+    });
+  console.log(
+    `${kib(initial.raw)} ${kib(initial.gz)} ${kib(initial.br)}  of which initial (in the HTML)`,
+  );
   return total;
 }
 
 const { jazzPlugin } = await import("jazz-tools/dev/vite");
-for (const [name, plugins] of [
-  ["full", [jazzPlugin()]],
-  ["lite", []],
+const { dslEntryPlugin } = await import("./dsl-entry-plugin.mjs");
+for (const [name, html, plugins] of [
+  ["full", "index-full.html", [jazzPlugin()]],
+  ["lite", "index-lite.html", []],
+  ["lite-dsl", "index-lite.html", [dslEntryPlugin()]],
+  ["upgrade", "index-upgrade.html", [dslEntryPlugin(), jazzPlugin()]],
 ]) {
   await build({
     root,
@@ -90,7 +106,7 @@ for (const [name, plugins] of [
     build: {
       outDir: path.join(out, name),
       emptyOutDir: true,
-      rollupOptions: { input: path.join(root, `index-${name}.html`) },
+      rollupOptions: { input: path.join(root, html) },
     },
   });
 }
@@ -99,7 +115,21 @@ const full = report(
   path.join(out, "full"),
   "index-full.html",
 );
-const lite = report("Jazz Lite (same app, same schema)", path.join(out, "lite"), "index-lite.html");
+const lite = report(
+  "Jazz Lite, schema imported from the jazz-tools root",
+  path.join(out, "lite"),
+  "index-lite.html",
+);
+report(
+  "Jazz Lite, schema imported from the DSL module only",
+  path.join(out, "lite-dsl"),
+  "index-lite.html",
+);
+report(
+  "Jazz Lite that lazy-loads full Jazz (upgrade demo)",
+  path.join(out, "upgrade"),
+  "index-upgrade.html",
+);
 console.log(
   `\nLite / full: raw ${((100 * lite.raw) / full.raw).toFixed(2)}%, gzip ${((100 * lite.gz) / full.gz).toFixed(2)}%, brotli ${((100 * lite.br) / full.br).toFixed(2)}%`,
 );
