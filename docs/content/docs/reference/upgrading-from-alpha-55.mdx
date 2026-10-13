@@ -147,8 +147,9 @@ See [Durability Tiers](/docs/reference/durability-tiers).
 
 Clients now connect straight to the core server, which authorizes and confirms writes.
 
-- Replace write waits on `{ tier: "edge" }` with `{ tier: "global" }`. `"edge"` still works for
-  waits but warns and waits for `"global"`. It throws as a read tier.
+- Replace write waits on `{ tier: "edge" }` with `{ tier: "global" }`. From alpha.60,
+  `wait({ tier: "edge" })` rejects with a `TypeError` (see
+  [`"edge"` write waits rejected](#edge-write-waits-rejected)). It also throws as a read tier.
 - Remove server upstream and edge configuration.
 - Don't clear local databases: writes an old edge had accepted are resubmitted to the core server.
 
@@ -177,6 +178,42 @@ If your app uses exclusive transactions, ship the alpha.58 client build together
 upgrade. Other writes and reads from alpha.56 and alpha.57 clients keep working.
 
 ## In alpha.60
+
+### `"edge"` write waits rejected
+
+`wait({ tier: "edge" })` used to warn and wait for `"global"`. It now rejects with a `TypeError`, and
+TypeScript no longer accepts it. Only the wait fails: the write was already applied, so a `.catch`
+that undoes the write on failure would undo every write. Change these waits to
+`wait({ tier: "global" })`.
+
+### Read tiers are `"local-first"` and `"remote"`
+
+The read tiers `"local"` and `"global"` (and the `"core"` alias) were removed and throw. Use
+`"local-first"` instead of `"local"`, and `"remote"` instead of `"global"`.
+`"local-first-unless-empty"` was also removed: use `"local-first"` with a `firstLoadRemoteWaitMs`
+of a few seconds. Outside the browser, a client connected to a server now reads `"remote"` by
+default. See [Durability Tiers](/docs/reference/durability-tiers).
+
+### Obsolete client options removed
+
+`defaultDurabilityTier` was removed. Set `tier` on each read that should differ from the default:
+`"local-first"` in browsers, in React Native and without a server, `"remote"` otherwise.
+
+The `tier` option of backend `createJazzContext()` was removed too. A Node or SSR app that set
+`tier: "local"` or `defaultDurabilityTier: "local"` together with a `serverUrl` used to read
+locally. It now reads `"remote"` by default and waits on the server. Pass `tier: "local-first"` on
+reads that should keep the old behavior.
+
+Also removed:
+
+- The React Native `sqliteStorage` option and the `ReactNativeSqlite*` driver types. The option was
+  always rejected; the native runtime owns storage.
+- The `--jazz-bin` flag of `jazz-tools validate`. It had no effect.
+- The `clientId`, `runtimeSources` and `tier` fields of `AppContext`. The backend no longer accepts
+  `runtimeSources`; the client option of the same name is unchanged.
+
+TypeScript flags these options. Plain JavaScript ignores them silently, and the read tier can
+change without warning, so search your code and remove them.
 
 ### Old local stores are refused
 

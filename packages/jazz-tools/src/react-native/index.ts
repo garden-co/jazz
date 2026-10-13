@@ -24,14 +24,6 @@ export {
   type LocalFirstAuth,
   type UseLocalFirstAuthOptions,
 } from "./use-local-first-auth.js";
-export {
-  REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
-  REACT_NATIVE_SQLITE_STORAGE_UNIMPLEMENTED_ERROR,
-  UnimplementedSqliteStorageDriver,
-  type ReactNativeSqliteConnection,
-  type ReactNativeSqliteStorageDriver,
-  type ReactNativeSqliteTransaction,
-} from "./storage.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 export type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 export { schema } from "../schema-namespace.js";
