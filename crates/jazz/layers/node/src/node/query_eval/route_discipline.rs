@@ -554,6 +554,8 @@ where
             | GraphBuilder::TypedTemplate { .. }
             | GraphBuilder::TemplateInput { .. } => {
                 // Not route-aware yet: keep them private to one binding.
+                // Templates are expanded before the check, so one reaches
+                // here only when it could not be.
                 let depends = self.depends(node);
                 if depends.is_empty() {
                     Ok(())
@@ -646,27 +648,67 @@ fn children(node: &GraphBuilder) -> Vec<&GraphBuilder> {
 
 /// Renames every binding source `graph` reads by appending `suffix`.
 pub(super) fn isolate_binding_sources(graph: &GraphBuilder, suffix: &str) -> GraphBuilder {
-    let mut renamed = HashMap::new();
-    isolate_node(graph, suffix, &mut renamed)
+    rewrite_graph(graph, &mut |mut node| {
+        if let GraphBuilder::BindingSource { shape, .. } = &mut node {
+            shape.push_str(suffix);
+        }
+        node
+    })
 }
 
-fn isolate_node(
+/// `graph` with every typed template replaced by the declarative operators
+/// it was compiled from, and every bound template input by its graph, so
+/// the route check sees each operator a template runs. A template that
+/// cannot be expanded stays, and the check treats it as opaque.
+fn expand_templates(graph: &GraphBuilder) -> GraphBuilder {
+    rewrite_graph(graph, &mut |node| match node {
+        GraphBuilder::TypedTemplate {
+            program,
+            inputs,
+            predicates,
+            scalars,
+        } => program
+            .bind_declarative_with_arguments(&inputs, &predicates, &scalars)
+            .map(|expanded| expand_templates(&expanded))
+            .unwrap_or(GraphBuilder::TypedTemplate {
+                program,
+                inputs,
+                predicates,
+                scalars,
+            }),
+        GraphBuilder::TemplateInput {
+            input: Some(input), ..
+        } => std::sync::Arc::unwrap_or_clone(input),
+        node => node,
+    })
+}
+
+/// Rebuilds `graph` bottom-up, applying `map` to each node once its inputs
+/// are rebuilt. A node shared within `graph` stays shared.
+fn rewrite_graph(
+    graph: &GraphBuilder,
+    map: &mut impl FnMut(GraphBuilder) -> GraphBuilder,
+) -> GraphBuilder {
+    let mut rewritten = HashMap::new();
+    rewrite_node(graph, map, &mut rewritten)
+}
+
+fn rewrite_node(
     node: &GraphBuilder,
-    suffix: &str,
-    renamed: &mut HashMap<*const GraphBuilder, std::sync::Arc<GraphBuilder>>,
+    map: &mut impl FnMut(GraphBuilder) -> GraphBuilder,
+    rewritten: &mut HashMap<*const GraphBuilder, std::sync::Arc<GraphBuilder>>,
 ) -> GraphBuilder {
     let mut arc = |child: &std::sync::Arc<GraphBuilder>| {
         let key = std::sync::Arc::as_ptr(child);
-        if let Some(done) = renamed.get(&key) {
+        if let Some(done) = rewritten.get(&key) {
             return std::sync::Arc::clone(done);
         }
-        let done = std::sync::Arc::new(isolate_node(child, suffix, renamed));
-        renamed.insert(key, std::sync::Arc::clone(&done));
+        let done = std::sync::Arc::new(rewrite_node(child, map, rewritten));
+        rewritten.insert(key, std::sync::Arc::clone(&done));
         done
     };
     let mut node = node.clone();
     match &mut node {
-        GraphBuilder::BindingSource { shape, .. } => shape.push_str(suffix),
         GraphBuilder::TypedTemplate { inputs, .. } | GraphBuilder::Union { inputs } => {
             for input in inputs {
                 *input = arc(input);
@@ -712,9 +754,10 @@ fn isolate_node(
         | GraphBuilder::InlineRecords { .. }
         | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
-        | GraphBuilder::FrontierSource { .. } => {}
+        | GraphBuilder::FrontierSource { .. }
+        | GraphBuilder::BindingSource { .. } => {}
     }
-    node
+    map(node)
 }
 
 impl<S> NodeState<S>
@@ -762,19 +805,30 @@ where
     ) -> Result<(), RouteViolation> {
         let parameters = &program.lowered.parameters;
         let route_params = prepared_route_param_names(parameters);
+        let expanded = program
+            .lowered
+            .terminals
+            .iter()
+            .map(|terminal| expand_templates(&terminal.graph))
+            .collect::<Vec<_>>();
+        let expanded_app_rows = program
+            .lowered
+            .internal_app_rows_graph
+            .as_ref()
+            .map(expand_templates);
         let mut terminals = Vec::new();
-        for terminal in &program.lowered.terminals {
+        for (terminal, graph) in program.lowered.terminals.iter().zip(&expanded) {
             let eligible = terminal_route_eligible_fields(&terminal.output)
                 .map_err(|error| RouteViolation(format!("{error:?}")))?;
             terminals.push((
                 terminal.sink.as_str(),
-                &terminal.graph,
+                graph,
                 terminal_route_fields(&route_params, &eligible)
                     .into_iter()
                     .collect(),
             ));
         }
-        if let Some(graph) = &program.lowered.internal_app_rows_graph {
+        if let Some(graph) = &expanded_app_rows {
             let eligible = app_row_terminal_route_eligible_fields(&program.lowered.output)
                 .map_err(|error| RouteViolation(format!("{error:?}")))?;
             terminals.push((
