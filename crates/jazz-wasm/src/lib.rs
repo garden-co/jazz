@@ -1381,6 +1381,42 @@ impl WasmDb {
         Ok(())
     }
 
+    /// A fresh root runtime owner over `inner`. Every runtime this binding
+    /// opens defers local persistence to the host's flush cadence.
+    fn runtime_owner(inner: WasmDbInner, trusted_backend: bool) -> Self {
+        inner.db.set_deferred_local_persistence(true);
+        Self {
+            inner: Rc::new(RefCell::new(Some(inner))),
+            owns_runtime: true,
+            non_durable_client: Rc::new(Cell::new(false)),
+            trusted_backend,
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn open_browser_runtime(
+        page_store: JsValue,
+        schema: JazzSchema,
+        config: WasmOpenDbConfig,
+        storage_owner: String,
+    ) -> Result<WasmDb, JsValue> {
+        let families = schema.column_families();
+        let families = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &families)
+            .await
+            .map_err(to_js_error)?;
+        let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
+            .await
+            .map_err(to_js_error)?;
+        db.restore_browser_relay_pending_uploads()
+            .await
+            .map_err(to_js_error)?;
+        Ok(Self::runtime_owner(
+            WasmDbInner::browser(Rc::new(db)),
+            false,
+        ))
+    }
+
     #[wasm_bindgen(js_name = openMemory)]
     pub fn open_memory(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
@@ -1395,13 +1431,7 @@ impl WasmDb {
             config,
         ))
         .map_err(to_js_error)?;
-        db.set_deferred_local_persistence(true);
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(WasmDbInner::memory(Rc::new(db))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            trusted_backend: false,
-        })
+        Ok(Self::runtime_owner(WasmDbInner::memory(Rc::new(db)), false))
     }
 
     /// Open a deliberate backend runtime. This remains a separate ABI from
@@ -1423,13 +1453,7 @@ impl WasmDb {
             identity,
         ))
         .map_err(to_js_error)?;
-        db.set_deferred_local_persistence(true);
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(WasmDbInner::memory(Rc::new(db))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            trusted_backend: true,
-        })
+        Ok(Self::runtime_owner(WasmDbInner::memory(Rc::new(db)), true))
     }
 
     /// Open with a verified Jazz self-signed client identity. This deliberately
@@ -1456,13 +1480,7 @@ impl WasmDb {
             config,
         ))
         .map_err(to_js_error)?;
-        db.set_deferred_local_persistence(true);
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(WasmDbInner::memory(Rc::new(db))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            trusted_backend: false,
-        })
+        Ok(Self::runtime_owner(WasmDbInner::memory(Rc::new(db)), false))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1477,24 +1495,7 @@ impl WasmDb {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
         validate_untrusted_open_author(&config)?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
-            .await
-            .map_err(to_js_error)?;
-        let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
-            .await
-            .map_err(to_js_error)?;
-        db.restore_browser_relay_pending_uploads()
-            .await
-            .map_err(to_js_error)?;
-        db.set_deferred_local_persistence(true);
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(WasmDbInner::browser(Rc::new(db))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            trusted_backend: false,
-        })
+        Self::open_browser_runtime(page_store, schema, config, storage_owner).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1513,24 +1514,7 @@ impl WasmDb {
         let (schema, mut config) = decode_open_args(&schema, &config)?;
         config.identity.author =
             verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
-            .await
-            .map_err(to_js_error)?;
-        let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
-            .await
-            .map_err(to_js_error)?;
-        db.restore_browser_relay_pending_uploads()
-            .await
-            .map_err(to_js_error)?;
-        db.set_deferred_local_persistence(true);
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(WasmDbInner::browser(Rc::new(db))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            trusted_backend: false,
-        })
+        Self::open_browser_runtime(page_store, schema, config, storage_owner).await
     }
 
     /// Register a typed schema view backed by this same runtime owner.

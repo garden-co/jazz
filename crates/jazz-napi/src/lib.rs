@@ -2610,29 +2610,29 @@ impl NapiDb {
         })
     }
 
+    /// A fresh runtime owner over `inner`, the root view of its runtime.
+    fn runtime_owner(inner: NapiDbInnerStorage, trusted_backend: bool) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(Some(inner))),
+            owns_runtime: true,
+            non_durable_client: Rc::new(Cell::new(false)),
+            view_id: 0,
+            streaming: StreamingOwnerLifecycle::new(),
+            trusted_backend,
+            author_admissions: NativeAuthorAdmissions::default(),
+        }
+    }
+
     #[napi(factory, js_name = "openMemory")]
     pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = open_core_db(
-            schema,
-            CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
-            config,
-            identity,
+        let storage = memory_core_storage(&schema);
+        let db = open_core_db(schema, storage, config, identity, false)?;
+        Ok(Self::runtime_owner(
+            NapiDbInnerStorage::memory(Rc::new(db)),
             false,
-        )?;
-        let streaming = StreamingOwnerLifecycle::new();
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::memory(Rc::new(db))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            view_id: 0,
-            streaming,
-            trusted_backend: false,
-            author_admissions: NativeAuthorAdmissions::default(),
-        })
+        ))
     }
 
     /// Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
@@ -2641,25 +2641,12 @@ impl NapiDb {
     pub fn open_memory_as_backend(schema: Uint8Array, config: Uint8Array) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_backend_identity(&config)?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = open_core_db(
-            schema,
-            CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
-            config,
-            identity,
+        let storage = memory_core_storage(&schema);
+        let db = open_core_db(schema, storage, config, identity, true)?;
+        Ok(Self::runtime_owner(
+            NapiDbInnerStorage::memory(Rc::new(db)),
             true,
-        )?;
-        let streaming = StreamingOwnerLifecycle::new();
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::memory(Rc::new(db))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            view_id: 0,
-            streaming,
-            trusted_backend: true,
-            author_admissions: NativeAuthorAdmissions::default(),
-        })
+        ))
     }
 
     /// Open with a verified Jazz self-signed client identity. This is a
@@ -2681,25 +2668,12 @@ impl NapiDb {
             claimed_author,
         };
         let identity = core_open_identity(&config, Some(&proof))?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = open_core_db(
-            schema,
-            CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
-            config,
-            identity,
+        let storage = memory_core_storage(&schema);
+        let db = open_core_db(schema, storage, config, identity, false)?;
+        Ok(Self::runtime_owner(
+            NapiDbInnerStorage::memory(Rc::new(db)),
             false,
-        )?;
-        let streaming = StreamingOwnerLifecycle::new();
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::memory(Rc::new(db))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            view_id: 0,
-            streaming,
-            trusted_backend: false,
-            author_admissions: NativeAuthorAdmissions::default(),
-        })
+        ))
     }
 
     #[napi(factory, js_name = "openPersistent")]
@@ -2712,18 +2686,10 @@ impl NapiDb {
         let identity = core_open_identity(&config, None)?;
         let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, false)?;
-        let streaming = StreamingOwnerLifecycle::new();
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::persistent(Rc::new(
-                db,
-            ))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            view_id: 0,
-            streaming,
-            trusted_backend: false,
-            author_admissions: NativeAuthorAdmissions::default(),
-        })
+        Ok(Self::runtime_owner(
+            NapiDbInnerStorage::persistent(Rc::new(db)),
+            false,
+        ))
     }
 
     /// Open a deliberate persistent backend runtime. This is intentionally a
@@ -2738,18 +2704,10 @@ impl NapiDb {
         let identity = core_open_backend_identity(&config)?;
         let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, true)?;
-        let streaming = StreamingOwnerLifecycle::new();
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::persistent(Rc::new(
-                db,
-            ))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            view_id: 0,
-            streaming,
-            trusted_backend: true,
-            author_admissions: NativeAuthorAdmissions::default(),
-        })
+        Ok(Self::runtime_owner(
+            NapiDbInnerStorage::persistent(Rc::new(db)),
+            true,
+        ))
     }
 
     #[napi(factory, js_name = "openPersistentWithSelfSignedProof")]
@@ -2770,18 +2728,10 @@ impl NapiDb {
         let identity = core_open_identity(&config, Some(&proof))?;
         let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, false)?;
-        let streaming = StreamingOwnerLifecycle::new();
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::persistent(Rc::new(
-                db,
-            ))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            view_id: 0,
-            streaming,
-            trusted_backend: false,
-            author_admissions: NativeAuthorAdmissions::default(),
-        })
+        Ok(Self::runtime_owner(
+            NapiDbInnerStorage::persistent(Rc::new(db)),
+            false,
+        ))
     }
 
     /// Register and return a typed view backed by this same runtime owner.
@@ -3616,6 +3566,12 @@ fn open_persistent_core_storage(
         &codec_profile,
     )
     .map_err(napi_error)
+}
+
+fn memory_core_storage(schema: &JazzSchema) -> CoreMemoryStorage {
+    let families = schema.column_families();
+    let families = families.iter().map(String::as_str).collect::<Vec<_>>();
+    CoreMemoryStorage::new(&families).expect("valid memory storage families")
 }
 
 fn open_core_db<S>(
