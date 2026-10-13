@@ -2291,20 +2291,22 @@ where
         match target {
             WriteTarget::Root => {
                 if patch.is_empty() {
-                    return match identity {
+                    self.ensure_row_not_deleted(table, row).await?;
+                    let existing = match identity {
                         WriteIdentity::Database | WriteIdentity::Attribution(_) => {
-                            self.no_op_update_handle_for_client(
+                            self.local_row_for_client_identity(
                                 table,
                                 row,
                                 permission_subject.unwrap_or(made_by),
                             )
-                            .await
+                            .await?
                         }
                         WriteIdentity::Session(author) => {
-                            self.no_op_update_handle_for_identity(table, row, author)
-                                .await
+                            self.local_row_for_trusted_identity(table, row, author)
+                                .await?
                         }
                     };
+                    return self.no_op_update_handle(table, row, existing).await;
                 }
                 let (cells, parent, authored_columns) = match identity {
                     WriteIdentity::Database | WriteIdentity::Attribution(_) => {
@@ -3659,49 +3661,16 @@ where
             }))
     }
 
-    async fn no_op_update_handle_for_client(
+    /// Handle for an empty root update: the write is a no-op that reports
+    /// the transaction of the row's current version, once `existing` (the
+    /// caller's identity-scoped view of the row) proves it may target it.
+    async fn no_op_update_handle(
         &self,
         table: &str,
         row: RowUuid,
-        identity: AuthorSubject,
+        existing: Option<CurrentRow>,
     ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row).await?;
-        let Some(existing) = self
-            .local_row_for_client_identity(table, row, identity)
-            .await?
-        else {
-            return Err(self.update_target_missing(table, row).await?);
-        };
-        let tx_id = self
-            .node
-            .node
-            .lock()
-            .await
-            .current_row_tx_id(&existing)
-            .await
-            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "current row has no transaction"))?;
-        let local_tier = self.write_state(tx_id)?.durability;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-            queued_status: None,
-            queued_alias: None,
-        })
-    }
-
-    async fn no_op_update_handle_for_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        identity: AuthorSubject,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row).await?;
-        let Some(existing) = self
-            .local_row_for_trusted_identity(table, row, identity)
-            .await?
-        else {
+        let Some(existing) = existing else {
             return Err(self.update_target_missing(table, row).await?);
         };
         let tx_id = self
