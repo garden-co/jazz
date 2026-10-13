@@ -1103,7 +1103,7 @@ mod tests {
     use jazz::protocol::SyncMessage;
     use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
     use jazz::schema::{JazzSchema, TableSchema};
-    use jazz::tx::{DurabilityTier, Fate, TxId};
+    use jazz::tx::{Fate, TxId};
     use jazz::wire::decode_frame;
     use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireTransport};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};

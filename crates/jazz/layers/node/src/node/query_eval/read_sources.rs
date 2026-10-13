@@ -662,66 +662,18 @@ where
                 && base.is_none_or(|base| matches!(base, BranchViewSourceBase::Current(_)))
             {
                 let tier = graph_tier.expect("branch view has a current tier");
-                let head_keys = self
-                    .node
-                    .equivalent_stored_branch_keys(
-                        &request.source.table,
-                        self.read_view.read_schema,
-                        head,
-                    )
-                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let head_content = self
-                    .projected_branch_content_source_graph(request, &table, tier, &head_keys)
-                    .await?;
-                let head_deletions = self
-                    .projected_branch_deletion_source_graph(request, tier, &head_keys)
-                    .await?;
                 // A head-over-current BranchView selects its winner from the
                 // head when present and otherwise from the base.  The
                 // IncludeDeleted sibling must use that exact same selection
                 // before policy evaluation, or an authorized base preimage
                 // could accidentally attest to a distinct head deletion.
-                let (content, deletions) = match base {
-                    Some(BranchViewSourceBase::Current(base)) if base != head => {
-                        let base_keys = self
-                            .node
-                            .equivalent_stored_branch_keys(
-                                &request.source.table,
-                                self.read_view.read_schema,
-                                base,
-                            )
-                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                        let base_content = self
-                            .projected_branch_content_source_graph(
-                                request, &table, tier, &base_keys,
-                            )
-                            .await?;
-                        let base_deletions = self
-                            .projected_branch_deletion_source_graph(request, tier, &base_keys)
-                            .await?;
-                        (
-                            GraphBuilder::union([
-                                head_content.clone(),
-                                GraphBuilder::anti_join(
-                                    base_content,
-                                    head_content,
-                                    ["row_uuid"],
-                                    ["row_uuid"],
-                                ),
-                            ]),
-                            GraphBuilder::union([
-                                head_deletions.clone(),
-                                GraphBuilder::anti_join(
-                                    base_deletions,
-                                    head_deletions,
-                                    ["row_uuid"],
-                                    ["row_uuid"],
-                                ),
-                            ]),
-                        )
-                    }
-                    _ => (head_content, head_deletions),
+                let live_base = match base {
+                    Some(BranchViewSourceBase::Current(base)) if base != head => Some(base),
+                    _ => None,
                 };
+                let (content, deletions) = self
+                    .live_branch_view_registers(request, &table, tier, head, live_base)
+                    .await?;
                 let base = include_deleted_branch_graph(&table, head, content, deletions)
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let graph = match &authorization {
@@ -796,77 +748,19 @@ where
             if base.is_none_or(|base| matches!(base, BranchViewSourceBase::Current(_))) {
                 let branch_witness_field =
                     (!table.branch_by.is_empty()).then_some("supplying_branch_key");
-                let head_keys = self
-                    .node
-                    .equivalent_stored_branch_keys(
-                        &request.source.table,
-                        self.read_view.read_schema,
-                        head,
-                    )
-                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let head_content = self
-                    .projected_branch_content_source_graph(
+                let live_base = match base {
+                    Some(BranchViewSourceBase::Current(base)) if base != head => Some(base),
+                    _ => None,
+                };
+                let (content, deletions) = self
+                    .live_branch_view_registers(
                         request,
                         &table,
                         graph_tier.expect("branch view has a current tier"),
-                        &head_keys,
+                        head,
+                        live_base,
                     )
                     .await?;
-                let head_deletions = self
-                    .projected_branch_deletion_source_graph(
-                        request,
-                        graph_tier.expect("branch view has a current tier"),
-                        &head_keys,
-                    )
-                    .await?;
-                let (content, deletions) = match base {
-                    Some(BranchViewSourceBase::Current(base)) if base != head => {
-                        let base_keys = self
-                            .node
-                            .equivalent_stored_branch_keys(
-                                &request.source.table,
-                                self.read_view.read_schema,
-                                base,
-                            )
-                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                        let base_content = self
-                            .projected_branch_content_source_graph(
-                                request,
-                                &table,
-                                graph_tier.expect("branch view has a current tier"),
-                                &base_keys,
-                            )
-                            .await?;
-                        let base_deletions = self
-                            .projected_branch_deletion_source_graph(
-                                request,
-                                graph_tier.expect("branch view has a current tier"),
-                                &base_keys,
-                            )
-                            .await?;
-                        (
-                            GraphBuilder::union([
-                                head_content.clone(),
-                                GraphBuilder::anti_join(
-                                    base_content,
-                                    head_content,
-                                    ["row_uuid"],
-                                    ["row_uuid"],
-                                ),
-                            ]),
-                            GraphBuilder::union([
-                                head_deletions.clone(),
-                                GraphBuilder::anti_join(
-                                    base_deletions,
-                                    head_deletions,
-                                    ["row_uuid"],
-                                    ["row_uuid"],
-                                ),
-                            ]),
-                        )
-                    }
-                    _ => (head_content, head_deletions),
-                };
                 let content_version = request
                     .requirements
                     .metadata
@@ -960,14 +854,29 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                // The frozen view stacks the live head over the snapshot base,
+                // content and deletion registers separately (`INV-BVIEW-9`).
+                // The head reads its whole branch key: its rows mask the
+                // snapshot whatever the query's predicate.
                 let head_content = self
-                    .projected_branch_content_source_graph(request, &table, tier, &head_keys)
+                    .projected_branch_content_source_graph(
+                        request,
+                        &table,
+                        tier,
+                        &head_keys,
+                        &BranchLayerAccess::Full,
+                    )
                     .await?;
                 let head_deletions = self
-                    .projected_branch_deletion_source_graph(request, tier, &head_keys)
+                    .projected_branch_deletion_source_graph(
+                        request,
+                        tier,
+                        &head_keys,
+                        &BranchLayerAccess::Full,
+                    )
                     .await?;
-                let head_content_presence = head_content.clone().project(["row_uuid"]);
-                let head_deletion_presence = head_deletions.clone().project(["row_uuid"]);
+                let head_content_layer = layer_stack::Layer::new(head_content.clone());
+                let head_deletion_layer = layer_stack::Layer::new(head_deletions.clone());
                 let deleted = head_deletions
                     .clone()
                     .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
@@ -1040,12 +949,7 @@ where
                         SourceGap::SchemaProjection,
                     ));
                 }
-                let inherited = GraphBuilder::anti_join(
-                    opening,
-                    head_content_presence,
-                    ["row_uuid"],
-                    ["row_uuid"],
-                );
+                let inherited = layer_stack::exposed(opening, [&head_content_layer]);
                 // A deletion-register winner is explicit for both states. Use
                 // its positive Restored row as a positive maintained input;
                 // relying only on retraction from a filtered Deleted relation
@@ -1055,12 +959,7 @@ where
                     // path: its static witness cannot publish the inherited
                     // row when a pending head content winner retracts.
                     GraphBuilder::union([
-                        GraphBuilder::anti_join(
-                            inherited.clone(),
-                            head_deletion_presence,
-                            ["row_uuid"],
-                            ["row_uuid"],
-                        ),
+                        layer_stack::exposed(inherited.clone(), [&head_deletion_layer]),
                         GraphBuilder::semi_join(inherited, restored, ["row_uuid"], ["row_uuid"]),
                     ])
                 } else {
@@ -1087,11 +986,9 @@ where
                         ["row_uuid"],
                     );
                     GraphBuilder::union([
-                        GraphBuilder::anti_join(
+                        layer_stack::exposed(
                             inherited_without_frozen_deletions,
-                            head_deletion_presence,
-                            ["row_uuid"],
-                            ["row_uuid"],
+                            [&head_deletion_layer],
                         ),
                         // A head Restored winner deliberately also reveals a
                         // base row whose frozen deletion winner was Deleted.
@@ -1944,13 +1841,20 @@ where
                 graph
             };
             let covered = self.exclude_settled_arm(request, covered, false).await?;
-            let inputs = vec![covered, graph];
-
-            let winner = GraphBuilder::arg_max_by(
-                GraphBuilder::union(inputs),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            );
+            let winner = if receiver_local_overlay {
+                // `[local, origin]` with the covered authority closure as
+                // origin: the local delta wins whatever its stamp.
+                layer_stack::compose([
+                    layer_stack::Layer::new(graph),
+                    layer_stack::Layer::new(covered),
+                ])
+            } else {
+                GraphBuilder::arg_max_by(
+                    GraphBuilder::union([covered, graph]),
+                    ["row_uuid"],
+                    ["tx_time", "tx_node_id"],
+                )
+            };
             if receiver_local_overlay {
                 let deleted = self
                     .pending_deletion_winner_graph(request)?
@@ -2893,19 +2797,29 @@ where
                 .node
                 .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-            GraphBuilder::table(physical_register_ahead_current_table_name(table_id))
+            let _ = table_id;
+            self.node
+                .physical_current_marker_source_graph(
+                    self.read_view.read_schema,
+                    &request.source.table,
+                    PhysicalCurrentClass::Ahead,
+                    &BranchKey::default(),
+                    None,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
         } else {
-            GraphBuilder::table(register_ahead_current_table_name(&request.source.table))
+            GraphBuilder::table(ahead_current_table_name(&request.source.table))
         };
         let fields = register_storage_fields_for_query_engine("");
-        // Ahead can contain several unconfirmed operations for the same row.
-        // A pending restore must supersede an earlier pending deletion.
+        // Ahead can contain several unconfirmed images of the same row. The
+        // newest one decides, so a pending restore supersedes a pending delete.
         Ok(GraphBuilder::arg_max_by(
             ahead.project_fields(fields.clone()),
             ["row_uuid"],
             ["tx_time", "tx_node_id"],
         )
-        .project_fields(fields))
+        .project_fields(fields)
+        .filter(PredicateExpr::is_not_null("_deletion")))
     }
 
     pub fn deletion_register_source_for_request(
@@ -2947,15 +2861,8 @@ where
                 row_uuid_field: "row_uuid".to_owned(),
             }));
         }
-        let register_table = self
-            .node
-            .physical_register_table_for_schema(
-                self.node.catalogue.local_schema_version_id,
-                &table.name,
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         Ok(Some(DeletionRegisterSource {
-            graph: deletion_register_current_source_graph(&table.name, &register_table, tier),
+            graph: deletion_register_current_source_graph(&table.name, tier),
             row_uuid_field: "row_uuid".to_owned(),
         }))
     }
@@ -3067,8 +2974,147 @@ where
         })
     }
 
+    /// How this branch-view source reads its branch layers: the source's
+    /// access path, when one bounds a branch layer (SPEC 11 §11.2).
+    fn branch_layer_access(&self, request: &SourceRequest) -> BranchLayerAccess {
+        match self.access_paths.get(&request.source) {
+            Some(CurrentAccessPath::PrimaryKey(prefix)) => {
+                BranchLayerAccess::PrimaryKey(prefix.clone())
+            }
+            Some(CurrentAccessPath::Index {
+                column,
+                order_column,
+                prefix,
+                intersections,
+                maintained,
+                // A branch layer is masked before its predicates, so neither
+                // a result cap nor another table's candidate set may narrow
+                // it.
+                reverse: _,
+                source_limit: _,
+                candidate_filter: _,
+            }) => BranchLayerAccess::Index {
+                column: column.clone(),
+                order_column: order_column.clone(),
+                prefix: prefix.clone(),
+                intersections: intersections.clone(),
+                maintained: *maintained,
+            },
+            Some(CurrentAccessPath::PrimaryKeyPage { .. }) | None => BranchLayerAccess::Full,
+        }
+    }
+
+    /// The content and deletion registers of a live branch view: `head`
+    /// over an optional live `base`, each a `[local, origin]` ref stack,
+    /// stacked by the layer-stack rule for content and deletion separately
+    /// (`INV-BVIEW-9`).
+    ///
+    /// Under an index access path every content layer reads only its index
+    /// prefix: the local delta masks origin through the shadow, and the head
+    /// masks the base by its presence, which costs the head's row count
+    /// rather than the base's. The deletion registers stay whole: a head row
+    /// inside the prefix can still be deleted by its base image anywhere in
+    /// the base key (`INV-BVIEW-10`), and finding that image by row id needs
+    /// a keyed lookup the graph has no operator for (#4005). A primary-key path
+    /// bounds every layer, deletion registers included.
+    async fn live_branch_view_registers(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        tier: DurabilityTier,
+        head: &BranchKey,
+        base: Option<&BranchKey>,
+    ) -> Result<(GraphBuilder, GraphBuilder), SourceResolutionError> {
+        let access = self.branch_layer_access(request);
+        let stored_keys = |this: &Self, key: &BranchKey| {
+            this.node
+                .equivalent_stored_branch_keys(
+                    &request.source.table,
+                    this.read_view.read_schema,
+                    key,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))
+        };
+        let head_keys = stored_keys(self, head)?;
+        let head_content = self
+            .projected_branch_content_source_graph(request, table, tier, &head_keys, &access)
+            .await?;
+        let head_deletions = self
+            .projected_branch_deletion_source_graph(request, tier, &head_keys, &access)
+            .await?;
+        let Some(base) = base else {
+            return Ok((head_content, head_deletions));
+        };
+        let base_keys = stored_keys(self, base)?;
+        let base_content = self
+            .projected_branch_content_source_graph(request, table, tier, &base_keys, &access)
+            .await?;
+        let base_deletions = self
+            .projected_branch_deletion_source_graph(request, tier, &base_keys, &access)
+            .await?;
+        let head_content = match access {
+            BranchLayerAccess::Index { .. } => layer_stack::Layer::masked_by(
+                head_content,
+                layer_stack::Mask::Presence(self.branch_presence(request, tier, &head_keys)?),
+            ),
+            BranchLayerAccess::Full | BranchLayerAccess::PrimaryKey(_) => {
+                layer_stack::Layer::new(head_content)
+            }
+        };
+        Ok((
+            layer_stack::compose([head_content, layer_stack::Layer::new(base_content)]),
+            layer_stack::compose([
+                layer_stack::Layer::new(head_deletions),
+                layer_stack::Layer::new(base_deletions),
+            ]),
+        ))
+    }
+
+    /// Every `row_uuid` a branch key holds at `tier`, whatever its values:
+    /// the union of its refs' rows, read through the system-field winner
+    /// projection.
+    fn branch_presence(
+        &mut self,
+        request: &SourceRequest,
+        tier: DurabilityTier,
+        stored_keys: &BTreeSet<BranchKey>,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        // The mask reads the whole branch key, not just the index prefix.
+        self.record_branch_layer_read(|metrics| metrics.source_branch_register_full_scans += 1);
+        let mut rows = Vec::new();
+        for r in Ref::stack(tier) {
+            for branch_key in stored_keys {
+                rows.push(
+                    self.node
+                        .physical_current_marker_source_graph(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            r.physical_class(),
+                            branch_key,
+                            None,
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
+                        .project(["row_uuid"]),
+                );
+            }
+        }
+        Ok(GraphBuilder::union(rows))
+    }
+
+    /// Record one branch-layer read in the query-engine read metrics. Like
+    /// every access-path receipt, it belongs to the fragment that owns the
+    /// deduplicated physical source, so a policy proof specialized from its
+    /// outer source records nothing (`count_access_path_metrics`), whatever
+    /// the access.
+    fn record_branch_layer_read(&mut self, record: impl FnOnce(&mut QueryEngineReadMetrics)) {
+        if self.count_access_path_metrics {
+            record(&mut self.node.query_engine_read_metrics);
+        }
+    }
+
     /// Build the maintained content-winner relation for one logical branch
-    /// key. `stored_keys` includes historical short spellings produced before
+    /// key: its `[local, origin]` ref stack, each ref read under `access`.
+    /// `stored_keys` includes historical short spellings produced before
     /// monotone branch-column additions; they compete as one branch-local row.
     pub async fn projected_branch_content_source_graph(
         &mut self,
@@ -3076,6 +3122,7 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
         stored_keys: &BTreeSet<BranchKey>,
+        access: &BranchLayerAccess,
     ) -> Result<GraphBuilder, SourceResolutionError> {
         let required_fields = self.current_projection_required_fields(request, table);
         let (projection_target, physical_fields) = self
@@ -3094,79 +3141,143 @@ where
                 &required_fields,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let branch_sources = |class, target: String| {
+        let refs = Ref::stack(tier).len() as u64;
+        let keys = stored_keys.len() as u64;
+        self.record_branch_layer_read(|metrics| match access {
+            BranchLayerAccess::Full => metrics.source_full_scans += 1,
+            BranchLayerAccess::PrimaryKey(_) => metrics.source_primary_key_scans += 1,
+            BranchLayerAccess::Index { intersections, .. } => {
+                // Each ref, plus the shadow under the local delta.
+                let scans = if tier == DurabilityTier::Global {
+                    refs
+                } else {
+                    refs + 1
+                };
+                metrics.source_index_probes += scans * keys * (1 + intersections.len() as u64);
+            }
+        });
+        // One class's rows under every stored spelling of the key.
+        let class_rows = |this: &Self, class| {
             stored_keys
                 .iter()
-                .map(|branch_key| {
-                    self.node
+                .map(|branch_key| match access {
+                    BranchLayerAccess::Full => this
+                        .node
                         .physical_current_branch_source_graph_with_projection_target(
-                            self.read_view.read_schema,
+                            this.read_view.read_schema,
                             &request.source.table,
                             class,
-                            target.clone(),
+                            projection_target.clone(),
                             branch_key,
-                        )
-                        .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
+                            None,
+                        ),
+                    BranchLayerAccess::PrimaryKey(prefix) => this
+                        .node
+                        .physical_current_branch_source_graph_with_projection_target(
+                            this.read_view.read_schema,
+                            &request.source.table,
+                            class,
+                            projection_target.clone(),
+                            branch_key,
+                            Some(row_prefix_scan(prefix)),
+                        ),
+                    BranchLayerAccess::Index {
+                        column,
+                        order_column,
+                        prefix,
+                        intersections,
+                        maintained,
+                    } => this.node.physical_current_source_for_index_scan_in(
+                        class,
+                        table,
+                        this.read_view.read_schema,
+                        branch_key,
+                        column,
+                        order_column.as_deref(),
+                        false,
+                        prefix,
+                        intersections,
+                        *maintained,
+                        None,
+                        None,
+                        &projection_target,
+                    ),
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map(GraphBuilder::union)
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
         };
-        let global = branch_sources(PhysicalCurrentClass::Global, projection_target.clone())?
-            .project(physical_fields.clone());
+        let layers = layer_stack::try_ref_layers(tier, |r| {
+            let rows = class_rows(self, r.physical_class())?.project(physical_fields.clone());
+            Ok(match (r, access) {
+                // Under an index prefix the local delta masks origin through
+                // the shadow, read under that same prefix.
+                (Ref::Local, BranchLayerAccess::Index { .. }) => layer_stack::Layer::masked_by(
+                    rows,
+                    layer_stack::Mask::Shadow(class_rows(self, PhysicalCurrentClass::AheadShadow)?),
+                ),
+                _ => layer_stack::Layer::new(rows),
+            })
+        })?;
         let content = if tier == DurabilityTier::Global {
-            global
+            layer_stack::compose(layers)
         } else {
-            let ahead = branch_sources(PhysicalCurrentClass::Ahead, projection_target)?;
-            let ahead = { ahead.project(physical_fields.clone()) };
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([global, ahead]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            )
-            .project(physical_fields)
+            layer_stack::compose(layers).project(physical_fields)
         };
         Ok(content.project_fields(post_winner_fields))
     }
 
     /// Build the maintained deletion-register winner relation for one logical
-    /// branch key, normalizing historical short key spellings before winner
-    /// selection.
+    /// branch key: its `[local, origin]` ref stack, normalizing historical
+    /// short key spellings before winner selection. Only a primary-key
+    /// `access` narrows it.
     pub async fn projected_branch_deletion_source_graph(
         &mut self,
         request: &SourceRequest,
         tier: DurabilityTier,
         stored_keys: &BTreeSet<BranchKey>,
+        access: &BranchLayerAccess,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let table_id = self
-            .node
-            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let fields = std::iter::once("branch_key".to_owned())
             .chain(register_storage_field_names())
             .collect::<Vec<_>>();
-        let branch_sources = |table_name: String| {
-            GraphBuilder::union(stored_keys.iter().map(|branch_key| {
-                GraphBuilder::table_scan(
-                    table_name.clone(),
-                    groove::ivm::StaticScanSpec::Prefix(vec![groove::ivm::LiteralValue::from(
-                        Value::Bytes(branch_key.canonical_bytes()),
-                    )]),
-                )
-            }))
+        let scan = match access {
+            BranchLayerAccess::PrimaryKey(prefix) => Some(row_prefix_scan(prefix)),
+            BranchLayerAccess::Full | BranchLayerAccess::Index { .. } => {
+                // The register reads the whole branch key even under an index.
+                self.record_branch_layer_read(|metrics| {
+                    metrics.source_branch_register_full_scans += 1
+                });
+                None
+            }
         };
-        let global = branch_sources(physical_register_global_current_table_name(table_id))
-            .project(fields.clone());
-        if tier == DurabilityTier::Global {
-            return Ok(global);
-        }
-        let ahead = branch_sources(physical_register_ahead_current_table_name(table_id));
-        let ahead = { ahead.project(fields.clone()) };
-        Ok(GraphBuilder::arg_max_by(
-            GraphBuilder::union([global, ahead]),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
-        )
-        .project(fields))
+        // Physical current tables are schema-variant; read them through the
+        // current projection. Deletion is a cell of the winning row image:
+        // select the image winner first; never-deleted rows carry no marker.
+        let layers = layer_stack::try_ref_layers(tier, |r| {
+            stored_keys
+                .iter()
+                .map(|branch_key| {
+                    self.node.physical_current_marker_source_graph(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        r.physical_class(),
+                        branch_key,
+                        scan.clone(),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|rows| {
+                    layer_stack::Layer::new(GraphBuilder::union(rows).project(fields.clone()))
+                })
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
+        })?;
+        let register = if tier == DurabilityTier::Global {
+            layer_stack::compose(layers)
+        } else {
+            layer_stack::compose(layers).project(fields)
+        };
+        Ok(register.filter(PredicateExpr::is_not_null("_deletion")))
     }
 
     pub fn projected_content_current_source_graph<'a>(
@@ -3178,7 +3289,11 @@ where
         exclude_deleted: bool,
     ) -> Pin<Box<dyn Future<Output = Result<GraphBuilder, SourceResolutionError>> + 'a>> {
         Box::pin(async move {
-            let fields = global_current_storage_fields(read_table, true, include_global_time);
+            let mut fields = global_current_storage_fields(read_table, true, include_global_time);
+            // Unfiltered callers receive the image's deletion cell.
+            if !exclude_deleted {
+                fields.push("_deletion".to_owned());
+            }
             // Global current storage has already selected the physical winner.  Apply
             // the ordinary lens-aware projection directly so added-column defaults
             // survive instead of being replaced with physical nulls by the raw
@@ -3265,16 +3380,8 @@ where
                 if !exclude_deleted {
                     return Ok(content.project(fields));
                 }
-                let deleted_winners = self
-                    .projected_deletion_register_current_source_graph(request, tier)?
-                    .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-                    .project(["row_uuid"]);
-                return Ok(GraphBuilder::anti_join(
-                    content,
-                    deleted_winners,
-                    ["row_uuid"],
-                    ["row_uuid"],
-                ));
+                // The settled image is the winner; its `_deletion` cell decides.
+                return Ok(content.filter(not_deleted_predicate()));
             }
             let required_fields = self.current_projection_required_fields(request, read_table);
             let (projection_target, physical_fields) = self
@@ -3387,6 +3494,65 @@ where
                 global
             } else {
                 let global = global.project(physical_fields.clone());
+                // An unlimited index read stays index-bounded on the overlay
+                // too: overlay rows under the prefix join the result, and the
+                // shadow (synced copies of overlaid rows, same indexes) names
+                // the settled candidates they replace. A pending edit that
+                // moved a row out of the prefix still shadows its settled
+                // copy, because the shadow holds the settled image.
+                if let Some(CurrentAccessPath::Index {
+                    column,
+                    order_column,
+                    reverse,
+                    prefix,
+                    intersections,
+                    source_limit,
+                    maintained,
+                    candidate_filter: _,
+                }) = &access_path
+                    && (!exclude_deleted)
+                        .then_some(*source_limit)
+                        .flatten()
+                        .is_none()
+                {
+                    let scan = |this: &Self, class| {
+                        this.node.physical_current_source_for_index_scan_in(
+                            class,
+                            read_table,
+                            this.read_view.read_schema,
+                            &BranchKey::default(),
+                            column,
+                            order_column.as_deref(),
+                            *reverse,
+                            prefix,
+                            intersections,
+                            *maintained,
+                            None,
+                            None,
+                            &projection_target,
+                        )
+                    };
+                    self.node.query_engine_read_metrics.source_index_probes +=
+                        2 * (1 + intersections.len() as u64);
+                    let ahead = scan(self, PhysicalCurrentClass::Ahead).map_err(|_| {
+                        source_resolution_error(request, SourceGap::SchemaProjection)
+                    })?;
+                    let shadow = scan(self, PhysicalCurrentClass::AheadShadow).map_err(|_| {
+                        source_resolution_error(request, SourceGap::SchemaProjection)
+                    })?;
+                    let ahead = self.exclude_settled_arm(request, ahead, true).await?;
+                    let ahead = ahead.project(physical_fields.clone());
+                    let content = layer_stack::compose([
+                        layer_stack::Layer::masked_by(ahead, layer_stack::Mask::Shadow(shadow)),
+                        layer_stack::Layer::new(global),
+                    ])
+                    .project(physical_fields)
+                    .project_fields(post_winner_fields);
+                    if !exclude_deleted {
+                        return Ok(content.project(fields));
+                    }
+                    return Ok(content.filter(not_deleted_predicate()));
+                }
                 let ahead = match &access_path {
                     Some(CurrentAccessPath::PrimaryKey(prefix)) => self
                         .node
@@ -3425,27 +3591,18 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
                 let ahead = self.exclude_settled_arm(request, ahead, true).await?;
                 let ahead = { ahead.project(physical_fields.clone()) };
-                GraphBuilder::arg_max_by(
-                    GraphBuilder::union([global, ahead]),
-                    ["row_uuid"],
-                    ["tx_time", "tx_node_id"],
-                )
+                layer_stack::compose([
+                    layer_stack::Layer::new(ahead),
+                    layer_stack::Layer::new(global),
+                ])
                 .project(physical_fields)
             };
             let content = content.project_fields(post_winner_fields);
             if !exclude_deleted {
                 return Ok(content.project(fields));
             }
-            let deleted_winners = self
-                .projected_deletion_register_current_source_graph(request, tier)?
-                .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-                .project(["row_uuid"]);
-            Ok(GraphBuilder::anti_join(
-                content,
-                deleted_winners,
-                ["row_uuid"],
-                ["row_uuid"],
-            ))
+            // Deletion is a cell of the winning image selected above.
+            Ok(content.filter(not_deleted_predicate()))
         })
     }
 
@@ -3464,20 +3621,26 @@ where
             .node
             .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let _ = table_id;
         let fields = register_storage_fields_for_query_engine("");
-        let global = GraphBuilder::table(physical_register_global_current_table_name(table_id));
-        if tier == DurabilityTier::Global {
-            return Ok(global);
-        }
-        let global = global.project_fields(fields.clone());
-        let ahead = GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
-        let ahead = { ahead.project_fields(fields.clone()) };
-        Ok(GraphBuilder::arg_max_by(
-            GraphBuilder::union([global, ahead]),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
-        )
-        .project_fields(fields))
+        let layers = layer_stack::try_ref_layers(tier, |r| {
+            self.node
+                .physical_current_marker_source_graph(
+                    self.read_view.read_schema,
+                    &request.source.table,
+                    r.physical_class(),
+                    &BranchKey::default(),
+                    None,
+                )
+                .map(|rows| layer_stack::Layer::new(rows.project_fields(fields.clone())))
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
+        })?;
+        let register = if tier == DurabilityTier::Global {
+            layer_stack::compose(layers)
+        } else {
+            layer_stack::compose(layers).project_fields(fields)
+        };
+        Ok(register.filter(PredicateExpr::is_not_null("_deletion")))
     }
 
     pub async fn projected_visible_current_source_graph(
@@ -3506,50 +3669,13 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, SourceResolutionError> {
+        let mut fields = storage_to_canonical_current_source_fields(table, true, false);
+        fields.push(ProjectField::named("_deletion"));
         let content = self
             .projected_content_current_source_graph(request, table, tier, false, false)
             .await?
-            .project_fields(storage_to_canonical_current_source_fields(
-                table, true, false,
-            ));
-        let deleted_winners = self
-            .projected_deletion_register_current_source_graph(request, tier)?
-            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-            .project_fields([
-                ProjectField::named("row_uuid"),
-                ProjectField::named("tx_time"),
-                ProjectField::named("tx_node_id"),
-                ProjectField::renamed("updated_by", "$updatedBy"),
-                ProjectField::renamed("updated_at", "$updatedAt"),
-            ]);
-        let undeleted = GraphBuilder::anti_join(
-            content.clone(),
-            deleted_winners.clone(),
-            ["row_uuid"],
-            ["row_uuid"],
-        )
-        .project_fields(
-            current_row_fields(table)
-                .into_iter()
-                .map(ProjectField::named)
-                .chain([ProjectField::literal("__jazz_deleted", Value::Bool(false))]),
-        );
-        let deleted = GraphBuilder::join(content, deleted_winners, ["row_uuid"], ["row_uuid"])
-            .project_fields(
-                current_row_fields(table)
-                    .into_iter()
-                    .map(|field| {
-                        let source = match field.as_str() {
-                            "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => {
-                                right_field(&field)
-                            }
-                            _ => left_field(&field),
-                        };
-                        ProjectField::renamed(source, field)
-                    })
-                    .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
-            );
-        Ok(GraphBuilder::union([undeleted, deleted]))
+            .project_fields(fields);
+        Ok(include_deleted_from_images(table, content))
     }
 
     pub fn can_use_bounded_historical_source(&self, table: &str) -> bool {
@@ -3568,23 +3694,24 @@ where
     }
 }
 
-fn deletion_register_current_source_graph(
-    table: &str,
-    physical_register_table: &str,
-    tier: DurabilityTier,
-) -> GraphBuilder {
-    if tier == DurabilityTier::Global {
-        return GraphBuilder::table(register_global_current_table_name(table))
-            .project_fields(register_storage_fields_for_query_engine(""));
-    }
-    let current_keys = deletion_register_current_keys_graph(table, tier);
-    GraphBuilder::join(
-        GraphBuilder::table(physical_register_table),
-        current_keys,
-        ["row_uuid", "tx_time", "tx_node_id"],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
-    .project_fields(register_storage_fields_for_query_engine("left."))
+fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
+    let fields = register_storage_fields_for_query_engine("");
+    let global =
+        GraphBuilder::table(global_current_table_name(table)).project_fields(fields.clone());
+    let current = if tier == DurabilityTier::Global {
+        global
+    } else {
+        GraphBuilder::arg_max_by(
+            GraphBuilder::union([
+                global,
+                GraphBuilder::table(ahead_current_table_name(table)).project_fields(fields.clone()),
+            ]),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        )
+        .project_fields(fields)
+    };
+    current.filter(PredicateExpr::is_not_null("_deletion"))
 }
 
 fn content_version_current_source_graph(
@@ -3612,24 +3739,6 @@ fn content_version_current_source_graph(
     .project(fields)
 }
 
-fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
-    let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
-    if tier == DurabilityTier::Global {
-        return GraphBuilder::table(register_global_current_table_name(table)).project(key_fields);
-    }
-    let ahead =
-        { GraphBuilder::table(register_ahead_current_table_name(table)).project(key_fields) };
-    GraphBuilder::arg_max_by(
-        GraphBuilder::union([
-            GraphBuilder::table(register_global_current_table_name(table)).project(key_fields),
-            ahead,
-        ]),
-        ["row_uuid"],
-        ["tx_time", "tx_node_id"],
-    )
-    .project(key_fields)
-}
-
 fn selected_visible_current_primary_key_graph(
     table: &TableSchema,
     tier: DurabilityTier,
@@ -3643,7 +3752,6 @@ fn selected_visible_current_primary_key_graph(
     let mut content_fields = vec![
         "row_uuid".to_owned(),
         "schema_version".to_owned(),
-        "parents".to_owned(),
         "authored_columns".to_owned(),
     ];
     content_fields.extend(user_fields.iter().cloned());
@@ -3655,71 +3763,56 @@ fn selected_visible_current_primary_key_graph(
         "tx_time".to_owned(),
         "tx_node_id".to_owned(),
     ]);
-    let content_scan = static_scan_for_prefix(prefix.clone(), 1);
-    let deletion_scan = static_scan_for_prefix(prefix, 1);
-
-    let (content_current, deleted_winners) = if tier == DurabilityTier::Global {
-        (
-            GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
-                .project(content_fields.clone()),
-            GraphBuilder::table_scan(
-                register_global_current_table_name(&table.name),
-                deletion_scan,
-            )
-            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-            .project(["row_uuid"]),
-        )
+    let content_scan = static_scan_for_prefix(prefix, 1);
+    let mut image_fields = content_fields.clone();
+    image_fields.push("_deletion".to_owned());
+    let current = if tier == DurabilityTier::Global {
+        GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
+            .project(image_fields)
     } else {
-        let ahead_content = {
-            GraphBuilder::table_scan(ahead_current_table_name(&table.name), content_scan.clone())
-                .project(content_fields.clone())
-        };
-        let deletion_fields = vec![
-            "row_uuid".to_owned(),
-            "tx_time".to_owned(),
-            "tx_node_id".to_owned(),
-            "created_by".to_owned(),
-            "created_at".to_owned(),
-            "updated_by".to_owned(),
-            "updated_at".to_owned(),
-            "_deletion".to_owned(),
-        ];
-        let ahead_deleted = {
-            GraphBuilder::table_scan(
-                register_ahead_current_table_name(&table.name),
-                deletion_scan.clone(),
-            )
-            .project(deletion_fields.clone())
-        };
-        (
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([
-                    GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
-                        .project(content_fields.clone()),
-                    ahead_content,
-                ]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            )
-            .project(content_fields.clone()),
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([
-                    GraphBuilder::table_scan(
-                        register_global_current_table_name(&table.name),
-                        deletion_scan,
-                    )
-                    .project(deletion_fields),
-                    ahead_deleted,
-                ]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            )
-            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-            .project(["row_uuid"]),
+        GraphBuilder::arg_max_by(
+            GraphBuilder::union([
+                GraphBuilder::table_scan(
+                    global_current_table_name(&table.name),
+                    content_scan.clone(),
+                )
+                .project(image_fields.clone()),
+                GraphBuilder::table_scan(ahead_current_table_name(&table.name), content_scan)
+                    .project(image_fields.clone()),
+            ]),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
         )
+        .project(image_fields)
     };
-    GraphBuilder::anti_join(content_current, deleted_winners, ["row_uuid"], ["row_uuid"])
+    current
+        .filter(not_deleted_predicate())
         .project(content_fields)
+}
+
+/// How a branch-view source reads each of its branch layers.
+#[derive(Clone, Debug)]
+pub(super) enum BranchLayerAccess {
+    /// Every row of the branch key.
+    Full,
+    /// The rows under one row-id prefix, in every layer and in both the
+    /// content and deletion registers.
+    PrimaryKey(Vec<Value>),
+    /// Content rows under one index prefix; see
+    /// `live_branch_view_registers` for what stays whole.
+    Index {
+        column: String,
+        order_column: Option<String>,
+        prefix: Vec<Value>,
+        intersections: Vec<(String, Vec<Value>)>,
+        maintained: bool,
+    },
+}
+
+/// A scan of every key under a row-id prefix, whatever the table's key
+/// length below it.
+fn row_prefix_scan(prefix: &[Value]) -> StaticScanSpec {
+    StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
 }
 
 pub(super) fn register_storage_fields_for_query_engine(prefix: &str) -> Vec<ProjectField> {
@@ -3735,7 +3828,6 @@ pub(super) fn register_storage_field_names() -> Vec<String> {
         "tx_time",
         "tx_node_id",
         "schema_version",
-        "parents",
         "created_by",
         "created_at",
         "updated_by",
@@ -4013,7 +4105,6 @@ where
             ProjectField::literal("table", Value::String(table.name.clone())),
             ProjectField::literal("layer", Value::String("content".to_owned())),
             ProjectField::named("schema_version"),
-            ProjectField::named("parents"),
             ProjectField::named("authored_columns"),
             ProjectField::renamed("$createdBy", "created_by"),
             ProjectField::renamed("$createdAt", "created_at"),
@@ -4228,7 +4319,6 @@ fn canonical_current_source_fields(
     if include_version {
         fields.extend([
             ProjectField::named("schema_version"),
-            ProjectField::named("parents"),
             ProjectField::named("authored_columns"),
         ]);
     }
@@ -4268,7 +4358,6 @@ fn storage_to_canonical_current_source_fields(
     if include_version {
         fields.extend([
             ProjectField::named("schema_version"),
-            ProjectField::named("parents"),
             ProjectField::named("authored_columns"),
         ]);
     }
@@ -4287,7 +4376,6 @@ fn branch_view_storage_source_fields(
         ProjectField::renamed("branch_key", "supplying_branch_key"),
         ProjectField::named("row_uuid"),
         ProjectField::named("schema_version"),
-        ProjectField::named("parents"),
         ProjectField::named("authored_columns"),
     ];
     for column in &table.columns {
@@ -4342,7 +4430,7 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields_for_current_stora
     metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
 ) -> RecordDescriptor {
     let logical = current_row_descriptor_with_hidden_source_fields(table, metadata);
-    let current = table.global_current_content_storage_table().record_schema();
+    let current = table.global_current_storage_table().record_schema();
     let current_types = table
         .columns
         .iter()
@@ -4457,13 +4545,6 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             records::DescriptorField::new("table", ValueType::String),
             records::DescriptorField::new("layer", ValueType::String),
             records::DescriptorField::new("schema_version", ValueType::U64),
-            records::DescriptorField::new(
-                "parents",
-                ValueType::Array(Box::new(ValueType::Tuple(vec![
-                    ValueType::U64,
-                    ValueType::Uuid,
-                ]))),
-            ),
             records::DescriptorField::new(
                 "authored_columns",
                 ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
@@ -5083,7 +5164,7 @@ where
             source_limit,
             candidate_filter,
             projection_target,
-            table.global_current_content_storage_table().record_schema(),
+            table.global_current_storage_table().record_schema(),
         )
     }
 
@@ -5102,6 +5183,43 @@ where
         projection_target: &str,
         _output: RecordDescriptor,
     ) -> Result<GraphBuilder, Error> {
+        self.physical_current_source_for_index_scan_in(
+            PhysicalCurrentClass::Global,
+            table,
+            schema_version,
+            &BranchKey::default(),
+            column,
+            order_column,
+            reverse,
+            prefix,
+            intersections,
+            maintained,
+            source_limit,
+            candidate_filter,
+            projection_target,
+        )
+    }
+
+    /// Read one physical current class under an index prefix of one branch
+    /// key. Physical current indexes lead with the branch key, so a branch
+    /// layer's index read never touches another branch's entries.
+    #[allow(clippy::too_many_arguments)]
+    fn physical_current_source_for_index_scan_in(
+        &self,
+        class: PhysicalCurrentClass,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        branch_key: &BranchKey,
+        column: &str,
+        order_column: Option<&str>,
+        reverse: bool,
+        prefix: &[Value],
+        intersections: &[(String, Vec<Value>)],
+        maintained: bool,
+        source_limit: Option<usize>,
+        candidate_filter: Option<&CurrentIndexCandidateFilter>,
+        projection_target: &str,
+    ) -> Result<GraphBuilder, Error> {
         let mapping = self
             .catalogue
             .physical_mappings
@@ -5117,12 +5235,13 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical current index column mapping missing",
             ))?;
-        let storage_table = physical_global_current_table_name(mapping.table_id);
+        let storage_table =
+            self.physical_current_table_for_schema(schema_version, &table.name, class)?;
         // Root reads address the shared (empty) branch coordinate. Physical
         // current indexes include that coordinate first so identical user keys
         // from branch-local rows cannot alias the shared index domain.
         let index_prefix = |prefix: &[Value]| {
-            std::iter::once(Value::Bytes(BranchKey::default().canonical_bytes()))
+            std::iter::once(Value::Bytes(branch_key.canonical_bytes()))
                 .chain(prefix.iter().cloned())
                 .collect::<Vec<_>>()
         };
@@ -5431,11 +5550,7 @@ pub(super) fn global_current_storage_fields(
 ) -> Vec<String> {
     let mut fields = vec!["row_uuid".to_owned()];
     if include_version {
-        fields.extend([
-            "schema_version".to_owned(),
-            "parents".to_owned(),
-            "authored_columns".to_owned(),
-        ]);
+        fields.extend(["schema_version".to_owned(), "authored_columns".to_owned()]);
     }
     fields.extend(
         table
@@ -5794,7 +5909,6 @@ fn inline_current_values_with_source_metadata_and_deletion(
             Value::String(table.name.clone()),
             Value::String("content".to_owned()),
             Value::U64(schema_version_alias.0),
-            Value::Array(Vec::new()),
             Value::Nullable(None),
             row_author_value(provenance.created_by)?,
             Value::U64(provenance.created_at),
@@ -5912,117 +6026,6 @@ fn inline_snapshot_include_deleted_current_graph_with_source_metadata(
     ))
 }
 
-#[cfg(test)]
-pub(super) fn historical_current_graph_full_scan(
-    table: &TableSchema,
-    table_id: PhysicalTableId,
-    position: GlobalTime,
-    history_rows: GraphBuilder,
-) -> GraphBuilder {
-    let cut_predicate = PredicateExpr::And(vec![
-        PredicateExpr::eq("physical_table_id", Value::U64(table_id.0)),
-        PredicateExpr::LtEq {
-            field: "global_time".to_owned(),
-            value: Value::U64(position.0).into(),
-        },
-    ])
-    .canonicalize();
-    let changes_for_layer = |layer: &'static str| {
-        GraphBuilder::table("jazz_global_changes").filter(
-            PredicateExpr::And(vec![
-                cut_predicate.clone(),
-                PredicateExpr::eq("layer", Value::Bytes(layer.as_bytes().to_vec())),
-            ])
-            .canonicalize(),
-        )
-    };
-    let nullable_deletion_type = ValueType::Nullable(Box::new(ValueType::EnumTag(
-        groove::records::ScalarEnumSchema::new("jazz_deletion", ["deleted", "restored"])
-            .expect("valid deletion enum")
-            .with_system_registry(groove::records::SystemVariantRegistry::deletion_state()),
-    )));
-    let content_events = changes_for_layer("content").project_fields([
-        ProjectField::named("row_uuid"),
-        ProjectField::named("tx_time"),
-        ProjectField::named("tx_node_id"),
-        ProjectField::literal("event_layer", Value::String("content".to_owned())),
-        ProjectField::null_typed("deletion", nullable_deletion_type.clone()),
-    ]);
-    let register_events = changes_for_layer("deletion").project_fields([
-        ProjectField::named("row_uuid"),
-        ProjectField::named("tx_time"),
-        ProjectField::named("tx_node_id"),
-        ProjectField::literal("event_layer", Value::String("deletion".to_owned())),
-        ProjectField::renamed("_deletion", "deletion"),
-    ]);
-    let latest_event = GraphBuilder::arg_max_by(
-        GraphBuilder::union([content_events.clone(), register_events]),
-        ["row_uuid"],
-        ["tx_time", "tx_node_id"],
-    );
-    let content_winners =
-        GraphBuilder::arg_max_by(content_events, ["row_uuid"], ["tx_time", "tx_node_id"]);
-    let history_rows = history_rows.project(maintained_view_history_storage_field_names(table));
-    let content_current = GraphBuilder::join(
-        history_rows,
-        content_winners,
-        ["row_uuid", "tx_time", "tx_node_id"],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
-    .project_fields(
-        ["row_uuid".to_owned()]
-            .into_iter()
-            .chain(
-                table
-                    .columns
-                    .iter()
-                    .map(|column| user_column_field(&column.name)),
-            )
-            .map(|field| ProjectField::renamed(left_field(&field), field))
-            .chain([
-                ProjectField::renamed("left.created_by", "$createdBy"),
-                ProjectField::renamed("left.created_at", "$createdAt"),
-                ProjectField::renamed("left.updated_by", "$updatedBy"),
-                ProjectField::renamed("left.updated_at", "$updatedAt"),
-                ProjectField::renamed("left.tx_time", "tx_time"),
-                ProjectField::renamed("left.tx_node_id", "tx_node_id"),
-            ]),
-    );
-    let latest_content = latest_event.clone().filter(PredicateExpr::eq(
-        "event_layer",
-        Value::String("content".to_owned()),
-    ));
-    let content_is_latest = GraphBuilder::join(
-        content_current.clone(),
-        latest_content,
-        ["row_uuid", "tx_time", "tx_node_id"],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
-    .project_fields(
-        current_row_fields(table)
-            .into_iter()
-            .map(|field| ProjectField::renamed(left_field(&field), field)),
-    );
-    let latest_restore = latest_event.filter(
-        PredicateExpr::And(vec![
-            PredicateExpr::eq("event_layer", Value::String("deletion".to_owned())),
-            PredicateExpr::eq(
-                "deletion",
-                Value::Nullable(Some(Box::new(Value::EnumTag(1)))),
-            ),
-        ])
-        .canonicalize(),
-    );
-    let restored_content =
-        GraphBuilder::join(content_current, latest_restore, ["row_uuid"], ["row_uuid"])
-            .project_fields(
-                current_row_fields(table)
-                    .into_iter()
-                    .map(|field| ProjectField::renamed(left_field(&field), field)),
-            );
-    GraphBuilder::union([content_is_latest, restored_content])
-}
-
 fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
     RecordDescriptor::new(
         std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
@@ -6103,16 +6106,18 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
     let mut content_storage_fields = vec![
         "row_uuid".to_owned(),
         "schema_version".to_owned(),
-        "parents".to_owned(),
         "authored_columns".to_owned(),
     ];
     content_storage_fields.extend(user_fields.iter().cloned());
-    content_storage_fields.push("created_by".to_owned());
-    content_storage_fields.push("created_at".to_owned());
-    content_storage_fields.push("updated_by".to_owned());
-    content_storage_fields.push("updated_at".to_owned());
-    content_storage_fields.push("tx_time".to_owned());
-    content_storage_fields.push("tx_node_id".to_owned());
+    content_storage_fields.extend([
+        "created_by".to_owned(),
+        "created_at".to_owned(),
+        "updated_by".to_owned(),
+        "updated_at".to_owned(),
+        "tx_time".to_owned(),
+        "tx_node_id".to_owned(),
+        "_deletion".to_owned(),
+    ]);
     let normalize_content_fields = |graph: GraphBuilder| {
         graph.project_fields(
             ["row_uuid".to_owned()]
@@ -6126,100 +6131,55 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
                     ProjectField::renamed("updated_at", "$updatedAt"),
                     ProjectField::named("tx_time"),
                     ProjectField::named("tx_node_id"),
+                    ProjectField::named("_deletion"),
                 ]),
         )
     };
-
-    let (content_current, deletion_current) = if tier == DurabilityTier::Global {
-        (
-            normalize_content_fields(
-                GraphBuilder::table(global_current_table_name(&table.name))
-                    .project(content_storage_fields.clone()),
-            ),
-            GraphBuilder::table(register_global_current_table_name(&table.name)),
-        )
-    } else {
-        let ahead_content = {
-            normalize_content_fields(
-                GraphBuilder::table(ahead_current_table_name(&table.name))
-                    .project(content_storage_fields.clone()),
-            )
-        };
-        let deletion_fields = vec![
-            "row_uuid".to_owned(),
-            "tx_time".to_owned(),
-            "tx_node_id".to_owned(),
-            "created_by".to_owned(),
-            "created_at".to_owned(),
-            "updated_by".to_owned(),
-            "updated_at".to_owned(),
-            "_deletion".to_owned(),
-        ];
-        let ahead_deletion = {
-            GraphBuilder::table(register_ahead_current_table_name(&table.name))
-                .project(deletion_fields.clone())
-        };
-        (
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([
-                    normalize_content_fields(
-                        GraphBuilder::table(global_current_table_name(&table.name))
-                            .project(content_storage_fields.clone()),
-                    ),
-                    ahead_content,
-                ]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            )
-            .project(current_row_fields(table)),
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([
-                    GraphBuilder::table(register_global_current_table_name(&table.name))
-                        .project(deletion_fields),
-                    ahead_deletion,
-                ]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            ),
-        )
-    };
-    let deleted_winners = deletion_current
-        .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-        .project_fields([
-            ProjectField::named("row_uuid"),
-            ProjectField::named("tx_time"),
-            ProjectField::named("tx_node_id"),
-            ProjectField::renamed("updated_by", "$updatedBy"),
-            ProjectField::renamed("updated_at", "$updatedAt"),
-        ]);
-    let undeleted = GraphBuilder::anti_join(
-        content_current.clone(),
-        deleted_winners.clone(),
-        ["row_uuid"],
-        ["row_uuid"],
-    )
-    .project_fields(
-        current_row_fields(table)
-            .into_iter()
-            .map(ProjectField::named)
-            .chain([ProjectField::literal("__jazz_deleted", Value::Bool(false))]),
+    let global = normalize_content_fields(
+        GraphBuilder::table(global_current_table_name(&table.name))
+            .project(content_storage_fields.clone()),
     );
-    let deleted = GraphBuilder::join(content_current, deleted_winners, ["row_uuid"], ["row_uuid"])
-        .project_fields(
+    // The winning image carries its own deletion state and provenance: a
+    // deleted row reports the deleting write as its last update.
+    let current = if tier == DurabilityTier::Global {
+        global
+    } else {
+        GraphBuilder::arg_max_by(
+            GraphBuilder::union([
+                global,
+                normalize_content_fields(
+                    GraphBuilder::table(ahead_current_table_name(&table.name))
+                        .project(content_storage_fields),
+                ),
+            ]),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        )
+    };
+    include_deleted_from_images(table, current)
+}
+
+/// Split winning row images into the IncludeDeleted carrier: every current
+/// row field plus `__jazz_deleted` derived from the image's `_deletion` cell.
+fn include_deleted_from_images(table: &TableSchema, current: GraphBuilder) -> GraphBuilder {
+    let with_flag = |graph: GraphBuilder, deleted: bool| {
+        graph.project_fields(
             current_row_fields(table)
                 .into_iter()
-                .map(|field| {
-                    let source = match field.as_str() {
-                        "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => {
-                            right_field(&field)
-                        }
-                        _ => left_field(&field),
-                    };
-                    ProjectField::renamed(source, field)
-                })
-                .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
-        );
-    GraphBuilder::union([undeleted, deleted])
+                .map(ProjectField::named)
+                .chain([ProjectField::literal(
+                    "__jazz_deleted",
+                    Value::Bool(deleted),
+                )]),
+        )
+    };
+    GraphBuilder::union([
+        with_flag(current.clone().filter(not_deleted_predicate()), false),
+        with_flag(
+            current.filter(PredicateExpr::eq("_deletion", Value::EnumTag(0))),
+            true,
+        ),
+    ])
 }
 
 pub(super) fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<String> {
@@ -6228,7 +6188,6 @@ pub(super) fn maintained_view_history_storage_field_names(table: &TableSchema) -
         "tx_time".to_owned(),
         "tx_node_id".to_owned(),
         "schema_version".to_owned(),
-        "parents".to_owned(),
         "created_by".to_owned(),
         "created_at".to_owned(),
         "updated_by".to_owned(),
