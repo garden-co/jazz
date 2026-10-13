@@ -32,14 +32,14 @@ fn schema_with_column(table: &str, column: &str, column_type: ColumnType) -> Sch
 }
 
 fn publish_body(schema: Schema) -> Value {
-    json!({ "schema": schema, "permissions": null })
+    jazz_testkit::schema_deployment(&schema, [])
 }
 
 #[tokio::test]
-async fn admin_schema_api_requires_secret_and_rejects_permissions() {
+async fn admin_deploy_requires_secret_and_explicit_permissions() {
     let server = start_server().await;
     let client = reqwest::Client::new();
-    let url = app_url(&server, "/admin/schemas");
+    let url = app_url(&server, "/admin/deploy");
     let body = publish_body(SchemaBuilder::new().build());
 
     assert_eq!(
@@ -58,8 +58,13 @@ async fn admin_schema_api_requires_secret_and_rejects_permissions() {
         401
     );
 
+    let mut missing_permissions = body.clone();
+    missing_permissions
+        .as_object_mut()
+        .unwrap()
+        .remove("permissions");
     let rejected = admin_request(client.post(&url))
-        .json(&json!({ "schema": SchemaBuilder::new().build(), "permissions": {} }))
+        .json(&missing_permissions)
         .send()
         .await
         .unwrap();
@@ -72,7 +77,7 @@ async fn admin_schema_api_requires_secret_and_rejects_permissions() {
 async fn admin_schema_api_rejects_oversized_bodies_before_the_handler_runs() {
     let server = start_server().await;
     let client = reqwest::Client::new();
-    let response = admin_request(client.post(app_url(&server, "/admin/schemas")))
+    let response = admin_request(client.post(app_url(&server, "/admin/deploy")))
         .header("content-type", "application/json")
         .body(vec![b' '; MAX_ADMIN_REQUEST_BODY_BYTES + 1])
         .send()
@@ -88,7 +93,7 @@ async fn admin_schema_api_rejects_oversized_bodies_before_the_handler_runs() {
 async fn admin_schema_api_publishes_lists_and_gets_schema_json() {
     let server = start_server().await;
     let client = reqwest::Client::new();
-    let publish_url = app_url(&server, "/admin/schemas");
+    let publish_url = app_url(&server, "/admin/deploy");
     let published = admin_request(client.post(&publish_url))
         .json(&publish_body(schema_with_column(
             "todos",
@@ -98,16 +103,13 @@ async fn admin_schema_api_publishes_lists_and_gets_schema_json() {
         .send()
         .await
         .unwrap();
-    assert_eq!(published.status(), 201);
+    assert_eq!(published.status(), 200);
     let published = json_response(published).await;
-    let hash = published["hash"].as_str().expect("schema hash").to_owned();
+    let hash = published["published"]["schemas"][0]
+        .as_str()
+        .expect("schema hash")
+        .to_owned();
     assert_eq!(hash.len(), 64);
-    assert!(
-        !published["objectId"]
-            .as_str()
-            .expect("object id")
-            .is_empty()
-    );
 
     let schemas_url = app_url(&server, "/schemas");
     assert_eq!(client.get(&schemas_url).send().await.unwrap().status(), 401);
@@ -144,7 +146,7 @@ async fn admin_schema_api_publishes_lists_and_gets_schema_json() {
 async fn admin_schema_api_rejects_noncanonical_schema_payloads() {
     let server = start_server().await;
     let client = reqwest::Client::new();
-    let url = app_url(&server, "/admin/schemas");
+    let url = app_url(&server, "/admin/deploy");
 
     // These intentionally bypass the schema builders: the HTTP boundary must
     // reject old/noncanonical JSON that no public Rust schema API can create.
@@ -167,7 +169,7 @@ async fn admin_schema_api_rejects_noncanonical_schema_payloads() {
         }),
     ] {
         let response = admin_request(client.post(&url))
-            .json(&json!({ "schema": schema, "permissions": null }))
+            .json(&json!({ "targetSchemaHash": "a".repeat(64), "schemas": [{ "hash": "a".repeat(64), "schema": schema }], "migrations": [], "permissions": {} }))
             .send()
             .await
             .unwrap();
@@ -181,7 +183,7 @@ async fn admin_schema_api_rejects_noncanonical_schema_payloads() {
 async fn admin_schema_api_accepts_public_schema_tables_wrapper() {
     let server = start_server().await;
     let client = reqwest::Client::new();
-    let response = admin_request(client.post(app_url(&server, "/admin/schemas")))
+    let response = admin_request(client.post(app_url(&server, "/admin/deploy")))
         .json(&publish_body(
             SchemaBuilder::new()
                 .table(
@@ -194,7 +196,7 @@ async fn admin_schema_api_accepts_public_schema_tables_wrapper() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 201);
+    assert_eq!(response.status(), 200);
 
     server.shutdown().await;
 }
@@ -212,7 +214,7 @@ async fn admin_schema_api_persists_catalogue_in_the_production_storage_backend()
         .await
         .expect("start test server");
     let client = reqwest::Client::new();
-    let published = admin_request(client.post(app_url(&server, "/admin/schemas")))
+    let published = admin_request(client.post(app_url(&server, "/admin/deploy")))
         .json(&publish_body(schema_with_column(
             "notes",
             "body",
@@ -221,8 +223,8 @@ async fn admin_schema_api_persists_catalogue_in_the_production_storage_backend()
         .send()
         .await
         .unwrap();
-    assert_eq!(published.status(), 201);
-    let hash = json_response(published).await["hash"]
+    assert_eq!(published.status(), 200);
+    let hash = json_response(published).await["published"]["schemas"][0]
         .as_str()
         .expect("schema hash")
         .to_owned();

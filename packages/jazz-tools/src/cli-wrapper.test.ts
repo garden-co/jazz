@@ -130,7 +130,7 @@ export default s.definePermissions(app, ({ policy }) => {
 
       expect(result.status).toBe(1);
       expect(result.stdout).toContain(`Loaded current schema from ${join(root, "schema.ts")}.`);
-      expect(result.stderr).toContain("request=/apps/explicit-wrapper-app/schemas");
+      expect(result.stderr).toContain("request=/apps/explicit-wrapper-app/admin/migrations/graph");
       expect(result.stderr).toContain("secret=real-secret");
       expect(result.stderr).not.toContain("Missing app ID");
       expect(result.stdout).not.toContain("Jazz distributed database CLI");

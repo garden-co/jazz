@@ -24,13 +24,18 @@ export function newInviteCode(): string {
  * the claim is rejected.
  *
  * The rest of the tour is written in one transaction after the claim commits (see
- * `stageTour`). If that transaction is lost (the tab closes before it syncs) or
- * rejected, the band stays without a tour and is not reseeded; the caller only
- * reports the error.
+ * `stageTour`). It shows locally at once; the server's answer is reported through
+ * `onTourRejected` rather than waited for. If that transaction is lost (the tab
+ * closes before it syncs) or rejected, the band stays without a tour and is not
+ * reseeded.
  */
 export async function claimDemoBand(
   db: Db,
-  { userId, ownerName }: { userId: string; ownerName: string },
+  {
+    userId,
+    ownerName,
+    onTourRejected,
+  }: { userId: string; ownerName: string; onTourRejected?: (error: unknown) => void },
 ): Promise<boolean> {
   const fixture = buildTourFixture({ seed: DEFAULT_SEED, start: new Date() });
   try {
@@ -44,23 +49,27 @@ export async function claimDemoBand(
   const tour = await db.transaction((tx) =>
     stageTour(tx, DEMO_BAND_ID, { userId, ownerName }, fixture),
   );
-  await tour.wait({ tier: "global" });
+  tour.wait({ tier: "global" }).catch((error: unknown) => onTourRejected?.(error));
   return true;
 }
 
-/** Creates a new band owned by `userId` with the seeded demo tour starting today. */
+/**
+ * Creates a new band owned by `userId` with the seeded demo tour starting today.
+ * Resolves once the tour is committed locally, so the caller can open the band
+ * straight away; `accepted` settles when the server has accepted the whole tour,
+ * or rejects when it turned it down (and the local rows are rolled back).
+ */
 export async function startDemoTour(
   db: Db,
   { userId, ownerName, seed = DEFAULT_SEED }: { userId: string; ownerName: string; seed?: number },
-): Promise<string> {
+): Promise<{ bandId: string; accepted: Promise<unknown> }> {
   const fixture = buildTourFixture({ seed, start: new Date() });
   const tour = await db.transaction((tx) => {
     const band = tx.insert(app.bands, { name: fixture.bandName, ownerId: userId });
     stageTour(tx, band.id, { userId, ownerName }, fixture);
     return band.id;
   });
-  await tour.wait({ tier: "global" });
-  return tour.value;
+  return { bandId: tour.value, accepted: tour.wait({ tier: "global" }) };
 }
 
 /**

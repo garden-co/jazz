@@ -48,7 +48,6 @@ async fn publish_schema_permissions(server: &JazzServer, schema: &Schema) {
         server.admin_secret(),
         schema,
         table_permissions,
-        None,
     )
     .await;
 }
@@ -68,11 +67,10 @@ async fn publish_generation(server: &JazzServer, schemas: &[Schema], lenses: &[L
     publish_schema_permissions(server, schemas.last().expect("at least one schema")).await;
 }
 
-/// Pushes the full two-generation lineage before any client connects; the
-/// permissions head then selects the active write generation. Post-migration
-/// writes require this order today: a lineage bundle published only at
-/// runtime leaves later writes unable to settle at the server.
+/// Activate the initial generation before admitting future lineage, with both
+/// generations available before clients connect.
 async fn push_full_catalogue(server: &JazzServer, schemas: &[Schema], lenses: &[Lens]) {
+    publish_schema_permissions(server, schemas.first().expect("initial schema")).await;
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -364,7 +362,6 @@ async fn v2_update_of_v1_document_preserves_untouched_columns_impl() {
         &[owner_lens_v1_to_v2()],
     )
     .await;
-    publish_schema_permissions(&server, &owner_schema_v1()).await;
     let (alice_ids, _mallory_id) = seed_owner_documents_under_v1(&server, 1).await;
     let doc_id = alice_ids[0];
     publish_schema_permissions(&server, &owner_schema_v2()).await;
@@ -436,7 +433,6 @@ async fn v2_update_denied_by_owner_policy_stays_rejected_impl() {
         &[owner_lens_v1_to_v2()],
     )
     .await;
-    publish_schema_permissions(&server, &owner_schema_v1()).await;
     let (alice_ids, _mallory_id) = seed_owner_documents_under_v1(&server, 1).await;
     let doc_id = alice_ids[0];
     publish_schema_permissions(&server, &owner_schema_v2()).await;
@@ -662,7 +658,6 @@ async fn migrated_membership_server(push: V2CataloguePush) -> (JazzServer, Membe
                 &[membership_lens_v1_to_v2()],
             )
             .await;
-            publish_schema_permissions(&server, &membership_schema_v1()).await;
             let seed = seed_membership_rows_under_v1(&server).await;
             publish_schema_permissions(&server, &membership_schema_v2()).await;
             (server, seed)
