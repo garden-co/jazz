@@ -200,9 +200,9 @@ describe("BrowserConnectionManager automatic worker recovery", () => {
         const originalFailure = fixture.contexts[0]!.onFailure;
         originalFailure(error);
         originalFailure(error);
-        await expect(fixture.manager.ensureReady("local")).rejects.toBe(error);
+        await expect(fixture.manager.ensureReady("runtime")).rejects.toBe(error);
         await vi.advanceTimersByTimeAsync(250);
-        await expect(fixture.manager.ensureReady("local")).resolves.toBeUndefined();
+        await expect(fixture.manager.ensureReady("runtime")).resolves.toBeUndefined();
         expect(fixture.createConnection).toHaveBeenCalledTimes(2);
         expect(fixture.createClient).toHaveBeenCalledOnce();
         expect(fixture.manager.getClient({})).toBe(fixture.client);
@@ -214,7 +214,7 @@ describe("BrowserConnectionManager automatic worker recovery", () => {
         originalFailure(error);
         await vi.advanceTimersByTimeAsync(60_000);
         expect(fixture.createConnection).toHaveBeenCalledTimes(2);
-        await expect(fixture.manager.ensureReady("local")).resolves.toBeUndefined();
+        await expect(fixture.manager.ensureReady("runtime")).resolves.toBeUndefined();
       } finally {
         fixture.allowFinish();
         fixture.host.isShuttingDown = true;
@@ -238,7 +238,7 @@ describe("BrowserConnectionManager automatic worker recovery", () => {
       expect(fixture.createConnection).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(1);
       expect(fixture.createConnection).toHaveBeenCalledTimes(3);
-      await expect(fixture.manager.ensureReady("local")).resolves.toBeUndefined();
+      await expect(fixture.manager.ensureReady("runtime")).resolves.toBeUndefined();
     } finally {
       fixture.allowFinish();
       fixture.host.isShuttingDown = true;
@@ -259,7 +259,7 @@ describe("BrowserConnectionManager automatic worker recovery", () => {
         fixture.fail(error);
         await vi.advanceTimersByTimeAsync(60_000);
         expect(fixture.createConnection).toHaveBeenCalledOnce();
-        await expect(fixture.manager.ensureReady("local")).rejects.toBe(error);
+        await expect(fixture.manager.ensureReady("runtime")).rejects.toBe(error);
       } finally {
         fixture.allowFinish();
         fixture.host.isShuttingDown = true;

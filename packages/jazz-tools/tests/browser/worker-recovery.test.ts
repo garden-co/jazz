@@ -55,7 +55,7 @@ describe("automatic SharedWorker mutation recovery", () => {
       try {
         const anchor = db.insert(todos, { title: "persisted before death", done: false });
         await anchor.wait({ tier: "local" });
-        await db.all(allTodos, { tier: "local" });
+        await db.all(allTodos, { tier: "local-first" });
         if (phase === "before delivery") {
           await command("hold-frames", "holding-frames");
           await command("die", "dying");
@@ -79,7 +79,7 @@ describe("automatic SharedWorker mutation recovery", () => {
           try {
             await waitForCondition(
               async () => {
-                const rows = await observer.all(allTodos, { tier: "local" });
+                const rows = await observer.all(allTodos, { tier: "local-first" });
                 return rows.length === 1 && rows[0]!.id === created.value.id;
               },
               10_000,
@@ -97,7 +97,7 @@ describe("automatic SharedWorker mutation recovery", () => {
           LIVENESS_TEST_SIGNAL_MS,
           "Original local durability handles did not recover",
         );
-        const rows = await db.all(allTodos, { tier: "local" });
+        const rows = await db.all(allTodos, { tier: "local-first" });
         expect(rows.map((row) => row.id)).toEqual([created.value.id]);
         await withTimeout(
           db.shutdown(),
@@ -106,9 +106,9 @@ describe("automatic SharedWorker mutation recovery", () => {
         );
         untrack(db);
         const reopened = track(await createDb(config));
-        expect((await reopened.all(allTodos, { tier: "local" })).map((row) => row.id)).toEqual([
-          created.value.id,
-        ]);
+        expect(
+          (await reopened.all(allTodos, { tier: "local-first" })).map((row) => row.id),
+        ).toEqual([created.value.id]);
         verified = true;
       } finally {
         // Preserve the bounded assertion as the regression signal; deliberately
