@@ -376,44 +376,13 @@ where
             .filter(eq(col("id"), lit(Value::Uuid(row_uuid.0))));
         let policy_shape =
             policy.validate_with_schema_version(&policy_schema, policy_schema_version)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
-        let policy_shape = bind_query_params_with_mode(
-            &policy_shape,
-            &policy_binding,
-            &policy_schema,
-            ParamBindingMode::InlineAllReachableSeeds,
-        )?;
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
-                &policy_shape,
-                &binding,
-                query_binding_source_shape_for_parts_if_needed(
-                    policy_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-                ),
-                BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-            ),
-            shape: input_shape,
-        };
-        let policy_context = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role: PolicyDecisionRole::Read,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
+        let (policy_shape, binding, input) =
+            self.inline_policy_subplan_input(&policy_shape, &policy_schema)?;
+        let policy_context = self.authorization_subplan_policy(
+            identity,
+            policy_shape.query().table.as_str(),
+            PolicyDecisionRole::Read,
+        );
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
@@ -571,6 +540,65 @@ where
         result
     }
 
+    /// The policy context of an authorization subplan protecting `table`
+    /// for `identity`. System authority keeps its unrestricted context.
+    fn authorization_subplan_policy(
+        &self,
+        identity: AuthorSubject,
+        table: &str,
+        role: PolicyDecisionRole,
+    ) -> PolicyContext {
+        match self.query_program_policy_context(identity) {
+            PolicyContext::Identity {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            } => PolicyContext::AuthorizationSubplan {
+                protected_source: root_source_id(table),
+                role,
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            },
+            other => other,
+        }
+    }
+
+    /// Inline a policy query's reachable seeds and build its row-set input,
+    /// returning the bound shape and binding with it.
+    fn inline_policy_subplan_input(
+        &self,
+        policy_shape: &ValidatedQuery,
+        schema: &RuntimeSchema,
+    ) -> Result<(ValidatedQuery, Binding, RowSetProgramInput), Error> {
+        let policy_binding = policy_shape.bind(BTreeMap::new())?;
+        let policy_shape = bind_query_params_with_mode(
+            policy_shape,
+            &policy_binding,
+            schema,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
+        let binding = policy_shape.bind(BTreeMap::new())?;
+        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let claim_params = binding_claim_params_for_shape(&input_shape, policy_shape.params());
+        let input = RowSetProgramInput {
+            binding: self.program_binding_for_shape(
+                &policy_shape,
+                &binding,
+                query_binding_source_shape_for_parts_if_needed(
+                    policy_shape.params(),
+                    &claim_params,
+                ),
+                BTreeMap::new(),
+                claim_params,
+            ),
+            shape: input_shape,
+        };
+        Ok((policy_shape, binding, input))
+    }
+
     pub(super) fn query_program_policy_context(&self, identity: AuthorSubject) -> PolicyContext {
         if identity == AuthorSubject::SYSTEM {
             PolicyContext::System
@@ -602,44 +630,13 @@ where
         identity: AuthorSubject,
     ) -> Result<bool, Error> {
         let policy_shape = policy.validate(&self.catalogue.schema)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
-        let policy_shape = bind_query_params_with_mode(
-            &policy_shape,
-            &policy_binding,
-            &self.catalogue.schema,
-            ParamBindingMode::InlineAllReachableSeeds,
-        )?;
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
-                &policy_shape,
-                &binding,
-                query_binding_source_shape_for_parts_if_needed(
-                    policy_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-                ),
-                BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-            ),
-            shape: input_shape,
-        };
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role: PolicyDecisionRole::Write,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
+        let (policy_shape, binding, input) =
+            self.inline_policy_subplan_input(&policy_shape, &self.catalogue.schema)?;
+        let policy = self.authorization_subplan_policy(
+            identity,
+            policy_shape.query().table.as_str(),
+            PolicyDecisionRole::Write,
+        );
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: current_query_read_set(
@@ -892,45 +889,11 @@ where
         let policy_shape = policy
             .clone()
             .validate_with_schema_version(policy_schema, policy_schema_version)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
-        let policy_shape = bind_query_params_with_mode(
-            &policy_shape,
-            &policy_binding,
-            policy_schema,
-            ParamBindingMode::InlineAllReachableSeeds,
-        )?;
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let (policy_shape, binding, input) =
+            self.inline_policy_subplan_input(&policy_shape, policy_schema)?;
         let root_source = root_source_id(policy_shape.query().table.as_str());
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
-                &policy_shape,
-                &binding,
-                query_binding_source_shape_for_parts_if_needed(
-                    policy_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-                ),
-                BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-            ),
-            shape: input_shape,
-        };
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
+        let policy =
+            self.authorization_subplan_policy(identity, policy_shape.query().table.as_str(), role);
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: current_query_read_set(
@@ -1292,22 +1255,11 @@ where
         if let Some(source_shape) = binding_source_shape.clone() {
             retarget_binding_value_sources(&mut input_shape, &source_shape);
         }
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role: PolicyDecisionRole::Read,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
+        let policy = self.authorization_subplan_policy(
+            identity,
+            policy_shape.query().table.as_str(),
+            PolicyDecisionRole::Read,
+        );
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy(
                 &policy_shape,
@@ -1406,22 +1358,8 @@ where
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(table_name),
-                role: PolicyDecisionRole::Read,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
+        let policy =
+            self.authorization_subplan_policy(identity, table_name, PolicyDecisionRole::Read);
         // System authority bypasses the table policy.  Its authorization
         // subplan must therefore describe all rows, not the policy's claim
         // predicates: those operands are invalid without an identity context
