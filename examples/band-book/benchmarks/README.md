@@ -38,9 +38,9 @@ fixture data, not an adopter schema. See
 
 Each sample reads the first page of 50 documents ordered by descending
 `updated_at`, with a literal equality on `owner_id` or `org_id`. All reads use
-the same admitted non-SYSTEM identity (owner 2), Global tier, deferred local
-updates, LocalOnly propagation, and exclude deleted rows. The database is
-history-complete. The original one-shot cases measure no transport or
+the same admitted non-SYSTEM identity (owner 2) and exclude deleted rows.
+One-shot reads use `ReadTier::Remote` through the trusted identity API;
+subscriptions use `ReadTier::LocalOnly`. The database is history-complete. The original one-shot cases measure no transport or
 subscription delivery.
 
 Compare identical data, indexes and queries across an explicit unrestricted SELECT policy,

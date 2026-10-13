@@ -5,8 +5,8 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts, RowCells,
-    SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
+    Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, RowCells, SeededRowIdSource,
+    SubscriptionEvent, SubscriptionStream,
 };
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -460,9 +460,7 @@ fn db_read_receipt(config: &Config) {
             let global_rows = block_on(db.all_for_identity(
                 &prepared,
                 ReadOpts {
-                    tier: DurabilityTier::Global,
-                    local_updates: LocalUpdates::Deferred,
-                    propagation: Propagation::LocalOnly,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
                 AuthorSubject::for_test_uuid(plan.user.0),

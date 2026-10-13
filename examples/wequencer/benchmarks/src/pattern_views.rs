@@ -13,8 +13,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent, SubscriptionStream, block_on,
+    Db, DbConfig, DbIdentity, ReadOpts, ReadTier, SeededRowIdSource, SubscriptionEvent,
+    SubscriptionStream, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
@@ -22,7 +22,6 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, param};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 const EDITS: &str = "pattern_pad_edits";
 const PATTERNS: usize = 1_001;
@@ -281,9 +280,7 @@ fn tagged_row(namespace: u64, value: u64) -> RowUuid {
 
 fn local_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }

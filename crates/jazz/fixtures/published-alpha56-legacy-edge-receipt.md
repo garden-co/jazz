@@ -15,22 +15,21 @@ It pins the byte state that alpha.56-and-earlier clients hold after a retired
 Edge server acknowledged a write that Core never saw:
 
 - `edgeAccepted`: fate tag 1 (Accepted), durability tag 2 (the retired Edge
-  tier), `global_time` null. Current code decodes this as Pending/Local and
-  replays it to Core through the author-scoped resend scan (#3265).
+  tier), `global_time` null. Before durability v2, this decoded as Pending/Local and replayed to Core
+  through the author-scoped resend scan (#3265).
 - `coreConfirmed`: a control write from the same client that reached Core:
-  fate tag 1, durability tag 3 (Global), `global_time` present. It must keep
-  its Accepted/Global outcome and is never replayed.
+  fate tag 1, durability tag 3 (Global), `global_time` present. This historically retained its Accepted/Global outcome.
 
-The test `published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent`
+The test `published_alpha56_legacy_edge_receipt_is_rejected_without_mutation`
 checks both records byte-for-byte in the physical store before current code
-opens it and again afterwards (reopen only reads them), then asserts the
-decoded fate, durability, tx id, author, row and resend-scan membership.
+attempts to open it and again afterwards. Durability v2 rejects the old
+storage profile before decoding or rewriting either record. The old replay
+compatibility path has been removed.
 
 There is no published fixture for a tag-2 record that already carries a
 global time. Alpha.56 stores a global time only together with Global
 durability (`ingest_known_transaction` asserts this), so the producer has no
-public path to that byte state. The codec rule alone keeps such a record
-Accepted.
+public path to that byte state. The entire historical root is now rejected regardless of that field.
 
 ## Explicit reproduction
 
