@@ -1029,14 +1029,25 @@ describe("broker SharedWorker construction", () => {
     const constructionSite = /new\s+(?:Shared)?Worker\s*\(\s*new\s+URL\s*\(\s*["'`]([^"'`]+)["'`]/g;
 
     const sites: string[] = [];
-    const entries = await readdir(srcRoot, { recursive: true, withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !/\.(?:ts|tsx|js|mjs)$/.test(entry.name)) continue;
-      if (/\.test\.|\.spec\./.test(entry.name)) continue;
-      const path = join(entry.parentPath, entry.name);
-      const source = await readFile(path, "utf8");
-      for (const match of source.matchAll(constructionSite)) {
-        if (match[1]!.includes("jazz-broker-worker")) sites.push(path);
+    // Walk by hand so dot-directories are never entered: concurrent tests
+    // create and delete scratch roots under src/.test-tmp, and a recursive
+    // readdir racing with them fails with ENOENT.
+    const pending = [srcRoot];
+    while (pending.length > 0) {
+      const dir = pending.pop()!;
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        if (entry.name.startsWith(".")) continue;
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          pending.push(path);
+          continue;
+        }
+        if (!entry.isFile() || !/\.(?:ts|tsx|js|mjs)$/.test(entry.name)) continue;
+        if (/\.test\.|\.spec\./.test(entry.name)) continue;
+        const source = await readFile(path, "utf8");
+        for (const match of source.matchAll(constructionSite)) {
+          if (match[1]!.includes("jazz-broker-worker")) sites.push(path);
+        }
       }
     }
 
