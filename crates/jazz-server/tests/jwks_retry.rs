@@ -12,9 +12,8 @@ use jazz::account_registry::AccountId;
 use jazz::ids::AuthorSubject;
 use jazz::tools::public_schema::Schema;
 use jazz::wire::{
-    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireError, WireErrorCode, WireFrame,
-    WireHello, WirePeerRole, WireRetry, decode_frame, decode_websocket_frame_batch, encode_frame,
-    encode_websocket_frame_batch,
+    FEATURE_NONE, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
+    decode_frame, decode_websocket_frame_batch, encode_frame, encode_websocket_frame_batch,
 };
 use jazz_server::{JazzServer, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -244,10 +243,7 @@ async fn rotated_key_outage_is_retryable_without_disabling_cached_keys() {
         StatusCode::SERVICE_UNAVAILABLE,
     );
 
-    let hello = WireFrame::Hello(WireHello::current(
-        WirePeerRole::Client,
-        FEATURE_STRUCTURED_ERRORS | FEATURE_SYNC_MESSAGE_PAYLOAD,
-    ));
+    let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, FEATURE_NONE));
     let hello_bytes = encode_websocket_frame_batch(&[encode_frame(&hello).expect("encode hello")])
         .expect("encode hello batch");
     let mut alice = connect(&server, "alice", &alice_token, account).await;
@@ -393,10 +389,7 @@ async fn jwks_outage_is_retryable_and_recovery_preserves_credential_denials() {
         AccountId(assignment.account),
     )
     .await;
-    let hello = WireFrame::Hello(WireHello::current(
-        WirePeerRole::Client,
-        FEATURE_STRUCTURED_ERRORS | FEATURE_SYNC_MESSAGE_PAYLOAD,
-    ));
+    let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, FEATURE_NONE));
     bounded(
         "sending the client hello",
         alice.send(Message::Binary(
