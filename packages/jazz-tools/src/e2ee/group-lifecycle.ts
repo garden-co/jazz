@@ -111,6 +111,10 @@ function accountMemberId(row: GroupMembership): string | undefined {
     : undefined;
 }
 
+// Prepared scopes retain query shape only, never rows, keys or authority. Share
+// the bounded working set with read-only recovery readers on the same Db.
+const preparedGroupScopes = new WeakMap<Db, WeakMap<DeviceTables & GroupTables, Set<string>>>();
+
 /** Group roots are accepted before any recipient envelopes are published. */
 export class Groups {
   private validated?: {
@@ -1363,6 +1367,45 @@ export class Groups {
 
   /** Key-free discovery only; empty group IDs never fall back to account discovery. */
   async warmMembership(scope: GroupHistoryScope, additionalAccountIds: readonly string[] = []) {
+    let schemas = preparedGroupScopes.get(this.db);
+    if (!schemas) {
+      schemas = new WeakMap();
+      const db = this.db;
+      preparedGroupScopes.set(db, schemas);
+      db.onShutdown(() => preparedGroupScopes.delete(db));
+    }
+    let prepared = schemas.get(this.tables);
+    if (!prepared) schemas.set(this.tables, (prepared = new Set()));
+    // Oversized scopes keep the ordinary chunked discovery path.
+    const key =
+      "accountId" in scope
+        ? JSON.stringify([this.accountId, "account", scope.accountId])
+        : scope.groupIds.length <= 128
+          ? JSON.stringify([this.accountId, "groups", [...new Set(scope.groupIds)].sort()])
+          : undefined;
+    if (key !== undefined && prepared.has(key)) {
+      // Drain preceding writes without collecting the component twice. Every
+      // subsequent authority transaction still discovers and covers the full
+      // current graph, including new edges, accounts and empty predicates.
+      await Promise.all([
+        this.db.all(
+          this.tables.__e2ee_groups.where(
+            "accountId" in scope
+              ? { accountId: scope.accountId }
+              : { id: { in: [...scope.groupIds] } },
+          ),
+          { tier: "remote" },
+        ),
+        ...[
+          ...new Set([
+            this.accountId,
+            ...additionalAccountIds,
+            ...("accountId" in scope ? [scope.accountId] : []),
+          ]),
+        ].map((accountId) => prefetchPublicMembershipHistory(this.db, accountId, this.tables)),
+      ]);
+      return;
+    }
     const { roots, records, successors } = await collectGroupHistory(scope, {
       roots: (selector) =>
         this.db.all(this.tables.__e2ee_groups.where(selector), { tier: "remote" }),
@@ -1389,6 +1432,10 @@ export class Groups {
         prefetchPublicMembershipHistory(this.db, accountId, this.tables),
       ),
     );
+    if (key !== undefined) {
+      prepared.add(key);
+      if (prepared.size > 8) prepared.delete(prepared.values().next().value!);
+    }
   }
 
   private async acceptedDelivery(
