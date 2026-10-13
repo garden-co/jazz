@@ -236,6 +236,7 @@ pub fn take_required_sink_deltas(
 }
 
 mod lowering;
+mod route_discipline;
 
 use lowering::*;
 pub use lowering::{PolicyAuthorizationGraph, SupportedQueryProgram};

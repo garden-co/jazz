@@ -90,7 +90,7 @@ fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>,
     })
 }
 
-fn app_row_terminal_route_eligible_fields(
+pub(super) fn app_row_terminal_route_eligible_fields(
     output: &ProgramOutputSchemas,
 ) -> Result<Vec<String>, Error> {
     let app_rows = app_row_terminal_schema(output)?;
@@ -234,7 +234,9 @@ fn prepared_param_route_field(param: &PreparedQueryParam) -> String {
     }
 }
 
-fn prepared_route_param_names(parameters: &super::query_engine::ParameterDomain) -> Vec<String> {
+pub(super) fn prepared_route_param_names(
+    parameters: &super::query_engine::ParameterDomain,
+) -> Vec<String> {
     prepared_params_from_domain(parameters)
         .iter()
         .map(prepared_param_route_field)
@@ -257,7 +259,10 @@ fn prepared_route_value_indices(
         .collect()
 }
 
-fn terminal_route_fields(route_params: &[String], route_eligible_fields: &[String]) -> Vec<String> {
+pub(super) fn terminal_route_fields(
+    route_params: &[String],
+    route_eligible_fields: &[String],
+) -> Vec<String> {
     let route_eligible_fields = route_eligible_fields.iter().collect::<BTreeSet<_>>();
     route_params
         .iter()
@@ -273,7 +278,9 @@ fn terminal_public_fields(terminal: &OutputTerminalSchema) -> Result<Vec<String>
     }
 }
 
-fn terminal_route_eligible_fields(terminal: &OutputTerminalSchema) -> Result<Vec<String>, Error> {
+pub(super) fn terminal_route_eligible_fields(
+    terminal: &OutputTerminalSchema,
+) -> Result<Vec<String>, Error> {
     let mut fields = terminal_public_fields(terminal)?;
     if let OutputTerminalSchema::AppRows(rows) = terminal {
         fields.extend(rows.hidden_fields.iter().cloned());
@@ -1005,6 +1012,7 @@ where
             Err(error) => Err(error),
         };
         if let Ok(program) = result.as_mut() {
+            resolver.node.isolate_route_unsafe_program(program);
             program
                 .lowered
                 .targeted_refresh_tables
