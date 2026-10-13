@@ -1,6 +1,6 @@
 import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
 import type { WasmSchema } from "../../drivers/types.js";
-import type { DurabilityTier, JazzClient, AuthUpdate } from "../client.js";
+import type { JazzClient, AuthUpdate } from "../client.js";
 import { resolveClientInternalSessionSync } from "../client-session.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 import type { BrowserForegroundNodeLease, BrowserWorkerConnection } from "../runtime-source.js";
@@ -12,6 +12,7 @@ import { BrowserWorkerUnresponsiveError } from "../native-runtime/browser-worker
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
+  type ConnectionRequirement,
   type DbForConnection,
 } from "./types.js";
 import { registerBrowserInspectorControl } from "../../dev/inspector-overlay/browser-control-registry.js";
@@ -228,7 +229,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.workerRecoveryTimer = null;
   }
 
-  async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
+  async ensureReady(requirement: ConnectionRequirement, signal?: AbortSignal): Promise<void> {
     if (this.host.isShuttingDown || signal?.aborted) return;
     const reset = this.storageReset;
     // Capture before yielding: callers already waiting on a rejected attempt
@@ -252,7 +253,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     await this.connectionReady;
     if (this.host.isShuttingDown) return;
     if (this.connectionError) throw this.connectionError;
-    if (tier !== "local") {
+    if (requirement === "server") {
       for (;;) {
         while (this.disconnected) {
           await this.waitForReconnect(signal);
@@ -262,7 +263,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         if (!this.disconnected || this.host.isShuttingDown || signal?.aborted) break;
       }
     }
-    if (this.host.config.serverUrl && tier !== "local") {
+    if (this.host.config.serverUrl && requirement === "server") {
       await this.connection?.waitForServerConnection();
     }
   }
@@ -290,8 +291,8 @@ export class BrowserConnectionManager extends ConnectionManager {
     return retry;
   }
 
-  shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean {
-    return tier === "global";
+  shouldDeferSubscriptionStart(requirement: ConnectionRequirement): boolean {
+    return requirement === "server";
   }
   isExplicitlyOffline(): boolean {
     return this.disconnected;

@@ -19,9 +19,8 @@ pub const MAX_WIRE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum raw wire frames carried by one postcard WebSocket batch.
 ///
 /// Carrier encoders split above this count. It is deliberately the same as
-/// the maximum atomic commit-unit cardinality; meanwhile the 512 KiB
-/// fragmentation extent means a maximum legal encoded message needs at most
-/// 564 physical frames. This keeps a tiny-frame flood from being retained or
+/// the maximum atomic commit-unit cardinality. Channel messages can span
+/// multiple batches. This keeps a tiny-frame flood from being retained or
 /// staged beyond a bounded cardinality at the WebSocket boundary.
 pub const MAX_WIRE_BATCH_FRAMES: usize = MAX_COMMIT_UNIT_VERSIONS;
 
@@ -41,11 +40,6 @@ pub const MAX_LOGICAL_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_ENCODED_MESSAGE_BYTES: usize =
     MAX_LOGICAL_MESSAGE_BYTES + MAX_LOGICAL_MESSAGE_BYTES / 10 + 24;
 
-/// Per-peer aggregate memory budget for incomplete encoded logical messages.
-pub const MAX_INFLIGHT_ENCODED_MESSAGE_BYTES: usize = MAX_ENCODED_MESSAGE_BYTES;
-
-/// Per-peer fairness bound for concurrently incomplete logical messages.
-pub const MAX_INFLIGHT_LOGICAL_MESSAGES: usize = 4;
 /// Maximum inactivity after the last novel fragment before reassembly expires.
 pub const MAX_FRAGMENT_REASSEMBLY_IDLE_MS: u64 = 30_000;
 /// Maximum total lifetime of an incomplete fragmented message, even with progress.
@@ -120,11 +114,6 @@ pub fn validate_wire_frame_len(len: usize) -> Result<(), String> {
 /// semantic decoding.
 pub fn validate_logical_message_len(len: usize) -> Result<(), String> {
     validate_len("logical message payload", len, MAX_LOGICAL_MESSAGE_BYTES)
-}
-
-/// Validate encoded logical sync payload bytes before reassembly or decoding.
-pub fn validate_encoded_message_len(len: usize) -> Result<(), String> {
-    validate_len("encoded message payload", len, MAX_ENCODED_MESSAGE_BYTES)
 }
 
 /// Validate the shape AST independently of its registration options.

@@ -63,7 +63,7 @@ describe("finite concurrent local write convergence", () => {
             })
             .wait({ tier: "global" });
           const observer = await open("observer");
-          await observer.all(app.records, { tier: "global" });
+          await observer.all(app.records, { tier: "remote" });
           const port = server.port;
           if (offline) {
             await server.stop();
@@ -91,21 +91,21 @@ describe("finite concurrent local write convergence", () => {
           await Promise.all(tails.map((settle) => settle()));
           await delay(1000);
           const editor = await open("editor");
-          expect(await editor.all(app.records, { tier: "global" })).toMatchObject([
+          expect(await editor.all(app.records, { tier: "remote" })).toMatchObject([
             { revision: 100, archived: false },
           ]);
           await editor.update(app.records, id, { archived: true }).wait({ tier: "global" });
-          expect(await editor.all(app.records, { tier: "global" })).toMatchObject([
+          expect(await editor.all(app.records, { tier: "remote" })).toMatchObject([
             { revision: 100, archived: true },
           ]);
-          const [settled] = await editor.all(app.records, { tier: "global" });
+          const [settled] = await editor.all(app.records, { tier: "remote" });
           expect(settled.count).toBe(offline ? 200 : 0);
           if (withGSet)
             expect(settled.tags).toEqual(expect.arrayContaining(["seed", "left", "right"]));
           // A second ordinary child also settles; no application writes remain.
           await editor.update(app.records, id, { title: "settled" }).wait({ tier: "global" });
           await expect
-            .poll(() => writer.all(app.records, { tier: "global" }))
+            .poll(() => writer.all(app.records, { tier: "remote" }))
             .toMatchObject([{ title: "settled", revision: 100, archived: true }]);
         } finally {
           for (const session of sessions.reverse()) {

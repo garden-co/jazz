@@ -6,8 +6,8 @@ import permissions from "../../permissions.js";
 
 /**
  * Policy receipts for BandBook. Every assertion goes through the serving
- * authority (`tier: "global"`), so these check permissions.ts itself, not any
- * UI that hides a button.
+ * authority (writes wait for `tier: "global"`, reads use `tier: "remote"`), so
+ * these check permissions.ts itself, not any UI that hides a button.
  */
 
 let testApp: PolicyTestApp | undefined;
@@ -37,6 +37,7 @@ function person(subject: string, identityIssuer = issuer): TestDb {
 }
 
 const global = { tier: "global" } as const;
+const remote = { tier: "remote" } as const;
 
 /**
  * Permission advice as the UI asks for it. "unknown" means Jazz could not give
@@ -101,7 +102,7 @@ function blockRow(
 }
 
 async function visibleTitles(db: TestDb, workspaceId: string): Promise<string[]> {
-  const pages = await db.all(app.pages.where({ workspaceId }), global);
+  const pages = await db.all(app.pages.where({ workspaceId }), remote);
   return pages.map((row) => row.title).sort();
 }
 
@@ -147,7 +148,7 @@ describe("page grants", () => {
       "Harbour lights",
       "Outro ideas",
     ]);
-    const blocks = await guest.all(app.blocks.where({ workspaceId: band.id }), global);
+    const blocks = await guest.all(app.blocks.where({ workspaceId: band.id }), remote);
     expect(blocks.map((block) => block.text)).toEqual(["Hold the last chord"]);
 
     // Edit access is inherited too: the guest writes deep inside the grant...
@@ -182,7 +183,7 @@ describe("page grants", () => {
     expect(() => guest.update(app.pages, songs.id, { title: "Hijacked" })).toThrow(
       /read policy denied UPDATE/,
     );
-    const songsNow = await owner.all(app.pages.where({ id: songs.id }), global);
+    const songsNow = await owner.all(app.pages.where({ id: songs.id }), remote);
     expect(songsNow.map((row) => [row.title, row.parentId])).toEqual([["Songs", null]]);
     // Deleting inside the grant is fine: access comes from above.
     await guest.delete(app.pages, subpage.id).wait(global);
@@ -203,7 +204,7 @@ describe("page grants", () => {
         role: "editor",
       })
       .wait(global);
-    await guest.all(app.pages.where({ workspaceId: band.id }), global);
+    await guest.all(app.pages.where({ workspaceId: band.id }), remote);
 
     // Edit: the granted page and below. Restructure: only below it.
     expect(await advice(() => guest.canUpdate(app.pages, harbour.id, { title: "x" }))).toBe(
@@ -291,8 +292,8 @@ describe("page grants", () => {
         label: "Can view: Harbour lights",
       })
       .wait(global);
-    expect(await guest.all(app.invites.where({ workspaceId: band.id }), global)).toEqual([]);
-    expect(await person("crew").all(app.invites.where({ workspaceId: band.id }), global)).toEqual(
+    expect(await guest.all(app.invites.where({ workspaceId: band.id }), remote)).toEqual([]);
+    expect(await person("crew").all(app.invites.where({ workspaceId: band.id }), remote)).toEqual(
       [],
     );
   });
@@ -329,7 +330,7 @@ describe("viewers", () => {
     // Crew cannot promote themselves.
     const [crewRow] = await crew.all(
       app.members.where({ workspaceId: band.id, account: accountFor("crew") }),
-      global,
+      remote,
     );
     await crew.expectDenied((db) => db.update(app.members, crewRow!.id, { role: "owner" }));
   });
@@ -368,7 +369,7 @@ describe("workspace isolation", () => {
     const bobSong = await page(bob, bobBand.id, "Bob's song");
 
     expect(await visibleTitles(bob, aliceBand.id)).toEqual([]);
-    expect(await bob.all(app.workspaces.where({ id: aliceBand.id }), global)).toEqual([]);
+    expect(await bob.all(app.workspaces.where({ id: aliceBand.id }), remote)).toEqual([]);
 
     // Writing into another band directly...
     await bob.expectDenied((db) =>
@@ -476,7 +477,7 @@ describe("issues", () => {
         role: "viewer",
       })
       .wait(global);
-    const seen = await guest.all(app.issues.where({ databaseId: database.id }), global);
+    const seen = await guest.all(app.issues.where({ databaseId: database.id }), remote);
     expect(seen.map((row) => row.status)).toEqual(["in_progress"]);
     await guest.expectDenied((db) => db.update(app.issues, issue.id, { status: "done" }));
   });
@@ -498,7 +499,7 @@ describe("ordering", () => {
         .where({ parentId: parent.id })
         .select("title", "$createdAt")
         .orderBy("$createdAt", "asc"),
-      global,
+      remote,
     );
     expect(rows.map((row) => row.title)).toEqual(["Porto", "Lisbon", "Madrid"]);
     const times = rows.map((row) => new Date(row.$createdAt as Date | number).getTime());
