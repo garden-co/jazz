@@ -38,6 +38,7 @@ pub(super) fn rewrite_claim_join_for_binding(
     claims: Option<&BTreeMap<String, Value>>,
 ) -> JoinVia {
     JoinVia {
+        requires_policy_provenance: join.requires_policy_provenance,
         table: join.table,
         on_column: join.on_column,
         target: join.target,
@@ -285,11 +286,15 @@ pub(super) fn disambiguate_policy_claim_params(
     schema: &RuntimeSchema,
     binding_values: &mut BTreeMap<String, Value>,
 ) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
+    let provenance = schema
+        .policy_provenance
+        .get(&(query.table.clone(), crate::schema::PolicySlot::SelectUsing));
     disambiguate_policy_claim_params_with_outer_slots(
         query,
         schema,
         binding_values,
         &BTreeMap::new(),
+        provenance,
     )
 }
 
@@ -304,8 +309,12 @@ pub(super) fn disambiguate_policy_claim_params_with_outer_slots(
     schema: &RuntimeSchema,
     binding_values: &mut BTreeMap<String, Value>,
     outer_slots: &BTreeMap<String, ProgramClaimParam>,
+    provenance: Option<&crate::schema::PolicyRelationProvenance>,
 ) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
-    let shape = query.validate_runtime(schema)?;
+    let shape = match provenance {
+        Some(provenance) => query.validate_with_policy_provenance(schema, provenance.clone())?,
+        None => query.validate_runtime(schema)?,
+    };
     let mut aliases = BTreeMap::new();
     let mut claims = BTreeMap::new();
     for (name, ty) in shape.params() {

@@ -110,6 +110,7 @@ fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
         &schema,
         &mut binding_values,
         &outer_slots,
+        None,
     )
     .expect("the policy shape is valid before binding values");
 
@@ -146,6 +147,7 @@ fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
         &schema,
         &mut other_path_values,
         &outer_slots,
+        None,
     )
     .expect("same-type claim at another path validates");
     let other_path_alias = typed_claim_param_alias(&other_name, &ColumnType::String);
@@ -173,6 +175,7 @@ fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
         &schema,
         &mut nullable_values,
         &outer_slots,
+        None,
     )
     .expect("nullable policy claim validates");
     let nullable_alias = typed_claim_param_alias(&plain_name, &ColumnType::String.nullable());

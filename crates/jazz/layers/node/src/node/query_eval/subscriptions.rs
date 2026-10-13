@@ -134,6 +134,15 @@ where
         shape_id: ShapeId,
         ast: &ShapeAst,
     ) -> Result<Option<ValidatedQuery>, Error> {
+        self.validate_shape_ast_for_registration_with_policy_provenance(shape_id, ast, None)
+    }
+
+    fn validate_shape_ast_for_registration_with_policy_provenance(
+        &self,
+        shape_id: ShapeId,
+        ast: &ShapeAst,
+        provenance: Option<crate::schema::PolicyRelationProvenance>,
+    ) -> Result<Option<ValidatedQuery>, Error> {
         if ast.version != ShapeAst::VERSION {
             return Err(Error::InvalidStoredValue("unsupported query AST version"));
         }
@@ -146,8 +155,18 @@ where
             &schema.schema
         };
         let shape = match &ast.body {
-            ShapeBody::Query(query) => {
-                query.validate_with_schema_version(schema, ast.schema_version)?
+            ShapeBody::Query(query) => match provenance {
+                Some(provenance) => query.validate_with_policy_provenance_version(
+                    schema,
+                    ast.schema_version,
+                    provenance,
+                )?,
+                None => query.validate_with_schema_version(schema, ast.schema_version)?,
+            },
+            ShapeBody::Relation(_) if provenance.is_some() => {
+                return Err(Error::InvalidStoredValue(
+                    "policy provenance on relation AST",
+                ));
             }
             ShapeBody::Relation(relation) => relation_query_to_query(relation)?
                 .validate_with_schema_version(schema, ast.schema_version)?,
@@ -231,7 +250,34 @@ where
         subscribe: Subscribe,
         policy_binding: crate::protocol::PolicyBindingKey,
     ) -> Result<(), Error> {
-        let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
+        self.register_query_subscription_for_peer_with_policy_provenance(
+            publication_owner,
+            shape_id,
+            ast,
+            opts,
+            subscribe,
+            policy_binding,
+            None,
+        )
+    }
+
+    /// Register an authority-owned support publication through ordinary
+    /// admission, retaining the exact programme already compiled for its slot.
+    /// Wire registrations never supply this private metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn register_query_subscription_for_peer_with_policy_provenance(
+        &mut self,
+        publication_owner: u64,
+        shape_id: ShapeId,
+        ast: ShapeAst,
+        opts: RegisterShapeOptions,
+        subscribe: Subscribe,
+        policy_binding: crate::protocol::PolicyBindingKey,
+        provenance: Option<crate::schema::PolicyRelationProvenance>,
+    ) -> Result<(), Error> {
+        let shape = self.validate_shape_ast_for_registration_with_policy_provenance(
+            shape_id, &ast, provenance,
+        )?;
         if opts.read_view_key() != subscribe.subscription.read_view {
             return Err(Error::InvalidStoredValue(
                 "served subscription read-view does not match its registration options",

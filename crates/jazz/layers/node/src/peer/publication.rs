@@ -659,7 +659,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        node.register_query_subscription_for_peer(
+        node.register_query_subscription_for_peer_with_policy_provenance(
             self.publication_owner,
             shape.shape_id(),
             ShapeAst::from_validated(shape),
@@ -675,6 +675,7 @@ impl PeerState {
                 policy_binding.0,
                 policy_binding.1.clone(),
             ),
+            shape.policy_provenance().cloned(),
         )?;
         Ok(())
     }

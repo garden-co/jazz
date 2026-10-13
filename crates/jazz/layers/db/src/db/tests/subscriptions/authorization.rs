@@ -171,7 +171,9 @@ fn exists_rel_compound_join_requires_cross_alias_equalities_for_read() {
 /// A compound relation can participate in a nested boolean policy without
 /// turning its ON equalities into independent witnesses. Alice sees the row
 /// through the compound branch only with a complete witness; the public row is
-/// visible through the alternate OR branch.
+/// visible through the alternate OR branch. The same rule governs comments
+/// inheriting each resource: two evidence rows satisfying different equalities
+/// cannot jointly authorise the private resource or its comment.
 ///
 /// left_facts ──┐
 ///              ├── all equalities ──► evidence ──┐
@@ -195,6 +197,17 @@ fn exists_rel_compound_join_composes_with_nested_boolean_policy() {
                     .column("label", PublicColumnType::Text)
                     .column("enabled", PublicColumnType::Boolean)
                     .policies(PublicTablePolicies::new().with_select(policy)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("comments")
+                    .fk_column("parent_resource", "resources")
+                    .policies(
+                        PublicTablePolicies::new().with_select(PublicPolicyExpr::Inherits {
+                            operation: crate::model::public_schema::Operation::Select,
+                            via_column: "parent_resource".to_owned(),
+                            max_depth: None,
+                        }),
+                    ),
             )
             .table(
                 PublicTableSchemaBuilder::new("left_facts")
@@ -233,6 +246,15 @@ fn exists_rel_compound_join_composes_with_nested_boolean_policy() {
             },
         )
         .unwrap();
+        db.insert(
+            "comments",
+            BTreeMap::from([("parent_resource".to_owned(), Value::Uuid(id.0))]),
+            crate::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
     for (id, left_key, right_key) in [
         (partial, "left-partial", "right-partial"),
@@ -259,6 +281,7 @@ fn exists_rel_compound_join_composes_with_nested_boolean_policy() {
     }
     for (left_key, right_key) in [
         ("left-partial", "not-right-partial"),
+        ("not-left-partial", "right-partial"),
         ("left-complete", "right-complete"),
     ] {
         db.insert(
@@ -272,14 +295,16 @@ fn exists_rel_compound_join_composes_with_nested_boolean_policy() {
         .unwrap();
     }
 
-    let prepared = db.prepare_query(&Query::from("resources")).unwrap();
-    let mut subscription =
-        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), reader)).unwrap();
-    assert_eq!(
-        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
-        vec![complete, alternate],
-        "the nested policy allows a complete compound witness or the explicit alternate branch, but not the false-prefix witness"
-    );
+    for table in ["resources", "comments"] {
+        let prepared = db.prepare_query(&Query::from(table)).unwrap();
+        let mut subscription =
+            block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), reader)).unwrap();
+        assert_eq!(
+            row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
+            vec![complete, alternate],
+            "{table}: nested and inherited policies allow a complete witness or the explicit alternate branch, but reject split witnesses"
+        );
+    }
 }
 
 /// Maintained policy membership must add and retract a resource as one

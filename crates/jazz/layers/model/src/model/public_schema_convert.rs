@@ -64,14 +64,12 @@ pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConver
         .map(|(name, table)| convert_table(schema, name, table, &mut policy_provenance))
         .collect::<Result<Vec<_>, _>>()?;
     coerce_typed_literals(schema, &mut converted);
-    validate_converted_schema(&converted)?;
-    Ok(JazzSchema::from_runtime(
-        schema.clone(),
-        RuntimeSchema {
-            tables: converted,
-            policy_provenance,
-        },
-    ))
+    let runtime = RuntimeSchema {
+        tables: converted,
+        policy_provenance,
+    };
+    validate_converted_schema(&runtime)?;
+    Ok(JazzSchema::from_runtime(schema.clone(), runtime))
 }
 
 /// Decode and compile the public JSON schema used by native bindings.
@@ -81,11 +79,17 @@ pub fn decode_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
     convert_public_schema(&schema).map_err(|error| format!("compile public schema: {error}"))
 }
 
-fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
+fn validate_converted_schema(schema: &RuntimeSchema) -> Result<(), SchemaConversionError> {
+    let tables = &schema.tables;
     validate_converted_references(tables)?;
-    let schema = RuntimeSchema {
-        tables: tables.to_vec(),
-        policy_provenance: BTreeMap::new(),
+    let validate_policy = |table: &str, slot: PolicySlot, policy: &Query| match schema
+        .policy_provenance
+        .get(&(table.to_owned(), slot))
+    {
+        Some(provenance) => policy
+            .clone()
+            .validate_with_policy_provenance(schema, provenance.clone()),
+        None => policy.clone().validate_runtime(schema),
     };
 
     let mut branch_column_types = BTreeMap::<String, GrooveColumnType>::new();
@@ -146,15 +150,39 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
     }
     for table in tables {
         if let Some(policy) = &table.read_policy {
-            policy.validate_runtime(&schema).map_err(|error| {
+            validate_policy(&table.name, PolicySlot::SelectUsing, policy).map_err(|error| {
                 err(
                     format!("$.{}.policies.select.using", table.name),
                     format!("converted read policy is invalid: {error:?}"),
                 )
             })?;
         }
-        for (label, policy) in table.write_policies.iter() {
-            policy.validate_runtime(&schema).map_err(|error| {
+        for (label, slot, policy) in [
+            (
+                "insert_check",
+                PolicySlot::InsertWithCheck,
+                table.write_policies.insert_check.as_ref(),
+            ),
+            (
+                "update_using",
+                PolicySlot::UpdateUsing,
+                table.write_policies.update_using.as_ref(),
+            ),
+            (
+                "update_check",
+                PolicySlot::UpdateWithCheck,
+                table.write_policies.update_check.as_ref(),
+            ),
+            (
+                "delete_using",
+                PolicySlot::DeleteUsing,
+                table.write_policies.delete_using.as_ref(),
+            ),
+        ] {
+            let Some(policy) = policy else {
+                continue;
+            };
+            validate_policy(&table.name, slot, policy).map_err(|error| {
                 err(
                     format!("$.{}.policies.{label}", table.name),
                     format!("converted write policy is invalid: {error:?}"),
@@ -1150,7 +1178,7 @@ fn finalize_policy_query(
     let mut next_group = 0;
     let mut used_groups = BTreeSet::new();
     finalize_policy_join_list(
-        &paired.query.joins,
+        &mut paired.query.joins,
         &mut paired.provenance.joins,
         &mut paired.provenance.groups,
         &mut used_groups,
@@ -1168,7 +1196,7 @@ fn finalize_policy_query(
     for (index, (branch, provenance)) in paired
         .query
         .policy_branches
-        .iter()
+        .iter_mut()
         .zip(&mut paired.provenance.branches)
         .enumerate()
     {
@@ -1180,7 +1208,7 @@ fn finalize_policy_query(
             });
         let mut used_groups = BTreeSet::new();
         finalize_policy_join_list(
-            &branch.joins,
+            &mut branch.joins,
             &mut provenance.joins,
             &mut provenance.groups,
             &mut used_groups,
@@ -1200,7 +1228,7 @@ fn finalize_policy_query(
 }
 
 fn finalize_policy_join_list(
-    joins: &[JoinVia],
+    joins: &mut [JoinVia],
     annotations: &mut [Option<crate::schema::PolicyJoinProvenance>],
     groups: &mut Vec<crate::schema::PolicyJoinGroup>,
     used_groups: &mut BTreeSet<u32>,
@@ -1215,7 +1243,7 @@ fn finalize_policy_join_list(
             "compiled policy join provenance does not match its query joins",
         ));
     }
-    for (index, join) in joins.iter().enumerate() {
+    for (index, join) in joins.iter_mut().enumerate() {
         let join_path = format!("{path}.join[{index}]");
         let mut annotation =
             annotations[index]
@@ -1278,6 +1306,10 @@ fn finalize_policy_join_list(
                         "compiled policy join group disappeared during normalization",
                     )
                 })?;
+            // Primary traversal retains only one ON key per edge. Secondary
+            // equalities must never be evaluated without this programme.
+            join.requires_policy_provenance =
+                group.equalities.len() > group.occurrences.len().saturating_sub(1);
             *destination = group;
             *annotations
                 .get_mut(index)
@@ -1285,7 +1317,7 @@ fn finalize_policy_join_list(
         } else {
             annotation.occurrence = allocate_policy_occurrence(next_occurrence, table, &join_path)?;
             finalize_policy_join_list(
-                &join.nested_joins,
+                &mut join.nested_joins,
                 &mut annotation.nested,
                 groups,
                 used_groups,
@@ -2361,6 +2393,7 @@ fn uncorrelated_exists_join(
     nested_joins: Vec<JoinVia>,
 ) -> JoinVia {
     JoinVia {
+        requires_policy_provenance: false,
         table,
         on_column: String::new(),
         target: JoinTarget::Uncorrelated,
@@ -2419,6 +2452,7 @@ fn root_exists_rel_at_correlation(
         })?;
         lowered.root_occurrence = Some(next_annotation.occurrence);
         let reverse = JoinVia {
+            requires_policy_provenance: false,
             table: previous_table.clone(),
             target: if source_column == "id" {
                 JoinTarget::RowId
@@ -2692,6 +2726,7 @@ fn append_exists_rel_policy_clause(
     }
 
     let join = JoinVia {
+        requires_policy_provenance: false,
         table: lowered_table,
         on_column: correlation_column.clone(),
         target: if correlation_column == "id" {
@@ -3115,6 +3150,7 @@ fn lower_exists_rel(
                         nested: right.join_provenance.clone(),
                     });
             let join = JoinVia {
+                requires_policy_provenance: false,
                 table: right_table,
                 on_column: primary_on.right.column.clone(),
                 target: if primary_on.right.column == "id" {
@@ -3891,6 +3927,7 @@ fn inherited_parent_branch_to_child_query(
     }
     for (join, annotation) in branch.branch.joins.into_iter().zip(branch.provenance.joins) {
         let JoinVia {
+            requires_policy_provenance,
             table: join_table,
             on_column,
             target,
@@ -3912,7 +3949,10 @@ fn inherited_parent_branch_to_child_query(
                         .join_via_row_id(parent_table.as_str(), via_column, Vec::new());
                 paired.track_appended_joins(paired.query.joins.len() - 1);
                 paired.push_join(
-                    uncorrelated_exists_join(join_table, filters, nested_joins),
+                    JoinVia {
+                        requires_policy_provenance,
+                        ..uncorrelated_exists_join(join_table, filters, nested_joins)
+                    },
                     annotation,
                 );
             }
@@ -3925,6 +3965,7 @@ fn inherited_parent_branch_to_child_query(
                     };
                     paired.push_join(
                         JoinVia {
+                            requires_policy_provenance,
                             table: join_table,
                             on_column,
                             target: JoinTarget::Column,
@@ -3950,6 +3991,7 @@ fn inherited_parent_branch_to_child_query(
                             "inherited policy join builder produced no join",
                         )
                     })?;
+                    last.requires_policy_provenance = requires_policy_provenance;
                     last.correlated_filters = correlated_filters;
                     last.nested_joins = nested_joins;
                     paired.track_appended_joins(previous_len);
@@ -3966,6 +4008,7 @@ fn inherited_parent_branch_to_child_query(
                     };
                     paired.push_join(
                         JoinVia {
+                            requires_policy_provenance,
                             table: join_table,
                             on_column,
                             target: JoinTarget::RowId,
@@ -3995,6 +4038,7 @@ fn inherited_parent_branch_to_child_query(
                             "inherited policy row-id join builder produced no join",
                         )
                     })?;
+                    last.requires_policy_provenance = requires_policy_provenance;
                     last.correlated_filters = correlated_filters;
                     last.nested_joins = nested_joins;
                     paired.track_appended_joins(previous_len);
@@ -7171,9 +7215,109 @@ mod tests {
             .table(
                 TableSchemaBuilder::new("right_facts")
                     .fk_column("resource_id", "resources")
-                    .column("numeric_key", ColumnType::Integer),
+                    .column("numeric_key", ColumnType::Integer)
+                    .column("right_key", ColumnType::Text),
             )
             .build()
+    }
+
+    /// Alice's lowered compound policies must fail closed in every operation
+    /// slot if an internal schema constructor omits the witness programme.
+    /// This is a model test because public schema compilation always supplies
+    /// provenance; it exercises the internal constructor named in the review.
+    #[test]
+    fn compound_policy_validation_rejects_missing_provenance_in_every_slot() {
+        let mut source = compound_exists_rel_schema_with_secondary_column("right_key");
+        let resources = source.get_mut(&TableName::from("resources")).unwrap();
+        let compound = resources.policies.select.using.clone().unwrap();
+        let policy = PolicyExpr::And(vec![
+            PolicyExpr::True,
+            PolicyExpr::Or(vec![PolicyExpr::False, compound]),
+        ]);
+        resources.policies = TablePolicies::new()
+            .with_select(policy.clone())
+            .with_insert(policy.clone())
+            .with_update(Some(policy.clone()), policy.clone())
+            .with_delete(policy);
+        let compiled = convert_public_schema(&source).unwrap();
+        assert!(
+            std::panic::catch_unwind(|| {
+                JazzSchema::new_with_branch_columns(compiled.tables().iter().cloned())
+            })
+            .is_err(),
+            "the internal constructor must reject missing compound provenance"
+        );
+        let missing = JazzSchema::from_runtime(
+            source,
+            RuntimeSchema {
+                tables: compiled.tables().to_vec(),
+                policy_provenance: BTreeMap::new(),
+            },
+        );
+        let table = compiled
+            .tables()
+            .iter()
+            .find(|table| table.name == "resources")
+            .unwrap();
+        for (slot, policy) in [
+            (PolicySlot::SelectUsing, table.read_policy.as_ref()),
+            (
+                PolicySlot::InsertWithCheck,
+                table.write_policies.insert_check.as_ref(),
+            ),
+            (
+                PolicySlot::UpdateUsing,
+                table.write_policies.update_using.as_ref(),
+            ),
+            (
+                PolicySlot::UpdateWithCheck,
+                table.write_policies.update_check.as_ref(),
+            ),
+            (
+                PolicySlot::DeleteUsing,
+                table.write_policies.delete_using.as_ref(),
+            ),
+        ] {
+            let policy = policy.unwrap();
+            let provenance = compiled
+                .runtime()
+                .policy_provenance
+                .get(&("resources".to_owned(), slot))
+                .unwrap()
+                .clone();
+            policy
+                .clone()
+                .validate_with_policy_provenance(compiled.runtime(), provenance.clone())
+                .expect("paired compound programme validates");
+            for error in [
+                policy
+                    .clone()
+                    .validate(&missing)
+                    .expect_err("missing map must fail closed"),
+                {
+                    let mut incomplete = provenance;
+                    incomplete.groups.clear();
+                    for branch in incomplete.branches.iter_mut().flatten() {
+                        branch.groups.clear();
+                    }
+                    policy
+                        .clone()
+                        .validate_with_policy_provenance(compiled.runtime(), incomplete)
+                        .expect_err("missing group must fail closed")
+                },
+            ] {
+                assert!(
+                    matches!(error,
+                    crate::query::QueryError::UnsupportedRelationQuery(message)
+                        if message.contains("requires paired policy provenance")),
+                    "{slot:?}"
+                );
+            }
+        }
+        Query::from("resources")
+            .join_via("right_facts", "resource_id", Vec::new())
+            .validate(&missing)
+            .expect("ordinary joins remain supported without provenance");
     }
 
     #[test]

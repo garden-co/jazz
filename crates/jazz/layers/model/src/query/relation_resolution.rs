@@ -915,6 +915,7 @@ fn build_relation_path_join(
         .cloned()
         .ok_or_else(|| relation_unification_error("relation query join scope is unknown"))?;
     let mut join = JoinVia {
+        requires_policy_provenance: false,
         table: join_table,
         on_column: right_column,
         target: JoinTarget::Column,

@@ -2631,7 +2631,20 @@ impl ShapeAst {
     pub const VERSION: u32 = 0;
 
     /// Wrap a query AST in the current protocol version.
-    pub fn new(query: Query, schema_version: SchemaVersionId) -> Self {
+    pub fn new(mut query: Query, schema_version: SchemaVersionId) -> Self {
+        // The public AST carries traversal syntax only. Authority-owned support
+        // retains its programme separately; keep in-process transports identical
+        // to serde, which skips these derived schema markers.
+        fn clear_policy_markers(joins: &mut [crate::query::JoinVia]) {
+            for join in joins {
+                join.requires_policy_provenance = false;
+                clear_policy_markers(&mut join.nested_joins);
+            }
+        }
+        clear_policy_markers(&mut query.joins);
+        for branch in &mut query.policy_branches {
+            clear_policy_markers(&mut branch.joins);
+        }
         Self {
             version: Self::VERSION,
             schema_version,

@@ -378,6 +378,11 @@ impl Include {
 /// Junction traversal.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct JoinVia {
+    /// This lowered policy join needs its paired same-witness programme.
+    /// Derived from the public schema, never persisted or sent on the wire.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub requires_policy_provenance: bool,
     /// Junction table.
     pub table: String,
     /// Column on the junction/target table. For [`JoinTarget::RowId`], this is

@@ -1074,12 +1074,70 @@ fn validate_query_canonical_parts_as(
     validate_query_canonical_parts_as_with_provenance(query, schema, role, None)
 }
 
+/// A converted compound join has lost secondary ON keys from its public
+/// traversal shape. Its derived marker prevents a missing side-map entry from
+/// turning that shape into an ordinary, less restrictive join.
+fn validate_required_policy_provenance(
+    query: &Query,
+    provenance: Option<&crate::schema::PolicyRelationProvenance>,
+) -> Result<(), QueryError> {
+    fn joins_required(
+        items: &[JoinVia],
+        annotations: Option<&[Option<crate::schema::PolicyJoinProvenance>]>,
+        groups: &[crate::schema::PolicyJoinGroup],
+    ) -> Result<(), QueryError> {
+        for (index, join) in items.iter().enumerate() {
+            let annotation = annotations
+                .and_then(|items| items.get(index))
+                .and_then(Option::as_ref);
+            if join.requires_policy_provenance
+                && !annotation.is_some_and(|annotation| {
+                    annotation.table == join.table
+                        && annotation.group.is_some_and(|id| {
+                            groups.iter().any(|group| {
+                                group.id == id && group.occurrences.contains(&annotation.occurrence)
+                            })
+                        })
+                })
+            {
+                return Err(QueryError::UnsupportedRelationQuery(format!(
+                    "compound policy join to '{}' requires paired policy provenance",
+                    join.table,
+                )));
+            }
+            joins_required(
+                &join.nested_joins,
+                annotation.map(|annotation| annotation.nested.as_slice()),
+                groups,
+            )?;
+        }
+        Ok(())
+    }
+    joins_required(
+        &query.joins,
+        provenance.map(|provenance| provenance.joins.as_slice()),
+        provenance.map_or(&[], |provenance| provenance.groups.as_slice()),
+    )?;
+    for (index, branch) in query.policy_branches.iter().enumerate() {
+        let provenance = provenance
+            .and_then(|provenance| provenance.branches.get(index))
+            .and_then(Option::as_ref);
+        joins_required(
+            &branch.joins,
+            provenance.map(|provenance| provenance.joins.as_slice()),
+            provenance.map_or(&[], |provenance| provenance.groups.as_slice()),
+        )?;
+    }
+    Ok(())
+}
+
 fn validate_query_canonical_parts_as_with_provenance(
     query: &Query,
     schema: &RuntimeSchema,
     role: RelationProjectionRole,
     policy_provenance: Option<&mut crate::schema::PolicyRelationProvenance>,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    validate_required_policy_provenance(query, policy_provenance.as_deref())?;
     if query.relation.is_some() && policy_provenance.is_some() {
         return Err(QueryError::UnsupportedRelationQuery(
             "policy provenance is unsupported on relation queries".to_owned(),

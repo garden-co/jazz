@@ -15,6 +15,8 @@ fn validate_policy_query(
     table: &str,
     slot: crate::schema::PolicySlot,
 ) -> Result<ValidatedQuery, Error> {
+    // Model validation rejects marked compound joins if this slot has no
+    // programme; the ordinary fallback is safe only for ordinary joins.
     let provenance = schema
         .runtime()
         .policy_provenance
@@ -1566,6 +1568,14 @@ where
             policy_schema,
             &mut policy_binding_values,
             &binding_claim_params,
+            policy_schema
+                .runtime()
+                .policy_provenance
+                .get(&(
+                    table_name.to_owned(),
+                    crate::schema::PolicySlot::SelectUsing,
+                ))
+                .filter(|_| identity != AuthorSubject::SYSTEM),
         )?;
         let policy_shape = if identity == AuthorSubject::SYSTEM {
             query.validate(policy_schema)?

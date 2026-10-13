@@ -4913,6 +4913,10 @@ where
                             // initial hydration is attempted.
                             schedule_tick_in(&self.scheduler, TickUrgency::AfterCurrentTurn);
                             scheduled_follow_up = true;
+                            // First-load progress does not establish settled
+                            // authorization. Scope receipts belong to the
+                            // authority-owned intent hydration sequence, after
+                            // every support clause has completed.
                             if let Some(mut update) = opening_pending {
                                 stamp_view_update_authorization_progress_from(
                                     peer,

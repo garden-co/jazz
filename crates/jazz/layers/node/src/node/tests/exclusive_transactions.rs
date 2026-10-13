@@ -3042,6 +3042,7 @@ fn narrowing_reverse_join(
     up: Option<crate::query::JoinVia>,
 ) -> crate::query::JoinVia {
     crate::query::JoinVia {
+        requires_policy_provenance: false,
         table: table.to_owned(),
         on_column: on.to_owned(),
         target: if on == "id" {
@@ -3146,6 +3147,7 @@ fn narrowing_todos_titled() -> crate::query::Query {
 fn narrowed_reads_follow_a_join_chain_to_the_root() {
     let mut query = narrowing_todos_titled();
     query.joins.push(crate::query::JoinVia {
+        requires_policy_provenance: false,
         table: "comments".to_owned(),
         on_column: "todo".to_owned(),
         target: crate::query::JoinTarget::Column,
@@ -3154,6 +3156,7 @@ fn narrowed_reads_follow_a_join_chain_to_the_root() {
         correlated_filters: Vec::new(),
         filters: vec![narrowing_body_is_hi()],
         nested_joins: vec![crate::query::JoinVia {
+            requires_policy_provenance: false,
             table: "reactions".to_owned(),
             on_column: "comment".to_owned(),
             target: crate::query::JoinTarget::Column,
@@ -3329,6 +3332,7 @@ fn exclusive_reads_reject_a_flat_join() {
 fn exclusive_reads_reject_a_lookup_join() {
     let mut query = narrowing_todos_titled();
     query.joins.push(crate::query::JoinVia {
+        requires_policy_provenance: false,
         table: "projects".to_owned(),
         on_column: "org".to_owned(),
         target: crate::query::JoinTarget::Column,
@@ -3354,6 +3358,7 @@ fn exclusive_reads_reject_a_lookup_join() {
 fn exclusive_reads_reject_a_reference_array_join_with_extra_keys() {
     let mut query = crate::query::Query::from("people");
     query.joins.push(crate::query::JoinVia {
+        requires_policy_provenance: false,
         table: "todos".to_owned(),
         on_column: "assignees".to_owned(),
         target: crate::query::JoinTarget::Column,

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Breaking changes — Rust APIs
+
+- `RuntimeSchema` literals must supply `policy_provenance`. Convert public schemas
+  with `JazzSchema::new` to retain compound policy witness programmes; validating
+  a lowered compound join without its provenance now returns a typed error.
+- `JoinVia` literals must supply `requires_policy_provenance` (false for ordinary
+  joins). This derived marker does not change query wire or storage encodings.
+- Authorization support subscriptions now contain `AuthorizationSupportClause`
+  values with `slot`, `shape` and `binding`, rather than shape/binding tuples.
+  Use `clause.identity()` to retain the operation slot.
+- `AuthorityScopeAggregate` construction and registration
+  use slot/shape/binding clause identities, so USING and CHECK clauses with the
+  same public query identity cannot collapse into one proof.
+
 ## 2.0.0-alpha.52
 
 ### Performance — OPFS B-tree Overhaul
