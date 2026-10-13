@@ -954,11 +954,16 @@ where
     }
 
     /// Give query join state scratch storage to spill to under memory
-    /// pressure.
-    pub fn set_arrangement_spill_storage(&self, storage: Rc<dyn groove::ivm::SpillStorage>) {
+    /// pressure, holding at most `max_bytes` there.
+    pub async fn set_arrangement_spill_storage(
+        &self,
+        storage: Rc<dyn groove::ivm::SpillStorage>,
+        max_bytes: usize,
+    ) {
         self.node
-            .borrow_mut()
-            .set_arrangement_spill_storage(storage);
+            .lock()
+            .await
+            .set_arrangement_spill_storage(storage, max_bytes);
     }
 
     /// Spill query join state until `bytes` less of it stays in memory.

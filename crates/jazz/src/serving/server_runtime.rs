@@ -1272,6 +1272,26 @@ impl ServerRuntimeHandle {
             .await
     }
 
+    /// Open scratch storage at `path` and let query join state spill there
+    /// under memory pressure, holding at most `max_bytes` at once. Returns
+    /// whether `factory`'s backend has scratch storage.
+    pub async fn enable_arrangement_spill(
+        &self,
+        factory: Arc<dyn StorageFactory>,
+        path: std::path::PathBuf,
+        max_bytes: usize,
+    ) -> Result<bool, String> {
+        self.run_async(move |shell| {
+            Box::pin(async move {
+                shell
+                    .enable_arrangement_spill(factory.as_ref(), path, max_bytes)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+        })
+        .await
+    }
+
     /// Move query join state to scratch storage until `bytes` less of it
     /// stays in memory. Results are unchanged; queries over spilled state
     /// read it back from scratch storage.

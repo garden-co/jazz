@@ -2107,12 +2107,14 @@ impl Database {
     }
 
     /// Give join arrangements scratch storage to spill to under memory
-    /// pressure (see [`Self::spill_arrangements`]).
+    /// pressure (see [`Self::spill_arrangements`]), holding at most
+    /// `max_bytes` there at once.
     pub fn set_arrangement_spill_storage(
         &mut self,
         storage: std::rc::Rc<dyn crate::ivm::SpillStorage>,
+        max_bytes: usize,
     ) {
-        self.ivm_runtime.set_spill_storage(storage);
+        self.ivm_runtime.set_spill_storage(storage, max_bytes);
     }
 
     /// Join-arrangement bytes currently held in memory.

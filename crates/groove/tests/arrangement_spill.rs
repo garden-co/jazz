@@ -71,7 +71,7 @@ impl Copy {
     async fn open(spill: Option<Rc<MemorySpillStorage>>) -> Self {
         let mut db = open_db().await;
         if let Some(storage) = spill {
-            db.set_arrangement_spill_storage(storage);
+            db.set_arrangement_spill_storage(storage, usize::MAX);
         }
         let mut subs = Vec::new();
         for query in queries() {
@@ -79,6 +79,12 @@ impl Copy {
         }
         let views = vec![BTreeMap::new(); subs.len()];
         Self { db, subs, views }
+    }
+
+    async fn open_with_cap(spill: Rc<MemorySpillStorage>, max_bytes: usize) -> Self {
+        let mut copy = Self::open(None).await;
+        copy.db.set_arrangement_spill_storage(spill, max_bytes);
+        copy
     }
 
     async fn subscribe(&mut self, query: GraphBuilder) {
@@ -172,8 +178,13 @@ async fn spilled_arrangements_keep_join_results_identical() {
         assert_eq!(memory.views, spilled.views, "round {round} diverged");
 
         if next(3) != 0 {
+            // Arrangements with little changed since their last spill stay
+            // resident (see `respilling_waits_for_enough_change`).
             let report = spilled.db.spill_arrangements(0).unwrap();
-            assert_eq!(report.resident_bytes_after, 0, "round {round}: {report:?}");
+            assert!(
+                report.resident_bytes_after <= report.resident_bytes_before,
+                "round {round}: {report:?}"
+            );
         }
 
         // A late subscriber hydrates against arrangements already spilled.
@@ -220,4 +231,55 @@ async fn without_spill_storage_spilling_keeps_everything_resident() {
     assert_eq!(report.spilled_arrangements, 0);
     assert_eq!(report.resident_bytes_after, report.resident_bytes_before);
     assert!(report.resident_bytes_after > 0);
+}
+
+fn catalogue(albums: u64) -> Vec<Op> {
+    let mut ops = (0..10).map(|id| Op::Artist(id, id % 3)).collect::<Vec<_>>();
+    ops.extend((0..albums).map(|id| Op::Album(id, id % 10)));
+    ops
+}
+
+#[futures_test::test]
+async fn respilling_waits_for_enough_change() {
+    let scratch = Rc::new(MemorySpillStorage::new());
+    let mut memory = Copy::open(None).await;
+    let mut spilled = Copy::open(Some(scratch.clone())).await;
+    memory.apply(&catalogue(200)).await;
+    spilled.apply(&catalogue(200)).await;
+    let first = spilled.db.spill_arrangements(0).unwrap();
+    assert!(first.spilled_arrangements > 0, "{first:?}");
+    let entries = scratch.len();
+
+    // One changed album is far less than a quarter of any run: rewriting
+    // the run for it would cost a full copy of the run on disk.
+    memory.apply(&[Op::Album(7, 3)]).await;
+    spilled.apply(&[Op::Album(7, 3)]).await;
+    let report = spilled.db.spill_arrangements(0).unwrap();
+    assert_eq!(report.spilled_arrangements, 0, "{report:?}");
+    assert!(report.resident_bytes_after > 0);
+    assert_eq!(scratch.len(), entries, "no run was rewritten");
+    assert_eq!(memory.views, spilled.views);
+
+    // Once most of an arrangement has changed, it spills again.
+    let moved = (0..200)
+        .map(|id| Op::Album(id, (id + 1) % 10))
+        .collect::<Vec<_>>();
+    memory.apply(&moved).await;
+    spilled.apply(&moved).await;
+    let report = spilled.db.spill_arrangements(0).unwrap();
+    assert!(report.spilled_arrangements > 0, "{report:?}");
+    assert_eq!(memory.views, spilled.views);
+}
+
+#[futures_test::test]
+async fn spilling_stops_at_the_disk_cap() {
+    let scratch = Rc::new(MemorySpillStorage::new());
+    let mut capped = Copy::open_with_cap(scratch.clone(), 64).await;
+    capped.apply(&catalogue(200)).await;
+
+    let report = capped.db.spill_arrangements(0).unwrap();
+    assert_eq!(report.spilled_arrangements, 0, "{report:?}");
+    assert!(report.kept_at_disk_cap > 0, "{report:?}");
+    assert_eq!(report.resident_bytes_after, report.resident_bytes_before);
+    assert!(scratch.is_empty());
 }

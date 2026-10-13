@@ -1,8 +1,8 @@
 //! Scratch store for query state spilled out of memory.
 //!
 //! Groove moves join arrangements here when the server runs short of memory
-//! (see [`groove::ivm::SpillStorage`]). Nothing in it outlives the process:
-//! the directory is wiped when the store opens and removed when it drops,
+//! (see [`groove::ivm::SpillStorage`]). Nothing in it outlives the store:
+//! it opens only an empty directory and removes it when it drops,
 //! writes skip the WAL, and nothing is ever synced, like a Postgres temp
 //! file. It shares the process block cache and write buffer budget with the
 //! durable stores, so spilling cannot grow RocksDB's own memory.
@@ -25,13 +25,15 @@ pub struct RocksDbSpillStorage {
 }
 
 impl RocksDbSpillStorage {
-    /// Open an empty scratch store at `path`, discarding anything a previous
-    /// process left there.
+    /// Open an empty scratch store at `path`, which must not exist or be an
+    /// empty directory: the store deletes its directory when dropped, so it
+    /// never takes over one holding anything else.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref().to_path_buf();
-        if path.exists() {
-            std::fs::remove_dir_all(&path)
-                .map_err(|error| format!("clearing spill directory {}: {error}", path.display()))?;
+        if let Ok(mut entries) = std::fs::read_dir(&path)
+            && entries.next().is_some()
+        {
+            return Err(format!("spill directory {} is not empty", path.display()));
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -178,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_discards_old_contents_and_dropping_removes_the_directory() {
+    fn dropping_removes_the_directory() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("spill");
         {
@@ -187,9 +189,18 @@ mod tests {
         }
         assert!(!path.exists());
 
-        std::fs::create_dir_all(path.join("stale")).unwrap();
+        std::fs::create_dir_all(&path).unwrap();
         let spill = RocksDbSpillStorage::open(&path).unwrap();
         assert!(spill.scan_prefix(b"", None, 10).unwrap().is_empty());
-        assert!(!path.join("stale").exists());
+    }
+
+    #[test]
+    fn refuses_a_directory_that_holds_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spill");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("keep.txt"), "mine").unwrap();
+        assert!(RocksDbSpillStorage::open(&path).is_err());
+        assert!(path.join("keep.txt").exists());
     }
 }

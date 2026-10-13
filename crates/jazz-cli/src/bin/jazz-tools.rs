@@ -201,6 +201,17 @@ enum Commands {
         #[arg(long, env = "JAZZ_MEMORY_LIMIT_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
         memory_limit_bytes: Option<u64>,
 
+        /// Directory under which the server creates its scratch store for
+        /// query state spilled out of memory. Defaults to the system temp
+        /// directory.
+        #[arg(long, env = "JAZZ_SPILL_DIR")]
+        spill_dir: Option<std::path::PathBuf>,
+
+        /// Most bytes of spilled query state kept on disk. Defaults to the
+        /// memory limit; `0` turns spilling off.
+        #[arg(long, env = "JAZZ_SPILL_MAX_BYTES")]
+        spill_max_bytes: Option<u64>,
+
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
@@ -277,6 +288,8 @@ async fn run() {
             shutdown_timeout_secs,
             max_connections,
             memory_limit_bytes,
+            spill_dir,
+            spill_max_bytes,
             bound_port_file,
             diagnostics_listen,
             diagnostics_token,
@@ -338,6 +351,8 @@ async fn run() {
                     max_websocket_connections: max_connections,
                     memory_limit_bytes: memory_limit_bytes
                         .or_else(jazz_server::resources::detect_memory_limit_bytes),
+                    spill_dir,
+                    spill_max_bytes,
                 },
             )
             .await

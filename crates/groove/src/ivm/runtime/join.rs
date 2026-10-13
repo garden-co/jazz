@@ -235,6 +235,21 @@ impl JoinBucket {
 }
 type JoinIndex = HashMap<JoinKey, JoinBucket>;
 
+/// Re-spill an arrangement only once its resident part reaches this
+/// fraction (one in N) of its existing run.
+const RESPILL_MIN_SHARE: usize = 4;
+
+/// What [`ArrangementState::spill`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SpillOutcome {
+    Spilled,
+    /// Nothing worth writing: not committed, empty, or too little changed
+    /// since the last spill.
+    Skipped,
+    /// Kept in memory because the run would pass the scratch storage cap.
+    AtDiskCap,
+}
+
 /// A bucket borrowed from memory or read from a spilled run.
 pub(super) enum BucketRef<'a> {
     Resident(&'a JoinBucket),
@@ -789,14 +804,35 @@ impl ArrangementState {
     }
 
     /// Move the committed buckets to a new run on scratch storage, keeping
-    /// nothing resident. Returns whether anything was written.
+    /// nothing resident.
     ///
     /// Only a committed arrangement (no overlay, no pending transition) is
     /// spilled. The spill changes representation, not contents: snapshots
     /// and staged copies sharing the previous state stay valid.
-    pub(super) fn spill(&mut self, context: &Rc<SpillContext>) -> Result<bool, String> {
+    ///
+    /// Re-spilling rewrites the whole previous run, so an arrangement that
+    /// already has one is only re-spilled once its resident part is at least
+    /// a `1 / RESPILL_MIN_SHARE` of that run; below that the rewrite would
+    /// cost far more disk traffic than the memory it returns.
+    pub(super) fn spill(&mut self, context: &Rc<SpillContext>) -> Result<SpillOutcome, String> {
         if !self.overlay.is_empty() || self.changes.is_some() || self.index.is_empty() {
-            return Ok(false);
+            return Ok(SpillOutcome::Skipped);
+        }
+        let resident_bytes: usize = self
+            .index
+            .iter()
+            .map(|(key, bucket)| {
+                key.len() + bucket.iter().map(|(record, _)| record.len()).sum::<usize>()
+            })
+            .sum();
+        let previous_bytes = self.spilled.as_ref().map_or(0, |run| run.bytes());
+        if resident_bytes.saturating_mul(RESPILL_MIN_SHARE) < previous_bytes {
+            return Ok(SpillOutcome::Skipped);
+        }
+        // The previous run stays live until the new one replaces it, so the
+        // peak is both of them.
+        if !context.has_room_for(previous_bytes + resident_bytes) {
+            return Ok(SpillOutcome::AtDiskCap);
         }
         let index = &self.index;
         let run = SpilledRun::write_merged(
@@ -807,7 +843,7 @@ impl ArrangementState {
         )?;
         self.spilled = Some(run);
         self.index = Rc::default();
-        Ok(true)
+        Ok(SpillOutcome::Spilled)
     }
 
     /// The spilled run, if this arrangement has one.
@@ -1528,7 +1564,7 @@ mod tests {
         let on = ["key".to_owned()];
         let mapping = [(0, 0), (1, 1)];
         let storage = Rc::new(MemorySpillStorage::new());
-        let context = Rc::new(SpillContext::new(storage.clone()));
+        let context = Rc::new(SpillContext::new(storage.clone(), usize::MAX, 0));
 
         #[derive(Default)]
         struct Copy {
@@ -1686,11 +1722,12 @@ mod tests {
                     &mut spilled.anti_left,
                     &mut spilled.anti_right,
                 ] {
-                    state.value_mut().spill(&context).expect("spill");
-                    assert!(
-                        state.value().index.is_empty(),
-                        "a spill keeps nothing resident"
-                    );
+                    if state.value_mut().spill(&context).expect("spill") == SpillOutcome::Spilled {
+                        assert!(
+                            state.value().index.is_empty(),
+                            "a spill keeps nothing resident"
+                        );
+                    }
                 }
             }
         }

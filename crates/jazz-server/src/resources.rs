@@ -6,7 +6,7 @@
 //! instead of from constants, so the same binary fits a 512 MiB pod and a
 //! 16 GiB host.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Share of the process memory limit given to the RocksDB block cache, which
 /// also carries memtable reservations and index/filter blocks.
@@ -15,12 +15,18 @@ const ROCKSDB_CACHE_MIN_BYTES: u64 = 32 * 1024 * 1024;
 const ROCKSDB_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Limits the server process applies to itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerResourceLimits {
     /// Live WebSocket connections admitted before upgrades get `503`.
     pub max_websocket_connections: usize,
     /// Memory the process may use, or `None` when nothing limits it.
     pub memory_limit_bytes: Option<u64>,
+    /// Where scratch stores for spilled query state go; the system temp
+    /// directory when `None`.
+    pub spill_dir: Option<PathBuf>,
+    /// Scratch bytes spilled query state may hold; the memory limit when
+    /// `None`, and `Some(0)` turns spilling off.
+    pub spill_max_bytes: Option<u64>,
 }
 
 impl Default for ServerResourceLimits {
@@ -28,11 +34,27 @@ impl Default for ServerResourceLimits {
         Self {
             max_websocket_connections: crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
             memory_limit_bytes: None,
+            spill_dir: None,
+            spill_max_bytes: None,
         }
     }
 }
 
 impl ServerResourceLimits {
+    /// How query state spills to disk under memory pressure, or `None` when
+    /// it cannot (no memory limit to measure pressure against) or is off.
+    ///
+    /// Spilled state is capped at the memory limit by default: past that
+    /// the server keeps the rest in memory rather than fill the volume.
+    pub fn spill_config(&self) -> Option<crate::memory_governor::SpillConfig> {
+        let limit = self.memory_limit_bytes?;
+        let max_bytes = self.spill_max_bytes.unwrap_or(limit);
+        (max_bytes > 0).then(|| crate::memory_governor::SpillConfig {
+            parent_dir: self.spill_dir.clone().unwrap_or_else(std::env::temp_dir),
+            max_bytes,
+        })
+    }
+
     /// The RocksDB budget for this process: a fixed share of the memory
     /// limit, clamped so small pods keep a usable cache and large hosts do
     /// not grow it past the measured default.
@@ -108,6 +130,31 @@ mod tests {
     fn missing_cgroup_files_mean_no_limit() {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(cgroup_memory_limit_bytes(root.path()), None);
+    }
+
+    #[test]
+    fn spilling_needs_a_memory_limit_and_defaults_its_cap_to_it() {
+        let limits = |memory_limit_bytes, spill_max_bytes| ServerResourceLimits {
+            memory_limit_bytes,
+            spill_max_bytes,
+            spill_dir: Some(PathBuf::from("/scratch")),
+            ..ServerResourceLimits::default()
+        };
+        assert_eq!(limits(None, None).spill_config(), None);
+        assert_eq!(limits(Some(512 * MIB), Some(0)).spill_config(), None);
+        assert_eq!(
+            limits(Some(512 * MIB), None).spill_config(),
+            Some(crate::memory_governor::SpillConfig {
+                parent_dir: PathBuf::from("/scratch"),
+                max_bytes: 512 * MIB,
+            })
+        );
+        assert_eq!(
+            limits(Some(512 * MIB), Some(64 * MIB))
+                .spill_config()
+                .map(|config| config.max_bytes),
+            Some(64 * MIB)
+        );
     }
 
     #[test]

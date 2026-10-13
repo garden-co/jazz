@@ -107,26 +107,42 @@ impl SpillStorage for MemorySpillStorage {
     }
 }
 
-/// The scratch storage a runtime spills to, and its run-id allocator.
+/// The scratch storage a runtime spills to, its run-id allocator, and the
+/// bytes its live runs hold against the configured cap.
 pub(super) struct SpillContext {
     storage: Rc<dyn SpillStorage>,
     next_run: Cell<u64>,
+    /// Encoded bytes of every run not yet dropped.
+    live_bytes: Cell<usize>,
+    max_bytes: usize,
 }
 
 impl std::fmt::Debug for SpillContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SpillContext")
             .field("next_run", &self.next_run.get())
+            .field("live_bytes", &self.live_bytes.get())
+            .field("max_bytes", &self.max_bytes)
             .finish_non_exhaustive()
     }
 }
 
 impl SpillContext {
-    pub(super) fn new(storage: Rc<dyn SpillStorage>) -> Self {
+    pub(super) fn new(storage: Rc<dyn SpillStorage>, max_bytes: usize, first_run: u64) -> Self {
         Self {
             storage,
-            next_run: Cell::new(0),
+            next_run: Cell::new(first_run),
+            live_bytes: Cell::new(0),
+            max_bytes,
         }
+    }
+
+    /// Whether `bytes` more of runs fit under the cap.
+    pub(super) fn has_room_for(&self, bytes: usize) -> bool {
+        self.live_bytes
+            .get()
+            .checked_add(bytes)
+            .is_some_and(|total| total <= self.max_bytes)
     }
 
     fn allocate_run(&self) -> u64 {
@@ -180,6 +196,10 @@ impl std::fmt::Debug for SpilledRun {
 
 impl Drop for SpilledRun {
     fn drop(&mut self) {
+        let context = &self.context;
+        context
+            .live_bytes
+            .set(context.live_bytes.get().saturating_sub(self.bytes));
         // A failed delete leaks scratch rows until the scratch storage is
         // recreated; they are never read again, so results are unaffected.
         let _ = self.context.storage.delete_prefix(&run_prefix(self.id));
@@ -229,6 +249,9 @@ impl SpilledRun {
                     if is_resident(key) {
                         continue;
                     }
+                    if decode_weight(value).is_none() {
+                        return Err(format!("malformed weight in spilled run {}", previous.id));
+                    }
                     run.push(&mut batch, key, record, value.clone())?;
                 }
                 if complete {
@@ -256,8 +279,12 @@ impl SpilledRun {
         record: &[u8],
         weight: Vec<u8>,
     ) -> Result<(), String> {
+        let bytes = key.len() + record.len();
         self.rows += 1;
-        self.bytes += key.len() + record.len();
+        self.bytes += bytes;
+        self.context
+            .live_bytes
+            .set(self.context.live_bytes.get() + bytes);
         batch.push((entry_key(self.id, key, record), weight));
         if batch.len() >= SPILL_BATCH {
             self.context.storage.write(std::mem::take(batch))?;
@@ -301,7 +328,9 @@ impl SpilledRun {
             after = Some(last.clone());
             let complete = page.len() < SPILL_BATCH;
             for (entry, value) in &page {
-                visit(entry, decode_weight(value));
+                let weight = decode_weight(value)
+                    .ok_or_else(|| format!("malformed weight in spilled run {}", self.id))?;
+                visit(entry, weight);
             }
             if complete {
                 return Ok(());
@@ -382,16 +411,25 @@ pub struct ArrangementSpillReport {
     pub resident_bytes_after: usize,
     /// Arrangements written to new runs by this call.
     pub spilled_arrangements: usize,
+    /// Arrangements left in memory because spilling them would pass the
+    /// scratch storage cap.
+    pub kept_at_disk_cap: usize,
 }
 
 impl super::IvmRuntime {
-    /// Spill join arrangements to `storage` when asked to shed memory.
+    /// Spill join arrangements to `storage` when asked to shed memory,
+    /// holding at most `max_bytes` of encoded runs there at once.
     ///
     /// Without spill storage every arrangement stays in memory, as before.
     /// Setting storage on a runtime that already has some keeps the old
-    /// storage for existing runs, which stay readable until dropped.
-    pub fn set_spill_storage(&mut self, storage: Rc<dyn SpillStorage>) {
-        self.spill_context = Some(Rc::new(SpillContext::new(storage)));
+    /// storage for existing runs, which stay readable until dropped; run ids
+    /// keep counting so the two never collide if the storage is the same.
+    pub fn set_spill_storage(&mut self, storage: Rc<dyn SpillStorage>, max_bytes: usize) {
+        let first_run = self
+            .spill_context
+            .as_ref()
+            .map_or(0, |context| context.next_run.get());
+        self.spill_context = Some(Rc::new(SpillContext::new(storage, max_bytes, first_run)));
     }
 
     /// Spill into the same storage as `other`, a runtime this one replaces.
@@ -455,13 +493,17 @@ impl super::IvmRuntime {
                 let Some(state) = self.arrangement_states.get_mut(&key) else {
                     continue;
                 };
-                if state
+                match state
                     .value_mut()
                     .spill(&context)
                     .map_err(super::IvmRuntimeError::ArrangementSpill)?
                 {
-                    report.spilled_arrangements += 1;
-                    resident = resident.saturating_sub(bytes);
+                    super::join::SpillOutcome::Spilled => {
+                        report.spilled_arrangements += 1;
+                        resident = resident.saturating_sub(bytes);
+                    }
+                    super::join::SpillOutcome::AtDiskCap => report.kept_at_disk_cap += 1,
+                    super::join::SpillOutcome::Skipped => {}
                 }
             }
             resident = self.resident_arrangement_bytes();
@@ -497,8 +539,8 @@ fn decode_entry(entry: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((rest.get(..len)?, rest.get(len..)?))
 }
 
-fn decode_weight(value: &[u8]) -> i64 {
-    value.try_into().map(i64::from_le_bytes).unwrap_or_default()
+fn decode_weight(value: &[u8]) -> Option<i64> {
+    value.try_into().ok().map(i64::from_le_bytes)
 }
 
 #[cfg(test)]
@@ -526,7 +568,7 @@ mod tests {
     #[test]
     fn run_reads_back_buckets_without_prefix_collisions() {
         let storage = Rc::new(MemorySpillStorage::new());
-        let context = Rc::new(SpillContext::new(storage.clone()));
+        let context = Rc::new(SpillContext::new(storage.clone(), usize::MAX, 0));
         let short = JoinKey::from_slice(b"a");
         let long = JoinKey::from_slice(b"ab");
         let short_bucket = bucket(&[(b"r1", 1), (b"r2", 2)]);
@@ -561,7 +603,7 @@ mod tests {
     #[test]
     fn dropping_the_last_reference_deletes_the_run() {
         let storage = Rc::new(MemorySpillStorage::new());
-        let context = Rc::new(SpillContext::new(storage.clone()));
+        let context = Rc::new(SpillContext::new(storage.clone(), usize::MAX, 0));
         let key = JoinKey::from_slice(b"k");
         let contents = bucket(&[(b"r", 1)]);
         let run = SpilledRun::write_merged(&context, None, [(&key, &contents)], |_| false)
@@ -594,7 +636,7 @@ mod tests {
 
     #[test]
     fn failed_reads_are_reported_not_answered() {
-        let context = Rc::new(SpillContext::new(Rc::new(FailingStorage)));
+        let context = Rc::new(SpillContext::new(Rc::new(FailingStorage), usize::MAX, 0));
         let key = JoinKey::from_slice(b"k");
         let contents = bucket(&[(b"r", 1)]);
         let run = SpilledRun::write_merged(&context, None, [(&key, &contents)], |_| false)

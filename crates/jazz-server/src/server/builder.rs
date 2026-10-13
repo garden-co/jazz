@@ -1359,8 +1359,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_server_spills_query_state_beside_its_store() {
+    async fn persistent_server_spills_query_state_into_a_fresh_scratch_dir() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let scratch_parent = tempfile::TempDir::new().expect("temp scratch dir");
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(jazz::tools::public_schema::TableSchema::builder("todos"))
             .build();
@@ -1373,15 +1374,31 @@ mod tests {
             .build()
             .await
             .expect("build RocksDB server");
-        let spill_dir = data_dir
-            .path()
-            .join(format!("{SERVER_SHELL_ROCKSDB_DIR}.spill"));
-        assert!(spill_dir.is_dir(), "scratch store opens with the shell");
+        let runtime = built.state.runtime().expect("server shell is running");
+        let scratch_dirs = || {
+            std::fs::read_dir(scratch_parent.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            scratch_dirs().is_empty(),
+            "nothing opens until spilling is enabled"
+        );
 
-        let report = built
-            .state
-            .runtime()
-            .expect("server shell is running")
+        crate::memory_governor::enable_spill(
+            &built.state,
+            &runtime,
+            &crate::memory_governor::SpillConfig {
+                parent_dir: scratch_parent.path().to_path_buf(),
+                max_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("enable spilling");
+        assert_eq!(scratch_dirs().len(), 1, "one fresh scratch dir");
+
+        let report = runtime
             .shed_arrangement_memory(usize::MAX)
             .await
             .expect("shedding query memory succeeds");
@@ -1391,7 +1408,10 @@ mod tests {
             built.shutdown().await,
             crate::server::ShutdownPhase::StorageClosed
         );
-        assert!(!spill_dir.exists(), "scratch store is removed on shutdown");
+        assert!(
+            scratch_dirs().is_empty(),
+            "scratch store is removed on shutdown"
+        );
     }
 
     #[test]

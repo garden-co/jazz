@@ -109,19 +109,24 @@ pub async fn run(
         None => None,
     };
     // Spilling needs scratch storage, which only durable storage provides.
-    let _memory_governor = match limits.memory_limit_bytes {
-        Some(limit) if !in_memory => {
+    let _memory_governor = match (limits.memory_limit_bytes, limits.spill_config()) {
+        (Some(limit), Some(spill)) if !in_memory => {
             let watermarks = memory_governor::MemoryWatermarks::for_limit(limit);
             info!(
-                "Spilling query state to disk above {} MiB",
-                watermarks.high_bytes / (1024 * 1024)
+                "Spilling query state to disk above {} MiB, at most {} MiB",
+                watermarks.high_bytes / (1024 * 1024),
+                spill.max_bytes / (1024 * 1024)
             );
             Some(AbortOnDrop(tokio::spawn(memory_governor::run(
                 built.state.clone(),
                 limit,
+                spill,
             ))))
         }
-        _ => None,
+        _ => {
+            info!("Spilling query state to disk: off");
+            None
+        }
     };
     let shutdown = built.state.shutdown.clone();
     let mut sigterm_task = install_signal_before_readiness(

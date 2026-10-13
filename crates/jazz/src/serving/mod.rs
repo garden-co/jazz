@@ -479,6 +479,17 @@ impl ShellDb {
         }
     }
 
+    async fn set_arrangement_spill_storage(
+        &self,
+        storage: Rc<dyn crate::groove::ivm::SpillStorage>,
+        max_bytes: usize,
+    ) {
+        let db = match self {
+            Self::Memory(db) | Self::Durable(db) => db,
+        };
+        db.set_arrangement_spill_storage(storage, max_bytes).await;
+    }
+
     async fn shed_arrangement_memory(
         &self,
         bytes: usize,
@@ -903,14 +914,9 @@ impl InMemoryServerShell {
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
-                let db = crate::local_executor::block_on(Db::open_history_complete(db_config))?;
-                if let Some(spill) = factory
-                    .open_spill_storage(spill_storage_path(path))
-                    .map_err(db_storage_error)?
-                {
-                    db.set_arrangement_spill_storage(Rc::from(spill));
-                }
-                ShellDb::Durable(db)
+                ShellDb::Durable(crate::local_executor::block_on(Db::open_history_complete(
+                    db_config,
+                ))?)
             }
             StorageConfig::SQLite { .. } => {
                 return Err(ShellError::UnsupportedStorage {
@@ -1568,9 +1574,27 @@ impl InMemoryServerShell {
         self.db.evict_expired_staged_large_values().await
     }
 
-    /// Move query join state to the store's scratch storage until `bytes`
-    /// less of it stays in memory. Results are unchanged; a shell without
-    /// scratch storage (in-memory storage) keeps everything resident.
+    /// Open scratch storage at `path` through `factory` and let query join
+    /// state spill there, holding at most `max_bytes` at once. Returns
+    /// whether the backend has scratch storage at all.
+    pub async fn enable_arrangement_spill(
+        &self,
+        factory: &dyn StorageFactory,
+        path: PathBuf,
+        max_bytes: usize,
+    ) -> ShellResult<bool> {
+        let Some(storage) = factory.open_spill_storage(path).map_err(db_storage_error)? else {
+            return Ok(false);
+        };
+        self.db
+            .set_arrangement_spill_storage(Rc::from(storage), max_bytes)
+            .await;
+        Ok(true)
+    }
+
+    /// Move query join state to the scratch storage until `bytes` less of
+    /// it stays in memory. Results are unchanged; a shell without scratch
+    /// storage keeps everything resident.
     pub async fn shed_arrangement_memory(
         &self,
         bytes: usize,
@@ -1824,14 +1848,6 @@ fn catalogue_acks_from_messages(messages: Vec<SyncMessage>) -> Vec<CatalogueAck>
             _ => None,
         })
         .collect()
-}
-
-/// Scratch storage for spilled query state lives beside the durable store,
-/// never inside it, so the durable layout stays the backend's own.
-fn spill_storage_path(store: &std::path::Path) -> PathBuf {
-    let mut name = store.file_name().unwrap_or_default().to_os_string();
-    name.push(".spill");
-    store.with_file_name(name)
 }
 
 fn db_storage_error(error: impl fmt::Display) -> ShellError {

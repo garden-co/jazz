@@ -118,12 +118,16 @@ where
     }
 
     /// Give query join state scratch storage to spill to under memory
-    /// pressure (see [`Self::shed_arrangement_memory`]).
-    pub fn set_arrangement_spill_storage(
+    /// pressure (see [`Self::shed_arrangement_memory`]), holding at most
+    /// `max_bytes` there.
+    pub async fn set_arrangement_spill_storage(
         &self,
         storage: std::rc::Rc<dyn groove::ivm::SpillStorage>,
+        max_bytes: usize,
     ) {
-        self.node.set_arrangement_spill_storage(storage);
+        self.node
+            .set_arrangement_spill_storage(storage, max_bytes)
+            .await;
     }
 
     /// Spill query join state to the scratch storage until `bytes` less of
