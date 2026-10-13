@@ -145,9 +145,9 @@ compatibility matrix. A change needs this corpus, both binding paths, and the
 SPEC decision reviewed together. Terminal operations remain JSON-native
 metadata rather than an alternative row byte layout.
 
-`wire_frame_artifact_corpus.json` is the companion v1 host-artifact rejection
+`wire_frame_artifact_corpus_v5.json` is the companion v5 host-artifact rejection
 receipt. The generated NAPI and WASM artifacts execute **every** exact Hello
-and semantic-message frame from the complete frozen frame manifests, plus the
+and semantic-message channel batch from the complete frozen frame manifests, plus the
 frozen structured-error and malformed, unsupported-version, trailing-byte,
 corrupt-compressed, malformed-semantic, unsupported-semantic, and
 trailing-semantic inputs from that corpus. TypeScript supplies the bytes and

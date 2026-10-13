@@ -1,6 +1,7 @@
 declare module "jazz-wasm" {
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
+  export function validateSchema(schema: Uint8Array): void;
   export function nativeArtifactFingerprint(): string;
   export function setJsonSchemaValidator(
     compile: (schemaJson: string) => (instanceJson: string) => string | undefined,
@@ -234,7 +235,7 @@ declare module "jazz-wasm" {
     tick(): Promise<void>;
     setNonDurableClient(): void;
     /** @internal Foreground node-lease handoff only. */
-    foregroundTxTimeHighWater(): bigint;
+    foregroundTxTimeHighWater(): Promise<bigint>;
     /** @internal Foreground node-lease bootstrap only. */
     seedForegroundTxTimeHighWater(highWater: bigint): void;
     /** Exact wire features compiled into this WASM artifact. */

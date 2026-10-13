@@ -143,9 +143,12 @@ const stopWriteErrors = db.onMutationError(reportWriteError);
 
 const { data: memberships } = useAll(
   () => (userId.value ? app.members.where({ userId: userId.value }) : undefined),
-  { tier: "local-first-unless-empty" },
+  { tier: "local-first", firstLoadRemoteWaitMs: 5_000 },
 );
-const { data: someBand } = useAll(app.bands.limit(1), { tier: "local-first-unless-empty" });
+const { data: someBand } = useAll(app.bands.limit(1), {
+  tier: "local-first",
+  firstLoadRemoteWaitMs: 5_000,
+});
 
 const bandId = computed(
   () => route.value.bandId ?? memberships.value?.[0]?.bandId ?? someBand.value?.[0]?.id ?? null,

@@ -35,7 +35,7 @@ fn read(path: &Path) -> Vec<VersionBundle> {
 }
 fn opts() -> ReadOpts {
     ReadOpts {
-        propagation: jazz::db::Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     }
 }

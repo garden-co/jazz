@@ -1,8 +1,9 @@
-import type { AuthUpdate, DurabilityTier } from "../client.js";
+import type { AuthUpdate } from "../client.js";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
+  type ConnectionRequirement,
   type DbForConnection,
 } from "./types.js";
 
@@ -98,8 +99,8 @@ export class DirectConnectionManager extends ConnectionManager {
     );
   }
 
-  async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
-    if (tier === "local") return;
+  async ensureReady(requirement: ConnectionRequirement, signal?: AbortSignal): Promise<void> {
+    if (requirement === "runtime") return;
     for (;;) {
       await this.host.runtimeSource?.nativeConnection?.waitForTransportTransition?.();
       while (this.isExplicitlyOffline()) {
@@ -111,7 +112,7 @@ export class DirectConnectionManager extends ConnectionManager {
     }
   }
 
-  shouldDeferSubscriptionStart(_tier?: DurabilityTier): boolean {
+  shouldDeferSubscriptionStart(_requirement: ConnectionRequirement): boolean {
     return false;
   }
   isExplicitlyOffline(): boolean {

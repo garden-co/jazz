@@ -90,8 +90,9 @@ Subscription membership, source-closure generations, live settlement and
 body-dedup cursors are process-local. Reopen does not recover any authority
 scope or delta predecessor. Local-first evaluates eligible local data plus
 pending writes. Remote waits for a fresh complete v2 supporting snapshot;
-local-first-unless-empty is local-first and waits for that snapshot only to
-replace an empty opening while a remote can answer (ch. 13). Retaining native bytes does not prove remote membership.
+local-first with a server wait is local-first and waits for that snapshot,
+at most until its deadline, only to replace its opening while a remote can
+answer (ch. 13). Retaining native bytes does not prove remote membership.
 
 Local-current queries read retained Global-current and Ahead-current rows;
 they do not require a recovered node-wide read timestamp. Native transaction
@@ -183,6 +184,26 @@ The concrete v1 byte contracts are:
   payload cells plus declared occurrence UUIDs and union labels; aggregate bytes
   contain only the declared groups and values.
   Member identity and query binding own omitted version/routing bookkeeping.
+- Aggregate replacement identity: zero outputs retain the scalar `String("empty")`
+  envelope; one output retains its exact canonical scalar descriptor/value
+  envelope and existing one-MiB identity limit. Two or more outputs use BLAKE3
+  over UTF-8 `jazz aggregate replacement v1`, the complete aggregate `JRPD`
+  descriptor length as little-endian `U64`, those descriptor bytes, canonical
+  row length as little-endian `U64`, then those row bytes. The 32 digest bytes
+  are wrapped in the existing runtime scalar `Bytes` descriptor/value envelope.
+  Hashing consumes the already materialised canonical publication, without an
+  allocated concatenated preimage or a second summary encoding. Producers and
+  validators use this same preimage; complete role/name/type and canonical row
+  validation MUST precede validation of the digest. Execution and nested runtime
+  bindings do not enter it, but logical names, recursive types and enum registry
+  identities do. A change to any output changes the replacement token (subject
+  to the BLAKE3 collision assumption); equal complete summaries still cancel
+  their before/after weights. The group-derived row identity and public
+  occurrence remain unchanged, including the fixed global group identity.
+  The scalar identity limit MUST NOT be applied to a complete multi-output
+  summary: previously admitted payloads above one MiB remain admitted, while
+  their replacement token has bounded size. This corrects an opaque, volatile
+  runtime discriminator; it changes no wire, durable, `JRPD` or binding format.
 - Root publication hash: BLAKE3 over ASCII `jazz terminal root publication v1`,
   the persisted role descriptor, root byte-layout position as little-endian
   `U64`, and carrier byte (`0` current-row, `1` logical). In descriptor order,
@@ -209,9 +230,9 @@ writer format explicitly. Hash-domain changes and descriptor-envelope versions
 are reviewed with the corresponding reader and rejection tests.
 
 The high-level `Db` facade follows the same boundary for every live
-subscription tier. Local subscriptions are desired and first-class: they are the
+subscription tier. Local-first subscriptions are desired and first-class: they are the
 application/UI-facing maintained view over the local read frontier, including the
-node's own pending committed writes. Global subscriptions are maintained
+node's own pending committed writes. Remote subscriptions are maintained
 views over their corresponding accepted-state frontiers, with additional
 settlement/completeness requirements. Tiers select the source/frontier
 expression and runtime consumption policy; they must not select a different
@@ -306,17 +327,20 @@ answer may be published; it does not select another evaluator:
 - `local-first` evaluates locally known current data plus pending local
   changes, online or offline. Installing a remote closure does not retire its
   cached inputs. This is determined by observation tier, not by whether the
-  local node is a trusted backend: a trusted backend may make the same Local
+  local node is a trusted backend: a trusted backend may make the same local-first
   read while merely propagating upstream. Remote scope withdrawal is not a
   stored client-side revocation;
 - `remote` waits for a fresh settled closure for its exact usage-site
   subscription and evaluates only that closure, without pending local changes.
   It waits while offline;
-- `local-first-unless-empty` evaluates exactly
-  like `local-first`; it differs only in publishing an empty first answer after
-  the usage's first settled authority closure while a remote can answer, and in
-  reading an `offset > 0` window as the strict remote view (ch. 13);
-- a core `Global` read with immediate local updates (no longer a product tier)
+- `local-first` with a server wait (`FirstLoad::WaitForRemote
+{ timeout_ms }`) evaluates exactly like `local-first`; it differs only in
+  withholding any unsettled first answer until the usage's first settled
+  authority closure, rejection, link loss, or the deadline, whichever comes
+  first, while a remote can answer, and in reading an `offset > 0` window as
+  the strict remote view (falling back to the local window at the deadline)
+  (ch. 13);
+- a local-first remote-answer execution, used by initial-wait pagination,
   evaluates the exact authority inputs with pending edits/deletes applied to
   those inputs, plus eligible pending new inserts. An edit alone does not
   admit an existing out-of-scope row. Relationships use only these inputs,
@@ -377,11 +401,11 @@ Worked examples:
   enters the same local graph and its collector removes every affected root or
   descendant occurrence in a remote-scoped result. The client does not
   re-evaluate the hidden policy, and the authority sends no presentation-level
-  remove. Local-first and local-first-unless-empty may still show the cached
-  row.
+  remove. Local-first (with or without a server wait) may still show the
+  cached row.
 - **Cached Local-first open.** A client can show retained same-scope A plus a
   pending insert B. A new authority closure containing only C does not evict A
-  from local-first knowledge. A `Global` read with immediate local updates
+  from local-first knowledge. A local-first remote-answer execution
   instead uses C plus B (if B matches using available query inputs); remote
   uses only C.
 - **Reconnect.** A fresh usage-site subscription cannot reuse its detached
@@ -811,9 +835,10 @@ a fallback. A narrower remote query requires its own coverage receipt.
 A later Local query applies its complete order/offset/limit to local current
 inputs, even if its numeric window is contained in a previously received remote
 page. For example, with only positions 8–27 cached, Local offset 8/limit 2 yields
-16–17. Use `remote` for authority-relative pagination. `local-first-unless-empty`
-reads an `offset > 0` window as the strict remote view while a remote can
-answer, and otherwise paginates locally like `local-first` (ch. 13).
+16–17. Use `remote` for authority-relative pagination. `local-first` with a
+server wait reads an `offset > 0` window as the strict remote view while a
+remote can answer, only until its deadline, and otherwise paginates locally like
+`local-first` (ch. 13).
 Pending local rows participate in that local ordering normally; retained remote
 page coordinates must not silently change their rank.
 
@@ -952,7 +977,7 @@ result changes back to the correct parent output.
 
 ## Open Questions
 
-- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand the `Global` + immediate-local-updates inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
+- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand the local-first remote-answer inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
 - 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Subscription patch and first-result API.
 - 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Correlated subquery maintenance.
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Partition-aware deletion witnesses.
