@@ -578,6 +578,13 @@ exact (`INV-BVIEW-10`). A lookup stays live: a key entering or leaving the
 candidates, and any write to a looked-up row, updates it. A row-id read
 bounds every layer by its row-id prefix instead.
 
+A lookup cannot run inside a recursive step: Groove evaluates the step
+without storage reads. Only a trusted include-deleted read hands an index
+path to a step's source; there the head's presence and the deletion
+registers are read whole, as before the lookup. That is exact (ids no
+candidate holds hide or delete nothing) and costs the branches' rows outside
+the prefix.
+
 **Peers (out of scope).** A peer remote would be one more sparse delta, read
 as `[local, peer, origin]`. Merging all peers into one delta keeps the stack
 short, as a relay's overlay already does. The model leaves room for it,

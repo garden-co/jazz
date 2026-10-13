@@ -3029,6 +3029,12 @@ where
     ///
     /// A primary-key path bounds every layer, deletion registers included,
     /// by the same prefix.
+    ///
+    /// A source inside a recursive step cannot look rows up (see
+    /// [`source_in_recursive_step`]). There the head's presence and every
+    /// deletion-register layer are read whole, as without the lookup: exact,
+    /// at the cost of the branches' rows outside the prefix. Only the
+    /// trusted include-deleted read hands an index path to a step source.
     async fn live_branch_view_registers(
         &mut self,
         request: &SourceRequest,
@@ -3048,12 +3054,15 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))
         };
         let indexed = matches!(access, BranchLayerAccess::Index { .. });
+        // Narrow the deletion registers to the candidates' row ids only where
+        // a lookup can run.
+        let narrow = indexed && !source_in_recursive_step(request);
         let head_keys = stored_keys(self, head)?;
         let head_content = self
             .projected_branch_content_source_graph(request, table, tier, &head_keys, &access)
             .await?;
         let Some(base) = base else {
-            let candidates = indexed.then(|| head_content.clone().project(["row_uuid"]));
+            let candidates = narrow.then(|| head_content.clone().project(["row_uuid"]));
             let head_deletions = self
                 .projected_branch_deletion_source_graph(
                     request,
@@ -3069,7 +3078,7 @@ where
         let base_content = self
             .projected_branch_content_source_graph(request, table, tier, &base_keys, &access)
             .await?;
-        let candidates = indexed.then(|| {
+        let candidates = narrow.then(|| {
             GraphBuilder::union([
                 head_content.clone().project(["row_uuid"]),
                 base_content.clone().project(["row_uuid"]),
@@ -3116,6 +3125,10 @@ where
     /// The `row_uuid`s a branch key holds at `tier` among `row_ids`,
     /// whatever their values: the union of its refs' rows, each looked up by
     /// those ids and read through the system-field winner projection.
+    ///
+    /// Inside a recursive step, where a lookup cannot run, it is the refs'
+    /// rows read whole: exact (the extra ids match no candidate, so they
+    /// hide nothing) and costs the head's rows, never the base's.
     fn branch_presence(
         &mut self,
         request: &SourceRequest,
@@ -3123,6 +3136,7 @@ where
         stored_keys: &BTreeSet<BranchKey>,
         row_ids: GraphBuilder,
     ) -> Result<GraphBuilder, SourceResolutionError> {
+        let in_recursive_step = source_in_recursive_step(request);
         let mut rows = Vec::new();
         for r in Ref::stack(tier) {
             for branch_key in stored_keys {
@@ -3136,11 +3150,14 @@ where
                         None,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-                rows.push(
-                    lookup_by_row_id(marker, row_ids.clone())
-                        .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
-                        .project(["row_uuid"]),
-                );
+                let present = if in_recursive_step {
+                    marker
+                } else {
+                    lookup_by_row_id(marker, row_ids.clone()).map_err(|_| {
+                        source_resolution_error(request, SourceGap::SchemaProjection)
+                    })?
+                };
+                rows.push(present.project(["row_uuid"]));
             }
         }
         Ok(GraphBuilder::union(rows))
@@ -3855,6 +3872,19 @@ fn lookup_by_row_id(rows: GraphBuilder, row_ids: GraphBuilder) -> Result<GraphBu
     GraphBuilder::lookup(rows, row_ids, ["row_uuid"]).ok_or(Error::InvalidStoredValue(
         "a keyed lookup needs a physical current table source",
     ))
+}
+
+/// Whether `request`'s source sits inside a recursive step. Groove
+/// evaluates a step without storage reads, so a keyed lookup there is a
+/// typed `UnsupportedLookup`; a source there reads what it would look up
+/// whole instead.
+fn source_in_recursive_step(request: &SourceRequest) -> bool {
+    request.source.path.components.iter().any(|role| {
+        matches!(
+            role,
+            crate::node::query_engine::SourceRole::RecursiveStep(_)
+        )
+    })
 }
 
 /// A scan of every key under a row-id prefix, whatever the table's key
