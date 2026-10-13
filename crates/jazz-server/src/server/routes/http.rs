@@ -21,6 +21,29 @@ use super::utils::{
     unix_timestamp_millis,
 };
 
+/// Admin secret presented in the `X-Jazz-Admin-Secret` request header, if any.
+pub(super) fn admin_secret_header(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok())
+}
+
+/// Reject the request with a JSON unauthorized body unless it carries the
+/// configured admin secret.
+#[allow(clippy::result_large_err)] // handlers return axum `Response` errors as-is
+fn require_admin(state: &ServerState, headers: &HeaderMap) -> Result<(), Response> {
+    validate_admin_secret(admin_secret_header(headers), &state.auth_config)
+        .map_err(|(status, msg)| (status, Json(ErrorResponse::unauthorized(msg))).into_response())
+}
+
+fn bad_request(message: impl Into<String>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse::bad_request(message)),
+    )
+        .into_response()
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SchemaSummary {
@@ -125,35 +148,16 @@ pub(super) async fn schema_handler(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let Some(hash_text) = params.get("hash") else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request(
-                "missing schema hash".to_string(),
-            )),
-        )
-            .into_response();
+        return bad_request("missing schema hash");
     };
 
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    match validate_admin_secret(admin_secret, &state.auth_config) {
-        Ok(()) => {}
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
+    if let Err(response) = require_admin(&state, &headers) {
+        return response;
     }
 
     let schema_hash = match parse_schema_hash_param(hash_text) {
         Ok(hash) => hash,
-        Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(message)),
-            )
-                .into_response();
-        }
+        Err(message) => return bad_request(message),
     };
 
     match state
@@ -211,16 +215,7 @@ pub(super) async fn schema_hashes_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
 ) -> Result<Json<SchemaSummaryResponse>, Response> {
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    match validate_admin_secret(admin_secret, &state.auth_config) {
-        Ok(()) => {}
-        Err((status, msg)) => {
-            return Err((status, Json(ErrorResponse::unauthorized(msg))).into_response());
-        }
-    }
+    require_admin(&state, &headers)?;
 
     match state.catalogue.known_schema_hashes(&state.catalogue_store) {
         Ok(hashes) => {
@@ -270,15 +265,8 @@ pub(super) async fn migration_graph_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    match validate_admin_secret(admin_secret, &state.auth_config) {
-        Ok(()) => {}
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
+    if let Err(response) = require_admin(&state, &headers) {
+        return response;
     }
 
     match state.catalogue.migration_graph(&state.catalogue_store) {
@@ -297,15 +285,8 @@ pub(super) async fn permissions_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    match validate_admin_secret(admin_secret, &state.auth_config) {
-        Ok(()) => {}
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
+    if let Err(response) = require_admin(&state, &headers) {
+        return response;
     }
 
     match state.catalogue.active_schema(&state.catalogue_store) {
@@ -450,36 +431,17 @@ pub(super) async fn admin_subscription_introspection_handler(
     headers: HeaderMap,
     Query(params): Query<AdminSubscriptionIntrospectionParams>,
 ) -> impl IntoResponse {
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    match validate_admin_secret(admin_secret, &state.auth_config) {
-        Ok(()) => {}
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
+    if let Err(response) = require_admin(&state, &headers) {
+        return response;
     }
 
     let Some(app_id_text) = params.app_id.as_deref() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request(
-                "appId query parameter is required",
-            )),
-        )
-            .into_response();
+        return bad_request("appId query parameter is required");
     };
 
     let requested_app_id = match parse_app_id_param(app_id_text) {
         Ok(app_id) => app_id,
-        Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(message)),
-            )
-                .into_response();
-        }
+        Err(message) => return bad_request(message),
     };
 
     if requested_app_id != state.app_id {
@@ -505,15 +467,8 @@ pub(super) async fn internal_shutdown_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    match validate_admin_secret(admin_secret, &state.auth_config) {
-        Ok(()) => {}
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
+    if let Err(response) = require_admin(&state, &headers) {
+        return response;
     }
 
     let first_request = state.shutdown.request_shutdown();
@@ -601,11 +556,8 @@ pub(super) async fn deploy_handler(
         axum::extract::rejection::JsonRejection,
     >,
 ) -> Response {
-    let secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
-    if let Err((status, message)) = validate_admin_secret(secret, &state.auth_config) {
-        return (status, Json(ErrorResponse::unauthorized(message))).into_response();
+    if let Err(response) = require_admin(&state, &headers) {
+        return response;
     }
     let request = match body {
         Ok(Json(request)) => request,

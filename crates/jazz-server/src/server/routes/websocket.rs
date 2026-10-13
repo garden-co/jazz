@@ -1050,7 +1050,8 @@ async fn send_ws_frames(socket: &mut WebSocket, frames: &[WireFrame]) -> Result<
     send_ws_encoded_frames(socket, &encoded).await
 }
 
-fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+/// Pack encoded wire frames into as few bounded WebSocket batch payloads as fit.
+pub(crate) fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard::Error> {
     let mut batches = Vec::new();
     let mut current = Vec::new();
     for frame in frames {

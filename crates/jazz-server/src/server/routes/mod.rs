@@ -35,8 +35,8 @@ use http::{
     schema_hashes_handler,
 };
 use utils::parse_app_id_param;
-pub(crate) use websocket::WebSocketAdmissionState;
 use websocket::ws_handler;
+pub(crate) use websocket::{WebSocketAdmissionState, encode_ws_frame_batches};
 
 async fn app_id_gate(
     State(state): State<Arc<ServerState>>,
