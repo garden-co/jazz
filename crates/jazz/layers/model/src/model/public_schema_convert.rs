@@ -259,7 +259,21 @@ fn coerce_query_typed_literals(
     for join in &mut query.joins {
         coerce_join_typed_literals(join, column_types);
     }
-    for reachable in &mut query.reachable {
+    coerce_reachable_typed_literals(&mut query.reachable, column_types);
+    for branch in &mut query.policy_branches {
+        coerce_predicates_typed_literals(&query.table, &mut branch.filters, column_types);
+        for join in &mut branch.joins {
+            coerce_join_typed_literals(join, column_types);
+        }
+        coerce_reachable_typed_literals(&mut branch.reachable, column_types);
+    }
+}
+
+fn coerce_reachable_typed_literals(
+    reachable: &mut [crate::query::ReachableVia],
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+) {
+    for reachable in reachable {
         coerce_predicates_typed_literals(
             &reachable.access_table,
             &mut reachable.access_filters,
@@ -272,27 +286,6 @@ fn coerce_query_typed_literals(
         );
         if let Some(seed) = &mut reachable.seed {
             coerce_predicates_typed_literals(&seed.table, &mut seed.filters, column_types);
-        }
-    }
-    for branch in &mut query.policy_branches {
-        coerce_predicates_typed_literals(&query.table, &mut branch.filters, column_types);
-        for join in &mut branch.joins {
-            coerce_join_typed_literals(join, column_types);
-        }
-        for reachable in &mut branch.reachable {
-            coerce_predicates_typed_literals(
-                &reachable.access_table,
-                &mut reachable.access_filters,
-                column_types,
-            );
-            coerce_predicates_typed_literals(
-                &reachable.edge_table,
-                &mut reachable.edge_filters,
-                column_types,
-            );
-            if let Some(seed) = &mut reachable.seed {
-                coerce_predicates_typed_literals(&seed.table, &mut seed.filters, column_types);
-            }
         }
     }
 }
@@ -1070,7 +1063,7 @@ fn convert_expanded_inherited_policy(
             .collect::<Vec<_>>()
             .join(" -> ");
         return Err(err(
-            format!("$.{}.{path}", table.as_str()),
+            policy_path(table, path),
             format!("cyclic policy expansion under INHERITS_REFERENCING is unsupported: {cycle}"),
         ));
     }
@@ -1107,7 +1100,7 @@ fn convert_policy_with_native_select_inherits(
     validate_exists_rel_policy_join_conditions(table, path, expr)?;
     match expr {
         PolicyExpr::And(exprs) => {
-            if !exprs.iter().any(is_core_policy_clause) {
+            if !exprs.iter().any(policy_requires_branch) {
                 return query_with_predicate_filters(
                     table.as_str(),
                     predicate_filters_for_expr(table, path, expr)?,
@@ -1195,18 +1188,6 @@ fn convert_policy_with_native_select_inherits(
             table.as_str(),
             predicate_filters_for_expr(table, path, expr)?,
         ),
-    }
-}
-
-fn is_core_policy_clause(expr: &PolicyExpr) -> bool {
-    match expr {
-        PolicyExpr::Inherits { max_depth: _, .. }
-        | PolicyExpr::InheritsReferencing { .. }
-        | PolicyExpr::Exists { .. }
-        | PolicyExpr::ExistsRel { .. } => true,
-        PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs.iter().any(is_core_policy_clause),
-        PolicyExpr::Not(expr) => is_core_policy_clause(expr),
-        _ => false,
     }
 }
 
@@ -1419,7 +1400,7 @@ fn append_inherited_referencing_policy(
     let source_table_name = TableName::new(source_table.to_owned());
     let source_schema = schema.get(&source_table_name).ok_or_else(|| {
         err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!("INHERITS_REFERENCING source_table '{source_table}' was not found"),
         )
     })?;
@@ -1429,9 +1410,7 @@ fn append_inherited_referencing_policy(
         .iter()
         .find(|column| column.name.as_str() == via_column)
         .ok_or_else(|| {
-            err(
-                format!("$.{}.{}", table.as_str(), path),
-                format!(
+            err(policy_path(table, path), format!(
                     "INHERITS_REFERENCING via_column '{via_column}' was not found on source_table '{source_table}'"
                 ),
             )
@@ -1440,7 +1419,7 @@ fn append_inherited_referencing_policy(
         Some(target) if target == table => {}
         Some(target) => {
             return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 format!(
                     "INHERITS_REFERENCING via_column '{via_column}' references '{target}', expected '{}'",
                     table.as_str()
@@ -1449,7 +1428,7 @@ fn append_inherited_referencing_policy(
         }
         None => {
             return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 format!("INHERITS_REFERENCING via_column '{via_column}' has no FK reference"),
             ));
         }
@@ -1457,7 +1436,7 @@ fn append_inherited_referencing_policy(
 
     let source_policy = source_operation_policy(source_schema, operation).ok_or_else(|| {
         err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!(
                 "INHERITS_REFERENCING source_table '{source_table}' has no {operation:?} policy"
             ),
@@ -1553,7 +1532,7 @@ fn append_exists_policy_clause(
     let exists_table_name = TableName::new(exists_table.to_owned());
     if !schema.contains_key(&exists_table_name) {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!("EXISTS references unknown table '{exists_table}'"),
         ));
     }
@@ -1726,7 +1705,7 @@ fn validate_exists_rel_join_conditions(
                     || !labels.insert(&arm.label)
                 {
                     return Err(err(
-                        format!("$.{}.{}", table.as_str(), path),
+                        policy_path(table, path),
                         "core schema ExistsRel union labels must be unique, NUL-free, and 1..=4096 bytes",
                     ));
                 }
@@ -1739,7 +1718,7 @@ fn validate_exists_rel_join_conditions(
         } => {
             if on.len() > 1 {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "core schema ExistsRel joins support exactly one column equality",
                 ));
             }
@@ -1871,13 +1850,13 @@ fn root_exists_rel_at_correlation(
         let mut next = lowered.joins.remove(index);
         let source_column = next.source_column.take().ok_or_else(|| {
             err(
-                format!("$.{}.{path}", table.as_str()),
+                policy_path(table, path),
                 "core schema ExistsRel nested join is missing its source column",
             )
         })?;
         let previous_table = lowered.table.replace(next.table).ok_or_else(|| {
             err(
-                format!("$.{}.{path}", table.as_str()),
+                policy_path(table, path),
                 "core schema ExistsRel correlation requires a row-producing relation",
             )
         })?;
@@ -1953,13 +1932,13 @@ fn append_exists_rel_policy_clause(
             || lowered.joins.iter().any(join_has_outer_correlations)
         {
             return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 "uncorrelated ExistsRel cannot contain unresolved outer references or reachability",
             ));
         }
         let proof_table = lowered.table.ok_or_else(|| {
             err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 "uncorrelated ExistsRel requires a table relation",
             )
         })?;
@@ -1977,13 +1956,13 @@ fn append_exists_rel_policy_clause(
     let correlation = lowered.filters.remove(correlation_index);
     let Some(correlation_column) = correlation.column.clone() else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "core schema ExistsRel policies must correlate a concrete column",
         ));
     };
     let Some(LoweredRelValue::OuterRow(source_column)) = correlation.value.clone() else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "core schema ExistsRel policies must correlate to an outer row reference",
         ));
     };
@@ -2041,7 +2020,7 @@ fn append_exists_rel_policy_clause(
 
     let lowered_table = lowered.table.ok_or_else(|| {
         err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "core schema scalar Gather output must be consumed by an access join",
         )
     })?;
@@ -2061,20 +2040,20 @@ fn append_exists_rel_policy_clause(
                 .any(|child| !child.correlated_filters.is_empty())
             {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "core schema ExistsRel does not yet support outer correlations beyond one nested join",
                 ));
             }
             let source_column = nested.source_column.clone().ok_or_else(|| {
                 err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "core schema ExistsRel nested join is missing its source column",
                 )
             })?;
             for correlation in std::mem::take(&mut nested.correlated_filters) {
                 if correlation.join_column != nested.on_column {
                     return Err(err(
-                        format!("$.{}.{}", table.as_str(), path),
+                        policy_path(table, path),
                         "core schema ExistsRel nested outer correlation must use its join key",
                     ));
                 }
@@ -2137,11 +2116,11 @@ fn resolve_rel_column_route(
     match lowered.scope_paths.get(scope) {
         Some(Some(route)) => Ok(route.clone()),
         Some(None) => Err(err(
-            format!("$.{}.{path}", table.as_str()),
+            policy_path(table, path),
             format!("ExistsRel column scope '{scope}' is ambiguous; use distinct aliases"),
         )),
         None => Err(err(
-            format!("$.{}.{path}", table.as_str()),
+            policy_path(table, path),
             format!("ExistsRel column references unknown scope '{scope}'"),
         )),
     }
@@ -2171,7 +2150,7 @@ fn append_scoped_rel_predicate(
     }
     if routes.len() > 1 {
         return Err(err(
-            format!("$.{}.{path}", table.as_str()),
+            policy_path(table, path),
             "ExistsRel Boolean filters spanning multiple sources are not supported",
         ));
     }
@@ -2260,7 +2239,7 @@ fn lower_exists_rel(
         } => {
             if *join_kind != RelJoinKind::Inner {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "core schema ExistsRel policies only support inner joins",
                 ));
             }
@@ -2268,7 +2247,7 @@ fn lower_exists_rel(
             let right = lower_exists_rel(schema, table, path, right)?;
             let Some(on) = on.first() else {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "core schema ExistsRel joins require a column equality",
                 ));
             };
@@ -2276,20 +2255,20 @@ fn lower_exists_rel(
             let target_route = resolve_rel_column_route(table, path, &right, &on.right)?;
             if !target_route.is_empty() {
                 return Err(err(
-                    format!("$.{}.{path}", table.as_str()),
+                    policy_path(table, path),
                     "core schema ExistsRel join target must be the right relation's root source",
                 ));
             }
             if let Some(pending) = left.pending_reachable.take() {
                 if on.left.column != "id" {
                     return Err(err(
-                        format!("$.{}.{}", table.as_str(), path),
+                        policy_path(table, path),
                         "core schema ExistsRel reachable joins must join from reachable id",
                     ));
                 }
                 let right_table = right.table.clone().ok_or_else(|| {
                     err(
-                        format!("$.{}.{}", table.as_str(), path),
+                        policy_path(table, path),
                         "core schema ExistsRel reachable access must be a row-producing relation",
                     )
                 })?;
@@ -2352,7 +2331,7 @@ fn lower_exists_rel(
                 .collect();
             let right_table = right.table.ok_or_else(|| {
                 err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "core schema ExistsRel joins require a row-producing right relation",
                 )
             })?;
@@ -2392,7 +2371,7 @@ fn lower_exists_rel(
             Ok(left)
         }
         RelExpr::Union { .. } => Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "core schema ExistsRel policies do not support Union yet",
         )),
     }
@@ -2437,7 +2416,7 @@ fn lower_gather_rel(
         RelRecursionBound::MaxDepth(depth) => *depth,
         RelRecursionBound::Fixpoint => {
             return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 "server shell public schema conversion does not support Gather Fixpoint yet",
             ));
         }
@@ -2481,7 +2460,7 @@ fn lower_gather_seed(
     } = input
     else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather seeded reachability requires a filtered seed table scan",
         ));
     };
@@ -2496,21 +2475,21 @@ fn lower_gather_seed(
         })
         .ok_or_else(|| {
             err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 "Gather same-table seeds require one claim-keyed equality filter",
             )
         })?;
     let seed_filter = &lowered_filters[seed_index];
     let Some(user_column) = seed_filter.column.clone() else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather seed claim filter must name a seed-table column",
         ));
     };
     let Some(LoweredRelValue::Operand(Operand::Claim(user_claim))) = seed_filter.value.clone()
     else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather seed claim filter must compare against a claim",
         ));
     };
@@ -2541,13 +2520,13 @@ fn unwrap_seed_projection<'a>(
     };
     let Some(column) = columns.iter().find(|column| column.alias == "id") else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather projected seed must expose an id column",
         ));
     };
     let RelProjectExpr::Column(projected) = &column.expr else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather projected seed id must be a column projection",
         ));
     };
@@ -2576,19 +2555,19 @@ fn unwrap_joined_seed_projection<'a>(
     } = right
     else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather projected seed hop must join to a table scan",
         ));
     };
     let Some(join) = on.first() else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather projected seed hop requires a join condition",
         ));
     };
     if projected.scope.as_ref() != right_alias.as_ref() || projected.column != "id" {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather projected seed id must come from the hop target row id",
         ));
     }
@@ -2602,7 +2581,7 @@ fn lower_gather_step(
 ) -> Result<(String, Option<String>, String, String, Vec<Predicate>), SchemaConversionError> {
     let RelExpr::Project { input, columns } = step else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather policies require projected recursive hops",
         ));
     };
@@ -2622,13 +2601,13 @@ fn lower_gather_step(
             } = right.as_ref()
             else {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "Gather recursive hop must join to the output table",
                 ));
             };
             let Some(on) = on.first() else {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "Gather recursive hop join requires a column equality",
                 ));
             };
@@ -2641,13 +2620,13 @@ fn lower_gather_step(
         } else {
             let Some(projected) = columns.iter().find(|column| column.alias == "id") else {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "Gather scalar recursive hop must project its parent key as id",
                 ));
             };
             let RelProjectExpr::Column(projected) = &projected.expr else {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "Gather scalar recursive hop id must be a column projection",
                 ));
             };
@@ -2666,7 +2645,7 @@ fn lower_gather_step(
     } = edge_input
     else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather recursive hop must start from an edge table scan",
         ));
     };
@@ -2676,7 +2655,7 @@ fn lower_gather_step(
         .is_some_and(|scope| scope != edge_scope)
     {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather scalar recursive hop id must project an edge-table column",
         ));
     }
@@ -2687,14 +2666,14 @@ fn lower_gather_step(
         .position(|filter| matches!(filter.value, Some(LoweredRelValue::FrontierRow)))
         .ok_or_else(|| {
             err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 "Gather recursive hop requires a frontier equality",
             )
         })?;
     let frontier = &lowered_filters[frontier_index];
     let Some(edge_member_column) = frontier.column.clone() else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather frontier equality must name an edge column",
         ));
     };
@@ -2778,7 +2757,7 @@ fn rel_predicate_to_policy(
                     | RelPredicateCmpOp::Gt
                     | RelPredicateCmpOp::Ge => {
                         return Err(err(
-                            format!("$.{}.{}", table.as_str(), path),
+                            policy_path(table, path),
                             "core schema ExistsRel NULL comparisons only support equality and inequality",
                         ));
                     }
@@ -2815,7 +2794,7 @@ fn rel_predicate_to_policy(
                 ) => Predicate::All(Vec::new()),
                 _ => {
                     return Err(err(
-                        format!("$.{}.{}", table.as_str(), path),
+                        policy_path(table, path),
                         "core schema ExistsRel special row-id comparisons only support equality",
                     ));
                 }
@@ -2843,7 +2822,7 @@ fn rel_predicate_to_policy(
                 rel_value_to_policy_operand(table, path, right)?
             else {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "core schema ExistsRel Contains does not support row-id operands",
                 ));
             };
@@ -2878,7 +2857,7 @@ fn rel_predicate_to_policy(
                     |value| match rel_value_to_policy_operand(table, path, value)? {
                         LoweredRelValue::Operand(operand) => Ok(operand),
                         _ => Err(err(
-                            format!("$.{}.{}", table.as_str(), path),
+                            policy_path(table, path),
                             "core schema ExistsRel In does not support row-id operands",
                         )),
                     },
@@ -2923,7 +2902,7 @@ fn rel_value_to_policy_operand(
         RelValueRef::RowId(RowIdRef::Outer) => Ok(LoweredRelValue::OuterRow("id".to_owned())),
         RelValueRef::RowId(RowIdRef::Frontier) => Ok(LoweredRelValue::FrontierRow),
         RelValueRef::RowId(RowIdRef::Current) => Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "core schema ExistsRel policies do not support Current row-id operands here",
         )),
     }
@@ -2949,26 +2928,24 @@ fn append_inherited_policy(
         .find(|column| column.name.as_str() == via_column)
         .ok_or_else(|| {
             err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 format!("INHERITS via_column '{via_column}' was not found"),
             )
         })?;
     let parent_table = column.references.as_ref().ok_or_else(|| {
         err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!("INHERITS via_column '{via_column}' has no FK reference"),
         )
     })?;
     let parent_schema = schema.get(parent_table).ok_or_else(|| {
         err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!("INHERITS via_column '{via_column}' references unknown table '{parent_table}'"),
         )
     })?;
     let parent_policy = source_operation_policy(parent_schema, operation).ok_or_else(|| {
-        err(
-            format!("$.{}.{}", table.as_str(), path),
-            format!("INHERITS via_column '{via_column}' references table '{parent_table}' without a {operation:?} policy"),
+        err(policy_path(table, path), format!("INHERITS via_column '{via_column}' references table '{parent_table}' without a {operation:?} policy"),
         )
     })?;
     // A top-level SELECT inherit lowers through derivation collapse. When its
@@ -2978,7 +2955,7 @@ fn append_inherited_policy(
     if operation == Operation::Select && !native_select_inherits {
         if max_depth.is_some() {
             return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 "bounded SELECT INHERITS under INHERITS_REFERENCING is unsupported because its expanded join chain cannot preserve max_depth",
             ));
         }
@@ -3267,7 +3244,7 @@ fn convert_policy_predicate(
                 CmpOp::Ne => Predicate::Ne(left, right),
                 CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => {
                     return Err(err(
-                        format!("$.{}.{}", table.as_str(), path),
+                        policy_path(table, path),
                         "core schema policies only support Eq/Ne SessionCmp operators yet",
                     ));
                 }
@@ -3325,7 +3302,7 @@ fn convert_policy_predicate(
                     .map(|operand| Predicate::In(operand, values))
             }),
         other => Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!("core schema policies do not support {other:?} yet"),
         )),
     }
@@ -3368,7 +3345,7 @@ fn convert_session_path_operand(
         ));
     }
     Err(err(
-        format!("$.{}.{}", table.as_str(), path),
+        policy_path(table, path),
         format!(
             "core schema policies only support session.user, session.authMode, and provider claims through session.claims; got session.{}",
             path_segments.join(".")
@@ -3389,7 +3366,7 @@ fn convert_policy_literal(
         Value::BigInt(value) => Ok(GrooveValue::I64(*value)),
         Value::Double(value) if value.is_finite() => Ok(GrooveValue::F64(*value)),
         Value::Double(_) => Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "core schema policy floating-point literals must be finite numbers",
         )),
         Value::Timestamp(value) => Ok(GrooveValue::U64(*value)),
@@ -3404,7 +3381,7 @@ fn convert_policy_literal(
             .collect::<Result<Vec<_>, _>>()
             .map(GrooveValue::Array),
         other => Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!("core schema policies do not support {other:?} literals yet"),
         )),
     }
@@ -3412,6 +3389,11 @@ fn convert_policy_literal(
 
 fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionError {
     SchemaConversionError::new(path, message)
+}
+
+/// The error path of `path` within `table`'s policies.
+fn policy_path(table: &TableName, path: &str) -> String {
+    format!("$.{}.{path}", table.as_str())
 }
 
 #[cfg(test)]
