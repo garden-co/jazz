@@ -37,71 +37,47 @@ If you need password-based first boot from rescue mode, include `FORCE_PASSWORD 
 
 ## Bootstrap the runner
 
-The checked-in bootstrap pins Rust `1.93.1`, Node `24.13.0` (official Node.js tarball SHA-256 `6223aad1a81f9d1e7b682c59d12e2de233f7b4c37475cd40d1c89c42b737ffa8`), Actions Runner `2.337.0` (SHA-256 `70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613`), rustup-init `1.28.2` (SHA-256 `20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c`), and wasm-pack `0.13.1`. Downloaded archives must match their fixed publisher hashes before execution/extraction; versions do not float to `latest`.
+The bootstrap supports a fresh Ubuntu 24.04 x64 host. It pins Rust `1.93.1`,
+rustup-init `1.28.2`, Node `24.13.0`, Actions Runner `2.337.0`, and
+wasm-pack `0.13.1`. Each downloaded installer or archive must match the SHA-256
+digest in `bootstrap_runner.sh` before it is executed or extracted. Rustup
+checks the Rust toolchain components against their release checksums.
 
-Bootstrap fails closed. The runner account must resolve to a non-root UID.
-Hashes are checked before archive extraction or execution; reuse requires the
-root-owned manifest to match every immutable runner-package entry.
-An empty runner `~/.cargo/bin` directory is not treated as an installed
-toolchain. Bootstrap rechecks tool paths after all verified runners are
-disabled, stopped and proven quiescent. If a job adds a tool during shutdown,
-the recheck finds unmanifested state and aborts before executing it.
+Keep the versions and digests together when updating them. Node and runner
+digests come from their official release checksums; the wasm-pack digest is
+pinned from the official [release archive](https://github.com/wasm-bindgen/wasm-pack/releases/tag/v0.13.1).
+The script uses no floating releases or `curl | sh`.
 
-Before bootstrap runs persistent Rustup or wasm-pack, it enumerates manager
-units and validates each matching runner unit, registration identity,
-root-owned unit file, executable and drop-ins. It disables all exact verified
-candidates before stopping any, then requires each to be inactive/dead with an
-empty cgroup-v2 `cgroup.events`. A disable, stop or cgroup-proof failure aborts
-before persistent tools run. If disabling fails, boot activation is uncertain.
-If stopping or proving an empty cgroup fails, a runner may remain active during
-the current boot; bootstrap does not claim that it stopped.
-Units still loaded in systemd remain candidates even if their on-disk files
-have disappeared. A missing unit definition is unverifiable: bootstrap rejects
-it before stopping the runner or running persistent tools.
+Run bootstrap as root. Rust, wasm-pack and the runner are installed for the
+non-root runner account; Node and its Corepack shims are installed under
+`/opt/node-v24.13.0/bin`. The runner's generated `svc.sh` installs and starts
+the standard `actions.runner.*.service` service. Hardening runs afterwards
+unless `SKIP_HARDENING=1`.
 
-Unknown or unverified units are left untouched; the runner-writable
-`.service` marker is never authoritative. After a successful disable, a failure
-before unit installation leaves the normal boot link removed. A successful
-bootstrap enables the managed Jazz unit again. `systemctl disable` removes
-normal enablement links; explicit starts and dependency-driven activation are
-outside this guarantee.
+The registration token is passed only to configuration through
+`ACTIONS_RUNNER_INPUT_TOKEN`, never through command arguments. Configuration
+output is suppressed to keep the token out of failure diagnostics. A failed
+download check, required installation, configuration or service action aborts
+bootstrap.
 
-Bootstrap installs, repairs, enables and starts a deterministic root-owned Jazz
-`jazz-benchmark-runner-<sha256>.service` unit. It never executes runner
-`svc.sh`.
+Bootstrap refuses an existing `~/actions-runner` directory. Use a fresh host
+for reprovisioning or after a partial installation. This script does not
+upgrade or migrate an existing runner. Runner updates are disabled; review and
+update the pinned runner release before GitHub's update deadline.
 
-During configuration, runner v2.337.0 may create `svc.sh`. Bootstrap temporarily
-opens the package directory in mode `1770` to the runner's primary group. It
-then moves the expected `svc.sh` out, restores root ownership and mode `0555`,
-checks the pinned package manifest, and removes the temporary copy. If config
-is interrupted, the exit cleanup removes `svc.sh` and reseals the directory.
-Other package changes fail the post-config manifest check or the next bootstrap.
+`INSTALL_SSM_AGENT=auto` installs SSM on detected AWS hardware and skips it
+elsewhere. Use `1` to require it, or `0` to skip it explicitly. SSM is installed
+through Ubuntu's apt/snap repositories; requested installation failures abort
+setup.
 
-The recorded background PID directly owns the `runuser` launcher. Cancellation
-targets its process group and waits for the launcher before resealing. Reaping
-`runuser` descendants still depends on `runuser` and the host's init process.
-
-The Jazz unit follows the pinned v2.337.0 template with `KillMode=process`
-intentionally omitted, so systemd's control-group default allows a full
-cgroup-empty proof. Upstream legacy unit names join the repository slug and
-runner name with `-` and `.`, so dots or hyphens can make them ambiguous.
-Bootstrap mutates a legacy unit only when its name uniquely identifies the
-requested repository and runner. It disables, stops and quiesces verified
-upstream or prior-version units, including those under
-`/opt/actions-runner/<version>`, then requires controlled reprovision without
-migrating or restarting them. Ambiguous or otherwise unverified units are left
-untouched.
-
-`INSTALL_SSM_AGENT=0` explicitly disables AWS SSM installation on Hetzner. `auto` also skips SSM on non-AWS hosts; set `INSTALL_SSM_AGENT=1` only on AWS when installation via signed apt/snap repositories is intended, and then failure is fatal.
-
-Use the checked-in bootstrap script from the repo:
+Use the checked-in script:
 
 ```bash
 read -rsp "GitHub registration token: " RUNNER_TOKEN
 printf '\n'
 export RUNNER_TOKEN
 sudo --preserve-env=RUNNER_TOKEN env \
-  RUNNER_URL="https://github.com/garden-co/jazz2" \
+  RUNNER_URL="https://github.com/garden-co/jazz" \
   RUNNER_USER=runner \
   RUNNER_NAME="benchmark-runner-hetzner" \
   RUNNER_LABELS="jazz-bench,hetzner" \
@@ -112,26 +88,23 @@ unset RUNNER_TOKEN
 exit "${bootstrap_status}"
 ```
 
-The registration token is read silently and remains environment data, not an
-argument. Bootstrap v2.337.0 passes it to `config.sh` using the runner's
-supported `ACTIONS_RUNNER_INPUT_TOKEN` secret input, then removes the variable;
-the token is not present in the configuration process's argv or failure logs.
-
-After a successful bootstrap, it:
-
-- creates the runner user if needed and installs Rust, Node, `pnpm`, `wasm-pack`, and `libclang`
-- configures the runner and installs/starts its root-managed Jazz systemd unit
-- skips AWS SSM installation on non-AWS hardware
-- applies `dev/benchmarks/realistic/harden_runner.sh` after runner service start unless `SKIP_HARDENING=1`
-
-Run the sandboxed bootstrap checks with
+Run the focused checks with
 `node --test dev/benchmarks/realistic/bootstrap_runner.test.mjs`.
-If started as root, the isolated test worker resolves the existing `nobody`
-account's primary GID, clears supplementary groups, then drops its GID and UID
-before creating fixtures. Missing identity or privilege-drop errors abort the
-worker. Fixtures still require a non-root UID and real ownership operations;
-their adapters map only the fixture owner's same-named group to its primary GID.
-This does not change the production bootstrap's root requirement.
+They use miniature archives and command stubs in temporary directories. They
+cover checksum failures, non-root installation commands, token handling and
+required installation failures; they do not validate a live systemd host.
+
+Before reprovisioning real runners, bootstrap one disposable host with
+`RUNNER_NAME=bootstrap-smoke-<unique-id>`, `RUNNER_LABELS=jazz-bootstrap-smoke`
+and `SKIP_HARDENING=1`. Keep its label separate from `jazz-bench` so it does
+not take production benchmark jobs. Check that its GitHub registration is
+online and that its `actions.runner.*.service` is active. As the runner user,
+check `rustc --version`, `rustup target list --installed`, `node --version`,
+`pnpm --version` and `wasm-pack --version` with
+`/opt/node-v24.13.0/bin` and `~/.cargo/bin` on `PATH`. Confirm the pinned
+versions and the `wasm32-unknown-unknown` target, then reboot and check the
+service again. Remove the disposable GitHub registration and host when done.
+Reprovision real hosts one at a time after this check succeeds.
 
 ## Hardening choices
 
@@ -161,7 +134,7 @@ cat /sys/devices/system/cpu/smt/control
 cat /sys/devices/system/cpu/online
 cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
 cat /sys/devices/system/cpu/cpufreq/boost
-systemctl list-units 'jazz-benchmark-runner-*.service'
+systemctl list-units 'actions.runner.*.service'
 ```
 
 Expected output on the current box:
