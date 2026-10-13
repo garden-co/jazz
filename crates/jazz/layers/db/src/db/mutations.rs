@@ -988,17 +988,7 @@ where
                     node.seal_large_value_updates(commit, &staged, self.schema_version_id)
                         .await?
                 };
-                if let Some(reserved) = self.reserved_tx_id {
-                    node.commit_mergeable_many_in_schema_at(
-                        self.schema_version_id,
-                        vec![commit],
-                        reserved,
-                    )
-                    .await?
-                } else {
-                    node.commit_mergeable_in_schema(self.schema_version_id, commit)
-                        .await?
-                }
+                self.commit_mergeable_batch(&mut node, vec![commit]).await?
             };
             Ok::<_, Error>(published)
         }
@@ -1506,17 +1496,7 @@ where
                     self.schema_version_id,
                 )
                 .await?;
-            if let Some(reserved) = self.reserved_tx_id {
-                node.commit_mergeable_many_in_schema_at(
-                    self.schema_version_id,
-                    vec![commit],
-                    reserved,
-                )
-                .await?
-            } else {
-                node.commit_mergeable_in_schema(self.schema_version_id, commit)
-                    .await?
-            }
+            self.commit_mergeable_batch(&mut node, vec![commit]).await?
         };
         self.finish_published_write(row, published).await
     }
@@ -2238,17 +2218,7 @@ where
                 .seal_inherited_large_values(commit, self.schema_version_id, true)
                 .await?
                 .staged_large_cell(column, staged, nullable);
-            if let Some(reserved) = self.reserved_tx_id {
-                node.commit_mergeable_many_in_schema_at(
-                    self.schema_version_id,
-                    vec![commit],
-                    reserved,
-                )
-                .await?
-            } else {
-                node.commit_mergeable_in_schema(self.schema_version_id, commit)
-                    .await?
-            }
+            self.commit_mergeable_batch(&mut node, vec![commit]).await?
         };
         self.finish_published_write(row, published).await
     }
@@ -2915,13 +2885,7 @@ where
             } else {
                 self.node.node.lock().await
             };
-            if let Some(reserved) = self.reserved_tx_id {
-                node.commit_mergeable_many_in_schema_at(self.schema_version_id, commits, reserved)
-                    .await?
-            } else {
-                node.commit_mergeable_many_in_schema(self.schema_version_id, commits)
-                    .await?
-            }
+            self.commit_mergeable_batch(&mut node, commits).await?
         };
         self.finish_published_write(row, published).await
     }
@@ -3020,19 +2984,28 @@ where
                     allow_inherited_descriptors,
                 )
                 .await?;
-            if let Some(reserved) = self.reserved_tx_id {
-                node.commit_mergeable_many_in_schema_at(
-                    self.schema_version_id,
-                    vec![commit],
-                    reserved,
-                )
-                .await?
-            } else {
-                node.commit_mergeable_in_schema(self.schema_version_id, commit)
-                    .await?
-            }
+            self.commit_mergeable_batch(&mut node, vec![commit]).await?
         };
         self.finish_published_write(row, published).await
+    }
+
+    /// Commit `commits` as one local transaction, into this handle's reserved
+    /// transaction slot when it has one.
+    async fn commit_mergeable_batch(
+        &self,
+        node: &mut NodeState<S>,
+        commits: Vec<MergeableCommit>,
+    ) -> Result<PublishedTransaction, Error> {
+        Ok(match self.reserved_tx_id {
+            Some(reserved) => {
+                node.commit_mergeable_many_in_schema_at(self.schema_version_id, commits, reserved)
+                    .await?
+            }
+            None => {
+                node.commit_mergeable_many_in_schema(self.schema_version_id, commits)
+                    .await?
+            }
+        })
     }
 
     async fn finish_published_write(
