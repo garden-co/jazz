@@ -193,6 +193,27 @@ The read tiers `"local"` and `"global"` (and the `"core"` alias) were removed an
 of a few seconds. Outside the browser, a client connected to a server now reads `"remote"` by
 default. See [Durability Tiers](/docs/reference/durability-tiers).
 
+### Obsolete client options removed
+
+`defaultDurabilityTier` was removed. Set `tier` on each read that should differ from the default:
+`"local-first"` in browsers, in React Native and without a server, `"remote"` otherwise.
+
+The `tier` option of backend `createJazzContext()` was removed too. A Node or SSR app that set
+`tier: "local"` or `defaultDurabilityTier: "local"` together with a `serverUrl` used to read
+locally. It now reads `"remote"` by default and waits on the server. Pass `tier: "local-first"` on
+reads that should keep the old behavior.
+
+Also removed:
+
+- The React Native `sqliteStorage` option and the `ReactNativeSqlite*` driver types. The option was
+  always rejected; the native runtime owns storage.
+- The `--jazz-bin` flag of `jazz-tools validate`. It had no effect.
+- The `clientId`, `runtimeSources` and `tier` fields of `AppContext`. The backend no longer accepts
+  `runtimeSources`; the client option of the same name is unchanged.
+
+TypeScript flags these options. Plain JavaScript ignores them silently, and the read tier can
+change without warning, so search your code and remove them.
+
 ### Import migration builders from `migration`
 
 The builders for migration files moved out of the `schema` namespace into their own `migration`
