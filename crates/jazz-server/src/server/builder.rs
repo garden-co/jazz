@@ -81,6 +81,7 @@ pub struct ServerBuilder {
     shutdown_timeout: Duration,
     storage_factory: Option<Arc<dyn StorageFactory>>,
     heap_profiler: Option<HeapProfileDump>,
+    max_websocket_connections: usize,
 }
 
 impl ServerBuilder {
@@ -99,6 +100,7 @@ impl ServerBuilder {
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             storage_factory: None,
             heap_profiler: None,
+            max_websocket_connections: crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
         }
     }
 
@@ -114,6 +116,12 @@ impl ServerBuilder {
 
     pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;
+        self
+    }
+
+    /// Cap live WebSocket connections; upgrades beyond it get `503`.
+    pub fn with_max_websocket_connections(mut self, max: usize) -> Self {
+        self.max_websocket_connections = max;
         self
     }
 
@@ -150,6 +158,9 @@ impl ServerBuilder {
     pub async fn build(self) -> Result<BuiltServer, String> {
         let auth_config = self.auth_config.clone();
         validate_server_config(&auth_config)?;
+        if self.max_websocket_connections == 0 {
+            return Err("max websocket connections must be at least 1".to_owned());
+        }
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config);
 
@@ -191,6 +202,7 @@ impl ServerBuilder {
             websocket_admissions: Arc::new(
                 crate::server::routes::WebSocketAdmissionState::default(),
             ),
+            max_websocket_connections: self.max_websocket_connections,
             core_server_shell_storage_config,
             storage_factory: self.storage_factory.clone(),
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),

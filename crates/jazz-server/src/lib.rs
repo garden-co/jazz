@@ -3,6 +3,7 @@
 pub mod loopback;
 pub mod middleware;
 pub mod profiling;
+pub mod resources;
 pub mod server;
 mod tcp;
 
@@ -38,6 +39,7 @@ pub async fn run(
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
     diagnostics: DiagnosticsConfig,
+    limits: resources::ServerResourceLimits,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
     diagnostics.validate()?;
@@ -49,9 +51,28 @@ pub async fn run(
     } else {
         info!("Data directory: {}", data_dir);
     }
+    match limits.memory_limit_bytes {
+        Some(limit) => info!("Memory limit: {} MiB", limit / (1024 * 1024)),
+        None => info!("Memory limit: none detected"),
+    }
+    info!(
+        "WebSocket connection cap: {}",
+        limits.max_websocket_connections
+    );
+    if !in_memory {
+        let budget = limits.rocksdb_memory_budget();
+        jazz_storage_rocksdb::configure_process_memory_budget(budget).map_err(|current| {
+            format!("RocksDB memory budget was already fixed at {current:?} before startup")
+        })?;
+        info!(
+            "Storage cache budget: {} MiB",
+            budget.block_cache_bytes / (1024 * 1024)
+        );
+    }
     let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
-        .with_shutdown_timeout(shutdown_timeout);
+        .with_shutdown_timeout(shutdown_timeout)
+        .with_max_websocket_connections(limits.max_websocket_connections);
     if let Some(dump) = diagnostics.heap_profiler {
         builder = builder.with_heap_profiler(dump);
     }
