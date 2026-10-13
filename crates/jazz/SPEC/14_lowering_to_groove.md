@@ -69,11 +69,14 @@ chapter 19. Jazz MUST NOT materialize descriptors after Groove has already
 evaluated filters, policies, ordering, grouping, joins, indices, or aggregates.
 
 Lowered subscription installation selects Groove's prepared-shape lifetime.
-Private retained serving shapes transfer ownership to their bindings after a
-successful opening; their last binding releases the registration. Retained
-client-local installations keep the existing shared-shape policy. First-result
-reads keep explicit ownership of their private preparation and retire it on
-completion or cancellation. While binding is suspended, the Jazz installation
+Retained installations, client-local and trusted serving alike, use shared
+prepared shapes: subscribers with identical terminals bind one shape, and its
+last binding releases the registration. A trusted-serving binding source is
+shared across sessions: claim values bound as binding slots (including a
+policy's equality against a carried claim) are part of a session's binding key,
+and a claim the graph still inlines as a literal makes its terminals, and so
+its shape, distinct. Client-local sources stay scoped to the session's claims. First-result reads keep explicit ownership of their
+private preparation and retire it on completion or cancellation. While binding is suspended, the Jazz installation
 guard still owns a caller-owned preparation. This changes resource ownership,
 not query results, authorisation routing, or storage and wire encodings.
 

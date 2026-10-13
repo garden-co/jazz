@@ -1691,3 +1691,136 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
         .all(|row| row.row_uuid() != orphan_row)
     );
 }
+
+/// Contract: trusted-serving subscribers of one claims-only query share one
+/// prepared program and its IVM graph, while each still reads only the rows
+/// its own claims admit (#4017).
+///
+/// Actors: the serving core owns every chat; each user is a member of one
+/// private chat and subscribes to `messages` with no query parameters. The
+/// membership policy compares `chatMembers.userId` with the subscriber's
+/// `user_id` claim, so the claim value is binding data, not graph structure.
+#[test]
+fn serving_subscribers_of_claims_only_query_share_one_prepared_program() {
+    let (_core_dir, mut core) = open_node_with_schema(node(9), private_message_membership_schema());
+    let readers = (0..8u8).map(|i| user(0xa0 + i)).collect::<Vec<_>>();
+    let mut messages = Vec::new();
+    for (i, reader) in readers.iter().enumerate() {
+        let i = i as u8;
+        core.set_test_provider_claims(
+            *reader,
+            BTreeMap::from([(
+                "user_id".to_owned(),
+                Value::String(reader.test_uuid().to_string()),
+            )]),
+        );
+        let chat = row(0x10 + i);
+        let message = row(0x30 + i);
+        accept_global(
+            &mut core,
+            MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
+                ("isPublic".to_owned(), Value::Bool(false)),
+                ("createdBy".to_owned(), Value::String(reader.test_uuid().to_string())),
+            ])),
+        );
+        accept_global(
+            &mut core,
+            MergeableCommit::new("chatMembers", row(0x20 + i), 11).cells(BTreeMap::from([
+                ("chatId".to_owned(), Value::Uuid(chat.0)),
+                ("userId".to_owned(), Value::String(reader.test_uuid().to_string())),
+            ])),
+        );
+        accept_global(
+            &mut core,
+            MergeableCommit::new("messages", message, 12).cells(BTreeMap::from([
+                ("chatId".to_owned(), Value::Uuid(chat.0)),
+                ("text".to_owned(), Value::String(format!("hello {i}"))),
+                ("createdAt".to_owned(), Value::U64(1_000 + u64::from(i))),
+            ])),
+        );
+        messages.push((chat, message));
+    }
+
+    // Updates also carry the chat rows the messages reference.
+    let message_rows = |update: &SyncMessage| {
+        canonical_view_update_rows(update)
+            .into_iter()
+            .filter(|(table, _row_uuid, _tx_id)| table.as_str() == "messages")
+            .map(|(_table, row_uuid, _tx_id)| row_uuid)
+            .collect::<BTreeSet<_>>()
+    };
+    let shape = Query::from("messages")
+        .order_by("createdAt", OrderDirection::Asc)
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        ..RegisterShapeOptions::default()
+    };
+    core.drive_query_runtime().unwrap();
+    let baseline = core.runtime_stats_for_test();
+
+    let mut peers = Vec::new();
+    let mut after_first = None;
+    for (reader, (_chat, message)) in readers.iter().zip(&messages) {
+        let mut peer = PeerState::client_link(*reader);
+        let update = peer
+            .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
+            .unwrap();
+        assert_eq!(
+            message_rows(&update),
+            BTreeSet::from([*message]),
+            "each subscriber reads only its own chat's messages",
+        );
+        peers.push(peer);
+        after_first.get_or_insert_with(|| core.runtime_stats_for_test());
+    }
+    let after_first = after_first.unwrap();
+    let after_all = core.runtime_stats_for_test();
+    assert_eq!(
+        after_all.active_prepared_shapes, after_first.active_prepared_shapes,
+        "later subscribers bind the first subscriber's prepared program",
+    );
+    let first_nodes = after_first.graph_nodes - baseline.graph_nodes;
+    let later_nodes = (after_all.graph_nodes - after_first.graph_nodes) / (readers.len() - 1);
+    assert!(
+        later_nodes * 4 < first_nodes,
+        "a later subscriber adds only its binding's nodes \
+         (first {first_nodes}, each later {later_nodes})",
+    );
+
+    // A new message reaches its chat's member and nobody else.
+    let (chat, _) = messages[3];
+    let fresh = row(0x50);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("messages", fresh, 20).cells(BTreeMap::from([
+            ("chatId".to_owned(), Value::Uuid(chat.0)),
+            ("text".to_owned(), Value::String("fresh".to_owned())),
+            ("createdAt".to_owned(), Value::U64(2_000)),
+        ])),
+    );
+    for (i, peer) in peers.iter_mut().enumerate() {
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        let adds = message_rows(&update);
+        if i == 3 {
+            assert_eq!(adds, BTreeSet::from([fresh]));
+        } else {
+            assert!(adds.is_empty(), "subscriber {i} must not see {fresh:?}");
+        }
+    }
+
+    for peer in &mut peers {
+        let key = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: opts.read_view_key(),
+        };
+        assert!(peer.forget_subscription_with_node(&mut core, key));
+    }
+    core.drive_query_runtime().unwrap();
+    let released = core.runtime_stats_for_test();
+    assert_eq!(released.active_prepared_shapes, baseline.active_prepared_shapes);
+    assert_eq!(released.graph_nodes, baseline.graph_nodes);
+}

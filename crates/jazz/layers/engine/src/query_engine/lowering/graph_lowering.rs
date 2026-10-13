@@ -2976,7 +2976,7 @@ fn lower_equality_param_filter_joins(
     let mut residual = Vec::new();
     let mut retained_route_fields = available_route_fields.clone();
     for predicate in predicates {
-        let Some(join) = equality_param_join(predicate, source_id, source)? else {
+        let Some(join) = equality_param_join(predicate, source_id, source, request)? else {
             residual.push(predicate.clone());
             continue;
         };
@@ -3077,6 +3077,7 @@ fn equality_param_join(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
+    request: &LoweringContext<'_>,
 ) -> Result<Option<EqualityParamJoin>, UnsupportedReason> {
     let PredicateExpr::Compare {
         left,
@@ -3086,24 +3087,51 @@ fn equality_param_join(
     else {
         return Ok(None);
     };
-    if let (Some((field, value_type, nullable)), NormalizedValueRef::Param(param)) =
-        (source_join_field(left, source_id, source)?, right)
-    {
-        return Ok(Some(EqualityParamJoin {
-            field,
-            param: param.clone(),
-            value_type,
-            nullable,
-        }));
-    }
-    match (left, source_join_field(right, source_id, source)?) {
-        (NormalizedValueRef::Param(param), Some((field, value_type, nullable))) => {
-            Ok(Some(EqualityParamJoin {
-                field,
-                param: param.clone(),
-                value_type,
-                nullable,
-            }))
+    let (field, value) = match (
+        source_join_field(left, source_id, source)?,
+        source_join_field(right, source_id, source)?,
+    ) {
+        (Some(field), None) => (field, right),
+        (None, Some(field)) => (field, left),
+        _ => return Ok(None),
+    };
+    let Some(param) = equality_binding_param(value, request)? else {
+        return Ok(None);
+    };
+    let (field, value_type, nullable) = field;
+    Ok(Some(EqualityParamJoin {
+        field,
+        param,
+        value_type,
+        nullable,
+    }))
+}
+
+/// The binding slot an equality operand reads, when it has one.
+///
+/// A claim operand is a binding slot too when the program carries that claim
+/// as a prepared parameter. Joining it against the binding source keeps the
+/// claim value out of the graph, so every session with the same query shares
+/// one graph instead of compiling its own literal copy (#4017). A claim the
+/// domain does not carry, or carries under several typed slots, stays a
+/// literal predicate.
+fn equality_binding_param(
+    value: &NormalizedValueRef,
+    request: &LoweringContext<'_>,
+) -> Result<Option<String>, UnsupportedReason> {
+    match value {
+        NormalizedValueRef::Param(param) => Ok(Some(param.clone())),
+        NormalizedValueRef::Claim(path) if request.input.binding.source_shape.is_some() => {
+            let domain = request.parameter_domain()?;
+            let mut slots = domain
+                .claim_params
+                .iter()
+                .filter(|(_, claim)| claim.path == *path)
+                .map(|(name, _)| name);
+            match (slots.next(), slots.next()) {
+                (Some(slot), None) => Ok(Some(slot.clone())),
+                _ => Ok(None),
+            }
         }
         _ => Ok(None),
     }

@@ -1533,12 +1533,12 @@ where
                 .with_route_value_indices(route_value_indices))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        // Retained client-local subscribers of identical terminals share one
-        // prepared shape, which retires itself with its last retained
-        // binding. Serving installs keep a private shape owned by that
-        // subscriber. First-result reads retire their private shape on return.
-        let shared_shape = lifetime == SubscriptionLifetime::Retained
-            && binding_source_shape.ends_with(":client-local");
+        // Retained subscribers of identical terminals share one prepared
+        // shape, which retires itself with its last retained binding. This
+        // holds for trusted serving too: a server holds one graph per query
+        // family, not one per connected subscriber (#4017). First-result
+        // reads retire their private shape on return.
+        let shared_shape = lifetime == SubscriptionLifetime::Retained;
         let prepared = if shared_shape {
             self.database
                 .prepare_shared(terminals, binding_source_shape, binding_descriptor)
@@ -1562,34 +1562,22 @@ where
             prepared_shape: Some(prepared.id()),
             shared_shape,
         };
-        let subscription = if lifetime == SubscriptionLifetime::Retained && !shared_shape {
-            owner
-                .database
-                .bind_shape_owned_with_root_values(
-                    prepared.id(),
-                    &values,
-                    root_indirect_values,
-                    progress_waker,
-                )
-                .await
-        } else {
-            owner
-                .database
-                .bind_shape_with_lifetime_and_root_values(
-                    prepared.id(),
-                    &values,
-                    lifetime,
-                    root_indirect_values,
-                    progress_waker,
-                )
-                .await
-        }
-        .map_err(|error| {
-            if crate::debug_env::covered_input_trace() {
-                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=bind_receiver_error error={error:?}");
-            }
-            Error::Groove(error)
-        })?;
+        let subscription = owner
+            .database
+            .bind_shape_with_lifetime_and_root_values(
+                prepared.id(),
+                &values,
+                lifetime,
+                root_indirect_values,
+                progress_waker,
+            )
+            .await
+            .map_err(|error| {
+                if crate::debug_env::covered_input_trace() {
+                    eprintln!("JAZZ_COVERED_INPUT_TRACE stage=bind_receiver_error error={error:?}");
+                }
+                Error::Groove(error)
+            })?;
         owner.prepared_shape = None;
         Ok((
             subscription,

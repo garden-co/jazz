@@ -1711,3 +1711,64 @@ async fn routed_prepared_public_carriers_preserve_distinct_logical_identities() 
         ]
     );
 }
+
+/// A shared shape whose only receiver was dropped without an unsubscribe
+/// stays listed until the next prune. Preparing the same terminals again
+/// must not hand back that shape only for the bind's own prune to retire it
+/// underneath the new caller.
+#[futures_test::test]
+async fn shared_shape_reprepared_after_dropped_receiver_binds() {
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let descriptor = RecordDescriptor::new([("route", ColumnType::String.clone())]);
+    let terminals = || {
+        [RoutedMultisinkTerminal::new(
+            "rows",
+            GraphBuilder::binding_source("shared_source", descriptor),
+            ["route"],
+            ["route"],
+        )]
+    };
+    let first_shape = database
+        .prepare_shared(terminals(), "shared_source", descriptor)
+        .await
+        .unwrap();
+    let first = database
+        .bind_shape_with_lifetime_and_root_values(
+            first_shape.id(),
+            &[Value::String("first".to_owned())],
+            crate::db::SubscriptionLifetime::Retained,
+            crate::db::RootIndirectValues::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    drop(first);
+
+    let second_shape = database
+        .prepare_shared(terminals(), "shared_source", descriptor)
+        .await
+        .unwrap();
+    let second = database
+        .bind_shape_with_lifetime_and_root_values(
+            second_shape.id(),
+            &[Value::String("second".to_owned())],
+            crate::db::SubscriptionLifetime::Retained,
+            crate::db::RootIndirectValues::default(),
+            None,
+        )
+        .await
+        .expect("a re-prepared shared shape must still exist when it is bound");
+    database.drive_progress().await.unwrap();
+    assert_eq!(
+        second
+            .try_recv()
+            .unwrap()
+            .get("rows")
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(vec![Value::String("second".to_owned())], 1)]
+    );
+    assert_eq!(database.runtime_stats().active_prepared_shapes, 1);
+}

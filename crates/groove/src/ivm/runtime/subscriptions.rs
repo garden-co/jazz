@@ -3797,6 +3797,13 @@ impl IvmRuntime {
         let mut terminals = terminals.into_iter().collect::<Vec<_>>();
         terminals.sort_by(|left, right| left.sink.cmp(&right.sink));
         let key: SharedShapeKey = (shape.clone(), terminals.clone());
+        // A shared shape whose last receiver was dropped is still listed
+        // until the next prune, and binding prunes before it hydrates.
+        // Prune first so that shape retires now rather than between this
+        // caller's prepare and bind, which would leave the caller holding
+        // a retired shape id.
+        self.prune_dropped_subscriptions_with_storage(storage)
+            .await?;
         if let Some(shape_id) = self.shared_prepared_shapes.get(&key).copied()
             && self
                 .prepared_shapes

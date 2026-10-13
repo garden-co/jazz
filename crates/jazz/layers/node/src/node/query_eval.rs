@@ -1606,12 +1606,21 @@ where
                 )
             })
             .flatten();
-        // Prepared binding-source names are runtime identities.  Claim values
-        // normally route independent bindings through one shape, but equal
-        // author identities may hold distinct authenticated sessions.  Give
-        // their claim scopes separate source identities so a later session
-        // cannot replace an already-maintained sibling binding.
+        // Prepared binding-source names are runtime identities.  On a client,
+        // equal author identities may hold distinct authenticated sessions:
+        // give their claim scopes separate source identities so a later
+        // session cannot replace an already-maintained sibling binding.
+        //
+        // Trusted serving shares one source across sessions. Claim values
+        // bound as slots are part of a session's binding key, so sessions
+        // with different claims hold different bindings of one shared graph;
+        // a claim still inlined as a literal makes the graph itself distinct.
+        // A per-session name would give every connected user a private copy
+        // of the whole compiled program and its IVM graph (#4017).
         let source_shape = source_shape.map(|source_shape| {
+            if !client_local {
+                return source_shape;
+            }
             self.active_session_claim_scope_key(identity)
                 .map(|scope| format!("{source_shape}:session:{scope}"))
                 .unwrap_or(source_shape)
