@@ -1,11 +1,13 @@
-//! Always-on sampled heap profiling for the Linux server binary.
+//! Sampled heap profiling for the Linux server binary.
 //!
 //! `jazz-tools` on Linux wraps mimalloc in [`SamplingAllocator`], which
-//! records the stack of one allocation per ~512 KiB allocated on average.
-//! That keeps the cost low enough to leave on in production while still
-//! showing which code holds memory when a server grows. It only sees Rust's
-//! allocations: memory that bundled C/C++ such as RocksDB takes from
-//! `malloc` directly is not in the profile.
+//! records the stack of one allocation per [`DEFAULT_SAMPLE_INTERVAL`] bytes
+//! allocated on average (or per [`SAMPLE_INTERVAL_ENV`] bytes; `0` turns
+//! sampling off), which shows which code holds memory when a server grows.
+//! Stacks come from frame pointers, so a write-heavy load costs about the
+//! same CPU with sampling as without. It only sees Rust's allocations:
+//! memory that bundled C/C++ such as RocksDB takes from `malloc` directly is
+//! not in the profile.
 //!
 //! Profiles name functions from the executable's symbol table but carry no
 //! file or line: DWARF-based symbolization would keep hundreds of MB of
@@ -20,32 +22,38 @@ mod symbols;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use jazz_server::profiling::HeapProfileDump;
+use jazz_server::profiling::{HeapProfileDump, HeapProfileError};
 
 pub use sampler::{
-    DEFAULT_SAMPLE_INTERVAL, LiveSample, SamplingAllocator, for_each_live_sample, sample_interval,
-    set_sample_interval,
+    DEFAULT_SAMPLE_INTERVAL, LiveSample, SamplingAllocator, enable_sampling, for_each_live_sample,
+    sample_interval, sampling_enabled,
 };
 use symbols::ExecutableSymbols;
 
-/// Environment variable overriding the mean bytes allocated between samples.
+/// Environment variable with the mean bytes allocated between samples;
+/// `0` turns sampling off.
 pub const SAMPLE_INTERVAL_ENV: &str = "JAZZ_HEAP_PROFILE_SAMPLE_BYTES";
 
 /// Value of [`SAMPLE_INTERVAL_ENV`] that [`configure`] could not use.
 static INVALID_SAMPLE_INTERVAL: OnceLock<String> = OnceLock::new();
 
-/// Apply [`SAMPLE_INTERVAL_ENV`]. Call it at the start of `main`, before any
-/// other thread starts: threads already running keep their current interval
-/// until their next sample.
+/// Turn sampling on, every [`SAMPLE_INTERVAL_ENV`] bytes when it is set and
+/// [`DEFAULT_SAMPLE_INTERVAL`] otherwise, unless it is `0`. Call it at the
+/// start of `main`, before any other thread starts: threads that already
+/// allocated never sample.
 pub fn configure() {
-    if let Ok(bytes) = std::env::var(SAMPLE_INTERVAL_ENV) {
-        match bytes.parse::<u64>() {
-            Ok(bytes) if bytes > 0 => set_sample_interval(bytes),
-            _ => {
+    let mean = match std::env::var(SAMPLE_INTERVAL_ENV) {
+        Err(_) => DEFAULT_SAMPLE_INTERVAL,
+        Ok(bytes) => match bytes.parse::<u64>() {
+            Ok(0) => return,
+            Ok(bytes) => bytes,
+            Err(_) => {
                 let _ = INVALID_SAMPLE_INTERVAL.set(bytes);
+                DEFAULT_SAMPLE_INTERVAL
             }
-        }
-    }
+        },
+    };
+    enable_sampling(mean);
 }
 
 /// Report the sampling configuration and return the profile dumper for the
@@ -53,16 +61,25 @@ pub fn configure() {
 /// allocator and [`configure`] ran first.
 pub fn activate() -> HeapProfileDump {
     if let Some(bytes) = INVALID_SAMPLE_INTERVAL.get() {
-        tracing::warn!("Ignoring {SAMPLE_INTERVAL_ENV}={bytes}: expected a positive byte count");
+        tracing::warn!("Ignoring {SAMPLE_INTERVAL_ENV}={bytes}: expected a byte count");
     }
-    tracing::info!(
-        "Heap profiling active, sampling every ~{} bytes allocated",
-        sample_interval()
-    );
+    if sampling_enabled() {
+        tracing::info!(
+            "Heap profiling active, sampling every ~{} bytes allocated",
+            sample_interval()
+        );
+    }
     dump_heap_profile
 }
 
-fn dump_heap_profile() -> Result<Vec<u8>, String> {
+fn dump_heap_profile() -> Result<Vec<u8>, HeapProfileError> {
+    if !sampling_enabled() {
+        return Err(HeapProfileError::NotEnabled(format!(
+            "Heap profiling is turned off on this server ({SAMPLE_INTERVAL_ENV}=0). \
+             Restart it without {SAMPLE_INTERVAL_ENV}, or with the mean bytes \
+             between samples, to sample the heap."
+        )));
+    }
     let mut samples = Vec::new();
     for_each_live_sample(|sample| {
         samples.push(pprof::HeapSample {
@@ -70,11 +87,12 @@ fn dump_heap_profile() -> Result<Vec<u8>, String> {
             stack: sample.stack.to_vec(),
         });
     });
-    let mappings =
-        pprof::process_mappings().ok_or("the process's loaded segments could not be read")?;
+    let mappings = pprof::process_mappings().ok_or_else(|| {
+        HeapProfileError::Failed("the process's loaded segments could not be read".to_owned())
+    })?;
     // Mappings name the executable as it was invoked (relative, or through
     // `PATH`), so find it by an address inside it instead of by path.
-    let here = dump_heap_profile as fn() -> Result<Vec<u8>, String> as usize;
+    let here = dump_heap_profile as HeapProfileDump as usize;
     let executable_path = mappings
         .iter()
         .find(|mapping| (mapping.memory_start..mapping.memory_end).contains(&here))

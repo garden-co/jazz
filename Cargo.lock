@@ -2087,7 +2087,6 @@ name = "jazz-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
- "backtrace",
  "base64 0.22.1",
  "clap",
  "flate2",
@@ -2110,6 +2109,7 @@ dependencies = [
  "rustc-demangle",
  "serde",
  "serde_json",
+ "stacker",
  "tempfile",
  "tokio",
  "tracing",

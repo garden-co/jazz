@@ -45,6 +45,8 @@ mod core_fate_authority;
 mod coverage_group_flush_once;
 #[path = "../deferred_local_persistence.rs"]
 mod deferred_local_persistence;
+#[path = "../deployment_preparation.rs"]
+mod deployment_preparation;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
 #[path = "../error_code_strings.rs"]
@@ -70,8 +72,11 @@ mod large_value_subscription_scaling;
 #[path = "../large_value_tx_update.rs"]
 mod large_value_tx_update;
 #[cfg(feature = "testing")]
-#[path = "../local_first_unless_empty.rs"]
-mod local_first_unless_empty;
+#[path = "../local_first_first_load_gate.rs"]
+mod local_first_first_load_gate;
+#[cfg(feature = "testing")]
+#[path = "../local_first_server_wait.rs"]
+mod local_first_server_wait;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[cfg(feature = "testing")]
