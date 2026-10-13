@@ -744,6 +744,24 @@ fn single_gap_report(gap: UnsupportedReason) -> Box<CapabilityReport> {
     })
 }
 
+/// Adds `graph` to the membership of `source`, unioning with any graph
+/// already recorded there.
+fn union_member(
+    members: &mut BTreeMap<SourceId, GraphBuilder>,
+    source: SourceId,
+    graph: GraphBuilder,
+) {
+    match members.entry(source) {
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            let existing = entry.get().clone();
+            entry.insert(GraphBuilder::union([existing, graph]));
+        }
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(graph);
+        }
+    }
+}
+
 fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
     let mut domain = ParameterDomain::default();
     for node in shape.nodes.values() {

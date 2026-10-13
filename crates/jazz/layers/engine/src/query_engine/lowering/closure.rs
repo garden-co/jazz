@@ -22,12 +22,7 @@ impl ClosureLowering {
         root_source: SourceId,
     ) -> BTreeMap<SourceId, GraphBuilder> {
         let mut members = self.result_members.clone();
-        members
-            .entry(root_source)
-            .and_modify(|existing| {
-                *existing = GraphBuilder::union([existing.clone(), self.visible_root.clone()]);
-            })
-            .or_insert_with(|| self.visible_root.clone());
+        union_member(&mut members, root_source, self.visible_root.clone());
         members
     }
 }
@@ -79,12 +74,7 @@ pub(super) fn lower_closure_membership(
                 resolved_source,
                 route_fields,
             ));
-            result_members
-                .entry(source)
-                .and_modify(|existing| {
-                    *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
-                })
-                .or_insert(graph);
+            union_member(&mut result_members, source, graph);
         }
     }
     Ok(ClosureLowering {
@@ -314,49 +304,30 @@ pub(super) fn join_contribution_membership_graph(
     request: &LoweringContext<'_>,
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
-    let mut visited = BTreeSet::new();
-    let plan = analyze_relation_input_node(&contribution.input, nodes, &mut visited)
-        .map_err(single_gap_report)?;
-    let lowered = lower_relation_input_for_contributor(&plan, resolved_sources, request)
-        .map_err(single_gap_report)?;
-    let (root_keys, join_keys) = lower_root_to_relation_key_pairs(
+    relation_membership_graph(
+        visible_root,
+        &contribution.input,
         &contribution.membership,
+        |join_key| {
+            Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Operator(format!(
+                    "join contribution {} does not provide join key field {join_key}",
+                    contribution.id
+                ))],
+                explain: ExplainPlan {
+                    capabilities: vec![
+                        "join contribution payload requires the normalized join key".to_owned(),
+                    ],
+                    ..ExplainPlan::default()
+                },
+            })
+        },
         root_source,
-        &plan,
-        &lowered,
+        contribution_source,
+        nodes,
+        resolved_sources,
         request,
-    )
-    .map_err(single_gap_report)?;
-    if let Some(join_key) = join_keys
-        .iter()
-        .find(|join_key| !lowered.fields.contains(*join_key))
-    {
-        return Err(Box::new(CapabilityReport {
-            gaps: vec![UnsupportedReason::Operator(format!(
-                "join contribution {} does not provide join key field {join_key}",
-                contribution.id
-            ))],
-            explain: ExplainPlan {
-                capabilities: vec![
-                    "join contribution payload requires the normalized join key".to_owned(),
-                ],
-                ..ExplainPlan::default()
-            },
-        }));
-    }
-    let mut contribution_graph = lowered.graph;
-    let mut unwrapped_join_keys = BTreeSet::new();
-    for join_key in &join_keys {
-        if lowered.nullable_fields.contains(join_key)
-            && unwrapped_join_keys.insert(join_key.clone())
-        {
-            contribution_graph = unwrap_nullable_join_key(contribution_graph, join_key.clone(), 1);
-        }
-    }
-    Ok(
-        GraphBuilder::join(visible_root, contribution_graph, root_keys, join_keys).project_fields(
-            project_join_contribution_fields_with_root_routes(contribution_source, route_fields),
-        ),
+        route_fields,
     )
 }
 
@@ -377,40 +348,65 @@ pub(super) fn inherited_contribution_membership_graph(
     request: &LoweringContext<'_>,
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
+    relation_membership_graph(
+        visible_root,
+        &contribution.input,
+        &contribution.membership,
+        |join_key| {
+            single_gap_report(UnsupportedReason::Operator(format!(
+                "inherited contribution {} does not provide parent key field {join_key}",
+                contribution.id
+            )))
+        },
+        root_source,
+        parent_source,
+        nodes,
+        resolved_sources,
+        request,
+        route_fields,
+    )
+}
+
+/// Join the visible roots to the relation at `input` on `membership`, and
+/// project the result to `target_source`'s fields plus the root routes.
+fn relation_membership_graph(
+    visible_root: GraphBuilder,
+    input: &RowSetNodeId,
+    membership: &PredicateExpr,
+    missing_join_key: impl FnOnce(&str) -> Box<CapabilityReport>,
+    root_source: &ResolvedSource,
+    target_source: &ResolvedSource,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &LoweringContext<'_>,
+    route_fields: &BTreeSet<String>,
+) -> CapabilityResult<GraphBuilder> {
     let mut visited = BTreeSet::new();
-    let plan = analyze_relation_input_node(&contribution.input, nodes, &mut visited)
-        .map_err(single_gap_report)?;
+    let plan =
+        analyze_relation_input_node(input, nodes, &mut visited).map_err(single_gap_report)?;
     let lowered = lower_relation_input_for_contributor(&plan, resolved_sources, request)
         .map_err(single_gap_report)?;
-    let (root_keys, join_keys) = lower_root_to_relation_key_pairs(
-        &contribution.membership,
-        root_source,
-        &plan,
-        &lowered,
-        request,
-    )
-    .map_err(single_gap_report)?;
+    let (root_keys, join_keys) =
+        lower_root_to_relation_key_pairs(membership, root_source, &plan, &lowered, request)
+            .map_err(single_gap_report)?;
     if let Some(join_key) = join_keys
         .iter()
         .find(|join_key| !lowered.fields.contains(*join_key))
     {
-        return Err(single_gap_report(UnsupportedReason::Operator(format!(
-            "inherited contribution {} does not provide parent key field {join_key}",
-            contribution.id
-        ))));
+        return Err(missing_join_key(join_key));
     }
-    let mut parent_graph = lowered.graph;
+    let mut relation_graph = lowered.graph;
     let mut unwrapped_join_keys = BTreeSet::new();
     for join_key in &join_keys {
         if lowered.nullable_fields.contains(join_key)
             && unwrapped_join_keys.insert(join_key.clone())
         {
-            parent_graph = unwrap_nullable_join_key(parent_graph, join_key.clone(), 1);
+            relation_graph = unwrap_nullable_join_key(relation_graph, join_key.clone(), 1);
         }
     }
     Ok(
-        GraphBuilder::join(visible_root, parent_graph, root_keys, join_keys).project_fields(
-            project_join_contribution_fields_with_root_routes(parent_source, route_fields),
+        GraphBuilder::join(visible_root, relation_graph, root_keys, join_keys).project_fields(
+            project_join_contribution_fields_with_root_routes(target_source, route_fields),
         ),
     )
 }
@@ -576,13 +572,10 @@ fn required_closure_parent_graph_from_segment(
         return Ok(parent_graph);
     };
     let target = resolved_sources.get(&segment.target).ok_or_else(|| {
-        Box::new(CapabilityReport {
-            gaps: vec![UnsupportedReason::Runtime(format!(
-                "closure target source {:?} was not resolved",
-                segment.target
-            ))],
-            explain: ExplainPlan::default(),
-        })
+        single_gap_report(UnsupportedReason::Runtime(format!(
+            "closure target source {:?} was not resolved",
+            segment.target
+        )))
     })?;
     let no_route_fields = BTreeSet::new();
     let target_valid = required_closure_parent_graph_from_segment(
@@ -596,12 +589,9 @@ fn required_closure_parent_graph_from_segment(
     )?;
     let source_key = user_column_field(&segment.source_field);
     let Some(source_key_type) = source_field_type(parent_source, &source_key) else {
-        return Err(Box::new(CapabilityReport {
-            gaps: vec![UnsupportedReason::Operator(format!(
-                "closure source field {source_key:?} is not projected"
-            ))],
-            explain: ExplainPlan::default(),
-        }));
+        return Err(single_gap_report(UnsupportedReason::Operator(format!(
+            "closure source field {source_key:?} is not projected"
+        ))));
     };
     let parent_row_uuid = parent_source.row_shape.row_uuid_field.clone();
     let target_row_uuid = target.row_shape.row_uuid_field.clone();
@@ -745,22 +735,16 @@ fn closure_membership_graph_for_path(
     let mut outputs = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
         let target = resolved_sources.get(&segment.target).ok_or_else(|| {
-            Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Runtime(format!(
-                    "closure target source {:?} was not resolved",
-                    segment.target
-                ))],
-                explain: ExplainPlan::default(),
-            })
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "closure target source {:?} was not resolved",
+                segment.target
+            )))
         })?;
         let source_key = user_column_field(&segment.source_field);
         let Some(source_key_type) = source_field_type(&current_source, &source_key) else {
-            return Err(Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Operator(format!(
-                    "closure source field {source_key:?} is not projected"
-                ))],
-                explain: ExplainPlan::default(),
-            }));
+            return Err(single_gap_report(UnsupportedReason::Operator(format!(
+                "closure source field {source_key:?} is not projected"
+            ))));
         };
         let joined = if can_lower_as_parent_semijoin {
             let (source_base, source_key_type) =
