@@ -900,7 +900,22 @@ pub struct PredicateRead {
     pub binding_id: BindingId,
     /// Binding values carried so validators do not need a prior binding registration.
     pub binding_values: BTreeMap<String, Value>,
+    /// The result an aggregate read observed, present exactly when `shape`
+    /// carries an aggregate (garden-co/jazz#3768). The authority re-runs the
+    /// aggregate as the transaction's permission subject and conflicts iff
+    /// the result differs; the aggregate's input rows are not recorded.
+    pub aggregate_result: Option<AggregateReadResult>,
 }
+
+/// Canonical `jazz.aggregate-read-result.v1` bytes: the complete result of
+/// one exclusive aggregate read, one entry per output group.
+///
+/// The bytes are opaque at this layer; the node layer owns the encoder and the
+/// canonical decoder (`jazz::node::aggregate_read_result`). Two results are
+/// equal exactly when their bytes are equal, so the encoder is the only
+/// producer of comparable values.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct AggregateReadResult(#[serde(with = "serde_bytes")] pub Vec<u8>);
 
 groove::define_record! {
     struct HistoryRowRecord {

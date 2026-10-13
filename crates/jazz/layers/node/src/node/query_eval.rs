@@ -3656,6 +3656,7 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
+        self.ensure_tx_aggregate_read_precedes_writes(tx_id, shape)?;
         let narrowing =
             self.offer_tx_query_narrowed_reads(tx_id, shape, binding, include_deleted)?;
         let program = self
@@ -3684,37 +3685,25 @@ where
                 &program,
             )
             .await?;
-        let predicate_read = PredicateRead {
-            table: shape.query().table.clone(),
-            shape_id: shape.shape_id(),
-            shape: shape.query().clone(),
-            binding_id: binding.binding_id(),
-            binding_values: binding.values().clone(),
-        };
-        let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.predicate_reads.push(predicate_read);
-        if shape.query().aggregate.is_none() {
-            // Prove every row the relation returns, root and included alike.
-            let mut returned = BTreeMap::<String, Vec<RowUuid>>::new();
-            for row in &snapshot.rows {
-                returned
-                    .entry(row.table().to_owned())
-                    .or_default()
-                    .push(row.row_uuid());
-            }
-            for (table, rows) in returned {
-                self.record_tx_query_row_reads(tx_id, shape.schema_version(), &table, rows)
-                    .await?;
-            }
-        } else {
-            self.record_tx_aggregate_input_reads(
-                tx_id,
-                shape,
-                binding,
-                identity,
-                authorization_mode,
-            )
-            .await?;
+        if shape.query().aggregate.is_some() {
+            // An aggregate's relation snapshot is its result rows.
+            self.record_tx_aggregate_read(tx_id, shape, binding, &snapshot.rows)?;
+            return Ok(snapshot);
+        }
+        self.open_tx_mut(tx_id)?
+            .predicate_reads
+            .push(predicate_read_without_result(shape, binding));
+        // Prove every row the relation returns, root and included alike.
+        let mut returned = BTreeMap::<String, Vec<RowUuid>>::new();
+        for row in &snapshot.rows {
+            returned
+                .entry(row.table().to_owned())
+                .or_default()
+                .push(row.row_uuid());
+        }
+        for (table, rows) in returned {
+            self.record_tx_query_row_reads(tx_id, shape.schema_version(), &table, rows)
+                .await?;
         }
         self.record_tx_narrowed_source_reads(tx_id, narrowed_reads, identity, authorization_mode)
             .await?;
@@ -3731,6 +3720,7 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
+        self.ensure_tx_aggregate_read_precedes_writes(tx_id, shape)?;
         let query = shape.query();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
         let narrowing =
@@ -3762,33 +3752,24 @@ where
         } else {
             self.materialize_inline_current_query_rows(&table, deltas)?
         };
-        let predicate_read = PredicateRead {
-            table: query.table.clone(),
-            shape_id: shape.shape_id(),
-            shape: shape.query().clone(),
-            binding_id: binding.binding_id(),
-            binding_values: binding.values().clone(),
-        };
-        let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.predicate_reads.push(predicate_read);
-        if query.aggregate.is_none() {
-            let root_rows = rows
-                .iter()
-                .filter(|row| row.table() == query.table)
-                .map(CurrentRow::row_uuid)
-                .collect::<Vec<_>>();
-            self.record_tx_query_row_reads(tx_id, shape.schema_version(), &query.table, root_rows)
-                .await?;
-        } else {
-            self.record_tx_aggregate_input_reads(
-                tx_id,
-                shape,
-                binding,
-                identity,
-                authorization_mode,
-            )
-            .await?;
+        if query.aggregate.is_some() {
+            self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
+            self.record_tx_aggregate_read(tx_id, shape, binding, &rows)?;
+            if query.array_subqueries.is_empty() {
+                self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+            }
+            return Ok(rows);
         }
+        self.open_tx_mut(tx_id)?
+            .predicate_reads
+            .push(predicate_read_without_result(shape, binding));
+        let root_rows = rows
+            .iter()
+            .filter(|row| row.table() == query.table)
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>();
+        self.record_tx_query_row_reads(tx_id, shape.schema_version(), &query.table, root_rows)
+            .await?;
         self.record_tx_narrowed_source_reads(tx_id, narrowed_reads, identity, authorization_mode)
             .await?;
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
@@ -3798,41 +3779,49 @@ where
         Ok(rows)
     }
 
-    /// Prove the rows an exclusive aggregate read consumed. An aggregate
-    /// returns no rows to prove, so the transaction also reads the aggregate's
-    /// input rows; the authority validates the aggregate against them
-    /// (garden-co/jazz#3694).
-    async fn record_tx_aggregate_input_reads(
+    /// Record an aggregate read by the result it returned
+    /// (`jazz.aggregate-read-result.v1`, garden-co/jazz#3768). The
+    /// transaction observed only that result, so it records neither the rows
+    /// the aggregate consumed nor the narrowed reads of its joined sources:
+    /// the authority re-runs the aggregate as the transaction's permission
+    /// subject and conflicts iff the result differs.
+    fn record_tx_aggregate_read(
         &mut self,
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
-        identity: AuthorSubject,
-        authorization_mode: QueryAuthorizationMode,
+        rows: &[CurrentRow],
     ) -> Result<(), Error> {
-        let Some(input) = shape.query().aggregate_input() else {
-            return Ok(());
-        };
-        if !self.transaction_is_exclusive(tx_id)? {
-            return Ok(());
+        let aggregate_result = aggregate_read_result::aggregate_read_result_from_rows(rows)?;
+        self.open_tx_mut(tx_id)?
+            .predicate_reads
+            .push(PredicateRead {
+                aggregate_result: Some(aggregate_result),
+                ..predicate_read_without_result(shape, binding)
+            });
+        Ok(())
+    }
+
+    /// Fail an exclusive aggregate read that would observe the transaction's
+    /// own staged writes. The authority re-runs the aggregate over committed
+    /// state only, which does not include this transaction's writes, so a
+    /// result that saw them cannot be compared soundly: a `max` that a staged
+    /// write lowered stays equal while another writer removes the row that
+    /// set it. An aggregate read before the transaction's first write is exact.
+    fn ensure_tx_aggregate_read_precedes_writes(
+        &self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+    ) -> Result<(), Error> {
+        if shape.query().aggregate.is_some()
+            && self.transaction_is_exclusive(tx_id)?
+            && !self.open_tx(tx_id)?.writes.is_empty()
+        {
+            return Err(Error::UnsupportedExclusiveRead(format!(
+                "an aggregate of `{}` after a write in the same transaction",
+                shape.query().table
+            )));
         }
-        let schema = &self
-            .catalogue
-            .catalogue_schemas
-            .get(&shape.schema_version())
-            .ok_or(Error::InvalidStoredValue("transaction schema is unknown"))?
-            .schema;
-        let input = input.validate(schema)?;
-        let input_binding = input.bind(binding.values().clone())?;
-        Box::pin(self.tx_query_in_authorization_mode(
-            tx_id,
-            &input,
-            &input_binding,
-            identity,
-            false,
-            authorization_mode,
-        ))
-        .await?;
         Ok(())
     }
 
@@ -5217,3 +5206,18 @@ fn query_order_value(row: &CurrentRow, table: &TableSchema, column: &str) -> Opt
 
 #[cfg(test)]
 mod tests;
+
+/// The predicate read of a non-aggregate `shape` under `binding`.
+pub(super) fn predicate_read_without_result(
+    shape: &ValidatedQuery,
+    binding: &Binding,
+) -> PredicateRead {
+    PredicateRead {
+        table: shape.query().table.clone(),
+        shape_id: shape.shape_id(),
+        shape: shape.query().clone(),
+        binding_id: binding.binding_id(),
+        binding_values: binding.values().clone(),
+        aggregate_result: None,
+    }
+}

@@ -316,6 +316,7 @@ fn hydrate_nested_payload_enum_cases(
     Ok(())
 }
 
+mod aggregate_read_result;
 pub mod api_error;
 mod authors;
 mod catalogue_ingest;

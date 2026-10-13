@@ -265,6 +265,13 @@ where
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
+        if let Some(reason) =
+            crate::node::aggregate_read_result::transaction_aggregate_read_malformation(&tx)
+        {
+            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
+            self.ingest_rejected_transaction(tx, fate.clone()).await?;
+            return Ok(PublicationOutcome::settled(fate));
+        }
         // Validate through the SAME authority path the core uses for an incoming
         // exclusive commit unit (§3.7): row/absent/predicate reads (INV-TX-16/17/18)
         // AND per-write first-committer-wins (INV-TX-20). Do not reimplement.
@@ -531,6 +538,16 @@ where
         {
             return self
                 .reject_malformed_commit(tx, "invalid contribution provenance".to_owned())
+                .await
+                .map(PublicationOutcome::settled);
+        }
+        // An aggregate read is validated by the result it recorded; a
+        // missing or garbled result is a malformed commit, not a conflict.
+        if let Some(reason) =
+            crate::node::aggregate_read_result::transaction_aggregate_read_malformation(&tx)
+        {
+            return self
+                .reject_malformed_commit(tx, reason)
                 .await
                 .map(PublicationOutcome::settled);
         }

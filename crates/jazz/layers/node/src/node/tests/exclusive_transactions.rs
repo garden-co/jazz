@@ -181,6 +181,7 @@ fn exclusive_tx_reads_own_pending_writes() {
             shape: predicate_shape.query().clone(),
             binding_id: predicate_binding.binding_id(),
             binding_values: predicate_binding.values().clone(),
+            aggregate_result: None,
         }]
     );
 }
@@ -2733,6 +2734,7 @@ fn notes_tx_fate(
                 shape: shape.query().clone(),
                 binding_id: binding.binding_id(),
                 binding_values: binding.values().clone(),
+                aggregate_result: None,
             });
         }
     }

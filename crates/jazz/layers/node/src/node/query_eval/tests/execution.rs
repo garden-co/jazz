@@ -890,14 +890,14 @@ fn grouped_aggregate_frontiers_preserve_identity_and_validate_payloads() {
         .query_rows(&shape, &binding, DurabilityTier::Global)
         .unwrap();
     assert_eq!(signature(&unchanged_rows), expected_signature);
-    assert!(matches!(
-        node.commit_exclusive_settled(locally_interfered_tx, AuthorSubject::SYSTEM, 5),
-        Err(Error::TransactionConflict)
-    ));
-    node.abandon_tx(locally_interfered_tx).unwrap();
+    // The rewrite leaves every group's payload unchanged, so the aggregate
+    // the transaction observed still holds and the commit is serializable
+    // (garden-co/jazz#3768).
+    node.commit_exclusive_settled(locally_interfered_tx, AuthorSubject::SYSTEM, 5)
+        .unwrap();
 }
 
-fn commit_metric_global_to_authority(
+pub(super) fn commit_metric_global_to_authority(
     writer: &mut NodeState,
     authority: &mut NodeState,
     row_uuid: RowUuid,
@@ -928,8 +928,11 @@ fn commit_metric_global_to_authority(
     writer.apply_sync_message_settled(fate).unwrap();
 }
 
+/// The authority validates a grouped aggregate by its result, not by the
+/// versions of the rows it consumed: a rewrite that keeps every group's
+/// payload is accepted (garden-co/jazz#3768).
 #[test]
-fn grouped_aggregate_authority_validation_checks_consumed_row_versions() {
+fn grouped_aggregate_authority_validation_compares_results() {
     let schema = signed_metric_schema();
     let (_writer_dir, mut writer) =
         open_node_with_uuid(NodeUuid::from_bytes([0xa4; 16]), schema.clone());
@@ -1000,8 +1003,8 @@ fn grouped_aggregate_authority_validation_checks_consumed_row_versions() {
         writer.tx_query(changed_tx, &shape, &binding).unwrap().len(),
         2
     );
-    // A rewrite that leaves every group's payload unchanged still conflicts:
-    // the aggregate is validated through the row versions it consumed.
+    // A rewrite that leaves every group's payload unchanged does not
+    // conflict: the aggregate is validated by the result it observed.
     commit_metric_global_to_authority(&mut other, &mut authority, row(2), "a", 2, 1_006);
     let (_tx_id, changed_unit) = writer
         .commit_exclusive_settled(changed_tx, AuthorSubject::SYSTEM, 1_007)
@@ -1011,13 +1014,16 @@ fn grouped_aggregate_authority_validation_checks_consumed_row_versions() {
         .unwrap()
         .try_into()
         .unwrap();
-    assert!(matches!(
-        changed_fate,
-        SyncMessage::FateUpdate {
-            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            changed_fate,
+            SyncMessage::FateUpdate {
+                fate: Fate::Accepted,
+                ..
+            }
+        ),
+        "unexpected rewritten authority fate: {changed_fate:?}"
+    );
 }
 
 #[test]
