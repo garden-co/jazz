@@ -146,8 +146,9 @@ See [Durability Tiers](/docs/reference/durability-tiers).
 
 Clients now connect straight to the core server, which authorizes and confirms writes.
 
-- Replace write waits on `{ tier: "edge" }` with `{ tier: "global" }`. `"edge"` still works for
-  waits but warns and waits for `"global"`. It throws as a read tier.
+- Replace write waits on `{ tier: "edge" }` with `{ tier: "global" }`. From alpha.60,
+  `wait({ tier: "edge" })` rejects with a `TypeError` (see
+  [`"edge"` write waits rejected](#edge-write-waits-rejected)). It also throws as a read tier.
 - Remove server upstream and edge configuration.
 - Don't clear local databases: writes an old edge had accepted are resubmitted to the core server.
 
@@ -176,6 +177,21 @@ If your app uses exclusive transactions, ship the alpha.58 client build together
 upgrade. Other writes and reads from alpha.56 and alpha.57 clients keep working.
 
 ## In alpha.60
+
+### `"edge"` write waits rejected
+
+`wait({ tier: "edge" })` used to warn and wait for `"global"`. It now rejects with a `TypeError`, and
+TypeScript no longer accepts it. Only the wait fails: the write was already applied, so a `.catch`
+that undoes the write on failure would undo every write. Change these waits to
+`wait({ tier: "global" })`.
+
+### Read tiers are `"local-first"` and `"remote"`
+
+The read tiers `"local"` and `"global"` (and the `"core"` alias) were removed and throw. Use
+`"local-first"` instead of `"local"`, and `"remote"` instead of `"global"`.
+`"local-first-unless-empty"` was also removed: use `"local-first"` with a `firstLoadRemoteWaitMs`
+of a few seconds. Outside the browser, a client connected to a server now reads `"remote"` by
+default. See [Durability Tiers](/docs/reference/durability-tiers).
 
 ### Import migration builders from `migration`
 
