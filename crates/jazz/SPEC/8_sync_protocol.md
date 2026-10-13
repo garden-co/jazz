@@ -604,7 +604,11 @@ transport:
 - The receiving link numbers commit units in arrival order. It holds a
   `ReadBarrier`, and every request behind it, until it has received
   `writes_through` commit units and answered each one. A write is answered by
-  the first `FateUpdate` this link sends for it, or by `RetryLater`. Messages on
+  the first `FateUpdate` this link sends for it, or by `RetryLater`. A
+  copy of a write this link has already answered as stored, and not yet
+  settled, is answered on arrival: a recovering relay acknowledges a write it
+  restored from its own storage before the writer's resent copy reaches it.
+  A terminal fate or `RetryLater` ends that standing. Messages on
   other channels are never held. Held requests keep their buffer leases, so
   the sender's request credit bounds what a receiver holds. When a turn's
   input runs out with requests held, the receiver sends the answers it has
