@@ -3105,6 +3105,12 @@ where
             )
             .await?;
         let head_content = if indexed {
+            if source_in_recursive_step(request) {
+                // No lookup: the head's presence reads its whole branch key.
+                self.record_branch_layer_read(|metrics| {
+                    metrics.source_branch_register_full_scans += 1
+                });
+            }
             let presence = self.presence(
                 request,
                 Ref::stack(tier),
@@ -3171,6 +3177,17 @@ where
         Ok(GraphBuilder::union(rows))
     }
 
+    /// Record one branch-layer read in the query-engine read metrics. Like
+    /// every access-path receipt, it belongs to the fragment that owns the
+    /// deduplicated physical source, so a policy proof specialized from its
+    /// outer source records nothing (`count_access_path_metrics`), whatever
+    /// the access.
+    fn record_branch_layer_read(&mut self, record: impl FnOnce(&mut QueryEngineReadMetrics)) {
+        if self.count_access_path_metrics {
+            record(&mut self.node.query_engine_read_metrics);
+        }
+    }
+
     /// Build the maintained content-winner relation for one logical branch
     /// key: its `[local, origin]` ref stack, each ref read under `access`.
     /// `stored_keys` includes historical short spellings produced before
@@ -3202,20 +3219,15 @@ where
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let refs = Ref::stack(tier).len() as u64;
         let keys = stored_keys.len() as u64;
-        match access {
-            BranchLayerAccess::Full => self.node.query_engine_read_metrics.source_full_scans += 1,
-            BranchLayerAccess::PrimaryKey(_) => {
-                if self.count_access_path_metrics {
-                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
-                }
-            }
+        self.record_branch_layer_read(|metrics| match access {
+            BranchLayerAccess::Full => metrics.source_full_scans += 1,
+            BranchLayerAccess::PrimaryKey(_) => metrics.source_primary_key_scans += 1,
             BranchLayerAccess::Index { intersections, .. } => {
                 // Each ref under the prefix; the local delta's mask over
                 // origin is a keyed lookup, not an index probe.
-                self.node.query_engine_read_metrics.source_index_probes +=
-                    refs * keys * (1 + intersections.len() as u64);
+                metrics.source_index_probes += refs * keys * (1 + intersections.len() as u64);
             }
-        }
+        });
         // One class's rows under every stored spelling of the key.
         let class_rows = |this: &Self, class| {
             stored_keys
@@ -3318,7 +3330,16 @@ where
             .collect::<Vec<_>>();
         let scan = match access {
             BranchLayerAccess::PrimaryKey(prefix) => Some(row_prefix_scan(prefix)),
-            BranchLayerAccess::Full | BranchLayerAccess::Index { .. } => None,
+            BranchLayerAccess::Full | BranchLayerAccess::Index { .. } => {
+                if row_ids.is_none() {
+                    // Neither a prefix nor a lookup: the register reads the
+                    // whole branch key.
+                    self.record_branch_layer_read(|metrics| {
+                        metrics.source_branch_register_full_scans += 1
+                    });
+                }
+                None
+            }
         };
         // Physical current tables are schema-variant; read them through the
         // current projection. Deletion is a cell of the winning row image:

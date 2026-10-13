@@ -114,12 +114,15 @@ fn indexed_branch_todos_schema() -> JazzSchema {
 /// entered it is found by the local index). An unindexed read of the same
 /// view is the control: it scans both branch keys.
 ///
-/// This asserts the content-source counters, which is what
-/// `query_engine_read_metrics` attributes; the deletion registers and the
-/// draft's presence are read by the candidates' row ids
-/// (`indexed_branch_view_registers_are_read_by_candidate_row_ids`).
+/// The deletion registers and the draft's presence are not index-bounded
+/// (a draft row can be deleted by its main image anywhere in main), so they
+/// are looked up by the content candidates' row ids
+/// (`indexed_branch_view_registers_are_read_by_candidate_row_ids`): no
+/// layer reads main whole, and the storage counters say so against the
+/// unindexed control, which reads all of main.
 ///
-/// White-box because the read path's source counters are not public.
+/// White-box because the read path's source and storage counters are not
+/// public.
 ///
 /// ```text
 /// main (settled):  overridden=needle  inherited=needle  moved_out=needle
@@ -205,10 +208,14 @@ fn indexed_branch_view_reads_each_content_layer_under_the_index_prefix() {
     let needle = db
         .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
         .expect("prepare indexed query");
+    // Warm the plan so the measured read is the row read alone.
+    block_on(db.all(&needle, view.clone())).expect("warm indexed read");
+    db.reset_storage_read_metrics_for_test();
     db.node.node.borrow_mut().reset_query_engine_read_metrics();
     let mut rows = row_ids(&block_on(db.all(&needle, view.clone())).expect("indexed read"));
     rows.sort();
     assert_eq!(rows, vec![inherited, moved_in]);
+    let storage = db.take_storage_read_metrics_for_test();
     let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
     assert_eq!(
         metrics.source_full_scans, 0,
@@ -216,22 +223,249 @@ fn indexed_branch_view_reads_each_content_layer_under_the_index_prefix() {
     );
     // Draft and main each read local and origin under the prefix; each
     // local delta masks its origin by a keyed lookup, not an index probe.
-    assert!(metrics.source_index_probes >= 4, "{metrics:?}");
+    assert_eq!(metrics.source_index_probes, 4, "{metrics:?}");
+    // Both deletion registers and the draft's presence are looked up by
+    // the candidates' row ids: none reads a branch key whole.
+    assert_eq!(metrics.source_branch_register_full_scans, 0, "{metrics:?}");
+    // Settled rows read: main's prefix hits and the register lookups by
+    // candidate id, 6 against the control's whole main (44).
+    assert_eq!(storage.global_current_rows.reads, 6, "{storage:?}");
 
     let all = db
         .prepare_query(&db.table("todos"))
         .expect("prepare full query");
+    block_on(db.all(&all, view.clone())).expect("warm unindexed read");
+    db.reset_storage_read_metrics_for_test();
     db.node.node.borrow_mut().reset_query_engine_read_metrics();
     let rows = block_on(db.all(&all, view)).expect("unindexed read");
     assert_eq!(rows.len(), 44);
+    let storage = db.take_storage_read_metrics_for_test();
+    let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
     assert_eq!(
-        db.node
-            .node
-            .borrow()
-            .query_engine_read_metrics()
-            .source_full_scans,
-        2,
+        metrics.source_full_scans, 2,
         "without an index both branch keys are read whole"
+    );
+    assert_eq!(metrics.source_branch_register_full_scans, 2, "{metrics:?}");
+    assert_eq!(storage.global_current_rows.reads, 44, "{storage:?}");
+}
+
+/// Bob reads alice's draft over main with an indexed root filter, a join to
+/// a shared (not branch-scoped) table filtered by its own index, and a read
+/// policy whose `EXISTS` proof reads that shared table. A branch view turns
+/// on secondary indexes for this one-shot read, so the shared join source and
+/// the policy subplan can take the one-shot index shapes (candidate filter,
+/// source limit) here for the first time, while the branch layers ignore both
+/// and stay masked before their predicates. The unindexed read of the same
+/// view is the control. White-box because the read path's source counters
+/// are not public.
+///
+/// ```text
+/// labels (shared): a(visible=yes)  b(visible=no)
+/// main (settled):  overridden=needle/a  inherited=needle/a  closed=needle/b
+///                  orphan=needle/ghost  hay x 20 = hay/a
+/// draft (pending): overridden -> hidden/a
+/// bob ──title = needle ⋈ labels(visible = yes), draft over main──► {inherited}
+/// ```
+#[test]
+fn branch_view_join_and_policy_subplan_match_the_unindexed_control() {
+    let labelled = public_exists("labels", [public_outer_eq("name", "label")]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("labels")
+                    .column("name", PublicColumnType::Text)
+                    .column("visible", PublicColumnType::Text)
+                    .index_only(["name"])
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_insert(PublicPolicyExpr::True),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text)
+                    .column("label", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .index_only(["title"])
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(labelled)
+                            .with_insert(PublicPolicyExpr::True)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                    ),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd9; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
+    }))
+    .expect("open history-complete authority");
+    let bob = AuthorSubject::for_test_bytes([0xda; 16]);
+    let text = |value: &str| Value::String(value.to_owned());
+    for (id, name, visible) in [(row(0x60), "a", "yes"), (row(0x61), "b", "no")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "labels",
+            id,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("name".to_owned(), text(name)),
+                ("visible".to_owned(), text(visible)),
+            ]),
+        )
+        .expect("seed label");
+    }
+    let main = BranchSelector::new([("branch_id", Value::Uuid(row(0xe0).0))]);
+    let draft = BranchSelector::new([("branch_id", Value::Uuid(row(0xe1).0))]);
+    let (overridden, inherited, closed, orphan) = (row(1), row(2), row(3), row(4));
+    let cells = |title: &str, label: &str| {
+        BTreeMap::from([
+            ("title".to_owned(), text(title)),
+            ("label".to_owned(), text(label)),
+        ])
+    };
+    let settled = [
+        (overridden, "needle", "a"),
+        (inherited, "needle", "a"),
+        (closed, "needle", "b"),
+        (orphan, "needle", "ghost"),
+    ]
+    .into_iter()
+    .chain((0x10..0x24).map(|byte| (row(byte), "hay", "a")));
+    for (row_id, title, label) in settled {
+        let write = block_on(db.insert(
+            "todos",
+            cells(title, label),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                target: crate::db::ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        ))
+        .expect("seed main row");
+        db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+            .expect("settle main row");
+    }
+    block_on(db.update(
+        "todos",
+        overridden,
+        cells("hidden", "a"),
+        crate::db::UpdateOptions {
+            target: crate::db::WriteTarget::BranchView {
+                head: draft.clone(),
+                base: Some(BranchViewBase::current(main.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("pending draft edit");
+
+    let view = ReadOpts {
+        tier: crate::db::ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(draft, Some(BranchViewBase::current(main)));
+    let join = |query: Query| {
+        query.join_via_column("labels", "name", "label", [eq(col("visible"), lit("yes"))])
+    };
+    let read = |query: &Query| {
+        let prepared = db.prepare_query(query).expect("prepare joined query");
+        // Warm the plan and the policy proof so the measured read is the
+        // row read alone.
+        block_on(db.all_for_identity(&prepared, view.clone(), bob)).expect("warm joined read");
+        db.node.node.borrow_mut().reset_query_engine_read_metrics();
+        let mut rows = row_ids(
+            &block_on(db.all_for_identity(&prepared, view.clone(), bob)).expect("joined read"),
+        );
+        rows.sort();
+        let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+        (rows, metrics)
+    };
+
+    let needle = || Query::from("todos").filter(eq(col("title"), lit("needle")));
+    let hay = || (0x10..0x24).map(row);
+    let sorted = |mut rows: Vec<RowUuid>| {
+        rows.sort();
+        rows
+    };
+
+    // The policy subplan under an indexed branch view. The proof is
+    // specialized from the outer `todos` source and shares its deduplicated
+    // physical branch layers, so they are counted once, for the outer read:
+    // draft and main each read local and origin under the prefix (each local
+    // delta masks its origin by a keyed lookup); both deletion registers and
+    // the draft's presence are looked up by the candidates' row ids.
+    // The specialized proof is compiled for this read, and its `labels`
+    // source, correlated only through the outer row, reads whole. The
+    // control reads both branch keys and both registers whole, no presence.
+    let (indexed, metrics) = read(&needle());
+    let (control, control_metrics) = read(&Query::from("todos"));
+    assert_eq!(
+        indexed,
+        sorted(vec![inherited, closed]),
+        "the head masks overridden; the policy drops orphan"
+    );
+    assert_eq!(
+        control,
+        sorted(
+            [overridden, inherited, closed]
+                .into_iter()
+                .chain(hay())
+                .collect()
+        ),
+        "the unindexed control agrees once its non-needle rows are set aside"
+    );
+    assert_eq!(
+        (
+            metrics.policy_authorization_graphs,
+            metrics.source_index_probes,
+            metrics.source_full_scans,
+            metrics.source_branch_register_full_scans,
+        ),
+        (1, 4, 1, 0),
+        "{metrics:?}"
+    );
+    assert_eq!(
+        (
+            control_metrics.source_index_probes,
+            control_metrics.source_full_scans,
+            control_metrics.source_branch_register_full_scans,
+        ),
+        (0, 2, 2),
+        "{control_metrics:?}"
+    );
+
+    // The joined read: the access-path selector takes no index through a
+    // join, so the branch view's one-shot index switch changes nothing for
+    // it and it resolves exactly like its unindexed control. Every layer
+    // reads whole: draft and main of `todos`, and the shared `labels`, whose
+    // branch view is its one shared key (content plus deletion register).
+    let (indexed, metrics) = read(&join(needle()));
+    let (control, control_metrics) = read(&join(Query::from("todos")));
+    assert_eq!(
+        indexed,
+        vec![inherited],
+        "the head masks overridden; the join drops closed; the policy drops orphan"
+    );
+    assert_eq!(
+        control,
+        sorted([overridden, inherited].into_iter().chain(hay()).collect())
+    );
+    assert_eq!(metrics, control_metrics);
+    assert_eq!(
+        (
+            metrics.source_index_probes,
+            metrics.source_full_scans,
+            metrics.source_branch_register_full_scans,
+        ),
+        (0, 3, 3),
+        "{metrics:?}"
     );
 }
 
@@ -294,13 +528,14 @@ fn by_id_branch_view_read_is_bounded_by_the_row_key() {
         vec![target]
     );
     let storage = db.take_storage_read_metrics_for_test();
+    let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
     assert_eq!(
-        db.node
-            .node
-            .borrow()
-            .query_engine_read_metrics()
-            .source_full_scans,
-        0
+        (
+            metrics.source_full_scans,
+            metrics.source_branch_register_full_scans,
+        ),
+        (0, 0),
+        "{metrics:?}"
     );
     assert!(
         storage.global_current_rows.reads <= 4,
@@ -6235,6 +6470,43 @@ fn db_at_reads_historical_cut_and_partial_requires_server() {
     assert_eq!(err.message, "historical read requires server evaluation");
 }
 
+/// Alice can use a UUID needle for array membership; a text needle is rejected
+/// before execution with both types. This public DB test checks user-visible
+/// query preparation.
+#[test]
+fn typed_uuid_array_contains_reports_expected_and_actual_types() {
+    let schema = build_public_db_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("items").column(
+            "tags",
+            PublicColumnType::Array {
+                element: Box::new(PublicColumnType::Uuid),
+            },
+        ),
+    ));
+    let db = open_db(0xd8, AuthorSubject::SYSTEM, &schema);
+    let tag = uuid::Uuid::from_bytes([0x31; 16]);
+    db.insert(
+        "items",
+        BTreeMap::from([("tags".to_owned(), Value::Array(vec![Value::Uuid(tag)]))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = Query::from("items").filter(contains(col("tags"), lit(Value::Uuid(tag))));
+    assert_eq!(row_ids(&prepared_read(&db, &query)), vec![row(1)]);
+
+    let mismatched = Query::from("items").filter(contains(col("tags"), lit("not-a-uuid")));
+    let error = db.prepare_query(&mismatched).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains("Uuid") && error.message.contains("String"),
+        "diagnostic must identify expected UUID member and actual String needle: {}",
+        error.message
+    );
+}
 #[test]
 fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
     let schema = issue_schema();
