@@ -77,6 +77,18 @@ pub struct ReconciledMaintainedSubscriptionClone {
     allow_storage_witness_fallback: bool,
 }
 
+/// What a usage-site reset knows about its downstream receiver before the
+/// canonical delta is applied.
+struct ClonedResetBasis {
+    known_state: Option<KnownStateDeclaration>,
+    known_membership_position: Option<GlobalTime>,
+    authorization_matches: bool,
+    removed_members_are_ordinary: bool,
+    source_had_program_fact_transitions: bool,
+    flat_row_removes: Option<Vec<ResultMemberEntry>>,
+    allow_storage_witness_fallback: bool,
+}
+
 struct MaintainedCanonicalUpdate {
     changed: bool,
     update: SyncMessage,
@@ -2556,30 +2568,16 @@ impl PeerState {
             terminal_operations: _,
             supporting_changed,
         } = source_transitions;
-        let known_state = self
-            .downstream_known_states
-            .get(&target_subscription)
-            .cloned();
-        let known_membership_position = fast_current_membership_position(&known_state);
-        let authorization_matches =
-            self.fast_cursor_authorization_matches(maintained_subscription, &known_state);
-        let removed_members_are_ordinary =
-            source_removes.iter().all(ordinary_current_content_member);
         let source_had_program_fact_transitions = supporting_changed
             || !source_program_fact_adds.is_empty()
             || !source_program_fact_removes.is_empty();
-        let client_link = self.role != PeerRole::Relay;
-        let flat_row_removes = (client_link
-            && authorization_matches
-            && removed_members_are_ordinary
-            && maintained_subscription.read_view
-                == RegisterShapeOptions::default().read_view_key()
-            && !source_had_program_fact_transitions
-            && self.publication_states[&maintained_subscription]
-                .supporting_rows()
-                .next()
-                .is_none())
-        .then(|| source_removes.clone());
+        let basis = self.cloned_reset_basis(
+            maintained_subscription,
+            target_subscription,
+            &source_removes,
+            source_had_program_fact_transitions,
+            source_allow_storage_witness_fallback,
+        );
         if supporting_changed
             || !source_adds.is_empty()
             || !source_removes.is_empty()
@@ -2593,160 +2591,15 @@ impl PeerState {
                 &source_removes,
             );
         }
-        let canonical_state = self
-            .publication_states
-            .get(&maintained_subscription)
-            .ok_or(Error::InvalidStoredValue(
-                "coverage group subscription is missing peer state",
-            ))?;
-        let current_result_member_set = &canonical_state.result_member_set;
-        let current_program_fact_set = canonical_state
-            .supporting_rows()
-            .cloned()
-            .collect::<Vec<_>>();
-        let can_forward_flat_removals = client_link
-            && ordinary_flat_row_duplicate_view(
-                shape,
-                &current_result_member_set,
-                removed_members_are_ordinary,
-                maintained_subscription.read_view,
-                canonical_state.supporting_rows().next().is_none(),
-                source_had_program_fact_transitions,
-            );
-        let authorization_mismatch =
-            client_link && known_membership_position.is_some() && !authorization_matches;
-        let target_result_member_removes = if can_forward_flat_removals && authorization_matches {
-            flat_row_removes.unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let (tier, read_view) = self
-            .publication_states
-            .get(&maintained_subscription)
-            .and_then(|state| state.prepared_query.as_ref())
-            .map(CachedPeerQueryPlan::context)
-            .ok_or(Error::InvalidStoredValue(
-                "coverage group subscription is missing prepared state",
-            ))?;
-        let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
-        let result_member_adds = if current_program_fact_set.is_empty()
-            && !authorization_mismatch
-            && let Some(position) = known_membership_position
-            && self
-                .canonical_subscription_settlement_time(node, maintained_subscription)
-                .0
-                > 0
-            && position
-                >= self.canonical_subscription_settlement_time(node, maintained_subscription)
-        {
-            Vec::new()
-        } else if current_program_fact_set.is_empty()
-            && !authorization_mismatch
-            && let Some(position) = known_membership_position
-            && current_result_member_set
-                .iter()
-                .any(|member| member_settle_position(member).is_some())
-        {
-            current_result_member_set
-                .iter()
-                .filter(|member| {
-                    member_settle_position(member).is_none_or(|settled| settled > position)
-                })
-                .cloned()
-                .collect()
-        } else {
-            current_result_member_set.iter().cloned().collect()
-        };
-        let (policy_identity, policy_claims) =
-            self.served_subscription_policy_binding(target_subscription)?;
-        let settled_through = self.maintained_publication_cut(node, maintained_subscription);
-        let catch_up_authorization_matches =
-            self.fast_cursor_authorization_matches(target_subscription, &known_state);
-        let catch_up = {
-            let canonical = self
-                .publication_states
-                .get(&maintained_subscription)
-                .ok_or(Error::InvalidStoredValue(
-                    "coverage group subscription is missing peer state",
-                ))?;
-            match canonical.maintained_subscription_view.as_ref() {
-                Some(view) if settled_through.0 > 0 => {
-                    watermark_catch_up(
-                        node,
-                        &known_state,
-                        read_view.is_default(),
-                        view.maintained.single_physical_table(),
-                        shape.query(),
-                        view.maintained.supporting_rows(),
-                        canonical.supporting_revision,
-                        catch_up_authorization_matches,
-                    )
-                    .await?
-                }
-                _ => None,
-            }
-        };
-        if catch_up.is_some() {
-            self.settle_watermark_declaration(target_subscription);
-        }
-        let leave_scan_after = fast_current_membership_position(&known_state);
-        let (known_state, target_result_member_removes) = if catch_up.is_some() {
-            (Some(known_state).flatten(), Vec::new())
-        } else {
-            (
-                (!authorization_mismatch).then_some(known_state).flatten(),
-                target_result_member_removes,
-            )
-        };
-        let update = {
-            let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
-            let maintained = &self
-                .publication_states
-                .get(&maintained_subscription)
-                .and_then(|state| state.maintained_subscription_view.as_ref())
-                .ok_or(Error::InvalidStoredValue(
-                    "coverage group subscription is missing maintained state",
-                ))?
-                .maintained;
-            scoped
-                .view_update_for_maintained_result_members(
-                    crate::node::MaintainedViewBundleInputs {
-                        supporting_update: catch_up,
-                        shape,
-                        has_default_read_view: read_view.is_default(),
-                        allow_authoritative_scalar_exit_refresh: !self
-                            .subscription_awaits_selected_authority_source(maintained_subscription),
-                        subscription: target_subscription,
-                        settled_through,
-                        peer_complete_tx_payloads,
-                        known_state,
-                        leave_scan_after,
-                        complete_exclusive_payloads: self.ship_complete_exclusive_payloads
-                            && self.role == PeerRole::Relay,
-                        previous_result_set: BTreeSet::new(),
-                        result_member_adds,
-                        result_member_removes: target_result_member_removes,
-                        // A newly attached usage site starts with no
-                        // subscription-scoped facts even when it shares the
-                        // canonical evaluator. Rehydrate the evaluator's complete
-                        // current fact closure; forwarding only future deltas
-                        // leaves array/join dependencies absent after a one-shot
-                        // attachment races their first update.
-                        identity: policy_identity,
-                        tier,
-                        maintained_facts: maintained,
-                        allow_storage_witness_fallback: source_allow_storage_witness_fallback,
-                    },
-                )
-                .await
-        };
-        let mut update = update?;
-        if let SyncMessage::ViewUpdate(view) = &mut update {
-            self.bind_cloned_supporting_revision(maintained_subscription, view);
-        }
-        self.record_outgoing_view_update_metadata(&update);
-        self.metrics.maintained_subscription_view.hits_out += 1;
-        Ok(Some(update))
+        self.cloned_subscription_reset(
+            node,
+            maintained_subscription,
+            target_subscription,
+            shape,
+            basis,
+        )
+        .await
+        .map(Some)
     }
 
     // A late usage gets the same physical state as the canonical publisher.
@@ -2834,6 +2687,33 @@ impl PeerState {
             source_had_program_fact_transitions,
             allow_storage_witness_fallback,
         } = reconciled;
+        let basis = self.cloned_reset_basis(
+            maintained_subscription,
+            target_subscription,
+            &source_removes,
+            source_had_program_fact_transitions,
+            allow_storage_witness_fallback,
+        );
+        self.cloned_subscription_reset(
+            node,
+            maintained_subscription,
+            target_subscription,
+            shape,
+            basis,
+        )
+        .await
+    }
+
+    /// Read what a usage-site reset needs to know about its downstream
+    /// receiver. Callers take this before applying the canonical delta.
+    fn cloned_reset_basis(
+        &self,
+        maintained_subscription: SubscriptionKey,
+        target_subscription: SubscriptionKey,
+        source_removes: &[ResultMemberEntry],
+        source_had_program_fact_transitions: bool,
+        allow_storage_witness_fallback: bool,
+    ) -> ClonedResetBasis {
         let known_state = self
             .downstream_known_states
             .get(&target_subscription)
@@ -2854,8 +2734,42 @@ impl PeerState {
                 .supporting_rows()
                 .next()
                 .is_none())
-        .then(|| source_removes.clone());
+        .then(|| source_removes.to_vec());
 
+        ClonedResetBasis {
+            known_state,
+            known_membership_position,
+            authorization_matches,
+            removed_members_are_ordinary,
+            source_had_program_fact_transitions,
+            flat_row_removes,
+            allow_storage_witness_fallback,
+        }
+    }
+
+    /// Assemble a usage-site reset from the canonical publisher's current
+    /// state, shared by direct rehydration and the reconciled clone path.
+    async fn cloned_subscription_reset<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        maintained_subscription: SubscriptionKey,
+        target_subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        basis: ClonedResetBasis,
+    ) -> Result<SyncMessage, Error>
+    where
+        S: OrderedKvStorage,
+    {
+        let ClonedResetBasis {
+            known_state,
+            known_membership_position,
+            authorization_matches,
+            removed_members_are_ordinary,
+            source_had_program_fact_transitions,
+            flat_row_removes,
+            allow_storage_witness_fallback,
+        } = basis;
+        let client_link = self.role != PeerRole::Relay;
         let canonical_state = self
             .publication_states
             .get(&maintained_subscription)
