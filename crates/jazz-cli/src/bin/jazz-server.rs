@@ -151,51 +151,17 @@ fn run_server_app(app_id: &str, args: Vec<String>, program: &str) -> ExitCode {
         eprintln!("error={error}");
         return ExitCode::FAILURE;
     }
-    let schema = empty_runtime_schema();
-    let identity = DbIdentity {
-        node: NodeUuid::from_bytes([0x5e; 16]),
-        author: AuthorSubject::SYSTEM,
-    };
     let storage = options.storage.clone();
     let auth_admission = options.auth_admission.clone();
-    let mut config = match options.storage {
-        StorageConfig::InMemory => LoopbackWebSocketServerConfig::in_memory(schema, identity),
-        StorageConfig::RocksDb { path } => {
-            LoopbackWebSocketServerConfig::persistent_data_dir(schema, identity, path)
-        }
-        StorageConfig::SQLite { .. } => unreachable!("CLI does not expose sqlite storage"),
-    }
-    .with_row_id_seed(0x5e)
-    .with_auth_admission(options.auth_admission);
-    if let Some(account) = options.admitted_account {
-        config = config.with_admitted_account(account);
-    }
-    config.listener.bind_addr = options.listen;
-    config.listener.websocket_path = options.websocket_path;
-
-    let websocket_path = config.listener.websocket_path.clone();
-    let server = match start_loopback_server(config) {
-        Ok(server) => server,
-        Err(error) => {
-            eprintln!("error={error}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    println!("command=server");
-    println!("app_id={app_id}");
-    println!("websocket_path={websocket_path}");
-    print_storage_report(&storage);
-    print_auth_report(&auth_admission);
-    println!("schema_catalogue=empty");
-    println!("runtime_schema_loading=static_empty_schema");
-    println!("ws_url=ws://{}{}", server.local_addr(), websocket_path);
-    let _ = io::stdout().flush();
-
-    let mut stdin = String::new();
-    let _ = io::stdin().read_to_string(&mut stdin);
-    server.shutdown();
-    ExitCode::SUCCESS
+    serve_loopback_until_stdin_closes(empty_runtime_schema(), options, |websocket_path| {
+        println!("command=server");
+        println!("app_id={app_id}");
+        println!("websocket_path={websocket_path}");
+        print_storage_report(&storage);
+        print_auth_report(&auth_admission);
+        println!("schema_catalogue=empty");
+        println!("runtime_schema_loading=static_empty_schema");
+    })
 }
 
 fn run_loopback_websocket_schema(
@@ -204,29 +170,22 @@ fn run_loopback_websocket_schema(
     args: Vec<String>,
     program: &str,
 ) -> ExitCode {
+    let usage_error = |error: String| {
+        eprintln!("error={error}");
+        if command == "serve-loopback-websocket-schema-data-dir" {
+            print_serve_data_dir_usage_stderr(program);
+        } else {
+            print_serve_usage_stderr(program, command);
+        }
+        ExitCode::from(2)
+    };
     let options = match CliOptions::parse(args, program) {
         Ok(options) => options,
-        Err(error) => {
-            eprintln!("error={error}");
-            if command == "serve-loopback-websocket-schema-data-dir" {
-                print_serve_data_dir_usage_stderr(program);
-            } else {
-                print_serve_usage_stderr(program, command);
-            }
-            return ExitCode::from(2);
-        }
+        Err(error) => return usage_error(error),
     };
     let schema_bytes = match decode_hex(schema_hex) {
         Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("error={error}");
-            if command == "serve-loopback-websocket-schema-data-dir" {
-                print_serve_data_dir_usage_stderr(program);
-            } else {
-                print_serve_usage_stderr(program, command);
-            }
-            return ExitCode::from(2);
-        }
+        Err(error) => return usage_error(error),
     };
     let schema = match jazz::tools::public_schema_convert::decode_public_schema_json(&schema_bytes)
     {
@@ -236,7 +195,17 @@ fn run_loopback_websocket_schema(
             return ExitCode::from(2);
         }
     };
+    serve_loopback_until_stdin_closes(schema, options, |_| {})
+}
 
+/// Start a loopback WebSocket server from the CLI options, print `report`
+/// (given the WebSocket path) and the `ws_url` line, then serve until stdin
+/// closes.
+fn serve_loopback_until_stdin_closes(
+    schema: JazzSchema,
+    options: CliOptions,
+    report: impl FnOnce(&str),
+) -> ExitCode {
     let identity = DbIdentity {
         node: NodeUuid::from_bytes([0x5e; 16]),
         author: AuthorSubject::SYSTEM,
@@ -265,6 +234,7 @@ fn run_loopback_websocket_schema(
         }
     };
 
+    report(&websocket_path);
     println!("ws_url=ws://{}{}", server.local_addr(), websocket_path);
     let _ = io::stdout().flush();
 
