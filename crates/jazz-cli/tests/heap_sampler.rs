@@ -5,7 +5,9 @@
 
 use std::alloc::System;
 
-use jazz_cli::heap_profiling::{SamplingAllocator, for_each_live_sample};
+use jazz_cli::heap_profiling::{
+    DEFAULT_SAMPLE_INTERVAL, SamplingAllocator, enable_sampling, for_each_live_sample,
+};
 
 #[global_allocator]
 static ALLOCATOR: SamplingAllocator<System> = SamplingAllocator::new(System);
@@ -31,6 +33,7 @@ fn allocate(count: usize, size: usize) -> Vec<Vec<u8>> {
 /// that memory is freed.
 #[test]
 fn estimates_live_bytes_and_forgets_freed_memory() {
+    enable_sampling(DEFAULT_SAMPLE_INTERVAL);
     let (baseline, _) = live_estimate();
     let mut kept = Vec::new();
     for round in 0..64 {

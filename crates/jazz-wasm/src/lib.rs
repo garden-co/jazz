@@ -19,12 +19,11 @@ use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
 use jazz::db::{
-    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, EmptyOpening, Error, ErrorCode,
-    InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MutationErrorCallback, PeerConnection,
-    PermissionAdvice, Propagation, ReadOpts, RemoteLinkHint, RowCells, SeededRowIdSource,
-    SerializedReadResult, SerializedSubscriptionAuthorization, StreamingMutationKind,
-    StreamingValueUpload, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
-    WriteHandle,
+    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error, ErrorCode, FirstLoad,
+    InitialSyncFlushCadence, LargeValueUpdate, MutationErrorCallback, PeerConnection,
+    PermissionAdvice, ReadOpts, RemoteLinkHint, RowCells, SeededRowIdSource, SerializedReadResult,
+    SerializedSubscriptionAuthorization, StreamingMutationKind, StreamingValueUpload,
+    SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::Value;
 #[cfg(target_arch = "wasm32")]
@@ -52,6 +51,12 @@ pub mod bench_probes;
 #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
 #[global_allocator]
 static TALC: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocator();
+
+/// Validate a schema and its embedded permissions without opening a database.
+#[wasm_bindgen(js_name = validateSchema)]
+pub fn validate_schema(schema: Vec<u8>) -> Result<(), JsValue> {
+    decode_public_schema(&schema).map(|_| ())
+}
 
 /// Initialize the WASM module.
 ///
@@ -198,23 +203,27 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
-/// Test-only direct execution of one frozen complete v1 frame through the
+/// Test-only execution of a frozen v5 frame batch through the
 /// generated WASM artifact. This reaches the production Rust frame, feature,
 /// compression, and semantic-payload decoders; it is not a browser transport
 /// API.
-#[wasm_bindgen(js_name = __testValidateWireFrameCorpus)]
-pub fn test_validate_wire_frame_corpus(
+#[wasm_bindgen(js_name = __testValidateWireFrameBatchCorpus)]
+pub fn test_validate_wire_frame_batch_corpus(
     frame: Vec<u8>,
     negotiated_features: String,
 ) -> Result<(), JsValue> {
     let negotiated_features = negotiated_features
         .parse()
         .map_err(|_| JsValue::from_str("test wire corpus features must be a u64 decimal"))?;
-    jazz::wire::validate_frame_for_artifact_corpus(&frame, negotiated_features)
+    jazz::wire::decode_websocket_frame_batch(&frame)
+        .map_err(|error| error.to_string())
+        .and_then(|frames| {
+            jazz::wire::validate_frames_for_artifact_corpus(&frames, negotiated_features)
+        })
         .map_err(|error| error.into())
 }
 
-/// Test-only feature inventory paired with [`test_validate_wire_frame_corpus`].
+/// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
 #[wasm_bindgen(js_name = __testWireFrameCorpusFeatures)]
 pub fn test_wire_frame_corpus_features() -> String {
     jazz::wire::current_wire_features().to_string()
@@ -1970,9 +1979,7 @@ impl WasmDb {
                     .map_err(to_js_error)?;
             }
             let requires_coverage = tier_is_explicit
-                && (non_durable_client
-                    || (opts.tier >= DurabilityTier::Global
-                        && opts.propagation == Propagation::Full));
+                && (non_durable_client || (opts.tier == jazz::db::ReadTier::Remote));
             let result = inner
                 .all_serialized_query(
                     query,
@@ -2398,7 +2405,7 @@ impl WasmDb {
     /// Report what the host knows about the path to the authoritative server
     /// (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
     /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
-    /// Drives only `local-first-unless-empty` reads. The core timestamps each
+    /// Drives only local-first reads that wait for the server on first load. The core timestamps each
     /// `"attempting"` report as the start of a new attempt; until this is
     /// first called, reachability is derived from this runtime's own upstream.
     #[wasm_bindgen(js_name = setRemoteLinkHint)]
@@ -2455,9 +2462,7 @@ impl WasmDb {
                 queues: queues.clone(),
             },
             jazz::wire::WIRE_PROTOCOL_VERSION,
-            jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+            jazz::wire::current_wire_features() & !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
             None,
         ));
         let db_inner = self.open_inner()?;
@@ -2627,9 +2632,7 @@ impl WasmDb {
         let features = if context.is_some() {
             jazz::wire::current_wire_features()
         } else {
-            jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
+            jazz::wire::current_wire_features() & !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
         };
         let transport = Box::new(WireTransportAdapter::new_with_session_context(
             WasmWireTransport {
@@ -3366,26 +3369,37 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
         }
     }
     if let Some(tier) = optional_string_prop(&value, "tier")? {
-        (opts.tier, opts.empty_opening) = read_tier_from_str(&tier)?;
-    }
-    if let Some(local_updates) = optional_string_prop(&value, "local_updates")? {
-        opts.local_updates = match local_updates.as_str() {
-            "Immediate" | "immediate" => LocalUpdates::Immediate,
-            "Deferred" | "deferred" => LocalUpdates::Deferred,
-            other => return Err(JsValue::from_str(&format!("unknown local_updates {other}"))),
-        };
-    }
-    if let Some(propagation) = optional_string_prop(&value, "propagation")? {
-        opts.propagation = match propagation.as_str() {
-            "Full" | "full" => Propagation::Full,
-            "LocalOnly" | "local_only" | "localOnly" => Propagation::LocalOnly,
-            other => return Err(JsValue::from_str(&format!("unknown propagation {other}"))),
-        };
+        opts.tier = read_tier_from_str(&tier)?;
     }
     if let Some(include_deleted) = optional_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
     }
+    if let Some(timeout_ms) = optional_wait_ms_prop(&value, "first_load_remote_wait_ms")? {
+        opts.first_load = local_first_server_wait(&opts, timeout_ms);
+    }
     Ok(opts)
+}
+
+/// A local-first read's server-wait timeout. `Remote` reads ignore it.
+fn local_first_server_wait(opts: &ReadOpts, timeout_ms: u64) -> FirstLoad {
+    if opts.tier == jazz::db::ReadTier::LocalFirst {
+        FirstLoad::WaitForRemote { timeout_ms }
+    } else {
+        opts.first_load
+    }
+}
+
+fn optional_wait_ms_prop(value: &JsValue, name: &str) -> Result<Option<u64>, JsValue> {
+    let prop = js_sys::Reflect::get(value, &JsValue::from_str(name))?;
+    if prop.is_undefined() || prop.is_null() {
+        return Ok(None);
+    }
+    match prop.as_f64() {
+        Some(ms) if ms.is_finite() && ms >= 0.0 => Ok(Some(ms.floor() as u64)),
+        _ => Err(JsValue::from_str(&format!(
+            "{name} must be a non-negative number of milliseconds"
+        ))),
+    }
 }
 
 fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
@@ -3401,26 +3415,13 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
 
 /// Read-only binding lowering. Write waits keep `durability_tier_from_str`, so
 /// a product read choice can never change write-settlement semantics.
-fn read_tier_from_str(tier: &str) -> Result<(DurabilityTier, EmptyOpening), JsValue> {
-    if let Some(message) = removed_read_tier(tier) {
-        return Err(JsValue::from_str(message));
-    }
+fn read_tier_from_str(tier: &str) -> Result<jazz::db::ReadTier, JsValue> {
     match tier {
-        "local-first" | "LocalFirst" => Ok((DurabilityTier::Local, EmptyOpening::Deliver)),
-        // The core owns the local-first-unless-empty gate.
-        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
-            Ok((DurabilityTier::Local, EmptyOpening::AwaitRemote))
-        }
-        "remote" | "Remote" => Ok((DurabilityTier::Global, EmptyOpening::Deliver)),
-        _ => durability_tier_from_str(tier).map(|tier| (tier, EmptyOpening::Deliver)),
+        "local-first" | "LocalFirst" => Ok(jazz::db::ReadTier::LocalFirst),
+        "remote" | "Remote" => Ok(jazz::db::ReadTier::Remote),
+        "local-only" | "LocalOnly" => Ok(jazz::db::ReadTier::LocalOnly),
+        other => Err(JsValue::from_str(&format!("unknown read tier {other}"))),
     }
-}
-
-/// Error message for a read tier name that was removed, if `tier` is one.
-fn removed_read_tier(tier: &str) -> Option<&'static str> {
-    matches!(tier, "remote-if-possible" | "RemoteIfPossible").then_some(
-        "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
-    )
 }
 
 fn write_state_to_js(state: jazz::db::WriteState) -> Result<JsValue, JsValue> {
@@ -4230,30 +4231,44 @@ mod dynamic_schema_view_tests {
 
     /// Binding read choices lower to the existing core tiers.
     #[test]
-    fn read_tier_names_lower_to_existing_core_tiers() {
+    fn read_tier_names_are_separate_from_durability() {
         assert_eq!(
             read_tier_from_str("local-first").expect("local-first read tier"),
-            (DurabilityTier::Local, EmptyOpening::Deliver)
+            jazz::db::ReadTier::LocalFirst
         );
         assert_eq!(
             read_tier_from_str("remote").expect("strict remote read tier"),
-            (DurabilityTier::Global, EmptyOpening::Deliver)
+            jazz::db::ReadTier::Remote
         );
-        for name in ["remote-if-possible", "RemoteIfPossible"] {
-            assert!(removed_read_tier(name).is_some(), "{name} was removed");
-        }
-        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
-            assert_eq!(
-                read_tier_from_str(name).expect("local-first-unless-empty read tier"),
-                (DurabilityTier::Local, EmptyOpening::AwaitRemote),
-                "{name} reads local-first with the core empty-opening gate"
-            );
-        }
         assert_eq!(
             durability_tier_from_str("local").expect("legacy write tier"),
             DurabilityTier::Local,
             "the write parser remains the separate legacy durability boundary"
         );
+    }
+
+    /// The JS binding must reject unsupported names through its normal parser.
+    /// This runs in WASM because constructing JsValue errors needs a JS host.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn read_tiers_reject_unknown_names() {
+        for name in [
+            "remote-if-possible",
+            "RemoteIfPossible",
+            "local-first-unless-empty",
+            "LocalFirstUnlessEmpty",
+            "core",
+            "Core",
+            "local",
+            "global",
+            "none",
+            "invalid-tier",
+        ] {
+            assert_eq!(
+                read_tier_from_str(name).unwrap_err().as_string().unwrap(),
+                format!("unknown read tier {name}"),
+            );
+        }
     }
 
     #[test]
@@ -4391,7 +4406,7 @@ mod dynamic_schema_view_tests {
 
         let opts = read_opts_from_js(value.into()).expect("parse read options");
 
-        assert_eq!(opts.propagation, Propagation::Full);
+        assert_eq!(opts.tier, jazz::db::ReadTier::LocalFirst);
     }
 
     /// The host-visible transport boundary must honor both parts of its
@@ -4443,8 +4458,7 @@ mod dynamic_schema_view_tests {
         // The pump strips compression bits because each auxiliary payload is an
         // independently encoded complete envelope.
         let features = jazz::wire::current_wire_features()
-            & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+            & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
                 | jazz::wire::FEATURE_PAYLOAD_LZ4
                 | jazz::wire::FEATURE_PAYLOAD_ZSTD);
         let request = |request_id| jazz::protocol::ChunkRequestEntry {
@@ -4473,20 +4487,15 @@ mod dynamic_schema_view_tests {
                     result: jazz::protocol::ChunkResponse::Unavailable,
                 }],
             });
-        let one_response_bytes =
-            jazz::wire::encode_sync_message_for_features(&one_response, features)
-                .expect("encode expected auxiliary response");
-        let one_response_frame = jazz::wire::encode_frame(&jazz::wire::WireFrame::Message(
-            jazz::wire::WireEnvelope::new(
-                jazz::wire::WIRE_PROTOCOL_VERSION,
-                features,
-                one_response_bytes,
-            ),
-        ))
-        .expect("frame expected auxiliary response");
+        let context =
+            jazz::wire::WireInboundContext::new(jazz::wire::WIRE_PROTOCOL_VERSION, features, None);
+        let mut expected_sender = jazz::db::AuxiliaryChannelEndpoint::new(context.clone()).unwrap();
+        expected_sender.enqueue(one_response).unwrap();
+        let one_response_frame = expected_sender.peek_outbound().unwrap().unwrap();
         let byte_budget = one_response_frame.len() as u32;
+        let mut receiver = jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
 
-        let decode_ids = |frames: js_sys::Array| {
+        let mut decode_ids = |frames: js_sys::Array| {
             frames
                 .iter()
                 .map(|frame| {
@@ -4495,13 +4504,17 @@ mod dynamic_schema_view_tests {
                         bytes.len() <= byte_budget as usize,
                         "each actual WASM result stays within the requested byte budget"
                     );
-                    let jazz::wire::WireFrame::Message(envelope) = jazz::wire::decode_frame(&bytes)
+                    let jazz::wire::WireFrame::Channel(envelope) = jazz::wire::decode_frame(&bytes)
                         .expect("decode actual wasm response frame")
                     else {
-                        panic!("auxiliary output remains a complete message frame");
+                        panic!("auxiliary output uses channel framing");
                     };
+                    let received = receiver
+                        .receive(envelope, bytes.len())
+                        .unwrap()
+                        .expect("complete response");
                     let response =
-                        jazz::wire::decode_sync_message_for_features(&envelope.payload, features)
+                        jazz::wire::decode_sync_message_for_features(&received.payload, features)
                             .expect("decode actual wasm auxiliary response");
                     let jazz::protocol::SyncMessage::ChunkResponseBatch(batch) = response else {
                         panic!("subscriber sends a chunk response on the auxiliary lane");
