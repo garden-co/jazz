@@ -28,12 +28,17 @@ Invariant digest:
 - `INV-QUERY-15`: SQL `plan_query` MUST reject query parameters; parameterized SQL MUST go through `plan_prepared_shape`/prepared binding flow.
 - `INV-QUERY-16`: SQL prepared-shape lowering MUST accept only equality predicates of the form `column = $parameter` or `$parameter = column` as binding predicates.
 - `INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including `SELECT DISTINCT`, grouped/ordered/limited selects, non-inner joins, and non-`UNION ALL` set operations.
-- `INV-QUERY-18`: SQL inner joins MUST lower only equality column predicates, with `AND` forming multi-column join keys.
+- `INV-QUERY-18`: SQL inner joins MUST lower only equality column predicates,
+  with `AND` forming multi-column join keys. Inner and prepared-parameter
+  equijoins compare supported, equally declared complete values once per pair;
+  arrays preserve order, length, duplicates and emptiness, and signed zeros
+  compare equal recursively. Unsupported declared key types are rejected before
+  reading rows, including empty arrays.
 - `INV-QUERY-18A`: Each SQL inner-join `ON` operand MUST resolve against the complete visible join namespace: qualified references match exactly one qualifier and column, while unqualified references match exactly one column. Missing or ambiguous references MUST be rejected, and resolved operands MUST reference opposite join inputs.
 - `INV-QUERY-18B`: SQL-lowered inner equijoins MUST exclude rows with SQL
   `NULL` in any nullable join-key position before joining, including prepared
-  parameter-equality joins. `NULL` MUST NOT match `NULL`; non-`NULL` equality,
-  weights, and direct `GraphBuilder` exact/policy join semantics are unchanged.
+  parameter-equality joins. `NULL` MUST NOT match `NULL`; direct `GraphBuilder`
+  exact/policy join semantics are unchanged.
 
 - `INV-QUERY-19`: `BindingSourceOp` MUST NOT be evaluated through ordinary subscription/query graphs outside prepared shapes.
 - `INV-QUERY-20`: `ArgMaxByOp` and `ArgMinByOp` MUST accept arbitrary upstream
@@ -188,9 +193,58 @@ changing their meaning (`INV-QUERY-18A`).
 Before an SQL-lowered inner equi-join, each input is filtered with
 `IsNotNull` for every nullable join-key column. This makes SQL `NULL` values
 ineligible for both arrangement insertion and matching, including a
-`NULL`-bound prepared parameter; non-`NULL` keys retain the ordinary join
-product and incremental retraction semantics. This rule applies only to SQL
-lowering, not to direct `GraphBuilder` exact or policy joins (`INV-QUERY-18B`).
+`NULL`-bound prepared parameter; non-`NULL` keys retain the join product and
+incremental retraction semantics. This rule applies only to SQL lowering, not
+to direct `GraphBuilder` exact or policy joins (`INV-QUERY-18B`).
+
+SQL joins use whole-value comparison, not array element membership. For
+example, `[1, 2]` joins `[1, 2]` once, but neither `[2, 1]` nor `[2, 3]`;
+`[]` joins `[]` once. A multi-column key compares each complete value, so two
+equal arrays do not multiply the pair's weight by their lengths.
+
+Each paired key must have exactly the same declared type. Supported keys are
+integer widths, Bool, String, Bytes, Uuid, scalar EnumTag and non-NaN F64,
+recursively composed with plain Arrays and supported Tuples. Tuple members use
+the existing tuple codec subset: integer widths, Bool, Uuid, EnumTag and
+recursive supported Tuples, not F64, String, Bytes or containers other than
+Tuple. Arrays of zero-width elements are rejected before reading rows; an empty
+Tuple itself and empty Tuple components in positive-width tuples remain valid.
+One top-level Nullable carrier is allowed when both declarations are identical.
+Record, payload Enum, engine-only large types and nested Nullable children are
+not supported; even an empty array of such a type is rejected. Existing record
+construction restrictions remain unchanged.
+
+SQL equality normalises `+0.0` and `-0.0`, including array children, without
+changing payload bytes. SQL prepared shapes retain a separate exact
+binding-identity routing contract: raw float bits, including signed zero,
+remain distinct binding keys and refcounts. Every bind path for such a shape
+uses that retained contract; attaching, dropping or rebinding one identity
+must not leak another identity's derivations or change its weights. Routing
+semantics participate in shape/cache compatibility and bound filter descriptor
+identity. Generic graph preparation keeps its existing ordinary Eq routes.
+This distinction implements exact ownership in chapter 5 (`INV-SHAPE-8`) rather
+than canonicalising callers' binding values.
+
+SQL retains every actual binding-origin occurrence under collision-free private
+carriers, including multiple CTE/join occurrences of the same parameter.
+Every carrier selector is ANDed against its binding value index; a public
+constrained column is never a substitute for its binding origin. Accepted enum
+labels are canonicalised to codec ordinals in one owned literal per binding
+parameter, shared across selectors and terminals, without changing float bits
+or raw binding records.
+The whole query's user namespace is reserved before private aliases are
+allocated, including later CTE parameters and relation/projection aliases.
+For `UNION ALL`, public columns retain positional compatibility. Private
+lanes align by owning parameter, using the maximum occurrence count across
+arms. Missing lanes copy only that arm's own representative of the same
+parameter, preserving weights; wholly absent parameters remain unsupported.
+Each common lane has distinct logical provenance so outer projections cannot
+collapse independently varying selectors.
+
+Whole-value keys use an isolated framed evaluation encoding and borrowed
+typed traversal of the existing record layout. They do not change record,
+storage or wire encodings. Exact and Policy graph joins still expand arrays
+as element membership, including Jazz reference and policy correlations.
 
 To see the double-count concretely, take key `k` with existing left row `L1`
 (weight +1) and existing right row `R1` (+1); the pre-tick join holds `L1·R1`.

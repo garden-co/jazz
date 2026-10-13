@@ -172,6 +172,54 @@ impl PredicateRecord for RoutedRecord<'_> {
         Ok(value)
     }
 
+    fn binding_identity_matches(
+        self,
+        name: &str,
+        literal: &LiteralValue,
+    ) -> Result<bool, IvmRuntimeError> {
+        let index = resolve_field_name(&self.routes.descriptor, name)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
+        self.binding_identity_matches_at(index, literal)
+    }
+
+    fn binding_identity_matches_at(
+        self,
+        index: usize,
+        literal: &LiteralValue,
+    ) -> Result<bool, IvmRuntimeError> {
+        let field = &self.routes.fields[index];
+        let mut ty = &self.routes.descriptor.fields()[index].value_type;
+        let mut literal = literal;
+        for _ in 0..field.present_wrappers {
+            let (ValueType::Nullable(inner), LiteralValue::Nullable(Some(value))) = (ty, literal)
+            else {
+                return Ok(false);
+            };
+            ty = inner;
+            literal = value;
+        }
+        super::super::key_encoding::encoded_binding_identity_matches(
+            records::EncodedValue::new(field.bytes(self.raw)?, ty),
+            literal,
+        )
+    }
+
+    fn sql_null_at(self, index: usize) -> Result<bool, IvmRuntimeError> {
+        let field = &self.routes.fields[index];
+        if field.present_wrappers != 0 {
+            return Ok(false);
+        }
+        let value_type = &self.routes.descriptor.fields()[index].value_type;
+        if !matches!(value_type, ValueType::Nullable(_)) {
+            return Ok(false);
+        }
+        Ok(
+            records::EncodedValue::new(field.bytes(self.raw)?, value_type)
+                .nullable()?
+                .is_none(),
+        )
+    }
+
     fn literal_ordering(
         self,
         name: &str,

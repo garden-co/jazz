@@ -167,14 +167,14 @@ pub struct FilterOp {
 
 /// Equality semantics attached to an operator that compares user values.
 ///
-/// Normal query and arrangement work compares encoded value types exactly.
-/// Policy evaluation is the sole exception: policy claims compare integral
-/// widths and signedness by their exact `i128` value.
+/// Exact and Policy preserve element-membership joins. SQL WholeValue compares
+/// complete, exactly-typed keys, normalising floating-point signed zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ValueComparison {
     #[default]
     Exact,
     Policy,
+    WholeValue,
 }
 
 /// Projection operator descriptor.
@@ -627,6 +627,11 @@ pub enum PredicateExpr {
     },
     And(Vec<PredicateExpr>),
     Or(Vec<PredicateExpr>),
+    /// SQL prepared routing compares raw binding identity, not SQL equality.
+    BindingIdentityEq {
+        field: String,
+        value: std::sync::Arc<LiteralValue>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

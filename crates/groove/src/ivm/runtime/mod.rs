@@ -701,6 +701,10 @@ pub enum IvmRuntimeError {
     UniqueIndexViolation { index: String },
     #[error("unsupported join key")]
     UnsupportedJoinKey,
+    #[error("SQL whole-value equality does not support declared type {0:?}")]
+    UnsupportedWholeValueType(ValueType),
+    #[error("SQL whole-value join types differ: {left:?} vs {right:?}")]
+    WholeValueTypeMismatch { left: ValueType, right: ValueType },
     #[error("non-monotone recursive delta reached positive-only incremental recursion")]
     UnsupportedNonMonotoneRecursion,
     #[error("nested recursive graphs are not supported in v0")]

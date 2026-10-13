@@ -8,7 +8,7 @@
 //! module remains syntax-only.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 
 use crate::queries::{
@@ -50,6 +50,20 @@ pub struct PlannedPreparedShape {
     pub binding_descriptor: crate::records::RecordDescriptor,
     pub output_key_fields: Vec<String>,
     pub public_output: Vec<LogicalField>,
+}
+
+/// SQL execution retains all binding occurrences; the public planner exposes
+/// only one representative route field per parameter for generic preparation.
+pub(crate) struct SqlPreparedPlan {
+    pub(crate) prepared: PlannedPreparedShape,
+    pub(crate) route_selectors: Vec<(String, usize)>,
+}
+
+#[derive(Clone)]
+struct SqlBindingOrigin {
+    parameter: String,
+    source_name: String,
+    constrained_sources: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -169,7 +183,15 @@ pub fn plan_prepared_shape(
     query: &Query,
     schema: &DatabaseSchema,
 ) -> Result<PlannedPreparedShape, PlannerError> {
-    let planned = Planner::new(schema).plan_query(query)?;
+    Ok(plan_sql_prepared_shape(query, schema)?.prepared)
+}
+
+pub(crate) fn plan_sql_prepared_shape(
+    query: &Query,
+    schema: &DatabaseSchema,
+) -> Result<SqlPreparedPlan, PlannerError> {
+    let mut planner = Planner::new(schema);
+    let planned = planner.plan_query(query)?;
     if planned.parameters.is_empty() {
         return Err(PlannerError::UnsupportedQuery(
             "prepare_query requires at least one query parameter",
@@ -181,11 +203,39 @@ pub fn plan_prepared_shape(
             .iter()
             .map(|parameter| (parameter.name.clone(), parameter.value_type.clone())),
     );
-    let output_key_fields = planned
+    let parameter_indices = planned
         .parameters
         .iter()
-        .map(|parameter| parameter.name.clone())
-        .collect();
+        .enumerate()
+        .map(|(index, parameter)| (parameter.name.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let route_selectors = planned
+        .planned
+        .output
+        .iter()
+        .filter(|field| field.qualifier.as_deref() == Some(BINDING_QUALIFIER))
+        .map(|field| {
+            let origin = planner
+                .binding_origins
+                .get(&field.name)
+                .expect("lowering retains the origin of every SQL binding carrier");
+            (
+                field.name.clone(),
+                parameter_indices[origin.parameter.as_str()],
+            )
+        })
+        .collect::<Vec<_>>();
+    let output_key_fields = (0..planned.parameters.len())
+        .map(|index| {
+            route_selectors
+                .iter()
+                .find(|(_, parameter)| *parameter == index)
+                .map(|(field, _)| field.clone())
+                .ok_or(PlannerError::UnsupportedQuery(
+                    "prepared output lost a binding origin",
+                ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let public_output = planned
         .planned
         .output
@@ -193,13 +243,16 @@ pub fn plan_prepared_shape(
         .filter(|field| field.qualifier.as_deref() != Some(BINDING_QUALIFIER))
         .cloned()
         .collect();
-    Ok(PlannedPreparedShape {
-        planned: planned.planned,
-        shape: planned.shape,
-        parameters: planned.parameters,
-        binding_descriptor,
-        output_key_fields,
-        public_output,
+    Ok(SqlPreparedPlan {
+        prepared: PlannedPreparedShape {
+            planned: planned.planned,
+            shape: planned.shape,
+            parameters: planned.parameters,
+            binding_descriptor,
+            output_key_fields,
+            public_output,
+        },
+        route_selectors,
     })
 }
 
@@ -209,6 +262,9 @@ struct Planner<'a> {
     /// Non-recursive CTEs in the current WITH scope. Recursive CTE lowering is
     /// intentionally rejected until recursive SQL planning is designed.
     ctes: HashMap<String, LogicalPlan>,
+    binding_origins: BTreeMap<String, SqlBindingOrigin>,
+    reserved_names: BTreeSet<String>,
+    next_binding_carrier: usize,
 }
 
 impl<'a> Planner<'a> {
@@ -216,10 +272,19 @@ impl<'a> Planner<'a> {
         Self {
             schema,
             ctes: HashMap::new(),
+            binding_origins: BTreeMap::new(),
+            next_binding_carrier: 0,
+            reserved_names: BTreeSet::new(),
         }
     }
 
     fn plan_query(&mut self, query: &Query) -> Result<PreparedPlan, PlannerError> {
+        for table in &self.schema.tables {
+            self.reserved_names.insert(table.name.clone());
+            self.reserved_names
+                .extend(table.columns.iter().map(|column| column.name.clone()));
+        }
+        reserve_query_names(query, &mut self.reserved_names);
         let mut logical = self.lower_query(query)?.canonicalize();
         let parameters = collect_binding_fields(&logical);
         let shape = if parameters.is_empty() {
@@ -253,14 +318,7 @@ impl<'a> Planner<'a> {
                 }
                 let left = self.lower_query(&set.left)?;
                 let right = self.lower_query(&set.right)?;
-                if comparable_fields(left.fields(), right.fields()) {
-                    Ok(LogicalPlan::UnionAll {
-                        fields: left.fields().to_vec(),
-                        inputs: vec![left, right],
-                    })
-                } else {
-                    Err(PlannerError::OutputMismatch)
-                }
+                self.align_union_origins(left, right)
             }
             Query::With(with) => {
                 if with.recursive {
@@ -271,7 +329,7 @@ impl<'a> Planner<'a> {
                 let old_ctes = self.ctes.clone();
                 for cte in &with.ctes {
                     let plan = self.lower_query(&cte.query)?;
-                    let plan = apply_relation_alias(plan, &cte.name, &cte.columns)?;
+                    let plan = self.alias_relation(plan, &cte.name, &cte.columns)?;
                     self.ctes.insert(cte.name.clone(), plan);
                 }
                 let result = self.lower_query(&with.query);
@@ -321,18 +379,8 @@ impl<'a> Planner<'a> {
                 };
             }
         }
-        let binding_fields = input
-            .fields()
-            .iter()
-            .filter(|field| field.qualifier.as_deref() == Some(BINDING_QUALIFIER))
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut projected = self.lower_projection(input, &select.projection)?;
-        if !binding_fields.is_empty() {
-            projected =
-                append_missing_binding_fields(projected, binding_fields, &binding_source_fields)?;
-        }
-        Ok(projected)
+        let projected = self.lower_projection(input, &select.projection)?;
+        self.retain_binding_origins(projected, &binding_source_fields, true)
     }
 
     fn lower_from(&mut self, from: &[TableRef]) -> Result<LogicalPlan, PlannerError> {
@@ -367,7 +415,7 @@ impl<'a> Planner<'a> {
                         Some(alias) => (alias.name.as_str(), alias.columns.as_slice()),
                         None => (table_name, &[][..]),
                     };
-                    return apply_relation_alias(cte.clone(), qualifier, columns);
+                    return self.alias_relation(cte.clone(), qualifier, columns);
                 }
                 let table = self
                     .schema
@@ -376,7 +424,7 @@ impl<'a> Planner<'a> {
                 let plan = scan_plan(table, alias.as_ref().map(|alias| alias.name.clone()));
                 match alias {
                     Some(alias) if !alias.columns.is_empty() => {
-                        apply_relation_alias(plan, &alias.name, &alias.columns)
+                        self.alias_relation(plan, &alias.name, &alias.columns)
                     }
                     _ => Ok(plan),
                 }
@@ -479,6 +527,215 @@ impl<'a> Planner<'a> {
             field.qualifier = None;
         }
         Ok(field)
+    }
+
+    fn alias_relation(
+        &mut self,
+        plan: LogicalPlan,
+        qualifier: &str,
+        column_aliases: &[String],
+    ) -> Result<LogicalPlan, PlannerError> {
+        let projected = apply_relation_alias(plan, qualifier, column_aliases)?;
+        self.retain_binding_origins(projected, &[], false)
+    }
+
+    fn retain_binding_origins(
+        &mut self,
+        projected: LogicalPlan,
+        binding_sources: &[(String, LogicalField)],
+        validate_public_names: bool,
+    ) -> Result<LogicalPlan, PlannerError> {
+        let LogicalPlan::Project { input, mut fields } = projected else {
+            unreachable!("projection lowering and relation aliases produce Project")
+        };
+        let binding_fields = input
+            .fields()
+            .iter()
+            .filter(|field| field.qualifier.as_deref() == Some(BINDING_QUALIFIER));
+        if !binding_fields.clone().any(|_| true) {
+            return Ok(LogicalPlan::Project { input, fields });
+        }
+        // Wildcards may select hidden fields. Rebuild them from actual input
+        // origins, never from a public field which happens to share a name.
+        fields.retain(|field| field.qualifier.as_deref() != Some(BINDING_QUALIFIER));
+        let mut used_names = fields
+            .iter()
+            .chain(input.fields())
+            .map(|field| field.name.clone())
+            .collect::<BTreeSet<_>>();
+        let mut seen_sources = BTreeSet::new();
+        for field in binding_fields {
+            if !seen_sources.insert(field.source_name.as_str()) {
+                continue;
+            }
+            let origin = if let Some(previous) = self.binding_origins.get(&field.name) {
+                let prefix = field
+                    .source_name
+                    .strip_suffix(&previous.source_name)
+                    .ok_or(PlannerError::UnsupportedQuery(
+                        "binding origin changed without provenance",
+                    ))?;
+                SqlBindingOrigin {
+                    parameter: previous.parameter.clone(),
+                    source_name: field.source_name.clone(),
+                    constrained_sources: previous
+                        .constrained_sources
+                        .iter()
+                        .map(|source| format!("{prefix}{source}"))
+                        .collect(),
+                }
+            } else {
+                let constrained_sources = binding_sources
+                    .iter()
+                    .filter(|(parameter, _)| parameter == &field.name)
+                    .flat_map(|(_, source)| {
+                        input
+                            .fields()
+                            .iter()
+                            .filter(move |candidate| {
+                                candidate.qualifier == source.qualifier
+                                    && candidate.name == source.name
+                            })
+                            .map(|candidate| candidate.source_name.clone())
+                    })
+                    .collect();
+                SqlBindingOrigin {
+                    parameter: field.name.clone(),
+                    source_name: field.source_name.clone(),
+                    constrained_sources,
+                }
+            };
+            if validate_public_names
+                && fields.iter().any(|public| {
+                    public.name == origin.parameter
+                        && !origin.constrained_sources.contains(&public.source_name)
+                })
+            {
+                return Err(PlannerError::UnsupportedQuery(
+                    "projected output names must not collide with parameter names",
+                ));
+            }
+            let name = loop {
+                let name = format!("__sql_binding_{}", self.next_binding_carrier);
+                self.next_binding_carrier += 1;
+                if !self.reserved_names.contains(&name) && used_names.insert(name.clone()) {
+                    break name;
+                }
+            };
+            let mut carrier = field.clone();
+            carrier.name = name.clone();
+            self.binding_origins.insert(name, origin);
+            fields.push(carrier);
+        }
+        Ok(LogicalPlan::Project { input, fields })
+    }
+
+    fn align_union_origins(
+        &mut self,
+        left: LogicalPlan,
+        right: LogicalPlan,
+    ) -> Result<LogicalPlan, PlannerError> {
+        let arms = [left, right];
+        let public = arms
+            .iter()
+            .map(|arm| {
+                arm.fields()
+                    .iter()
+                    .filter(|field| field.qualifier.as_deref() != Some(BINDING_QUALIFIER))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        if !comparable_fields(&public[0], &public[1]) {
+            return Err(PlannerError::OutputMismatch);
+        }
+        let groups = arms
+            .iter()
+            .map(|arm| {
+                let mut groups = BTreeMap::<String, Vec<LogicalField>>::new();
+                for field in arm
+                    .fields()
+                    .iter()
+                    .filter(|field| field.qualifier.as_deref() == Some(BINDING_QUALIFIER))
+                {
+                    let origin = self
+                        .binding_origins
+                        .get(&field.name)
+                        .expect("every lowered binding carrier has stored ownership");
+                    groups
+                        .entry(origin.parameter.clone())
+                        .or_default()
+                        .push(field.clone());
+                }
+                groups
+            })
+            .collect::<Vec<_>>();
+        if groups[0].keys().ne(groups[1].keys()) {
+            return Err(PlannerError::OutputMismatch);
+        }
+        let mut aligned = public;
+        let mut output = aligned[0].clone();
+        let mut used_names = arms
+            .iter()
+            .flat_map(|arm| arm.fields())
+            .map(|field| field.name.clone())
+            .collect::<BTreeSet<_>>();
+        for (parameter, left_fields) in &groups[0] {
+            let right_fields = &groups[1][parameter];
+            let value_type = &left_fields[0].value_type;
+            if left_fields
+                .iter()
+                .chain(right_fields)
+                .any(|field| &field.value_type != value_type)
+            {
+                return Err(PlannerError::OutputMismatch);
+            }
+            for lane in 0..left_fields.len().max(right_fields.len()) {
+                let name = loop {
+                    let name = format!("__sql_binding_{}", self.next_binding_carrier);
+                    self.next_binding_carrier += 1;
+                    if !self.reserved_names.contains(&name) && used_names.insert(name.clone()) {
+                        break name;
+                    }
+                };
+                let mut target = left_fields[lane.min(left_fields.len() - 1)].clone();
+                target.name = name.clone();
+                // UNION lanes have their own semantic identity. Physical arm
+                // expressions may reuse a representative, but outer projection
+                // must never collapse two independently varying common lanes.
+                target.source_name = name.clone();
+                let representative = self
+                    .binding_origins
+                    .get(&left_fields[0].name)
+                    .expect("aligned representative has stored ownership");
+                self.binding_origins.insert(
+                    name.clone(),
+                    SqlBindingOrigin {
+                        parameter: parameter.clone(),
+                        source_name: name.clone(),
+                        constrained_sources: representative.constrained_sources.clone(),
+                    },
+                );
+                for (index, fields) in [left_fields, right_fields].into_iter().enumerate() {
+                    let mut expression = fields[lane.min(fields.len() - 1)].clone();
+                    expression.name = name.clone();
+                    aligned[index].push(expression);
+                }
+                output.push(target);
+            }
+        }
+        let inputs = arms
+            .into_iter()
+            .zip(aligned)
+            .map(|(input, fields)| LogicalPlan::Project {
+                input: Box::new(input),
+                fields,
+            })
+            .collect();
+        Ok(LogicalPlan::UnionAll {
+            inputs,
+            fields: output,
+        })
     }
 
     fn lower_predicate(
@@ -663,6 +920,168 @@ impl<'a> Planner<'a> {
     }
 }
 
+/// Collect the whole user namespace before allocating any private carrier.
+/// Later CTEs and parameters are as real as identifiers already lowered.
+fn reserve_query_names(query: &Query, names: &mut BTreeSet<String>) {
+    fn column(column: &crate::queries::ColumnRef, names: &mut BTreeSet<String>) {
+        names.insert(column.name.clone());
+        names.extend(column.qualifier.iter().cloned());
+    }
+    fn expression(expr: &Expr, names: &mut BTreeSet<String>) {
+        match expr {
+            Expr::Column(value) => column(value, names),
+            Expr::Parameter(name) => {
+                names.insert(name.clone());
+            }
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => expression(expr, names),
+            Expr::Binary { left, right, .. } => {
+                expression(left, names);
+                expression(right, names);
+            }
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                expression(expr, names);
+                expression(low, names);
+                expression(high, names);
+            }
+            Expr::InList { expr, list, .. } => {
+                expression(expr, names);
+                for value in list {
+                    expression(value, names);
+                }
+            }
+            Expr::InSubquery { expr, query, .. } => {
+                expression(expr, names);
+                reserve_query_names(query, names);
+            }
+            Expr::Exists { query, .. } | Expr::Subquery(query) => reserve_query_names(query, names),
+            Expr::CorrelatedSubquery(subquery) => {
+                reserve_query_names(&subquery.query, names);
+                for reference in &subquery.outer_refs {
+                    column(reference, names);
+                }
+            }
+            Expr::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                if let Some(value) = operand {
+                    expression(value, names);
+                }
+                for (when, then) in when_then {
+                    expression(when, names);
+                    expression(then, names);
+                }
+                if let Some(value) = else_expr {
+                    expression(value, names);
+                }
+            }
+            Expr::Function(call) => {
+                names.extend(call.name.0.iter().cloned());
+                for argument in &call.args {
+                    if let crate::queries::FunctionArg::Expr(expr) = argument {
+                        expression(expr, names);
+                    }
+                }
+                if let Some(filter) = &call.filter {
+                    expression(filter, names);
+                }
+                if let Some(window) = &call.over {
+                    for value in &window.partition_by {
+                        expression(value, names);
+                    }
+                    for order in &window.order_by {
+                        expression(&order.expr, names);
+                    }
+                }
+            }
+            Expr::Literal(_) | Expr::Null => {}
+        }
+    }
+    fn table(relation: &TableRef, names: &mut BTreeSet<String>) {
+        match relation {
+            TableRef::Named { name, alias } => {
+                names.extend(name.0.iter().cloned());
+                if let Some(alias) = alias {
+                    names.insert(alias.name.clone());
+                    names.extend(alias.columns.iter().cloned());
+                }
+            }
+            TableRef::Derived { query, alias, .. } => {
+                reserve_query_names(query, names);
+                if let Some(alias) = alias {
+                    names.insert(alias.name.clone());
+                    names.extend(alias.columns.iter().cloned());
+                }
+            }
+            TableRef::Join {
+                left,
+                right,
+                constraint,
+                ..
+            } => {
+                table(left, names);
+                table(right, names);
+                match constraint {
+                    JoinConstraint::On(expr) => expression(expr, names),
+                    JoinConstraint::Using(columns) => names.extend(columns.iter().cloned()),
+                    JoinConstraint::Natural | JoinConstraint::None => {}
+                }
+            }
+        }
+    }
+    match query {
+        Query::With(with) => {
+            for cte in &with.ctes {
+                names.insert(cte.name.clone());
+                names.extend(cte.columns.iter().cloned());
+                reserve_query_names(&cte.query, names);
+            }
+            reserve_query_names(&with.query, names);
+        }
+        Query::Set(set) => {
+            reserve_query_names(&set.left, names);
+            reserve_query_names(&set.right, names);
+        }
+        Query::Select(select) => {
+            for item in &select.projection {
+                match item {
+                    SelectItem::Expr { expr, alias } => {
+                        if let Some(alias) = alias {
+                            names.insert(alias.clone());
+                        }
+                        expression(expr, names);
+                    }
+                    SelectItem::QualifiedWildcard(qualifier) => {
+                        names.extend(qualifier.iter().cloned())
+                    }
+                    SelectItem::Wildcard => {}
+                }
+            }
+            for value in &select.from {
+                table(value, names);
+            }
+            for value in select
+                .selection
+                .iter()
+                .chain(&select.having)
+                .chain(&select.limit)
+                .chain(&select.offset)
+            {
+                expression(value, names);
+            }
+            for value in &select.group_by {
+                expression(value, names);
+            }
+            for value in &select.order_by {
+                expression(&value.expr, names);
+            }
+        }
+    }
+}
+
 struct PreparedPlan {
     planned: PlannedQuery,
     parameters: Vec<QueryParameter>,
@@ -752,7 +1171,8 @@ fn graph_from_logical_required(
                 right_on,
                 &right_keys,
             )?;
-            let join = GraphBuilder::join(left_graph, right_graph, left_keys, right_keys);
+            let join =
+                GraphBuilder::whole_value_join(left_graph, right_graph, left_keys, right_keys);
             project_join_required_graph(join, &left_required, &right_required, required)
         }
         LogicalPlan::UnionAll { inputs, fields } => {
@@ -793,7 +1213,11 @@ fn filter_sql_nullable_join_keys(
     } else {
         PredicateExpr::And(predicates).canonicalize()
     };
-    Ok(graph.filter(predicate))
+    Ok(GraphBuilder::Filter {
+        input: std::sync::Arc::new(graph),
+        predicate,
+        comparison: crate::ivm::ValueComparison::WholeValue,
+    })
 }
 
 fn project_join_required_graph(
@@ -1121,52 +1545,6 @@ fn remap_join_keys(
             Ok(new_field.source_name.clone())
         })
         .collect()
-}
-
-fn append_missing_binding_fields(
-    input: LogicalPlan,
-    binding_fields: Vec<LogicalField>,
-    binding_source_fields: &[(String, LogicalField)],
-) -> Result<LogicalPlan, PlannerError> {
-    let (input, mut fields) = match input {
-        LogicalPlan::Project { input, fields } => (*input, fields),
-        input => {
-            let fields = input.fields().to_vec();
-            (input, fields)
-        }
-    };
-    for field in binding_fields {
-        let mut existing_name = false;
-        for existing in fields
-            .iter()
-            .filter(|candidate| candidate.name == field.name)
-        {
-            existing_name = true;
-            if existing.qualifier == field.qualifier {
-                continue;
-            }
-            let Some((_, source)) = binding_source_fields
-                .iter()
-                .find(|(parameter, _)| parameter == &field.name)
-            else {
-                return Err(PlannerError::UnsupportedQuery(
-                    "projected output names must not collide with parameter names",
-                ));
-            };
-            if existing.qualifier != source.qualifier || existing.name != source.name {
-                return Err(PlannerError::UnsupportedQuery(
-                    "projected output names must not collide with parameter names",
-                ));
-            }
-        }
-        if !existing_name {
-            fields.push(field);
-        }
-    }
-    Ok(LogicalPlan::Project {
-        input: Box::new(input),
-        fields,
-    })
 }
 
 fn collect_binding_fields(plan: &LogicalPlan) -> Vec<QueryParameter> {
@@ -1927,47 +2305,6 @@ mod tests {
     }
 
     #[test]
-    fn resolves_qualified_join_keys_and_lowers_inner_join() {
-        let query = Query::Select(Box::new(Select::new([SelectItem::Wildcard]).from([
-            TableRef::Join {
-                left: Box::new(TableRef::Named {
-                    name: ObjectName::single("albums"),
-                    alias: Some(TableAlias::new("a")),
-                }),
-                right: Box::new(TableRef::Named {
-                    name: ObjectName::single("artists"),
-                    alias: Some(TableAlias::new("r")),
-                }),
-                kind: JoinKind::Inner,
-                constraint: JoinConstraint::On(Expr::binary(
-                    Expr::Column(ColumnRef::qualified(["a"], "artist_id")),
-                    BinaryOp::Eq,
-                    Expr::Column(ColumnRef::qualified(["r"], "id")),
-                )),
-            },
-        ])));
-
-        let planned = plan_query(&query, &schema()).unwrap();
-
-        assert_eq!(
-            planned.graph,
-            GraphBuilder::join(
-                GraphBuilder::table("albums").project(["artist_id", "id", "title"]),
-                GraphBuilder::table("artists"),
-                ["artist_id"],
-                ["id"]
-            )
-            .project_fields([
-                ProjectField::renamed("left.id", "id"),
-                ProjectField::renamed("left.artist_id", "artist_id"),
-                ProjectField::renamed("left.title", "title"),
-                ProjectField::renamed("right.id", "id"),
-                ProjectField::renamed("right.name", "name"),
-            ])
-        );
-    }
-
-    #[test]
     fn lowers_union_all() {
         let left = Query::Select(Box::new(
             Select::new([SelectItem::expr(Expr::column("id"))]).from([TableRef::named("albums")]),
@@ -2289,7 +2626,6 @@ mod tests {
                 value_type: ValueType::U64
             }]
         );
-        assert_eq!(planned.output_key_fields, vec!["artist"]);
         assert!(matches!(
             plan_query(&query, &schema()),
             Err(PlannerError::UnsupportedQuery(
@@ -2398,7 +2734,6 @@ mod tests {
 
         let planned = plan_prepared_shape(&query, &schema()).unwrap();
 
-        assert_eq!(planned.output_key_fields, vec!["artist"]);
         assert_eq!(
             planned
                 .public_output
@@ -2406,14 +2741,6 @@ mod tests {
                 .map(|field| field.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["declared_id"]
-        );
-        assert!(
-            planned
-                .planned
-                .logical
-                .fields()
-                .iter()
-                .any(|field| field.qualifier.as_deref() == Some(BINDING_QUALIFIER))
         );
     }
 

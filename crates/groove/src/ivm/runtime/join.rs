@@ -16,7 +16,7 @@ use std::sync::{Arc, Weak};
 
 use crate::{
     ivm::{FieldRef, ValueComparison},
-    records::{RecordDescriptor, ValueType},
+    records::{self, RecordDescriptor, ValueType},
 };
 
 use super::{
@@ -956,9 +956,9 @@ struct JoinOutputBuffer {
     deltas: Vec<(Range<usize>, i64)>,
 }
 
-struct KeyedRecordDelta<'a> {
-    delta: &'a RecordDelta,
-    key: JoinKey,
+pub(super) struct KeyedRecordDelta<'a> {
+    pub(super) delta: &'a RecordDelta,
+    pub(super) key: JoinKey,
 }
 
 enum JoinProbeSide {
@@ -1016,12 +1016,26 @@ fn build_join_delta_index(deltas: &[KeyedRecordDelta<'_>]) -> JoinIndex {
     index
 }
 
-fn keyed_join_deltas<'a>(
+pub(super) fn keyed_join_deltas<'a>(
     descriptor: &RecordDescriptor,
     fields: &[String],
     deltas: &'a [RecordDelta],
     comparison: ValueComparison,
 ) -> Result<Vec<KeyedRecordDelta<'a>>, IvmRuntimeError> {
+    if comparison == ValueComparison::WholeValue {
+        let indices = whole_value_field_indices(descriptor, fields)?;
+        let mut keyed = Vec::with_capacity(deltas.len());
+        let mut key = JoinKey::new();
+        for delta in deltas {
+            key.clear();
+            write_whole_value_key(descriptor, delta.raw(), &indices, &mut key)?;
+            keyed.push(KeyedRecordDelta {
+                delta,
+                key: key.clone(),
+            });
+        }
+        return Ok(keyed);
+    }
     if let Some(field_indices) = scalar_join_field_indices(descriptor, fields)? {
         let mut keyed = Vec::with_capacity(deltas.len());
         // Short keys are retained inline by JoinKey. Reuse the temporary encoder
@@ -1048,6 +1062,40 @@ fn keyed_join_deltas<'a>(
         }
     }
     Ok(keyed)
+}
+
+fn whole_value_field_indices(
+    descriptor: &RecordDescriptor,
+    fields: &[String],
+) -> Result<Vec<usize>, IvmRuntimeError> {
+    fields
+        .iter()
+        .map(|field| {
+            let index = resolve_field_name(descriptor, field)
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+            let value_type = &descriptor.fields()[index].value_type;
+            if !records::supports_whole_value(value_type) {
+                return Err(IvmRuntimeError::UnsupportedWholeValueType(
+                    value_type.clone(),
+                ));
+            }
+            Ok(index)
+        })
+        .collect()
+}
+
+fn write_whole_value_key(
+    descriptor: &RecordDescriptor,
+    record: &[u8],
+    indices: &[usize],
+    key: &mut JoinKey,
+) -> Result<(), IvmRuntimeError> {
+    for &index in indices {
+        let span = descriptor.field_span(record, index)?;
+        records::EncodedValue::new(&record[span], &descriptor.fields()[index].value_type)
+            .write_key(key)?;
+    }
+    Ok(())
 }
 
 fn scalar_join_field_indices(
@@ -1096,21 +1144,17 @@ fn append_bucket(deltas: &mut Vec<RecordDelta>, bucket: Option<&JoinBucket>, sig
     }
 }
 
-pub(super) fn join_keys(
-    descriptor: &RecordDescriptor,
-    record: &[u8],
-    fields: &[String],
-    comparison: ValueComparison,
-) -> Result<Vec<JoinKey>, IvmRuntimeError> {
-    join_keys_with_comparison(descriptor, record, fields, comparison)
-}
-
 fn join_keys_with_comparison(
     descriptor: &RecordDescriptor,
     record: &[u8],
     fields: &[String],
     comparison: ValueComparison,
 ) -> Result<Vec<JoinKey>, IvmRuntimeError> {
+    debug_assert_ne!(
+        comparison,
+        ValueComparison::WholeValue,
+        "whole keys use batch traversal"
+    );
     if fields.len() == 1 {
         let field_idx = resolve_field_name(descriptor, &fields[0])
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(fields[0].clone()))?;
@@ -1339,8 +1383,8 @@ mod tests {
             "integer and float join keys remain type-exact"
         );
         assert_ne!(
-            join_keys(&u32, &u32_record, &fields, ValueComparison::Exact).unwrap(),
-            join_keys(&i64, &i64_record, &fields, ValueComparison::Exact).unwrap(),
+            join_keys_with_comparison(&u32, &u32_record, &fields, ValueComparison::Exact).unwrap(),
+            join_keys_with_comparison(&i64, &i64_record, &fields, ValueComparison::Exact).unwrap(),
             "ordinary arrangement keys retain their exact typed encoding"
         );
     }

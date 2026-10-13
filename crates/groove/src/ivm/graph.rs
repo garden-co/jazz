@@ -940,6 +940,21 @@ impl GraphBuilder {
         }
     }
 
+    pub(crate) fn whole_value_join(
+        left: GraphBuilder,
+        right: GraphBuilder,
+        left_on: impl IntoIterator<Item = impl Into<String>>,
+        right_on: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::Join {
+            left: Arc::new(left),
+            right: Arc::new(right),
+            left_on: left_on.into_iter().map(FieldRef::name).collect(),
+            right_on: right_on.into_iter().map(FieldRef::name).collect(),
+            comparison: ValueComparison::WholeValue,
+        }
+    }
+
     /// Join using policy value comparison semantics.
     pub fn policy_join(
         left: GraphBuilder,

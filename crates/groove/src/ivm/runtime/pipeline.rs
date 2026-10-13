@@ -5,6 +5,7 @@ use super::evaluator::NodeMemoLookup;
 use super::*;
 use std::task::{Context, Poll};
 mod fields;
+use super::key_encoding::PreparedSqlSelector;
 use fields::FieldRoutes;
 
 pub(crate) fn supports_node(graph: &IvmGraph, id: NodeId) -> bool {
@@ -40,9 +41,9 @@ enum Stage {
     /// A total projection was composed into subsequent field routes. Keep its
     /// budget slot so arbitrarily deep chains still yield within a row.
     VirtualProject,
-    RoutedFilter(FilterOp, FieldRoutes),
+    RoutedFilter(FilterOp, FieldRoutes, Option<PreparedSqlSelector>),
     Materialize(FieldRoutes),
-    Filter(FilterOp, RecordDescriptor),
+    Filter(FilterOp, RecordDescriptor, Option<PreparedSqlSelector>),
     Project {
         project: MapProjectOp,
         input: RecordDescriptor,
@@ -109,9 +110,12 @@ impl PendingPipeline {
             };
             let result = match stage {
                 Stage::VirtualProject => continue,
-                Stage::RoutedFilter(filter, routes) => filter
-                    .predicate
-                    .matches(routes.record(raw), filter.comparison),
+                Stage::RoutedFilter(filter, routes, prepared) => match prepared {
+                    Some(selector) => selector.matches(routes.record(raw)),
+                    None => filter
+                        .predicate
+                        .matches(routes.record(raw), filter.comparison),
+                },
                 Stage::Materialize(routes) => {
                     if routes.reuses_input {
                         continue;
@@ -137,9 +141,12 @@ impl PendingPipeline {
                         result.map(|_| true)
                     }
                 }
-                Stage::Filter(filter, descriptor) => filter
-                    .predicate
-                    .matches(BorrowedRecord::new(raw, descriptor), filter.comparison),
+                Stage::Filter(filter, descriptor, prepared) => match prepared {
+                    Some(selector) => selector.matches(BorrowedRecord::new(raw, descriptor)),
+                    None => filter
+                        .predicate
+                        .matches(BorrowedRecord::new(raw, descriptor), filter.comparison),
+                },
                 Stage::Project {
                     project,
                     input,
@@ -268,10 +275,16 @@ impl TickEvaluator<'_> {
             let graph_node = self.graph.node(node)?;
             let output = graph_node.descriptor.output.records();
             let stage = match &graph_node.descriptor.operator {
-                OpType::Filter(filter) if virtual_rows => {
-                    Stage::RoutedFilter(filter.clone(), routes.clone())
-                }
-                OpType::Filter(filter) => Stage::Filter(filter.clone(), descriptor),
+                OpType::Filter(filter) if virtual_rows => Stage::RoutedFilter(
+                    filter.clone(),
+                    routes.clone(),
+                    PreparedSqlSelector::prepare(&filter.predicate, filter.comparison, &descriptor),
+                ),
+                OpType::Filter(filter) => Stage::Filter(
+                    filter.clone(),
+                    descriptor,
+                    PreparedSqlSelector::prepare(&filter.predicate, filter.comparison, &descriptor),
+                ),
                 OpType::MapProject(project) => {
                     let prepared = self
                         .raw_projection_fields(node, project, &descriptor, output)

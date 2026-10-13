@@ -2630,6 +2630,19 @@ pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8]
     }
 }
 
+/// Borrow the primitive payload of an encoder-owned scalar envelope. External
+/// ingress uses the validated public accessor; trusted evaluation only needs
+/// bounded tag interpretation and delegates indirect content to materialisation.
+pub(crate) fn trusted_primitive_scalar_bytes(encoded: &[u8]) -> Result<&[u8], Error> {
+    let (tag, payload) =
+        crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;
+    match tag {
+        2 => Ok(payload),
+        3 => Err(Error::RequiresEvaluation),
+        _ => Err(Error::MalformedScalar),
+    }
+}
+
 fn stored_scalar_schema(kind: LargeValueKind) -> &'static EnumSchema {
     // Current-row evaluation decodes this ordinary scalar envelope on every
     // affected record. Building its nested descriptors repeatedly re-hashes

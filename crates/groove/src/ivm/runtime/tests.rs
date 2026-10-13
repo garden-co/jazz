@@ -3915,3 +3915,321 @@ fn join_chain_narrowing_stops_at_positional_references() {
     };
     assert_eq!(positional.clone().narrow_projected_join_chain(), positional);
 }
+
+/// Alice and Bob call Runtime binds directly on an SQL-prepared shape.
+/// This lower seam is necessary because named Database binding alone would
+/// miss a facade-only fix. The normal SQL preparation module supplies the
+/// shape; assertions use public subscription deltas and Runtime ticks.
+#[futures_test::test]
+async fn sql_runtime_binds_keep_raw_zero_identity_and_route_descriptors() {
+    use crate::queries::{BinaryOp, Expr, Query, Select, SelectItem, TableRef};
+    for ty in [
+        ValueType::F64,
+        ValueType::F64.array_of().array_of(),
+        ValueType::F64.array_of().nullable(),
+    ] {
+        let wrap = |number: f64| match &ty {
+            ValueType::F64 => Value::F64(number),
+            ValueType::Array(_) => Value::Array(vec![Value::Array(vec![Value::F64(number)])]),
+            ValueType::Nullable(_) => {
+                Value::Nullable(Some(Box::new(Value::Array(vec![Value::F64(number)]))))
+            }
+            _ => unreachable!(),
+        };
+        let schema = DatabaseSchema::new([TableSchema::new(
+            "numbers",
+            [
+                ColumnSchema::new("id", ValueType::U64),
+                ColumnSchema::new("number", ty.clone()),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+        let query = Query::Select(Box::new(
+            Select::new([SelectItem::expr(Expr::column("id"))])
+                .from([TableRef::named("numbers")])
+                .where_(Expr::binary(
+                    Expr::column("number"),
+                    BinaryOp::Eq,
+                    Expr::parameter("number"),
+                )),
+        ));
+        let sql_plan = crate::ivm::plan_sql_prepared_shape(&query, &schema).unwrap();
+        let plan = sql_plan.prepared;
+        let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+        let storage = Rc::new(MemoryStorage::new(&["numbers"]).unwrap());
+        let sql = runtime
+            .prepare_sql_one_sink(
+                plan.planned.graph.clone(),
+                plan.shape.clone(),
+                plan.binding_descriptor,
+                sql_plan.route_selectors,
+                storage.as_ref(),
+            )
+            .await
+            .unwrap();
+        let alice = runtime
+            .bind_shape_one_sink(sql.id(), &[wrap(0.0)], &storage)
+            .unwrap();
+        let bob = runtime
+            .bind_shape(sql.id(), &[wrap(-0.0)], &storage)
+            .unwrap();
+        assert!(alice.recv().unwrap().is_empty());
+        assert!(
+            bob.recv()
+                .unwrap()
+                .sinks
+                .values()
+                .all(RecordDeltas::is_empty)
+        );
+        let numbers = schema.table("numbers").unwrap().record_schema();
+        // Runtime ticks maintain deltas; the owner stages the authoritative
+        // table write first so later prepared hydration sees the same row.
+        let row = numbers.create(&[Value::U64(1), wrap(0.0)]).unwrap();
+        let store = RecordStore::new(storage.as_ref(), "numbers", &numbers);
+        let encoded = crate::records::encode_variant_record(0, &row);
+        store
+            .write_many(vec![store.set(&1u64.to_be_bytes(), &encoded)])
+            .await
+            .unwrap();
+        runtime
+            .tick(
+                vec![TableDelta {
+                    variant_tag: 0,
+                    table: "numbers".into(),
+                    descriptor: numbers,
+                    deltas: vec![RecordDelta {
+                        record: row.into(),
+                        weight: 1,
+                    }],
+                }],
+                storage.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            alice.recv().unwrap().to_values().unwrap(),
+            [(vec![Value::U64(1), wrap(0.0)], 1)]
+        );
+        let bob_rows = bob.recv().unwrap();
+        let bob_rows = bob_rows.sinks.values().next().unwrap().to_values().unwrap();
+        assert_eq!(bob_rows.len(), 1);
+        assert_eq!(bob_rows[0].1, 1);
+        assert_eq!(bob_rows[0].0[0], Value::U64(1));
+        assert_eq!(
+            LiteralValue::from(bob_rows[0].0[1].clone()),
+            LiteralValue::from(wrap(-0.0))
+        );
+
+        // Preparing this same graph through the generic graph API deliberately
+        // retains ordinary Eq routing. Its descriptor must not capture the
+        // SQL identity route, despite sharing an input and positive literal.
+        let generic = runtime
+            .prepare_one_sink(
+                plan.planned.graph,
+                plan.shape,
+                plan.binding_descriptor,
+                plan.output_key_fields,
+                storage.as_ref(),
+            )
+            .await
+            .unwrap();
+        let generic = runtime
+            .bind_shape_one_sink(generic.id(), &[wrap(0.0)], &storage)
+            .unwrap();
+        let mut generic_rows = generic
+            .recv()
+            .unwrap()
+            .to_values()
+            .unwrap()
+            .into_iter()
+            .map(|(values, weight)| {
+                (
+                    values
+                        .into_iter()
+                        .map(LiteralValue::from)
+                        .collect::<Vec<_>>(),
+                    weight,
+                )
+            })
+            .collect::<Vec<_>>();
+        generic_rows.sort();
+        let mut expected = [wrap(0.0), wrap(-0.0)]
+            .into_iter()
+            .map(|value| (vec![LiteralValue::U64(1), LiteralValue::from(value)], 1))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(generic_rows, expected);
+    }
+}
+
+/// Alice declares an engine-only large scalar inside an array; Bob's empty
+/// binding cannot bypass eligibility. This type has no public constructor, so
+/// the fixture is local, but rejection is through Database's public SQL API.
+#[futures_test::test]
+async fn sql_declared_large_children_reject_before_empty_binding() {
+    use crate::db::{Database, Error as DatabaseError};
+    use crate::queries::{BinaryOp, Expr, Query, Select, SelectItem, TableRef};
+    for kind in [
+        crate::large_values::LargeValueKind::String,
+        crate::large_values::LargeValueKind::Bytes,
+        crate::large_values::LargeValueKind::Json,
+    ] {
+        let ty = ValueType::stored_scalar(kind).array_of();
+        let schema = DatabaseSchema::new([TableSchema::new(
+            "items",
+            [
+                ColumnSchema::new("id", ValueType::U64),
+                ColumnSchema::new("values", ty.clone()),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+        let mut database = Database::new(schema, MemoryStorage::new(&["items"]).unwrap())
+            .await
+            .unwrap();
+        let query = Query::Select(Box::new(
+            Select::new([SelectItem::expr(Expr::column("id"))])
+                .from([TableRef::named("items")])
+                .where_(Expr::binary(
+                    Expr::column("values"),
+                    BinaryOp::Eq,
+                    Expr::parameter("values"),
+                )),
+        ));
+        assert!(matches!(database.prepare_query(query).await,
+            Err(DatabaseError::IvmRuntime(IvmRuntimeError::UnsupportedWholeValueType(actual))) if actual == ty));
+    }
+}
+
+/// Alice and Bob bind directly by Runtime SQL shape ID. Independent CTE
+/// occurrences retain every raw selector; canonical enum labels and ordinals
+/// share source ownership without requiring Database's named-binding facade.
+/// p -> filtered l --join-- filtered r <- p -> exact weight-one ID pair
+#[futures_test::test]
+async fn sql_runtime_repeated_map_and_canonical_labels_are_retained() {
+    use crate::queries::{
+        BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem,
+        TableRef, WithQuery,
+    };
+    let enum_type = ValueType::EnumTag(
+        crate::records::ScalarEnumSchema::new("state", ["open", "closed"])
+            .unwrap()
+            .with_registry_id(44),
+    );
+    for (ty, first, second) in [
+        (
+            ValueType::F64.array_of(),
+            Value::Array(vec![Value::F64(0.0)]),
+            Value::Array(vec![Value::F64(-0.0)]),
+        ),
+        (
+            enum_type.array_of(),
+            Value::Array(vec![Value::EnumTag(0)]),
+            Value::Array(vec![Value::String("open".into())]),
+        ),
+    ] {
+        let schema = DatabaseSchema::new([TableSchema::new_with_bound_registries(
+            "items",
+            [
+                ColumnSchema::new("id", ValueType::U64),
+                ColumnSchema::new("codes", ty),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+        let filtered = Query::Select(Box::new(
+            Select::new([SelectItem::expr(Expr::column("id"))])
+                .from([TableRef::named("items")])
+                .where_(Expr::binary(
+                    Expr::column("codes"),
+                    BinaryOp::Eq,
+                    Expr::parameter("p"),
+                )),
+        ));
+        let query = Query::With(Box::new(WithQuery::new(
+            [Cte::new("filtered", filtered)],
+            Query::Select(Box::new(
+                Select::new([
+                    SelectItem::aliased(Expr::Column(ColumnRef::qualified(["l"], "id")), "left_id"),
+                    SelectItem::aliased(
+                        Expr::Column(ColumnRef::qualified(["r"], "id")),
+                        "right_id",
+                    ),
+                ])
+                .from([TableRef::Join {
+                    left: Box::new(TableRef::named("filtered").aliased("l")),
+                    right: Box::new(TableRef::named("filtered").aliased("r")),
+                    kind: JoinKind::Inner,
+                    constraint: JoinConstraint::On(Expr::binary(
+                        Expr::Column(ColumnRef::qualified(["l"], "id")),
+                        BinaryOp::Eq,
+                        Expr::Column(ColumnRef::qualified(["r"], "id")),
+                    )),
+                }]),
+            )),
+        )));
+        let sql = crate::ivm::plan_sql_prepared_shape(&query, &schema).unwrap();
+        let plan = sql.prepared;
+        let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+        let storage = Rc::new(MemoryStorage::new(&["items"]).unwrap());
+        let shape = runtime
+            .prepare_sql_one_sink(
+                plan.planned.graph,
+                plan.shape,
+                plan.binding_descriptor,
+                sql.route_selectors,
+                storage.as_ref(),
+            )
+            .await
+            .unwrap();
+        let alice = runtime
+            .bind_shape_one_sink(shape.id(), std::slice::from_ref(&first), &storage)
+            .unwrap();
+        let bob = runtime
+            .bind_shape(shape.id(), std::slice::from_ref(&second), &storage)
+            .unwrap();
+        assert!(alice.recv().unwrap().is_empty());
+        assert!(
+            bob.recv()
+                .unwrap()
+                .sinks
+                .values()
+                .all(RecordDeltas::is_empty)
+        );
+        let descriptor = schema.table("items").unwrap().record_schema();
+        let row = descriptor.create(&[Value::U64(1), first]).unwrap();
+        let store = RecordStore::new(storage.as_ref(), "items", &descriptor);
+        let encoded = crate::records::encode_variant_record(0, &row);
+        store
+            .write_many(vec![store.set(&1u64.to_be_bytes(), &encoded)])
+            .await
+            .unwrap();
+        runtime
+            .tick(
+                vec![TableDelta {
+                    table: "items".into(),
+                    variant_tag: 0,
+                    descriptor,
+                    deltas: vec![RecordDelta {
+                        record: row.into(),
+                        weight: 1,
+                    }],
+                }],
+                storage.as_ref(),
+            )
+            .await
+            .unwrap();
+        let alice_rows = alice.recv().unwrap().to_values().unwrap();
+        let bob_update = bob.recv().unwrap();
+        let bob_rows = bob_update
+            .sinks
+            .values()
+            .next()
+            .unwrap()
+            .to_values()
+            .unwrap();
+        for rows in [&alice_rows, &bob_rows] {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].1, 1);
+            assert_eq!(&rows[0].0[..2], [Value::U64(1), Value::U64(1)]);
+        }
+    }
+}

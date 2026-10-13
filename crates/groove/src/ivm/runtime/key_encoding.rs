@@ -6,6 +6,17 @@ use super::*;
 /// Implementations retain the same typed comparison and SQL-null semantics.
 pub(super) trait PredicateRecord: Copy {
     fn value(self, field: &str) -> Result<Value, IvmRuntimeError>;
+    fn binding_identity_matches(
+        self,
+        field: &str,
+        value: &LiteralValue,
+    ) -> Result<bool, IvmRuntimeError>;
+    fn binding_identity_matches_at(
+        self,
+        index: usize,
+        value: &LiteralValue,
+    ) -> Result<bool, IvmRuntimeError>;
+    fn sql_null_at(self, index: usize) -> Result<bool, IvmRuntimeError>;
     fn literal_ordering(
         self,
         field: &str,
@@ -18,6 +29,42 @@ impl PredicateRecord for BorrowedRecord<'_> {
         let index = super::record_projection::resolve_field_name(&self.descriptor(), field)
             .ok_or_else(|| records::Error::FieldNotFound(field.to_owned()))?;
         self.get_idx(index).map_err(Into::into)
+    }
+
+    fn binding_identity_matches(
+        self,
+        field: &str,
+        value: &LiteralValue,
+    ) -> Result<bool, IvmRuntimeError> {
+        let descriptor = self.descriptor();
+        let index = super::record_projection::resolve_field_name(&descriptor, field)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
+        self.binding_identity_matches_at(index, value)
+    }
+
+    fn binding_identity_matches_at(
+        self,
+        index: usize,
+        value: &LiteralValue,
+    ) -> Result<bool, IvmRuntimeError> {
+        let descriptor = self.descriptor();
+        let bytes = &self.raw()[descriptor.field_span(self.raw(), index)?];
+        encoded_binding_identity_matches(
+            records::EncodedValue::new(bytes, &descriptor.fields()[index].value_type),
+            value,
+        )
+    }
+
+    fn sql_null_at(self, index: usize) -> Result<bool, IvmRuntimeError> {
+        let descriptor = self.descriptor();
+        let value_type = &descriptor.fields()[index].value_type;
+        if !matches!(value_type, ValueType::Nullable(_)) {
+            return Ok(false);
+        }
+        let bytes = &self.raw()[descriptor.field_span(self.raw(), index)?];
+        Ok(records::EncodedValue::new(bytes, value_type)
+            .nullable()?
+            .is_none())
     }
 
     fn literal_ordering(
@@ -36,6 +83,128 @@ fn resolved_record_value(
     field: &str,
 ) -> Result<Value, IvmRuntimeError> {
     record.value(field)
+}
+
+/// Indexed execution only for generated SQL identity/NULL selectors. Missing
+/// fields are deferred until matching, so empty inputs and earlier filtering
+/// retain their existing error behaviour.
+#[derive(Clone, Debug)]
+pub(super) enum PreparedSqlSelector {
+    Identity {
+        index: Option<usize>,
+        field: String,
+        value: Arc<LiteralValue>,
+    },
+    Null {
+        index: Option<usize>,
+        field: String,
+        negate: bool,
+    },
+    And(Vec<Self>),
+}
+
+impl PreparedSqlSelector {
+    pub(super) fn prepare(
+        predicate: &PredicateExpr,
+        comparison: ValueComparison,
+        descriptor: &RecordDescriptor,
+    ) -> Option<Self> {
+        match predicate {
+            PredicateExpr::BindingIdentityEq { field, value } => Some(Self::Identity {
+                index: super::record_projection::resolve_field_name(descriptor, field),
+                field: field.clone(),
+                value: Arc::clone(value),
+            }),
+            PredicateExpr::IsNull { field } | PredicateExpr::IsNotNull { field }
+                if comparison == ValueComparison::WholeValue =>
+            {
+                Some(Self::Null {
+                    index: super::record_projection::resolve_field_name(descriptor, field),
+                    field: field.clone(),
+                    negate: matches!(predicate, PredicateExpr::IsNotNull { .. }),
+                })
+            }
+            PredicateExpr::And(children) if !children.is_empty() => children
+                .iter()
+                .map(|child| Self::prepare(child, comparison, descriptor))
+                .collect::<Option<Vec<_>>>()
+                .map(Self::And),
+            _ => None,
+        }
+    }
+
+    pub(super) fn matches(&self, record: impl PredicateRecord) -> Result<bool, IvmRuntimeError> {
+        match self {
+            Self::Identity {
+                index,
+                field,
+                value,
+            } => {
+                let index =
+                    index.ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+                record.binding_identity_matches_at(index, value)
+            }
+            Self::Null {
+                index,
+                field,
+                negate,
+            } => {
+                let index =
+                    index.ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+                record.sql_null_at(index).map(|is_null| is_null != *negate)
+            }
+            Self::And(children) => {
+                let mut matches = true;
+                for child in children {
+                    // Evaluate every child after false, as PredicateExpr::And
+                    // does; later reachable errors must not disappear.
+                    let child_matches = child.matches(record)?;
+                    matches = matches && child_matches;
+                }
+                Ok(matches)
+            }
+        }
+    }
+}
+
+pub(super) fn encoded_binding_identity_matches(
+    encoded: records::EncodedValue<'_>,
+    literal: &LiteralValue,
+) -> Result<bool, IvmRuntimeError> {
+    match (encoded.value_type, literal) {
+        (ValueType::Array(_), LiteralValue::Array(values))
+        | (ValueType::Tuple(_), LiteralValue::Tuple(values)) => {
+            let children = encoded.children()?;
+            if children.len() != values.len() {
+                return Ok(false);
+            }
+            for (child, value) in children.zip(values) {
+                if !encoded_binding_identity_matches(child?, value)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (ValueType::Nullable(_), LiteralValue::Nullable(value)) => {
+            match (encoded.nullable()?, value.as_deref()) {
+                (None, None) => Ok(true),
+                (Some(child), Some(value)) => encoded_binding_identity_matches(child, value),
+                _ => Ok(false),
+            }
+        }
+        (ValueType::String, LiteralValue::String(value)) => {
+            Ok(encoded.scalar_bytes()? == value.as_bytes())
+        }
+        (ValueType::Bytes, LiteralValue::Bytes(value)) => Ok(encoded.scalar_bytes()? == value),
+        (ValueType::EnumTag(_), LiteralValue::EnumTag(value)) => {
+            Ok(encoded.enum_ordinal()? == *value)
+        }
+        (ValueType::Array(_) | ValueType::Tuple(_) | ValueType::Nullable(_), _) => Ok(false),
+        (ValueType::Record(_) | ValueType::Enum(_) | ValueType::Internal(_), _) => Err(
+            IvmRuntimeError::UnsupportedWholeValueType(encoded.value_type.clone()),
+        ),
+        _ => Ok(LiteralValue::from(encoded.scalar_value()?) == *literal),
+    }
 }
 
 pub(crate) fn durable_index_key_prefix(table: &str, index: &str) -> Vec<u8> {
