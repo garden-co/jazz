@@ -423,15 +423,15 @@
       ]
     },
     {
-      "id": "jazz.exclusive-read-evidence.v1",
+      "id": "jazz.exclusive-read-evidence.v2",
       "boundary": "durable-storage",
       "spec": {
         "path": "crates/jazz/SPEC/2_data_model_identity.md",
-        "anchor": "Positions 5 through 8 hold exclusive read evidence"
+        "anchor": "The pending record's four evidence slots hold exclusive read evidence"
       },
       "semantic_fixture": {
         "path": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
-        "anchor": "fn exclusive_read_evidence_v1_bytes_are_pinned"
+        "anchor": "fn exclusive_read_evidence_v2_bytes_are_pinned"
       },
       "rejection_receipt": {
         "path": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
@@ -453,6 +453,70 @@
         {
           "path": "dev/proofs/exclusive-read-evidence-storage-compatibility.md",
           "anchor": "## Mixed versions"
+        },
+        {
+          "path": "dev/proofs/tx-record-v2-storage-compatibility.md",
+          "anchor": "## Wire"
+        }
+      ]
+    },
+    {
+      "id": "jazz.tx-record.v2",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/2_data_model_identity.md",
+        "anchor": "**Transaction record (`jazz.tx-record.v2`).**"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/node/src/node/codec.rs",
+        "anchor": "fn accepted_transaction_record_bytes_are_pinned"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/layers/node/src/node/codec.rs",
+        "anchor": "fn malformed_transaction_records_are_refused"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
+          "anchor": "fn transaction_records_name_authors_by_dictionary_code"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
+          "anchor": "fn reopen_refuses_a_store_with_truncated_history"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/branch_views.rs",
+          "anchor": "fn transaction_record_size_is_independent_of_branch_write_count"
+        },
+        {
+          "path": "dev/proofs/tx-record-v2-storage-compatibility.md",
+          "anchor": "## Upgrade path"
+        }
+      ]
+    },
+    {
+      "id": "jazz.aggregate-read-result.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/2_data_model_identity.md",
+        "anchor": "`jazz.aggregate-read-result.v1`"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/node/src/node/aggregate_read_result.rs",
+        "anchor": "fn aggregate_read_result_v1_bytes_are_pinned_and_canonical"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/layers/node/src/node/aggregate_read_result.rs",
+        "anchor": "fn aggregate_read_result_v1_rejects_malformed_bytes"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/layers/node/src/node/query_eval/tests/exclusive_aggregates.rs",
+          "anchor": "fn exclusive_count_commit_payload_is_independent_of_the_counted_rows"
+        },
+        {
+          "path": "dev/proofs/tx-record-v2-storage-compatibility.md",
+          "anchor": "## Wire"
         }
       ]
     },
