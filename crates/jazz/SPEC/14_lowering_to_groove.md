@@ -510,6 +510,19 @@ that fallback, not a different semantic evaluator. Prepared-shape steady-state
 probing is the later
 overlay-probe phase (groove ch. 4 §4.6).
 
+A retained program with a shared binding source (one prepared graph serving
+every subscriber's binding, §14.1) MUST NOT take a primary-key or index prefix
+from one binding's parameter or claim value: that literal would make the graph,
+and so every node under it, private to that binding. Such an equality on a
+Global source instead lowers to a keyed lookup (`GraphBuilder::lookup`) of the
+primary key or the single-column current index, keyed by the binding source's
+field for that parameter or routing claim. Each live binding value is one
+storage probe, and the lowered equality join with the binding source still
+routes each row to its binding. Only plain scalar key types whose stored index
+encoding equals the binding value's (UUID, text, boolean, integers, bytes,
+optionally nullable) take a lookup; any other equality, and every non-Global
+source, keeps the literal path.
+
 ### 14.7 Existence lowering for inherited-parent policy joins
 
 Inherited-parent authorization (`inherits(parent_column)`) is existence

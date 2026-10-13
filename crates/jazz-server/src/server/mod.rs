@@ -29,7 +29,7 @@ pub(crate) use catalogue_storage::CatalogueStorage;
 pub(crate) use catalogue_storage::{
     CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage,
 };
-pub use shutdown::{ShutdownController, ShutdownPhase};
+pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]
 pub use testing::{
     JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER,
@@ -78,6 +78,13 @@ pub async fn push_catalogue_in_memory(
 /// small amount of slack for unusual topologies) without giving an
 /// attacker meaningful amplification before the cap bites.
 pub(crate) const PER_CLIENT_CONNECTION_CAP: usize = 4;
+/// Default cap on live WebSocket connections per server process.
+///
+/// Every connection may hold up to its per-session ingress and egress
+/// budgets, so an uncapped listener lets connection count alone exhaust the
+/// process. Upgrades beyond the cap get `503 Service Unavailable` with
+/// `Retry-After`, and clients reconnect with backoff.
+pub const DEFAULT_MAX_WEBSOCKET_CONNECTIONS: usize = 1024;
 pub(crate) const MAX_CATALOGUE_REQUEST_BODY_BYTES: usize = 8 << 20;
 /// Server state shared across request handlers.
 pub struct ServerState {
@@ -97,6 +104,9 @@ pub struct ServerState {
     /// The owner is shared by every router and connection task that clones
     /// this `ServerState`, while independently built states remain isolated.
     pub(crate) websocket_admissions: Arc<routes::WebSocketAdmissionState>,
+    /// Live WebSocket connections this process admits before refusing
+    /// upgrades with `503`.
+    pub(crate) max_websocket_connections: usize,
     pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
     pub(crate) storage_factory: Option<Arc<dyn jazz::groove::storage::StorageFactory>>,
     /// Serializes durable-catalogue reconciliation into the local runtime shell.
@@ -462,6 +472,7 @@ mod tests {
             jwt_verifier: None,
             core_server_shell: StdRwLock::new(None),
             websocket_admissions: Arc::new(routes::WebSocketAdmissionState::default()),
+            max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
             core_server_shell_storage_config: None,
             storage_factory: None,
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),

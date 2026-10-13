@@ -291,6 +291,22 @@ pub enum GraphBuilder {
         right_on: Vec<FieldRef>,
         comparison: ValueComparison,
     },
+    /// The rows of a stored table whose primary key (or, with `index`, whose
+    /// key in that secondary index), after `scan`'s static prefix, starts
+    /// with the key of some row of `keys`: a semi-join of the table by
+    /// `keys`, computed by probing storage once per live key instead of
+    /// arranging the whole table. See [`GraphBuilder::lookup`].
+    Lookup {
+        keys: Arc<GraphBuilder>,
+        keys_on: Vec<FieldRef>,
+        table: String,
+        /// A secondary index of `table` to probe instead of its primary key.
+        /// Index lookups always output table rows through
+        /// `variant_projection`.
+        index: Option<String>,
+        scan: Option<StaticScanSpec>,
+        variant_projection: Option<String>,
+    },
     ArgMaxBy {
         input: Arc<GraphBuilder>,
         group_cols: Vec<FieldRef>,
@@ -787,7 +803,8 @@ impl GraphBuilder {
                 | Self::ArgMinBy { input, .. }
                 | Self::TopBy { input, .. }
                 | Self::CollectBy { input, .. }
-                | Self::Aggregate { input, .. } => pending.push((input, false)),
+                | Self::Aggregate { input, .. }
+                | Self::Lookup { keys: input, .. } => pending.push((input, false)),
                 Self::Union { inputs } => {
                     pending.extend(inputs.iter().rev().map(|input| (input.as_ref(), false)));
                 }
@@ -840,7 +857,8 @@ impl GraphBuilder {
             | Self::ArgMinBy { input, .. }
             | Self::TopBy { input, .. }
             | Self::CollectBy { input, .. }
-            | Self::Aggregate { input, .. } => visit(input),
+            | Self::Aggregate { input, .. }
+            | Self::Lookup { keys: input, .. } => visit(input),
             Self::Union { inputs } => inputs.iter().for_each(visit),
             Self::Join { left, right, .. }
             | Self::SemiJoin { left, right, .. }
@@ -894,7 +912,8 @@ impl GraphBuilder {
             | Self::ArgMinBy { input, .. }
             | Self::TopBy { input, .. }
             | Self::CollectBy { input, .. }
-            | Self::Aggregate { input, .. } => *input = map(input),
+            | Self::Aggregate { input, .. }
+            | Self::Lookup { keys: input, .. } => *input = map(input),
             Self::Union { inputs } => inputs.iter_mut().for_each(|input| *input = map(input)),
             Self::Join { left, right, .. }
             | Self::SemiJoin { left, right, .. }
@@ -984,6 +1003,62 @@ impl GraphBuilder {
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
             comparison: ValueComparison::Exact,
         }
+    }
+
+    /// Probe a stored table by the keys of another relation.
+    ///
+    /// `right` must be a [`GraphBuilder::Table`] source (as built by
+    /// [`Self::table`], [`Self::table_scan`] with a point or prefix scan, or
+    /// [`Self::variant_source_scan`]) or a row-projected secondary-index
+    /// source without intersections or candidate filter (as built by
+    /// [`Self::variant_index_scan`] with a point or prefix scan); otherwise
+    /// this returns `None`. The result is the rows of `right` whose primary
+    /// key (respectively index key), after the scan's static prefix, starts
+    /// with the values of `keys_on` of some row of `keys`. The key fields map
+    /// positionally onto the following key columns. A primary-key lookup's
+    /// key fields must have their columns' value types; an index lookup's
+    /// key field may also be the non-null type of a nullable index column,
+    /// and then probes that column's non-null values.
+    ///
+    /// Keys have set semantics: a key selects its rows while its count is
+    /// positive. Hydration reads one storage prefix per distinct live key,
+    /// and maintenance probes only keys that become live, so the work is
+    /// proportional to the keys and to changes touching them, never to the
+    /// table's size. The relation stays live: a key leaving or entering
+    /// `keys`, and any insert, update or delete of a matching table row,
+    /// updates the result.
+    ///
+    /// `semi_join(left, lookup(t, left, on), on, pk)` and the `anti_join`
+    /// analogue are the keyed lookup semi- and anti-joins.
+    pub fn lookup(
+        right: GraphBuilder,
+        keys: GraphBuilder,
+        keys_on: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Option<Self> {
+        let (table, index, scan, variant_projection) = match right {
+            Self::Table {
+                table,
+                scan,
+                variant_projection,
+            } => (table, None, scan, variant_projection),
+            Self::Index {
+                table,
+                index,
+                scan,
+                intersections,
+                candidate_filter: None,
+                row_projection: Some(row_projection),
+            } if intersections.is_empty() => (table, Some(index), scan, Some(row_projection)),
+            _ => return None,
+        };
+        Some(Self::Lookup {
+            keys: Arc::new(keys),
+            keys_on: keys_on.into_iter().map(FieldRef::name).collect(),
+            table,
+            index,
+            scan,
+            variant_projection,
+        })
     }
 
     pub fn arg_max_by(
@@ -1840,6 +1915,14 @@ impl IvmGraph {
                     .or_default()
                     .insert(id);
             }
+            // A lookup is also a source of its probed table: that table's
+            // deltas must activate it even when its keys did not change.
+            OpType::Lookup(lookup) => {
+                self.table_sources
+                    .entry(lookup.source.table.clone())
+                    .or_default()
+                    .insert(id);
+            }
             OpType::BindingSource(source) => {
                 self.binding_sources
                     .entry(source.key.clone())
@@ -1979,6 +2062,9 @@ impl IvmGraph {
             }
             OpType::IndexSource(source) => {
                 remove_source_node(&mut self.table_sources, &source.table, id);
+            }
+            OpType::Lookup(lookup) => {
+                remove_source_node(&mut self.table_sources, &lookup.source.table, id);
             }
             OpType::BindingSource(source) => {
                 remove_source_node(&mut self.binding_sources, &source.key, id);
@@ -2608,6 +2694,21 @@ impl NodeDescriptor {
                 },
             ),
             OpType::RecursiveStepWitness(_) => expect_arity(&self.inputs, 1),
+            OpType::Lookup(lookup) => {
+                expect_arity(&self.inputs, 1)?;
+                if lookup.key_descriptor != input_outputs[0] {
+                    return Err(GraphValidationError::JoinInputDescriptorMismatch);
+                }
+                for &field_idx in &lookup.key_fields {
+                    if field_idx >= input_outputs[0].fields().len() {
+                        return Err(GraphValidationError::FieldIndexOutOfBounds {
+                            index: field_idx,
+                            len: input_outputs[0].fields().len(),
+                        });
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -2700,6 +2801,9 @@ pub enum OpType {
     Join(JoinOp),
     SemiJoin(JoinOp),
     AntiJoin(JoinOp),
+    /// A table source probed by the keys of its only input
+    /// ([`GraphBuilder::Lookup`]).
+    Lookup(LookupOp),
     Union,
     Negate,
     Distinct,
@@ -2755,6 +2859,9 @@ pub enum NodeDurability {
 pub struct DurableStorage {
     pub column_family: String,
     pub key_prefix: Vec<u8>,
+    /// Human-readable name of the durable object, used in errors
+    /// (`table.index` for a schema index, whose key prefix is a numeric id).
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -2952,6 +3059,7 @@ mod tests {
                 storage: DurableStorage {
                     column_family: "albums".to_owned(),
                     key_prefix: Vec::new(),
+                    name: "albums".to_owned(),
                 },
             },
         );
@@ -3129,6 +3237,7 @@ mod tests {
                 storage: DurableStorage {
                     column_family: "indices".to_owned(),
                     key_prefix: Vec::new(),
+                    name: "albums.albums_by_title".to_owned(),
                 },
                 key_fields: vec![1],
                 unique: false,

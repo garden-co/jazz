@@ -842,6 +842,228 @@ fn shared_program_private_count_without_params() {
     shared_program_private_count(false);
 }
 
+// Parameter sharing: subscribers whose parameters differ share one program.
+
+/// Public table (policy admits everything), so only the param routing can
+/// keep subscribers apart. Same user with two params on one peer, two users
+/// with the same param, unsubscribe of one of two same-key subscribers, key
+/// re-entry after every subscriber left.
+#[test]
+fn shared_program_public_param_eq_routes_each_binding() {
+    let (_dir, mut core) = open_node_with_schema(node(9), shared_program_public_schema());
+    let (c1, c2, c3) = (row(0x11), row(0x12), row(0x13));
+    shared_program_seed_chats(&mut core, &[c1, c2, c3]);
+    // Model: message -> chat.
+    let mut model = BTreeMap::<RowUuid, RowUuid>::new();
+    let mut put = |core: &mut NodeState, model: &mut BTreeMap<RowUuid, RowUuid>, m: RowUuid, c: RowUuid, tx: u64| {
+        shared_program_put_msg(core, m, tx, shared_program_msg(c, "a", tx));
+        model.insert(m, c);
+    };
+    put(&mut core, &mut model, row(0x31), c1, 20);
+    put(&mut core, &mut model, row(0x32), c1, 21);
+    put(&mut core, &mut model, row(0x33), c2, 22);
+    put(&mut core, &mut model, row(0x34), c3, 23);
+    let shape = Query::from("messages")
+        .filter(eq(col("chatId"), param("chat")))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let p = |c: RowUuid| shared_program_params(&[("chat", Value::Uuid(c.0))]);
+    core.drive_query_runtime().unwrap();
+    let base = shared_program_shapes(&core);
+    let mut peers: Vec<PeerState> = (0..4).map(|i| PeerState::client_link(user(0xa0 + i))).collect();
+    // Live subscriptions: (peer index, chat, delivered state).
+    let mut subs: Vec<(usize, RowUuid, SharedProgramState)> = Vec::new();
+    let mut chat_overdelivery = Vec::new();
+    let want = |model: &BTreeMap<RowUuid, RowUuid>, c: RowUuid| {
+        model.iter().filter(|(_, mc)| **mc == c).map(|(m, _)| *m).collect::<BTreeSet<_>>()
+    };
+    let mut first = None;
+    for (pi, c) in [(0usize, c1), (0, c2), (1, c1), (2, c3)] {
+        let mut st = SharedProgramState::new();
+        shared_program_apply(&mut st, &shared_program_sub(&mut core, &mut peers[pi], &shape, &p(c)));
+        assert_eq!(shared_program_t(&st, "messages"), want(&model, c), "initial peer {pi} chat {c:?}");
+        if !shared_program_t(&st, "chats").is_subset(&BTreeSet::from([c])) {
+            chat_overdelivery.push(("initial", pi, c, shared_program_t(&st, "chats")));
+        }
+        subs.push((pi, c, st));
+        first.get_or_insert(shared_program_shapes(&core) - base);
+    }
+    let total = shared_program_shapes(&core) - base;
+    if std::env::var_os("SharedProgram_OFF").is_none() { assert_eq!(first, Some(total), "the param shapes must share one prepared program"); }
+
+    macro_rules! check_all {
+        ($step:expr) => {
+            for (pi, c, st) in subs.iter_mut() {
+                shared_program_apply(st, &shared_program_upd(&mut core, &mut peers[*pi], &shape, &p(*c)));
+                assert_eq!(shared_program_t(st, "messages"), want(&model, *c), "{} peer {} chat {:?}", $step, pi, c);
+                if !shared_program_t(st, "chats").is_subset(&BTreeSet::from([*c])) {
+                    chat_overdelivery.push(($step, *pi, *c, shared_program_t(st, "chats")));
+                }
+            }
+        };
+    }
+    put(&mut core, &mut model, row(0x35), c2, 30);
+    check_all!("insert c2");
+    put(&mut core, &mut model, row(0x31), c3, 31);
+    check_all!("move c1->c3");
+    // peer 1 (c1) leaves; peer 0 (c1) remains.
+    let (pi, c, _) = subs.remove(2);
+    shared_program_forget(&mut core, &mut peers[pi], &shape, &p(c));
+    put(&mut core, &mut model, row(0x36), c1, 32);
+    check_all!("insert c1 after one c1 sub left");
+    // the last c1 sub leaves; c1 gets a row; a new c1 subscriber re-probes.
+    let (pi, c, _) = subs.remove(0);
+    shared_program_forget(&mut core, &mut peers[pi], &shape, &p(c));
+    put(&mut core, &mut model, row(0x37), c1, 33);
+    check_all!("insert c1 with no c1 sub");
+    let mut st = SharedProgramState::new();
+    shared_program_apply(&mut st, &shared_program_sub(&mut core, &mut peers[3], &shape, &p(c1)));
+    assert_eq!(shared_program_t(&st, "messages"), want(&model, c1), "re-entered c1 key");
+    subs.push((3, c1, st));
+    put(&mut core, &mut model, row(0x32), c2, 34);
+    check_all!("move c1->c2 after re-entry");
+
+    for (pi, c, _) in subs.drain(..) {
+        shared_program_forget(&mut core, &mut peers[pi], &shape, &p(c));
+    }
+    core.drive_query_runtime().unwrap();
+    assert_eq!(shared_program_shapes(&core), base);
+    assert!(chat_overdelivery.is_empty(), "foreign chats rows delivered (closure): {chat_overdelivery:?}");
+}
+
+/// A nullable indexed column probed by a non-null text key: null and
+/// empty-string rows never match; a row moving to null leaves.
+#[test]
+fn shared_program_nullable_indexed_param_column() {
+    let (_dir, mut core) = open_node_with_schema(node(9), shared_program_public_schema());
+    let c1 = row(0x11);
+    shared_program_seed_chats(&mut core, &[c1]);
+    let (tx_, ty, tnull, tempty) = (row(0x41), row(0x42), row(0x43), row(0x44));
+    let put = |core: &mut NodeState, r: RowUuid, tx: u64, tag: Option<&str>| {
+        shared_program_put_msg(core, r, tx, SharedProgramMsg { tag, ..shared_program_msg(c1, "a", tx) });
+    };
+    put(&mut core, tx_, 20, Some("x"));
+    put(&mut core, ty, 21, Some("y"));
+    put(&mut core, tnull, 22, None);
+    put(&mut core, tempty, 23, Some(""));
+    let shape = Query::from("messages")
+        .filter(eq(col("tag"), param("tag")))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let p = |t: &str| shared_program_params(&[("tag", Value::Nullable(Some(Box::new(Value::String(t.to_owned())))))]);
+    core.drive_query_runtime().unwrap();
+    let base = shared_program_shapes(&core);
+    let mut ux = PeerState::client_link(user(0xa0));
+    let mut uy = PeerState::client_link(user(0xa1));
+    let mut ue = PeerState::client_link(user(0xa2));
+    assert_eq!(shared_program_added(&shared_program_sub(&mut core, &mut ux, &shape, &p("x")), "messages"), BTreeSet::from([tx_]));
+    let first = shared_program_shapes(&core) - base;
+    assert_eq!(shared_program_added(&shared_program_sub(&mut core, &mut uy, &shape, &p("y")), "messages"), BTreeSet::from([ty]));
+    assert_eq!(shared_program_added(&shared_program_sub(&mut core, &mut ue, &shape, &p("")), "messages"), BTreeSet::from([tempty]));
+    // Null param, if the API accepts one: must not read null rows of other subscribers' keys.
+    let null_params = shared_program_params(&[("tag", Value::Nullable(None))]);
+    match shape.bind(null_params.clone()) {
+        Ok(_) => {
+            let mut un = PeerState::client_link(user(0xa3));
+            let up = shared_program_sub(&mut core, &mut un, &shape, &null_params);
+            assert!(!shared_program_added(&up, "messages").contains(&tx_) && !shared_program_added(&up, "messages").contains(&ty));
+        }
+        Err(_) => {}
+    }
+    // x -> null, y -> x.
+    put(&mut core, tx_, 30, None);
+    put(&mut core, ty, 31, Some("x"));
+    let upx = shared_program_upd(&mut core, &mut ux, &shape, &p("x"));
+    let upy = shared_program_upd(&mut core, &mut uy, &shape, &p("y"));
+    let upe = shared_program_upd(&mut core, &mut ue, &shape, &p(""));
+    assert_eq!((shared_program_added(&upx, "messages"), shared_program_removed(&upx, "messages")), (BTreeSet::from([ty]), BTreeSet::from([tx_])));
+    assert_eq!((shared_program_added(&upy, "messages"), shared_program_removed(&upy, "messages")), (BTreeSet::new(), BTreeSet::from([ty])));
+    assert!(shared_program_added(&upe, "messages").is_empty() && shared_program_removed(&upe, "messages").is_empty());
+}
+
+/// OR with a param branch, IN list of params, and a non-equality param
+/// (n > $min): no lookup for these, but isolation must hold.
+#[test]
+fn shared_program_or_in_and_range_params() {
+    let (_dir, mut core) = open_node_with_schema(node(9), shared_program_public_schema());
+    let (c1, c2, c3) = (row(0x11), row(0x12), row(0x13));
+    shared_program_seed_chats(&mut core, &[c1, c2, c3]);
+    let (m1, m2, m3p) = (row(0x41), row(0x42), row(0x43));
+    shared_program_put_msg(&mut core, m1, 20, SharedProgramMsg { n: 1, ..shared_program_msg(c1, "a", 1) });
+    shared_program_put_msg(&mut core, m2, 21, SharedProgramMsg { n: 5, ..shared_program_msg(c2, "a", 2) });
+    shared_program_put_msg(&mut core, m3p, 22, SharedProgramMsg { n: 9, pinned: true, ..shared_program_msg(c3, "a", 3) });
+    let p = |c: RowUuid| shared_program_params(&[("chat", Value::Uuid(c.0))]);
+
+    let int_shape = Query::from("messages")
+        .filter(eq(col("n"), param("n")))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let pn = |n: i32| shared_program_params(&[("n", Value::I32(n))]);
+    let base = shared_program_shapes(&core);
+    let mut a = PeerState::client_link(user(0xd0));
+    let mut b = PeerState::client_link(user(0xd1));
+    let ua = shared_program_sub(&mut core, &mut a, &int_shape, &pn(1));
+    let first = shared_program_shapes(&core) - base;
+    let ub = shared_program_sub(&mut core, &mut b, &int_shape, &pn(9));
+    assert_eq!(shared_program_added(&ua, "messages"), BTreeSet::from([m1]));
+    assert_eq!(shared_program_added(&ub, "messages"), BTreeSet::from([m3p]));
+    let range_shape = Query::from("messages")
+        .filter(eq(col("chatId"), param("chat")))
+        .filter(crate::query::gt(col("n"), param("min")))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let pr = |c: RowUuid, min: i32| shared_program_params(&[("chat", Value::Uuid(c.0)), ("min", Value::I32(min))]);
+    let base = shared_program_shapes(&core);
+    let mut a = PeerState::client_link(user(0xc0));
+    let mut b = PeerState::client_link(user(0xc1));
+    let mut c = PeerState::client_link(user(0xc2));
+    let ua = shared_program_sub(&mut core, &mut a, &range_shape, &pr(c1, 0));
+    let ub = shared_program_sub(&mut core, &mut b, &range_shape, &pr(c2, 7));
+    let uc = shared_program_sub(&mut core, &mut c, &range_shape, &pr(c2, 0));
+    assert_eq!(shared_program_added(&ua, "messages"), BTreeSet::from([m1]));
+    assert!(shared_program_added(&ub, "messages").is_empty());
+    assert_eq!(shared_program_added(&uc, "messages"), BTreeSet::from([m2]));
+
+    let in_shape = Query::from("messages")
+        .filter(crate::query::in_list(col("chatId"), [param("x"), param("y")]))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let pin = |x: RowUuid, y: RowUuid| shared_program_params(&[("x", Value::Uuid(x.0)), ("y", Value::Uuid(y.0))]);
+    let base = shared_program_shapes(&core);
+    let mut a = PeerState::client_link(user(0xb0));
+    let mut b = PeerState::client_link(user(0xb1));
+    let ua = shared_program_sub(&mut core, &mut a, &in_shape, &pin(c1, c2));
+    let ub = shared_program_sub(&mut core, &mut b, &in_shape, &pin(c3, c3));
+    assert_eq!(shared_program_added(&ua, "messages"), BTreeSet::from([m1, m2]));
+    assert_eq!(shared_program_added(&ub, "messages"), BTreeSet::from([m3p]));
+}
+
+/// OR with a param branch: the literal branch reaches every subscriber, the
+/// param branch only its own.
+#[test]
+fn shared_program_or_param_branch() {
+    let (_dir, mut core) = open_node_with_schema(node(9), shared_program_public_schema());
+    let (c1, c2, c3) = (row(0x11), row(0x12), row(0x13));
+    shared_program_seed_chats(&mut core, &[c1, c2, c3]);
+    let (m1, m2, m3p) = (row(0x41), row(0x42), row(0x43));
+    shared_program_put_msg(&mut core, m1, 20, SharedProgramMsg { n: 1, ..shared_program_msg(c1, "a", 1) });
+    shared_program_put_msg(&mut core, m2, 21, SharedProgramMsg { n: 5, ..shared_program_msg(c2, "a", 2) });
+    shared_program_put_msg(&mut core, m3p, 22, SharedProgramMsg { n: 9, pinned: true, ..shared_program_msg(c3, "a", 3) });
+    let p = |c: RowUuid| shared_program_params(&[("chat", Value::Uuid(c.0))]);
+    let or_shape = Query::from("messages")
+        .filter(crate::query::any_of([eq(col("chatId"), param("chat")), eq(col("pinned"), lit(true))]))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let base = shared_program_shapes(&core);
+    let mut a = PeerState::client_link(user(0xa0));
+    let mut b = PeerState::client_link(user(0xa1));
+    let ua = shared_program_sub(&mut core, &mut a, &or_shape, &p(c1));
+    let ub = shared_program_sub(&mut core, &mut b, &or_shape, &p(c2));
+    assert_eq!(shared_program_added(&ua, "messages"), BTreeSet::from([m1, m3p]));
+    assert_eq!(shared_program_added(&ub, "messages"), BTreeSet::from([m2, m3p]));
+
+}
+
 // Claim-only sharing: one prepared program per policy shape, each reader
 // still confined to the rows its own claims authorize.
 

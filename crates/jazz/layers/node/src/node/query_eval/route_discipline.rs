@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use groove::ivm::{FieldRef, GraphBuilder, TopByLimit};
+use groove::ivm::{FieldRef, GraphBuilder, ProjectExpr, TopByLimit};
 
 use super::lowering::{
     app_row_terminal_route_eligible_fields, prepared_route_param_names,
@@ -53,12 +53,21 @@ pub(super) fn check_route_discipline<'g, E: std::fmt::Debug>(
     slot_routes: &BTreeMap<String, String>,
     infer: impl Fn(&GraphBuilder) -> Result<RecordDescriptor, E>,
 ) -> Result<(), RouteViolation> {
+    let terminals = terminals.into_iter().collect::<Vec<_>>();
+    let aliases = slot_aliases(
+        terminals.iter().map(|(_, graph, _)| *graph),
+        slot_routes,
+        &infer,
+    );
     let mut checker = RouteChecker {
         slot_routes,
+        aliases,
         routes: slot_routes.values().cloned().collect(),
         infer,
         deps: HashMap::new(),
         carried: HashMap::new(),
+        masks: HashMap::new(),
+        equivalents: HashMap::new(),
         checked: BTreeSet::new(),
     };
     for (sink, graph, delivered) in terminals {
@@ -69,16 +78,65 @@ pub(super) fn check_route_discipline<'g, E: std::fmt::Debug>(
             )));
         }
         checker.check(graph)?;
+        let masked = checker.masked(graph)?;
+        if !masked.is_empty() {
+            return Err(RouteViolation(format!(
+                "terminal {sink} reads lookup rows never paired with binding routes {masked:?}"
+            )));
+        }
     }
     Ok(())
 }
 
+/// Slot names a graph may use for its route: a binding source names its
+/// fields by slot, and a join against it keeps that name. A slot whose name
+/// a stored relation also uses is not aliased, so a stored column is never
+/// taken for a route.
+fn slot_aliases<'g, E>(
+    graphs: impl IntoIterator<Item = &'g GraphBuilder>,
+    slot_routes: &BTreeMap<String, String>,
+    infer: &impl Fn(&GraphBuilder) -> Result<RecordDescriptor, E>,
+) -> BTreeMap<String, String> {
+    let mut stored = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut pending = graphs.into_iter().collect::<Vec<_>>();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(std::ptr::from_ref(node)) {
+            continue;
+        }
+        let kids = children(node);
+        if !matches!(node, GraphBuilder::BindingSource { .. })
+            && (kids.is_empty() || matches!(node, GraphBuilder::Lookup { .. }))
+        {
+            match infer(node) {
+                Ok(output) => stored.extend(
+                    output
+                        .fields()
+                        .iter()
+                        .filter_map(|field| field.name.clone()),
+                ),
+                // Unknown columns could be named like any slot.
+                Err(_) => return BTreeMap::new(),
+            }
+        }
+        pending.extend(kids);
+    }
+    slot_routes
+        .iter()
+        .filter(|(slot, route)| slot != route && !stored.contains(*slot))
+        .map(|(slot, route)| (slot.clone(), route.clone()))
+        .collect()
+}
+
 struct RouteChecker<'a, F> {
     slot_routes: &'a BTreeMap<String, String>,
+    aliases: BTreeMap<String, String>,
     routes: BTreeSet<String>,
     infer: F,
     deps: HashMap<*const GraphBuilder, BTreeSet<String>>,
     carried: HashMap<*const GraphBuilder, BTreeSet<String>>,
+    masks: HashMap<*const GraphBuilder, BTreeSet<String>>,
+    equivalents: HashMap<*const GraphBuilder, BTreeMap<String, String>>,
     checked: BTreeSet<*const GraphBuilder>,
 }
 
@@ -124,10 +182,73 @@ where
         let carried = self
             .output_names(node)?
             .into_iter()
+            .map(|field| self.route_name(field))
             .filter(|field| self.routes.contains(field))
             .collect::<BTreeSet<_>>();
         self.carried.insert(key, carried.clone());
         Ok(carried)
+    }
+
+    /// Binding routes `node` depends on only through a binding lookup
+    /// (`GraphBuilder::Lookup` keyed by binding values). Such rows are a
+    /// superset for every binding at once and carry no route, so they are
+    /// sound only once a join pairs them with the route itself.
+    fn masked(&mut self, node: &GraphBuilder) -> Result<BTreeSet<String>, RouteViolation> {
+        let key = std::ptr::from_ref(node);
+        if let Some(masked) = self.masks.get(&key) {
+            return Ok(masked.clone());
+        }
+        let masked = match node {
+            GraphBuilder::Lookup { keys, .. } => self.depends(keys),
+            GraphBuilder::Join {
+                left,
+                right,
+                left_on,
+                right_on,
+                ..
+            } => {
+                let mut masked = self.masked(left)?;
+                masked.extend(self.masked(right)?);
+                let resolved = self.mask_resolutions(left, right, left_on, right_on)?;
+                masked.retain(|route| !resolved.contains(route));
+                masked
+            }
+            _ => {
+                let mut masked = BTreeSet::new();
+                for child in children(node) {
+                    masked.extend(self.masked(child)?);
+                }
+                masked
+            }
+        };
+        self.masks.insert(key, masked.clone());
+        Ok(masked)
+    }
+
+    /// Routes a join pairs with a lookup-masked side: one side's key is
+    /// the route itself, carried by that side, so every output row belongs
+    /// to exactly the bindings whose route equals the other side's key.
+    fn mask_resolutions(
+        &mut self,
+        left: &GraphBuilder,
+        right: &GraphBuilder,
+        left_on: &[FieldRef],
+        right_on: &[FieldRef],
+    ) -> Result<BTreeSet<String>, RouteViolation> {
+        let left_carried = self.carried(left)?;
+        let right_carried = self.carried(right)?;
+        let mut resolved = BTreeSet::new();
+        for (left_key, right_key) in left_on.iter().zip(right_on) {
+            let left_key = self.key_route(left, left_key)?;
+            let right_key = self.key_route(right, right_key)?;
+            if right_carried.contains(&right_key) {
+                resolved.insert(right_key);
+            }
+            if left_carried.contains(&left_key) {
+                resolved.insert(left_key);
+            }
+        }
+        Ok(resolved)
     }
 
     fn output_names(&self, node: &GraphBuilder) -> Result<Vec<String>, RouteViolation> {
@@ -143,7 +264,112 @@ where
             .collect())
     }
 
+    /// The route a join key stands for: the key's own route name, or the
+    /// route an earlier join pinned that field to.
+    fn key_route(
+        &mut self,
+        input: &GraphBuilder,
+        field: &FieldRef,
+    ) -> Result<String, RouteViolation> {
+        let name = self.raw_field_name(input, field)?;
+        let equivalents = self.equivalents(input)?;
+        Ok(equivalents
+            .get(&name)
+            .cloned()
+            .unwrap_or_else(|| self.route_name(name)))
+    }
+
+    /// Fields of `node`'s output that equal a binding route in every row,
+    /// because a join keyed them on that route. A later join keyed on such
+    /// a field keys on the route itself.
+    fn equivalents(
+        &mut self,
+        node: &GraphBuilder,
+    ) -> Result<BTreeMap<String, String>, RouteViolation> {
+        let key = std::ptr::from_ref(node);
+        if let Some(equivalents) = self.equivalents.get(&key) {
+            return Ok(equivalents.clone());
+        }
+        let equivalents = match node {
+            GraphBuilder::Join {
+                left,
+                right,
+                left_on,
+                right_on,
+                ..
+            } => {
+                let mut equivalents = BTreeMap::new();
+                for (prefix, side) in [("left.", left), ("right.", right)] {
+                    for (field, route) in self.equivalents(side)? {
+                        equivalents.insert(format!("{prefix}{field}"), route);
+                    }
+                }
+                let left_carried = self.carried(left)?;
+                let right_carried = self.carried(right)?;
+                for (left_key, right_key) in left_on.iter().zip(right_on) {
+                    let left_name = self.raw_field_name(left, left_key)?;
+                    let right_name = self.raw_field_name(right, right_key)?;
+                    let left_route = self.key_route(left, left_key)?;
+                    let right_route = self.key_route(right, right_key)?;
+                    if right_carried.contains(&right_route)
+                        || self.routes.contains(&right_route) && right_route != right_name
+                    {
+                        equivalents.insert(format!("left.{left_name}"), right_route.clone());
+                    }
+                    if left_carried.contains(&left_route)
+                        || self.routes.contains(&left_route) && left_route != left_name
+                    {
+                        equivalents.insert(format!("right.{right_name}"), left_route.clone());
+                    }
+                }
+                equivalents
+            }
+            GraphBuilder::Project { input, fields } => {
+                let input_equivalents = self.equivalents(input)?;
+                let mut equivalents = BTreeMap::new();
+                for field in fields {
+                    let source = match &field.expression {
+                        ProjectExpr::Field(source)
+                        | ProjectExpr::Nullable(source)
+                        | ProjectExpr::NullableFlat(source) => source,
+                        _ => continue,
+                    };
+                    let source = self.raw_field_name(input, source)?;
+                    if let Some(route) = input_equivalents.get(&source) {
+                        equivalents.insert(field.output_name.clone(), route.clone());
+                    }
+                }
+                equivalents
+            }
+            GraphBuilder::Filter { input, .. }
+            | GraphBuilder::UnwrapNullable { input, .. }
+            | GraphBuilder::ArgMaxBy { input, .. }
+            | GraphBuilder::ArgMinBy { input, .. }
+            | GraphBuilder::TopBy { input, .. }
+            | GraphBuilder::SemiJoin { left: input, .. }
+            | GraphBuilder::AntiJoin { left: input, .. } => self.equivalents(input)?,
+            _ => BTreeMap::new(),
+        };
+        self.equivalents.insert(key, equivalents.clone());
+        Ok(equivalents)
+    }
+
+    /// `name`, or the route it aliases.
+    fn route_name(&self, name: String) -> String {
+        self.aliases.get(&name).cloned().unwrap_or(name)
+    }
+
+    /// The name of `field` in `input`, as the route it aliases if any.
     fn field_name(&self, input: &GraphBuilder, field: &FieldRef) -> Result<String, RouteViolation> {
+        let name = self.raw_field_name(input, field)?;
+        Ok(self.route_name(name))
+    }
+
+    fn raw_field_name(
+        &self,
+        input: &GraphBuilder,
+        field: &FieldRef,
+    ) -> Result<String, RouteViolation> {
         Ok(match field {
             FieldRef::Name(name) | FieldRef::StoredName(name) => name.clone(),
             FieldRef::Resolved(index) => self
@@ -198,14 +424,29 @@ where
                 // on, or the join cannot tell whose rows it is matching.
                 let left_carried = self.carried(left)?;
                 let right_carried = self.carried(right)?;
-                for (side, depends, carried) in [
-                    ("left", &left_depends, &left_carried),
-                    ("right", &right_depends, &right_carried),
+                // A lookup-masked side need not carry its masked routes when
+                // an inner join pairs it with them here.
+                let resolved = if matches!(node, GraphBuilder::Join { .. }) {
+                    self.mask_resolutions(left, right, left_on, right_on)?
+                } else {
+                    BTreeSet::new()
+                };
+                let left_masked = self.masked(left)?;
+                let right_masked = self.masked(right)?;
+                for (side, depends, carried, masked) in [
+                    ("left", &left_depends, &left_carried, &left_masked),
+                    ("right", &right_depends, &right_carried, &right_masked),
                 ] {
-                    if !depends.is_subset(carried) {
+                    let unresolved = depends
+                        .iter()
+                        .filter(|route| !(masked.contains(*route) && resolved.contains(*route)))
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    if !unresolved.is_subset(carried) {
                         return Err(RouteViolation(format!(
-                            "{} {side} input depends on binding routes {depends:?} but carries {carried:?} (left names {:?}, right names {:?})",
+                            "{} {side} input depends on binding routes {depends:?} but carries {carried:?} (sketch {}; left names {:?}, right names {:?})",
                             operator_name(node),
+                            sketch(node, 12),
                             self.output_names(left)?,
                             self.output_names(right)?,
                         )));
@@ -213,8 +454,8 @@ where
                 }
                 let mut keyed = BTreeSet::new();
                 for (left_key, right_key) in left_on.iter().zip(right_on) {
-                    let left_key = self.field_name(left, left_key)?;
-                    if left_key == self.field_name(right, right_key)? {
+                    let left_key = self.key_route(left, left_key)?;
+                    if left_key == self.key_route(right, right_key)? {
                         keyed.insert(left_key);
                     }
                 }
@@ -235,8 +476,10 @@ where
                         .zip(right_on)
                         .map(|(l, r)| Ok((self.field_name(left, l)?, self.field_name(right, r)?)))
                         .collect::<Result<Vec<_>, RouteViolation>>()?;
+                    let left_equivalents = self.equivalents(left)?;
                     return Err(RouteViolation(format!(
-                        "join does not key on binding route {route} (keys {keys:?}, left carries {left_carried:?}, right carries {right_carried:?}, left names {:?}, right names {:?})",
+                        "join does not key on binding route {route} (keys {keys:?}, left carries {left_carried:?}, right carries {right_carried:?}, left equivalents {left_equivalents:?}, sketch {}; left names {:?}, right names {:?})",
+                        sketch(node, 12),
                         self.output_names(left)?,
                         self.output_names(right)?,
                     )));
@@ -326,6 +569,27 @@ where
     }
 }
 
+fn sketch(node: &GraphBuilder, depth: usize) -> String {
+    let name = format!("{node:?}");
+    let name = name
+        .split([' ', '{', '('])
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    if depth == 0 {
+        return name;
+    }
+    let kids = children(node)
+        .into_iter()
+        .map(|child| sketch(child, depth - 1))
+        .collect::<Vec<_>>();
+    if kids.is_empty() {
+        name
+    } else {
+        format!("{name}[{}]", kids.join(", "))
+    }
+}
+
 fn operator_name(node: &GraphBuilder) -> &'static str {
     match node {
         GraphBuilder::Recursive { .. } => "Recursive",
@@ -366,7 +630,8 @@ fn children(node: &GraphBuilder) -> Vec<&GraphBuilder> {
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => vec![input.as_ref()],
+        | GraphBuilder::Aggregate { input, .. }
+        | GraphBuilder::Lookup { keys: input, .. } => vec![input.as_ref()],
         GraphBuilder::Join { left, right, .. }
         | GraphBuilder::SemiJoin { left, right, .. }
         | GraphBuilder::AntiJoin { left, right, .. } => vec![left.as_ref(), right.as_ref()],
@@ -435,7 +700,8 @@ fn isolate_node(
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => *input = arc(input),
+        | GraphBuilder::Aggregate { input, .. }
+        | GraphBuilder::Lookup { keys: input, .. } => *input = arc(input),
         GraphBuilder::Join { left, right, .. }
         | GraphBuilder::SemiJoin { left, right, .. }
         | GraphBuilder::AntiJoin { left, right, .. } => {

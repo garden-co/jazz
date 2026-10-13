@@ -1,8 +1,6 @@
 //! Read-view-specific source selection for query evaluation.
 
 use super::*;
-use crate::node::query_engine::BranchViewSourceBase;
-use crate::protocol::BranchViewBase;
 
 pub(super) fn current_query_read_set(
     shape: &NormalizedRowSetShape,
@@ -246,28 +244,9 @@ pub(super) fn query_read_set_for_read_view(
                     .ok_or(Error::InvalidStoredValue(
                         "branch view source table missing",
                     ))?;
-                let (head_key, _) = schema
-                    .project_branch_view_selector(table, head)
-                    .map_err(Error::InvalidBranchKey)?;
-                let mut base = base
-                    .as_ref()
-                    .map(|base| match base {
-                        BranchViewBase::Current(selector) => schema
-                            .project_branch_view_selector(table, selector)
-                            .map(|(key, _)| BranchViewSourceBase::Current(key)),
-                        BranchViewBase::Snapshot { branch, snapshot } => schema
-                            .project_branch_view_selector(table, branch)
-                            .map(|(key, _)| BranchViewSourceBase::Snapshot(key, snapshot.clone())),
-                    })
-                    .transpose()
-                    .map_err(Error::InvalidBranchKey)?;
-                if base.as_ref().is_some_and(|base| match base {
-                    BranchViewSourceBase::Current(key) | BranchViewSourceBase::Snapshot(key, _) => {
-                        key == &head_key
-                    }
-                }) {
-                    base = None;
-                }
+                let (head_key, base) =
+                    layer_stack::branch_view_stack(schema, table, head, base.as_ref())
+                        .map_err(Error::InvalidBranchKey)?;
                 sources.insert(
                     source.clone(),
                     SourceExpr::BranchView {

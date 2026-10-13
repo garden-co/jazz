@@ -34,10 +34,14 @@ export interface ForegroundNodeLease {
 
 /** Browser-only terminal cleanup; the durable retirement outcome remains unknown. */
 export interface BrowserForegroundNodeLease extends ForegroundNodeLease {
+  /** Ephemeral owner identity; a successor realm cannot acknowledge this port. */
+  readonly workerRealmId?: string;
   /** The caller must first disable the foreground lifetime that can mint this node's TxIds. */
   abandonAfterWorkerFailure(error: Error): void;
   /** Locally releases an erased epoch after its worker-authored reset receipt; never writes a handoff. */
   releaseAfterStorageReset(reason: Error): void;
+  /** Release a dead owner's port after quiescing; its node remains non-reusable. */
+  releaseAfterWorkerReplacement?(reason: Error): void;
 }
 
 export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConfig> {
@@ -50,6 +54,7 @@ export interface BrowserWorkerConnection {
   /** Only a rejected initial configuration admission permits a later API call to retry. */
   canRetryInitialConfigurationAdmission?(): boolean;
   ready(): Promise<void>;
+  getWorkerRealmId?(): string | undefined;
   waitForServerConnection(): Promise<void>;
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   disconnect(): Promise<void>;

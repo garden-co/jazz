@@ -1,0 +1,85 @@
+# linear-history spike: rows=1500 update_percent=90 depth=100 repeats=3 (min ms)
+
+## backend=memory layout=current+history
+phase                                           ms    rows   writes    w/row    w_bytes     gets   scans   scanned  extra
+seed_one_tx                                  6.621    1500     6002     4.00     484537     1501       0         0  
+update_lww_one_tx                            5.263    1350     6752     5.00     473887     1351       0         0  
+update_threeway_counter_one_tx               4.551    1350     4052     3.00     391537     2701       0         0  
+update_lww_tx_per_row                        3.551    1350     6750     5.00     406350     2700       0         0  
+history_depth_rounds                       862.311  135000   674414     5.00   44339869   135100       0         0  rounds=100
+update_small_tail_one_tx                     0.179      15       77     5.13       4897       16       0         0  
+read_current_scan                            1.488    1500        0     0.00          0        0       1      1500  visible=1500
+read_point_current_all                       0.484    1500        0     0.00          0     1500       0         0  
+read_point_at_seed_cut_all                   2.949    1500        0     0.00          0     1500    1500      1500  
+read_scan_at_seed_cut                        3.965    1500        0     0.00          0        0    1501      3000  visible=1500
+query_eq_at_seed_cut_forward                 3.974    1500        0     0.00          0        0    1501      3000  matches=1500
+query_eq_at_seed_cut_rewind                 33.692    1500        0     0.00          0     3000    1502    140642  matches=1500
+query_eq_at_recent_cut_forward               2.064    1500        0     0.00          0        0      16      1515  matches=77
+query_eq_at_recent_cut_rewind                0.253    1500        0     0.00          0       30      17       107  matches=77
+sync_changes_since_recent_cut                0.016      15        0     0.00          0       15       1        15  rows=15 payload_bytes=1650
+sync_changes_since_seed_cut                 29.832    1500        0     0.00          0     1500       1    139065  rows=1500 payload_bytes=167027
+exclusive_predicate_validate_conflict       27.000       1        1     1.00         14        3       2    139066  Rejected(PredicateConflict)
+exclusive_predicate_validate_clean           0.027       1        5     5.00        249        3       1         0  Accepted(1455)
+
+## backend=memory layout=history-only
+phase                                           ms    rows   writes    w/row    w_bytes     gets   scans   scanned  extra
+seed_one_tx                                  6.590    1500     4502     3.00     292537        1    1500         0  
+update_lww_one_tx                            5.596    1350     5402     4.00     302437        1    1350      1350  
+update_threeway_counter_one_tx               5.860    1350     2702     2.00     220087        1    2700      2700  
+update_lww_tx_per_row                        4.179    1350     5400     4.00     252450     1350    1350      1350  
+history_depth_rounds                       875.817  135000   539414     4.00   28707298      100  135000    135000  rounds=100
+update_small_tail_one_tx                     0.105      15       62     4.13       3187        1      15        15  
+read_current_scan                           72.118    1500        0     0.00          0        0       1    140565  visible=1500
+read_point_current_all                       2.357    1500        0     0.00          0        0    1500      1500  
+read_point_at_seed_cut_all                   2.044    1500        0     0.00          0        0    1500      1500  
+read_scan_at_seed_cut                       59.064    1500        0     0.00          0        0       1    140565  visible=1500
+query_eq_at_seed_cut_forward                58.169    1500        0     0.00          0        0       1    140565  matches=1500
+query_eq_at_seed_cut_rewind                 35.304    1500        0     0.00          0        0    3002    142142  matches=1500
+query_eq_at_recent_cut_forward              53.971    1500        0     0.00          0        0       1    140565  matches=77
+query_eq_at_recent_cut_rewind                0.269    1500        0     0.00          0        0      32       122  matches=77
+sync_changes_since_recent_cut                0.028      15        0     0.00          0        0      16        30  rows=15 payload_bytes=1650
+sync_changes_since_seed_cut                 30.125    1500        0     0.00          0        0    1501    140565  rows=1500 payload_bytes=167027
+exclusive_predicate_validate_conflict       31.036       1        1     1.00         14        1       3    139067  Rejected(PredicateConflict)
+exclusive_predicate_validate_clean           0.029       1        4     4.00        161        1       3         1  Accepted(1455)
+
+## backend=rocksdb layout=current+history
+phase                                           ms    rows   writes    w/row    w_bytes     gets   scans   scanned  extra
+seed_one_tx                                  7.333    1500     6002     4.00     484537     1501       0         0  
+update_lww_one_tx                            7.323    1350     6752     5.00     473887     1351       0         0  
+update_threeway_counter_one_tx               6.849    1350     4052     3.00     391537     2701       0         0  
+update_lww_tx_per_row                       20.966    1350     6750     5.00     406350     2700       0         0  
+history_depth_rounds                       840.593  135000   674414     5.00   44339869   135100       0         0  rounds=100
+update_small_tail_one_tx                     0.141      15       77     5.13       4897       16       0         0  
+read_current_scan                            1.277    1500        0     0.00          0        0       1      1500  visible=1500
+read_point_current_all                       1.336    1500        0     0.00          0     1500       0         0  
+read_point_at_seed_cut_all                  17.741    1500        0     0.00          0     1500    1500      1500  
+read_scan_at_seed_cut                       13.617    1500        0     0.00          0        0    1501      3000  visible=1500
+query_eq_at_seed_cut_forward                13.452    1500        0     0.00          0        0    1501      3000  matches=1500
+query_eq_at_seed_cut_rewind                 55.396    1500        0     0.00          0     3000    1502    140642  matches=1500
+query_eq_at_recent_cut_forward               1.367    1500        0     0.00          0        0      16      1515  matches=77
+query_eq_at_recent_cut_rewind                4.639    1500        0     0.00          0       30      17       107  matches=77
+sync_changes_since_recent_cut                0.030      15        0     0.00          0       15       1        15  rows=15 payload_bytes=1650
+sync_changes_since_seed_cut                 38.854    1500        0     0.00          0     1500       1    139065  rows=1500 payload_bytes=167027
+exclusive_predicate_validate_conflict       37.168       1        1     1.00         14        3       2    139066  Rejected(PredicateConflict)
+exclusive_predicate_validate_clean           0.069       1        5     5.00        249        3       1         0  Accepted(1455)
+
+## backend=rocksdb layout=history-only
+phase                                           ms    rows   writes    w/row    w_bytes     gets   scans   scanned  extra
+seed_one_tx                                  8.045    1500     4502     3.00     292537        1    1500         0  
+update_lww_one_tx                            8.308    1350     5402     4.00     302437        1    1350      1350  
+update_threeway_counter_one_tx               9.878    1350     2702     2.00     220087        1    2700      2700  
+update_lww_tx_per_row                       21.013    1350     5400     4.00     252450     1350    1350      1350  
+history_depth_rounds                      1195.240  135000   539414     4.00   28707298      100  135000    135000  rounds=100
+update_small_tail_one_tx                     0.215      15       62     4.13       3187        1      15        15  
+read_current_scan                           54.494    1500        0     0.00          0        0       1    140565  visible=1500
+read_point_current_all                      10.080    1500        0     0.00          0        0    1500      1500  
+read_point_at_seed_cut_all                   9.265    1500        0     0.00          0        0    1500      1500  
+read_scan_at_seed_cut                       46.046    1500        0     0.00          0        0       1    140565  visible=1500
+query_eq_at_seed_cut_forward                44.213    1500        0     0.00          0        0       1    140565  matches=1500
+query_eq_at_seed_cut_rewind                 57.750    1500        0     0.00          0        0    3002    142142  matches=1500
+query_eq_at_recent_cut_forward              50.055    1500        0     0.00          0        0       1    140565  matches=77
+query_eq_at_recent_cut_rewind                3.918    1500        0     0.00          0        0      32       122  matches=77
+sync_changes_since_recent_cut                0.094      15        0     0.00          0        0      16        30  rows=15 payload_bytes=1650
+sync_changes_since_seed_cut                 47.485    1500        0     0.00          0        0    1501    140565  rows=1500 payload_bytes=167027
+exclusive_predicate_validate_conflict       35.733       1        1     1.00         14        1       3    139067  Rejected(PredicateConflict)
+exclusive_predicate_validate_clean           0.060       1        4     4.00        161        1       3         1  Accepted(1455)

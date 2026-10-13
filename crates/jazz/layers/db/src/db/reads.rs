@@ -571,7 +571,21 @@ where
         // Remote publication waits for settlement. A local foreground also
         // needs a fresh delivery from its durable owner, while the maintained
         // subscription drives the complete multi-hop input closure.
-        if require_coverage && is_relation {
+        //
+        // A strict (Global) client one-shot reads through its own fresh
+        // stream as well, as the native client's remote one-shot does.
+        // Attaching coverage first and then evaluating `Db::all` would read
+        // against an already-settled coverage, so no stream would run its
+        // first-settlement deletion reconciliation and a held row deleted at
+        // Core would survive locally (INV-SYNC-48).
+        let strict_client_one_shot = !is_relation
+            && open_tx.is_none()
+            && author.is_none()
+            && prepared.shape().query().array_subqueries.is_empty()
+            && coverage_tier >= DurabilityTier::Global
+            && opts.read_view.is_default()
+            && !opts.include_deleted;
+        if require_coverage && (is_relation || strict_client_one_shot) {
             let local_coverage = if coverage_tier == DurabilityTier::Local {
                 Some(SerializedReadCoverage {
                     attachment: Some(
@@ -592,6 +606,29 @@ where
             let mut stream = self
                 .subscribe_one_shot_with_coverage(&prepared, opts.clone(), author, coverage_tier)
                 .await?;
+            // The fresh stream opens settled when an earlier subscription
+            // already settled the same binding, so on its own it can answer
+            // from a coverage the authority has since moved past. A strict
+            // one-shot also waits for an authority receipt newer than its own
+            // open, as an attached remote read does. Attaching after the
+            // stream opened leaves its deletion reconciliation unchanged.
+            let strict_coverage = if strict_client_one_shot {
+                Some(SerializedReadCoverage {
+                    attachment: Some(
+                        self.attach_query_with_coverage_async(
+                            &prepared,
+                            opts.clone(),
+                            coverage_tier,
+                            None,
+                            author,
+                        )
+                        .await?,
+                    ),
+                    release: Some(release_coverage),
+                })
+            } else {
+                None
+            };
             let outcome = async {
                 let mut next = Box::pin(stream.next_event());
                 let event = std::future::poll_fn(|cx| {
@@ -601,14 +638,15 @@ where
                             "Timed out waiting for query coverage",
                         )));
                     }
-                    if local_coverage.as_ref().is_some_and(|coverage| {
-                        !self.query_attachment_is_covered(
-                            coverage
-                                .attachment
-                                .as_ref()
-                                .expect("live local read coverage"),
-                        )
-                    }) {
+                    if local_coverage
+                        .iter()
+                        .chain(strict_coverage.iter())
+                        .any(|coverage| {
+                            !self.query_attachment_is_covered(
+                                coverage.attachment.as_ref().expect("live read coverage"),
+                            )
+                        })
+                    {
                         return Poll::Pending;
                     }
                     std::future::Future::poll(next.as_mut(), cx).map(Ok)

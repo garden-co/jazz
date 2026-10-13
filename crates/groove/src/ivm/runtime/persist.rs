@@ -14,9 +14,7 @@ use crate::ivm::DurableStorage;
 use crate::records::RecordDescriptor;
 use crate::storage::{OrderedKvStorage, OwnedWriteOperation, RecordStore};
 
-use super::{
-    IvmRuntimeError, RecordDeltas, encode_key_part, encode_ordered_bytes, index_record_descriptor,
-};
+use super::{IvmRuntimeError, RecordDeltas, encode_key_part, index_record_descriptor};
 
 #[derive(Default)]
 struct PendingPersistKey {
@@ -32,8 +30,30 @@ pub(super) async fn apply_persist_delta(
     unique: bool,
     delta: &RecordDeltas,
 ) -> Result<(), IvmRuntimeError> {
+    apply_persist_delta_with(
+        storage,
+        durable_storage,
+        key_fields,
+        unique,
+        delta,
+        Vec::new(),
+    )
+    .await
+}
+
+/// Like [`apply_persist_delta`], and submit `leading` in the same atomic
+/// storage write (used to make an index's id registration durable together
+/// with its first entries).
+pub(super) async fn apply_persist_delta_with(
+    storage: &dyn OrderedKvStorage,
+    durable_storage: &DurableStorage,
+    key_fields: &[usize],
+    unique: bool,
+    delta: &RecordDeltas,
+    leading: Vec<OwnedWriteOperation>,
+) -> Result<(), IvmRuntimeError> {
     if key_fields == [0] && delta.descriptor == index_record_descriptor() {
-        return apply_index_persist_delta(storage, durable_storage, unique, delta).await;
+        return apply_index_persist_delta(storage, durable_storage, unique, delta, leading).await;
     }
 
     let store = RecordStore::new(storage, &durable_storage.column_family, &delta.descriptor);
@@ -63,11 +83,13 @@ pub(super) async fn apply_persist_delta(
         }
     }
 
+    let mut operations = leading;
     if unique {
-        return apply_unique_pending(&store, durable_storage, pending).await;
+        operations.extend(unique_pending_operations(&store, durable_storage, pending).await?);
+        return Ok(store.write_many(operations).await?);
     }
 
-    let mut operations = Vec::with_capacity(pending.len());
+    operations.reserve(pending.len());
     for (key, entry) in pending {
         if entry.weight > 0 {
             let record = entry
@@ -96,66 +118,99 @@ pub(super) async fn apply_persist_delta(
     Ok(store.write_many(operations).await?)
 }
 
+/// Persist `IndexBy` records as compact durable index entries.
+///
+/// The storage key is the index's numeric id prefix followed directly by the
+/// record's logical `key` bytes (already a prefix-free, order-preserving
+/// concatenation of typed parts, so no second escaping). The storage value is
+/// the record's raw `value` bytes: empty for non-unique indexes, and the
+/// primary-key columns missing from the key for unique ones. The logical key
+/// is never repeated in the value.
 async fn apply_index_persist_delta(
     storage: &dyn OrderedKvStorage,
     durable_storage: &DurableStorage,
     unique: bool,
     delta: &RecordDeltas,
+    leading: Vec<OwnedWriteOperation>,
 ) -> Result<(), IvmRuntimeError> {
     let store = RecordStore::new(storage, &durable_storage.column_family, &delta.descriptor);
     let mut pending = BTreeMap::<Vec<u8>, PendingPersistKey>::new();
 
     for record_delta in &delta.deltas {
+        if record_delta.weight == 0 {
+            continue;
+        }
         let record = record_delta.borrowed(&delta.descriptor);
         let logical_key = record
             .get_bytes(0)
             .map_err(IvmRuntimeError::RecordEncoding)?;
-        let key = persisted_index_record_key(durable_storage, logical_key);
-        if record_delta.weight == 0 {
-            continue;
-        }
+        let value = record
+            .get_bytes(1)
+            .map_err(IvmRuntimeError::RecordEncoding)?;
+        let mut key = durable_storage.key_prefix.clone();
+        key.extend_from_slice(logical_key);
         add_pending_delta(
             pending.entry(key).or_default(),
-            &record_delta.record,
+            &Bytes::copy_from_slice(value),
             record_delta.weight,
             unique,
         );
     }
 
+    let mut operations = leading;
     if unique {
-        return apply_unique_pending(&store, durable_storage, pending).await;
+        operations.extend(unique_pending_operations(&store, durable_storage, pending).await?);
+        return Ok(store.write_many(operations).await?);
     }
 
     // `pending` is already ordered. Consume it directly into owned storage
     // operations instead of building a second BTreeMap and then asking
-    // RecordStore to clone every key and record once more.
-    let mut operations = Vec::with_capacity(pending.len());
+    // RecordStore to clone every key and value once more.
+    operations.reserve(pending.len());
     for (key, entry) in pending {
         if entry.weight > 0 {
-            let record = entry
+            let value = entry
                 .positive_record
                 .ok_or(IvmRuntimeError::PersistRecordMismatch)?;
             operations.push(OwnedWriteOperation::Set {
                 cf: durable_storage.column_family.clone(),
                 key,
-                value: record,
+                value,
             });
         } else if entry.weight < 0 {
             operations.push(OwnedWriteOperation::Delete {
                 cf: durable_storage.column_family.clone(),
                 key,
             });
-        } else if let Some(record) = entry.positive_record
+        } else if let Some(value) = entry.positive_record
             && store.get_raw(&key).await?.is_some()
         {
             operations.push(OwnedWriteOperation::Set {
                 cf: durable_storage.column_family.clone(),
                 key,
-                value: record,
+                value,
             });
         }
     }
     Ok(store.write_many(operations).await?)
+}
+
+/// Rebuild the in-memory `IndexBy` record of one durable index entry from
+/// its storage key (minus the `prefix_len`-byte id prefix) and value.
+pub(super) fn index_record_from_storage(
+    prefix_len: usize,
+    key: &[u8],
+    value: Vec<u8>,
+) -> Result<Bytes, IvmRuntimeError> {
+    let logical_key = key.get(prefix_len..).ok_or_else(|| {
+        IvmRuntimeError::InvalidPersistedIndex("index key shorter than its id prefix".to_owned())
+    })?;
+    Ok(index_record_descriptor()
+        .create(&[
+            crate::records::Value::Bytes(logical_key.to_vec()),
+            crate::records::Value::Bytes(value),
+        ])?
+        .into())
 }
 
 fn add_pending_delta(entry: &mut PendingPersistKey, record: &Bytes, weight: i64, unique: bool) {
@@ -174,11 +229,11 @@ fn add_pending_delta(entry: &mut PendingPersistKey, record: &Bytes, weight: i64,
     }
 }
 
-async fn apply_unique_pending<S>(
+async fn unique_pending_operations<S>(
     store: &RecordStore<'_, S>,
     durable_storage: &DurableStorage,
     pending: BTreeMap<Vec<u8>, PendingPersistKey>,
-) -> Result<(), IvmRuntimeError>
+) -> Result<Vec<OwnedWriteOperation>, IvmRuntimeError>
 where
     S: OrderedKvStorage + ?Sized,
 {
@@ -197,7 +252,7 @@ where
             }),
         }
     }
-    Ok(store.write_many(operations).await?)
+    Ok(operations)
 }
 
 async fn resolve_unique_owner<S>(
@@ -230,17 +285,8 @@ where
     Ok(owner)
 }
 
-fn persisted_index_record_key(durable_storage: &DurableStorage, logical_key: &[u8]) -> Vec<u8> {
-    let mut key = durable_storage.key_prefix.clone();
-    key.push(7);
-    encode_ordered_bytes(&mut key, logical_key);
-    key
-}
-
 fn durable_storage_name(durable_storage: &DurableStorage) -> String {
-    String::from_utf8_lossy(&durable_storage.key_prefix)
-        .trim_end_matches('\0')
-        .replace('\0', ".")
+    durable_storage.name.clone()
 }
 
 fn persist_record_keys(
@@ -324,7 +370,8 @@ mod tests {
             let (storage, control) = TestStorage::controlled(&["indices"]);
             let durable_storage = DurableStorage {
                 column_family: "indices".to_owned(),
-                key_prefix: b"albums\0unique_albums_by_title\0".to_vec(),
+                key_prefix: super::super::durable_index_key_prefix(1),
+                name: "albums.unique_albums_by_title".to_owned(),
             };
             let descriptor = index_record_descriptor();
             let delta = RecordDeltas {
@@ -349,9 +396,10 @@ mod tests {
                 .unwrap();
             control.take_observed();
 
-            let error = apply_index_persist_delta(&storage, &durable_storage, true, &delta)
-                .await
-                .unwrap_err();
+            let error =
+                apply_index_persist_delta(&storage, &durable_storage, true, &delta, Vec::new())
+                    .await
+                    .unwrap_err();
             assert!(matches!(
                 error,
                 IvmRuntimeError::UniqueIndexViolation { index }
