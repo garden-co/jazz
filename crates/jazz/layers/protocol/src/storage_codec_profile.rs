@@ -43,6 +43,12 @@ pub fn epoch_1_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
 /// Families declared by every root that stores Jazz rows (Core, relay and
 /// client node stores, on every adapter), in canonical order.
 ///
+/// `groove.dictionary.v1` is Groove's dictionary of interned column values:
+/// every stored author column (`made_by`, `created_by`, `updated_by`) holds a
+/// 4-byte code into the node-local `authors` dictionary instead of the full
+/// author. A root written before interned author columns lacks it and is
+/// refused with [`Error::UnsupportedStorageCodecs`].
+///
 /// `groove.durable-index.v2` is Groove's compact secondary-index layout
 /// (numeric index ids, single-escaped keys, empty values). Only node roots
 /// declare schema indexes, so auxiliary roots do not carry it. A node root
@@ -54,15 +60,16 @@ pub fn epoch_1_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
 /// `_deletion` as a cell, history keyed by seq with each write's base and lost
 /// cells, a `by_seq` current index and a per-row ahead overlay. History and ahead-current tables carry
 /// no `by_tx` secondary index; the node-local `jazz_tx_touched_rows` record of
-/// each transaction lists the rows it touched instead. A history image stores `updated_by`
-/// only when it differs from its transaction's `made_by`.
+/// each transaction lists the rows it touched instead. Every history image
+/// stores its `updated_by`.
 ///
 /// It replaces the unreleased `v2` (`by_tx` indexes) and `v3` (a
-/// `jazz_transactions.touched_rows` column, `updated_by` always stored) and the DAG layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57),
+/// `jazz_transactions.touched_rows` column) and the DAG layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57),
 /// which was never a manifest member. A root written by either lacks this
 /// family and is refused at manifest admission with
 /// [`Error::UnsupportedStorageCodecs`] before any record is decoded.
 pub const JAZZ_NODE_STORAGE_CODECS: &[&str] = &[
+    crate::groove::storage::GROOVE_DICTIONARY_V1_CODEC,
     crate::groove::storage::GROOVE_DURABLE_INDEX_V2_CODEC,
     "jazz.history-version-current.v4",
 ];
@@ -126,7 +133,7 @@ mod tests {
 
     /// Internal manifest receipt: the node-root inventory is a durable byte
     /// contract that no public API exposes. It differs from the epoch-one
-    /// base only by the durable-index and row-history families, so an old
+    /// base only by the dictionary, durable-index and row-history families, so an old
     /// node root (base only) is refused with the typed codec-inventory error.
     #[test]
     fn node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots() {
@@ -141,7 +148,7 @@ mod tests {
             &node_storage_codec_profile().expect("valid node profile"),
         )
         .expect("valid manifest");
-        let expected = b"JSM1\0\x01\0\x01\x06memory\x0f\x17groove.durable-index.v2\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x1fjazz.history-version-current.v4\x25jazz.subscription-program-fact-key.v1\x1ejazz.transaction-durability.v2\x01\x09key-order\0\x16unsigned-lexicographic";
+        let expected = b"JSM1\0\x01\0\x01\x06memory\x10\x14groove.dictionary.v1\x17groove.durable-index.v2\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x1fjazz.history-version-current.v4\x25jazz.subscription-program-fact-key.v1\x1ejazz.transaction-durability.v2\x01\x09key-order\0\x16unsigned-lexicographic";
         assert_eq!(node.encode().expect("canonical manifest"), expected);
 
         let base_root = crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
@@ -162,6 +169,7 @@ mod tests {
                 assert_eq!(
                     missing,
                     vec![
+                        "groove.dictionary.v1".to_owned(),
                         "groove.durable-index.v2".to_owned(),
                         "jazz.history-version-current.v4".to_owned()
                     ]
@@ -223,9 +231,9 @@ mod tests {
     }
 
     /// Roots written by the unreleased v2 row layout (history `by_tx`
-    /// indexes) and v3 (`updated_by` in every history image) are refused
+    /// indexes) and v3 (a `jazz_transactions.touched_rows` column) are refused
     /// with the typed error naming the missing families (the current history
-    /// family and the durable-index layout) and the retired one, before any
+    /// family, the dictionary and the durable-index layout) and the retired one, before any
     /// record is decoded.
     #[test]
     fn node_profile_refuses_history_v2_and_v3_roots() {
@@ -265,6 +273,7 @@ mod tests {
                     assert_eq!(
                         missing,
                         vec![
+                            "groove.dictionary.v1".to_owned(),
                             "groove.durable-index.v2".to_owned(),
                             "jazz.history-version-current.v4".to_owned()
                         ]

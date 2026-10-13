@@ -319,14 +319,12 @@ where
                 batch.accept_large_value(*staged_id);
             }
         }
-        let tx_made_by = self.stage_author_code(&mut batch, tx.made_by).await?;
         stage_transaction_record(
             &mut batch,
             TransactionRecordWrite::Insert {
                 provenance: contribution_merge,
             },
             tx_node_alias,
-            tx_made_by,
             &tx,
             &TransactionRecordStatus::new(Fate::Pending, None, self.authored_commit_durability),
         )?;
@@ -505,7 +503,7 @@ where
                 .map(|cells| row_version(cells, Vec::new()))
                 .transpose()?;
             let stored = row_version(cells, counter_signs)?;
-            let (history_table, groove_record) = self.version_storage_write_binding(&stored, tx.made_by)?;
+            let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             batch.insert_raw(
                 history_table.as_ref(),
                 self.version_storage_primary_key(&stored)?,

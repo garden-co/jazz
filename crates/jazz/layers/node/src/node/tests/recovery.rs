@@ -822,7 +822,6 @@ fn mark_accepted_without_ahead_cleanup<S>(
         &mut batch,
         TransactionRecordWrite::Update,
         stored.node_alias,
-        crate::local_executor::block_on(node.author_code(stored.tx.made_by)).unwrap().unwrap(),
         &stored.tx,
         &TransactionRecordStatus::new(stored.fate.clone(), stored.global_time, stored.durability),
     )
@@ -982,7 +981,6 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
             &mut batch,
             TransactionRecordWrite::Update,
             stored.node_alias,
-            crate::local_executor::block_on(node.author_code(stored.tx.made_by)).unwrap().unwrap(),
             &stored.tx,
             &TransactionRecordStatus::new(Fate::Accepted, Some(GlobalTime(7)), DurabilityTier::Local),
         )
@@ -2187,7 +2185,6 @@ fn transaction_status_projects_state_without_decoding_payloads() {
             for global_time in [None, Some(GlobalTime(42))] {
                 let mut values = transaction_record_values(
                     stored.node_alias,
-                    crate::local_executor::block_on(core.author_code(stored.tx.made_by)).unwrap().unwrap(),
                     &stored.tx,
                     &TransactionRecordStatus::new(fate.clone(), global_time, durability),
                 )
@@ -2228,7 +2225,6 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         stored.tx.contribution_merge = Some(provenance);
         let values = transaction_record_values(
             stored.node_alias,
-            crate::local_executor::block_on(core.author_code(stored.tx.made_by)).unwrap().unwrap(),
             &stored.tx,
             &TransactionRecordStatus::new(
                 stored.fate.clone(),
@@ -2407,42 +2403,189 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
     storage.close().unwrap();
 }
 
-/// Actors: one writer committing as two authors, then a reopen.
+/// Actors: a writer committing as alice and bob, Core accepting its global
+/// writes, then a cold reopen of the writer.
 ///
-/// A transaction record names its author by a `jazz_authors` code: one entry
-/// per distinct author however many transactions name it, written in the
-/// same batch as the first record that uses it, and resolved back to the
-/// full author after a reopen.
+/// Every stored author column names its author by a 4-byte code in the
+/// `authors` Groove dictionary: a transaction record's `made_by`, and the
+/// `created_by`/`updated_by` of history images and of global and ahead
+/// current rows. The dictionary holds one entry per distinct author however
+/// many records name it, and a reopen resolves every code back to the full
+/// author. White-box: every read (and the wire) sees full authors, so the
+/// stored bytes are read from RocksDB after close.
 #[test]
-fn transaction_records_name_authors_by_dictionary_code() {
+fn author_columns_store_dictionary_codes() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let mut committed = Vec::new();
+    let tables;
     {
-        let mut node = open_node_at(&temp_dir, schema.clone());
-        for (index, author) in [alice, bob, alice, alice].into_iter().enumerate() {
-            let tx_id = node
-                .commit_mergeable_settled(
-                    MergeableCommit::new("todos", row(0x40 + index as u8), 10)
-                        .made_by(author)
-                        .cells(title_cells("coded")),
-                )
-                .unwrap();
+        let mut writer = open_node_at(&temp_dir, schema.clone());
+        let (_core_dir, mut core) = open_node_with_uuid(node(9));
+        // Accepted: alice creates row 0x40, bob creates 0x41 and then updates
+        // alice's row.
+        for (author, row_byte, title) in [
+            (alice, 0x40, "alice's"),
+            (bob, 0x41, "bob's"),
+            (bob, 0x40, "bob edits alice's"),
+        ] {
+            let tx_id = commit_mergeable_global(
+                &mut writer,
+                &mut core,
+                MergeableCommit::new("todos", row(row_byte), 10)
+                    .made_by(author)
+                    .cells(title_cells(title)),
+            );
             committed.push((tx_id, author));
         }
-        let entries = crate::local_executor::block_on(
-            node.database
-                .primary_key_scan_raw(crate::schema::AUTHORS_TABLE, &[]),
-        )
-        .unwrap()
-        .len();
-        assert_eq!(entries, 2, "one dictionary entry per distinct author");
+        // Pending: alice creates row 0x42, which only the ahead overlay holds.
+        let tx_id = writer
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row(0x42), 10)
+                    .made_by(alice)
+                    .cells(title_cells("alice's pending")),
+            )
+            .unwrap();
+        committed.push((tx_id, alice));
+
+        let table_id = writer
+            .physical_table_id_for_schema(writer.catalogue.local_schema_version_id, "todos")
+            .unwrap();
+        tables = [
+            "jazz_transactions".to_owned(),
+            physical_history_table_name(table_id),
+            physical_global_current_table_name(table_id),
+            physical_ahead_current_table_name(table_id),
+        ]
+        .map(|name| {
+            let schema = writer.database.table_schema(&name).unwrap().clone();
+            (name, schema)
+        });
     }
 
+    let encoded = |author: AuthorSubject| {
+        crate::ids::RowAuthor::from_persisted_subject(author)
+            .unwrap()
+            .encoded_record()
+            .raw()
+    };
+    let options = rocksdb::Options::default();
+    let families = rocksdb::DB::list_cf(&options, temp_dir.path()).unwrap();
+    let db = rocksdb::DB::open_cf_for_read_only(&options, temp_dir.path(), &families, false)
+        .unwrap();
+    let mut dictionary = Vec::new();
+    // Per table: the stored author codes of each record, in key order.
+    let mut codes = BTreeMap::<&str, Vec<Vec<u32>>>::new();
+    for family in &families {
+        let handle = db.cf_handle(family).unwrap();
+        for entry in db.iterator_cf(&handle, rocksdb::IteratorMode::Start) {
+            let (key, value) = entry.unwrap();
+            if family == "__groove_dictionary_authors" {
+                dictionary.push((key.to_vec(), value.to_vec()));
+                continue;
+            }
+            let Some((name, table)) = tables.iter().find(|(name, _)| {
+                key.len() > 4 + name.len()
+                    && key[..4] == (name.len() as u32).to_be_bytes()
+                    && &key[4..4 + name.len()] == name.as_bytes()
+            }) else {
+                continue;
+            };
+            for author in [alice, bob] {
+                assert!(
+                    !value
+                        .windows(encoded(author).len())
+                        .any(|window| window == encoded(author)),
+                    "{name} stores a code, never the full author"
+                );
+            }
+            let (tag, payload) = groove::records::split_variant_record(&value).unwrap();
+            let descriptor = table.storage_record_schema_for_variant(tag).unwrap();
+            let record = OwnedRecord::new(payload.to_vec(), descriptor);
+            let columns: &[&str] = if name == "jazz_transactions" {
+                &["made_by"]
+            } else {
+                &["created_by", "updated_by"]
+            };
+            codes.entry(name).or_default().push(
+                columns
+                    .iter()
+                    .map(|column| {
+                        let index = descriptor.field_index(column).unwrap();
+                        assert_eq!(
+                            descriptor.fields()[index].value_type,
+                            crate::schema::interned_author_type()
+                        );
+                        match record.borrowed().get_idx(index).unwrap() {
+                            Value::U32(code) => code,
+                            other => panic!("{name}.{column} stores {other:?}"),
+                        }
+                    })
+                    .collect(),
+            );
+        }
+    }
+    drop(db);
+
+    assert_eq!(
+        dictionary,
+        vec![
+            (0u32.to_be_bytes().to_vec(), encoded(alice).to_vec()),
+            (1u32.to_be_bytes().to_vec(), encoded(bob).to_vec()),
+        ],
+        "one entry per distinct author, in first-use order"
+    );
+    let (alice_code, bob_code) = (0, 1);
+    let sorted = |mut rows: Vec<Vec<u32>>| {
+        rows.sort();
+        rows
+    };
+    assert_eq!(
+        sorted(codes.remove("jazz_transactions").unwrap()),
+        sorted(vec![
+            vec![alice_code],
+            vec![bob_code],
+            vec![bob_code],
+            vec![alice_code],
+        ])
+    );
+    assert_eq!(
+        sorted(codes.remove(tables[1].0.as_str()).unwrap()),
+        sorted(vec![
+            vec![alice_code, alice_code],
+            vec![bob_code, bob_code],
+            vec![alice_code, bob_code],
+            vec![alice_code, alice_code],
+        ]),
+        "history: created_by, updated_by of every image"
+    );
+    assert_eq!(
+        sorted(codes.remove(tables[2].0.as_str()).unwrap()),
+        sorted(vec![vec![alice_code, bob_code], vec![bob_code, bob_code]]),
+        "global current"
+    );
+    assert_eq!(
+        codes.remove(tables[3].0.as_str()).unwrap(),
+        vec![vec![alice_code, alice_code]],
+        "ahead current"
+    );
+
     let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
-    for (tx_id, author) in committed {
-        assert_eq!(reopened.query_transaction(tx_id).unwrap().unwrap().tx.made_by, author);
+    for (index, (tx_id, author)) in committed.into_iter().enumerate() {
+        assert_eq!(
+            reopened.query_transaction(tx_id).unwrap().unwrap().tx.made_by,
+            author
+        );
+        let [version] = reopened
+            .query_versions_for_tx(tx_id)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(version.updated_by(), author);
+        // Bob's edit keeps alice as the row's creator.
+        let creator = if index == 2 { alice } else { author };
+        assert_eq!(version.created_by(), creator);
     }
 }

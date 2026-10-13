@@ -304,19 +304,22 @@ forwarding and materialization read the listed `(table, branch, row)` keys at
 the transaction's seq (from its `jazz_transactions` record) and its
 `(tx_time, tx_node_id)`, or at `seq = 0` while it has no accepted fate. "The row at seq `S`" and "the row's writes after `S`" are a point read
 and a range read of history (SPEC 4 §4.6). Recovery takes the transaction-clock
-high-water mark from the last `jazz_transactions` key. A history image's
-`updated_by` is null when it equals the `made_by` of the transaction its key
-names, and every read fills it in from that `jazz_transactions` record. An
-image takes `updated_by` from the write it applies, so it is the author of the
-row's latest applied write (SPEC 4 §4.6) and is stored only when that write's
-own provenance names another author than its transaction's `made_by`.
-`created_by`, `created_at` and `updated_at` stay in every image, and global
-current and the ahead overlay keep all four. It has no `parents`, no
+high-water mark from the last `jazz_transactions` key. Every history image,
+global-current record and ahead-overlay record stores all four provenance
+fields. An image takes `updated_by` from the write it applies, so it is the
+author of the row's latest applied write (SPEC 4 §4.6). `created_by` and
+`updated_by` are interned columns (Groove SPEC 2, "Interned columns and
+dictionaries", codec family `groove.dictionary.v1`): each stores a 4-byte code
+into the node-local `authors` dictionary, whose entries are the canonical
+`RowAuthor` record bytes, so an image spends 5 bytes on its two authors
+however long they are (the 1-byte nullable `updated_by` that omitted the
+transaction's own author is gone with them). Every read, IVM source, query,
+policy and the wire see the full `RowAuthor`; codes never leave the node. It has no `parents`, no
 register tables, no shared deletion history, no `jazz_merge_heads`, no
 `jazz_global_changes` and no parked parent edges. A root written by the DAG
 layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) or by the
 unreleased v2 (history and ahead-current `by_tx` indexes, no touched-row list)
-or v3 (`updated_by` stored in every history image) row layouts lacks the v4
+or v3 (a `jazz_transactions.touched_rows` column) row layouts lacks the v4
 family (v4 itself is unreleased, and its history key and merge fields
 changed in place before release, without a new codec ID), so opening it fails at the manifest check, before any record is
 decoded, with the typed `groove::storage::Error::UnsupportedStorageCodecs`,
@@ -390,9 +393,10 @@ accepted/reopen/rebuild receipts for the same coordinate.
   and branch mappings), `jazz_catalogue`, and
   `jazz_catalogue_pointer`;
 - _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`, with
-  `jazz_pending_transactions` and `jazz_tx_provenance` beside it, the
-  `jazz_authors` dictionary, `jazz_history_horizon`, and
-  `jazz_rejected_transactions` (§2.8);
+  `jazz_pending_transactions` and `jazz_tx_provenance` beside it,
+  `jazz_history_horizon`, and `jazz_rejected_transactions` (§2.8). Both open
+  stages also declare the `authors` Groove dictionary (§2.8, `made_by`) that
+  every stored author column is interned into;
 - _per physical lineage_ — `jazz_physical_{id}_history`, keyed by
   `(branch_key, row_uuid, seq, tx_time, tx_node_id)` (`seq = 0` while pending), plus a per-lineage combined derived current
   row per exact branch key. The database has exactly one
@@ -421,7 +425,8 @@ bytes, not RocksDB SSTs, SQLite pages, or IndexedDB implementation files.
 what a node needs for as long as it keeps a transaction, so fate, seq and
 durability reads never load anything that grows with the transaction or that
 matters only while it is pending. Its fields are, in order: `(time: TxTime,
-node_id: NodeAlias, kind, flags: U8, n_total_writes: U32, made_by: U32, fate,
+node_id: NodeAlias, kind, flags: U8, n_total_writes: U32, made_by: RowAuthor
+interned into `authors`, fate,
 global_time: Nullable<U64>, durability, user_metadata: Nullable<String>,
 rejection: Nullable<{reason, cascade_root: Nullable<(U64, Uuid)>, detail:
 Nullable<String>}>, permission_subject: Nullable<AuthorSubject>)`, keyed
@@ -440,12 +445,14 @@ Nullable<String>}>, permission_subject: Nullable<AuthorSubject>)`, keyed
 - `permission_subject` is the identity the writes were authorized as when it
   is not the author. Replayed and relayed units carry it, so a settled
   transaction keeps it; a set bit 2 with a non-null field is refused.
-- `made_by` is the author's code in the node-local `jazz_authors` Groove
-  dictionary table (`code: U32` key, `value: Bytes` with a unique index),
-  whose value is the canonical `RowAuthor` record bytes. An entry is written
-  in the same batch as the first record that names its code and never
-  changes; a code without an entry is corrupt storage. Codes never leave the
-  node: receipts carry the full author.
+- `made_by` (here and in `jazz_rejected_transactions`) is an interned column:
+  the record stores a 4-byte code into the node-local `authors` Groove
+  dictionary (`groove.dictionary.v1`), whose entry is the canonical
+  `RowAuthor` record bytes. Groove allocates the code and writes a new entry
+  in the same storage write as the first record that uses it; an entry never
+  changes, and a code without an entry is corrupt storage, refused at open.
+  Every read sees the full author, and codes never leave the node: receipts
+  carry the full author.
 - `rejection` is non-null exactly when fate is `Rejected`; `cascade_root` is
   set exactly for `Cascade` and `detail` exactly for `MalformedCommit`. Any
   other spelling is refused.

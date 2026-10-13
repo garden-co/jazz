@@ -88,12 +88,10 @@ where
                 .global_current_updates_for_versions(&batch, tx_id, global_time, &tx_versions)
                 .await?;
         }
-        let tx_made_by = self.stage_author_code(&mut batch, stored.tx.made_by).await?;
         stage_transaction_record(
             &mut batch,
             TransactionRecordWrite::Update,
             stored.node_alias,
-            tx_made_by,
             &stored.tx,
             &TransactionRecordStatus::new(
                 stored.fate.clone(),
@@ -107,7 +105,7 @@ where
                 self.write_global_current_update(&mut batch, version, global_time)?;
                 // History holds the row's post-image at this seq, which is
                 // what peers receive for this transaction.
-                self.write_history_post_image(&mut batch, version, stored.tx.made_by)?;
+                self.write_history_post_image(&mut batch, version)?;
             }
             let mut moved = !global_current_updates.is_empty();
             if matches!(stored.fate, Fate::Accepted) {
@@ -121,7 +119,7 @@ where
                     });
                     if !updated && version.seq()? == GlobalTime(0) {
                         let at_seq = version.with_seq(global_time)?;
-                        self.write_history_post_image(&mut batch, &at_seq, stored.tx.made_by)?;
+                        self.write_history_post_image(&mut batch, &at_seq)?;
                         moved = true;
                     }
                 }

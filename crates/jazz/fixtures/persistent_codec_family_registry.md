@@ -36,12 +36,20 @@ epoch-one `jazz-root` base, and the non-profile
 The touched-rows transaction record (2026-09-30) retired the unreleased
 `jazz.history-version-current.v2` (history and ahead-current `by_tx` indexes)
 in favour of `jazz.history-version-current.v3`, whose `jazz_transactions`
-records list the rows each transaction touched. Implicit history
-`updated_by` (2026-09-30) then retired the unreleased `v3` in favour of
-`jazz.history-version-current.v4`: a history image stores `updated_by` only
-when it differs from its transaction's `made_by`, and the touched-row list
-lives in the node-local `jazz_tx_touched_rows`, outside the replicated
-transaction record.
+records list the rows each transaction touched. The node-local touched-row
+list (2026-09-30) then retired the unreleased `v3` in favour of
+`jazz.history-version-current.v4`: the list lives in the node-local
+`jazz_tx_touched_rows`, outside the replicated transaction record. (`v4`
+first also omitted a history image's `updated_by` when it equalled its
+transaction's `made_by`; interned author columns, below, store it in every
+image again, before any release.)
+
+Interned author columns (alpha.60) added `groove.dictionary.v1` to the
+`jazz-node-root` profile: Groove's dictionaries of interned column values
+(Groove SPEC 2, "Interned columns and dictionaries"). Every stored author
+column (`made_by`, `created_by`, `updated_by`) holds a 4-byte code into the
+node-local `authors` dictionary. Node roots written before it lack it and are
+refused at manifest admission.
 
 The compact durable-index layout (alpha.60) added `groove.durable-index.v2`
 to the `jazz-node-root` profile: numeric index ids, single-escaped keys and

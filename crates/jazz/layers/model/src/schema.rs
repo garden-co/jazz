@@ -51,6 +51,22 @@ pub const LOCAL_ROW_AVAILABILITY_STORE: &str = "jazz_local_row_availability_v1";
 /// reads it since the repair lane was removed; it stays registered so stores
 /// that already hold it still open.
 pub const SCOPE_RELAY_REPAIR_LEDGER_STORE: &str = "jazz_scope_relay_repair_ledger";
+/// The Groove dictionary that every stored author column is interned into
+/// (`groove.dictionary.v1`): transaction records' `made_by` and the row
+/// images' `created_by`/`updated_by` store a node-local 4-byte code, while
+/// every read, query, policy and the wire see the full [`RowAuthor`].
+///
+/// [`RowAuthor`]: crate::ids::RowAuthor
+pub const AUTHORS_DICTIONARY: &str = "authors";
+
+/// The stored type of an author column: a [`RowAuthor`] interned into
+/// [`AUTHORS_DICTIONARY`].
+///
+/// [`RowAuthor`]: crate::ids::RowAuthor
+pub fn interned_author_type() -> ValueType {
+    ValueType::interned(AUTHORS_DICTIONARY, crate::ids::RowAuthor::value_type())
+}
+
 /// Source-backed Jazz schema accepted by public database APIs.
 ///
 /// The developer-authored source is retained for durable catalogue
@@ -505,7 +521,6 @@ impl RuntimeSchema {
             tx_touched_rows_table(),
             rejected_transactions_table(),
             history_horizon_table(),
-            authors_table(),
         ]
     }
 
@@ -539,6 +554,10 @@ impl RuntimeSchema {
         // claims remain in the collision-checked directory value, never in
         // an ordered B-tree key.
         schema
+            .with_dictionary(groove::schema::DictionarySchema::new(
+                AUTHORS_DICTIONARY,
+                crate::ids::RowAuthor::value_type(),
+            ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 AUTHORITY_POLICY_BINDINGS_STORE,
                 RecordDescriptor::new([("policy_binding_digest", ValueType::Bytes)]),
@@ -1058,14 +1077,9 @@ impl TableSchema {
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("schema_version", GrooveColumnType::U64),
-            column("created_by", crate::ids::RowAuthor::value_type()),
+            column("created_by", interned_author_type()),
             column("created_at", GrooveColumnType::U64),
-            // Null when the image's `updated_by` is the `made_by` of the
-            // transaction named by this record's key: the node reads it from
-            // that `jazz_transactions` record instead of storing the author
-            // in every image. Set only when the merge kept an earlier
-            // writer's provenance (SPEC 2 §2.7.1).
-            column("updated_by", crate::ids::RowAuthor::value_type().nullable()),
+            column("updated_by", interned_author_type()),
             column("updated_at", GrooveColumnType::U64),
             // Deletion is a cell of the row image: null until deleted or restored.
             column("_deletion", deletion_column().nullable()),
@@ -1122,9 +1136,9 @@ impl TableSchema {
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("schema_version", GrooveColumnType::U64),
-            column("created_by", crate::ids::RowAuthor::value_type()),
+            column("created_by", interned_author_type()),
             column("created_at", GrooveColumnType::U64),
-            column("updated_by", crate::ids::RowAuthor::value_type()),
+            column("updated_by", interned_author_type()),
             column("updated_at", GrooveColumnType::U64),
             column("global_time", GrooveColumnType::U64.nullable()),
             column("_deletion", deletion_column().nullable()),
@@ -1182,9 +1196,9 @@ impl TableSchema {
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("schema_version", GrooveColumnType::U64),
-            column("created_by", crate::ids::RowAuthor::value_type()),
+            column("created_by", interned_author_type()),
             column("created_at", GrooveColumnType::U64),
-            column("updated_by", crate::ids::RowAuthor::value_type()),
+            column("updated_by", interned_author_type()),
             column("updated_at", GrooveColumnType::U64),
             column("global_time", GrooveColumnType::U64.nullable()),
             column("_deletion", deletion_column().nullable()),
@@ -1455,17 +1469,6 @@ pub fn global_current_composite_index_name(columns: &[String]) -> String {
     )
 }
 
-/// `jazz_authors`: node-local codes for the authors that transaction records
-/// name, a Groove dictionary table. A transaction record stores its author's
-/// 4-byte code instead of the full author, which is the largest field of the
-/// record and repeats across an author's transactions.
-#[doc(hidden)]
-pub const AUTHORS_TABLE: &str = "jazz_authors";
-
-fn authors_table() -> GrooveTableSchema {
-    groove::dictionary::table_schema(AUTHORS_TABLE)
-}
-
 fn nodes_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_nodes",
@@ -1504,8 +1507,7 @@ fn transactions_table() -> GrooveTableSchema {
             // are reserved and refused on read.
             column("flags", GrooveColumnType::U8),
             column("n_total_writes", GrooveColumnType::U32),
-            // node-local-derived: the author's code in `jazz_authors`.
-            column("made_by", GrooveColumnType::U32),
+            column("made_by", interned_author_type()),
             // upstream-decided: written only by fate/state application.
             column("fate", fate_column()),
             // upstream-decided: written only by fate/state application.
@@ -1999,7 +2001,7 @@ fn rejected_transactions_table() -> GrooveTableSchema {
             column("time", GrooveColumnType::U64),
             column("node_id", GrooveColumnType::U64),
             column("kind", tx_kind_column()),
-            column("made_by", crate::ids::RowAuthor::value_type()),
+            column("made_by", interned_author_type()),
             column("rejection_reason", rejection_reason_column()),
             column("cascade_root", tx_id_column().nullable()),
             column("reason_detail", GrooveColumnType::String.nullable()),
@@ -2305,13 +2307,9 @@ mod tests {
 
         for table in [&history, global_current, ahead_current] {
             for name in ["created_by", "updated_by"] {
-                // History omits `updated_by` when it is the transaction's
-                // own author; current carriers always store it.
-                let expected = if std::ptr::eq(table, &history) && name == "updated_by" {
-                    crate::ids::RowAuthor::value_type().nullable()
-                } else {
-                    crate::ids::RowAuthor::value_type()
-                };
+                // Every carrier stores both authors, interned into the
+                // authors dictionary.
+                let expected = interned_author_type();
                 assert_eq!(
                     table
                         .columns
@@ -2319,7 +2317,7 @@ mod tests {
                         .find(|column| column.name == name)
                         .map(|column| &column.column_type),
                     Some(&expected),
-                    "{name} must use the structured author record in {}",
+                    "{name} must store an interned author record in {}",
                     table.name
                 );
             }
@@ -2350,6 +2348,31 @@ mod tests {
                 .iter()
                 .any(|column| column.name == "durability")
         );
+        for table in [transactions, &rejected_transactions_table()] {
+            assert_eq!(
+                table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == "made_by")
+                    .map(|column| &column.column_type),
+                Some(&interned_author_type()),
+                "made_by must store an interned author record in {}",
+                table.name
+            );
+        }
+        // Both open stages declare the dictionary: a rebuild may not declare
+        // one the first stage did not load.
+        for lowered in [
+            schema.lower_catalogue_meta_to_groove(),
+            schema.lower_to_groove(),
+        ] {
+            assert_eq!(
+                lowered
+                    .dictionary(AUTHORS_DICTIONARY)
+                    .map(|dictionary| &dictionary.value_type),
+                Some(&crate::ids::RowAuthor::value_type())
+            );
+        }
         for table in [&history, global_current, ahead_current] {
             assert!(
                 table

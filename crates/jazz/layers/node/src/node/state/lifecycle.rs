@@ -899,8 +899,6 @@ impl NodeState {
             ahead_current_keys: FxHashMap::default(),
             ahead_shadow_dirty: Vec::new(),
             tx_touched_dirty: BTreeMap::new(),
-            history_tx_authors: BTreeMap::new(),
-            authors: groove::dictionary::Dictionary::new(crate::schema::AUTHORS_TABLE),
             history_tx_seqs: RefCell::new(FxHashMap::default()),
             minting_global_time: false,
             sync_metrics: SyncMetrics::default(),

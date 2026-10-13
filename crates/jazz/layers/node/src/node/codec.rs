@@ -24,7 +24,7 @@ groove::define_record! {
         4 => schema_version: SchemaVersionAlias,
         5 => created_by: RowAuthor,
         6 => created_at: TxTime,
-        7 => updated_by: Option<RowAuthor>,
+        7 => updated_by: RowAuthor,
         8 => updated_at: TxTime,
         9 => _deletion: Option<DeletionEvent>,
         .. user_cells,
@@ -109,7 +109,7 @@ groove::define_record! {
         2 => kind: TxKind,
         3 => flags: u8,
         4 => n_total_writes: u32,
-        5 => made_by: u32,
+        5 => made_by: RowAuthor,
         6 => fate: FateTag,
         7 => global_time: Option<GlobalTime>,
         8 => durability: DurabilityTier,
@@ -2576,7 +2576,7 @@ impl VersionRow {
                     4 => Value::U64(schema_version_alias.0),
                     5 => row_author_value(version.created_by())?,
                     6 => Value::U64(created_at),
-                    7 => history_updated_by_value(version.updated_by())?,
+                    7 => row_author_value(version.updated_by())?,
                     8 => Value::U64(updated_at),
                     9 => nullable_deletion_value(deletion),
                     i if i < HistoryRowRecord::USER_CELLS + table.columns.len() => {
@@ -2696,27 +2696,16 @@ impl VersionRow {
         )
     }
 
-    /// The image's `updated_by`. History storage omits it when it is the
-    /// author of the image's own transaction; every read path fills it in
-    /// from that transaction record (`resolve_history_updated_by`) before a
-    /// `VersionRow` leaves storage, so an in-memory row always carries it.
     pub(super) fn updated_by(&self) -> AuthorSubject {
         let idx = HistoryRowRecord::FIELD_UPDATED_BY_IDX;
-        <Option<RowAuthor> as records::RecordField>::read(&self.record.borrowed(), idx)
-            .expect("valid updated_by")
-            .expect("history updated_by is resolved when the image is read")
-            .as_author_subject()
-    }
-
-    /// Whether this image still lacks `updated_by`: it was read from history
-    /// storage, which omits the transaction's own author.
-    pub(super) fn updated_by_is_implicit(&self) -> Result<bool, Error> {
-        Ok(matches!(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)?,
-            Value::Nullable(None)
-        ))
+                .get_record(idx)
+                .expect("valid updated_by"),
+        )
+        .expect("canonical updated_by")
+        .as_author_subject()
     }
 
     pub(super) fn updated_at(&self) -> TxTime {
@@ -3747,11 +3736,10 @@ pub(super) fn stage_transaction_record(
     batch: &mut DatabaseBatch,
     write: TransactionRecordWrite,
     node_alias: NodeAlias,
-    made_by: AuthorCode,
     tx: &Transaction,
     status: &TransactionRecordStatus,
 ) -> Result<(), Error> {
-    let header = transaction_record_values(node_alias, made_by, tx, status)?;
+    let header = transaction_record_values(node_alias, tx, status)?;
     let key = || {
         PrimaryKeyValue::Composite(vec![
             PrimaryKeyValue::U64(tx.tx_id.time.0),
@@ -3793,7 +3781,6 @@ pub(super) fn stage_transaction_record(
 /// Values of a `jazz_transactions` record (`jazz.tx-record.v2`).
 pub(super) fn transaction_record_values(
     node_alias: NodeAlias,
-    made_by: AuthorCode,
     tx: &Transaction,
     status: &TransactionRecordStatus,
 ) -> Result<Vec<Value>, Error> {
@@ -3820,7 +3807,9 @@ pub(super) fn transaction_record_values(
         }),
         Value::U8(flags),
         Value::U32(tx.n_total_writes),
-        Value::U32(made_by.0),
+        RowAuthor::from_persisted_subject(tx.made_by)
+            .map_err(|_| Error::UnadmittedWriteAuthor)?
+            .to_value(),
         Value::String(fate_string(&status.fate)),
         Value::Nullable(status.global_time.map(|time| Box::new(Value::U64(time.0)))),
         Value::String(durability_string(status.durability).to_owned()),
@@ -4158,12 +4147,6 @@ pub(super) fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
         .to_value())
 }
 
-/// `updated_by` of an in-memory history image: always present. Storage may
-/// omit it (see [`VersionRow::updated_by`]).
-pub(super) fn history_updated_by_value(author: AuthorSubject) -> Result<Value, Error> {
-    Ok(Value::Nullable(Some(Box::new(row_author_value(author)?))))
-}
-
 pub(super) fn history_values_from_parts(
     table: &TableSchema,
     version: &VersionRowParts,
@@ -4176,7 +4159,7 @@ pub(super) fn history_values_from_parts(
         Value::U64(version.schema_version_alias.0),
         row_author_value(version.created_by)?,
         Value::U64(version.created_at.0),
-        history_updated_by_value(version.updated_by)?,
+        row_author_value(version.updated_by)?,
         Value::U64(version.updated_at.0),
         nullable_deletion_value(version.deletion),
     ];
@@ -4258,7 +4241,7 @@ fn history_values_from_wire(
             .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
             .0,
     ));
-    values.push(history_updated_by_value(version.updated_by())?);
+    values.push(row_author_value(version.updated_by())?);
     values.push(Value::U64(
         TxTime::from_physical_ms(version.updated_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
@@ -5249,8 +5232,46 @@ mod transaction_record_tests {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
+    /// The logical record bytes, as every read sees them.
     fn encode(table: &str, values: &[Value]) -> Vec<u8> {
         descriptor(table).create(values).unwrap()
+    }
+
+    /// The stored record bytes: the logical record with each author column
+    /// replaced by its `authors` dictionary code, here always the first
+    /// code (0).
+    fn stored(table: &str, values: &[Value]) -> Vec<u8> {
+        let schema = RuntimeSchema::new(Vec::<TableSchema>::new())
+            .lower_to_groove()
+            .table(table)
+            .unwrap()
+            .storage_record_schema();
+        let transcoder = records::RecordTranscoder::new(schema)
+            .unwrap()
+            .expect("the author column is interned");
+        let stored = transcoder
+            .to_physical::<records::Error>(&encode(table, values), |dictionary, _, _| {
+                assert_eq!(dictionary, crate::schema::AUTHORS_DICTIONARY);
+                Ok(0)
+            })
+            .unwrap();
+        let logical = transcoder
+            .to_logical::<records::Error>(&stored, |_, code| {
+                assert_eq!(code, 0);
+                Ok(
+                    RowAuthor::from_persisted_subject(AuthorSubject::for_test_bytes([5; 16]))
+                        .unwrap()
+                        .encoded_record()
+                        .raw(),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            logical,
+            encode(table, values),
+            "the stored form decodes back"
+        );
+        stored
     }
 
     /// The settled record of an accepted transaction carries no pending-only,
@@ -5264,10 +5285,9 @@ mod transaction_record_tests {
             Some(GlobalTime(9)),
             DurabilityTier::Global,
         );
-        let values = transaction_record_values(NodeAlias(1), AuthorCode(0), &tx, &status).unwrap();
-        let bytes = encode("jazz_transactions", &values);
+        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
         assert_eq!(
-            hex(&bytes),
+            hex(&stored("jazz_transactions", &values)),
             "020100000000000001000000000000000000030000000000000001010900000000000000022e0000002f000000000000"
         );
         assert_eq!(
@@ -5287,9 +5307,9 @@ mod transaction_record_tests {
             None,
             DurabilityTier::Local,
         );
-        let values = transaction_record_values(NodeAlias(1), AuthorCode(0), &tx, &status).unwrap();
+        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
         assert_eq!(
-            hex(&encode("jazz_transactions", &values)),
+            hex(&stored("jazz_transactions", &values)),
             "020100000000000001000000000000000000030000000000000002000000000000000000012e0000004a000000000104010000000000000101080808080808080808080808080808080000"
         );
         assert_eq!(
@@ -5309,10 +5329,10 @@ mod transaction_record_tests {
         tx.user_metadata_json = Some("{}".to_owned());
         let status = TransactionRecordStatus::new(Fate::Pending, None, DurabilityTier::Local)
             .view_scoped(true);
-        let values = transaction_record_values(NodeAlias(1), AuthorCode(0), &tx, &status).unwrap();
+        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
-            hex(&bytes),
+            hex(&stored("jazz_transactions", &values)),
             "02010000000000000100000000000000000103000000000000000000000000000000000001310000003200000001027b7d0001019c6dbdef71c955b8a4d72db3a1e0c7d1120000000275726e3a6a617a7a3a746573740230363036303630362d303630362d303630362d303630362d303630363036303630363036"
         );
         let record = OwnedRecord::new(bytes, descriptor("jazz_transactions"));
@@ -5327,10 +5347,10 @@ mod transaction_record_tests {
         );
 
         tx.permission_subject = Some(tx.made_by);
-        let values = transaction_record_values(NodeAlias(1), AuthorCode(0), &tx, &status).unwrap();
+        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
-            hex(&bytes),
+            hex(&stored("jazz_transactions", &values)),
             "02010000000000000100000000000000000503000000000000000000000000000000000001310000003200000001027b7d0000"
         );
         let record = OwnedRecord::new(bytes, descriptor("jazz_transactions"));
@@ -5353,7 +5373,6 @@ mod transaction_record_tests {
         };
         let accepted = transaction_record_values(
             NodeAlias(1),
-            AuthorCode(0),
             &tx,
             &TransactionRecordStatus::new(
                 Fate::Accepted,
@@ -5364,7 +5383,6 @@ mod transaction_record_tests {
         .unwrap();
         let rejected = transaction_record_values(
             NodeAlias(1),
-            AuthorCode(0),
             &tx,
             &TransactionRecordStatus::new(
                 Fate::Rejected(RejectionReason::MalformedCommit("bad".to_owned())),

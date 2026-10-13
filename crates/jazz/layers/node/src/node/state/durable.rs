@@ -383,10 +383,15 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
+            let made_by =
+                RowAuthor::from_record(record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
+                    .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                    .as_author_subject();
             let durability = durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?;
-            if !(fate == 0 || fate == 1)
+            if author.is_some_and(|author| !durable_author_matches(author, made_by))
+                || !(fate == 0 || fate == 1)
                 || (!include_missing_authority_timestamp && durability >= DurabilityTier::Global)
             {
                 continue;
@@ -394,17 +399,10 @@ where
             candidates.push((
                 NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?),
                 TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
-                AuthorCode(record.get_u32(TransactionRowRecord::FIELD_MADE_BY_IDX)?),
             ));
         }
         let mut tx_ids = Vec::with_capacity(candidates.len());
-        for (alias, time, made_by) in candidates {
-            if let Some(author) = author {
-                let made_by = self.row_author_for_code(made_by).await?.as_author_subject();
-                if !durable_author_matches(author, made_by) {
-                    continue;
-                }
-            }
+        for (alias, time) in candidates {
             let Some(node) = self.resolve_node_alias(alias).await? else {
                 continue;
             };
@@ -437,9 +435,6 @@ where
         };
 
         let mut scan = PendingTransactionScan::default();
-        let Some(durable_author) = self.author_code(durable_author).await? else {
-            return Ok(scan);
-        };
         for raw in self
             .database
             .index_scan_raw(
@@ -452,7 +447,11 @@ where
             scan.records_visited += 1;
             let record = raw.record();
             if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
-                || AuthorCode(record.get_u32(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
+                || RowAuthor::from_record(
+                    record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+                )
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .as_author_subject()
                     != durable_author
             {
                 continue;

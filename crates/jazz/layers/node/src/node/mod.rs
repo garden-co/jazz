@@ -318,7 +318,6 @@ fn hydrate_nested_payload_enum_cases(
 
 mod aggregate_read_result;
 pub mod api_error;
-mod authors;
 mod catalogue_ingest;
 mod codec;
 mod currency;
@@ -370,7 +369,6 @@ pub use query_eval::{
 pub use views::MaintainedViewBundleInputs;
 pub use views::{simple_scalar_exit_query, single_table_scalar_query};
 
-use authors::AuthorCode;
 use codec::*;
 use database_slot::DatabaseSlot;
 use open_tx::*;
@@ -420,8 +418,8 @@ mod tests;
 /// Default client-clock skew tolerance in milliseconds.
 pub const SKEW_TOLERANCE_MS: u64 = 30_000;
 const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
-/// Bound on `history_tx_authors`; the cache is cleared when it fills.
-const HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES: usize = 4096;
+/// Bound on `history_tx_seqs`; the cache is cleared when it fills.
+const HISTORY_TX_SEQ_CACHE_MAX_ENTRIES: usize = 4096;
 
 static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -612,17 +610,10 @@ pub struct NodeState<S = BoxedStorage> {
     /// transaction `(tx_time, tx_node_alias)`; `apply_node_batch` adds them to
     /// the transaction's `jazz_tx_touched_rows` list.
     tx_touched_dirty: BTreeMap<(TxTime, NodeAlias), TouchedRows>,
-    /// `made_by` of transactions whose history images omitted `updated_by`
-    /// (`resolve_history_updated_by`). Bounded; transaction authors never
-    /// change, so entries never go stale.
-    /// Each entry is the encoded field, ready to splice into an image.
-    history_tx_authors: BTreeMap<(TxTime, NodeAlias), Rc<[u8]>>,
-    /// Codes of the authors that transaction records name (`jazz_authors`).
-    authors: groove::dictionary::Dictionary,
     /// Global times of transactions read from storage, which key their
-    /// history records (`history_tx_seq`). Bounded like
-    /// `history_tx_authors`; a transaction's global time never changes once
-    /// set, so entries never go stale.
+    /// history records (`history_tx_seq`). Bounded by
+    /// `HISTORY_TX_SEQ_CACHE_MAX_ENTRIES`; a transaction's global time never
+    /// changes once set, so entries never go stale.
     history_tx_seqs: RefCell<FxHashMap<(TxTime, NodeAlias), GlobalTime>>,
     /// Set while this node (Core) mints a seq for an incoming patch.
     minting_global_time: bool,

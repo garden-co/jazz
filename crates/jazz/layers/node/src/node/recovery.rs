@@ -289,15 +289,10 @@ impl<S: OrderedKvStorage> NodeState<S> {
         tx.absent_read_set = None;
         tx.predicate_read_set = None;
         let mut batch = self.database.open_batch();
-        let tx_made_by = self
-            .stage_author_code(&mut batch, tx.made_by)
-            .await
-            .unwrap();
         stage_transaction_record(
             &mut batch,
             TransactionRecordWrite::Update,
             stored.node_alias,
-            tx_made_by,
             &tx,
             &TransactionRecordStatus::new(
                 stored.fate.clone(),

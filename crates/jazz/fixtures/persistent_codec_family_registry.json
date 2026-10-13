@@ -406,7 +406,7 @@
         },
         {
           "path": "crates/jazz/layers/node/src/node/tests/general.rs",
-          "anchor": "fn history_images_store_updated_by_only_when_it_differs_from_the_transaction_author"
+          "anchor": "fn history_images_always_store_updated_by"
         },
         {
           "path": "crates/jazz/layers/node/src/node/tests/general.rs",
@@ -478,7 +478,7 @@
       "evidence": [
         {
           "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
-          "anchor": "fn transaction_records_name_authors_by_dictionary_code"
+          "anchor": "fn author_columns_store_dictionary_codes"
         },
         {
           "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
@@ -517,6 +517,41 @@
         {
           "path": "dev/proofs/tx-record-v2-storage-compatibility.md",
           "anchor": "## Wire"
+        }
+      ]
+    },
+    {
+      "id": "groove.dictionary.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-node-root",
+      "spec": {
+        "path": "crates/groove/SPEC/2_storage_model.md",
+        "anchor": "### Interned columns and dictionaries"
+      },
+      "semantic_fixture": {
+        "path": "crates/groove/src/db/tests/dictionaries.rs",
+        "anchor": "fn dictionary_v1_entry_and_row_bytes_are_pinned"
+      },
+      "rejection_receipt": {
+        "path": "crates/groove/src/db/tests/dictionaries.rs",
+        "anchor": "fn a_corrupt_dictionary_is_refused"
+      },
+      "evidence": [
+        {
+          "path": "crates/groove/src/db/tests/dictionaries.rs",
+          "anchor": "fn a_reopened_database_decodes_rows_and_continues_allocation"
+        },
+        {
+          "path": "crates/groove/src/db/tests/dictionaries.rs",
+          "anchor": "fn a_new_entry_rides_the_publication_s_single_storage_write"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
+          "anchor": "fn author_columns_store_dictionary_codes"
+        },
+        {
+          "path": "crates/jazz/tests/storage_format_refusal.rs",
+          "anchor": "fn node_root_without_the_dictionary_family_is_refused"
         }
       ]
     },

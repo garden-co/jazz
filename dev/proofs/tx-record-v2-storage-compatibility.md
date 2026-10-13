@@ -33,13 +33,23 @@ SPEC 2 §2.8 has the normative layout. In short:
 
 | table                       | key               | holds                                                                                                                                                                                                            | lifetime                                          |
 | --------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| `jazz_transactions`         | `(time, node_id)` | time, node_id, kind, flags `U8`, n_total_writes, `made_by` as a `U32` author code, fate, global_time, durability, user_metadata, one nullable rejection record, the permission subject when it is not the author | forever                                           |
+| `jazz_transactions`         | `(time, node_id)` | time, node_id, kind, flags `U8`, n_total_writes, `made_by` interned (4-byte code), fate, global_time, durability, user_metadata, one nullable rejection record, the permission subject when it is not the author | forever                                           |
 | `jazz_tx_provenance`        | `(time, node_id)` | the contribution provenance record                                                                                                                                                                               | forever, only when flag bit 1 is set              |
 | `jazz_pending_transactions` | `(time, node_id)` | the four read-evidence slots                                                                                                                                                                                     | until the batch that records a seq or a rejection |
-| `jazz_authors`              | `code: U32`       | canonical `RowAuthor` bytes, unique value index                                                                                                                                                                  | forever, append-only                              |
 | `jazz_history_horizon`      | `id: U8 = 0`      | the seq at or below which history was truncated                                                                                                                                                                  | forever; this release requires 0                  |
 
 `base_pending` in history becomes a nullable `{time: U64, node: Uuid}` record.
+
+`made_by` (in `jazz_transactions` and `jazz_rejected_transactions`) and the
+`created_by`/`updated_by` of history, global-current and ahead-current rows
+are Groove interned columns (`groove.dictionary.v1`, Groove SPEC 2 "Interned
+columns and dictionaries"): each stores a 4-byte code into the node-local
+`authors` dictionary, a Groove-owned family keyed by the big-endian code and
+valued by the canonical `RowAuthor` bytes, append-only and loaded into memory
+on open. Every history image stores its `updated_by` again (5 bytes with
+`created_by`'s code); the earlier implicit form, null when it equalled the
+transaction's `made_by` and filled in from the transaction record on read, is
+gone.
 
 Exclusive read evidence moves to `jazz.exclusive-read-evidence.v2` (#3768):
 the predicate-read slot gains each aggregate read's recorded result
@@ -53,8 +63,11 @@ Byte pins: `node::codec::transaction_record_tests`,
 ## Wire
 
 The transaction record change is storage-only. A `Transaction` on the wire
-still carries its full author, provenance, permission hint and read evidence;
-author codes never leave the node.
+still carries its full author, provenance, permission hint and read evidence,
+and a replicated row carries its full `$createdBy`/`$updatedBy`: Groove
+decodes interned columns on every read, and a descriptor with an interned
+column refuses to encode (`InternedTypeNotEncodable`), so codes cannot reach
+the wire. Author codes never leave the node.
 
 `PredicateRead` gains a trailing `aggregate_result` (#3768). Old and new peers
 cannot decode each other's units, so mixed peers must be refused at Hello by
@@ -78,14 +91,17 @@ complete.
   peers admit and deduplicate them by it, so it is not pending-only. It costs
   a flag bit when it is the author. Duplicate detection treats a stored copy
   without read evidence as matching a redelivery that carries it.
-- **Author codes are node-local and append-only.** An entry is written in the
-  same batch as the first record that uses its code, so no durable record can
-  name a code without an entry. A batch that is dropped before it applies
-  keeps its code reserved in memory, so no code is handed to two authors.
-- **Only the transaction record uses author codes so far.** History and
-  current rows still store full authors, because `$createdBy` and `$updatedBy`
-  are query fields that can be filtered, sorted and projected; coding them
-  needs query engine support and would be a later layout change.
+- **Author codes are node-local, append-only and Groove's.** Jazz only marks
+  its author columns interned; Groove allocates codes while encoding a write
+  and stages each new entry into the same storage write as the first record
+  that uses it, so no durable record can name a code without an entry. A
+  batch that is dropped before it applies keeps its code reserved in memory,
+  so no code is handed to two authors. Open loads and validates the whole
+  dictionary (dense codes, canonical values) and refuses a corrupt one.
+- **Queries see full authors.** `$createdBy` and `$updatedBy` can be
+  filtered, sorted and projected because Groove decodes codes before rows
+  reach IVM sources, deltas and reads. An interned column cannot be a key,
+  index or foreign-key column; Jazz indexes none of its author columns.
 - **The horizon is reserved, not used.** Truncation itself is alpha.61. New
   side tables can be added later without a codec change, and truncation can
   keep the winning transactions' records, so the horizon record and its
@@ -113,9 +129,25 @@ per-transaction bytes:
 The run measured 83 bytes for the record; keeping the permission subject
 added its 5-byte null slot, which the pinned record bytes confirm.
 
-`jazz_authors` adds one entry and one index entry per distinct author (about
-180 bytes), not per transaction. History images are 20 bytes smaller from the
-variable-width `base_pending`.
+The `authors` dictionary adds one entry per distinct author (75 bytes for
+the test author: a 4-byte key and the 71-byte author), not per transaction;
+the earlier `jazz_authors` table and its value index cost about 180 bytes.
+History images are 20 bytes smaller from the variable-width `base_pending`.
+
+Interning the row author columns, same workload (bytes per row on RocksDB):
+
+| per row                                  | before (implicit history `updated_by`) |    after |
+| ---------------------------------------- | -------------------------------------: | -------: |
+| history image value (Core, writer)       |                                    251 |      179 |
+| `jazz_physical_2_history` (Core, writer) |                                    668 |      524 |
+| global-current value                     |                                    291 |      149 |
+| `jazz_physical_2_global_current`         |                                    354 |      212 |
+| **Core total**                           |                               **1546** | **1259** |
+| **reader total**                         |                                **985** |  **771** |
+
+Each author column drops from the 71-byte author to a 4-byte code; a history
+image's `updated_by` costs 4 bytes instead of the 1-byte null it had when it
+was the transaction's own author.
 
 The rest of the way to about 120 bytes per transaction is the touched-row
 list, which settled transactions could delete. That changes no layout, so it

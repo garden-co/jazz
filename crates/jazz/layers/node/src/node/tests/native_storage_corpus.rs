@@ -2392,12 +2392,14 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
 /// Before linear history this receipt reopened and extended the alpha.54 root.
 /// The history codec is now `jazz.history-version-current.v4` and old roots
 /// are refused rather than migrated, so the receipt pins the refusal instead:
-/// the root lacks exactly the durable-index and row-history families and
+/// the root lacks exactly the dictionary, durable-index, row-history and
+/// durability families and
 /// declares nothing this build does not read.
 ///
 /// ```text
 /// alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                       missing [groove.durable-index.v2,
+///                                       missing [groove.dictionary.v1,
+///                                                groove.durable-index.v2,
 ///                                                jazz.history-version-current.v4,
 ///                                                jazz.transaction-durability.v2]
 /// ```
@@ -2469,6 +2471,7 @@ fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>,
             assert_eq!(
                 missing,
                 vec![
+                    "groove.dictionary.v1".to_owned(),
                     "groove.durable-index.v2".to_owned(),
                     "jazz.history-version-current.v4".to_owned(),
                     "jazz.transaction-durability.v2".to_owned(),

@@ -697,7 +697,7 @@ where
             };
             for version in versions {
                 let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, seq, &version).await?;
-                let (table, record) = self.version_storage_write_binding(&stored, existing.tx.made_by)?;
+                let (table, record) = self.version_storage_write_binding(&stored)?;
                 let key = self.version_storage_primary_key(&stored)?;
                 if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
                     // The authority's post-image replaces this node's copy,
@@ -935,14 +935,12 @@ where
             // exclusive transaction. Preserve that scope marker even when
             // the redacted write count equals this fragment's length, so a
             // later sibling view can extend the same local projection.
-            let tx_made_by = self.stage_author_code(&mut batch, tx.made_by).await?;
             stage_transaction_record(
                 &mut batch,
                 TransactionRecordWrite::Insert {
                     provenance: contribution_merge,
                 },
                 tx_node_alias,
-                tx_made_by,
                 tx,
                 &TransactionRecordStatus::new(
                     (*first.fate).clone(),
@@ -991,7 +989,7 @@ where
                     (author_schema != self.catalogue.local_schema_version_id)
                         .then_some(author_schema),
                 )?;
-                let (history_table, groove_record) = self.version_storage_write_binding(&stored, tx.made_by)?;
+                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
                     self.version_storage_primary_key(&stored)?,

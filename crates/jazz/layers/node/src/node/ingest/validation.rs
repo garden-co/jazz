@@ -304,12 +304,10 @@ where
                 provenance: contribution_merge,
             }
         };
-        let tx_made_by = self.stage_author_code(batch, storage_tx.made_by).await?;
         stage_transaction_record(
             batch,
             write,
             tx_node_alias,
-            tx_made_by,
             storage_tx,
             &TransactionRecordStatus::new(fate.clone(), global_time, durability)
                 .view_scoped(view_scoped_cardinality && !preserve_authoritative_cardinality),
@@ -416,7 +414,7 @@ where
             // immutable history and deleting it in the same batch would violate
             // ensure_exact's promise that admitted immutable bytes survive.
             if !matches!(fate, Fate::Rejected(_)) {
-                let (history_table, groove_record) = self.version_storage_write_binding(&stored, tx.made_by)?;
+                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 let storage_key = self.version_storage_primary_key(&stored)?;
                 if tx_already_known && stored.seq()? != GlobalTime(0) {
                     // The write is accepted now: its pending record moves to
@@ -736,14 +734,12 @@ where
         }
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
         let mut batch = self.database.open_batch();
-        let tx_made_by = self.stage_author_code(&mut batch, tx.made_by).await?;
         stage_transaction_record(
             &mut batch,
             TransactionRecordWrite::Insert {
                 provenance: contribution_merge,
             },
             tx_node_alias,
-            tx_made_by,
             &tx,
             &TransactionRecordStatus::new(fate.clone(), None, DurabilityTier::Local),
         )?;
