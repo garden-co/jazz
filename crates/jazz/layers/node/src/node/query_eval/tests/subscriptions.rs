@@ -434,7 +434,8 @@ fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => graph_contains_point_scan(input),
+        | GraphBuilder::Aggregate { input, .. }
+        | GraphBuilder::Lookup { keys: input, .. } => graph_contains_point_scan(input),
         GraphBuilder::Union { inputs } => {
             inputs.iter().any(|input| graph_contains_point_scan(input))
         }

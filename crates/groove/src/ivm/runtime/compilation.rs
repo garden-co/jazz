@@ -416,6 +416,7 @@ impl IvmRuntime {
             keys,
             keys_on,
             table,
+            index,
             scan,
             variant_projection,
         } = graph
@@ -446,33 +447,88 @@ impl IvmRuntime {
             .schema
             .table(table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
-        let primary_key = primary_key_field_indices(table_schema, &inferred_output)?;
-        if primary_key.len() < prefix_len + key_fields.len() {
-            return Err(IvmRuntimeError::UnsupportedLookup(
-                "a lookup's prefix and keys exceed the table's primary key",
-            ));
-        }
-        // The probe is the storage key encoding of the key values, so each
-        // key field must have the type of the primary-key column it names.
-        for (key, column) in key_fields.iter().zip(&primary_key[prefix_len..]) {
-            if key_descriptor.fields()[*key].value_type
-                != inferred_output.fields()[*column].value_type
-            {
-                return Err(IvmRuntimeError::UnsupportedLookup(
-                    "a lookup key field must have its primary-key column's type",
-                ));
+        let index_source = match index {
+            None => {
+                let primary_key = primary_key_field_indices(table_schema, &inferred_output)?;
+                if primary_key.len() < prefix_len + key_fields.len() {
+                    return Err(IvmRuntimeError::UnsupportedLookup(
+                        "a lookup's prefix and keys exceed the table's primary key",
+                    ));
+                }
+                // The probe is the storage key encoding of the key values, so
+                // each key field must have the type of the primary-key column
+                // it names.
+                for (key, column) in key_fields.iter().zip(&primary_key[prefix_len..]) {
+                    if key_descriptor.fields()[*key].value_type
+                        != inferred_output.fields()[*column].value_type
+                    {
+                        return Err(IvmRuntimeError::UnsupportedLookup(
+                            "a lookup key field must have its primary-key column's type",
+                        ));
+                    }
+                }
+                None
             }
-        }
+            Some(index) => {
+                let index_schema = table_schema
+                    .indices
+                    .iter()
+                    .find(|candidate| candidate.name == *index)
+                    .ok_or_else(|| IvmRuntimeError::IndexNotFound(index.clone()))?;
+                let source = self.index_source_op(
+                    table_schema,
+                    index_schema,
+                    scan.clone(),
+                    Vec::new(),
+                    None,
+                    variant_projection.clone(),
+                )?;
+                if source.key_fields.len() < prefix_len + key_fields.len() {
+                    return Err(IvmRuntimeError::UnsupportedLookup(
+                        "a lookup's prefix and keys exceed the index key",
+                    ));
+                }
+                for (key, column) in key_fields
+                    .iter()
+                    .zip(&source.key_fields[prefix_len..prefix_len + key_fields.len()])
+                {
+                    let column_type = &source.input_descriptor.fields()[*column].value_type;
+                    if matches!(column_type, ValueType::Array(_))
+                        || matches!(column_type, ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Array(_)))
+                    {
+                        return Err(IvmRuntimeError::UnsupportedLookup(
+                            "an index lookup cannot probe a multi-valued index column",
+                        ));
+                    }
+                    if index_lookup_key_envelopes(
+                        &key_descriptor.fields()[*key].value_type,
+                        column_type,
+                    )
+                    .is_none()
+                    {
+                        return Err(IvmRuntimeError::UnsupportedLookup(
+                            "an index lookup key field must have its index column's type or that type's non-null type",
+                        ));
+                    }
+                }
+                Some(source)
+            }
+        };
         let node = self.graph.dedup_node(
             NodeDescriptor::new(
                 OpType::Lookup(LookupOp {
                     source: TableSourceOp {
                         table: table.clone(),
-                        scan: scan.clone(),
+                        scan: if index_source.is_some() {
+                            None
+                        } else {
+                            scan.clone()
+                        },
                         variant_projection: variant_projection
                             .clone()
                             .map(VariantProjectionTarget::Named),
                     },
+                    index: index_source,
                     key_descriptor,
                     key_fields,
                 }),

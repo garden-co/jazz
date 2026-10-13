@@ -43,6 +43,10 @@ pub struct TableSourceOp {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LookupOp {
     pub source: TableSourceOp,
+    /// Probe this row-projected secondary index instead of the primary key.
+    /// Its `scan` is the static index-key prefix and `source.scan` is unset;
+    /// `source.variant_projection` is the index's row projection.
+    pub index: Option<IndexSourceOp>,
     pub key_descriptor: RecordDescriptor,
     pub key_fields: Vec<usize>,
 }

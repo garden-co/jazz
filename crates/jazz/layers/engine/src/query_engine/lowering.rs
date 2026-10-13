@@ -653,7 +653,9 @@ fn declared_node_fields(
                     fields
                 })
         }
-        GraphBuilder::Table { .. } | GraphBuilder::Index { .. } => None,
+        GraphBuilder::Table { .. } | GraphBuilder::Index { .. } | GraphBuilder::Lookup { .. } => {
+            None
+        }
     }
 }
 
@@ -882,6 +884,36 @@ fn parameter_domain_for_request(
     Ok(domain)
 }
 
+/// The binding-source field that carries `value` in every binding of a
+/// shared prepared program, with its validated type: a user parameter, or a
+/// claim that routes the program's rows. A source equality against such a
+/// value lowers to a join with the binding source, so a physical source may
+/// be narrowed by the live bindings' values without fixing any one of them.
+/// `None` when the program has no shared binding source or `value` is not
+/// carried by it.
+pub fn shared_binding_key_field(
+    request: &QueryProgramRequest,
+    value: &NormalizedValueRef,
+) -> Result<Option<(String, ColumnType)>, UnsupportedReason> {
+    if request.input.binding.source_shape.is_none() {
+        return Ok(None);
+    }
+    let domain = parameter_domain_for_request(request)?;
+    Ok(match value {
+        NormalizedValueRef::Param(param) => domain
+            .user_params
+            .get(param)
+            .map(|ty| (param.clone(), ty.clone())),
+        NormalizedValueRef::Claim(path) => claim_binding_slot(&domain, path)
+            .filter(|slot| domain.routing_params.contains(slot))
+            .and_then(|slot| {
+                let ty = domain.claim_params.get(&slot)?.ty.clone();
+                Some((slot, ty))
+            }),
+        _ => None,
+    })
+}
+
 /// The one binding slot carrying `path`, when a source equality against
 /// that claim can join the binding source instead of inlining its value.
 pub(crate) fn claim_binding_slot(domain: &ParameterDomain, path: &ClaimPath) -> Option<String> {
@@ -1095,7 +1127,8 @@ fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
             | GraphBuilder::ArgMinBy { input, .. }
             | GraphBuilder::TopBy { input, .. }
             | GraphBuilder::CollectBy { input, .. }
-            | GraphBuilder::Aggregate { input, .. } => pending.push((input, false)),
+            | GraphBuilder::Aggregate { input, .. }
+            | GraphBuilder::Lookup { keys: input, .. } => pending.push((input, false)),
             GraphBuilder::Union { inputs } => {
                 pending.extend(inputs.iter().rev().map(|input| (input.as_ref(), false)));
             }

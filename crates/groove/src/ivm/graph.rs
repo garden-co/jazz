@@ -291,14 +291,19 @@ pub enum GraphBuilder {
         right_on: Vec<FieldRef>,
         comparison: ValueComparison,
     },
-    /// The rows of a stored table whose primary key, after `scan`'s static
-    /// prefix, starts with the key of some row of `keys`: a semi-join of the
-    /// table by `keys`, computed by probing the table's storage once per live
-    /// key instead of arranging the whole table. See [`GraphBuilder::lookup`].
+    /// The rows of a stored table whose primary key (or, with `index`, whose
+    /// key in that secondary index), after `scan`'s static prefix, starts
+    /// with the key of some row of `keys`: a semi-join of the table by
+    /// `keys`, computed by probing storage once per live key instead of
+    /// arranging the whole table. See [`GraphBuilder::lookup`].
     Lookup {
         keys: Arc<GraphBuilder>,
         keys_on: Vec<FieldRef>,
         table: String,
+        /// A secondary index of `table` to probe instead of its primary key.
+        /// Index lookups always output table rows through
+        /// `variant_projection`.
+        index: Option<String>,
         scan: Option<StaticScanSpec>,
         variant_projection: Option<String>,
     },
@@ -1004,11 +1009,16 @@ impl GraphBuilder {
     ///
     /// `right` must be a [`GraphBuilder::Table`] source (as built by
     /// [`Self::table`], [`Self::table_scan`] with a point or prefix scan, or
-    /// [`Self::variant_source_scan`]); otherwise this returns `None`. The
-    /// result is the rows of `right` whose primary key, after the scan's
-    /// static prefix, starts with the values of `keys_on` of some row of
-    /// `keys`. The key fields map positionally onto the following primary-key
-    /// columns and must have their value types.
+    /// [`Self::variant_source_scan`]) or a row-projected secondary-index
+    /// source without intersections or candidate filter (as built by
+    /// [`Self::variant_index_scan`] with a point or prefix scan); otherwise
+    /// this returns `None`. The result is the rows of `right` whose primary
+    /// key (respectively index key), after the scan's static prefix, starts
+    /// with the values of `keys_on` of some row of `keys`. The key fields map
+    /// positionally onto the following key columns. A primary-key lookup's
+    /// key fields must have their columns' value types; an index lookup's
+    /// key field may also be the non-null type of a nullable index column,
+    /// and then probes that column's non-null values.
     ///
     /// Keys have set semantics: a key selects its rows while its count is
     /// positive. Hydration reads one storage prefix per distinct live key,
@@ -1025,18 +1035,27 @@ impl GraphBuilder {
         keys: GraphBuilder,
         keys_on: impl IntoIterator<Item = impl Into<String>>,
     ) -> Option<Self> {
-        let Self::Table {
-            table,
-            scan,
-            variant_projection,
-        } = right
-        else {
-            return None;
+        let (table, index, scan, variant_projection) = match right {
+            Self::Table {
+                table,
+                scan,
+                variant_projection,
+            } => (table, None, scan, variant_projection),
+            Self::Index {
+                table,
+                index,
+                scan,
+                intersections,
+                candidate_filter: None,
+                row_projection: Some(row_projection),
+            } if intersections.is_empty() => (table, Some(index), scan, Some(row_projection)),
+            _ => return None,
         };
         Some(Self::Lookup {
             keys: Arc::new(keys),
             keys_on: keys_on.into_iter().map(FieldRef::name).collect(),
             table,
+            index,
             scan,
             variant_projection,
         })

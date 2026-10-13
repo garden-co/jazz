@@ -85,6 +85,7 @@ pub(super) fn collect_binding_source_fingerprint(
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. }
+        | GraphBuilder::Lookup { keys: input, .. }
         | GraphBuilder::StreamingChecksum { input, .. } => {
             collect_binding_source_fingerprint(input, sources);
         }
@@ -152,6 +153,7 @@ pub(super) fn graph_any(graph: &GraphBuilder, predicate: &impl Fn(&GraphBuilder)
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. }
+        | GraphBuilder::Lookup { keys: input, .. }
         | GraphBuilder::StreamingChecksum { input, .. } => graph_any(input, predicate),
         GraphBuilder::Union { inputs } => inputs.iter().any(|input| graph_any(input, predicate)),
         GraphBuilder::Join { left, right, .. }

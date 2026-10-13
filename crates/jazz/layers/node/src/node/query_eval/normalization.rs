@@ -526,6 +526,37 @@ fn collect_root_literal_equalities(
     Ok(())
 }
 
+/// The root columns a conjunctive top-level filter equates with a query
+/// parameter, by parameter name: the parameter-valued subset of
+/// [`literal_equalities_for_filters`], before any binding resolves it.
+pub(super) fn root_param_equalities(filters: &[Predicate]) -> BTreeMap<String, String> {
+    fn collect(predicate: &Predicate, equalities: &mut BTreeMap<String, String>) {
+        match predicate {
+            Predicate::All(predicates) => {
+                for predicate in predicates {
+                    collect(predicate, equalities);
+                }
+            }
+            Predicate::Eq(left, right) => {
+                for (field, value) in [(left, right), (right, left)] {
+                    if let (Operand::Column(column), Operand::Param(param)) = (field, value) {
+                        equalities
+                            .entry(column.clone())
+                            .or_insert_with(|| param.clone());
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut equalities = BTreeMap::new();
+    for predicate in filters {
+        collect(predicate, &mut equalities);
+    }
+    equalities
+}
+
 fn root_equality_literal(
     field: &Operand,
     value: &Operand,

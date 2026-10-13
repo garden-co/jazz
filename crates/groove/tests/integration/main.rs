@@ -23,6 +23,8 @@ mod inline_records_snapshot;
 mod large_value_leaf_codec;
 #[path = "../large_value_query.rs"]
 mod large_value_query;
+#[path = "../lookup_index.rs"]
+mod lookup_index;
 #[path = "../lookup_join.rs"]
 mod lookup_join;
 #[path = "../multisink_subscription.rs"]

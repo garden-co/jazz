@@ -1,5 +1,6 @@
 //! Keyed lookup: a table source probed by the keys of its only input
-//! ([`GraphBuilder::lookup`](crate::ivm::GraphBuilder::lookup)).
+//! ([`GraphBuilder::lookup`](crate::ivm::GraphBuilder::lookup)), through its
+//! primary key or through a secondary index.
 //!
 //! Hydration reads one storage prefix per distinct live key. A tick probes
 //! only keys that become live, retracts the rows of keys that stop being
@@ -48,15 +49,36 @@ fn encoded_key(
     Ok(key)
 }
 
-/// Where a lookup's probe key sits inside the table's primary key.
+/// Where a lookup's probe key sits inside the probed key.
+#[derive(Clone)]
 struct LookupLayout {
-    /// Storage-key prefix of the static scan (empty without one).
+    /// The static scan's key prefix (empty without one). For a primary-key
+    /// lookup this is also the storage-key prefix; for an index lookup it is
+    /// the logical index-key prefix inside the index's storage envelope.
     prefix: Vec<u8>,
-    /// Output field indices of the whole primary key.
-    primary_key: Vec<usize>,
-    /// Output field indices of the primary-key columns the keys name.
-    key_columns: Vec<usize>,
+    probe: LookupProbe,
 }
+
+#[derive(Clone)]
+enum LookupProbe {
+    Table {
+        /// Output field indices of the whole primary key.
+        primary_key: Vec<usize>,
+        /// Output field indices of the primary-key columns the keys name.
+        key_columns: Vec<usize>,
+    },
+    Index {
+        /// `durable_index_key_prefix` of the probed index.
+        storage_base: Vec<u8>,
+        /// Per key field, how many nullable envelopes its index column adds
+        /// around the key's own type.
+        envelopes: Vec<usize>,
+    },
+}
+
+/// A probed row: the key it was found under, its encoded row identity and
+/// its output record.
+type KeyedRow = (Vec<u8>, Vec<u8>, Bytes);
 
 impl TickEvaluator<'_> {
     fn lookup_layout(
@@ -64,12 +86,11 @@ impl TickEvaluator<'_> {
         lookup: &LookupOp,
         output: &RecordDescriptor,
     ) -> Result<LookupLayout, IvmRuntimeError> {
-        let table = self
-            .schema
-            .table(&lookup.source.table)
-            .ok_or_else(|| IvmRuntimeError::TableNotFound(lookup.source.table.clone()))?;
-        let primary_key = primary_key_field_indices(table, output)?;
-        let prefix_len = match &lookup.source.scan {
+        let scan = match &lookup.index {
+            Some(index) => index.scan.as_ref(),
+            None => lookup.source.scan.as_ref(),
+        };
+        let prefix_len = match scan {
             None => 0,
             Some(StaticScanSpec::Prefix(values) | StaticScanSpec::Point(values)) => values.len(),
             Some(_) => {
@@ -78,13 +99,47 @@ impl TickEvaluator<'_> {
                 ));
             }
         };
-        let prefix = match lookup.source.scan.as_ref().map(scan_bounds).transpose()? {
+        let prefix = match scan.map(scan_bounds).transpose()? {
             None => Vec::new(),
             Some(StaticScanBounds::Prefix(prefix)) => prefix,
             Some(StaticScanBounds::Range { .. }) => {
                 unreachable!("point and prefix scans have prefix bounds")
             }
         };
+        if let Some(index) = &lookup.index {
+            let columns = index
+                .key_fields
+                .get(prefix_len..prefix_len + lookup.key_fields.len())
+                .ok_or(IvmRuntimeError::UnsupportedLookup(
+                    "a lookup's prefix and keys exceed the index key",
+                ))?;
+            let envelopes = lookup
+                .key_fields
+                .iter()
+                .zip(columns)
+                .map(|(key, column)| {
+                    index_lookup_key_envelopes(
+                        &lookup.key_descriptor.fields()[*key].value_type,
+                        &index.input_descriptor.fields()[*column].value_type,
+                    )
+                    .ok_or(IvmRuntimeError::UnsupportedLookup(
+                        "an index lookup key field must have its index column's type or that type's non-null type",
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(LookupLayout {
+                prefix,
+                probe: LookupProbe::Index {
+                    storage_base: durable_index_key_prefix(&index.table, &index.index),
+                    envelopes,
+                },
+            });
+        }
+        let table = self
+            .schema
+            .table(&lookup.source.table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(lookup.source.table.clone()))?;
+        let primary_key = primary_key_field_indices(table, output)?;
         let key_columns = primary_key
             .get(prefix_len..prefix_len + lookup.key_fields.len())
             .ok_or(IvmRuntimeError::UnsupportedLookup(
@@ -93,9 +148,132 @@ impl TickEvaluator<'_> {
             .to_vec();
         Ok(LookupLayout {
             prefix,
-            primary_key,
-            key_columns,
+            probe: LookupProbe::Table {
+                primary_key,
+                key_columns,
+            },
         })
+    }
+
+    /// The probe key of one key record: the storage-key encoding of its key
+    /// fields as the probed key columns hold them.
+    fn lookup_probe_key(
+        lookup: &LookupOp,
+        layout: &LookupLayout,
+        descriptor: &RecordDescriptor,
+        record: &[u8],
+    ) -> Result<Vec<u8>, IvmRuntimeError> {
+        match &layout.probe {
+            LookupProbe::Table { .. } => encoded_key(descriptor, record, &lookup.key_fields),
+            LookupProbe::Index { envelopes, .. } => {
+                // A nullable index column stores a present value as the
+                // nullable tag followed by the value's own encoding.
+                let mut key = Vec::new();
+                for (&field, &envelopes) in lookup.key_fields.iter().zip(envelopes) {
+                    key.extend(std::iter::repeat_n(9, envelopes));
+                    encode_record_field_key_part(&mut key, descriptor, record, field)?;
+                }
+                Ok(key)
+            }
+        }
+    }
+
+    /// Key, identity and output record of each of the probed table's rows
+    /// that lies under the lookup's static prefix.
+    fn lookup_keyed_rows(
+        &self,
+        lookup: &LookupOp,
+        layout: &LookupLayout,
+        output: &RecordDescriptor,
+        table_deltas: &[TableDelta],
+    ) -> Result<Vec<(i64, KeyedRow)>, IvmRuntimeError> {
+        match (&lookup.index, &layout.probe) {
+            (
+                None,
+                LookupProbe::Table {
+                    primary_key,
+                    key_columns,
+                },
+            ) => {
+                let rows = NodeState::update_table_source(
+                    &lookup.source,
+                    self.schema,
+                    self.variant_projections,
+                    output,
+                    table_deltas,
+                )?;
+                rows.deltas
+                    .into_iter()
+                    .map(|delta| {
+                        let key = encoded_key(output, delta.raw(), key_columns)?;
+                        let identity = encoded_key(output, delta.raw(), primary_key)?;
+                        Ok((delta.weight, (key, identity, delta.record)))
+                    })
+                    .collect()
+            }
+            (Some(index), LookupProbe::Index { envelopes, .. }) => {
+                let key_len = layout_prefix_len(index) + envelopes.len();
+                let index_input = TableSourceOp {
+                    table: index.table.clone(),
+                    scan: None,
+                    variant_projection: index.variant_projection.clone(),
+                };
+                let mut rows = Vec::new();
+                // Project each row on its own: a row whose variant one
+                // projection omits must not shift the other's alignment.
+                for table_delta in table_deltas
+                    .iter()
+                    .filter(|delta| delta.table == index.table)
+                {
+                    for record_delta in &table_delta.deltas {
+                        let one = [TableDelta {
+                            table: table_delta.table.clone(),
+                            variant_tag: table_delta.variant_tag,
+                            descriptor: table_delta.descriptor,
+                            deltas: vec![record_delta.clone()],
+                        }];
+                        let indexed = NodeState::update_table_source(
+                            &index_input,
+                            self.schema,
+                            self.variant_projections,
+                            &index.input_descriptor,
+                            &one,
+                        )?;
+                        let Some(indexed) = indexed.deltas.first() else {
+                            continue;
+                        };
+                        let index_key = encoded_key(
+                            &index.input_descriptor,
+                            indexed.raw(),
+                            &index.key_fields[..key_len],
+                        )?;
+                        let Some(key) = index_key.strip_prefix(layout.prefix.as_slice()) else {
+                            continue;
+                        };
+                        let identity = encoded_key(
+                            &index.input_descriptor,
+                            indexed.raw(),
+                            &index.value_fields,
+                        )?;
+                        let projected = NodeState::update_table_source(
+                            &lookup.source,
+                            self.schema,
+                            self.variant_projections,
+                            output,
+                            &one,
+                        )?;
+                        for delta in projected.deltas {
+                            rows.push((
+                                delta.weight,
+                                (key.to_vec(), identity.clone(), delta.record),
+                            ));
+                        }
+                    }
+                }
+                Ok(rows)
+            }
+            _ => unreachable!("a lookup's layout follows its source"),
+        }
     }
 
     /// Read every row of `keys` from storage through the evaluation
@@ -109,21 +287,34 @@ impl TickEvaluator<'_> {
         keys: impl IntoIterator<Item = &'k Vec<u8>> + Clone,
     ) -> Result<ProbedRows, IvmRuntimeError> {
         let schema = self.schema;
-        let variant_projections = self.variant_projections;
+        let request = |key: &[u8]| {
+            let mut prefix = layout.prefix.clone();
+            prefix.extend_from_slice(key);
+            match (&lookup.index, &layout.probe) {
+                (Some(index), LookupProbe::Index { storage_base, .. }) => {
+                    // The same storage envelope `persisted_index_scan_bounds`
+                    // puts around a static index prefix.
+                    let mut storage_key = storage_base.clone();
+                    storage_key.push(7);
+                    encode_ordered_bytes_without_terminal(&mut storage_key, &prefix);
+                    super::super::evaluation_session::StorageRequestKey::IndexedRowsPrefix {
+                        table: index.table.clone(),
+                        index: index.index.clone(),
+                        prefix: storage_key,
+                    }
+                }
+                _ => super::super::evaluation_session::StorageRequestKey::ScanPrefix {
+                    family: lookup.source.table.clone(),
+                    prefix,
+                },
+            }
+        };
         let inputs =
             self.evaluation_inputs
                 .as_deref_mut()
                 .ok_or(IvmRuntimeError::UnsupportedLookup(
                     "a lookup reads storage and cannot run in a recursive step or durable node",
                 ))?;
-        let request = |key: &[u8]| {
-            let mut prefix = layout.prefix.clone();
-            prefix.extend_from_slice(key);
-            super::super::evaluation_session::StorageRequestKey::ScanPrefix {
-                family: lookup.source.table.clone(),
-                prefix,
-            }
-        };
         let mut blocked = false;
         for key in keys.clone() {
             match inputs.rows(request(key)) {
@@ -138,28 +329,47 @@ impl TickEvaluator<'_> {
         let table = schema
             .table(&lookup.source.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(lookup.source.table.clone()))?;
-        // The probe prefix already bounds the rows; project them like the
-        // table source would.
-        let source = TableSourceOp {
-            scan: None,
-            ..lookup.source.clone()
-        };
-        let mut probed = ProbedRows::default();
+        let mut loaded = Vec::new();
         for key in keys {
+            let inputs = self
+                .evaluation_inputs
+                .as_deref_mut()
+                .expect("checked above");
             let stored = inputs.rows(request(key))?;
             let grouped =
                 NodeState::group_source_rows(table, stored.iter().map(|(_, row)| row.as_slice()))?;
-            let projected = NodeState::update_table_source(
-                &source,
-                schema,
-                variant_projections,
-                output,
-                &grouped,
-            )?;
+            loaded.push((key.clone(), grouped));
+        }
+        // The probe prefix already bounds the rows; project them like the
+        // source would.
+        let unscanned = LookupOp {
+            source: TableSourceOp {
+                scan: None,
+                ..lookup.source.clone()
+            },
+            ..lookup.clone()
+        };
+        let unscanned_layout = LookupLayout {
+            prefix: Vec::new(),
+            ..layout.clone()
+        };
+        let mut probed = ProbedRows::default();
+        for (key, grouped) in loaded {
+            let layout = match &lookup.index {
+                // An index row's own key is still checked against the
+                // static prefix, which the probe prefix includes.
+                Some(_) => layout,
+                None => &unscanned_layout,
+            };
+            let found = self.lookup_keyed_rows(&unscanned, layout, output, &grouped)?;
             let rows = probed.entry(key.clone()).or_default();
-            for delta in projected.deltas {
-                let primary_key = encoded_key(output, delta.raw(), &layout.primary_key)?;
-                rows.insert(primary_key, delta.record);
+            for (_, (row_key, identity, record)) in found {
+                // An index entry and the row it names are separate reads; a
+                // row that has since left this key is not one of its rows.
+                if lookup.index.is_some() && row_key != key {
+                    continue;
+                }
+                rows.insert(identity, record);
             }
         }
         Ok(probed)
@@ -181,7 +391,7 @@ impl TickEvaluator<'_> {
         let input = self.materialize_indirect_field_indices(input, &lookup.key_fields)?;
         let mut key_deltas = BTreeMap::<Vec<u8>, i64>::new();
         for delta in &input.deltas {
-            let key = encoded_key(&input.descriptor, delta.raw(), &lookup.key_fields)?;
+            let key = Self::lookup_probe_key(lookup, &layout, &input.descriptor, delta.raw())?;
             *key_deltas.entry(key).or_default() += delta.weight;
         }
 
@@ -228,20 +438,33 @@ impl TickEvaluator<'_> {
         // Read every entering key before touching state: a blocked probe
         // re-polls this node with the same inputs.
         let probed = self.probe_lookup_keys(lookup, &output_desc, &layout, entering.iter())?;
-        // The table's own changes, under the static prefix, for keys that
-        // stay live. Entering keys were read from storage, which already
-        // holds this tick's writes; leaving keys are retracted whole.
+        // The table's own changes, under the static prefix. Leaving keys are
+        // retracted whole. An entering key's probe may or may not already
+        // reflect this tick's writes (a secondary index is written after the
+        // rows it names), so its rows take the changes too: a row is removed
+        // only if it is the probed row and inserted over any probed version,
+        // which converges either way.
         let table_rows = if replace {
-            RecordDeltas::empty(output_desc)
+            Vec::new()
         } else {
-            NodeState::update_table_source(
-                &lookup.source,
-                self.schema,
-                self.variant_projections,
-                &output_desc,
-                self.table_deltas,
-            )?
+            self.lookup_keyed_rows(lookup, &layout, &output_desc, self.table_deltas)?
         };
+        let mut probed = probed;
+        for (weight, (key, identity, record)) in &table_rows {
+            let Some(rows) = probed.get_mut(key) else {
+                continue;
+            };
+            if *weight < 0 && rows.get(identity) == Some(record) {
+                rows.remove(identity);
+            }
+        }
+        for (weight, (key, identity, record)) in &table_rows {
+            if *weight > 0
+                && let Some(rows) = probed.get_mut(key)
+            {
+                rows.insert(identity.clone(), record.clone());
+            }
+        }
 
         let mut operator = match self.operator_states.remove(&operator_key) {
             Some(operator) if !replace => operator,
@@ -250,18 +473,15 @@ impl TickEvaluator<'_> {
         let OperatorState::Lookup(state) = &mut operator else {
             return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
         };
-        // Changes to rows of keys that stay live: the table's changes under
-        // the static prefix, by primary key.
+        // Changes to rows of keys that stay live, by row identity.
         let mut changes = Vec::new();
         {
             let current = state.value().0.as_ref();
-            for delta in &table_rows.deltas {
-                let key = encoded_key(&output_desc, delta.raw(), &layout.key_columns)?;
+            for (weight, (key, identity, record)) in table_rows {
                 if !current.live(&key) || leaving.contains(&key) {
                     continue;
                 }
-                let primary_key = encoded_key(&output_desc, delta.raw(), &layout.primary_key)?;
-                changes.push((delta.weight, key, primary_key, delta.record.clone()));
+                changes.push((weight, key, identity, record));
             }
         }
         let mut output = Vec::new();
@@ -319,5 +539,13 @@ impl TickEvaluator<'_> {
             descriptor: output_desc,
             deltas: output,
         })
+    }
+}
+
+/// Static-prefix length of an index lookup.
+fn layout_prefix_len(index: &IndexSourceOp) -> usize {
+    match &index.scan {
+        Some(StaticScanSpec::Prefix(values) | StaticScanSpec::Point(values)) => values.len(),
+        _ => 0,
     }
 }

@@ -290,9 +290,29 @@ pub(super) struct CurrentIndexCandidateFilter {
     source_column: String,
 }
 
+/// The binding-source field whose live values key a [`CurrentAccessPath::BindingLookup`].
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct BindingLookupKey {
+    /// The shared program's binding-source shape.
+    pub(super) shape: String,
+    /// The parameter or claim slot carrying the equality's value.
+    pub(super) field: String,
+    pub(super) ty: ColumnType,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
+    /// A shared retained program's equality between `column` (`id` for the
+    /// primary key, otherwise a single-column current index) and a value
+    /// carried by its binding source. The source is probed by every live
+    /// binding's value instead of one binding's literal prefix, so all
+    /// bindings share one graph; the lowered equality join still decides
+    /// which binding each row belongs to.
+    BindingLookup {
+        column: String,
+        key: BindingLookupKey,
+    },
     /// First-result Global listing in physical row-UUID order. The caller
     /// re-proves the page after policy and deletion filtering before returning.
     PrimaryKeyPage {
@@ -2844,6 +2864,24 @@ where
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
                 Ok(Some(rows))
             }
+            CurrentAccessPath::BindingLookup { column, key } => {
+                if tier != DurabilityTier::Global {
+                    return Ok(None);
+                }
+                let projection_target = self.current_projection_target(request, table)?;
+                let rows = self
+                    .node
+                    .physical_global_current_binding_lookup(
+                        table,
+                        self.read_view.read_schema,
+                        &column,
+                        &key,
+                        &projection_target,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                self.node.query_engine_read_metrics.source_index_probes += 1;
+                Ok(Some(rows))
+            }
             CurrentAccessPath::Index {
                 column,
                 order_column,
@@ -3215,6 +3253,18 @@ where
                         .map_err(|_| {
                             source_resolution_error(request, SourceGap::SchemaProjection)
                         })?,
+                    Some(CurrentAccessPath::BindingLookup { column, key }) => {
+                        self.node.query_engine_read_metrics.source_index_probes += 1;
+                        self.node
+                            .physical_global_current_binding_lookup(
+                                read_table,
+                                self.read_view.read_schema,
+                                &column,
+                                &key,
+                                &projection_target,
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                    }
                     Some(CurrentAccessPath::Index {
                         column,
                         order_column,
@@ -4770,6 +4820,9 @@ where
                 .into_iter()
                 .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
         );
+        if matches!(lifetime, HydrationLifetime::Retained) {
+            paths.extend(self.binding_lookup_access_paths(request, shape)?);
+        }
         if matches!(lifetime, HydrationLifetime::FirstResult) {
             let query = shape.query();
             let root = root_source_id(&query.table);
@@ -4973,6 +5026,110 @@ where
         Ok(paths)
     }
 
+    /// Retained access paths of a shared prepared program (one whose binding
+    /// source carries every subscriber's values). An equality against a
+    /// carried parameter or routing claim narrows its source by a keyed
+    /// lookup of every live binding's value: a literal prefix taken from this
+    /// binding would make the prepared graph, and so every node under it,
+    /// private to this binding (#4017). Like the literal paths, a lookup only
+    /// selects candidates; the lowered equality join with the binding source
+    /// still decides which binding each row belongs to.
+    ///
+    /// Only Global sources take a lookup: a Local source re-reads its ahead
+    /// overlay in full and keeps its literal settled prefix.
+    fn binding_lookup_access_paths(
+        &self,
+        request: &QueryProgramRequest,
+        shape: &ValidatedQuery,
+    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        let Some(binding_shape) = request.input.binding.source_shape.clone() else {
+            return Ok(BTreeMap::new());
+        };
+        let mut equalities = BTreeMap::<SourceId, BTreeMap<String, NormalizedValueRef>>::new();
+        // The root id narrows the content source even when relational nodes
+        // follow it, as the literal primary-key path does.
+        let query = shape.query();
+        if let Some(param) = root_param_equalities(&query.filters).remove("id") {
+            equalities
+                .entry(root_source_id(&query.table))
+                .or_default()
+                .insert("id".to_owned(), NormalizedValueRef::Param(param));
+        }
+        // Secondary paths follow `query_program_access_paths`: alternatives
+        // and relations may reuse a source identity with other predicates.
+        if !request.input.shape.nodes.values().any(|node| {
+            matches!(
+                node,
+                RowSetExpr::Union { .. }
+                    | RowSetExpr::Join { .. }
+                    | RowSetExpr::RecursiveRelation { .. }
+            )
+        }) {
+            for node_id in request.input.shape.nodes.keys() {
+                let Some(found) =
+                    normalized_program_binding_equalities(&request.input.shape, node_id)?
+                else {
+                    continue;
+                };
+                for (source, fields) in found {
+                    let source_equalities = equalities.entry(source).or_default();
+                    for (field, value) in fields {
+                        source_equalities.entry(field).or_insert(value);
+                    }
+                }
+            }
+        }
+
+        let mut paths = BTreeMap::new();
+        for (source, fields) in equalities {
+            if request.reads.primary.source_current_tier(&source) != Some(DurabilityTier::Global) {
+                continue;
+            }
+            let table =
+                self.table_in_schema_ref(&source.table, request.reads.primary.read_schema)?;
+            let columns =
+                std::iter::once("id".to_owned()).chain(table.global_current_indexed_columns());
+            for column in columns {
+                let Some(value) = fields.get(&column) else {
+                    continue;
+                };
+                let Some((field, ty)) =
+                    crate::node::query_engine::shared_binding_key_field(request, value)
+                        .map_err(|reason| Error::QueryCapability(format!("{reason:?}")))?
+                else {
+                    continue;
+                };
+                let probeable = if column == "id" {
+                    ty == ColumnType::Uuid
+                } else {
+                    table
+                        .columns
+                        .iter()
+                        .find(|candidate| candidate.name == column)
+                        .is_some_and(|candidate| {
+                            binding_lookup_column_type(&candidate.column_type, &ty)
+                        })
+                };
+                if !probeable {
+                    continue;
+                }
+                paths.insert(
+                    source.clone(),
+                    CurrentAccessPath::BindingLookup {
+                        column,
+                        key: BindingLookupKey {
+                            shape: binding_shape.clone(),
+                            field,
+                            ty,
+                        },
+                    },
+                );
+                break;
+            }
+        }
+        Ok(paths)
+    }
+
     pub(super) fn current_query_primary_key_access_paths(
         &self,
         shape: &ValidatedQuery,
@@ -5055,6 +5212,63 @@ where
             access_paths.insert(source.clone(), access_path);
         }
         Ok(())
+    }
+
+    /// The Global current rows of `table` whose `column` (`id` for the
+    /// primary key) equals the value of `key` in some live binding of the
+    /// shared program ([`CurrentAccessPath::BindingLookup`]).
+    fn physical_global_current_binding_lookup(
+        &self,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        column: &str,
+        key: &BindingLookupKey,
+        projection_target: &str,
+    ) -> Result<GraphBuilder, Error> {
+        let keys = GraphBuilder::binding_source(
+            key.shape.clone(),
+            RecordDescriptor::new([(key.field.clone(), key.ty.clone())]),
+        );
+        let rows = if column == "id" {
+            // The physical source helper prepends the shared branch
+            // coordinate; the probed primary-key column is row_uuid.
+            self.physical_current_source_scan_graph_with_projection_target(
+                schema_version,
+                &table.name,
+                PhysicalCurrentClass::Global,
+                projection_target,
+                StaticScanSpec::Prefix(Vec::new()),
+            )?
+        } else {
+            let mapping = self
+                .catalogue
+                .physical_mappings
+                .get(&schema_version)
+                .and_then(|mapping| mapping.tables.get(&table.name))
+                .ok_or(Error::InvalidStoredValue(
+                    "physical current index table mapping missing",
+                ))?;
+            let column_id =
+                mapping
+                    .columns
+                    .get(column)
+                    .copied()
+                    .ok_or(Error::InvalidStoredValue(
+                        "physical current index column mapping missing",
+                    ))?;
+            // Physical current indexes lead with the shared branch coordinate.
+            GraphBuilder::variant_index_scan(
+                physical_global_current_table_name(mapping.table_id),
+                physical_current_index_name(column_id),
+                projection_target,
+                StaticScanSpec::Prefix(vec![LiteralValue::from(Value::Bytes(
+                    BranchKey::default().canonical_bytes(),
+                ))]),
+            )
+        };
+        GraphBuilder::lookup(rows, keys, [key.field.clone()]).ok_or(Error::InvalidStoredValue(
+            "binding lookup source is not a probeable current source",
+        ))
     }
 
     fn physical_global_current_source_for_index_scan(
@@ -5389,6 +5603,97 @@ fn normalized_program_equality(
         return Ok(None);
     }
     Ok(Some((source, field, value)))
+}
+
+/// The equalities between a source field and a parameter or claim along a
+/// source's own Filter -> Source pipeline, unresolved: the same restrictions
+/// `normalized_program_equalities` resolves against one binding.
+fn normalized_program_binding_equalities(
+    shape: &NormalizedRowSetShape,
+    node_id: &RowSetNodeId,
+) -> Result<Option<BTreeMap<SourceId, BTreeMap<String, NormalizedValueRef>>>, Error> {
+    let node = shape.nodes.get(node_id).ok_or(Error::InvalidStoredValue(
+        "normalized access-path node missing",
+    ))?;
+    match node {
+        RowSetExpr::Filter { input, predicate } => {
+            let Some(mut equalities) = normalized_program_binding_equalities(shape, input)? else {
+                return Ok(None);
+            };
+            collect_normalized_program_binding_equalities(predicate, &mut equalities);
+            Ok(Some(equalities))
+        }
+        RowSetExpr::Distinct { input, .. }
+        | RowSetExpr::OrderBy { input, .. }
+        | RowSetExpr::Project { input, .. }
+        | RowSetExpr::Slice { input, .. } => normalized_program_binding_equalities(shape, input),
+        RowSetExpr::Source { source, .. } => {
+            Ok(Some(BTreeMap::from([(source.clone(), BTreeMap::new())])))
+        }
+        RowSetExpr::Aggregate { .. }
+        | RowSetExpr::CorrelatedPathProjection { .. }
+        | RowSetExpr::FrontierSource { .. }
+        | RowSetExpr::Join { .. }
+        | RowSetExpr::RecursiveRelation { .. }
+        | RowSetExpr::Union { .. }
+        | RowSetExpr::ValueSource { .. } => Ok(None),
+    }
+}
+
+fn collect_normalized_program_binding_equalities(
+    predicate: &NormalizedPredicateExpr,
+    equalities: &mut BTreeMap<SourceId, BTreeMap<String, NormalizedValueRef>>,
+) {
+    match predicate {
+        // As for literal equalities, only an enclosing conjunction restricts
+        // every row; a disjunction branch does not.
+        NormalizedPredicateExpr::And(predicates) => {
+            for predicate in predicates {
+                collect_normalized_program_binding_equalities(predicate, equalities);
+            }
+        }
+        NormalizedPredicateExpr::Compare {
+            left,
+            op: NormalizedComparisonOp::Eq,
+            right,
+        } => {
+            for (field, value) in [(left, right), (right, left)] {
+                if let Some((source, field)) = normalized_program_source_field(field)
+                    && matches!(
+                        value,
+                        NormalizedValueRef::Param(_) | NormalizedValueRef::Claim(_)
+                    )
+                {
+                    equalities
+                        .entry(source)
+                        .or_default()
+                        .entry(field)
+                        .or_insert_with(|| value.clone());
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A key the binding source carries can probe `column`'s current index when
+/// the index stores it as is: a plain scalar of the key's type, possibly
+/// nullable. Enum columns acquire registry identities in storage, and
+/// floats have more than one encoding of an equal value.
+fn binding_lookup_column_type(column: &ColumnType, key: &ColumnType) -> bool {
+    let scalar = matches!(
+        key,
+        ColumnType::Uuid
+            | ColumnType::String
+            | ColumnType::Bool
+            | ColumnType::I32
+            | ColumnType::I64
+            | ColumnType::U64
+            | ColumnType::Bytes
+    );
+    scalar
+        && (column == key || matches!(column, ColumnType::Nullable(inner) if inner.as_ref() == key))
 }
 
 fn normalized_program_source_field(value: &NormalizedValueRef) -> Option<(SourceId, String)> {

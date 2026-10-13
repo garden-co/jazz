@@ -991,12 +991,14 @@ pub(super) fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 keys,
                 keys_on,
                 table,
+                index,
                 scan,
                 variant_projection,
             } => {
                 child!(keys).hash(&mut hasher);
                 keys_on.hash(&mut hasher);
                 table.hash(&mut hasher);
+                index.hash(&mut hasher);
                 scan.hash(&mut hasher);
                 variant_projection.hash(&mut hasher);
             }

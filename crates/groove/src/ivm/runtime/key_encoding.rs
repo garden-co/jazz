@@ -89,6 +89,26 @@ pub(super) fn primary_key_field_indices(
         .collect()
 }
 
+/// How many nullable envelopes an index column of type `column` adds around
+/// a lookup key of type `key`: `Some(0)` for equal types, one more for each
+/// `Nullable` that wraps `key`'s type. A present nullable value is encoded
+/// as the nullable tag followed by the value's own encoding, so a key probes
+/// the column's present values by prefixing that many tags.
+pub(super) fn index_lookup_key_envelopes(key: &ValueType, column: &ValueType) -> Option<usize> {
+    let mut column = column;
+    let mut envelopes = 0;
+    loop {
+        if column == key {
+            return Some(envelopes);
+        }
+        let ValueType::Nullable(inner) = column else {
+            return None;
+        };
+        column = inner.as_ref();
+        envelopes += 1;
+    }
+}
+
 pub(super) fn encode_record_field_key_part(
     key: &mut Vec<u8>,
     descriptor: &RecordDescriptor,
