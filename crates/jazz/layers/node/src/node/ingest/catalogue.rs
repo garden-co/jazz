@@ -108,7 +108,6 @@ where
                 return Err(Error::CatalogueActivationFailed);
             }
             match message {
-                SyncMessage::Reserved30(retired) => match retired {},
                 SyncMessage::ChunkUploadStart(start) => {
                     if !self.admit_large_value_ingress(
                         super::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,
@@ -316,7 +315,7 @@ where
                     self.register_shape_with_options(shape_id, ast, opts)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }
-                SyncMessage::Reserved15(retired) | SyncMessage::Reserved16(retired) => {
+                SyncMessage::Reserved14(retired) | SyncMessage::Reserved15(retired) => {
                     match retired {}
                 }
                 SyncMessage::CatalogueSnapshot(_) => Err(Error::UnsupportedSyncMessage(
@@ -371,10 +370,6 @@ where
                 SyncMessage::CurrentRowsRequest(_)
                 | SyncMessage::CurrentRowsReceipt(_)
                 | SyncMessage::CurrentRowsCancel { .. }
-                | SyncMessage::PermissionAdviceRequest { .. }
-                | SyncMessage::PermissionAdviceResponse { .. }
-                | SyncMessage::AuthorizationScopeSubscribe { .. }
-                | SyncMessage::AuthorizationScopeReceipt { .. }
                 | SyncMessage::AuthorizationScopeIntent { .. }
                 | SyncMessage::AuthorizationScopeView { .. }
                 | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
