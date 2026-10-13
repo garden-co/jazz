@@ -1614,6 +1614,22 @@ fn lower_linear_plan_steps_cached(
                     let mut next_fields = fields.clone();
                     let mut next_nullable = nullable_fields.clone();
                     let mut next_depths = nullable_field_depths.clone();
+                    // A binding route the right input introduces must stay
+                    // addressable under its own name: the next join keys on
+                    // it, so a later input pairs only with rows derived for
+                    // the same binding. Renaming it away would let a chain
+                    // whose left lacked the route pair one binding's proof
+                    // with another's (#4017).
+                    for field in &right_fields {
+                        let binding_route = route_param_from_field(field).is_some()
+                            || claim_path_from_param_field(field).is_some();
+                        if binding_route && !fields.contains(field) {
+                            projection
+                                .push(ProjectField::renamed(right_field(field), field.clone()));
+                            next_fields.insert(field.clone());
+                            available_route_fields.insert(field.clone());
+                        }
+                    }
                     for field in right_fields {
                         let output = union_occurrence_outputs
                             .get(&field)
