@@ -615,7 +615,10 @@ transport:
   `writes_through` commit units and answered each one. A write is answered by
   the first `FateUpdate` this link sends for it, or by `RetryLater`. Messages on
   other channels are never held. Held requests keep their buffer leases, so
-  the sender's request credit bounds what a receiver holds.
+  the sender's request credit bounds what a receiver holds. When a turn's
+  input runs out with requests held, the receiver sends the answers it has
+  ready and serves the requests they release in that same turn, so the
+  barrier costs no extra turn when the write is handled at once.
 - "Answered" means stored or decided **at this node**. A Core answers with the
   terminal fate. A relay or local receiver answers with its local
   acknowledgement once the write is durable there, so its clients keep reading
