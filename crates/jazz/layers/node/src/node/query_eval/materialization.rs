@@ -93,7 +93,6 @@ where
             .query_version_by_alias(
                 canonical_table,
                 row_uuid,
-                VersionLayer::Content,
                 version_ref.tx.time,
                 tx_node_alias,
             )
@@ -113,9 +112,7 @@ where
             .query_versions_for_tx(version_ref.tx)
             .await?
             .into_iter()
-            .filter(|version| {
-                version.row_uuid() == row_uuid && version.layer() == VersionLayer::Content
-            })
+            .filter(|version| version.row_uuid() == row_uuid)
             .collect::<Vec<_>>();
         let mut matching = Vec::new();
         for version in candidates {
@@ -571,7 +568,6 @@ where
         tx_ids: impl IntoIterator<Item = TxId>,
         cache: &mut BTreeMap<TxId, Vec<VersionRow>>,
     ) -> Result<(), Error> {
-        let mut by_alias = BTreeMap::<(NodeUuid, NodeAlias), BTreeSet<TxTime>>::new();
         for tx_id in tx_ids {
             if cache
                 .get(&tx_id)
@@ -583,78 +579,14 @@ where
                 cache.insert(tx_id, versions);
                 continue;
             }
-            if let Some(alias) = self.node_aliases.get(&tx_id.node).copied() {
-                by_alias
-                    .entry((tx_id.node, alias))
-                    .or_default()
-                    .insert(tx_id.time);
-                cache.entry(tx_id).or_default();
+            if self.node_aliases.get(&tx_id.node).is_none() {
+                continue;
             }
-        }
-
-        if by_alias.is_empty() {
-            return Ok(());
-        }
-
-        let tables = self.tx_version_scan_tables();
-        for ((node, alias), times) in by_alias {
-            for (start, end) in contiguous_tx_time_spans(&times) {
-                let Some(end) = end else {
-                    let tx_id = TxId::new(start, node);
-                    let versions = self.query_versions_for_tx(tx_id).await?;
-                    cache.insert(tx_id, versions);
-                    continue;
-                };
-                let mut scanned_sources = BTreeSet::new();
-                for table in &tables {
-                    for storage_table in self.version_storage_sources(table)? {
-                        if !scanned_sources.insert(storage_table.clone()) {
-                            continue;
-                        }
-                        let raws = self
-                            .database
-                            .index_scan_range_raw(
-                                &storage_table,
-                                "by_tx",
-                                &[Value::U64(start.0), Value::U64(alias.0)],
-                                &[Value::U64(end.0), Value::U64(0)],
-                            )
-                            .await?
-                            .into_iter()
-                            .map(|raw| raw.owned_record())
-                            .collect::<Vec<_>>();
-                        for record in raws {
-                            let requested_table = if storage_table == SHARED_DELETION_HISTORY_TABLE
-                            {
-                                ""
-                            } else {
-                                table
-                            };
-                            let version = self.decode_history_owned_record(
-                                requested_table,
-                                &storage_table,
-                                record,
-                            )?;
-                            if version.tx_node_alias() != alias
-                                || !times.contains(&version.tx_time())
-                            {
-                                continue;
-                            }
-                            let tx_id = TxId::new(version.tx_time(), node);
-                            cache.entry(tx_id).or_default().push(version);
-                        }
-                    }
-                }
-            }
-        }
-
-        for versions in cache.values_mut() {
-            versions.sort_by(|left, right| {
-                left.table()
-                    .cmp(right.table())
-                    .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
-                    .then_with(|| left.layer().cmp(&right.layer()))
-            });
+            // Each transaction record lists the history rows it wrote, so
+            // its versions are exact point reads; `query_versions_for_tx`
+            // returns them in `(table, row)` order.
+            let versions = self.query_versions_for_tx(tx_id).await?;
+            cache.insert(tx_id, versions);
         }
         Ok(())
     }
@@ -958,7 +890,6 @@ where
             .query_version_by_alias(
                 target_table_name,
                 target_row,
-                VersionLayer::Content,
                 target_tx_time,
                 target_tx_node,
             )

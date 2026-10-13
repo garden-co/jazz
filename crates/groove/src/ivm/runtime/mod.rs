@@ -31,11 +31,11 @@ use crate::ivm::{
     CollectByMode, CollectByOp, CollectByProjection, CollectBySlot, CollectBySlotBuilder,
     DurableStorage, FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp,
     IndexSourceOp, InlineRecordsOp, InputSourceId, IvmGraph, JoinOp, JoinOpKind, LiteralValue,
-    MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor, NodeDurability, NodeId, NodeOutput,
-    OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr,
-    RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec, StreamingChecksumOp, TableSourceOp,
-    TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
-    ValueComparison, VariantProjectOp, VariantProjectionTarget,
+    LookupOp, MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor, NodeDurability, NodeId,
+    NodeOutput, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
+    ProjectionExpr, RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec,
+    StreamingChecksumOp, TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField,
+    UnnestOp, UnwrapNullableOp, ValueComparison, VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, PreparedProjection,
@@ -67,7 +67,7 @@ use evaluation_memo::EvaluationMemo;
 use join::{
     AntiJoinState, ArrangementState, JoinInput, JoinState, SemiJoinState, touched_join_keys,
 };
-use persist::apply_persist_delta;
+use persist::{apply_persist_delta, index_record_from_storage};
 use rank_index::RankIndex;
 use recursion::{
     RecursiveNodes, RecursiveState, hydrate_recursive_arrangements, recursive_delta,
@@ -223,6 +223,8 @@ pub struct IvmRuntime {
     /// acknowledgement that may have followed commit. This runtime must not
     /// evaluate against its pre-flush state again.
     persistence_indeterminate: Rc<Cell<bool>>,
+    /// Durable numeric ids of schema indexes, shared by runtime clones.
+    index_ids: SharedIndexIds,
     /// Persistent operator state keyed by scope and node. This survives ticks;
     /// see [`EvalMemoKey`] for per-evaluation caching.
     operator_states: HashMap<OperatorStateKey, OperatorState>,
@@ -307,6 +309,15 @@ impl IvmRuntime {
     }
 
     pub fn new(schema: DatabaseSchema) -> Result<Self, IvmRuntimeError> {
+        Self::new_with_index_ids(schema, SharedIndexIds::default())
+    }
+
+    /// Build a runtime whose schema indexes take their durable numeric ids
+    /// from `index_ids` (loaded from storage by the database facade).
+    pub(crate) fn new_with_index_ids(
+        schema: DatabaseSchema,
+        index_ids: SharedIndexIds,
+    ) -> Result<Self, IvmRuntimeError> {
         let table_storage_descriptors = schema
             .tables
             .iter()
@@ -387,6 +398,7 @@ impl IvmRuntime {
             durable_notification_publications: HashSet::default(),
             completed_deferred_publications: HashSet::default(),
             persistence_indeterminate: Rc::new(Cell::new(false)),
+            index_ids,
         };
         runtime.define_schema_index_variant_projections()?;
         runtime.add_dedup_schema_indices()?;
@@ -482,6 +494,16 @@ impl IvmRuntime {
         self.table_descriptors.get(table)
     }
 
+    pub(crate) fn index_ids(&self) -> &SharedIndexIds {
+        &self.index_ids
+    }
+
+    /// The durable id of a declared schema index (allocated in memory when
+    /// first seen; see [`index_ids`]).
+    pub(crate) fn index_storage_id(&self, table: &str, index: &IndexSchema) -> u32 {
+        self.index_ids.borrow_mut().resolve(table, index)
+    }
+
     pub(crate) fn table_storage_descriptor(&self, table: &str) -> Option<&RecordDescriptor> {
         self.table_storage_descriptors.get(table)
     }
@@ -529,8 +551,12 @@ use evaluator::*;
 mod record_projection;
 use record_projection::*;
 mod key_encoding;
+pub(crate) use key_encoding::encode_key_part;
 use key_encoding::*;
-pub(crate) use key_encoding::{durable_index_key_prefix, encode_key_part};
+pub(crate) mod index_ids;
+pub(crate) use index_ids::{
+    IndexIdRegistry, SharedIndexIds, durable_index_key_prefix, split_durable_index_key,
+};
 mod windows;
 use windows::*;
 
@@ -572,6 +598,9 @@ pub enum IvmRuntimeError {
     UnsupportedIndexIntersectionScan,
     #[error("candidate-filtered index sources require snapshot row projection and prefix scans")]
     UnsupportedIndexCandidateFilter,
+    /// A keyed lookup whose shape the runtime cannot probe by key.
+    #[error("unsupported keyed lookup: {0}")]
+    UnsupportedLookup(&'static str),
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]

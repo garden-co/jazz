@@ -383,8 +383,15 @@ impl Database {
         // marker/mutation path.
         validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
-        let ivm_runtime = IvmRuntime::new(schema)?;
+        // Compile once against a scratch id registry so an invalid schema
+        // fails before any durable engine state (layout marker) is created.
+        drop(IvmRuntime::new(schema.clone())?);
         let storage = Rc::new(LayoutStorage::new(storage, storage_layout).await?);
+        // Durable index ids must be known before schema indexes compile. This
+        // also refuses an `indices` family written by an earlier index layout.
+        let index_ids = crate::ivm::runtime::IndexIdRegistry::load(storage.as_ref()).await?;
+        let ivm_runtime =
+            IvmRuntime::new_with_index_ids(schema, Rc::new(std::cell::RefCell::new(index_ids)))?;
         let chunk_storage: Rc<dyn crate::chunks::ChunkStorage> =
             Rc::new(crate::chunks::ManagedChunkStorage::new(Rc::new(
                 crate::chunks::OrderedChunkStorage::new(Rc::downgrade(&storage)),
@@ -421,6 +428,8 @@ impl Database {
                 }),
             ),
         ));
+        let storage_read_metrics =
+            Rc::new(ReadMetricsSink::new(Rc::clone(ivm_runtime.index_ids())));
         Self {
             storage,
             chunk_storage,
@@ -428,7 +437,7 @@ impl Database {
             ivm_runtime,
             last_commit_metrics: None,
             last_tick_metrics: None,
-            storage_read_metrics: Rc::new(RefCell::new(StorageReadMetrics::default())),
+            storage_read_metrics,
             stored_record_descriptors: RefCell::new(BTreeMap::new()),
             next_publication_id: 1,
             immutable_batch_owner: Rc::new(()),
@@ -578,7 +587,8 @@ impl Database {
         );
         validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
-        let mut runtime = IvmRuntime::new(schema)?;
+        let mut runtime =
+            IvmRuntime::new_with_index_ids(schema, Rc::clone(self.ivm_runtime.index_ids()))?;
         runtime.set_plain_output_root_positions_enabled(
             self.ivm_runtime.plain_output_root_positions_enabled(),
         );

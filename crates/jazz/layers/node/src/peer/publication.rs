@@ -1197,11 +1197,6 @@ impl PeerState {
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
-        let previous_member_result_set = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::member_result_set)
-            .unwrap_or_default();
         let public_result_is_silent =
             result_member_adds.is_empty() && result_member_removes.is_empty();
         // A deletion witness can require a one-shot membership reconciliation
@@ -1228,6 +1223,11 @@ impl PeerState {
                 .maintained_subscription_view
                 .full_diff_fallbacks
                 .membership_reconciliations += 1;
+            let previous_member_result_set = self
+                .publication_states
+                .get(&subscription)
+                .map(PeerSubscriptionState::member_result_set)
+                .unwrap_or_default();
             return self
                 .rehydrate_query_maintained_subscription_view(
                     node,
@@ -1327,11 +1327,6 @@ impl PeerState {
                 allow_storage_witness_fallback: false,
             }));
         }
-        let previous_result_tx_ids = previous_member_result_set
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .map(|(_, _, tx_id)| tx_id)
-            .collect::<BTreeSet<_>>();
         let (tier, read_view) = self
             .publication_states
             .get(&subscription)
@@ -1371,11 +1366,12 @@ impl PeerState {
                         settled_through,
                         peer_complete_tx_payloads,
                         known_state,
+                        leave_scan_after: None,
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
-                        previous_result_set: previous_result_tx_ids,
-                        result_member_adds,
-                        result_member_removes,
+                        previous_result_set: BTreeSet::new(),
+                        result_member_adds: result_member_adds.clone(),
+                        result_member_removes: result_member_removes.clone(),
                         identity: policy_identity,
                         tier,
                         maintained_facts: maintained,
@@ -1419,6 +1415,17 @@ impl PeerState {
         // fallible bundle construction succeeds. Failed/cancelled attempts
         // leave every changed identity available to the next drain.
         self.record_outgoing_view_update_metadata(&update);
+        // The maintained rehydrate records the membership it shipped as this
+        // subscription's baseline. Advance that baseline by the delta shipped
+        // here, so it stays the receiver's exact membership: a later diff or
+        // usage-site rehydrate from this subscription must never see a member
+        // this frame already replaced or removed.
+        self.apply_outgoing_view_delta(
+            subscription,
+            false,
+            &result_member_adds,
+            &result_member_removes,
+        );
         if let SyncMessage::ViewUpdate(view) = &update {
             let state = self
                 .publication_states
@@ -1499,11 +1506,6 @@ impl PeerState {
         }
         node.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
-        let previous_member_result_set = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::member_result_set)
-            .unwrap_or_default();
         let output_tables = self
             .publication_states
             .get(&subscription)
@@ -1537,10 +1539,14 @@ impl PeerState {
         let mut requires_authoritative_membership_reconcile = false;
         let mut initial_deletion_witness = false;
         {
-            let Some(maintained_subscription_view) = self
-                .publication_states
-                .get_mut(&subscription)
-                .and_then(|state| state.maintained_subscription_view.as_mut())
+            // Classify transitions against the membership this link last
+            // shipped. Borrow it: it holds every member, so a copy per drain
+            // would make each incremental publication linear in the result.
+            let Some(state) = self.publication_states.get_mut(&subscription) else {
+                return Ok(ResultTransitions::default());
+            };
+            let previous_member_result_set = &state.result_member_set;
+            let Some(maintained_subscription_view) = state.maintained_subscription_view.as_mut()
             else {
                 return Ok(ResultTransitions::default());
             };
@@ -1621,6 +1627,11 @@ impl PeerState {
             }
         }
         if initial_deletion_witness {
+            let previous_member_result_set = self
+                .publication_states
+                .get(&subscription)
+                .map(PeerSubscriptionState::member_result_set)
+                .unwrap_or_default();
             let (hydrated_active_members, hydrated_published_members) = self
                 .publication_states
                 .get(&subscription)
@@ -1981,7 +1992,29 @@ impl PeerState {
         } else {
             reset_input_set
         };
-        let bundle_known_state = if cursor_membership_mismatch {
+        // "Q at W" against a single table: membership depends only on each
+        // row's own image, so the rows whose seq moved past W are the whole
+        // difference between the receiver's set and the current one.
+        let catch_up = if watermark.0 > 0 {
+            watermark_catch_up(
+                node,
+                &known_state,
+                read_view.is_default(),
+                maintained.single_physical_table(),
+                shape.query(),
+                maintained.supporting_rows(),
+                None,
+                authorization_matches,
+            )
+            .await?
+        } else {
+            None
+        };
+        if catch_up.is_some() {
+            result_member_removes.clear();
+            self.settle_watermark_declaration(subscription);
+        }
+        let bundle_known_state = if cursor_membership_mismatch && catch_up.is_none() {
             None
         } else {
             known_state.clone()
@@ -2008,7 +2041,7 @@ impl PeerState {
             scoped
                 .view_update_for_maintained_result_members(
                     crate::node::MaintainedViewBundleInputs {
-                        supporting_update: None,
+                        supporting_update: catch_up,
                         shape,
                         has_default_read_view: read_view.is_default(),
                         allow_authoritative_scalar_exit_refresh: !self
@@ -2017,6 +2050,7 @@ impl PeerState {
                         settled_through: watermark,
                         peer_complete_tx_payloads,
                         known_state: bundle_known_state,
+                        leave_scan_after: known_membership_position,
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
                         previous_result_set: BTreeSet::new(),
@@ -2083,6 +2117,13 @@ impl PeerState {
             source_authority_result: source_authority_result_key,
             initial_received: true,
         };
+        // Whichever frame shape was chosen (full reset, membership delta, or
+        // Q-at-W catch-up), the receiver now holds exactly the current
+        // membership. Record it as the baseline so the next rehydrate can
+        // express a joined-row removal as a member remove: there is no
+        // deletion witness left to carry it.
+        let current_members = current_member_result_set.into_iter().collect::<Vec<_>>();
+        self.apply_outgoing_view_delta(subscription, true, &current_members, &[]);
         self.replace_maintained_subscription_view(node, subscription, maintained_subscription);
         self.record_outgoing_view_update(node, shape.schema_version(), &update)?;
         self.publication_states
@@ -2619,6 +2660,44 @@ impl PeerState {
         let (policy_identity, policy_claims) =
             self.served_subscription_policy_binding(target_subscription)?;
         let settled_through = self.maintained_publication_cut(node, maintained_subscription);
+        let catch_up_authorization_matches =
+            self.fast_cursor_authorization_matches(target_subscription, &known_state);
+        let catch_up = {
+            let canonical = self
+                .publication_states
+                .get(&maintained_subscription)
+                .ok_or(Error::InvalidStoredValue(
+                    "coverage group subscription is missing peer state",
+                ))?;
+            match canonical.maintained_subscription_view.as_ref() {
+                Some(view) if settled_through.0 > 0 => {
+                    watermark_catch_up(
+                        node,
+                        &known_state,
+                        read_view.is_default(),
+                        view.maintained.single_physical_table(),
+                        shape.query(),
+                        view.maintained.supporting_rows(),
+                        canonical.supporting_revision,
+                        catch_up_authorization_matches,
+                    )
+                    .await?
+                }
+                _ => None,
+            }
+        };
+        if catch_up.is_some() {
+            self.settle_watermark_declaration(target_subscription);
+        }
+        let leave_scan_after = fast_current_membership_position(&known_state);
+        let (known_state, target_result_member_removes) = if catch_up.is_some() {
+            (Some(known_state).flatten(), Vec::new())
+        } else {
+            (
+                (!authorization_mismatch).then_some(known_state).flatten(),
+                target_result_member_removes,
+            )
+        };
         let update = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
@@ -2632,7 +2711,7 @@ impl PeerState {
             scoped
                 .view_update_for_maintained_result_members(
                     crate::node::MaintainedViewBundleInputs {
-                        supporting_update: None,
+                        supporting_update: catch_up,
                         shape,
                         has_default_read_view: read_view.is_default(),
                         allow_authoritative_scalar_exit_refresh: !self
@@ -2640,7 +2719,8 @@ impl PeerState {
                         subscription: target_subscription,
                         settled_through,
                         peer_complete_tx_payloads,
-                        known_state: (!authorization_mismatch).then_some(known_state).flatten(),
+                        known_state,
+                        leave_scan_after,
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
                         previous_result_set: BTreeSet::new(),
@@ -2843,6 +2923,44 @@ impl PeerState {
         let (policy_identity, policy_claims) =
             self.served_subscription_policy_binding(target_subscription)?;
         let settled_through = self.maintained_publication_cut(node, maintained_subscription);
+        let catch_up_authorization_matches =
+            self.fast_cursor_authorization_matches(target_subscription, &known_state);
+        let catch_up = {
+            let canonical = self
+                .publication_states
+                .get(&maintained_subscription)
+                .ok_or(Error::InvalidStoredValue(
+                    "coverage group subscription is missing peer state",
+                ))?;
+            match canonical.maintained_subscription_view.as_ref() {
+                Some(view) if settled_through.0 > 0 => {
+                    watermark_catch_up(
+                        node,
+                        &known_state,
+                        read_view.is_default(),
+                        view.maintained.single_physical_table(),
+                        shape.query(),
+                        view.maintained.supporting_rows(),
+                        canonical.supporting_revision,
+                        catch_up_authorization_matches,
+                    )
+                    .await?
+                }
+                _ => None,
+            }
+        };
+        if catch_up.is_some() {
+            self.settle_watermark_declaration(target_subscription);
+        }
+        let leave_scan_after = fast_current_membership_position(&known_state);
+        let (known_state, target_result_member_removes) = if catch_up.is_some() {
+            (Some(known_state).flatten(), Vec::new())
+        } else {
+            (
+                (!authorization_mismatch).then_some(known_state).flatten(),
+                target_result_member_removes,
+            )
+        };
         let target_reset = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
@@ -2856,7 +2974,7 @@ impl PeerState {
             scoped
                 .view_update_for_maintained_result_members(
                     crate::node::MaintainedViewBundleInputs {
-                        supporting_update: None,
+                        supporting_update: catch_up,
                         shape,
                         has_default_read_view: read_view.is_default(),
                         allow_authoritative_scalar_exit_refresh: !self
@@ -2864,7 +2982,8 @@ impl PeerState {
                         subscription: target_subscription,
                         settled_through,
                         peer_complete_tx_payloads,
-                        known_state: (!authorization_mismatch).then_some(known_state).flatten(),
+                        known_state,
+                        leave_scan_after,
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
                         previous_result_set: BTreeSet::new(),
@@ -2900,4 +3019,116 @@ impl PeerState {
     pub fn review_publication_count(&self) -> usize {
         self.publication_states.len()
     }
+}
+
+/// Answer a "Q at W" declaration from the `by_seq` index when the view reads
+/// a single table, so its membership depends only on each row's own image.
+/// `revision` pins the successor to a canonical publisher's revision.
+async fn watermark_catch_up<'a, S: OrderedKvStorage>(
+    node: &mut NodeState<S>,
+    known_state: &Option<KnownStateDeclaration>,
+    default_read_view: bool,
+    single_table: Option<(&str, crate::ids::GlobalPhysicalTableId)>,
+    query: &crate::query::Query,
+    rows: impl Iterator<Item = &'a crate::protocol::SupportingRow>,
+    revision: Option<[u8; 16]>,
+    authorization_matches: bool,
+) -> Result<Option<crate::protocol::SupportingRowsUpdate>, Error> {
+    let Some(KnownStateDeclaration::Watermark {
+        position,
+        supporting_revision,
+        ..
+    }) = known_state
+    else {
+        return Ok(None);
+    };
+    let (true, Some((table, physical_table))) = (default_read_view, single_table) else {
+        return Ok(None);
+    };
+    // A read policy can hide or reveal a row without moving its seq (claims
+    // or policy changes). Only a receiver that echoes this link's current
+    // authorization progress may skip the rows that did not move.
+    // Unmoved rows keep their membership only when it depends on nothing
+    // but the row itself: no window, join or aggregate over other rows.
+    if !row_local_membership(query) {
+        return Ok(None);
+    }
+    let read_policy = node.table(table)?.read_policy.clone();
+    if !read_policy.as_ref().is_none_or(row_local_membership) {
+        return Ok(None);
+    }
+    // Claims can change without any row moving, so a claims-dependent view
+    // may skip unmoved rows only for a receiver that echoes this link's
+    // current authorization progress.
+    if !authorization_matches
+        && (query_uses_claims(query) || read_policy.as_ref().is_some_and(query_uses_claims))
+    {
+        return Ok(None);
+    }
+    let mut update = node
+        .supporting_catch_up_after(table, physical_table, rows, *position, *supporting_revision)
+        .await?;
+    if let (
+        Some(pinned),
+        crate::protocol::SupportingRowsUpdate::CatchUp { revision, .. },
+    ) = (revision, &mut update)
+    {
+        *revision = pinned;
+    }
+    Ok(Some(update))
+}
+
+/// A read policy with no conditions: readability never changes, so a catch-up
+/// needs no authorization receipt.
+pub(crate) fn read_policy_admits_every_row(policy: &crate::query::Query) -> bool {
+    policy.joins.is_empty()
+        && policy.flat_join.is_none()
+        && policy.policy_branches.is_empty()
+        && policy.reachable.is_empty()
+        && policy.inherits.is_empty()
+        && policy.relation.is_none()
+        && policy.filters.iter().all(
+            |filter| matches!(filter, crate::query::Predicate::All(all) if all.is_empty()),
+        )
+}
+
+/// Membership of a row in this query depends only on the row's own image.
+pub(crate) fn row_local_membership(query: &crate::query::Query) -> bool {
+    let scalar_filters = query.filters.is_empty()
+        || crate::node::simple_scalar_exit_query(&crate::query::Query {
+            select: None,
+            ..query.clone()
+        });
+    scalar_filters
+        && query.joins.is_empty()
+        && query.flat_join.is_none()
+        && query.policy_branches.is_empty()
+        && query.reachable.is_empty()
+        && query.inherits.is_empty()
+        && query.includes.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.aggregate.is_none()
+        && query.limit.is_none()
+        && query.offset == 0
+        && query.relation.is_none()
+}
+
+pub(crate) fn query_uses_claims(query: &crate::query::Query) -> bool {
+    fn operand(operand: &crate::query::Operand) -> bool {
+        matches!(operand, crate::query::Operand::Claim(_))
+    }
+    fn predicate(filter: &crate::query::Predicate) -> bool {
+        use crate::query::Predicate::*;
+        match filter {
+            All(children) | Any(children) => children.iter().any(predicate),
+            Not(child) => predicate(child),
+            Eq(a, b) | Ne(a, b) | Gt(a, b) | Gte(a, b) | Lt(a, b) | Lte(a, b) | Contains(a, b) => {
+                operand(a) || operand(b)
+            }
+            In(a, list) => operand(a) || list.iter().any(operand),
+            EnumMatch { payload, .. } => predicate(payload),
+            IsNull(a) => operand(a),
+        }
+    }
+    query.filters.iter().any(predicate)
 }

@@ -364,6 +364,13 @@ impl TickEvaluator<'_> {
                     &right,
                 )
             }
+            OpType::Lookup(lookup) => {
+                let input = inputs
+                    .first()
+                    .cloned()
+                    .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
+                self.update_lookup(node, lookup, output_desc, &input)
+            }
             OpType::RecursiveStepWitness(_) => {
                 let [recursive] = graph_node.descriptor.inputs.as_slice() else {
                     return Err(IvmRuntimeError::GraphInputArityMismatch(node));
@@ -390,7 +397,8 @@ fn operator_phase_span(operator: &OpType) -> tracing::Span {
         | OpType::IndexSource(_)
         | OpType::BindingSource(_)
         | OpType::FrontierSource(_)
-        | OpType::InlineRecords(_) => tracing::trace_span!("cold.phase.op_source"),
+        | OpType::InlineRecords(_)
+        | OpType::Lookup(_) => tracing::trace_span!("cold.phase.op_source"),
         OpType::Arrange(_) => tracing::trace_span!("cold.phase.op_arrange"),
         OpType::Join(_) | OpType::SemiJoin(_) | OpType::AntiJoin(_) => {
             tracing::trace_span!("cold.phase.op_join")

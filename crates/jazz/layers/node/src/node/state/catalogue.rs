@@ -207,7 +207,7 @@ where
                 Value::Bytes(codec::encode_catalogue_schema(schema)?),
             ],
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = self.database.persist_with_progress(&applied).await;
 self.database.finish_persistence(persisted)?;
         Ok(())
@@ -422,7 +422,7 @@ self.database.finish_persistence(persisted)?;
                 ))?;
         let mut batch = self.database.open_batch();
         Self::write_schema_version_mapping_to_batch(&mut batch, alias, schema_version, &mapping)?;
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = self.database.persist_with_progress(&applied).await;
 self.database.finish_persistence(persisted)?;
         self.catalogue
@@ -977,7 +977,7 @@ self.database.finish_persistence(persisted)?;
                 Value::Bytes(codec::encode_catalogue_staged_lineage(staged)?),
             ],
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = self.database.persist_with_progress(&applied).await;
 self.database.finish_persistence(persisted)?;
         Ok(())
@@ -997,7 +997,7 @@ self.database.finish_persistence(persisted)?;
                 Value::Bytes(codec::encode_catalogue_pending_lineage(pending)?),
             ],
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = self.database.persist_with_progress(&applied).await;
 self.database.finish_persistence(persisted)?;
         Ok(())
@@ -1016,7 +1016,7 @@ self.database.finish_persistence(persisted)?;
                 PrimaryKeyValue::Uuid(publication_id.0),
             ]),
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = self.database.persist_with_progress(&applied).await;
 self.database.finish_persistence(persisted)?;
         self.catalogue.pending_lineages.remove(&catalogue_seq);
@@ -1117,7 +1117,7 @@ self.database.finish_persistence(persisted)?;
                 ))?;
             Self::write_schema_version_mapping_to_batch(&mut batch, alias, lens.target, mapping)?;
         }
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = self.database.persist_with_progress(&applied).await;
 self.database.finish_persistence(persisted)?;
         Ok(())
@@ -1211,7 +1211,7 @@ self.database.finish_persistence(persisted)?;
                 Value::Bytes(codec::encode_catalogue_schema(&structural)?),
             ],
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
         let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
         Ok(())
@@ -1373,7 +1373,7 @@ self.database.finish_persistence(persisted)?;
             "jazz_nodes",
             vec![Value::U64(alias.0), Value::Uuid(node_uuid.0)],
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = self.database.persist_with_progress(&applied).await;
 self.database.finish_persistence(persisted)?;
         // This mapping is a durable prerequisite for every later row that
@@ -1420,41 +1420,6 @@ self.database.finish_persistence(persisted)?;
             .schema_version_aliases
             .iter()
             .find_map(|(id, candidate)| (*candidate == alias).then_some(*id))
-    }
-
-    async fn record_child_edges(&mut self, child: TxId, parents: impl IntoIterator<Item = TxId>) {
-        if self
-            .query_transaction(child)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|tx| !matches!(tx.fate, Fate::Pending))
-        {
-            return;
-        }
-        for parent in parents {
-            if self
-                .query_transaction(parent)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|tx| !matches!(tx.fate, Fate::Pending))
-            {
-                continue;
-            }
-            self.rejections
-                .child_txs_by_parent
-                .entry(parent)
-                .or_default()
-                .insert(child);
-        }
-    }
-
-    fn prune_child_edges(&mut self, child: TxId) {
-        self.rejections.child_txs_by_parent.retain(|_, children| {
-            children.remove(&child);
-            !children.is_empty()
-        });
     }
 
 }
