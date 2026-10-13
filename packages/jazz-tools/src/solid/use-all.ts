@@ -1,6 +1,6 @@
 import { batch, createEffect, onCleanup, type Accessor } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
-import { applyDelta } from "../reconcile-array.js";
+import { applyDelta, applyDeltaToRows } from "../reconcile-array.js";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
@@ -78,12 +78,8 @@ export function useAll<T extends { id: string }>(
                   applyDelta(current, delta);
                 }),
               );
-            } else if (delta.reset) {
-              setState("data", reconcile([...delta.all]));
             } else {
-              const current: T[] = [];
-              applyDelta(current, delta);
-              setState("data", reconcile(current));
+              setState("data", reconcile(applyDeltaToRows(undefined, delta)));
             }
             setState("isLoading", false);
             setState("error", null);

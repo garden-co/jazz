@@ -1,4 +1,4 @@
-import { applyDelta } from "../shared/index.js";
+import { applyDelta, applyDeltaToRows } from "../reconcile-array.js";
 import { limitQueryToOne } from "../runtime/db.js";
 import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "../shared/index.js";
 import { getJazzContext } from "./context.svelte.js";
@@ -95,13 +95,8 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
               const rows = delta.all ?? (this.current ? [this.current as unknown as T] : []);
               if (!delta.all) applyDelta(rows, delta);
               this.current = (rows[0] ?? null) as unknown as Result;
-            } else if (this.current) {
-              applyDelta(this.current as T[], delta);
-            } else if (delta.reset) {
-              this.current = [...delta.all] as unknown as Result;
             } else {
-              this.current = [] as unknown as Result;
-              applyDelta(this.current as T[], delta);
+              this.current = applyDeltaToRows(this.current as T[] | undefined, delta) as Result;
             }
           },
           onError: (error: unknown) => {

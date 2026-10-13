@@ -1,5 +1,5 @@
 import { ref, toValue, watchEffect, type MaybeRefOrGetter, type Ref } from "vue";
-import { applyDelta } from "../shared/index.js";
+import { applyDeltaToRows } from "../reconcile-array.js";
 import type {
   CacheEntryHandle,
   QueryBuilder,
@@ -72,14 +72,7 @@ function subscribeToEntry<T extends { id: string }>(
       isLoading.value = false;
     },
     onDelta: (delta: SubscriptionDelta<T>) => {
-      if (data.value) {
-        applyDelta(data.value, delta);
-      } else if (delta.reset) {
-        data.value = [...delta.all];
-      } else {
-        data.value = [];
-        applyDelta(data.value, delta);
-      }
+      data.value = applyDeltaToRows(data.value, delta);
       isLoading.value = false;
     },
     onError: (err) => {
