@@ -5,14 +5,23 @@ import {
   accountRegistry,
   accountToken,
   AccountAuthError,
+  isProvisionalAccount,
+  onAccountCredentialBound,
   onAccountInvalidated,
 } from "./enrollment.js";
 import { accountAppId } from "./local-first.js";
-import { createDbWithRuntimeSource, type Db, type DbConfig } from "../runtime/db.js";
+import {
+  createDbWithRuntimeSource,
+  releaseUnusedLease,
+  startBrowserWorkerLease,
+  type Db,
+  type DbConfig,
+} from "../runtime/db.js";
 import type { RuntimeSource } from "../runtime/runtime-source.js";
 import {
   internalSessionFromVerifiedReservedJwtPayload,
   parseJwtPayload,
+  retainedAccountSession,
 } from "../runtime/client-session.js";
 import { setTrustedReservedSession } from "../runtime/db-internal-session.js";
 import { AuthRenewalBackoff, authRetryDelay } from "../runtime/auth-renewal-backoff.js";
@@ -66,6 +75,21 @@ function accountContextScope(config: AccountDbConfig): string {
 export async function resolveAccountRuntimeConfig(config: AccountDbConfig): Promise<DbConfig> {
   const registry = accountContextScope(config);
   const { account, ...runtimeConfig } = config;
+  if (isProvisionalAccount(account)) {
+    // Open the retained account's local data now. With no credential this
+    // context does not connect upstream, and its writes stay local until the
+    // first provider JWT replaces this session and starts its connection. In a
+    // shared browser worker another tab's credential for the same account may
+    // sync them sooner. Local policies see no provider claims until then.
+    const retained: DbConfig = {
+      ...runtimeConfig,
+      accountId: account.id,
+      accountRegistryAuthority: registry,
+    };
+    setTrustedReservedSession(retained, retainedAccountSession(account.identity));
+    admitAccountConfig(retained, account);
+    return retained;
+  }
   const jwtToken = await accountToken(account, registry);
   const resolved: DbConfig = {
     ...runtimeConfig,
@@ -103,10 +127,22 @@ export async function createAccountDbWithRuntimeSource(
         .catch((error) => console.error("Account context shutdown failed", error));
     }
   });
+  let stopBound: (() => void) | undefined;
+  let lease: ReturnType<typeof startBrowserWorkerLease>;
   try {
+    // The browser root is named by the account alone: boot its worker while
+    // the account's credential resolves.
+    const { account: _account, ...scope } = config;
+    lease = startBrowserWorkerLease(
+      { ...scope, accountId: account.id, accountRegistryAuthority: accountRegistry(account) },
+      runtimeSource,
+    );
     const resolved = await resolveAccountRuntimeConfig(config);
-    const jwtToken = resolved.jwtToken!;
-    db = await createDbWithRuntimeSource(resolved, runtimeSource);
+    const jwtToken = resolved.jwtToken;
+    // From here the runtime adopts the lease or returns it itself.
+    const opening = lease;
+    lease = undefined;
+    db = await createDbWithRuntimeSource(resolved, runtimeSource, opening);
     if (invalidated) {
       await db.shutdown();
       throw new AccountAuthError("account_logged_out");
@@ -140,7 +176,8 @@ export async function createAccountDbWithRuntimeSource(
       else scheduleIn(delay);
     };
     const refresh = async () => {
-      if (refreshing || stopped) return;
+      // A retained account refreshes when revalidation binds its credential.
+      if (refreshing || stopped || isProvisionalAccount(account)) return;
       refreshing = true;
       try {
         const token = await opened.refreshAccountAuth(account);
@@ -159,15 +196,24 @@ export async function createAccountDbWithRuntimeSource(
     const stopAuth = opened.onAuthChanged((state) => {
       if (state.error === "expired" || state.error === "missing") renew();
     });
+    stopBound = onAccountCredentialBound(account, () => {
+      renewals.reset();
+      failedRefreshes = 0;
+      void refresh();
+    });
     opened.onShutdown(() => {
       stopped = true;
       if (timer) clearTimeout(timer);
       stopAuth();
+      stopBound?.();
       unsubscribe();
     });
-    schedule(jwtToken);
+    if (jwtToken) schedule(jwtToken);
     return opened;
   } catch (error) {
+    stopBound?.();
+    // Return a lease the runtime never received before tearing it down.
+    await releaseUnusedLease(lease);
     unsubscribe();
     if (!db) await runtimeSource.shutdown();
     throw error;

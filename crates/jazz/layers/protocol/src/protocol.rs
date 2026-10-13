@@ -111,9 +111,6 @@ pub enum SyncMessage {
         /// Lens payload.
         lens: MigrationLens,
     },
-    /// Retired wire tag. Uninhabited so it cannot be sent or received.
-    #[doc(hidden)]
-    Reserved12(ReservedWireMessage),
     /// Catalogue-lane acknowledgement.
     CatalogueAck(CatalogueAck),
     /// Downstream current-row view update.
@@ -121,47 +118,13 @@ pub enum SyncMessage {
     /// Retired row-version repair request tag. Rows are identified by
     /// `(row, row_seq)` and resent whole, so there is no per-version fetch.
     #[doc(hidden)]
-    Reserved15(ReservedWireMessage),
+    Reserved14(ReservedWireMessage),
     /// Retired row-version repair response tag.
     #[doc(hidden)]
-    Reserved16(ReservedWireMessage),
+    Reserved15(ReservedWireMessage),
     /// Trusted upstream catalogue metadata required to decode immutable
     /// authored-version payloads before their view update arrives.
     CatalogueSnapshot(Box<CatalogueSnapshot>),
-    /// One-shot permission preflight. The authenticated link identity is the
-    /// subject; identity and claims are intentionally absent from the payload.
-    PermissionAdviceRequest {
-        /// Client-generated opaque id, unique among requests on this live link.
-        request_id: PermissionAdviceRequestId,
-        /// Hypothetical operation to evaluate without mutation.
-        action: PermissionAdviceAction,
-    },
-    /// One-shot permission preflight result. No supporting rows or denial
-    /// reason are carried across this boundary.
-    PermissionAdviceResponse {
-        /// Opaque id copied from the request.
-        request_id: PermissionAdviceRequestId,
-        /// Final serving-authority result, or `Unknown` when unavailable.
-        advice: PermissionAdvice,
-    },
-    /// Register and hydrate a support view for one authorization scope.
-    ///
-    /// Appended to preserve every pre-existing postcard enum discriminant.
-    /// This wraps the existing subscription pipeline rather than creating a
-    /// second query transport, and is feature-gated for old peers.
-    AuthorizationScopeSubscribe {
-        /// Ordinary shape/binding subscription carrying the support view.
-        subscribe: Subscribe,
-        /// Scope and non-secret operation purpose of that support view.
-        purpose: AuthorizationScopePurpose,
-    },
-    /// Authority proof emitted after the matching support `ViewUpdate`.
-    AuthorizationScopeReceipt {
-        /// Support view that the receiver must apply before accepting proof.
-        subscription: SubscriptionKey,
-        /// Bound authority receipt.
-        receipt: AuthorizationScopeReceipt,
-    },
     /// Minimal request for an authority-owned authorization support scope.
     ///
     /// The caller supplies only an opaque correlation id and the hypothetical
@@ -223,8 +186,6 @@ pub enum SyncMessage {
     ChunkUploadNodes(ChunkUploadNodes),
     /// Receiver acknowledgement for a pushed upload.
     ChunkUploadResult(ChunkUploadResult),
-    /// Retired edge-publication tag. No current message may use this slot.
-    Reserved30(ReservedWireMessage),
     /// Bounded known-row revalidation in the current default view.
     CurrentRowsRequest(CurrentRowsRequest),
     /// Core-backed current-row evidence, scoped to one admitted request.
@@ -675,15 +636,6 @@ pub struct AuthorizationOperationKey {
     pub candidate_digest: [u8; 32],
 }
 
-/// Minimal caller intent for a regular subscription opened as authorization
-/// support. The authority derives the scope key and operation itself from this
-/// intent, its authenticated link identity, and the registered shape/binding.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct AuthorizationScopePurpose {
-    /// Candidate operation whose policy support is being hydrated.
-    pub action: PermissionAdviceAction,
-}
-
 /// Authority-issued receipt proving one scope was hydrated through its stated cut.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct AuthorizationScopeReceipt {
@@ -749,9 +701,6 @@ impl SyncMessage {
     /// to an older peer.
     pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
         match self {
-            Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
-                crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-            }
             Self::AuthorizationScopeIntent { .. }
             | Self::AuthorizationScopeView { .. }
             | Self::AuthorizationScopeAggregateReceipt { .. }
@@ -3471,7 +3420,6 @@ pub enum ResultMemberEntry {
         revision: Vec<u8>,
     },
     /// Real row whose occurrence needs typed derivation discriminators.
-    /// Appended after every legacy variant so their postcard tags stay exact.
     TypedRow {
         /// Compatibility row payload and legacy ordered source-row identity.
         row: RealRowMemberEntry,
@@ -6135,7 +6083,6 @@ mod tests {
         ColumnType as PublicColumnType, PolicyExpr, SchemaBuilder, TablePolicies,
         TableSchemaBuilder,
     };
-    use crate::tx::TxKind;
     use groove::records::ValueType;
     use groove::schema::{ColumnSchema, ColumnType};
 
