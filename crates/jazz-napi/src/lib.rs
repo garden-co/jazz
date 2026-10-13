@@ -3718,29 +3718,15 @@ fn decode_core_cells(bytes: &[u8]) -> napi::Result<CoreRowCells> {
 }
 
 fn core_row_uuid_from_bytes(bytes: &[u8]) -> napi::Result<CoreRowUuid> {
-    let bytes: [u8; 16] = bytes
-        .try_into()
-        .map_err(|_| napi::Error::from_reason("row id must be 16 bytes"))?;
-    Ok(CoreRowUuid::from_bytes(bytes))
+    jazz::binding_args::row_uuid(bytes).map_err(napi::Error::from_reason)
 }
 
 fn checked_u64(value: f64, name: &str) -> napi::Result<u64> {
-    if !value.is_finite()
-        || value < 0.0
-        || value.fract() != 0.0
-        || value > jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER as f64
-    {
-        return Err(napi::Error::from_reason(format!(
-            "{name} must be a nonnegative safe integer"
-        )));
-    }
-    Ok(value as u64)
+    jazz::binding_args::checked_u64(value, name).map_err(napi::Error::from_reason)
 }
 
 fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorSubject> {
-    let canonical = std::str::from_utf8(bytes)
-        .map_err(|_| napi::Error::from_reason("author subject must be canonical UTF-8 JSON"))?;
-    CoreAuthorSubject::from_untrusted_canonical(canonical).map_err(napi_error)
+    jazz::binding_args::author_subject(bytes).map_err(napi::Error::from_reason)
 }
 
 fn core_delegated_session_from_napi(
@@ -3793,31 +3779,13 @@ fn core_claims_from_json(
     author: CoreAuthorSubject,
     claims: Option<JsonValue>,
 ) -> napi::Result<BTreeMap<String, CoreValue>> {
-    let claims = match claims {
-        None | Some(JsonValue::Null) => BTreeMap::new(),
-        Some(JsonValue::Object(map)) => {
-            let mut projected = BTreeMap::new();
-            for (key, value) in map {
-                if let Some(value) = core_claim_value_from_json(value)? {
-                    projected.insert(key, value);
-                }
-            }
-            projected
-        }
-        Some(_) => {
-            return Err(napi::Error::from_reason(
-                "identity claims must be an object",
-            ));
-        }
-    };
     // This public NAPI ingress receives either an external canonical subject
-    // or one already verified by a distinct first-party proof ABI. The shared
-    // constructor namespaces raw provider values and derives reserved fields.
-    Ok(jazz::tools::policy_claims::canonical_policy_binding_claims(
-        &author, claims,
-    ))
+    // or one already verified by a distinct first-party proof ABI.
+    jazz::binding_args::policy_claims(&author, claims.unwrap_or(JsonValue::Null))
+        .map_err(napi::Error::from_reason)
 }
 
+#[cfg(test)]
 fn core_claim_value_from_json(value: JsonValue) -> napi::Result<Option<CoreValue>> {
     jazz::tools::policy_claims::json_value_to_policy_claim(
         value,
@@ -4218,27 +4186,11 @@ fn core_restore_options(options: Option<RestoreOptions>) -> napi::Result<jazz::d
 }
 
 fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
-    match tier {
-        "None" | "none" => Ok(CoreDurabilityTier::None),
-        "Local" | "local" => Ok(CoreDurabilityTier::Local),
-        "Global" | "global" => Ok(CoreDurabilityTier::Global),
-        other => Err(napi::Error::from_reason(format!(
-            "unknown durability tier {other}"
-        ))),
-    }
+    jazz::binding_args::durability_tier(tier).map_err(napi::Error::from_reason)
 }
 
-/// Read-only binding lowering. Write waits keep the durability-tier parser so
-/// `remote` names cannot accidentally become a write settlement tier.
 fn core_read_tier_from_str(tier: &str) -> napi::Result<jazz::db::ReadTier> {
-    match tier {
-        "local-first" | "LocalFirst" => Ok(jazz::db::ReadTier::LocalFirst),
-        "remote" | "Remote" => Ok(jazz::db::ReadTier::Remote),
-        "local-only" | "LocalOnly" => Ok(jazz::db::ReadTier::LocalOnly),
-        other => Err(napi::Error::from_reason(format!(
-            "unknown read tier {other}"
-        ))),
-    }
+    jazz::binding_args::read_tier(tier).map_err(napi::Error::from_reason)
 }
 
 fn optional_json_string_prop(value: &JsonValue, name: &str) -> napi::Result<Option<String>> {

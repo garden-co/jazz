@@ -2843,30 +2843,15 @@ where
 }
 
 fn row_uuid_from_bytes(bytes: &[u8]) -> Result<RowUuid, JsValue> {
-    let bytes: [u8; 16] = bytes
-        .try_into()
-        .map_err(|_| JsValue::from_str("row id must be 16 bytes"))?;
-    Ok(RowUuid::from_bytes(bytes))
+    jazz::binding_args::row_uuid(bytes).map_err(|error| JsValue::from_str(&error))
 }
 
 fn checked_js_u64(value: f64, name: &str) -> Result<u64, JsValue> {
-    checked_js_safe_u64(value)
-        .ok_or_else(|| JsValue::from_str(&format!("{name} must be a nonnegative safe integer")))
-}
-
-fn checked_js_safe_u64(value: f64) -> Option<u64> {
-    (value.is_finite()
-        && value >= 0.0
-        && value.fract() == 0.0
-        && value <= jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER as f64)
-        .then_some(value as u64)
+    jazz::binding_args::checked_u64(value, name).map_err(|error| JsValue::from_str(&error))
 }
 
 fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorSubject, JsValue> {
-    let canonical = std::str::from_utf8(bytes)
-        .map_err(|_| JsValue::from_str("author subject must be canonical UTF-8 JSON"))?;
-    AuthorSubject::from_untrusted_canonical(canonical)
-        .map_err(|error| JsValue::from_str(&error.to_string()))
+    jazz::binding_args::author_subject(bytes).map_err(|error| JsValue::from_str(&error))
 }
 
 fn claims_from_js(
@@ -2874,35 +2859,10 @@ fn claims_from_js(
     claims: JsValue,
 ) -> Result<BTreeMap<String, Value>, JsValue> {
     let raw: serde_json::Value = serde_wasm_bindgen::from_value(claims).map_err(to_js_error)?;
-    let claims = match raw {
-        serde_json::Value::Null => BTreeMap::new(),
-        serde_json::Value::Object(map) => {
-            let mut projected = BTreeMap::new();
-            for (key, value) in map {
-                if let Some(value) = claim_value_from_json(value)? {
-                    projected.insert(key, value);
-                }
-            }
-            projected
-        }
-        _ => return Err(JsValue::from_str("identity claims must be an object")),
-    };
-    Ok(admit_binding_claims(author, claims))
+    jazz::binding_args::policy_claims(&author, raw).map_err(|error| JsValue::from_str(&error))
 }
 
-/// Admit raw provider claims received through a binding-local transport.
-///
-/// The transport identity is the authority for the reserved policy fields and
-/// for `session.claims.iss`/`session.claims.sub`; callers may not replace
-/// those values by supplying similarly named provider claims. All other
-/// provider values remain below the collision-proof `session.claims` prefix.
-fn admit_binding_claims(
-    author: AuthorSubject,
-    claims: BTreeMap<String, Value>,
-) -> BTreeMap<String, Value> {
-    jazz::tools::policy_claims::canonical_policy_binding_claims(&author, claims)
-}
-
+#[cfg(test)]
 fn claim_value_from_json(value: serde_json::Value) -> Result<Option<Value>, JsValue> {
     jazz::tools::policy_claims::json_value_to_policy_claim(
         value,
@@ -2973,25 +2933,11 @@ fn optional_wait_ms_prop(value: &JsValue, name: &str) -> Result<Option<u64>, JsV
 }
 
 fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
-    match tier {
-        "None" | "none" => Ok(DurabilityTier::None),
-        "Local" | "local" => Ok(DurabilityTier::Local),
-        "Global" | "global" => Ok(DurabilityTier::Global),
-        other => Err(JsValue::from_str(&format!(
-            "unknown durability tier {other}"
-        ))),
-    }
+    jazz::binding_args::durability_tier(tier).map_err(|error| JsValue::from_str(&error))
 }
 
-/// Read-only binding lowering. Write waits keep `durability_tier_from_str`, so
-/// a product read choice can never change write-settlement semantics.
 fn read_tier_from_str(tier: &str) -> Result<jazz::db::ReadTier, JsValue> {
-    match tier {
-        "local-first" | "LocalFirst" => Ok(jazz::db::ReadTier::LocalFirst),
-        "remote" | "Remote" => Ok(jazz::db::ReadTier::Remote),
-        "local-only" | "LocalOnly" => Ok(jazz::db::ReadTier::LocalOnly),
-        other => Err(JsValue::from_str(&format!("unknown read tier {other}"))),
-    }
+    jazz::binding_args::read_tier(tier).map_err(|error| JsValue::from_str(&error))
 }
 
 fn write_state_to_js(state: jazz::db::WriteState) -> Result<JsValue, JsValue> {
@@ -3558,12 +3504,12 @@ mod dynamic_schema_view_tests {
     #[test]
     fn write_timestamp_requires_a_nonnegative_safe_integer_millisecond_value() {
         assert_eq!(
-            checked_js_safe_u64(1_704_067_200_123.0),
+            jazz::binding_args::safe_u64(1_704_067_200_123.0),
             Some(1_704_067_200_123),
         );
         for invalid in [-1.0, 1.5, f64::NAN, f64::INFINITY, 9_007_199_254_740_992.0] {
             assert!(
-                checked_js_safe_u64(invalid).is_none(),
+                jazz::binding_args::safe_u64(invalid).is_none(),
                 "invalid updatedAtMs {invalid:?} must fail before a write"
             );
         }
@@ -4300,8 +4246,8 @@ mod dynamic_schema_view_tests {
             .with_account(jazz::account_registry::AccountId(uuid::Uuid::from_u128(
                 0x5301,
             )));
-        let claims = admit_binding_claims(
-            author,
+        let claims = jazz::tools::policy_claims::canonical_policy_binding_claims(
+            &author,
             BTreeMap::from([
                 ("user".to_owned(), Value::String("forged-user".to_owned())),
                 (
