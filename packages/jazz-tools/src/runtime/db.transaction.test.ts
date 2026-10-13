@@ -71,7 +71,7 @@ afterEach(async () => {
 });
 
 function allTodos() {
-  return db.all(app.todos.where({}), { tier: "local" });
+  return db.all(app.todos.where({}), { tier: "local-first" });
 }
 
 describe("Db exclusive transaction initialization", () => {
@@ -91,7 +91,7 @@ describe("Db transactions", () => {
       await allTodos();
       const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
       const inserted = tx.insert(app.todos, { title: "read before commit", done: false });
-      const reading = tx.all(app.todos.where({ id: inserted.id }), { tier: "local" });
+      const reading = tx.all(app.todos.where({ id: inserted.id }), { tier: "local-first" });
       const committed = tx.commit();
       expect(committed).not.toBeInstanceOf(Promise);
       expect(() => tx.update(app.todos, inserted.id, { title: "too late" })).toThrow();
@@ -110,7 +110,9 @@ describe("Db transactions", () => {
     const tx = db.beginExclusiveTransaction();
     db.insert(app.todos, { title: "committed after begin", done: false });
 
-    await expect(tx.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([beforeBegin]);
+    await expect(tx.all(app.todos.where({}), { tier: "local-first" })).resolves.toEqual([
+      beforeBegin,
+    ]);
     await tx.rollback();
   });
 
@@ -163,12 +165,12 @@ describe("Db transactions", () => {
 
       await expect(allTodos()).resolves.toEqual([]);
       await expect(
-        tx.one(app.todos.where({ id: inserted.id }), { tier: "local" }),
+        tx.one(app.todos.where({ id: inserted.id }), { tier: "local-first" }),
       ).resolves.toEqual(inserted);
 
       tx.update(app.todos, inserted.id, { done: true });
       await expect(
-        tx.one(app.todos.where({ id: inserted.id }), { tier: "local" }),
+        tx.one(app.todos.where({ id: inserted.id }), { tier: "local-first" }),
       ).resolves.toEqual({
         ...inserted,
         done: true,
@@ -178,13 +180,13 @@ describe("Db transactions", () => {
     });
 
     await result.wait({ tier: "local" });
-    await expect(db.one(app.todos.where({ id: result.value }), { tier: "local" })).resolves.toEqual(
-      {
-        id: result.value,
-        title: "staged",
-        done: true,
-      },
-    );
+    await expect(
+      db.one(app.todos.where({ id: result.value }), { tier: "local-first" }),
+    ).resolves.toEqual({
+      id: result.value,
+      title: "staged",
+      done: true,
+    });
   });
 
   it("reads insert update delete effects inside a mergeable callback transaction", async () => {
@@ -195,7 +197,7 @@ describe("Db transactions", () => {
       tx.update(app.todos, existing.id, { done: true });
       tx.delete(app.todos, inserted.id);
 
-      await expect(tx.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
+      await expect(tx.all(app.todos.where({}), { tier: "local-first" })).resolves.toEqual([
         { id: existing.id, title: "committed", done: true },
       ]);
 
@@ -203,7 +205,7 @@ describe("Db transactions", () => {
     });
 
     await result.wait({ tier: "local" });
-    await expect(db.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
+    await expect(db.all(app.todos.where({}), { tier: "local-first" })).resolves.toEqual([
       { id: existing.id, title: "committed", done: true },
     ]);
   });
@@ -217,17 +219,17 @@ describe("Db transactions", () => {
     const result = await db.transaction(async (tx) => {
       const restored = tx.restore(app.todos, deleted.id, { title: "restored", done: true });
 
-      await expect(tx.one(app.todos.where({ id: deleted.id }), { tier: "local" })).resolves.toEqual(
-        restored,
-      );
+      await expect(
+        tx.one(app.todos.where({ id: deleted.id }), { tier: "local-first" }),
+      ).resolves.toEqual(restored);
 
       return restored;
     });
 
     await result.wait({ tier: "local" });
-    await expect(db.one(app.todos.where({ id: deleted.id }), { tier: "local" })).resolves.toEqual(
-      result.value,
-    );
+    await expect(
+      db.one(app.todos.where({ id: deleted.id }), { tier: "local-first" }),
+    ).resolves.toEqual(result.value);
   });
 
   it("applies defaults to empty inserts and restores inside a mergeable callback transaction", async () => {
@@ -238,7 +240,7 @@ describe("Db transactions", () => {
       const restored = tx.restore(defaultsApp.defaults_todos, inserted.id, {});
 
       await expect(
-        tx.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local" }),
+        tx.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local-first" }),
       ).resolves.toEqual(restored);
 
       return restored;
@@ -246,7 +248,7 @@ describe("Db transactions", () => {
 
     await result.wait({ tier: "local" });
     await expect(
-      db.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local" }),
+      db.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local-first" }),
     ).resolves.toEqual(inserted);
   });
 
@@ -260,14 +262,16 @@ describe("Db transactions", () => {
       // assertions pin the observable behavior: explicit title ordering here,
       // and SPEC 6.4.1's implicit ascending row_uuid ordering below.
       await expect(
-        tx.all(app.todos.where({}).orderBy("title", "asc"), { tier: "local" }),
+        tx.all(app.todos.where({}).orderBy("title", "asc"), { tier: "local-first" }),
       ).resolves.toMatchObject([{ title: "a" }, { title: "b" }, { title: "c" }]);
 
-      return tx.all(app.todos.where({}), { tier: "local" });
+      return tx.all(app.todos.where({}), { tier: "local-first" });
     });
 
     await result.wait({ tier: "local" });
-    await expect(db.all(app.todos.where({}), { tier: "local" })).resolves.toEqual(result.value);
+    await expect(db.all(app.todos.where({}), { tier: "local-first" })).resolves.toEqual(
+      result.value,
+    );
   });
 
   it("applies non-eq predicates and limit offset inside a mergeable transaction", async () => {
@@ -279,12 +283,12 @@ describe("Db transactions", () => {
 
       await expect(
         tx.all(app.todos.where({ title: { gt: "b" } } as never).orderBy("title", "asc"), {
-          tier: "local",
+          tier: "local-first",
         }),
       ).resolves.toMatchObject([{ title: "c" }, { title: "d" }]);
 
       return tx.all(app.todos.where({}).orderBy("title", "asc").offset(1).limit(2), {
-        tier: "local",
+        tier: "local-first",
       });
     });
 
@@ -306,7 +310,7 @@ describe("Db transactions", () => {
         tx.insert(taggedApp.tagged_todos, { title: "home", tags: ["personal"] });
 
         return tx.all(taggedApp.tagged_todos.where({ tags: { contains: "urgent" } } as never), {
-          tier: "local",
+          tier: "local-first",
         });
       });
 
@@ -451,7 +455,7 @@ describe("Db mergeable transactions", () => {
       const tx = sessionDb.beginTransaction();
       tx.insert(app.todos, { title: "Session-scoped transaction", done: false });
       await tx.commit();
-      await expect(sessionDb.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
+      await expect(sessionDb.all(app.todos.where({}), { tier: "local-first" })).resolves.toEqual([
         { id: expect.any(String), title: "Session-scoped transaction", done: false },
       ]);
     } finally {
