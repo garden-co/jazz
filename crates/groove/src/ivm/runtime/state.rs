@@ -36,6 +36,11 @@ pub struct RuntimeStats {
     pub hydration_memo_distinct_computed_nodes: usize,
     pub arrangement_rows: usize,
     pub arrangement_encoded_bytes: usize,
+    /// Arrangements with a spilled run on scratch storage.
+    pub spilled_arrangements: usize,
+    /// Rows and encoded bytes held in spilled runs, outside memory.
+    pub spilled_arrangement_rows: usize,
+    pub spilled_arrangement_bytes: usize,
     pub recursive_state_count: usize,
     pub recursive_accumulated_rows: usize,
     pub recursive_accumulated_encoded_bytes: usize,

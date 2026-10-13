@@ -56,6 +56,7 @@ mod persist;
 pub(crate) mod pipeline;
 mod rank_index;
 mod recursion;
+mod spill;
 mod state;
 mod terminal;
 mod typed_template;
@@ -72,6 +73,7 @@ use recursion::{
     RecursiveNodes, RecursiveState, hydrate_recursive_arrangements, recursive_delta,
     recursive_read_tables, require_snapshot_inputs, snapshot_requirement,
 };
+pub use spill::{ArrangementSpillReport, MemorySpillStorage, SpillEntries, SpillStorage};
 use state::{
     ArrangementKey, ArrangementUpdateMode, AsOf, EvalContext, EvalMemoEntry, EvalMemoKey, EvalMode,
     HydrationMode, NodeInputSignature, OperatorStateKey, ScopeId, SubTick, Tick,
@@ -256,6 +258,9 @@ pub struct IvmRuntime {
     /// so an unbounded TopBy keeps its delta-only path.
     plain_output_root_positions: bool,
     collect_tick_runtime_stats: bool,
+    /// Scratch storage join arrangements spill to under memory pressure.
+    /// `None` keeps every arrangement in memory.
+    spill_context: Option<Rc<spill::SpillContext>>,
 }
 
 impl IvmRuntime {
@@ -368,6 +373,7 @@ impl IvmRuntime {
             auto_direct_family_enabled: true,
             plain_output_root_positions: true,
             collect_tick_runtime_stats: false,
+            spill_context: None,
             prepared_shapes: HashMap::default(),
             auto_direct_families: HashMap::default(),
             shared_prepared_shapes: HashMap::default(),
@@ -618,6 +624,8 @@ pub enum IvmRuntimeError {
     StorageUnavailable,
     #[error("evaluation blocked on a non-resident storage input")]
     EvaluationBlocked,
+    #[error("spilled arrangement scratch storage failed: {0}")]
+    ArrangementSpill(String),
     #[error("streaming checksum window and work budgets must be non-zero")]
     InvalidStreamingChecksumBudget,
     #[error("streaming checksum requires a String or Bytes field")]

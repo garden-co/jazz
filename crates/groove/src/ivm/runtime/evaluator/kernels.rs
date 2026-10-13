@@ -9,6 +9,20 @@ impl TickEvaluator<'_> {
         node: NodeId,
         inputs: &[Arc<RecordDeltas>],
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let result = self.compute_batch_kernel(node, inputs);
+        // A kernel that read a spilled arrangement whose scratch storage
+        // failed computed from missing buckets; never let that result out.
+        if let Some(error) = super::super::spill::take_spill_error() {
+            return Err(IvmRuntimeError::ArrangementSpill(error));
+        }
+        result
+    }
+
+    fn compute_batch_kernel(
+        &mut self,
+        node: NodeId,
+        inputs: &[Arc<RecordDeltas>],
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
         let graph_node = self
             .graph
             .node(node)
