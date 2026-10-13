@@ -455,7 +455,7 @@ history stays findable by transaction until its fate arrives without a
 per-version index.
 
 Positions 5 through 8 hold exclusive read evidence in the
-`jazz.exclusive-read-evidence.v1` family, and only while it can still be
+`jazz.exclusive-read-evidence.v2` family, and only while it can still be
 retransmitted. Exclusive snapshot/read/CAS evidence belongs to the immutable
 `Transaction` commit-unit payload and authority validation seam. A node that
 authored or relays an `Exclusive` transaction whose fate is still `Pending`
@@ -466,14 +466,18 @@ committed. The row rewrite that records a settled fate writes all four back to
 null; the slots are not an audit or revalidation log. Every other row, and any
 exclusive row whose evidence v1 cannot represent, writes all four null, and a
 missing snapshot still fails authority validation. Each non-null slot is the
-Groove typed-record v1 bytes of one fixed descriptor led by `format_v1 = 1`:
-`(format_v1, owner, global_base, local_base, dots[(time, node)])`,
-`(format_v1, reads[(table, row_uuid, version_time, version_node)])`,
-`(format_v1, reads[(table, row_uuid)])` and
-`(format_v1, reads[(table, shape_id, query, binding_id, bindings)])`, where
-`query` is the native query Postcard carrier and `bindings` the canonical
-`jazz-binding-v0` preimage of `binding_id`. Decoders MUST reject non-canonical
-bytes, an unknown `format_v1`, a binding id that does not match its bindings,
+Groove typed-record v1 bytes of one fixed descriptor led by a format byte:
+`(format_v1 = 1, owner, global_base, local_base, dots[(time, node)])`,
+`(format_v1 = 1, reads[(table, row_uuid, version_time, version_node)])`,
+`(format_v1 = 1, reads[(table, row_uuid)])` and
+`(format_v2 = 2, reads[(table, shape_id, query, binding_id, bindings,
+aggregate_result?)])`, where `query` is the native query Postcard carrier,
+`bindings` the canonical `jazz-binding-v0` preimage of `binding_id`, and
+`aggregate_result` the canonical `jazz.aggregate-read-result.v1` bytes an
+aggregate read observed (null exactly when the shape has no aggregate).
+Decoders MUST reject non-canonical bytes, an unknown format byte (including a
+v1 predicate-read slot), a missing, malformed or stray aggregate result, a
+binding id that does not match its bindings,
 read sets without a snapshot, and evidence on a `Mergeable` row, as corrupt
 storage. Validation MUST still finish before lowering discards the evidence.
 Reopen recovers the resulting fate and immutable versions, and MUST NOT
