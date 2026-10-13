@@ -127,6 +127,25 @@ export function ConfiguredJazzSessionProvider<Config, Client extends CoreJazzCli
   return <SessionContext.Provider value={startup}>{fallback}</SessionContext.Provider>;
 }
 
+/** A host adapter's session exports, with its client type and session factory filled in. */
+export function createJazzSessionBindings<Config, Client extends CoreJazzClient>(
+  createJazzSession: (config: Config) => Promise<JazzSession<Client>>,
+) {
+  return {
+    useJazzSession: (): UseJazzSessionResult<Client> => useJazzSession<Client>(),
+    JazzSessionProvider: (
+      props: JazzSessionProviderProps<Client> | ConfiguredJazzSessionProviderProps<Config>,
+    ) =>
+      "session" in props ? (
+        <JazzSessionProvider {...props} />
+      ) : (
+        <ConfiguredJazzSessionProvider {...props} createJazzSession={createJazzSession} />
+      ),
+    /** Capture configuration once and retain the owner across authentication UI transitions. */
+    useJazzSessionOwner: (config: Config) => useJazzSessionOwner(config, createJazzSession),
+  };
+}
+
 /** Own a session while keeping application authentication coordination mounted across transitions.
  * Configuration is captured at mount; use a React key to replace it.
  */
