@@ -2264,7 +2264,7 @@ async function runB7(config: ProfileConfig): Promise<ScenarioResult> {
   try {
     db = await createServerDb(appId, dbName, "realistic-b7");
     await seedDataset(db, largeConfig);
-    const warmRows = await db.all(hydrationQuery, { tier: "local" });
+    const warmRows = await db.all(hydrationQuery, { tier: "local-first" });
     rootRows = warmRows.length;
     commentRows = warmRows.reduce(
       (total, row) => total + (row.task_commentsViaTask?.length ?? 0),
@@ -2274,12 +2274,12 @@ async function runB7(config: ProfileConfig): Promise<ScenarioResult> {
     const wallStart = performance.now();
     for (let cycle = 0; cycle < cycles; cycle += 1) {
       const startedAt = performance.now();
-      const rows = await db.all(hydrationQuery, { tier: "local" });
+      const rows = await db.all(hydrationQuery, { tier: "local-first" });
       latencies.push(performance.now() - startedAt);
       expect(rows.length).toBe(rootRows);
     }
     const wallMs = performance.now() - wallStart;
-    const validationRows = await db.all(hydrationQuery, { tier: "local" });
+    const validationRows = await db.all(hydrationQuery, { tier: "local-first" });
     const relationIdentity = (rows: typeof warmRows) =>
       rows.map((row) => [row.id, (row.task_commentsViaTask ?? []).map((comment) => comment.id)]);
     expect(relationIdentity(validationRows)).toEqual(relationIdentity(warmRows));

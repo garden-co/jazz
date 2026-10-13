@@ -4103,20 +4103,6 @@ fn aggregate_result_membership_fields(
             Value::String("global".to_owned()),
         ));
     }
-    // This runtime-only token pairs the aggregate operator's before/after
-    // records. It is wrapped as an opaque protocol type before it crosses the
-    // runtime boundary, so it cannot be mistaken for row version metadata.
-    if let Some(first_output) = outputs.first() {
-        fields.push(ProjectField::renamed(
-            aggregate_output_field(&first_output.output.name),
-            "synthetic_replacement",
-        ));
-    } else {
-        fields.push(ProjectField::literal(
-            "synthetic_replacement",
-            Value::String("empty".to_owned()),
-        ));
-    }
     for group in group_by {
         let field = aggregate_source_field_name(group, source)?;
         let identity = source
@@ -4138,7 +4124,7 @@ fn aggregate_result_membership_fields(
             &output.output.name,
         ))),
         output_name: aggregate_output_field(&output.output.name),
-        output_identity: FieldIdentity::Name(output.output.name.clone()),
+        output_identity: FieldIdentity::Name(aggregate_output_field(&output.output.name)),
     }));
     fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
     Ok(fields)

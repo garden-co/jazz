@@ -89,8 +89,7 @@ fn logical_message_larger_than_frame_round_trips_in_channel_fifo() {
 fn strict_bootstrap_receive_rejects_bad_physical_frame_before_later_valid_message() {
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);
-    let features =
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let features = 0;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
     let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
     sender
@@ -160,8 +159,7 @@ fn schema_lineage_publication_fragments_before_atomic_admission() {
 
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);
-    let features =
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let features = 0;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
     let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
     sender.send(message.clone()).unwrap();
@@ -215,7 +213,7 @@ fn channel_reordering_and_duplicate_extents_fail_closed() {
     for duplicate in [false, true] {
         let (left, right) = byte_duplex_raw();
         let staged = Rc::clone(&right.inbound);
-        let features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+        let features = 0;
         let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
         let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
         sender
@@ -244,63 +242,6 @@ fn channel_reordering_and_duplicate_extents_fail_closed() {
             receiver.try_recv_result().is_err(),
             "terminal state cannot skip ahead to later valid extents"
         );
-    }
-}
-
-#[test]
-fn fragment_admission_bounds_peer_state_and_rejects_conflicting_duplicates() {
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION;
-    let fragment = |message_id, payload: u8| WireMessageFragment {
-        protocol_version: WIRE_PROTOCOL_VERSION,
-        features,
-        session: None,
-        message_id,
-        message_digest: [payload; 32],
-        total_len: 2,
-        offset: 0,
-        payload: vec![payload],
-    };
-    let mut reassembler = LogicalMessageReassembler::default();
-    assert_eq!(reassembler.push(fragment(1, 1), 0).unwrap(), None);
-    assert!(
-        reassembler
-            .push(fragment(1, 2), 0)
-            .unwrap_err()
-            .contains("disagree")
-    );
-    reassembler.discard(1);
-    for message_id in 0..MAX_INFLIGHT_LOGICAL_MESSAGES as u64 {
-        assert_eq!(
-            reassembler
-                .push(fragment(message_id, message_id as u8), 0)
-                .unwrap(),
-            None
-        );
-    }
-    assert!(
-        reassembler
-            .push(fragment(MAX_INFLIGHT_LOGICAL_MESSAGES as u64, 9), 0)
-            .unwrap_err()
-            .contains("too many incomplete")
-    );
-}
-
-fn test_message_fragment(
-    message_id: u64,
-    message_digest: [u8; 32],
-    total_len: u64,
-    offset: u64,
-    payload: Vec<u8>,
-) -> WireMessageFragment {
-    WireMessageFragment {
-        protocol_version: WIRE_PROTOCOL_VERSION,
-        features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION,
-        session: None,
-        message_id,
-        message_digest,
-        total_len,
-        offset,
-        payload,
     }
 }
 
@@ -335,7 +276,7 @@ fn receive_poll_reports_permanent_failure_while_flushing_accepted_backlog() {
             ]),
         },
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION,
+        0,
         None,
     );
 
@@ -374,7 +315,7 @@ fn pending_outbound_backpressure_retains_a_bounded_fifo_queue() {
             .collect(),
         },
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD,
+        0,
         None,
     );
     for _ in 0..MAX_CHANNEL_QUEUED_MESSAGES {
@@ -388,327 +329,6 @@ fn pending_outbound_backpressure_retains_a_bounded_fifo_queue() {
         adapter.send(test_catalogue_ack()),
         Err(TransportError::Backpressure),
         "the producer retains only the message beyond the queue bound"
-    );
-}
-
-#[test]
-fn stale_near_limit_staged_bytes_are_reclaimed_and_duplicates_do_not_extend_expiry() {
-    let mut reassembler = LogicalMessageReassembler::with_staging_budget_for_test(8);
-    let stale = test_message_fragment(1, [1; 32], 8, 0, vec![1; 7]);
-
-    assert_eq!(reassembler.push(stale.clone(), 0).unwrap(), None);
-    assert_eq!(
-        reassembler
-            .push(stale, MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1)
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(2, [2; 32], 9, 0, vec![2; 8]),
-                MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
-            )
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        (
-            reassembler.incomplete.len(),
-            reassembler.staged_bytes,
-            reassembler.incomplete.contains_key(&2),
-        ),
-        (1, 8, true)
-    );
-}
-
-#[test]
-fn four_stale_tiny_incomplete_ids_are_reclaimed_before_admitting_another() {
-    let mut reassembler = LogicalMessageReassembler::default();
-    for message_id in 0..MAX_INFLIGHT_LOGICAL_MESSAGES as u64 {
-        assert_eq!(
-            reassembler
-                .push(
-                    test_message_fragment(message_id, [message_id as u8; 32], 2, 0, vec![1]),
-                    0,
-                )
-                .unwrap(),
-            None
-        );
-    }
-
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(
-                    MAX_INFLIGHT_LOGICAL_MESSAGES as u64,
-                    [9; 32],
-                    2,
-                    0,
-                    vec![9],
-                ),
-                MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
-            )
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        (
-            reassembler.incomplete.len(),
-            reassembler.staged_bytes,
-            reassembler
-                .incomplete
-                .contains_key(&(MAX_INFLIGHT_LOGICAL_MESSAGES as u64)),
-        ),
-        (1, 1, true)
-    );
-}
-
-#[test]
-fn actively_progressing_legal_fragmented_message_completes_before_maximum_age() {
-    let payload = b"legal fragmented message".to_vec();
-    let digest = *blake3::hash(&payload).as_bytes();
-    let total_len = payload.len() as u64;
-    let mut reassembler = LogicalMessageReassembler::default();
-
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(7, digest, total_len, 0, payload[..5].to_vec()),
-                0,
-            )
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(7, digest, total_len, 5, payload[5..11].to_vec()),
-                MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1,
-            )
-            .unwrap(),
-        None
-    );
-    let envelope = reassembler
-        .push(
-            test_message_fragment(7, digest, total_len, 11, payload[11..].to_vec()),
-            (MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1) * 2,
-        )
-        .unwrap()
-        .expect("novel extents refresh inactivity without exceeding maximum age");
-
-    assert_eq!(envelope.payload, payload);
-}
-
-#[test]
-fn steady_progress_cannot_retain_an_incomplete_message_beyond_maximum_age() {
-    let mut reassembler = LogicalMessageReassembler::default();
-    let mut now_ms = 0;
-    let mut offset = 0;
-    while now_ms < MAX_FRAGMENT_REASSEMBLY_AGE_MS {
-        assert_eq!(
-            reassembler
-                .push(
-                    test_message_fragment(
-                        8,
-                        [8; 32],
-                        MAX_LOGICAL_MESSAGE_BYTES as u64,
-                        offset,
-                        vec![8],
-                    ),
-                    now_ms,
-                )
-                .unwrap(),
-            None
-        );
-        offset += 1;
-        now_ms = now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1);
-    }
-
-    reassembler.expire(MAX_FRAGMENT_REASSEMBLY_AGE_MS);
-
-    assert_eq!(
-        (reassembler.incomplete.len(), reassembler.staged_bytes),
-        (0, 0)
-    );
-}
-
-#[test]
-fn active_reassembly_still_rejects_overlapping_extents() {
-    let payload = b"abcd";
-    let digest = *blake3::hash(payload).as_bytes();
-    let mut reassembler = LogicalMessageReassembler::default();
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(9, digest, payload.len() as u64, 0, payload[..2].to_vec()),
-                0,
-            )
-            .unwrap(),
-        None
-    );
-
-    let error = reassembler
-        .push(
-            test_message_fragment(9, digest, payload.len() as u64, 1, payload[1..3].to_vec()),
-            1,
-        )
-        .unwrap_err();
-
-    assert!(error.contains("overlapping logical message fragments"));
-}
-
-#[test]
-fn active_reassembly_still_rejects_a_completed_payload_with_the_wrong_digest() {
-    let mut reassembler = LogicalMessageReassembler::default();
-    assert_eq!(
-        reassembler
-            .push(test_message_fragment(10, [0; 32], 2, 0, vec![1]), 0)
-            .unwrap(),
-        None
-    );
-
-    let error = reassembler
-        .push(test_message_fragment(10, [0; 32], 2, 1, vec![2]), 1)
-        .unwrap_err();
-
-    assert!(error.contains("logical message digest mismatch"));
-}
-
-/// Verifies that Alice can finish an older fragmented message after her later
-/// message completes first on a reordering transport.
-///
-/// ```text
-/// alice message 1 extent 0 ─┐
-/// alice message 2 complete ──┼──► receiver
-/// alice message 1 extent 1 ─┘
-/// ```
-#[test]
-fn active_lower_id_reassembly_completes_after_higher_id() {
-    let mut reassembler = LogicalMessageReassembler::default();
-    let lower = b"ab";
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(
-                    1,
-                    *blake3::hash(lower).as_bytes(),
-                    lower.len() as u64,
-                    0,
-                    lower[..1].to_vec(),
-                ),
-                0,
-            )
-            .unwrap(),
-        None
-    );
-    let completed = vec![2];
-    assert!(
-        reassembler
-            .push(
-                test_message_fragment(2, *blake3::hash(&completed).as_bytes(), 1, 0, completed),
-                1,
-            )
-            .unwrap()
-            .is_some()
-    );
-
-    let envelope = reassembler
-        .push(
-            test_message_fragment(
-                1,
-                *blake3::hash(lower).as_bytes(),
-                lower.len() as u64,
-                1,
-                lower[1..].to_vec(),
-            ),
-            1,
-        )
-        .unwrap()
-        .expect("the older message remains active after the later completion");
-    assert_eq!(envelope.payload, lower);
-}
-
-/// Verifies that Alice's expired lower message id can start fresh after her
-/// higher id completed while physical delivery was reordered.
-///
-/// ```text
-/// alice message 1 extent ─────► receiver ──idle expiry──► new message 1 extent
-/// alice message 2 complete ───► receiver
-/// ```
-#[test]
-fn expired_lower_id_restarts_after_higher_id_completion() {
-    let mut reassembler = LogicalMessageReassembler::default();
-    assert_eq!(
-        reassembler
-            .push(test_message_fragment(1, [1; 32], 2, 0, vec![1]), 0)
-            .unwrap(),
-        None
-    );
-    let completed = vec![2];
-    assert!(
-        reassembler
-            .push(
-                test_message_fragment(2, *blake3::hash(&completed).as_bytes(), 1, 0, completed),
-                1,
-            )
-            .unwrap()
-            .is_some()
-    );
-
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(1, [1; 32], 2, 0, vec![1]),
-                MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
-            )
-            .unwrap(),
-        None
-    );
-    assert!(reassembler.incomplete.contains_key(&1));
-}
-
-#[test]
-fn completed_replay_delivers_only_after_exact_recent_completion_eviction() {
-    fn complete(
-        reassembler: &mut LogicalMessageReassembler,
-        message_id: u64,
-    ) -> Option<WireEnvelope> {
-        let payload = vec![message_id as u8];
-        reassembler
-            .push(
-                test_message_fragment(
-                    message_id,
-                    *blake3::hash(&payload).as_bytes(),
-                    payload.len() as u64,
-                    0,
-                    payload,
-                ),
-                0,
-            )
-            .unwrap()
-    }
-
-    assert_eq!(RECENT_COMPLETED_LOGICAL_MESSAGES, 64);
-    let mut reassembler = LogicalMessageReassembler::default();
-    assert!(complete(&mut reassembler, 0).is_some());
-    for message_id in 1..RECENT_COMPLETED_LOGICAL_MESSAGES as u64 {
-        assert!(complete(&mut reassembler, message_id).is_some());
-    }
-
-    assert_eq!(
-        complete(&mut reassembler, 0),
-        None,
-        "the oldest completion remains deduplicated at the exact cache bound"
-    );
-    let first_message_after_horizon = RECENT_COMPLETED_LOGICAL_MESSAGES as u64;
-    assert!(
-        complete(&mut reassembler, first_message_after_horizon).is_some(),
-        "the next completion evicts the oldest retained completion"
-    );
-    assert!(
-        complete(&mut reassembler, 0).is_some(),
-        "an exact old replay may deliver again only after its completion is evicted"
     );
 }
 
@@ -844,8 +464,7 @@ fn pending_backpressure_admits_later_receipt_in_bounded_channel_queue() {
 
 #[test]
 fn reconnect_discards_missing_fragments_and_replays_the_logical_message() {
-    let features =
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let features = 0;
     let message = SyncMessage::SessionClaims {
         identity: AuthorSubject::for_test_bytes([0x74; 16]),
         claims: BTreeMap::from([(
@@ -884,19 +503,13 @@ pub(super) fn byte_duplex_with_session(
         Box::new(WireTransportAdapter::new(
             left,
             WIRE_PROTOCOL_VERSION,
-            FEATURE_SYNC_MESSAGE_PAYLOAD
-                | crate::wire::FEATURE_SESSION_FRAME
-                | FEATURE_STRUCTURED_ERRORS
-                | FEATURE_MESSAGE_FRAGMENTATION,
+            0,
             Some(session.clone()),
         )),
         Box::new(WireTransportAdapter::new(
             right,
             WIRE_PROTOCOL_VERSION,
-            FEATURE_SYNC_MESSAGE_PAYLOAD
-                | crate::wire::FEATURE_SESSION_FRAME
-                | FEATURE_STRUCTURED_ERRORS
-                | FEATURE_MESSAGE_FRAGMENTATION,
+            0,
             Some(session),
         )),
     )
@@ -922,9 +535,7 @@ fn test_catalogue_ack() -> SyncMessage {
 fn encode_test_message_frame(session: Option<WireSession>) -> Vec<u8> {
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-        | crate::wire::FEATURE_SESSION_FRAME
-        | FEATURE_STRUCTURED_ERRORS;
+    let features = 0;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, session);
     sender.send(test_catalogue_ack()).unwrap();
     staged.borrow_mut().pop_front().unwrap()
@@ -962,7 +573,7 @@ fn wire_transport_adapter_carries_only_admitted_session_context() {
             epoch: 19,
         }),
         link_identity: AuthorSubject::for_test_bytes([0x83; 16]),
-        negotiated_features: crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+        negotiated_features: crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
     };
     let adapter = WireTransportAdapter::new_with_session_context(
         left,
@@ -1025,14 +636,7 @@ fn wire_transport_adapter_accepts_matching_session() {
         .borrow_mut()
         .push_back(encode_test_message_frame(Some(session.clone())));
 
-    let mut adapter = WireTransportAdapter::new(
-        left,
-        WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
-        Some(session),
-    );
+    let mut adapter = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, 0, Some(session));
 
     assert_eq!(adapter.try_recv(), Some(test_catalogue_ack()));
     while let Some(bytes) = right.try_recv_frame() {
@@ -1054,9 +658,7 @@ fn wire_transport_adapter_rejects_missing_session_without_emitting_sync_message(
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
+        0,
         Some(test_wire_session(identity, 3)),
     );
 
@@ -1068,9 +670,7 @@ fn wire_transport_adapter_rejects_missing_session_without_emitting_sync_message(
 fn channel_authentication_precedes_payload_admission() {
     let (left, mut right) = byte_duplex_raw();
     let expected_identity = AuthorSubject::for_test_bytes([0xa5; 16]);
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-        | crate::wire::FEATURE_SESSION_FRAME
-        | FEATURE_STRUCTURED_ERRORS;
+    let features = 0;
     let mut frame = decode_frame(&encode_test_message_frame(Some(test_wire_session(
         AuthorSubject::for_test_bytes([0xb5; 16]),
         3,
@@ -1102,7 +702,7 @@ fn channel_authentication_precedes_payload_admission() {
 #[test]
 fn channel_negotiation_validation_precedes_payload_admission() {
     let (left, mut right) = byte_duplex_raw();
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+    let features = 0;
     let mut frame = decode_frame(&encode_test_message_frame(None)).unwrap();
     let WireFrame::Channel(envelope) = &mut frame else {
         panic!("channel fixture")
@@ -1143,9 +743,7 @@ fn wire_transport_adapter_rejects_wrong_identity_without_emitting_sync_message()
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
+        0,
         Some(test_wire_session(expected_identity, 3)),
     );
 
@@ -1166,9 +764,7 @@ fn wire_transport_adapter_rejects_stale_epoch_without_emitting_sync_message() {
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
+        0,
         Some(test_wire_session(identity, 3)),
     );
 
@@ -1205,13 +801,13 @@ fn wire_transport_adapter_lz4_compresses_payload_when_negotiated() {
     let mut sender = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4,
+        crate::wire::FEATURE_PAYLOAD_LZ4,
         None,
     );
     let mut receiver = WireTransportAdapter::new(
         right,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4,
+        crate::wire::FEATURE_PAYLOAD_LZ4,
         None,
     );
     let message = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
@@ -1265,7 +861,7 @@ fn lz4_fragmentation_round_trips_incompressible_payload_over_logical_limit() {
         .expect("deterministic message encodes")
         .len();
     assert!(logical_len <= MAX_LOGICAL_MESSAGE_BYTES);
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4;
+    let features = crate::wire::FEATURE_PAYLOAD_LZ4;
     let (left, right) = byte_duplex_raw();
     let attempts = Rc::new(RefCell::new(Vec::new()));
     let mut sender = WireTransportAdapter::new(
@@ -1308,52 +904,6 @@ fn lz4_fragmentation_round_trips_incompressible_payload_over_logical_limit() {
     assert!(receiver.try_recv_result().unwrap().is_none());
 }
 
-#[cfg(feature = "transport-compression-lz4")]
-#[test]
-fn lz4_fragmentation_rejects_encoded_payload_over_encoded_cap_before_admitting() {
-    const EXPECTED_MAX_ENCODED_MESSAGE_BYTES: usize =
-        MAX_LOGICAL_MESSAGE_BYTES + MAX_LOGICAL_MESSAGE_BYTES / 10 + 24;
-    // Reassembly is the private pre-allocation resource seam: use a one-byte
-    // synthetic extent so this rejection proves no over-cap payload is staged
-    // without allocating a payload near the encoded cap.
-    let mut reassembler = LogicalMessageReassembler::default();
-    let error = reassembler
-        .push(
-            WireMessageFragment {
-                protocol_version: WIRE_PROTOCOL_VERSION,
-                features: FEATURE_SYNC_MESSAGE_PAYLOAD
-                    | crate::wire::FEATURE_PAYLOAD_LZ4
-                    | FEATURE_MESSAGE_FRAGMENTATION,
-                session: None,
-                message_id: 91,
-                message_digest: [9; 32],
-                total_len: (EXPECTED_MAX_ENCODED_MESSAGE_BYTES + 1) as u64,
-                offset: 0,
-                payload: vec![9],
-            },
-            0,
-        )
-        .expect_err("encoded payload over the encoded cap must be rejected");
-    assert!(error.contains("encoded message payload"));
-    assert!(reassembler.incomplete.is_empty());
-    assert_eq!(reassembler.staged_bytes, 0);
-}
-
-#[cfg(feature = "transport-compression-lz4")]
-#[test]
-fn lz4_decoder_rejects_decompressed_payload_over_logical_limit() {
-    let mut decoder =
-        WireStreamDecoder::new(crate::wire::FEATURE_PAYLOAD_LZ4).expect("lz4 decoder");
-    let mut decompression_bomb = (MAX_LOGICAL_MESSAGE_BYTES as u32 + 1)
-        .to_le_bytes()
-        .to_vec();
-    decompression_bomb.push(0);
-    let error = decoder
-        .decode_message(&decompression_bomb, crate::wire::FEATURE_PAYLOAD_LZ4)
-        .expect_err("receiver must retain the decompressed-output bound");
-    assert!(error.contains("exceeds max"));
-}
-
 #[cfg(feature = "transport-compression-zstd")]
 #[test]
 fn wire_transport_adapter_zstd_stream_preserves_message_order() {
@@ -1361,13 +911,13 @@ fn wire_transport_adapter_zstd_stream_preserves_message_order() {
     let mut sender = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD,
+        crate::wire::FEATURE_PAYLOAD_ZSTD,
         None,
     );
     let mut receiver = WireTransportAdapter::new(
         right,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD,
+        crate::wire::FEATURE_PAYLOAD_ZSTD,
         None,
     );
     let first = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
@@ -1607,7 +1157,7 @@ fn channel_encoded_budget_is_enforced_independently_of_decoded_bytes() {
     use crate::wire::channels::{ChannelClass, ChannelFrame, MAX_CHANNEL_FRAME_PAYLOAD};
     const EXPECTED_ENCODED_CAP: usize =
         MAX_LOGICAL_MESSAGE_BYTES + MAX_LOGICAL_MESSAGE_BYTES / 10 + 24;
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD;
+    let features = crate::wire::FEATURE_PAYLOAD_ZSTD;
     let (left, right) = byte_duplex_raw();
     let inbound = Rc::clone(&right.inbound);
     let mut bob = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
@@ -1671,7 +1221,7 @@ fn channel_decoded_budget_is_checked_before_payload_admission() {
     let WireFrame::Channel(envelope) = &mut frame else {
         panic!("channel fixture")
     };
-    envelope.features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+    envelope.features = 0;
     envelope.extent.message_len = MAX_LOGICAL_MESSAGE_BYTES as u32 + 1;
     envelope.extent.payload = vec![0xff];
     // Bypass the semantic sender's admission to model a malicious physical
@@ -1679,12 +1229,7 @@ fn channel_decoded_budget_is_checked_before_payload_admission() {
     left.inbound
         .borrow_mut()
         .push_back(encode_frame(&frame).unwrap());
-    let mut bob = WireTransportAdapter::new(
-        left,
-        WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD,
-        None,
-    );
+    let mut bob = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, 0, None);
     let error = bob.try_recv_result().unwrap_err();
     assert!(format!("{error:?}").contains("logical size limit"));
     assert!(bob.try_recv_result().is_err());
@@ -1869,7 +1414,7 @@ fn rejected_dynamic_channel_admission_preserves_generation() {
             self.inner.try_recv_frame()
         }
     }
-    let reply = |byte| SyncMessage::PermissionAdviceResponse {
+    let reply = |byte| SyncMessage::AuthorizationScopeDecision {
         request_id: crate::protocol::PermissionAdviceRequestId([byte; 16]),
         advice: crate::protocol::PermissionAdvice::Unknown,
     };

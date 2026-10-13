@@ -6,7 +6,7 @@ Axum REST + SSE service backed by the `jazz` Rust client, RocksDB storage and th
 
 - Using `JazzClient::connect_with_native_transport` with persistent storage and a remote sync server.
 - Enrolling an ordinary user with `JAZZ_JWT_TOKEN` through `/accounts/login-or-register` before connecting. The returned account supplies `AppContext.account_id`; neither backend nor admin credentials are used by the todo worker. Local-first tokens use `/accounts/found-local-first`.
-- Loading a TypeScript schema from Rust by shelling out to the `jazz-tools` CLI (`schema export`) at startup &mdash; the schema is authored once in `schema.ts` and consumed both by the JS tooling and the Rust client.
+- Loading a TypeScript schema from Rust by shelling out to the `jazz-tools` CLI (`schema compile`) at startup &mdash; the schema is authored once in `schema.ts` and consumed both by the JS tooling and the Rust client.
 - CRUD over `/todos` (`GET`, `POST`, `PUT /:id`, `DELETE /:id`) backed by Jazz inserts / updates / deletes.
 - Server-Sent Events on `/todos/live` broadcasting the full todo list whenever it changes, via a `tokio::sync::broadcast` channel.
 - `mimalloc` as the native example's global allocator.
@@ -45,14 +45,14 @@ Both examples remain deliberately excluded from the root Cargo workspace. Build 
 
 Configurable via env vars (`JAZZ_JWT_TOKEN` is required):
 
-| Variable          | Default                                 |
-| ----------------- | --------------------------------------- |
-| `JAZZ_APP_ID`     | hard-coded fallback id (see `main.rs`)  |
-| `JAZZ_SERVER_URL` | `http://localhost:1625`                 |
-| `JAZZ_JWT_TOKEN`  | required ordinary-user JWT              |
-| `TODO_DATA_DIR`   | `./todo-data` (local data directory)    |
-| `TODO_PORT`       | `3000`                                  |
-| `JAZZ_TOOLS_BIN`  | `jazz-tools` (used for `schema export`) |
+| Variable          | Default                                  |
+| ----------------- | ---------------------------------------- |
+| `JAZZ_APP_ID`     | hard-coded fallback id (see `main.rs`)   |
+| `JAZZ_SERVER_URL` | `http://localhost:1625`                  |
+| `JAZZ_JWT_TOKEN`  | required ordinary-user JWT               |
+| `TODO_DATA_DIR`   | `./todo-data` (local data directory)     |
+| `TODO_PORT`       | `3000`                                   |
+| `JAZZ_TOOLS_BIN`  | `jazz-tools` (used for `schema compile`) |
 
 ## API
 

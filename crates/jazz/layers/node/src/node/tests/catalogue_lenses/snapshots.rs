@@ -1413,10 +1413,10 @@ fn reopen_derives_staged_lens_identity_from_canonical_payload() {
         .next()
         .unwrap()
         .clone();
-    let expected_lens_id = staged.publication.lens.content_id();
+    let expected_lens_id = staged.publication.predecessors[0].lens.content_id();
     // `MigrationLens::id` is derived, never serialized: stale in-memory
     // bookkeeping cannot become a distinct durable identity.
-    staged.publication.lens.id = MigrationLensId(uuid::Uuid::nil());
+    staged.publication.predecessors[0].lens.id = MigrationLensId(uuid::Uuid::nil());
     write_catalogue_record(
         &mut receiver,
         b"schema_lineage_staged",
@@ -1432,10 +1432,13 @@ fn reopen_derives_staged_lens_identity_from_canonical_payload() {
         .values()
         .next()
         .expect("recovered staged lineage");
-    assert_eq!(recovered.publication.lens.id(), expected_lens_id);
     assert_eq!(
-        recovered.publication.lens.id(),
-        recovered.publication.lens.content_id()
+        recovered.publication.predecessors[0].lens.id(),
+        expected_lens_id
+    );
+    assert_eq!(
+        recovered.publication.predecessors[0].lens.id(),
+        recovered.publication.predecessors[0].lens.content_id()
     );
 }
 
@@ -1446,8 +1449,9 @@ fn reopen_rejects_staged_lens_target_mismatch() {
         0x49,
         "staged schema lineage violates trusted publication invariants",
         |staged| {
-            staged.publication.lens.target = base_id;
-            staged.publication.lens.id = staged.publication.lens.content_id();
+            staged.publication.predecessors[0].lens.target = base_id;
+            staged.publication.predecessors[0].lens.id =
+                staged.publication.predecessors[0].lens.content_id();
             staged.publication.id = staged.publication.content_id();
         },
     );
@@ -1456,8 +1460,11 @@ fn reopen_rejects_staged_lens_target_mismatch() {
 #[test]
 fn reopen_rejects_staged_lens_operation_mismatch() {
     assert_staged_corruption_rejected(0x4a, "staged schema lineage lens is invalid", |staged| {
-        staged.publication.lens.table_lenses[0].ops.clear();
-        staged.publication.lens.id = staged.publication.lens.content_id();
+        staged.publication.predecessors[0].lens.table_lenses[0]
+            .ops
+            .clear();
+        staged.publication.predecessors[0].lens.id =
+            staged.publication.predecessors[0].lens.content_id();
         staged.publication.id = staged.publication.content_id();
     });
 }
@@ -1468,7 +1475,9 @@ fn reopen_rejects_staged_table_partition_mismatch() {
         0x4b,
         "staged schema lineage table partition is invalid",
         |staged| {
-            staged.publication.new_tables.push("todos".to_owned());
+            staged.publication.predecessors[0]
+                .new_tables
+                .push("todos".to_owned());
             staged.publication.id = staged.publication.content_id();
         },
     );
@@ -1554,6 +1563,7 @@ fn reopen_rejects_standalone_lens_semantic_tamper() {
         .next()
         .unwrap()
         .publication
+        .predecessors[0]
         .lens
         .clone();
     tampered.table_lenses[0].ops.clear();
@@ -2267,25 +2277,53 @@ fn reordered_lineage_declarations_survive_client_and_authority_reopen() {
     }
     let evolved = SchemaVersion::new(crate::schema::JazzSchema::new(&builder.build()).unwrap());
     let (bob_dir, mut bob) = open_node_with_schema(node(0xd1), base.clone());
-    publish_schema_lineage(&mut bob, evolved.clone(), MigrationLens::new(
-        base.version_id(), evolved.id, vec![TableLens {
-            source_table: "todos".into(), target_table: "todos".into(), ops: vec![],
-        }]).unwrap(), ["zebra", "alpha", "middle"], Vec::<String>::new()).unwrap();
+    publish_schema_lineage(
+        &mut bob,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".into(),
+                target_table: "todos".into(),
+                ops: vec![],
+            }],
+        )
+        .unwrap(),
+        ["zebra", "alpha", "middle"],
+        Vec::<String>::new(),
+    )
+    .unwrap();
     let snapshot = bob.catalogue_snapshot().unwrap();
-    assert_eq!(snapshot.lineages[0].1.new_tables, ["alpha", "middle", "zebra"]);
+    assert_eq!(
+        snapshot.lineages[0].1.predecessors[0].new_tables,
+        ["alpha", "middle", "zebra"]
+    );
     let (alice_dir, mut alice) = open_node_with_schema(node(0xd2), base.clone());
-    alice.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
+    alice
+        .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .unwrap();
     drop(alice);
     let mut alice = reopen_node_at(&alice_dir, node(0xd2), base.clone());
     // Simulate all orders produced by a pre-fix warm authority or wire sender.
-    for order in [["alpha", "middle", "zebra"], ["alpha", "zebra", "middle"],
-        ["middle", "alpha", "zebra"], ["middle", "zebra", "alpha"],
-        ["zebra", "alpha", "middle"], ["zebra", "middle", "alpha"]] {
+    for order in [
+        ["alpha", "middle", "zebra"],
+        ["alpha", "zebra", "middle"],
+        ["middle", "alpha", "zebra"],
+        ["middle", "zebra", "alpha"],
+        ["zebra", "alpha", "middle"],
+        ["zebra", "middle", "alpha"],
+    ] {
         let mut reordered = snapshot.clone();
-        reordered.lineages[0].1.new_tables = order.map(String::from).to_vec();
-        assert_eq!(reordered.lineages[0].1.content_id(), snapshot.lineages[0].1.id);
+        reordered.lineages[0].1.predecessors[0].new_tables = order.map(String::from).to_vec();
+        assert_eq!(
+            reordered.lineages[0].1.content_id(),
+            snapshot.lineages[0].1.id
+        );
         assert_eq!(reordered.lineages[0].1, snapshot.lineages[0].1);
-        alice.apply_trusted_catalogue_snapshot_settled(reordered).unwrap();
+        alice
+            .apply_trusted_catalogue_snapshot_settled(reordered)
+            .unwrap();
     }
     drop(bob);
     let bob = reopen_node_at(&bob_dir, node(0xd1), base);
@@ -2308,25 +2346,38 @@ fn lineage_equality_preserves_content_and_declaration_multiplicity() {
     // Internal payload contract coverage is needed for malformed payloads that
     // public authoring APIs deliberately cannot construct.
     let mut original = catalogue_snapshot_fixture().lineages.remove(0).1;
-    original.new_tables = vec!["zebra".into(), "alpha".into()];
-    original.dropped_tables = vec!["retired_z".into(), "retired_a".into()];
+    original.predecessors[0].new_tables = vec!["zebra".into(), "alpha".into()];
+    original.predecessors[0].dropped_tables = vec!["retired_z".into(), "retired_a".into()];
     original.id = original.content_id();
     let mut reordered = original.clone();
-    reordered.new_tables.reverse();
-    reordered.dropped_tables.reverse();
+    reordered.predecessors[0].new_tables.reverse();
+    reordered.predecessors[0].dropped_tables.reverse();
     assert_eq!(original.content_id(), reordered.content_id());
     assert_eq!(original, reordered);
     for field in 0..6 {
         let mut changed = original.clone();
         match field {
-            0 => changed.new_tables.push("alpha".into()),
-            1 => changed.dropped_tables[0] = "other".into(),
+            0 => changed.predecessors[0].new_tables.push("alpha".into()),
+            1 => changed.predecessors[0].dropped_tables[0] = "other".into(),
             2 => changed.schema.id = SchemaVersion::new(schema()).id,
-            3 => changed.lens = MigrationLens::new(changed.lens.source(), changed.lens.target(), vec![]).unwrap(),
-            4 => changed.physical_identities = PhysicalIdentityManifest::allocate(&changed.schema.schema),
+            3 => {
+                changed.predecessors[0].lens = MigrationLens::new(
+                    changed.predecessors[0].lens.source(),
+                    changed.predecessors[0].lens.target(),
+                    vec![],
+                )
+                .unwrap()
+            }
+            4 => {
+                changed.physical_identities =
+                    PhysicalIdentityManifest::allocate(&changed.schema.schema)
+            }
             _ => changed.id = SchemaLineagePublicationId(uuid::Uuid::nil()),
         }
-        assert_ne!(original, changed, "changed field {field} must remain unequal even with a copied id");
+        assert_ne!(
+            original, changed,
+            "changed field {field} must remain unequal even with a copied id"
+        );
         if field != 5 {
             assert_ne!(original.content_id(), changed.content_id());
         }
@@ -2413,7 +2464,7 @@ fn permission_bearing_lineage_snapshot_replay_reopens_without_restoring_old_gran
         &snapshot.schemas[0].schema,
         &snapshot.genesis_physical_identities,
         SchemaVersion::new(granted.clone()),
-        original.lens.clone(),
+        original.predecessors[0].lens.clone(),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -2595,4 +2646,28 @@ fn trusted_identity_rebind_updates_live_peer_support_coordinates() {
         baseline_subscriptions,
         "forget must release the replacement without waiting for another runtime tick"
     );
+}
+
+/// Internal: snapshot replay/recovery must retain immutable lineage records
+/// while refreshing compatible metadata on the selected runtime schema.
+#[test]
+fn compatible_metadata_snapshot_replays_and_reopens() {
+    let mut snapshot = catalogue_snapshot_fixture();
+    let updated = JazzSchema::new(&crate::model::public_schema::SchemaBuilder::new()
+        .table(crate::model::public_schema::TableSchema::builder("todos")
+            .column_with_default("title", crate::model::public_schema::ColumnType::Text, crate::model::public_schema::Value::Text("new default".into()))
+            .column("body", crate::model::public_schema::ColumnType::Text).index_only(["body"]))
+        .build()).unwrap();
+    assert_eq!(snapshot.schemas[1].id, updated.version_id());
+    let original = snapshot.lineages.clone();
+    snapshot.schemas[1] = SchemaVersion::new(updated.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let mut edge = fresh_dynamic_catalogue_open(dir.path(), node(0xcb)).unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
+    drop(edge);
+    let mut reopened = fresh_dynamic_catalogue_open(dir.path(), node(0xcb)).unwrap();
+    assert_eq!(reopened.catalogue.active_schema.compiled.public_schema(), updated.public_schema());
+    assert_eq!(reopened.catalogue_snapshot().unwrap().lineages, original);
+    reopened.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
 }
