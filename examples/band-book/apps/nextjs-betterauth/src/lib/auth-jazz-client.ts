@@ -29,7 +29,6 @@ export async function authJazzClient(): Promise<JazzClient> {
       backendSecret: serverSecret("BACKEND_SECRET", "band-book-development-backend-secret"),
     },
     env: jazzEnv,
-    tier: "global",
   }));
   try {
     const session = await pending;

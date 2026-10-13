@@ -17,7 +17,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     const db = await userDb(request);
     const id = (await params).id;
     const meta = await db.one(app.attachments.where({ id }).select("mediaType", "byteLength"), {
-      tier: "global",
+      tier: "remote",
     });
     if (!meta) return Response.json({ error: "attachment not found" }, { status: 404 });
 

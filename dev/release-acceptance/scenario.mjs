@@ -74,7 +74,7 @@ async function close(x) {
   await timeout(x.session.close(), "close");
   sessions.delete(x.session);
 }
-async function one(db, id, tier = "global") {
+async function one(db, id, tier = "remote") {
   return timeout(db.one(app.docs.where({ id }), { tier }), `read ${tier}`);
 }
 async function wait(write, tier = "global") {
@@ -105,14 +105,14 @@ try {
     assert.equal(
       (
         await timeout(
-          backend.db.one(app.denied.where({ id: hidden.id }), { tier: "global" }),
+          backend.db.one(app.denied.where({ id: hidden.id }), { tier: "remote" }),
           "control read",
         )
       ).value,
       "control-confirmed",
     );
     assert.deepEqual(
-      await timeout(reader.db.all(app.denied, { tier: "global" }), "denied read"),
+      await timeout(reader.db.all(app.denied, { tier: "remote" }), "denied read"),
       [],
     );
     log("backend-auth-and-ordinary-default-deny-read");
@@ -142,15 +142,15 @@ try {
     );
     state.pending = pending.id;
     assert.equal(await one(reader.db, pending.id), null);
-    assert.equal((await one(writer.db, pending.id, "local")).body, "offline");
+    assert.equal((await one(writer.db, pending.id, "local-first")).body, "offline");
     writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
     log("pending-local-write-not-visible-at-authority");
   } else if (phase === "offline") {
     const writer = await open("writer");
     assert.equal(writer.account, state.account);
-    assert.equal((await one(writer.db, state.pending, "local")).body, "offline");
-    assert.equal((await one(writer.db, state.keep, "local")).body, "retained");
-    assert.equal(await one(writer.db, state.remove, "local"), null);
+    assert.equal((await one(writer.db, state.pending, "local-first")).body, "offline");
+    assert.equal((await one(writer.db, state.keep, "local-first")).body, "retained");
+    assert.equal(await one(writer.db, state.remove, "local-first"), null);
     log("offline-process-reopen-same-account-and-store");
   } else if (phase === "reconnect") {
     const writer = await open("writer");
@@ -161,7 +161,7 @@ try {
     assert.equal((await one(reader.db, state.keep)).body, "retained");
     assert.equal(await one(reader.db, state.remove), null);
     const rows = await timeout(
-      reader.db.all(app.docs.where({ id: state.pending }), { tier: "global" }),
+      reader.db.all(app.docs.where({ id: state.pending }), { tier: "remote" }),
       "pending authority read",
     );
     assert.equal(rows.length, 1);

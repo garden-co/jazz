@@ -1956,7 +1956,7 @@ fn websocket_reconnect_preserves_local_structured_terminal_patches() {
     let mut subscription = block_on(reader.db.subscribe(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..Default::default()
         },
     ))
@@ -2253,7 +2253,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     let mut stalled_data_subscription = block_on(stalled.db.subscribe(
         &data_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..Default::default()
         },
     ))
@@ -2265,7 +2265,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     let _auxiliary_subscription = block_on(stalled.db.subscribe(
         &auxiliary_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..Default::default()
         },
     ))
@@ -2349,7 +2349,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     let mut independent_subscription = block_on(independent.db.subscribe(
         &control_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..Default::default()
         },
     ))
