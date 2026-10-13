@@ -254,6 +254,16 @@ pub enum SyncMessage {
         /// The writer's pending predecessor the authority waits for.
         awaiting: TxId,
     },
+    /// Read-your-writes barrier on the requests channel (SPEC 8 §8.2.1).
+    /// The receiver holds this and every later request from this link until
+    /// it has answered the first `writes_through` commit units this link sent
+    /// it, each with its first `FateUpdate` or a `RetryLater`. Writes and
+    /// requests travel on independently credited channels, so without it a
+    /// read can overtake an earlier write from the same writer.
+    ReadBarrier {
+        /// Commit units the sender put on this link before this barrier.
+        writes_through: u64,
+    },
 }
 
 /// Maximum known rows in one current-availability request.

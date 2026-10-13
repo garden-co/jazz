@@ -2016,6 +2016,7 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::Reserved30(retired) => match *retired {},
         SyncMessage::FateUpdate { .. } => "FateUpdate",
         SyncMessage::RetryLater { .. } => "RetryLater",
+        SyncMessage::ReadBarrier { .. } => "ReadBarrier",
         SyncMessage::RegisterShape { .. } => "RegisterShape",
         SyncMessage::Subscribe(_) => "Subscribe",
         SyncMessage::SubscribeRejected { .. } => "SubscribeRejected",

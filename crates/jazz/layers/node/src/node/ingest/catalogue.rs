@@ -327,6 +327,9 @@ where
                 SyncMessage::RetryLater { .. } => Err(Error::UnsupportedSyncMessage(
                     "retry-later answers are handled by the uploading link",
                 )),
+                SyncMessage::ReadBarrier { .. } => Err(Error::UnsupportedSyncMessage(
+                    "read barriers are handled by the receiving link",
+                )),
                 SyncMessage::Subscribe(subscribe) => {
                     self.apply_subscribe(subscribe)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
