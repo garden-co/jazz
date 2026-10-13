@@ -1721,8 +1721,11 @@ where
             let base = self
                 .projected_include_deleted_current_source_graph(request, &table, tier)
                 .await?;
-            let graph = match &authorization {
-                SourceAuthorizationRequest::System => base.clone(),
+            // The policy proof carries the binding routes it depends on; they
+            // must reach the deletion witness, or a shared graph would hand
+            // one binding's authorized deletions to every binding.
+            let (graph, routing_fields) = match &authorization {
+                SourceAuthorizationRequest::System => (base.clone(), BTreeSet::new()),
                 SourceAuthorizationRequest::PolicyFiltered {
                     permission_subject,
                     plan,
@@ -1759,27 +1762,33 @@ where
                     });
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
-                    self.node
+                    let filtered = self
+                        .node
                         .compose_policy_filtered_current_source_graph(
                             policy_request,
                             base.clone(),
                             &output_fields,
                         )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                        .map_err(|error| {
+                            source_resolution_error_from_policy_proof(request, error)
+                        })?;
+                    (filtered.graph, filtered.route_fields)
                 }
             };
             (
                 graph,
                 include_deleted_current_row_descriptor(&table),
                 BTreeMap::new(),
-                BTreeSet::new(),
+                routing_fields,
             )
         } else if request.visibility == RowVisibility::IncludeDeleted {
             let tier = graph_tier.expect("visible current source has a tier");
             let base = include_deleted_current_graph(&table, tier);
-            let graph = match &authorization {
-                SourceAuthorizationRequest::System => base,
+            // The policy proof carries the binding routes it depends on; they
+            // must reach the deletion witness, or a shared graph would hand
+            // one binding's authorized deletions to every binding.
+            let (graph, routing_fields) = match &authorization {
+                SourceAuthorizationRequest::System => (base, BTreeSet::new()),
                 SourceAuthorizationRequest::PolicyFiltered {
                     permission_subject,
                     plan,
@@ -1814,21 +1823,24 @@ where
                     });
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
-                    self.node
+                    let filtered = self
+                        .node
                         .compose_policy_filtered_current_source_graph(
                             policy_request,
                             base,
                             &output_fields,
                         )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                        .map_err(|error| {
+                            source_resolution_error_from_policy_proof(request, error)
+                        })?;
+                    (filtered.graph, filtered.route_fields)
                 }
             };
             (
                 graph,
                 include_deleted_current_row_descriptor(&table),
                 BTreeMap::new(),
-                BTreeSet::new(),
+                routing_fields,
             )
         } else {
             let tier = graph_tier.expect("visible current source has a tier");

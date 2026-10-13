@@ -80,6 +80,26 @@ private preparation and retire it on completion or cancellation. While binding i
 guard still owns a caller-owned preparation. This changes resource ownership,
 not query results, authorisation routing, or storage and wire encodings.
 
+A shared prepared program is only sound when every operator keeps bindings
+apart. Before a trusted-serving program is installed, the node checks its
+lowered graphs structurally against the binding routes the parameter domain
+declares (`route_discipline.rs`). A node depends on a route when a binding
+source for it lies below. Then:
+
+- every terminal delivers by every route its graph depends on;
+- a binding-dependent join input carries the routes it depends on, an inner
+  join keys on every route both inputs carry, and a semi or anti join keys on
+  every route its right input depends on;
+- aggregates, arg-max/min, windows and collect-by group on every route their
+  input depends on;
+- recursive and template operators depend on no route.
+
+A program that breaks a rule is not shared: its binding source is renamed to a
+per-session, per-binding name, so it behaves exactly as a private preparation.
+The check is the safety net; lowering paths that keep routes (closure joins
+key on routes both sides carry, include-deleted policy sources declare their
+routes) are what let a program share.
+
 ### 14.2 Schema → groove
 
 A jazz schema lowers its fixed system tables and direct record stores through
