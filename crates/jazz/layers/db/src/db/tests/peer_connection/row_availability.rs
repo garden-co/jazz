@@ -382,12 +382,12 @@ fn current_rows_wire_v1_corpus_is_mandatory() {
         let bytes = crate::wire::encode_sync_message(&message).unwrap();
         let expected = match name {
             "request" => {
-                "1f0101010101010101010101010101010101100202020202020202020202020202020204726f77731003030303030303030303030303030303100404040404040404040404040404040400"
+                "190101010101010101010101010101010101100202020202020202020202020202020204726f77731003030303030303030303030303030303100404040404040404040404040404040400"
             }
             "receipt" => {
-                "200101010101010101010101010101010101100202020202020202020202020202020204726f77731003030303030303030303030303030303100404040404040404040404040404040401021c5b2275726e3a6a617a7a3a73797374656d222c2273797374656d225d001000000000000000000000000000000000000000000000"
+                "1a0101010101010101010101010101010101100202020202020202020202020202020204726f77731003030303030303030303030303030303100404040404040404040404040404040401021c5b2275726e3a6a617a7a3a73797374656d222c2273797374656d225d001000000000000000000000000000000000000000000000"
             }
-            "cancel" => "2101010101010101010101010101010101",
+            "cancel" => "1b01010101010101010101010101010101",
             _ => unreachable!(),
         };
         assert_eq!(hex::encode(&bytes), expected);
@@ -678,7 +678,7 @@ fn backend_own_system_scalar_query_reconciles_after_reconnect() {
         &backend,
         &Query::from("todos"),
         ReadOpts {
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     );
@@ -821,7 +821,7 @@ fn scalar_unavailability_receipt_preserves_inflight_local_edit() {
         &client,
         &Query::from("todos"),
         ReadOpts {
-            propagation: Propagation::LocalOnly,
+            tier: crate::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     );

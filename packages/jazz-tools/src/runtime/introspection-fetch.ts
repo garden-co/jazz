@@ -6,7 +6,6 @@ export interface IntrospectionSubscriptionGroup {
   table: string;
   query: string;
   branches: string[];
-  propagation: "full" | "local-only";
 }
 
 export interface IntrospectionSubscriptionResponse {

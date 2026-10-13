@@ -78,7 +78,7 @@ describe.skipIf(__JAZZ_ABSTRACT_BENCH__ !== "1")("local cold-load phase receipt"
                   },
                   onError: reject,
                 },
-                { tier: "local" },
+                { tier: "local-first" },
               );
             });
           } finally {
@@ -87,7 +87,7 @@ describe.skipIf(__JAZZ_ABSTRACT_BENCH__ !== "1")("local cold-load phase receipt"
         };
         try {
           db = await measure("initial_open", () => createDb(config));
-          await measure("initial_empty_all", () => db!.all(app.tasks, { tier: "local" }));
+          await measure("initial_empty_all", () => db!.all(app.tasks, { tier: "local-first" }));
           await measure("seed_local_durable", async () => {
             const result = await db!.transaction((tx) => {
               for (let i = 0; i < count; i++)
@@ -96,14 +96,16 @@ describe.skipIf(__JAZZ_ABSTRACT_BENCH__ !== "1")("local cold-load phase receipt"
             await result.wait({ tier: "local" });
           });
           expect(
-            await measure("first_all_after_seed", () => db!.all(app.tasks, { tier: "local" })),
+            await measure("first_all_after_seed", () =>
+              db!.all(app.tasks, { tier: "local-first" }),
+            ),
           ).toHaveLength(count);
           await measure("initial_subscription_after_all", firstSubscription);
           if (storage === "persistent") {
             await measure("shutdown_before_reopen", () => db!.shutdown());
             db = await measure("reopen_runtime", () => createDb(config));
             expect(
-              await measure("reopen_first_all", () => db!.all(app.tasks, { tier: "local" })),
+              await measure("reopen_first_all", () => db!.all(app.tasks, { tier: "local-first" })),
             ).toHaveLength(count);
             await measure("reopen_subscription_after_all", firstSubscription);
             await db.shutdown();
@@ -143,14 +145,14 @@ describe.skipIf(__JAZZ_ABSTRACT_BENCH__ !== "1")("local cold-load phase receipt"
             db = await createDb(config);
           }
           if (count === 1500) {
-            const rows = await db.all(app.tasks, { tier: "local" });
+            const rows = await db.all(app.tasks, { tier: "local-first" });
             let completed = 0;
             const stop = db.subscribe(
               app.tasks,
               (rows) => {
                 completed = rows.filter((row) => row.done).length;
               },
-              { tier: "local" },
+              { tier: "local-first" },
             );
             try {
               if (__JAZZ_COLD_LOAD_BATCH_UPDATES__) {
@@ -169,7 +171,7 @@ describe.skipIf(__JAZZ_ABSTRACT_BENCH__ !== "1")("local cold-load phase receipt"
                   }
                 });
               }
-              assertSelectedRows(rows, await db.all(app.tasks, { tier: "local" }));
+              assertSelectedRows(rows, await db.all(app.tasks, { tier: "local-first" }));
               await measure("final_subscription_delivery", async () => {
                 const deadline = performance.now() + 30_000;
                 while (completed !== 1350 && performance.now() < deadline) {
@@ -187,7 +189,7 @@ describe.skipIf(__JAZZ_ABSTRACT_BENCH__ !== "1")("local cold-load phase receipt"
               await db.shutdown();
               db = await measure("post_update_reopen_runtime", () => createDb(config));
               const reopened = await measure("post_update_reopen_all", () =>
-                db!.all(app.tasks, { tier: "local" }),
+                db!.all(app.tasks, { tier: "local-first" }),
               );
               assertSelectedRows(rows, reopened);
               const stats = await pageStats(names[0]!.name!);
@@ -280,7 +282,9 @@ it.skipIf(__JAZZ_ABSTRACT_BENCH__ !== "1" || !__JAZZ_COLD_LOAD_FIXTURE__)(
     let stop = () => {};
     try {
       db = await measure("reopen_runtime", () => createDb(config));
-      const rows = await measure("reopen_first_all", () => db!.all(app.tasks, { tier: "local" }));
+      const rows = await measure("reopen_first_all", () =>
+        db!.all(app.tasks, { tier: "local-first" }),
+      );
       expect(rows).toHaveLength(1500);
       expect(rows.map((row) => row.title).sort()).toEqual(
         Array.from({ length: 1500 }, (_, i) => `Task ${i}`).sort(),
@@ -300,7 +304,7 @@ it.skipIf(__JAZZ_ABSTRACT_BENCH__ !== "1" || !__JAZZ_COLD_LOAD_FIXTURE__)(
                 },
                 onError: reject,
               },
-              { tier: "local" },
+              { tier: "local-first" },
             );
           }),
       );
@@ -319,7 +323,7 @@ it.skipIf(__JAZZ_ABSTRACT_BENCH__ !== "1" || !__JAZZ_COLD_LOAD_FIXTURE__)(
       await db.shutdown();
       db = await measure("post_update_reopen_runtime", () => createDb(config));
       const reopened = await measure("post_update_reopen_all", () =>
-        db!.all(app.tasks, { tier: "local" }),
+        db!.all(app.tasks, { tier: "local-first" }),
       );
       assertSelectedRows(rows, reopened);
       await commands.writeRealisticBrowserReport("cold-load-upgrade-result", {

@@ -24,6 +24,8 @@ mod claims_merge_integration;
 mod client_storage_shutdown_integration;
 #[path = "../clients_sync.rs"]
 mod clients_sync;
+#[path = "../compatible_deployment.rs"]
+mod compatible_deployment;
 #[path = "../durable_local_write_replay_integration.rs"]
 mod durable_local_write_replay_integration;
 #[path = "../flush_once_per_refresh.rs"]
@@ -42,14 +44,16 @@ mod large_json_permissions;
 mod large_value_subscriptions;
 #[path = "../local_first_auth_integration.rs"]
 mod local_first_auth_integration;
-#[path = "../local_first_unless_empty.rs"]
-mod local_first_unless_empty;
+#[path = "../local_first_server_wait.rs"]
+mod local_first_server_wait;
 #[path = "../merged_redelivery.rs"]
 mod merged_redelivery;
 #[path = "../mixed_generation_history.rs"]
 mod mixed_generation_history;
 #[path = "../native_account_admission.rs"]
 mod native_account_admission;
+#[path = "../native_audio_streaming.rs"]
+mod native_audio_streaming;
 #[path = "../native_client_channel_pump.rs"]
 mod native_client_channel_pump;
 #[path = "../nullable_writes.rs"]
