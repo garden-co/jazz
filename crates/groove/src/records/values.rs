@@ -2010,7 +2010,7 @@ fn validate_value_inner(
             let discriminant = read_exact::<1>(bytes)?[0];
             schema.variant(discriminant).map(|_| ())
         }
-        ValueType::Tuple(members) => validate_tuple(bytes, members, require_constructible),
+        ValueType::Tuple(members) => validate_tuple(bytes, members),
         ValueType::Array(element_type) => {
             validate_array(bytes, element_type, require_constructible)
         }
@@ -2089,11 +2089,7 @@ fn validate_array(
     Ok(())
 }
 
-fn validate_tuple(
-    bytes: &[u8],
-    members: &[ValueType],
-    require_constructible: bool,
-) -> Result<(), Error> {
+fn validate_tuple(bytes: &[u8], members: &[ValueType]) -> Result<(), Error> {
     let mut offset = 0;
     for member in members {
         let width = member
@@ -2102,10 +2098,9 @@ fn validate_tuple(
                 member_type: member.clone(),
             })?;
         let end = checked_add(offset, width)?;
-        validate_value_inner(
+        validate_tuple_member(
             bytes.get(offset..end).ok_or_else(|| Error::UnexpectedEof)?,
             member,
-            require_constructible,
         )?;
         offset = end;
     }
@@ -2113,6 +2108,47 @@ fn validate_tuple(
         Ok(())
     } else {
         Err(Error::InvalidOffset)
+    }
+}
+
+/// Structural validation of one tuple member in the tuple member encoding.
+///
+/// This admits exactly the bytes `decode_tuple_member` decodes, and every
+/// admitted byte string is the canonical encoding of the value it decodes to
+/// (SPEC 2 `INV-STORAGE-9`), so tuple-containing records need no
+/// decode/re-encode comparison at an admission boundary.
+fn validate_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<(), Error> {
+    match value_type {
+        ValueType::U8 => read_exact::<1>(bytes).map(|_| ()),
+        ValueType::U16 => read_exact::<2>(bytes).map(|_| ()),
+        ValueType::U32 | ValueType::I32 => read_exact::<4>(bytes).map(|_| ()),
+        ValueType::U64 | ValueType::I64 => read_exact::<8>(bytes).map(|_| ()),
+        ValueType::U48 => read_exact::<6>(bytes).map(|_| ()),
+        ValueType::F64 => f64_from_order_preserving(read_exact::<8>(bytes)?).map(|_| ()),
+        ValueType::Bool => match read_exact::<1>(bytes)?[0] {
+            0 | 1 => Ok(()),
+            value => Err(Error::InvalidBool(value)),
+        },
+        ValueType::Uuid => read_exact::<16>(bytes).map(|_| ()),
+        ValueType::EnumTag(schema) => schema.variant(read_exact::<1>(bytes)?[0]).map(|_| ()),
+        ValueType::Tuple(members) => validate_tuple(bytes, members),
+        ValueType::Nullable(inner_type) => {
+            let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
+            match flag {
+                0 if payload.iter().any(|byte| *byte != 0) => Err(Error::InvalidOffset),
+                0 => Ok(()),
+                1 => validate_tuple_member(payload, inner_type),
+                value => Err(Error::InvalidNullFlag(value)),
+            }
+        }
+        ValueType::String
+        | ValueType::Bytes
+        | ValueType::Internal(_)
+        | ValueType::Array(_)
+        | ValueType::Record(_)
+        | ValueType::Enum(_) => Err(Error::InvalidTupleMember {
+            member_type: value_type.clone(),
+        }),
     }
 }
 
@@ -2410,42 +2446,17 @@ fn ensure_enum_value(value: &EnumValue, schema: &EnumSchema) -> Result<(), Error
     validate_embedded_record(value.record.borrowed())
 }
 
-// Tuple decoding and encoding have historically different constructibility
-// rules (including nullable member byte order). Preserve the exact round-trip
-// admission rule for those descriptors rather than broadening accepted bytes.
-fn contains_tuple(value_type: &ValueType) -> bool {
-    match value_type {
-        ValueType::Tuple(_) => true,
-        ValueType::Array(inner) | ValueType::Nullable(inner) => contains_tuple(inner),
-        ValueType::Record(descriptor) => descriptor
-            .fields()
-            .iter()
-            .any(|field| contains_tuple(&field.value_type)),
-        ValueType::Enum(schema) => schema.cases.iter().any(|case| {
-            case.payload
-                .fields()
-                .iter()
-                .any(|field| contains_tuple(&field.value_type))
-        }),
-        _ => false,
-    }
-}
-
 fn validate_embedded_record(record: super::BorrowedRecord<'_>) -> Result<(), Error> {
     let descriptor = record.descriptor();
-    if !descriptor
-        .fields()
-        .iter()
-        .any(|field| contains_tuple(&field.value_type))
-        && record.validate_canonical().is_ok()
-    {
+    if record.validate_canonical().is_ok() {
         // Record spans cover the complete packed layout; scalar, offset,
-        // nullable and enum validators enforce canonical encodings.
+        // nullable, tuple-member and enum validators enforce canonical
+        // encodings, and admit exactly what decoding admits (#2759).
         return Ok(());
     }
     // The diagnostic error ordering of structural validation differs from
-    // decoding (for example malformed UTF-8 scalar payloads). Preserve legacy
-    // errors on invalid input as well as legacy tuple admission semantics.
+    // decoding (for example malformed UTF-8 scalar payloads). Rejected input
+    // keeps the decoder's error.
     let values = record.to_values()?;
     if descriptor.create(&values)? != record.raw() {
         return Err(Error::NonCanonicalRecord);
@@ -2513,6 +2524,7 @@ fn encode_tuple_member(
         (Value::U48(value), ValueType::U48) => bytes.extend(u48_be_bytes(*value)?),
         (Value::I32(value), ValueType::I32) => bytes.extend(order_preserving_i32(*value)),
         (Value::I64(value), ValueType::I64) => bytes.extend(order_preserving_i64(*value)),
+        (Value::F64(value), ValueType::F64) => bytes.extend(order_preserving_f64(*value)?),
         (Value::Bool(value), ValueType::Bool) => bytes.push(u8::from(*value)),
         (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
         (Value::String(value), ValueType::EnumTag(schema)) => {
@@ -2561,7 +2573,7 @@ fn decode_tuple(bytes: &[u8], members: &[ValueType]) -> Result<Value, Error> {
     Ok(Value::Tuple(values))
 }
 
-fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Error> {
+pub(super) fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Error> {
     match value_type {
         ValueType::U8 => Ok(Value::U8(read_exact::<1>(bytes)?[0])),
         ValueType::U16 => Ok(Value::U16(u16::from_be_bytes(read_exact::<2>(bytes)?))),
@@ -2588,10 +2600,22 @@ fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Er
                 .variant(discriminant)
                 .map(|_| Value::EnumTag(discriminant))
         }
+        ValueType::F64 => f64_from_order_preserving(read_exact::<8>(bytes)?).map(Value::F64),
         ValueType::Tuple(members) => decode_tuple(bytes, members),
-        ValueType::Nullable(inner_type) => decode_nullable(bytes, inner_type),
-        ValueType::F64
-        | ValueType::String
+        // A nullable tuple member's payload is itself a tuple member: decoding
+        // it with the record-value (little-endian) decoder would byte-swap
+        // present integers (#2759).
+        ValueType::Nullable(inner_type) => {
+            let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
+            match flag {
+                0 if payload.iter().any(|byte| *byte != 0) => Err(Error::InvalidOffset),
+                0 => Ok(Value::Nullable(None)),
+                1 => decode_tuple_member(payload, inner_type)
+                    .map(|value| Value::Nullable(Some(Box::new(value)))),
+                value => Err(Error::InvalidNullFlag(value)),
+            }
+        }
+        ValueType::String
         | ValueType::Bytes
         | ValueType::Internal(_)
         | ValueType::Array(_)
@@ -2638,6 +2662,36 @@ fn order_preserving_i64(value: i64) -> [u8; 8] {
 
 fn i64_from_order_preserving(bytes: [u8; 8]) -> i64 {
     (u64::from_be_bytes(bytes) ^ (1_u64 << 63)) as i64
+}
+
+/// `F64` tuple member: the ordered-index transform (SPEC 2 §2.8) big-endian,
+/// so member bytes sort like IEEE numeric order. NaN has no encoding.
+fn order_preserving_f64(value: f64) -> Result<[u8; 8], Error> {
+    if value.is_nan() {
+        return Err(Error::InvalidF64NaN);
+    }
+    let bits = value.to_bits();
+    let ordered = if bits & (1 << 63) == 0 {
+        bits ^ (1 << 63)
+    } else {
+        !bits
+    };
+    Ok(ordered.to_be_bytes())
+}
+
+pub(super) fn f64_from_order_preserving(bytes: [u8; 8]) -> Result<f64, Error> {
+    let ordered = u64::from_be_bytes(bytes);
+    let bits = if ordered & (1 << 63) != 0 {
+        ordered ^ (1 << 63)
+    } else {
+        !ordered
+    };
+    let value = f64::from_bits(bits);
+    if value.is_nan() {
+        Err(Error::InvalidF64NaN)
+    } else {
+        Ok(value)
+    }
 }
 
 fn order_preserving_i32(value: i32) -> [u8; 4] {
