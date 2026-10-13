@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Todo (Jazz Lite)</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { startApp } from "./app/main-lite.ts";
+      const params = new URLSearchParams(location.search);
+      startApp(document.getElementById("app"), {
+        url: params.get("proxy") ?? "ws://localhost:4300/lite",
+        getToken: () => params.get("token") ?? "",
+      });
+    </script>
+  </body>
+</html>
