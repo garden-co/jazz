@@ -776,7 +776,7 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
         user_id: "00000000-0000-0000-0000-0000000000b2",
         claims: { team: "later-team" },
       }),
-      "local",
+      "local-first",
       JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([
@@ -1435,7 +1435,7 @@ it("keeps session-scoped transaction reads on the client-local native method", a
         issuer: "https://issuer.example",
         user_id: "00000000-0000-0000-0000-0000000000b2",
       }),
-      "local",
+      "local-first",
       JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([
@@ -1452,7 +1452,7 @@ it("keeps session-scoped transaction reads on the client-local native method", a
         issuer: "https://issuer.example",
         user_id: "00000000-0000-0000-0000-0000000000a1",
       }),
-      "local",
+      "local-first",
       JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([

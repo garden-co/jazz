@@ -265,7 +265,7 @@ export async function purchase(db: Db, request: PurchaseRequest): Promise<Purcha
   // Create the client before beginning an exclusive transaction. This is also
   // the app's minimal connected preflight; an exclusive checkout is not an
   // offline cart operation.
-  await db.all(app.warehouses.where({ id: request.warehouseId }).limit(1), { tier: "global" });
+  await db.all(app.warehouses.where({ id: request.warehouseId }).limit(1), { tier: "remote" });
 
   const reserved = await reserveOrder(db, request);
   if ("receipt" in reserved) return reserved.receipt;
@@ -393,7 +393,7 @@ export async function reserveOrder(
     // the next attempt sees the competing order's decrement.
     () =>
       db.all(app.stock.where({ warehouse_id: request.warehouseId }).limit(100), {
-        tier: "global",
+        tier: "remote",
       }),
   );
 }
@@ -543,7 +543,7 @@ export interface DeliveredOrder {
  * the same order twice; the loser retries against the new queue heads.
  */
 export async function deliverBatch(db: Db, warehouseId: string): Promise<DeliveredOrder[]> {
-  await db.all(app.warehouses.where({ id: warehouseId }).limit(1), { tier: "global" });
+  await db.all(app.warehouses.where({ id: warehouseId }).limit(1), { tier: "remote" });
   return await retryExclusive(db, async () => {
     const write = await db.exclusiveTransaction(async (tx) => {
       const districts = await tx.all(consoleQueries.districtsOf(warehouseId));
@@ -588,7 +588,7 @@ export async function recordPayment(
   if (!Number.isSafeInteger(request.amountCents) || request.amountCents <= 0) {
     throw new Error("payment must be a positive amount");
   }
-  await db.all(app.warehouses.where({ id: request.warehouseId }).limit(1), { tier: "global" });
+  await db.all(app.warehouses.where({ id: request.warehouseId }).limit(1), { tier: "remote" });
   return await retryExclusive(db, async () => {
     const write = await db.exclusiveTransaction(async (tx) => {
       const [existing, customer] = await Promise.all([
@@ -665,7 +665,7 @@ function normalizeLines(lines: readonly PurchaseLine[]): PurchaseLine[] {
 async function retryExclusive<T>(
   db: Db,
   attempt: () => Promise<T>,
-  beforeRetry: () => Promise<unknown> = () => db.all(app.warehouses.limit(1), { tier: "global" }),
+  beforeRetry: () => Promise<unknown> = () => db.all(app.warehouses.limit(1), { tier: "remote" }),
 ): Promise<T> {
   return await retryOnConflict(attempt, beforeRetry);
 }
