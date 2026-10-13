@@ -78,22 +78,28 @@ hosted or general product-performance receipt. Preserve the caller-owned
 discovery tradeoff for a separately justified performance change rather than
 coupling crypto lifecycle changes to correctness-fixture execution budgets.
 
-## E2EE group delivery observations (2026-10-13)
+## E2EE multi-account history batching (2026-10-13)
 
-Replacing the separate globally accepted delivery-observation transaction with
-one accepted-only local snapshot preserved remote preparation and the final
-authority/publication transaction. Against E15 at `af67f1e7fc`, two local
-repeats reduced five group files' summed test time from 121.14s to 113.02s
-(-6.7%); all 49 selected tests passed.
+The trial replaced five reads per additional account with five bounded set
+queries, partitioning device keys by verified creation-account metadata and
+retaining each row's settlement evidence. Empty and single-account paths kept
+the original reader. A narrow TypeScript declaration enabled `in` on
+`$createdBy.account`; no query executor or storage encoding changed.
 
-The full TypeScript trial also included Better Auth fixture schema reuse.
-Both full runs passed 3,366 Node tests and 395 browser tests. Node changed from
-291.04s to 288.31s (-0.94%), while the consumer stage changed from 480.1s to
-485.2s (+1.06%). This did not establish a useful overall benefit, so the
-runtime change was removed; the simpler auth fixture change was retained
-separately. Fewer observation commits alone do not justify repeating this
-trial. These are local correctness-suite measurements, not hosted product
-performance evidence.
+A full E2EE census found 135 completed multi-account reader invocations. The
+five busiest suites covered 117 of these; their nine unchanged tests passed
+twice per arm, with mean run span falling from 53.52s to 48.26s (-9.8%). A
+same-transaction parity check matched 192 rows and 192 settlement records
+across 24 snapshots on Native and WASM, including duplicate and absent account
+requests.
+
+The complete Node suite did not improve: two controlled runs per arm averaged
+285.38s without batching and 285.89s with it (+0.18%), retaining all 3,383 case
+names (3,366 passes, two expected failures and 15 skips). None of the six
+slowest suites exercised the multi-account path. The batch reader and its
+type declaration were removed. Fewer queries and a faster selected subset do
+not establish a useful whole-suite win. These are local correctness-suite
+measurements, not hosted product-performance evidence.
 
 ## Before building another trial
 

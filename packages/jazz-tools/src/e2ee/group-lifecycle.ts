@@ -1010,16 +1010,20 @@ export class Groups {
     await this.db.all(this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }), {
       tier: "remote",
     });
-    const prior = await exclusiveE2eeTransaction(this.db, async (tx) => ({
+    // Retained acceptance suffices for these observations. Current authority
+    // and key confirmation remain in the subsequent publication transaction.
+    const [repairs, recovery, deliveries] = await this.db.observeE2eeHistory([
+      this.tables.__e2ee_group_repairs.where({ groupId: id }),
+      this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }),
+      ...(!preparedDeliveries ? [this.tables.__e2ee_group_deliveries.where({ groupId: id })] : []),
+    ]);
+    return {
       deliveries:
         preparedDeliveries ??
-        (await tx.allSettledForE2ee(this.tables.__e2ee_group_deliveries.where({ groupId: id }))),
-      repairs: await tx.allSettledForE2ee(this.tables.__e2ee_group_repairs.where({ groupId: id })),
-      recovery: await tx.allSettledForE2ee(
-        this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }),
-      ),
-    }));
-    return await prior.wait({ tier: "global" });
+        (deliveries! as { rows: GroupDelivery[]; settlements: RowSettlement[] }),
+      repairs: repairs! as { rows: GroupRepair[]; settlements: RowSettlement[] },
+      recovery: recovery! as { rows: GroupRecoveryDelivery[]; settlements: RowSettlement[] },
+    };
   }
 
   private async prepareDelivery(
