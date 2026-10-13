@@ -1,6 +1,69 @@
 use super::*;
+use crate::schema::PrimaryKey;
+
+/// How many key columns a probe must supply.
+#[derive(Clone, Copy)]
+enum KeyArity {
+    /// Every key column.
+    Exact,
+    /// Any leading run of key columns.
+    Prefix,
+}
+
+impl KeyArity {
+    fn admits(self, expected: usize, actual: usize) -> bool {
+        match self {
+            Self::Exact => actual == expected,
+            Self::Prefix => actual <= expected,
+        }
+    }
+
+    fn check_index(self, index: &str, expected: usize, key: &[Value]) -> Result<(), Error> {
+        if self.admits(expected, key.len()) {
+            Ok(())
+        } else {
+            Err(Error::IndexKeyArity {
+                index: index.to_owned(),
+                expected,
+                actual: key.len(),
+            })
+        }
+    }
+
+    /// Check `values` against the table's primary key and encode them.
+    fn encode_primary_key(
+        self,
+        table: &str,
+        table_schema: &TableSchema,
+        primary_key: &PrimaryKey,
+        values: &[Value],
+    ) -> Result<Vec<u8>, Error> {
+        if !self.admits(primary_key.columns.len(), values.len()) {
+            return Err(Error::PrimaryKeyArity {
+                table: table.to_owned(),
+                expected: primary_key.columns.len(),
+                actual: values.len(),
+            });
+        }
+        let mut key = Vec::new();
+        for (value, column) in values.iter().zip(&primary_key.columns) {
+            ensure_primary_key_value_type(table_schema, column, value)?;
+            encode_primary_key_part(&mut key, value)?;
+        }
+        Ok(key)
+    }
+}
 
 impl Database {
+    fn primary_key_schema(&self, table: &str) -> Result<(&TableSchema, &PrimaryKey), Error> {
+        let table_schema = self.table(table)?;
+        let primary_key = table_schema
+            .primary_key
+            .as_ref()
+            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
+        Ok((table_schema, primary_key))
+    }
+
     /// Whether this physical table contains any stored record in the current
     /// applied resident state. This does not evaluate a query or permissions.
     /// Unapplied writes in an open batch are not visible. At most one logical
@@ -36,13 +99,7 @@ impl Database {
         key: &[Value],
     ) -> Result<Vec<VariantRecord>, Error> {
         let index = self.index(table, index_name)?;
-        if key.len() != index.columns.len() {
-            return Err(Error::IndexKeyArity {
-                index: index_name.to_owned(),
-                expected: index.columns.len(),
-                actual: key.len(),
-            });
-        }
+        KeyArity::Exact.check_index(index_name, index.columns.len(), key)?;
         self.index_scan(table, index_name, key).await
     }
 
@@ -86,13 +143,7 @@ impl Database {
         prefix: &[Value],
     ) -> Result<Vec<VariantRecord>, Error> {
         let index = self.index(table, index_name)?;
-        if prefix.len() > index.columns.len() {
-            return Err(Error::IndexKeyArity {
-                index: index_name.to_owned(),
-                expected: index.columns.len(),
-                actual: prefix.len(),
-            });
-        }
+        KeyArity::Prefix.check_index(index_name, index.columns.len(), prefix)?;
         let raw_entries = self.index_scan_raw(table, index_name, prefix).await?;
         self.decode_index_records(table, index_name, raw_entries)
     }
@@ -150,20 +201,8 @@ impl Database {
         end: &[Value],
     ) -> Result<Vec<VariantRecord>, Error> {
         let index = self.index(table, index_name)?;
-        if start.len() > index.columns.len() {
-            return Err(Error::IndexKeyArity {
-                index: index_name.to_owned(),
-                expected: index.columns.len(),
-                actual: start.len(),
-            });
-        }
-        if end.len() > index.columns.len() {
-            return Err(Error::IndexKeyArity {
-                index: index_name.to_owned(),
-                expected: index.columns.len(),
-                actual: end.len(),
-            });
-        }
+        KeyArity::Prefix.check_index(index_name, index.columns.len(), start)?;
+        KeyArity::Prefix.check_index(index_name, index.columns.len(), end)?;
         let raw_entries = self
             .index_scan_range_raw(table, index_name, start, end)
             .await?;
@@ -294,24 +333,10 @@ impl Database {
         if batch_writes_table {
             self.ensure_batch_storage_txn(batch)?;
         }
-        let table_schema = self.table(table)?;
-        let primary_key = table_schema
-            .primary_key
-            .as_ref()
-            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
-        if key.len() != primary_key.columns.len() {
-            return Err(Error::PrimaryKeyArity {
-                table: table.to_owned(),
-                expected: primary_key.columns.len(),
-                actual: key.len(),
-            });
-        }
+        let (table_schema, primary_key) = self.primary_key_schema(table)?;
         let descriptor = self.table_storage_descriptor(table)?;
-        let mut encoded_key = Vec::new();
-        for (value, column) in key.iter().zip(&primary_key.columns) {
-            ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut encoded_key, value)?;
-        }
+        let encoded_key =
+            KeyArity::Exact.encode_primary_key(table, table_schema, primary_key, key)?;
         let staged_contains_key = batch_writes_table
             && batch
                 .txn_operations
@@ -348,24 +373,10 @@ impl Database {
     where
         T: OrderedKvStorage,
     {
-        let table_schema = self.table(table)?;
-        let primary_key = table_schema
-            .primary_key
-            .as_ref()
-            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
-        if key.len() != primary_key.columns.len() {
-            return Err(Error::PrimaryKeyArity {
-                table: table.to_owned(),
-                expected: primary_key.columns.len(),
-                actual: key.len(),
-            });
-        }
+        let (table_schema, primary_key) = self.primary_key_schema(table)?;
         let descriptor = self.table_storage_descriptor(table)?;
-        let mut encoded_key = Vec::new();
-        for (value, column) in key.iter().zip(&primary_key.columns) {
-            ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut encoded_key, value)?;
-        }
+        let encoded_key =
+            KeyArity::Exact.encode_primary_key(table, table_schema, primary_key, key)?;
         let store = RecordStore::new(storage, table, &descriptor);
         store
             .get_raw(&encoded_key)
@@ -383,24 +394,10 @@ impl Database {
     where
         T: OrderedKvStorage,
     {
-        let table_schema = self.table(table)?;
-        let primary_key = table_schema
-            .primary_key
-            .as_ref()
-            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
-        if prefix.len() > primary_key.columns.len() {
-            return Err(Error::PrimaryKeyArity {
-                table: table.to_owned(),
-                expected: primary_key.columns.len(),
-                actual: prefix.len(),
-            });
-        }
+        let (table_schema, primary_key) = self.primary_key_schema(table)?;
         let descriptor = self.table_storage_descriptor(table)?;
-        let mut key_prefix = Vec::new();
-        for (value, column) in prefix.iter().zip(&primary_key.columns) {
-            ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut key_prefix, value)?;
-        }
+        let key_prefix =
+            KeyArity::Prefix.encode_primary_key(table, table_schema, primary_key, prefix)?;
         let store = RecordStore::new(storage, table, &descriptor);
         store
             .prefix(&key_prefix)
@@ -419,24 +416,10 @@ impl Database {
     where
         T: OrderedKvStorage,
     {
-        let table_schema = self.table(table)?;
-        let primary_key = table_schema
-            .primary_key
-            .as_ref()
-            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
-        if prefix.len() > primary_key.columns.len() {
-            return Err(Error::PrimaryKeyArity {
-                table: table.to_owned(),
-                expected: primary_key.columns.len(),
-                actual: prefix.len(),
-            });
-        }
+        let (table_schema, primary_key) = self.primary_key_schema(table)?;
         let descriptor = self.table_storage_descriptor(table)?;
-        let mut key_prefix = Vec::new();
-        for (value, column) in prefix.iter().zip(&primary_key.columns) {
-            ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut key_prefix, value)?;
-        }
+        let key_prefix =
+            KeyArity::Prefix.encode_primary_key(table, table_schema, primary_key, prefix)?;
         let store = RecordStore::new(storage, table, &descriptor);
         store
             .last_with_prefix(&key_prefix)
@@ -488,36 +471,11 @@ impl Database {
     where
         T: OrderedKvStorage,
     {
-        let table_schema = self.table(table)?;
-        let primary_key = table_schema
-            .primary_key
-            .as_ref()
-            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
-        if start.len() != primary_key.columns.len() {
-            return Err(Error::PrimaryKeyArity {
-                table: table.to_owned(),
-                expected: primary_key.columns.len(),
-                actual: start.len(),
-            });
-        }
-        if end.len() != primary_key.columns.len() {
-            return Err(Error::PrimaryKeyArity {
-                table: table.to_owned(),
-                expected: primary_key.columns.len(),
-                actual: end.len(),
-            });
-        }
+        let (table_schema, primary_key) = self.primary_key_schema(table)?;
         let descriptor = self.table_storage_descriptor(table)?;
-        let mut start_key = Vec::new();
-        for (value, column) in start.iter().zip(&primary_key.columns) {
-            ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut start_key, value)?;
-        }
-        let mut end_key = Vec::new();
-        for (value, column) in end.iter().zip(&primary_key.columns) {
-            ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut end_key, value)?;
-        }
+        let start_key =
+            KeyArity::Exact.encode_primary_key(table, table_schema, primary_key, start)?;
+        let end_key = KeyArity::Exact.encode_primary_key(table, table_schema, primary_key, end)?;
         let store = RecordStore::new(storage, table, &descriptor);
         store
             .range(&start_key, &end_key)
@@ -573,36 +531,12 @@ impl Database {
         prefix: &[Value],
         upper: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        let table_schema = self.table(table)?;
-        let primary_key = table_schema
-            .primary_key
-            .as_ref()
-            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
-        if prefix.len() > primary_key.columns.len() {
-            return Err(Error::PrimaryKeyArity {
-                table: table.to_owned(),
-                expected: primary_key.columns.len(),
-                actual: prefix.len(),
-            });
-        }
-        if upper.len() != primary_key.columns.len() {
-            return Err(Error::PrimaryKeyArity {
-                table: table.to_owned(),
-                expected: primary_key.columns.len(),
-                actual: upper.len(),
-            });
-        }
+        let (table_schema, primary_key) = self.primary_key_schema(table)?;
         let descriptor = self.table_storage_descriptor(table)?;
-        let mut key_prefix = Vec::new();
-        for (value, column) in prefix.iter().zip(&primary_key.columns) {
-            ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut key_prefix, value)?;
-        }
-        let mut upper_key = Vec::new();
-        for (value, column) in upper.iter().zip(&primary_key.columns) {
-            ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut upper_key, value)?;
-        }
+        let key_prefix =
+            KeyArity::Prefix.encode_primary_key(table, table_schema, primary_key, prefix)?;
+        let upper_key =
+            KeyArity::Exact.encode_primary_key(table, table_schema, primary_key, upper)?;
         if !upper_key.starts_with(&key_prefix) {
             return Ok(None);
         }
@@ -629,13 +563,7 @@ impl Database {
         key: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
         let index = self.index(table, index_name)?;
-        if key.len() != index.columns.len() {
-            return Err(Error::IndexKeyArity {
-                index: index_name.to_owned(),
-                expected: index.columns.len(),
-                actual: key.len(),
-            });
-        }
+        KeyArity::Exact.check_index(index_name, index.columns.len(), key)?;
         self.index_scan_raw(table, index_name, key).await
     }
 
@@ -685,13 +613,7 @@ impl Database {
         T: OrderedKvStorage,
     {
         let index = self.index(table, index_name)?;
-        if prefix.len() > index.columns.len() {
-            return Err(Error::IndexKeyArity {
-                index: index_name.to_owned(),
-                expected: index.columns.len(),
-                actual: prefix.len(),
-            });
-        }
+        KeyArity::Prefix.check_index(index_name, index.columns.len(), prefix)?;
         let storage_prefix = self.persisted_index_scan_prefix(table, index_name, prefix)?;
         let index_descriptor = index_record_descriptor();
         let raw_entries = self
@@ -711,13 +633,7 @@ impl Database {
         prefix: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
         let index = self.index(table, index_name)?;
-        if prefix.len() > index.columns.len() {
-            return Err(Error::IndexKeyArity {
-                index: index_name.to_owned(),
-                expected: index.columns.len(),
-                actual: prefix.len(),
-            });
-        }
+        KeyArity::Prefix.check_index(index_name, index.columns.len(), prefix)?;
         let storage_prefix = self.persisted_index_scan_prefix(table, index_name, prefix)?;
         let index_descriptor = index_record_descriptor();
         let resident = self.resident_storage();
@@ -749,20 +665,8 @@ impl Database {
         end: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
         let index = self.index(table, index_name)?;
-        if start.len() > index.columns.len() {
-            return Err(Error::IndexKeyArity {
-                index: index_name.to_owned(),
-                expected: index.columns.len(),
-                actual: start.len(),
-            });
-        }
-        if end.len() > index.columns.len() {
-            return Err(Error::IndexKeyArity {
-                index: index_name.to_owned(),
-                expected: index.columns.len(),
-                actual: end.len(),
-            });
-        }
+        KeyArity::Prefix.check_index(index_name, index.columns.len(), start)?;
+        KeyArity::Prefix.check_index(index_name, index.columns.len(), end)?;
         let start = self.persisted_index_scan_prefix(table, index_name, start)?;
         let end = self.persisted_index_scan_prefix(table, index_name, end)?;
         let index_descriptor = index_record_descriptor();
