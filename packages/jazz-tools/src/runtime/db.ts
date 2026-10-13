@@ -1,3 +1,4 @@
+import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
@@ -32,17 +33,14 @@ import {
   type InsertOptions as InternalInsertOptions,
   type RestoreOptions as InternalRestoreOptions,
   type UpdateOptions as InternalUpdateOptions,
-  type DurabilityTier,
-  type QueryExecutionOptions,
+  type ReadTierOptions,
   type InternalQueryExecutionOptions,
-  type QueryPropagation,
   type QueryVisibility,
   isPublicQueryReadTier,
   rejectRemovedReadTier,
+  normalizeFirstLoadRemoteWaitMs,
   resolveEffectiveQueryExecutionOptions,
-  resolveReadTier,
-  isLocalFirstUnlessEmptyTier,
-  type RuntimeReadTier,
+  type InternalReadTier,
   type BranchSelector,
   type BranchView,
   type OpenTransactionId,
@@ -50,7 +48,11 @@ import {
   type PermissionAdvice,
   type StreamingValueSource,
 } from "./client.js";
-import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
+import {
+  type BrowserForegroundNodeLease,
+  type RuntimeSource,
+  type RuntimeTokenOptions,
+} from "./runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import {
@@ -68,7 +70,10 @@ import {
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
 } from "./client-session.js";
-import { createBrowserPhysicalDatabaseName } from "./browser-worker-config.js";
+import {
+  createBrowserPhysicalDatabaseName,
+  createBrowserStorageOwner,
+} from "./browser-worker-config.js";
 import {
   createInspectorLocalQueryOptions,
   isInspectorLocalQueryOptions,
@@ -205,7 +210,7 @@ export type QualifiedBranch = Record<string, BranchValue>;
 export type Branch = BranchValue | QualifiedBranch;
 export type BranchBase = Branch | readonly [branch: Branch, snapshot: unknown];
 
-export type QueryOptions = Omit<QueryExecutionOptions, "branch"> & {
+export type QueryOptions = ReadTierOptions & {
   /** Current branch coordinate. A scalar selects a table with one `branchBy` column. */
   branch?: Branch;
   /** Optional live base, or `[base, snapshotRef]` for a frozen base. */
@@ -214,8 +219,6 @@ export type QueryOptions = Omit<QueryExecutionOptions, "branch"> & {
 
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
   tier?: InternalQueryExecutionOptions["tier"];
-  localUpdates?: InternalQueryExecutionOptions["localUpdates"];
-  propagation?: InternalQueryExecutionOptions["propagation"];
   visibility?: InternalQueryExecutionOptions["visibility"];
 };
 /**
@@ -244,15 +247,6 @@ export interface DbDeltaSubscriptionCallbacks<T extends { id: string }> {
  * must not be able to select local-only propagation or a deferred own-write
  * overlay by adding private fields to an options object.
  */
-/**
- * Readiness to await before a read. The core Db gates a
- * local-first-unless-empty opening itself, so such a read needs only local
- * readiness and never blocks on the server transport.
- */
-function readinessTier(tier: RuntimeReadTier): DurabilityTier {
-  return tier === "local-first-unless-empty" ? "local" : tier;
-}
-
 function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptions | undefined {
   if (!options) return undefined;
   const candidate = options as QueryOptions & {
@@ -263,6 +257,10 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
   rejectRemovedReadTier(candidate.tier);
   const lowered: InternalDbQueryOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) lowered.tier = candidate.tier;
+  const firstLoadRemoteWaitMs = normalizeFirstLoadRemoteWaitMs(
+    (candidate as { firstLoadRemoteWaitMs?: unknown }).firstLoadRemoteWaitMs,
+  );
+  if (firstLoadRemoteWaitMs !== undefined) lowered.firstLoadRemoteWaitMs = firstLoadRemoteWaitMs;
   if (candidate.branch !== undefined) lowered.branch = candidate.branch as Branch;
   if (candidate.base !== undefined) lowered.base = candidate.base as BranchBase;
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
@@ -511,8 +509,7 @@ export interface ActiveQuerySubscriptionTrace {
   query: string;
   table: string;
   branches: string[];
-  tier: RuntimeReadTier;
-  propagation: QueryPropagation;
+  tier: InternalReadTier;
   createdAt: string;
   stack?: string;
 }
@@ -1530,7 +1527,6 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       translateQuery(builderJson, planningSchema),
       {
         ...queryOptions,
-        localUpdates: "deferred",
         openTransactionId,
       },
       this.context?.readSession,
@@ -1727,7 +1723,7 @@ export class Db {
     // Client construction starts the follower's init handshake. Do not decide
     // the read tier from config/MessagePort shape: wait for the worker receipt.
     this.getClient(query._schema);
-    await this.connection.ensureReady("local");
+    await this.connection.ensureReady("runtime");
     const selectedOptions = this.#authenticatedInspectorPhysicalDbName
       ? createInspectorLocalQueryOptions(options)
       : // Drop a source's cache-only marker when the worker did not issue an
@@ -1926,9 +1922,10 @@ export class Db {
   static async createWithBrowserWorker(
     config: DbConfig,
     runtimeSource: AnyRuntimeSource,
+    earlyLease?: Promise<BrowserForegroundNodeLease>,
   ): Promise<Db> {
     const db = new Db(config, runtimeSource);
-    const connection = new BrowserConnectionManager(db.dbForConnection());
+    const connection = new BrowserConnectionManager(db.dbForConnection(), earlyLease);
     db.connection = connection;
     await connection.start();
     return db;
@@ -1948,13 +1945,18 @@ export class Db {
     return this.connection.getCurrentClient();
   }
 
-  protected async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
-    await this.connection.ensureReady(tier, signal ?? this.shutdownAbort.signal);
+  protected async ensureReady(
+    requirement: ConnectionRequirement,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.connection.ensureReady(requirement, signal ?? this.shutdownAbort.signal);
     this.assertOpen();
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
-    return setWriteWaitReadiness(handle, (tier) => this.ensureReady(tier));
+    return setWriteWaitReadiness(handle, (tier) =>
+      this.ensureReady(tier === "global" ? "server" : "runtime"),
+    );
   }
 
   protected getAccessContext(): DbAccessContext | null {
@@ -2579,8 +2581,9 @@ export class Db {
     const client = this.getClient(query._schema);
     // A newly attached browser-worker follower learns the namespace-wide
     // connection state during its init handshake. The core read gate needs
-    // that state before it decides whether an empty result may wait.
-    const initialOfflineState = isLocalFirstUnlessEmptyTier(options?.tier)
+    // that state before it decides whether the first load may wait.
+    const mayWaitForServer = (options?.firstLoadRemoteWaitMs ?? 0) > 0;
+    const initialOfflineState = mayWaitForServer
       ? this.connection.initialExplicitOfflineState()
       : null;
     if (initialOfflineState) await initialOfflineState;
@@ -2593,11 +2596,8 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getAccessContext();
-    const effectiveTier = resolveEffectiveQueryExecutionOptions(
-      { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
-      queryOptions,
-    ).tier;
-    await this.ensureReady(readinessTier(effectiveTier));
+    const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
+    await this.ensureReady(effectiveTier === "remote" ? "server" : "runtime");
     const rows =
       context || usesRelationTraversal
         ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
@@ -2964,19 +2964,13 @@ export class Db {
     // The native maintained stream owns both the opening snapshot and later
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
-    if (
-      this.connection.shouldDeferSubscriptionStart(
-        readinessTier(resolveReadTier(queryOptions.tier ?? "local")),
-      )
-    ) {
+    const requirement = queryOptions.tier === "remote" ? "server" : "runtime";
+    if (this.connection.shouldDeferSubscriptionStart(requirement)) {
       // The worker can only classify the initial authority-tier snapshot as
       // settled after its own server transport is attached. Delay native
       // subscription creation until that topology is ready; the native stream
       // then owns the settled-snapshot gate and remains the sole data source.
-      void this.ensureReady(
-        readinessTier(resolveReadTier(queryOptions.tier ?? "local")),
-        readyAbort.signal,
-      )
+      void this.ensureReady(requirement, readyAbort.signal)
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
           if (unsubscribed || readyAbort.signal.aborted || this.shutdownPromise) return;
@@ -3096,13 +3090,10 @@ export class Db {
       return null;
     }
 
-    const resolvedOptions = resolveEffectiveQueryExecutionOptions(
-      { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
-      options,
-    );
+    const resolvedOptions = resolveEffectiveQueryExecutionOptions(this.config, options);
     // Inspector-only reads must not recursively appear in the inspector's
     // own subscription list. Public local-first still propagates and is listed.
-    if (resolvedOptions.propagation === "local-only") return null;
+    if (resolvedOptions.tier === "local-only") return null;
     const payload = this.parseRuntimeQueryTracePayload(queryJson);
     const traceId = `sub-${this.nextActiveQuerySubscriptionTraceId++}`;
 
@@ -3112,7 +3103,6 @@ export class Db {
       table: payload.table,
       branches: payload.branches,
       tier: resolvedOptions.tier,
-      propagation: resolvedOptions.propagation,
       createdAt: new Date().toISOString(),
       stack: trimSubscriptionTraceStack(new Error().stack),
       visibility: resolvedOptions.visibility ?? "public",
@@ -3209,9 +3199,104 @@ function createRuntimeTokenOptions(
   };
 }
 
+/**
+ * @internal Start the persistent browser worker for an account context before
+ * its runtime and credential are ready. An account's browser root and worker
+ * are named by its account id and registry alone, so the SharedWorker can boot
+ * and compile its WASM while the page loads its own runtime and resolves auth.
+ * Returns undefined when the root depends on a credential or no worker is used.
+ */
+export function startBrowserWorkerLease(
+  config: DbConfig,
+  runtimeSource: RuntimeSource<any>,
+): Promise<BrowserForegroundNodeLease> | undefined {
+  if (
+    !runtimeSource.supportsBrowserWorker ||
+    !isBrowserRuntime() ||
+    resolveStorageDriver(config.driver).type !== "persistent" ||
+    !config.accountId ||
+    !config.accountRegistryAuthority ||
+    config.adminSecret ||
+    config.runtimeSources?.browserWorkerPort
+  )
+    return undefined;
+  const lease = runtimeSource.acquireBrowserForegroundNodeLease(config);
+  // Observed by the Db that adopts it, or returned by releaseUnusedLease.
+  void lease.catch(() => undefined);
+  leaseRoots.set(lease, browserLeaseRoot(config));
+  return lease;
+}
+
+/** The worker realm, physical root and owner a lease was acquired for. */
+const leaseRoots = new WeakMap<Promise<BrowserForegroundNodeLease>, string | undefined>();
+
+function browserLeaseRoot(config: DbConfig): string | undefined {
+  try {
+    const sources = config.runtimeSources;
+    return JSON.stringify([
+      resolveDefaultPersistentDbName(config),
+      createBrowserStorageOwner(config),
+      sources?.wasmUrl ?? null,
+      sources?.baseUrl ?? null,
+      sources?.brokerWorkerUrl ?? null,
+      sources?.wasmVersion ?? null,
+      Boolean(sources?.wasmModule || sources?.wasmSource),
+    ]);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * An early lease is only adopted for the exact root it was acquired for; a
+ * config whose principal or assets changed while it resolved gets its own.
+ */
+function leaseMatches(lease: Promise<BrowserForegroundNodeLease>, config: DbConfig): boolean {
+  const root = leaseRoots.get(lease);
+  return root !== undefined && root === browserLeaseRoot(config);
+}
+
+/**
+ * @internal Return a lease that no Db adopted, keeping its node reusable.
+ * Resolves once the worker has the lease back (or it never issued one), so a
+ * replacement acquired afterwards never queues behind it.
+ */
+export async function releaseUnusedLease(
+  lease: Promise<BrowserForegroundNodeLease> | undefined,
+): Promise<void> {
+  if (!lease || leaseClaimed.has(lease)) return;
+  leaseClaimed.add(lease);
+  try {
+    const acquired = await lease;
+    await acquired.returnWithHighWater(acquired.confirmedTxTime);
+  } catch {
+    // A lease that failed to arrive, or could not be returned, holds nothing.
+  }
+}
+
 export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
   runtimeSource: RuntimeSource<RuntimeConfig>,
+  earlyLease?: Promise<BrowserForegroundNodeLease>,
+): Promise<Db> {
+  let lease = earlyLease;
+  try {
+    return await openDbWithRuntimeSource(config, runtimeSource, () => {
+      lease ??= startBrowserWorkerLease(config, runtimeSource);
+      return lease;
+    });
+  } finally {
+    void releaseUnusedLease(lease);
+  }
+}
+
+/** Leases already adopted by a Db or released; neither may happen twice. */
+const leaseClaimed = new WeakSet<Promise<BrowserForegroundNodeLease>>();
+
+async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
+  config: RuntimeConfig,
+  runtimeSource: RuntimeSource<RuntimeConfig>,
+  startLease: () => Promise<BrowserForegroundNodeLease> | undefined,
 ): Promise<Db> {
   assertAccountConfig(config);
   assertNoClientBackendSecret(config);
@@ -3232,6 +3317,8 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 
   let resolvedConfig: DbConfig = { ...config };
   setTrustedReservedSession(resolvedConfig, getTrustedReservedSession(config));
+  // Boot the worker while this page loads its own runtime.
+  const earlyLease = startLease();
   await runtimeSource.load(config);
   const {
     secret: _secret,
@@ -3276,10 +3363,26 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   runtimeSource.admitConfig(resolvedConfig as RuntimeConfig);
 
   const driver = resolveStorageDriver(resolvedConfig.driver);
-  const db =
-    runtimeSource.supportsBrowserWorker && isBrowserRuntime() && driver.type === "persistent"
-      ? await Db.createWithBrowserWorker(resolvedConfig, runtimeSource as AnyRuntimeSource)
-      : await Db.createWithDirectConnection(resolvedConfig, runtimeSource as AnyRuntimeSource);
+  const browserWorker =
+    runtimeSource.supportsBrowserWorker && isBrowserRuntime() && driver.type === "persistent";
+  const adoptedLease =
+    earlyLease && browserWorker && leaseMatches(earlyLease, resolvedConfig)
+      ? earlyLease
+      : undefined;
+  if (adoptedLease) {
+    leaseClaimed.add(adoptedLease);
+  } else if (earlyLease) {
+    // Hand a lease for some other root back before this Db acquires its own,
+    // so the two are never held, or queued behind each other, at once.
+    await releaseUnusedLease(earlyLease);
+  }
+  const db = browserWorker
+    ? await Db.createWithBrowserWorker(
+        resolvedConfig,
+        runtimeSource as AnyRuntimeSource,
+        adoptedLease,
+      )
+    : await Db.createWithDirectConnection(resolvedConfig, runtimeSource as AnyRuntimeSource);
 
   if (localFirstSecret) {
     db.initLocalFirstAuth(localFirstSecret, 3600, !config.jwtToken);
