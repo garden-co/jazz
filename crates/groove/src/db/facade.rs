@@ -663,13 +663,6 @@ impl Database {
         crate::chunks::LocalChunkReader::new(self.chunk_storage.clone())
     }
 
-    pub fn large_value_upload_cursor(
-        &self,
-        value: &crate::large_values::LargeValueRef,
-    ) -> Result<crate::large_values::LargeValueUploadCursor, crate::large_values::Error> {
-        crate::large_values::LargeValueUploadCursor::new(value, self.owned_chunk_provider())
-    }
-
     /// Install Groove's policy-blind immutable chunk storage and route future
     /// evaluation reads directly through it.
     pub fn set_chunk_storage(&mut self, storage: Rc<dyn crate::chunks::ChunkStorage>) {

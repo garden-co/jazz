@@ -1280,109 +1280,35 @@ pub(crate) fn consolidate_appends_attempt(
     let mut logical_suffix = last_leaf;
     logical_suffix.extend_from_slice(&appended);
     let mut staged_chunks = Vec::new();
-    let mut replacement = Vec::new();
-    for range in leaf_ranges(value.kind, &logical_suffix)? {
-        let bytes = logical_suffix[range].to_vec();
-        let node = ChunkNode::Leaf {
-            format: FORMAT_VERSION,
-            kind: value.kind,
-            bytes,
-        };
-        replacement.push(stage_node_reusing(
+    let mut replacement = stage_leaves_reusing(
+        value.kind,
+        &logical_suffix,
+        &existing,
+        &mut fresh_locator,
+        &mut staged_chunks,
+    )?;
+
+    for mut level in spine.into_iter().rev() {
+        level.pop();
+        let mut rebuilt = level.into_iter().map(built_from_child).collect::<Vec<_>>();
+        rebuilt.append(&mut replacement);
+        replacement = stage_branch_level_reusing(
             value.kind,
-            node,
+            &rebuilt,
             &existing,
             &mut fresh_locator,
             &mut staged_chunks,
-        )?);
+        )?;
     }
 
-    for children in spine.into_iter().rev() {
-        let mut level = children;
-        level.pop();
-        let mut rebuilt = level
-            .into_iter()
-            .map(|child| BuiltNode {
-                node_ref: child.node_ref,
-                metrics: child.metrics,
-                structural_hash: child.logical_hash,
-            })
-            .collect::<Vec<_>>();
-        rebuilt.append(&mut replacement);
-        replacement = Vec::new();
-        for range in branch_ranges(value.kind, &rebuilt) {
-            let children = rebuilt[range].to_vec();
-            let node = ChunkNode::Branch {
-                format: FORMAT_VERSION,
-                kind: value.kind,
-                children: children
-                    .iter()
-                    .map(|child| BranchChild {
-                        node_ref: child.node_ref.clone(),
-                        metrics: child.metrics,
-                        logical_hash: child.structural_hash,
-                    })
-                    .collect(),
-            };
-            replacement.push(stage_node_reusing(
-                value.kind,
-                node,
-                &existing,
-                &mut fresh_locator,
-                &mut staged_chunks,
-            )?);
-        }
-    }
-
-    let mut extra_depth = depth;
-    while replacement.len() > 1 {
-        extra_depth += 1;
-        if extra_depth > MAX_TREE_DEPTH {
-            return Err(Error::InvalidTree.into());
-        }
-        let mut next = Vec::new();
-        for range in branch_ranges(value.kind, &replacement) {
-            let children = replacement[range].to_vec();
-            let node = ChunkNode::Branch {
-                format: FORMAT_VERSION,
-                kind: value.kind,
-                children: children
-                    .iter()
-                    .map(|child| BranchChild {
-                        node_ref: child.node_ref.clone(),
-                        metrics: child.metrics,
-                        logical_hash: child.structural_hash,
-                    })
-                    .collect(),
-            };
-            next.push(stage_node_reusing(
-                value.kind,
-                node,
-                &existing,
-                &mut fresh_locator,
-                &mut staged_chunks,
-            )?);
-        }
-        replacement = next;
-    }
-    let root = replacement.pop().ok_or(Error::MalformedNode)?;
-    if root.metrics.byte_length != value.byte_length
-        || root.metrics.utf16_length != value.utf16_length
-    {
-        return Err(Error::DescriptorMismatch.into());
-    }
-    Ok(PreparedLargeValue {
-        value_ref: LargeValueRef {
-            kind: value.kind,
-            format_version: FORMAT_VERSION,
-            logical_hash: root.structural_hash,
-            root: root.node_ref,
-            byte_length: root.metrics.byte_length,
-            utf16_length: root.metrics.utf16_length,
-            edit_tail: Vec::new(),
-        },
+    finish_rebuilt_tree(
+        value,
+        replacement,
+        depth,
+        &existing,
+        &mut fresh_locator,
         staged_chunks,
-    })
+    )
 }
 
 /// Consolidate one replacement against an otherwise tail-free base. The
@@ -1494,22 +1420,17 @@ pub(crate) fn consolidate_single_edit_attempt(
     }
 
     let mut staged_chunks = Vec::new();
-    let mut replacement = Vec::new();
-    if !segment.is_empty() {
-        for range in leaf_ranges(value.kind, &segment)? {
-            replacement.push(stage_node_reusing(
-                value.kind,
-                ChunkNode::Leaf {
-                    format: FORMAT_VERSION,
-                    kind: value.kind,
-                    bytes: segment[range].to_vec(),
-                },
-                &existing,
-                &mut fresh_locator,
-                &mut staged_chunks,
-            )?);
-        }
-    }
+    let mut replacement = if segment.is_empty() {
+        Vec::new()
+    } else {
+        stage_leaves_reusing(
+            value.kind,
+            &segment,
+            &existing,
+            &mut fresh_locator,
+            &mut staged_chunks,
+        )?
+    };
 
     for depth in (0..left_path.len()).rev() {
         let left = &left_path[depth];
@@ -1542,21 +1463,40 @@ pub(crate) fn consolidate_single_edit_attempt(
             )?
         };
     }
-    let mut tree_depth = left_path.len();
-    while replacement.len() > 1 {
-        tree_depth += 1;
-        if tree_depth > MAX_TREE_DEPTH {
+    finish_rebuilt_tree(
+        value,
+        replacement,
+        left_path.len(),
+        &existing,
+        &mut fresh_locator,
+        staged_chunks,
+    )
+}
+
+/// Stage parent levels over `level` (rebuilt at `depth`) until one root
+/// remains, then check that root still describes `value`'s final contents.
+fn finish_rebuilt_tree(
+    value: &LargeValueRef,
+    mut level: Vec<BuiltNode>,
+    mut depth: usize,
+    existing: &std::collections::BTreeMap<ContentHash, Locator>,
+    fresh_locator: &mut impl FnMut(ContentHash) -> Locator,
+    mut staged_chunks: Vec<StagedChunk>,
+) -> Result<PreparedLargeValue, IvmRuntimeError> {
+    while level.len() > 1 {
+        depth += 1;
+        if depth > MAX_TREE_DEPTH {
             return Err(Error::InvalidTree.into());
         }
-        replacement = stage_branch_level_reusing(
+        level = stage_branch_level_reusing(
             value.kind,
-            &replacement,
-            &existing,
-            &mut fresh_locator,
+            &level,
+            existing,
+            fresh_locator,
             &mut staged_chunks,
         )?;
     }
-    let root = replacement.pop().ok_or(Error::MalformedNode)?;
+    let root = level.pop().ok_or(Error::MalformedNode)?;
     if root.metrics.byte_length != value.byte_length
         || root.metrics.utf16_length != value.utf16_length
     {
@@ -1578,8 +1518,6 @@ pub(crate) fn consolidate_single_edit_attempt(
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Error {
-    #[error("large-value upload batch limit must be non-zero")]
-    InvalidUploadBatchLimit,
     #[error("large string is not valid UTF-8")]
     InvalidUtf8,
     #[error("large JSON is not valid JSON")]
@@ -1644,6 +1582,16 @@ struct PhysicalTraversal {
 }
 
 impl PhysicalTraversal {
+    /// Walk `value`'s physical tree. Root metrics are only known up front
+    /// when there is no edit tail; otherwise they describe the base tree.
+    fn for_value(value: &LargeValueRef) -> Self {
+        let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
+            byte_length: value.byte_length,
+            utf16_length: value.utf16_length,
+        });
+        Self::new(value.root.clone(), root_metrics, value.logical_hash)
+    }
+
     fn new(
         root: NodeRef,
         expected_metrics: Option<NodeMetrics>,
@@ -1931,12 +1879,7 @@ pub async fn visit_reachable_chunks(
     mut visit: impl FnMut(&ChunkRequest),
 ) -> Result<u64, ReachabilityError> {
     check_format(value.format_version)?;
-    let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
-        byte_length: value.byte_length,
-        utf16_length: value.utf16_length,
-    });
-    let mut traversal =
-        PhysicalTraversal::new(value.root.clone(), root_metrics, value.logical_hash);
+    let mut traversal = PhysicalTraversal::for_value(value);
     let mut visited = 0_u64;
     while let Some(entry) = traversal.pop() {
         let node_ref = &entry.node_ref;
@@ -1962,76 +1905,6 @@ pub async fn visit_reachable_chunks(
     Ok(visited)
 }
 
-/// Bounded-memory exporter for the push-before-row sync path.
-pub struct LargeValueUploadCursor {
-    format_version: u8,
-    kind: LargeValueKind,
-    provider: crate::chunks::OwnedChunkProvider,
-    traversal: PhysicalTraversal,
-}
-
-impl LargeValueUploadCursor {
-    pub(crate) fn new(
-        value: &LargeValueRef,
-        provider: crate::chunks::OwnedChunkProvider,
-    ) -> Result<Self, Error> {
-        check_format(value.format_version)?;
-        let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
-            byte_length: value.byte_length,
-            utf16_length: value.utf16_length,
-        });
-        Ok(Self {
-            format_version: value.format_version,
-            kind: value.kind,
-            provider,
-            traversal: PhysicalTraversal::new(value.root.clone(), root_metrics, value.logical_hash),
-        })
-    }
-
-    /// Read and authenticate at most `limit` nodes. `limit` must be non-zero.
-    /// An empty result means the graph is complete; the cursor retains the
-    /// branch frontier plus one authenticated expectation per distinct physical
-    /// node.
-    pub async fn next_batch(
-        &mut self,
-        limit: usize,
-    ) -> Result<Vec<StagedChunk>, ReachabilityError> {
-        if limit == 0 {
-            return Err(Error::InvalidUploadBatchLimit.into());
-        }
-        let mut batch = Vec::new();
-        while batch.len() < limit {
-            let Some(entry) = self.traversal.pop() else {
-                break;
-            };
-            let node_ref = &entry.node_ref;
-            let request = ChunkRequest {
-                object_hash: node_ref.object_hash.0,
-                locator: node_ref.locator,
-            };
-            let encoded = self.provider.get(request).await?;
-            let node = decode_node_for_format(
-                self.format_version,
-                self.kind,
-                node_ref.object_hash,
-                encoded.bytes(),
-            )?;
-            self.traversal.validate_node(self.kind, node_ref, &node)?;
-            if let ChunkNode::Branch { children, .. } = node {
-                self.traversal.discover_children(&entry, children)?;
-            }
-            batch.push(StagedChunk {
-                node_ref: entry.node_ref,
-                encoded: encoded.bytes().to_vec(),
-            });
-        }
-        if self.traversal.pending.is_empty() {
-            self.traversal.finish()?;
-        }
-        Ok(batch)
-    }
-}
-
 /// Authenticate the locally present prefix of a descriptor's tree and return
 /// its current missing frontier. Children are discovered only from verified
 /// branch nodes, so an empty result is a proof of graph closure.
@@ -2041,12 +1914,7 @@ pub(crate) async fn missing_upload_frontier(
     limit: usize,
 ) -> Result<Vec<NodeRef>, ReachabilityError> {
     check_format(value.format_version)?;
-    let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
-        byte_length: value.byte_length,
-        utf16_length: value.utf16_length,
-    });
-    let mut traversal =
-        PhysicalTraversal::new(value.root.clone(), root_metrics, value.logical_hash);
+    let mut traversal = PhysicalTraversal::for_value(value);
     let mut missing = Vec::new();
     while let Some(entry) = traversal.pop() {
         let node_ref = &entry.node_ref;
@@ -2090,12 +1958,7 @@ pub(crate) async fn validate_finalized_upload(
     descriptor_was_bound_before_completion: bool,
 ) -> Result<(), ReachabilityError> {
     validate_descriptor(value)?;
-    let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
-        byte_length: value.byte_length,
-        utf16_length: value.utf16_length,
-    });
-    let mut traversal =
-        PhysicalTraversal::new(value.root.clone(), root_metrics, value.logical_hash);
+    let mut traversal = PhysicalTraversal::for_value(value);
     while let Some(entry) = traversal.pop() {
         let node_ref = &entry.node_ref;
         // Descriptor-keyed peer uploads may legitimately discover that an
@@ -3530,6 +3393,31 @@ fn built_from_child(child: BranchChild) -> BuiltNode {
         metrics: child.metrics,
         structural_hash: child.logical_hash,
     }
+}
+
+fn stage_leaves_reusing(
+    kind: LargeValueKind,
+    bytes: &[u8],
+    existing: &std::collections::BTreeMap<ContentHash, Locator>,
+    fresh_locator: &mut impl FnMut(ContentHash) -> Locator,
+    staged_chunks: &mut Vec<StagedChunk>,
+) -> Result<Vec<BuiltNode>, Error> {
+    leaf_ranges(kind, bytes)?
+        .into_iter()
+        .map(|range| {
+            stage_node_reusing(
+                kind,
+                ChunkNode::Leaf {
+                    format: FORMAT_VERSION,
+                    kind,
+                    bytes: bytes[range].to_vec(),
+                },
+                existing,
+                fresh_locator,
+                staged_chunks,
+            )
+        })
+        .collect()
 }
 
 fn stage_branch_level_reusing(
@@ -6688,34 +6576,6 @@ mod tests {
         .unwrap();
         assert_eq!(count as usize, prepared.staged_chunks.len());
         assert_eq!(visited.len(), prepared.staged_chunks.len());
-
-        let owned = crate::chunks::OwnedChunkProvider::new(std::rc::Rc::new(
-            PreparedProvider::new(&prepared),
-        ));
-        let mut cursor = LargeValueUploadCursor::new(&prepared.value_ref, owned).unwrap();
-        assert!(matches!(
-            futures::executor::block_on(cursor.next_batch(0)),
-            Err(ReachabilityError::LargeValue(
-                Error::InvalidUploadBatchLimit
-            ))
-        ));
-        let mut uploaded = Vec::new();
-        loop {
-            let batch = futures::executor::block_on(cursor.next_batch(7)).unwrap();
-            if batch.is_empty() {
-                break;
-            }
-            uploaded.extend(batch);
-        }
-        assert_eq!(uploaded.len(), prepared.staged_chunks.len());
-        assert_eq!(
-            uploaded
-                .iter()
-                .map(|chunk| chunk.node_ref.clone())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            prepared.staged_chunks.len()
-        );
 
         let mut inputs = EvaluationInputs::default();
         for chunk in &prepared.staged_chunks {
