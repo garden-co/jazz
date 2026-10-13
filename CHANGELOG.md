@@ -49,4 +49,6 @@ First-class Solid.js support is now available in `jazz-tools` (`createSolidJazzC
 - Compound `ExistsRel` policy joins enforce every equality against one witness tuple across reads, writes, inherited policies, and maintained subscriptions. Public-schema conversion rejects unknown or incompatible secondary ON columns.
 - Authorization support hydration now identifies clauses by policy slot as well as shape and binding, preserving provenance-distinct USING/CHECK clauses and reopening terminal support when its scope identity changes.
 - Direct permission advice now keeps local claim revisions separate from serving-authority revisions. Stable admitted claims receive definitive answers, while claim changes (including A→B→A) retire old requests as `Unknown` across buffered responses, backpressure, and reconnects.
+- Fix low-level `Db::SubscriptionStream` recovery after a rejected authority source closure, preserving withheld row and occurrence movements relative to the last emitted result.
+- Make the heap-sampler lifecycle regression deterministic without changing production sampling or weakening its accuracy and deallocation checks.
 - Removed `TestingServer` and `pushSchemaCatalogue` — use `startLocalJazzServer` and `deploy` instead.

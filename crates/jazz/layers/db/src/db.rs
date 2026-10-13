@@ -3620,6 +3620,7 @@ fn server_failure_code(error: &crate::node::Error) -> SubscribeServerFailureCode
         | crate::node::Error::InvalidCatalogueUpdate(_) => {
             SubscribeServerFailureCode::SchemaResolution
         }
+        crate::node::Error::QueryResultProtocol => SubscribeServerFailureCode::QueryResultProtocol,
         _ => SubscribeServerFailureCode::Internal,
     }
 }
@@ -5133,13 +5134,22 @@ impl SubscriptionSender {
         &self,
         event: SubscriptionEvent,
     ) -> Result<(), futures_channel::mpsc::TrySendError<SubscriptionEvent>> {
-        let terminal = matches!(&event, SubscriptionEvent::Closed)
+        let releases_opening = matches!(&event, SubscriptionEvent::Closed)
             || matches!(&event, SubscriptionEvent::Rejected { reason }
                 if !matches!(reason, SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission));
-        if terminal {
+        if releases_opening {
             let mut publication = self.publication.borrow_mut();
-            publication.deferred = None;
-            // A terminal event ends any first-load wait. A rejection's
+            // A locally rejected closure can be followed by a valid frame on
+            // this stream; retain its last published occurrence baseline.
+            if !matches!(
+                &event,
+                SubscriptionEvent::Rejected {
+                    reason: SubscribeRejectReason::InvalidAuthoritySourceClosure { .. },
+                }
+            ) {
+                publication.deferred = None;
+            }
+            // A rejection or close ends any first-load wait. A rejection's
             // withheld opening was already published by
             // `SubscriptionState::send_rejection`.
             publication.opening_gate = None;
@@ -5482,9 +5492,12 @@ impl SubscriptionStream {
                 // Anything before the window's opening reset (its link wake,
                 // receipt-only transitions) describes no published view.
                 Poll::Ready(Some(SubscriptionEvent::Delta { .. })) => continue,
-                // A rejected window is reported like any rejected read; the
-                // fallback keeps serving the cached page afterwards.
+                // Only a result-protocol rejection terminates this exact query
+                // stream; other rejections keep serving the cached fallback.
                 Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. })) => {
+                    if subscription_event_is_terminal(&event) {
+                        self.mark_terminated();
+                    }
                     return Poll::Ready(Some(event));
                 }
                 // A closed window leaves the fallback serving.
@@ -5527,6 +5540,20 @@ impl SubscriptionStream {
         materialized_subscription_snapshot(&state.snapshot, &state.snapshot_index)
     }
 
+    fn mark_terminated(&mut self) {
+        self.terminated = true;
+        self.window_fallback = None;
+        self._state
+            .borrow()
+            .sender
+            .publication
+            .borrow_mut()
+            .deferred = None;
+        if let Some(cleanup) = self.cleanup.take() {
+            drop(cleanup(None));
+        }
+    }
+
     /// Return the next queued materialized subscription event without waiting.
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
         if self.terminated {
@@ -5542,9 +5569,13 @@ impl SubscriptionStream {
                 };
             }
             let event = self.receiver.try_recv().ok()?;
-            if subscription_event_is_publishable(&event) {
-                return Some(event);
+            if !subscription_event_is_publishable(&event) {
+                continue;
             }
+            if subscription_event_is_terminal(&event) {
+                self.mark_terminated();
+            }
+            return Some(event);
         }
     }
 
@@ -5559,6 +5590,18 @@ impl SubscriptionStream {
             .as_ref()
             .and_then(LocalMaintainedViewSubscription::compiled_authorization_mode)
     }
+}
+
+fn subscription_event_is_terminal(event: &SubscriptionEvent) -> bool {
+    matches!(
+        event,
+        SubscriptionEvent::Closed
+            | SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::QueryResultProtocol,
+                },
+            }
+    )
 }
 
 fn subscription_event_is_publishable(event: &SubscriptionEvent) -> bool {
@@ -5586,6 +5629,9 @@ impl Stream for SubscriptionStream {
             }
             match Pin::new(&mut this.receiver).poll_next(cx) {
                 Poll::Ready(Some(event)) if subscription_event_is_publishable(&event) => {
+                    if subscription_event_is_terminal(&event) {
+                        this.mark_terminated();
+                    }
                     return Poll::Ready(Some(event));
                 }
                 Poll::Ready(Some(_)) => continue,

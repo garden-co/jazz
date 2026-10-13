@@ -214,3 +214,208 @@ fn dropping_subscription_while_node_mutex_is_held_queues_finalization() {
             .any(|command| matches!(command, PendingUpstreamCommand::Unsubscribe(_)))
     );
 }
+
+fn existing_subscription_rejections() -> Vec<SubscribeRejectReason> {
+    let mut reasons = [
+        SubscribeServerFailureCode::TableNotFound,
+        SubscribeServerFailureCode::SchemaResolution,
+        SubscribeServerFailureCode::QueryValidation,
+        SubscribeServerFailureCode::QueryLowering,
+        SubscribeServerFailureCode::PolicyEvaluation,
+        SubscribeServerFailureCode::Internal,
+    ]
+    .into_iter()
+    .map(|code| SubscribeRejectReason::ServerFailure { code })
+    .collect::<Vec<_>>();
+    reasons.extend([
+        SubscribeRejectReason::UnsupportedShapeCapability {
+            detail: "unsupported shape".to_owned(),
+        },
+        SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+        SubscribeRejectReason::InvalidAuthoritySourceClosure {
+            transition: "invalid closure".to_owned(),
+        },
+    ]);
+    reasons
+}
+
+/// Alice's low-level stream keeps publishing local rows after every existing
+/// rejection reason from Bob. The private delivery seam injects exact reasons
+/// without depending on unrelated server compilation or policy failures.
+#[test]
+fn existing_rejections_keep_low_level_subscription_live() {
+    for reason in existing_subscription_rejections() {
+        for poll in [false, true] {
+            let db = block_on(doctest_support::open_todos_db()).unwrap();
+            let prepared = db.prepare_query(&db.table("todos")).unwrap();
+            let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+            block_on(stream.next_raw()).expect("Alice's local opening");
+            stream
+                ._state
+                .borrow()
+                .send_rejection(SubscriptionEvent::Rejected {
+                    reason: reason.clone(),
+                })
+                .unwrap();
+            let event = if poll {
+                let mut cx = Context::from_waker(Waker::noop());
+                match Pin::new(&mut stream).poll_next(&mut cx) {
+                    Poll::Ready(event) => event,
+                    Poll::Pending => panic!("queued rejection must be ready"),
+                }
+            } else {
+                stream.try_next_event()
+            };
+            assert!(
+                matches!(event, Some(SubscriptionEvent::Rejected { reason: delivered }) if delivered == reason)
+            );
+            block_on(db.insert(
+                "todos",
+                doctest_support::todo_cells("after rejection", false),
+                Default::default(),
+            ))
+            .unwrap();
+            block_on(db.tick()).unwrap();
+            assert!(
+                matches!(stream.try_next_event(), Some(SubscriptionEvent::Delta { added, .. }) if added.len() == 1),
+                "existing rejection {reason:?} must leave Alice's stream live"
+            );
+        }
+    }
+}
+
+/// Alice's cached window survives Bob's existing rejection reasons; only a
+/// result-protocol rejection ends it. Injecting rejection at the private seam
+/// isolates fallback lifetime from server query validation.
+///
+/// alice: window waits -> link fails -> cached [b] -> Bob rejects -> insert aa
+///        existing reason: cached [aa]; QueryResultProtocol: stream ends.
+#[test]
+fn window_fallback_survives_existing_rejections_and_terminates_on_result_protocol() {
+    let mut reasons = existing_subscription_rejections();
+    reasons.push(SubscribeRejectReason::ServerFailure {
+        code: SubscribeServerFailureCode::QueryResultProtocol,
+    });
+    for reason in reasons {
+        let terminal = matches!(
+            reason,
+            SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::QueryResultProtocol
+            }
+        );
+        let db = block_on(doctest_support::open_todos_db()).unwrap();
+        for title in ["a", "b", "c"] {
+            block_on(db.insert(
+                "todos",
+                doctest_support::todo_cells(title, false),
+                Default::default(),
+            ))
+            .unwrap();
+        }
+        db.set_remote_link_hint(RemoteLinkHint::Live);
+        let query = db
+            .table("todos")
+            .order_by("title", OrderDirection::Asc)
+            .offset(1)
+            .limit(1);
+        let prepared = db.prepare_query(&query).unwrap();
+        let mut stream = block_on(db.subscribe(
+            &prepared,
+            ReadOpts {
+                first_load: FirstLoad::WaitForRemote { timeout_ms: 60_000 },
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap();
+        assert!(
+            stream.try_next_event().is_none(),
+            "remote opening is withheld"
+        );
+        db.set_remote_link_hint(RemoteLinkHint::Failed);
+        assert!(
+            matches!(stream.try_next_event(), Some(SubscriptionEvent::Delta { reset: true, added, .. }) if added.len() == 1)
+        );
+        stream
+            ._state
+            .borrow()
+            .send_rejection(SubscriptionEvent::Rejected {
+                reason: reason.clone(),
+            })
+            .unwrap();
+        assert!(
+            matches!(stream.try_next_event(), Some(SubscriptionEvent::Rejected { reason: delivered }) if delivered == reason)
+        );
+        block_on(db.insert(
+            "todos",
+            doctest_support::todo_cells("aa", false),
+            Default::default(),
+        ))
+        .unwrap();
+        block_on(db.tick()).unwrap();
+        let event = stream.try_next_event();
+        if terminal {
+            assert!(event.is_none());
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                Pin::new(&mut stream).poll_next(&mut cx),
+                Poll::Ready(None)
+            ));
+        } else {
+            assert!(
+                matches!(event, Some(SubscriptionEvent::Delta { added, .. }) if added.len() == 1),
+                "existing rejection {reason:?} must preserve the cached window"
+            );
+        }
+    }
+}
+
+/// Bob's closure rejection releases Alice's current WaitForRemote opening
+/// before the rejection, and Alice can keep reading subsequent local writes.
+/// The private rejection seam makes this first-load ordering deterministic.
+#[test]
+fn closure_rejection_releases_wait_for_remote_opening_and_keeps_stream_live() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    db.set_remote_link_hint(RemoteLinkHint::Live);
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut stream = block_on(db.subscribe(
+        &prepared,
+        ReadOpts {
+            first_load: FirstLoad::WaitForRemote { timeout_ms: 60_000 },
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert!(
+        stream.try_next_event().is_none(),
+        "Alice's opening is withheld"
+    );
+    stream
+        ._state
+        .borrow()
+        .send_rejection(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                transition: "invalid closure".to_owned(),
+            },
+        })
+        .unwrap();
+    assert!(matches!(
+        stream.try_next_event(),
+        Some(SubscriptionEvent::Delta { reset: true, .. })
+    ));
+    assert!(matches!(
+        stream.try_next_event(),
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::InvalidAuthoritySourceClosure { .. }
+        })
+    ));
+    block_on(db.insert(
+        "todos",
+        doctest_support::todo_cells("after closure rejection", false),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(db.tick()).unwrap();
+    assert!(
+        matches!(stream.try_next_event(), Some(SubscriptionEvent::Delta { added, .. }) if added.len() == 1)
+    );
+}
