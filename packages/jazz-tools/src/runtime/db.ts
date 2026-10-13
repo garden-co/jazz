@@ -2588,10 +2588,7 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getAccessContext();
-    const effectiveTier = resolveEffectiveQueryExecutionOptions(
-      { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
-      queryOptions,
-    ).tier;
+    const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
     await this.ensureReady(effectiveTier === "remote" ? "server" : "runtime");
     const rows =
       context || usesRelationTraversal
@@ -3085,10 +3082,7 @@ export class Db {
       return null;
     }
 
-    const resolvedOptions = resolveEffectiveQueryExecutionOptions(
-      { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
-      options,
-    );
+    const resolvedOptions = resolveEffectiveQueryExecutionOptions(this.config, options);
     // Inspector-only reads must not recursively appear in the inspector's
     // own subscription list. Public local-first still propagates and is listed.
     if (resolvedOptions.tier === "local-only") return null;

@@ -58,11 +58,9 @@ type BackendContextSchemaConfig =
       permissions?: undefined;
     };
 
-export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clientId" | "tier"> & {
+export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
-  /** Optional node durability tier identity. */
-  tier?: "local" | "global";
   /**
    * Direct JWKS endpoint used to verify external bearer JWTs in `forRequest()`.
    * Requires HTTPS, except development HTTP whose WHATWG-canonical hostname is
@@ -192,7 +190,6 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     }
 
     this.initializedSchemaJson = schemaJson;
-    const nodeTier = this.config.tier ?? "global";
     const env = this.config.env ?? "dev";
     this.runtime = new NativeRuntimeAdapter(
       NapiDb,
@@ -230,9 +227,6 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         backendSecret: this.config.backendSecret,
         adminSecret: config.adminSecret,
         cookieSession: config.cookieSession,
-        tier: nodeTier,
-        defaultDurabilityTier:
-          this.config.defaultDurabilityTier ?? (config.serverUrl ? nodeTier : undefined),
       },
       { onAuthFailure },
     );
