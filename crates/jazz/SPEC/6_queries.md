@@ -221,10 +221,20 @@ Supported matrix:
 | Array<T>          | Membership in a list of whole-array values.                                                               | Element membership with a needle of type `T`; this includes arrays of numbers, booleans, UUID/reference values, enums, timestamps, and text. |
 
 Invalid operator/type combinations must be rejected before execution with a
-clear type error. In particular, `contains` on a scalar non-text column is never
-interpreted as stringification, and `in` candidates (including parameters) must
-match the column's whole-value type except for the narrow compatibility
-coercions listed above. Integer literals are the one scalar compatibility rule:
+clear type error. For a supported text or array `contains` haystack and a known
+mismatched needle, validation MUST report the expected and actual needle types:
+expected is `String` for text or the declared array member type (including
+member nullability), while actual preserves operand nullability. Outer
+haystack nullability is ignored only when selecting text/array semantics.
+When the opposite operand supplies enough type information, validation MUST
+infer an unknown `Operand::Param`'s type. Claims are not parameter bindings:
+statically known claim types participate in normal checking, while provider or
+session claims without a declared static type MUST remain dynamically typed
+until execution.
+`contains` on a scalar non-text column is never interpreted as stringification,
+and `in` candidates (including parameters) must match the column's whole-value
+type except for the narrow compatibility coercions listed above. Integer
+literals are the one scalar compatibility rule:
 for equality, ordering, and `in`, an Integer (`I32`) literal is widened when
 compared with a BigInt (`I64`) column, and a BigInt literal is narrowed for an
 Integer column only when its value is representable as `I32`. This normalization
@@ -279,6 +289,42 @@ validation. Its identity is content-addressed independently of the shape:
 `BindingId = Uuid::new_v5(QUERY_NAMESPACE, canonical_binding_bytes(values))`,
 with values encoded in parameter-name order. Binding rejects missing, unknown,
 or type-mismatched params (`INV-QUERY-3`).
+
+Parameter types are finalised before type-sensitive predicate checks. Direct
+column comparisons in either operand order anchor a parameter's complete type.
+The six binary comparisons (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`) also propagate
+that type between independently valued parameter names when their complete
+underlying descriptors match exactly. Across an anchored chain or cycle, any
+required occurrence makes the connected exact-base parameters required;
+nullable-only groups retain `Nullable(T)`. Only one outer nullable wrapper is
+removed for this relationship: nested member types, record layouts and enum
+identities remain part of the descriptor. Unanchored groups and incompatible
+types are rejected rather than guessed. Ordered comparisons still require an
+orderable type; type propagation does not substitute or equate binding values.
+
+For example, comparing `p` with nullable UUID ownership, comparing `p` with `q`,
+and comparing `p` with required UUID membership requires bare UUID bindings for
+both names, in every occurrence order and after canonical query revalidation.
+Nullable carriers, including `Nullable(None)`, are rejected for both holes.
+A nullable-only group accepts nullable UUID carriers. Adding `IsNull(p)` to the
+mixed group rejects the query consistently: nullness is checked against the
+final domain, not a provisional nullable type.
+
+Preparation retains operator-specific inference: `in` relates whole values
+with directional compatibility, while `contains` infers a String needle from
+a String haystack or an exact member needle from an Array haystack. A required
+member supplies a required needle constraint even when another comparison uses
+a nullable column; an explicitly nullable member still rejects a separately
+required needle. A typed needle can infer an otherwise unanchored Array haystack
+only after available haystack anchors settle. Constructor members remain
+dependent on their final needle types. Typed literals provide fallback
+inference; checked integer-literal
+normalisation, overflow rejection and the direct-column empty-array exception
+above remain unchanged. An empty `in` eliminates its unused parameter hole.
+Broad compatibility, such as enum/U8 comparisons, is not a transitive type
+relationship. UNION arms still validate independently and merge parameter
+domains only when their complete types are equal. This is bounded anchored
+inference, not generic or polymorphic parameter solving.
 
 Claims are a separate input channel. `Operand::Claim` is _not_
 client-supplied binding data: claim bindings are injected server-side from the

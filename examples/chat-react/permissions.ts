@@ -77,6 +77,6 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   );
 
   policy.strokes.allowRead.where(allowedTo.read("canvas"));
-  policy.strokes.allowInsert.where(allowedTo.read("canvas"));
+  policy.strokes.allowInsert.where(allowedTo.insert("canvas"));
   policy.strokes.allowDelete.where({ "$createdBy.account": session.user.account });
 });

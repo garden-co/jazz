@@ -126,6 +126,10 @@ this document or public receipts.
   rollout. The coordinator owns both until infra reports the tenant counts per
   version; the release is not finished while eligible stable tenants remain on an
   older version without a recorded reason.
+- With the fleet rollout, hand infra the smoke probe update: bump `jazz-tools`
+  and `jazz-napi` in `kubernetes/tests/v2-sync` (garden-co/infra) to the new
+  release, port any API changes the release requires, and redeploy the probe.
+  Probes left on an old client stop testing what adopters run.
 - Create a new ordinary tenant with the real npm release; validate/deploy schema
   and permissions and run authenticated write/read/update/delete plus
   reconnect/reopen. Delete test tenants. Check existing sync probes and rollout

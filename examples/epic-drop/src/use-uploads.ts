@@ -7,13 +7,15 @@ export interface UploadTask {
   name: string;
   size: number;
   uploaded: number;
-  status: "uploading" | "failed";
+  /** "saving": streamed, being written to this browser's storage. */
+  status: "uploading" | "saving" | "failed";
   error?: string;
 }
 
 /**
- * Uploads in flight for this tab. A finished upload leaves the queue because
- * its row appears in the folder; a cancelled one leaves because none does.
+ * Uploads in flight for this tab. An upload leaves the queue once its row is
+ * stored durably in this browser (a reload keeps it); a cancelled one leaves
+ * because no row appears.
  */
 export function useUploads(userId: string | undefined) {
   const db = useDb();
@@ -44,6 +46,7 @@ export function useUploads(userId: string | undefined) {
           ownerId: userId,
           signal: controller.signal,
           onProgress: (uploaded) => patch(id, { uploaded }),
+          onSaving: () => patch(id, { status: "saving" }),
         }).then(
           () => patch(id, null),
           (error: unknown) => {
