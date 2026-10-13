@@ -1,15 +1,14 @@
 import { accountRegistryUrl } from "../accounts/context.js";
 import { requestAccountRegistry } from "../accounts/registry-client.js";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import {
   startLocalJazzServer,
+  deploy as deployFixture,
   startTestJwtIssuer,
   type LocalJazzServerHandle,
 } from "../testing/index.js";
-import { deploy as deployProject } from "../dev/catalogue-project.js";
 import {
   app as fixtureApp,
   permissions as fixturePermissions,
@@ -76,11 +75,12 @@ describe("jazzAdapter", () => {
       jwtIssuer: jwtIssuer.issuer,
       jwtAudience: jwtIssuer.audience,
     });
-    await deployProject({
+    await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schemaDir: join(import.meta.dirname, "fixtures"),
+      schema: fixtureApp,
+      permissions: fixturePermissions,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -143,11 +143,12 @@ describe("jazzAdapter", () => {
       jwtIssuer: jwtIssuer.issuer,
       jwtAudience: jwtIssuer.audience,
     });
-    await deployProject({
+    await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schemaDir: join(import.meta.dirname, "fixtures"),
+      schema: fixtureApp,
+      permissions: fixturePermissions,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -290,11 +291,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-adapter-methods",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -1171,11 +1173,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-common-user-flows",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -1542,11 +1545,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-better-auth-usage",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -1622,11 +1626,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-integration-tests",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -1688,11 +1693,12 @@ describe("jazzAdapter", () => {
     });
 
     test("creates and reads records through the sync server", async () => {
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       const ctx1 = createJazzContext({
@@ -1764,11 +1770,12 @@ describe("jazzAdapter", () => {
       "admits exactly one concurrent composite account identity across two backends",
       { timeout: 30_000 },
       async () => {
-        await deployProject({
+        await deployFixture({
           serverUrl: server.url,
           appId: server.appId,
           adminSecret: server.adminSecret,
-          schemaDir: join(import.meta.dirname, "fixtures"),
+          schema: fixtureApp,
+          permissions: fixturePermissions,
         });
         const ctx1 = createJazzContext({
           appId: server.appId,
