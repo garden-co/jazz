@@ -52,18 +52,18 @@ session metadata or semantic permission checks.
 
 ### Routing and dependency table
 
-| Messages                                                                                                                                        | Channel                                                  | Dependency                                                                             |
-| ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| SessionClaims, PublishSchema, PublishSchemaWithLens, PublishLens, CatalogueAck, CatalogueSnapshot                                               | Control                                                  | Bilateral global canonical barrier                                                     |
-| RegisterShape, Subscribe, Unsubscribe, AuthorizationScopeSubscribe                                                                              | Requests                                                 | One FIFO preserves registration-before-subscription and request cancellation order     |
-| FetchRowVersions, PermissionAdviceRequest, AuthorizationScopeIntent, CurrentRowsRequest, CurrentRowsCancel                                      | Requests                                                 | Request FIFO; connection/request identities remain semantic correlation                |
-| CommitUnit                                                                                                                                      | Writes                                                   | One FIFO; commit units retain their authored ordering                                  |
-| ViewUpdate, SubscribeRejected, AuthorizationScopeReceipt                                                                                        | Delivery keyed by complete SubscriptionKey               | View precedes its scope receipt                                                        |
-| AuthorizationScopeView, AuthorizationScopeAggregateReceipt, AuthorizationScopeUnavailable, AuthorizationScopeDecision, PermissionAdviceResponse | Delivery keyed by intent/request id                      | All clause views precede aggregate proof                                               |
-| CurrentRowsReceipt                                                                                                                              | Delivery keyed by request id in a separate key namespace | Existing authority/session validation remains mandatory                                |
-| RowVersionPayloads                                                                                                                              | Shared repair delivery                                   | No invented per-query ownership for a response lacking request id                      |
-| ChunkUploadStart, ChunkUploadNodes, ChunkUploadResult                                                                                           | Transfer keyed by immutable root hash                    | Root-first upload order; referencing writes retain semantic Staged prerequisite        |
-| ChunkRequestBatch, ChunkResponseBatch                                                                                                           | Reserved auxiliary                                       | Immutable storage objects only; independent progress while canonical application waits |
+| Messages                                                                                                              | Channel                                                  | Dependency                                                                             |
+| --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| SessionClaims, PublishSchema, PublishSchemaWithLens, PublishLens, CatalogueAck, CatalogueSnapshot                     | Control                                                  | Bilateral global canonical barrier                                                     |
+| RegisterShape, Subscribe, Unsubscribe                                                                                 | Requests                                                 | One FIFO preserves registration-before-subscription and request cancellation order     |
+| FetchRowVersions, AuthorizationScopeIntent, CurrentRowsRequest, CurrentRowsCancel                                     | Requests                                                 | Request FIFO; connection/request identities remain semantic correlation                |
+| CommitUnit                                                                                                            | Writes                                                   | One FIFO; commit units retain their authored ordering                                  |
+| ViewUpdate, SubscribeRejected                                                                                         | Delivery keyed by complete SubscriptionKey               | Ordered delivery for each subscription                                                 |
+| AuthorizationScopeView, AuthorizationScopeAggregateReceipt, AuthorizationScopeUnavailable, AuthorizationScopeDecision | Delivery keyed by intent/request id                      | All clause views precede aggregate proof                                               |
+| CurrentRowsReceipt                                                                                                    | Delivery keyed by request id in a separate key namespace | Existing authority/session validation remains mandatory                                |
+| RowVersionPayloads                                                                                                    | Shared repair delivery                                   | No invented per-query ownership for a response lacking request id                      |
+| ChunkUploadStart, ChunkUploadNodes, ChunkUploadResult                                                                 | Transfer keyed by immutable root hash                    | Root-first upload order; referencing writes retain semantic Staged prerequisite        |
+| ChunkRequestBatch, ChunkResponseBatch                                                                                 | Reserved auxiliary                                       | Immutable storage objects only; independent progress while canonical application waits |
 
 FateUpdate uses the Writes channel with a bilateral canonical barrier. A local-first
 query can deliver another author's Pending transaction carrier. After accepting
@@ -197,11 +197,10 @@ Frame grants and buffer grants share the same reliable ordered control stream
 and grant sequence. Holding a decoded buffer does not hold physical-frame
 credit, and releasing physical-frame credit does not release the decoded lease.
 
-### Explicit v3 postcard byte contract
+### Explicit v5 postcard byte contract
 
-The outer `WireFrame` is encoded with postcard-v1. Channel is appended enum tag
-4 and ChannelCredit tag 5; prior tags remain corpus/handshake identities, not an
-alternate live message transport. A Channel envelope encodes protocol version
+The outer `WireFrame` is encoded with postcard-v1. Its compact v5 tags are
+Hello 0, Error 1, Channel 2, and ChannelCredit 3. A Channel envelope encodes protocol version
 (u16), features (u64), optional WireSession, then the channel extent. The extent's
 field order is slot (u16), generation (u64), sequence (u64), class enum, first
 (bool), last (bool), semantic message size (u32), decoded extent size (u32), and
