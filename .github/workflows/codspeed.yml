@@ -251,6 +251,9 @@ jobs:
           node dev/artifacts/verify-starter-e2e-artifacts.mjs
       - name: Package the runtime for the measurement host
         run: |
+          # The napi build does not always emit every loader flavour (index.js
+          # is not generated today); skip unmatched globs instead of failing tar.
+          shopt -s nullglob
           tar -czf text-editor-runtime.tar.gz \
             packages/jazz-tools/dist crates/jazz-wasm/pkg \
             crates/jazz-napi/.native-artifacts \
