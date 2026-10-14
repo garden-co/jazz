@@ -175,7 +175,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     await expect(
       withTimeout(createDb(config), 5_000, "published alpha.54 open did not reject"),
     ).rejects.toThrow(
-      'unsupported storage format: this epoch-1 root lacks codec families ["groove.durable-index.v2","groove.large-value.v2","jazz.node-storage.v1"] required by this build and declares ["groove.large-value.v1","jazz.branch-key.v1","jazz.catalogue.activation.v1","jazz.catalogue.bootstrap-ready.v1","jazz.catalogue.lens.v1","jazz.catalogue.lineage.v1","jazz.catalogue.physical-mapping.v1","jazz.catalogue.schema.v1","jazz.catalogue.write-pointer.v1","jazz.subscription-program-fact-key.v1"] that this build does not read',
+      'unsupported storage format: this epoch-1 root lacks codec families ["groove.durable-index.v2","groove.large-value.v2","groove.ordered-chunk-storage.v2","jazz.node-storage.v1"] required by this build and declares ["groove.large-value.v1","groove.ordered-chunk-storage.v1","jazz.branch-key.v1","jazz.catalogue.activation.v1","jazz.catalogue.bootstrap-ready.v1","jazz.catalogue.lens.v1","jazz.catalogue.lineage.v1","jazz.catalogue.physical-mapping.v1","jazz.catalogue.schema.v1","jazz.catalogue.write-pointer.v1","jazz.subscription-program-fact-key.v1"] that this build does not read',
     );
     expect(await rawRecords(physicalDbName)).toEqual(published);
   }, 30_000);
@@ -574,7 +574,7 @@ describe("browser Jazz storage compatibility corpus", () => {
 
     await pinnedPhase("refused-open", () =>
       expect(openPersistentDb(config, "pinned-refused")).rejects.toThrow(
-        'unsupported storage format: this epoch-1 root lacks codec families ["groove.durable-index.v2","groove.large-value.v2","jazz.node-storage.v1"] required by this build and declares ["groove.large-value.v1","jazz.branch-key.v1","jazz.catalogue.activation.v1","jazz.catalogue.bootstrap-ready.v1","jazz.catalogue.lens.v1","jazz.catalogue.lineage.v1","jazz.catalogue.physical-mapping.v1","jazz.catalogue.schema.v1","jazz.catalogue.write-pointer.v1","jazz.subscription-program-fact-key.v1"] that this build does not read',
+        'unsupported storage format: this epoch-1 root lacks codec families ["groove.durable-index.v2","groove.large-value.v2","groove.ordered-chunk-storage.v2","jazz.node-storage.v1"] required by this build and declares ["groove.large-value.v1","groove.ordered-chunk-storage.v1","jazz.branch-key.v1","jazz.catalogue.activation.v1","jazz.catalogue.bootstrap-ready.v1","jazz.catalogue.lens.v1","jazz.catalogue.lineage.v1","jazz.catalogue.physical-mapping.v1","jazz.catalogue.schema.v1","jazz.catalogue.write-pointer.v1","jazz.subscription-program-fact-key.v1"] that this build does not read',
       ),
     );
     expect(await pinnedPhase("read-refused-records", () => rawRecords(physicalDbName))).toEqual(

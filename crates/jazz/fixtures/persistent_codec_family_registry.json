@@ -26,7 +26,7 @@
       ]
     },
     {
-      "id": "groove.ordered-chunk-storage.v1",
+      "id": "groove.ordered-chunk-storage.v2",
       "boundary": "durable-storage",
       "profile": "groove-root",
       "spec": {
@@ -34,8 +34,8 @@
         "anchor": "## 9.2 Tree and chunk format"
       },
       "semantic_fixture": {
-        "path": "crates/groove/src/db/tests/mod.rs",
-        "anchor": "large_value_metadata_keys_use_the_canonical_node_ref_record"
+        "path": "crates/groove/src/chunks.rs",
+        "anchor": "ordered_chunk_storage_v2_has_pinned_bytes"
       },
       "rejection_receipt": {
         "path": "crates/groove/src/db/tests/batches.rs",

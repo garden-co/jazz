@@ -162,10 +162,10 @@ canonical manifest bytes begin with `JSM1` and contain the storage epoch,
 adapter ID and format version, the sorted set of required authoritative codec
 IDs, and sorted decode-relevant adapter parameters. Groove contributes the
 mandatory base IDs `groove.ordered-kv.v1`, `groove.large-value.v2`, and
-`groove.ordered-chunk-storage.v1`; every profile and decoded manifest MUST
+`groove.ordered-chunk-storage.v2`; every profile and decoded manifest MUST
 contain all three before an adapter may mutate. `groove.large-value.v2` covers
 the inseparable V1 descriptor/`NodeRef` records and authenticated immutable-node
-envelopes; `groove.ordered-chunk-storage.v1` covers that adapter's independent
+envelopes; `groove.ordered-chunk-storage.v2` covers that adapter's independent
 install-receipt wrapper. The caller composes this closed base with its own
 persistent codec profile before opening the adapter. The adapter treats
 higher-layer IDs as opaque and never learns their semantics. A Jazz root, for

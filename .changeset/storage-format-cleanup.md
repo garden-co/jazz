@@ -11,4 +11,6 @@
 - Store only the upload ID in completed-receipt reverse mappings, instead of duplicating the full upload record and chunk list. Atomic promotion, restart retries, and receipt cleanup retain their bidirectional checks.
 - Give completed uploads a dedicated record with required receipt and descriptor fields, removing their unused chunk lists and creation timestamps.
 
+- Remove the repeated 32-byte magic prefix from each stored chunk (`groove.ordered-chunk-storage.v2`), retaining installation receipts and content integrity checks.
+
 Databases using the preceding formats are rejected at open. There is no automatic migration; create a fresh database and restore or resync its data. Current-format databases continue to retain native rows and pending writes across restarts.
