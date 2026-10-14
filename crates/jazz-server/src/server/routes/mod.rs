@@ -1326,10 +1326,7 @@ mod tests {
             LensOp::AddTable { table, schema } => {
                 assert_eq!(table, "profiles");
                 let expected = v2.get(&TableName::from("profiles")).unwrap();
-                assert_eq!(
-                    schema.columns.content_hash(),
-                    expected.columns.content_hash(),
-                );
+                assert_eq!(schema.columns, expected.columns);
                 assert_eq!(schema.policies, expected.policies);
             }
             other => panic!("expected AddTable op, got {other:?}"),
@@ -1339,10 +1336,7 @@ mod tests {
             LensOp::RemoveTable { table, schema } => {
                 assert_eq!(table, "legacy_profiles");
                 let expected = v1.get(&TableName::from("legacy_profiles")).unwrap();
-                assert_eq!(
-                    schema.columns.content_hash(),
-                    expected.columns.content_hash(),
-                );
+                assert_eq!(schema.columns, expected.columns);
                 assert_eq!(schema.policies, expected.policies);
             }
             other => panic!("expected RemoveTable op, got {other:?}"),
