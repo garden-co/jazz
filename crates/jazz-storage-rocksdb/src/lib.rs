@@ -1220,7 +1220,7 @@ mod tests {
         let mut bytes = b"JSM1\0\x01\0\x03\x07rocksdb\x03".to_vec();
         for codec in [
             "groove.large-value.v1",
-            "groove.ordered-chunk-storage.v2",
+            "groove.ordered-chunk-storage.v1",
             "groove.ordered-kv.v1",
         ] {
             bytes.push(codec.len() as u8);
