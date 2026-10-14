@@ -48,6 +48,33 @@ fn ordinary_current_content_member(member: &ResultMemberEntry) -> bool {
         && row.batch.is_none())
 }
 
+/// Whether a maintained publication exposes `member`: rows of its output
+/// tables (narrowed to `result_table`), and synthetic aggregate members
+/// unless the aggregate is policy scoped.
+fn published_member(
+    member: &ResultMemberEntry,
+    result_table: Option<&str>,
+    output_tables: &BTreeMap<String, TableSchema>,
+    aggregate_is_policy_scoped: bool,
+) -> bool {
+    let Some(table_name) = member.table_name() else {
+        return false;
+    };
+    let synthetic = matches!(member, ResultMemberEntry::Synthetic { .. });
+    (synthetic || result_table.is_none_or(|table| table_name == table))
+        && (output_tables.contains_key(table_name) || (synthetic && !aggregate_is_policy_scoped))
+}
+
+fn aggregate_is_policy_scoped<S: OrderedKvStorage>(
+    node: &NodeState<S>,
+    shape: &ValidatedQuery,
+) -> Result<bool, Error> {
+    Ok(
+        shape.query().aggregate.is_some()
+            && node.table(&shape.query().table)?.read_policy.is_some(),
+    )
+}
+
 /// Reconcile a retained downstream result set against a cold maintained-view
 /// snapshot that contains a static deletion witness. The active membership is
 /// authoritative for removals. Publishability only gates members the
@@ -1484,11 +1511,7 @@ impl PeerState {
             self.selected_authority_source(subscription)
                 .filter(|source| node.has_settled_authority_result(source))
         });
-        let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
-            && node
-                .table(shape.query().table.as_str())?
-                .read_policy
-                .is_some();
+        let aggregate_is_policy_scoped = aggregate_is_policy_scoped(node, shape)?;
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let (mut program_fact_adds, mut program_fact_removes) = (Vec::new(), Vec::new());
         let mut supporting_changed = deletion_changes;
@@ -1553,16 +1576,13 @@ impl PeerState {
                         // Groove terminals belong to the local host binding ABI.
                         // Peer sync carries the maintained program's covered inputs,
                         // never this authority-owned output.
-                        program_fact_adds.extend(filter_program_facts_for_result_table(
-                            transitions.program_fact_adds,
-                            result_table_filter,
-                            &output_tables,
-                        ));
-                        program_fact_removes.extend(filter_program_facts_for_result_table(
-                            transitions.program_fact_removes,
-                            result_table_filter,
-                            &output_tables,
-                        ));
+                        let closure = |facts: Vec<ProgramFactEntry>| {
+                            facts
+                                .into_iter()
+                                .filter(ProgramFactEntry::is_peer_source_closure_fact)
+                        };
+                        program_fact_adds.extend(closure(transitions.program_fact_adds));
+                        program_fact_removes.extend(closure(transitions.program_fact_removes));
                         for member in transitions.adds {
                             let before = previous_member_result_set.contains(&member);
                             states
@@ -1609,18 +1629,12 @@ impl PeerState {
         let mut result_member_adds = Vec::new();
         let mut result_member_removes = Vec::new();
         for (member, (before, after)) in states {
-            let Some(table_name) = member.table_name() else {
-                continue;
-            };
-            if !matches!(member, ResultMemberEntry::Synthetic { .. })
-                && result_table_filter.is_some_and(|table| table_name != table)
-            {
-                continue;
-            }
-            if !output_tables.contains_key(table_name)
-                && (!matches!(member, ResultMemberEntry::Synthetic { .. })
-                    || aggregate_is_policy_scoped)
-            {
+            if !published_member(
+                &member,
+                result_table_filter,
+                &output_tables,
+                aggregate_is_policy_scoped,
+            ) {
                 continue;
             }
             match (before, after) {
@@ -1858,12 +1872,7 @@ impl PeerState {
         let raw_remove_count = transitions.removes.len();
         let raw_fact_add_count = transitions.program_fact_adds.len();
         let filter_start = Instant::now();
-        let output_tables = tables.clone();
-        let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
-            && node
-                .table(shape.query().table.as_str())?
-                .read_policy
-                .is_some();
+        let aggregate_is_policy_scoped = aggregate_is_policy_scoped(node, shape)?;
         let known_state = self.downstream_known_states.get(&subscription).cloned();
         let known_membership_position = fast_current_membership_position(&known_state);
         let authorization_matches =
@@ -1875,14 +1884,12 @@ impl PeerState {
             .adds
             .into_iter()
             .filter(|member| {
-                let Some(table_name) = member.table_name() else {
-                    return false;
-                };
-                (matches!(member, ResultMemberEntry::Synthetic { .. })
-                    || result_table_filter.is_none_or(|table| table_name == table))
-                    && (output_tables.contains_key(table_name)
-                        || (matches!(member, ResultMemberEntry::Synthetic { .. })
-                            && !aggregate_is_policy_scoped))
+                published_member(
+                    member,
+                    result_table_filter,
+                    &tables,
+                    aggregate_is_policy_scoped,
+                )
             })
             .collect::<Vec<_>>();
         let current_member_result_set = result_member_adds.iter().cloned().collect::<BTreeSet<_>>();
