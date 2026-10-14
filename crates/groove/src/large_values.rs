@@ -1190,36 +1190,23 @@ pub(crate) fn consolidate_appends_attempt(
         return Err(Error::DescriptorMismatch.into());
     }
 
+    let root = (value.root.clone(), value.logical_hash);
+    let last_leaf = descend_attempt(
+        value,
+        root,
+        Vec::new(),
+        MAX_TREE_DEPTH,
+        inputs,
+        |children| children.len().checked_sub(1).ok_or(Error::MalformedNode),
+    )?;
     let mut existing = std::collections::BTreeMap::<ContentHash, Locator>::new();
-    let mut spine = Vec::<Vec<BranchChild>>::new();
-    let mut node_ref = value.root.clone();
-    let mut expected_logical_hash = value.logical_hash;
-    let mut depth = 0_usize;
-    let last_leaf = loop {
-        if depth > MAX_TREE_DEPTH {
-            return Err(Error::InvalidTree.into());
-        }
+    for node_ref in last_leaf.path.iter().map(|frame| &frame.node_ref) {
         existing.insert(node_ref.object_hash, node_ref.locator);
-        let node = load_authenticated_node_attempt(
-            value.format_version,
-            value.kind,
-            &node_ref,
-            expected_logical_hash,
-            inputs,
-        )?;
-        match node {
-            ChunkNode::Leaf { bytes, .. } => break bytes,
-            ChunkNode::Branch { children, .. } => {
-                let last = children.last().ok_or(Error::MalformedNode)?;
-                node_ref = last.node_ref.clone();
-                expected_logical_hash = last.logical_hash;
-                spine.push(children);
-                depth += 1;
-            }
-        }
-    };
+    }
+    existing.insert(last_leaf.node_ref.object_hash, last_leaf.node_ref.locator);
+    let depth = last_leaf.path.len();
 
-    let mut logical_suffix = last_leaf;
+    let mut logical_suffix = last_leaf.bytes;
     logical_suffix.extend_from_slice(&appended);
     let mut staged_chunks = Vec::new();
     let mut replacement = stage_leaves_reusing(
@@ -1230,7 +1217,8 @@ pub(crate) fn consolidate_appends_attempt(
         &mut staged_chunks,
     )?;
 
-    for mut level in spine.into_iter().rev() {
+    for frame in last_leaf.path.into_iter().rev() {
+        let mut level = frame.children;
         level.pop();
         let mut rebuilt = level.into_iter().map(BuiltNode::from).collect::<Vec<_>>();
         rebuilt.append(&mut replacement);
@@ -1279,58 +1267,34 @@ pub(crate) fn consolidate_single_edit_attempt(
         return consolidate_appends_attempt(value, inputs, fresh_locator);
     }
 
-    let first = locate_leaf_attempt(value, edit.offset, base_len, inputs)?;
-    let mut leaves = vec![first];
-    let mut covered_end = leaves[0]
-        .start
-        .checked_add(leaves[0].bytes.len() as u64)
-        .ok_or(Error::MetricOverflow)?;
-    while covered_end < edit_end {
-        let next = next_leaf_attempt(
-            value.format_version,
-            value.kind,
-            leaves.last().unwrap(),
-            inputs,
-        )?
-        .ok_or(Error::DescriptorMismatch)?;
-        covered_end = next
+    let mut leaves = vec![locate_leaf_attempt(value, edit.offset, base_len, inputs)?];
+    let segment = loop {
+        let last = leaves.last().unwrap();
+        let covered_end = last
             .start
-            .checked_add(next.bytes.len() as u64)
+            .checked_add(last.bytes.len() as u64)
             .ok_or(Error::MetricOverflow)?;
-        leaves.push(next);
-    }
-
-    loop {
-        let segment_start = leaves[0].start;
-        let mut segment = leaves
-            .iter()
-            .flat_map(|leaf| leaf.bytes.iter().copied())
-            .collect::<Vec<_>>();
-        let local_start =
-            usize::try_from(edit.offset - segment_start).map_err(|_| Error::MetricOverflow)?;
-        let local_end =
-            usize::try_from(edit_end - segment_start).map_err(|_| Error::MetricOverflow)?;
-        segment.splice(local_start..local_end, edit.insert_bytes.iter().copied());
-        let ranges = leaf_ranges(value.kind, &segment)?;
-        let resynchronized = ranges.last().is_some_and(|range| {
-            range.start > 0 && segment[range.clone()] == leaves.last().unwrap().bytes
-        });
-        if resynchronized || covered_end == base_len {
-            break;
+        if covered_end >= edit_end {
+            let segment_start = leaves[0].start;
+            let mut segment = leaves
+                .iter()
+                .flat_map(|leaf| leaf.bytes.iter().copied())
+                .collect::<Vec<_>>();
+            let local_start =
+                usize::try_from(edit.offset - segment_start).map_err(|_| Error::MetricOverflow)?;
+            let local_end =
+                usize::try_from(edit_end - segment_start).map_err(|_| Error::MetricOverflow)?;
+            segment.splice(local_start..local_end, edit.insert_bytes.iter().copied());
+            let ranges = leaf_ranges(value.kind, &segment)?;
+            let resynchronized = ranges
+                .last()
+                .is_some_and(|range| range.start > 0 && segment[range.clone()] == last.bytes);
+            if resynchronized || covered_end == base_len {
+                break segment;
+            }
         }
-        let next = next_leaf_attempt(
-            value.format_version,
-            value.kind,
-            leaves.last().unwrap(),
-            inputs,
-        )?
-        .ok_or(Error::DescriptorMismatch)?;
-        covered_end = next
-            .start
-            .checked_add(next.bytes.len() as u64)
-            .ok_or(Error::MetricOverflow)?;
-        leaves.push(next);
-    }
+        leaves.push(next_leaf_attempt(value, last, inputs)?);
+    };
 
     let left_path = leaves.first().unwrap().path.clone();
     let right_path = leaves.last().unwrap().path.clone();
@@ -1344,15 +1308,6 @@ pub(crate) fn consolidate_single_edit_attempt(
             existing.insert(frame.node_ref.object_hash, frame.node_ref.locator);
         }
     }
-    let segment_start = leaves[0].start;
-    let mut segment = leaves
-        .iter()
-        .flat_map(|leaf| leaf.bytes.iter().copied())
-        .collect::<Vec<_>>();
-    let local_start =
-        usize::try_from(edit.offset - segment_start).map_err(|_| Error::MetricOverflow)?;
-    let local_end = usize::try_from(edit_end - segment_start).map_err(|_| Error::MetricOverflow)?;
-    segment.splice(local_start..local_end, edit.insert_bytes.iter().copied());
 
     if value.byte_length == 0 {
         if !segment.is_empty() {
@@ -1799,70 +1754,112 @@ impl PhysicalTraversalNodeBudget {
     }
 }
 
-/// Per-walk state of a logical (occurrence-counting) tree read: the step
-/// budget, and whether any node read is blocked on a later input round.
-struct LogicalTraversal {
-    remaining: usize,
-    blocked: bool,
+/// Where one node of a logical walk sits: its start and length in the walk's
+/// unit, and the metrics its parent claims for it (`None` only for a root
+/// whose descriptor carries an edit tail).
+struct WalkSpan {
+    start: u64,
+    len: u64,
+    metrics: Option<NodeMetrics>,
 }
 
-impl LogicalTraversal {
-    fn new() -> Self {
-        Self {
-            remaining: MAX_LOGICAL_TRAVERSAL_STEPS,
-            blocked: false,
-        }
+impl WalkSpan {
+    fn end(&self) -> Result<u64, Error> {
+        self.start
+            .checked_add(self.len)
+            .ok_or(Error::MetricOverflow)
     }
+}
 
-    /// Charge the step for visiting a node at `depth`.
-    fn enter(&mut self, depth: usize) -> Result<(), Error> {
-        self.consume_many(1)?;
-        if depth > MAX_TREE_DEPTH {
-            return Err(Error::InvalidTree);
-        }
+/// One kind of logical (occurrence-counting) read of a value's base tree.
+/// [`walk_logical`] owns the frontier, the step budget, the depth bound and
+/// the blocked bookkeeping; a visitor says which nodes to read and what to
+/// do with them.
+trait LogicalVisitor {
+    /// Whether to load this node; `false` prunes it (out of range, or
+    /// already accounted from its parent's metrics).
+    fn wants(&mut self, _span: &WalkSpan) -> Result<bool, Error> {
+        Ok(true)
+    }
+    fn leaf(&mut self, span: &WalkSpan, bytes: Vec<u8>) -> Result<(), Error>;
+    /// Check a branch before its children are charged to the budget.
+    fn branch(&mut self, _span: &WalkSpan, _children: &[BranchChild]) -> Result<(), Error> {
         Ok(())
     }
+    /// A child's length in the walk's unit.
+    fn child_len(&self, metrics: &NodeMetrics) -> Result<u64, Error>;
+    /// Whether a branch's children must exactly cover the branch's span.
+    const EXACT_COVER: bool = false;
+}
 
-    fn consume_many(&mut self, count: usize) -> Result<(), Error> {
-        self.remaining = self
-            .remaining
+/// Walk the base tree of `value` depth-first, leaves in logical order. A node
+/// read blocked on a later input round is skipped, and the walk reports the
+/// blocked outcome only after every other node has been tried, so one round
+/// requests every missing chunk the walk can discover.
+fn walk_logical<V: LogicalVisitor>(
+    value: &LargeValueRef,
+    root: WalkSpan,
+    visitor: &mut V,
+    inputs: &mut EvaluationInputs,
+) -> Result<(), IvmRuntimeError> {
+    let mut pending = vec![(value.root.clone(), value.logical_hash, root, 0_usize)];
+    let mut remaining = MAX_LOGICAL_TRAVERSAL_STEPS;
+    let mut charge = |count: usize| -> Result<(), Error> {
+        remaining = remaining
             .checked_sub(count)
             .ok_or(Error::TraversalWorkLimitExceeded)?;
         Ok(())
-    }
-
-    /// Load one authenticated node of `value`, or record that the read is
-    /// blocked and return `None` so the walk can continue with other nodes.
-    fn load(
-        &mut self,
-        value: &LargeValueRef,
-        node_ref: &NodeRef,
-        expected_logical_hash: ContentHash,
-        inputs: &mut EvaluationInputs,
-    ) -> Result<Option<ChunkNode>, IvmRuntimeError> {
-        match load_authenticated_node_attempt(
+    };
+    let mut blocked = false;
+    while let Some((node_ref, expected_hash, span, depth)) = pending.pop() {
+        charge(1)?;
+        if depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        if !visitor.wants(&span)? {
+            continue;
+        }
+        let node = match load_authenticated_node_attempt(
             value.format_version,
             value.kind,
-            node_ref,
-            expected_logical_hash,
+            &node_ref,
+            expected_hash,
             inputs,
         ) {
-            Ok(node) => Ok(Some(node)),
             Err(IvmRuntimeError::EvaluationBlocked) => {
-                self.blocked = true;
-                Ok(None)
+                blocked = true;
+                continue;
             }
-            Err(error) => Err(error),
+            node => node?,
+        };
+        match node {
+            ChunkNode::Leaf { bytes, .. } => visitor.leaf(&span, bytes)?,
+            ChunkNode::Branch { children, .. } => {
+                visitor.branch(&span, &children)?;
+                charge(children.len())?;
+                let first = pending.len();
+                let mut child_start = span.start;
+                for child in children {
+                    let len = visitor.child_len(&child.metrics)?;
+                    let child_span = WalkSpan {
+                        start: child_start,
+                        len,
+                        metrics: Some(child.metrics),
+                    };
+                    child_start = child_span.end()?;
+                    pending.push((child.node_ref, child.logical_hash, child_span, depth + 1));
+                }
+                if V::EXACT_COVER && child_start != span.end()? {
+                    return Err(Error::DescriptorMismatch.into());
+                }
+                pending[first..].reverse();
+            }
         }
     }
-
-    /// Fail with the blocked outcome if any node read was blocked.
-    fn finish(self) -> Result<(), IvmRuntimeError> {
-        if self.blocked {
-            return Err(IvmRuntimeError::EvaluationBlocked);
-        }
-        Ok(())
+    if blocked {
+        return Err(IvmRuntimeError::EvaluationBlocked);
     }
+    Ok(())
 }
 
 /// Authenticate and visit every immutable node reachable from one descriptor.
@@ -3455,21 +3452,18 @@ fn load_authenticated_node_attempt(
     Ok(node)
 }
 
-fn locate_leaf_attempt(
+/// Descend from `node_ref` to one leaf, letting `choose` pick a child of each
+/// branch and recording the branches on `path`. A blocked read fails at once.
+fn descend_attempt(
     value: &LargeValueRef,
-    offset: u64,
-    base_length: u64,
+    (mut node_ref, mut expected_hash): (NodeRef, ContentHash),
+    mut path: Vec<PathFrame>,
+    max_depth: usize,
     inputs: &mut EvaluationInputs,
+    mut choose: impl FnMut(&[BranchChild]) -> Result<usize, Error>,
 ) -> Result<LocatedLeaf, IvmRuntimeError> {
-    if offset >= base_length {
-        return Err(Error::MalformedScalar.into());
-    }
-    let mut node_ref = value.root.clone();
-    let mut expected_hash = value.logical_hash;
-    let mut node_start = 0_u64;
-    let mut path = Vec::new();
     loop {
-        if path.len() > MAX_TREE_DEPTH {
+        if path.len() > max_depth {
             return Err(Error::InvalidTree.into());
         }
         match load_authenticated_node_attempt(
@@ -3480,94 +3474,93 @@ fn locate_leaf_attempt(
             inputs,
         )? {
             ChunkNode::Leaf { bytes, .. } => {
-                if offset >= node_start + bytes.len() as u64 {
-                    return Err(Error::DescriptorMismatch.into());
-                }
                 return Ok(LocatedLeaf {
                     node_ref,
                     bytes,
-                    start: node_start,
+                    start: 0,
                     path,
                 });
             }
             ChunkNode::Branch { children, .. } => {
-                let mut child_start = node_start;
-                let selected = children
-                    .iter()
-                    .position(|child| {
-                        let end = child_start.saturating_add(child.metrics.byte_length);
-                        if offset < end {
-                            true
-                        } else {
-                            child_start = end;
-                            false
-                        }
-                    })
-                    .ok_or(Error::DescriptorMismatch)?;
-                let child = children[selected].clone();
+                let selected = choose(&children)?;
+                let child = &children[selected];
+                let parent = std::mem::replace(&mut node_ref, child.node_ref.clone());
+                expected_hash = child.logical_hash;
                 path.push(PathFrame {
-                    node_ref,
+                    node_ref: parent,
                     children,
                     selected,
                 });
-                node_ref = child.node_ref;
-                expected_hash = child.logical_hash;
-                node_start = child_start;
             }
         }
     }
 }
 
+fn locate_leaf_attempt(
+    value: &LargeValueRef,
+    offset: u64,
+    base_length: u64,
+    inputs: &mut EvaluationInputs,
+) -> Result<LocatedLeaf, IvmRuntimeError> {
+    if offset >= base_length {
+        return Err(Error::MalformedScalar.into());
+    }
+    let root = (value.root.clone(), value.logical_hash);
+    let mut start = 0_u64;
+    let mut leaf = descend_attempt(
+        value,
+        root,
+        Vec::new(),
+        MAX_TREE_DEPTH,
+        inputs,
+        |children| {
+            children
+                .iter()
+                .position(|child| {
+                    let end = start.saturating_add(child.metrics.byte_length);
+                    let found = offset < end;
+                    if !found {
+                        start = end;
+                    }
+                    found
+                })
+                .ok_or(Error::DescriptorMismatch)
+        },
+    )?;
+    if offset >= start + leaf.bytes.len() as u64 {
+        return Err(Error::DescriptorMismatch.into());
+    }
+    leaf.start = start;
+    Ok(leaf)
+}
+
 fn next_leaf_attempt(
-    format_version: u8,
-    kind: LargeValueKind,
+    value: &LargeValueRef,
     current: &LocatedLeaf,
     inputs: &mut EvaluationInputs,
-) -> Result<Option<LocatedLeaf>, IvmRuntimeError> {
+) -> Result<LocatedLeaf, IvmRuntimeError> {
     let mut path = current.path.clone();
-    let mut next = None;
-    while let Some(frame) = path.last_mut() {
+    let child = loop {
+        let frame = path.last_mut().ok_or(Error::DescriptorMismatch)?;
         if frame.selected + 1 < frame.children.len() {
             frame.selected += 1;
-            next = Some(frame.children[frame.selected].clone());
-            break;
+            let child = &frame.children[frame.selected];
+            break (child.node_ref.clone(), child.logical_hash);
         }
         path.pop();
-    }
-    let Some(mut child) = next else {
-        return Ok(None);
     };
     let start = current
         .start
         .checked_add(current.bytes.len() as u64)
         .ok_or(Error::MetricOverflow)?;
-    loop {
-        match load_authenticated_node_attempt(
-            format_version,
-            kind,
-            &child.node_ref,
-            child.logical_hash,
-            inputs,
-        )? {
-            ChunkNode::Leaf { bytes, .. } => {
-                return Ok(Some(LocatedLeaf {
-                    node_ref: child.node_ref,
-                    bytes,
-                    start,
-                    path,
-                }));
-            }
-            ChunkNode::Branch { children, .. } => {
-                let first = children.first().cloned().ok_or(Error::MalformedNode)?;
-                path.push(PathFrame {
-                    node_ref: child.node_ref,
-                    children,
-                    selected: 0,
-                });
-                child = first;
-            }
+    let mut leaf = descend_attempt(value, child, path, usize::MAX, inputs, |children| {
+        if children.is_empty() {
+            return Err(Error::MalformedNode);
         }
-    }
+        Ok(0)
+    })?;
+    leaf.start = start;
+    Ok(leaf)
 }
 
 pub fn decode_node(
@@ -4062,59 +4055,49 @@ pub(crate) fn materialize_attempt(
     value: &LargeValueRef,
     inputs: &mut EvaluationInputs,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
-    check_format(value.format_version)?;
-    let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
-        byte_length: value.byte_length,
-        utf16_length: value.utf16_length,
-    });
-    let mut pending = vec![(
-        value.root.clone(),
-        0_usize,
-        root_metrics,
-        value.logical_hash,
-    )];
-    let mut leaves = Vec::<(NodeRef, Vec<u8>)>::new();
-    let mut walk = LogicalTraversal::new();
-    while let Some((node_ref, depth, expected_metrics, expected_logical_hash)) = pending.pop() {
-        walk.enter(depth)?;
-        let Some(node) = walk.load(value, &node_ref, expected_logical_hash, inputs)? else {
-            continue;
-        };
-        match node {
-            ChunkNode::Leaf { bytes, .. } => {
-                if expected_metrics
-                    .is_some_and(|expected| metrics(value.kind, &bytes).ok() != Some(expected))
-                {
-                    return Err(Error::DescriptorMismatch.into());
-                }
-                leaves.push((node_ref, bytes));
+    /// Collects every leaf, checking each node against its claimed metrics.
+    /// Children are never positioned, so their walk length is zero.
+    struct Materialize(LargeValueKind, Vec<Vec<u8>>);
+    impl LogicalVisitor for Materialize {
+        fn leaf(&mut self, span: &WalkSpan, bytes: Vec<u8>) -> Result<(), Error> {
+            if span
+                .metrics
+                .is_some_and(|expected| metrics(self.0, &bytes).ok() != Some(expected))
+            {
+                return Err(Error::DescriptorMismatch);
             }
-            ChunkNode::Branch { children, .. } => {
-                if let Some(expected) = expected_metrics {
-                    let mut child_metrics = children.iter().map(|child| child.metrics);
-                    let Some(first) = child_metrics.next() else {
-                        return Err(Error::MalformedNode.into());
-                    };
-                    if child_metrics.try_fold(first, add_metrics)? != expected {
-                        return Err(Error::DescriptorMismatch.into());
-                    }
-                }
-                walk.consume_many(children.len())?;
-                for child in children.into_iter().rev() {
-                    pending.push((
-                        child.node_ref,
-                        depth + 1,
-                        Some(child.metrics),
-                        child.logical_hash,
-                    ));
+            self.1.push(bytes);
+            Ok(())
+        }
+        fn branch(&mut self, span: &WalkSpan, children: &[BranchChild]) -> Result<(), Error> {
+            if let Some(expected) = span.metrics {
+                let mut child_metrics = children.iter().map(|child| child.metrics);
+                let first = child_metrics.next().ok_or(Error::MalformedNode)?;
+                if child_metrics.try_fold(first, add_metrics)? != expected {
+                    return Err(Error::DescriptorMismatch);
                 }
             }
+            Ok(())
+        }
+        fn child_len(&self, _: &NodeMetrics) -> Result<u64, Error> {
+            Ok(0)
         }
     }
-    walk.finish()?;
+
+    check_format(value.format_version)?;
+    let root = WalkSpan {
+        start: 0,
+        len: 0,
+        metrics: value.edit_tail.is_empty().then_some(NodeMetrics {
+            byte_length: value.byte_length,
+            utf16_length: value.utf16_length,
+        }),
+    };
+    let mut leaves = Materialize(value.kind, Vec::new());
+    walk_logical(value, root, &mut leaves, inputs)?;
     let mut bytes =
         Vec::with_capacity(usize::try_from(value.byte_length).map_err(|_| Error::MetricOverflow)?);
-    for (_, leaf) in leaves {
+    for leaf in leaves.1 {
         bytes.extend_from_slice(&leaf);
     }
     apply_edits(&mut bytes, &value.edit_tail)?;
@@ -4390,26 +4373,41 @@ fn range_attempt(
     if range.start > range.end || range.end > length {
         return Err(Error::MalformedScalar.into());
     }
+    let mut output = Vec::new();
+    read_pieces(value, range, length, unit, |piece, base_length| {
+        match piece {
+            RangePiece::Inserted(bytes) => output.extend(bytes),
+            RangePiece::Base(range) => {
+                output.extend(base_range_attempt(value, base_length, range, unit, inputs)?)
+            }
+        }
+        Ok(())
+    })?;
+    Ok(output)
+}
+
+/// Map a final range onto the base tree and read each piece in order. A
+/// blocked piece wins only after every piece has been tried.
+fn read_pieces(
+    value: &LargeValueRef,
+    range: std::ops::Range<u64>,
+    length: u64,
+    unit: RangeUnit,
+    mut read: impl FnMut(RangePiece, u64) -> Result<(), IvmRuntimeError>,
+) -> Result<(), IvmRuntimeError> {
     let pieces = map_final_range_to_base(range, &value.edit_tail, unit)?;
     let base_length = base_length(length, &value.edit_tail, unit)?;
-    let mut outputs = Vec::with_capacity(pieces.len());
     let mut blocked = false;
     for piece in pieces {
-        match piece {
-            RangePiece::Inserted(bytes) => outputs.push(bytes),
-            RangePiece::Base(range) => {
-                match base_range_attempt(value, base_length, range, unit, inputs) {
-                    Ok(bytes) => outputs.push(bytes),
-                    Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
-                    Err(error) => return Err(error),
-                }
-            }
+        match read(piece, base_length) {
+            Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
+            result => result?,
         }
     }
     if blocked {
         return Err(IvmRuntimeError::EvaluationBlocked);
     }
-    Ok(outputs.into_iter().flatten().collect())
+    Ok(())
 }
 
 /// Resolve a final logical UTF-16 boundary to its final logical byte offset
@@ -4542,30 +4540,27 @@ fn utf16_length_for_byte_range_attempt(
     {
         return Err(Error::MalformedScalar.into());
     }
-    let pieces = map_final_range_to_base(range, &value.edit_tail, RangeUnit::Bytes)?;
-    let base_length = base_length(value.byte_length, &value.edit_tail, RangeUnit::Bytes)?;
     let mut total = 0_u64;
-    let mut blocked = false;
-    for piece in pieces {
-        let result = match piece {
-            RangePiece::Inserted(bytes) => std::str::from_utf8(&bytes)
-                .map_err(|_| IvmRuntimeError::from(Error::InvalidUtf8))
-                .and_then(|text| Ok(utf16_length_of(text)?)),
-            RangePiece::Base(range) => {
-                base_utf16_length_for_byte_range_attempt(value, base_length, range, inputs)
-            }
-        };
-        match result {
-            Ok(length) => total = total.checked_add(length).ok_or(Error::MetricOverflow)?,
-            Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
-            Err(error) => return Err(error),
-        }
-    }
-    if blocked {
-        Err(IvmRuntimeError::EvaluationBlocked)
-    } else {
-        Ok(total)
-    }
+    let length = value.byte_length;
+    read_pieces(
+        value,
+        range,
+        length,
+        RangeUnit::Bytes,
+        |piece, base_length| {
+            let length = match piece {
+                RangePiece::Inserted(bytes) => {
+                    utf16_length_of(std::str::from_utf8(&bytes).map_err(|_| Error::InvalidUtf8)?)?
+                }
+                RangePiece::Base(range) => {
+                    base_utf16_length_for_byte_range_attempt(value, base_length, range, inputs)?
+                }
+            };
+            total = total.checked_add(length).ok_or(Error::MetricOverflow)?;
+            Ok(())
+        },
+    )?;
+    Ok(total)
 }
 
 fn base_utf16_length_for_byte_range_attempt(
@@ -4574,6 +4569,41 @@ fn base_utf16_length_for_byte_range_attempt(
     range: std::ops::Range<u64>,
     inputs: &mut EvaluationInputs,
 ) -> Result<u64, IvmRuntimeError> {
+    /// Sums the UTF-16 metric of fully covered subtrees and counts the
+    /// covered part of each boundary leaf. Spans are in bytes.
+    struct Utf16Count(std::ops::Range<u64>, u64);
+    impl Utf16Count {
+        fn add(&mut self, units: u64) -> Result<(), Error> {
+            self.1 = self.1.checked_add(units).ok_or(Error::MetricOverflow)?;
+            Ok(())
+        }
+    }
+    impl LogicalVisitor for Utf16Count {
+        fn wants(&mut self, span: &WalkSpan) -> Result<bool, Error> {
+            let (start, end) = (span.start, span.end()?);
+            if self.0.start >= end || self.0.end <= start {
+                return Ok(false);
+            }
+            if self.0.start <= start && end <= self.0.end {
+                let units = span.metrics.and_then(|metrics| metrics.utf16_length);
+                self.add(units.ok_or(Error::DescriptorMismatch)?)?;
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        fn leaf(&mut self, span: &WalkSpan, bytes: Vec<u8>) -> Result<(), Error> {
+            let to_index = |offset: u64| usize::try_from(offset).map_err(|_| Error::MetricOverflow);
+            let a = to_index(self.0.start.max(span.start) - span.start)?;
+            let b = to_index(self.0.end.min(span.end()?) - span.start)?;
+            let text = std::str::from_utf8(&bytes[a..b]).map_err(|_| Error::InvalidUtf8)?;
+            self.add(utf16_length_of(text)?)
+        }
+        fn child_len(&self, metrics: &NodeMetrics) -> Result<u64, Error> {
+            metrics.utf16_length.ok_or(Error::DescriptorMismatch)?;
+            Ok(metrics.byte_length)
+        }
+    }
+
     if range.end > base_length {
         return Err(Error::MalformedScalar.into());
     }
@@ -4586,67 +4616,17 @@ fn base_utf16_length_for_byte_range_attempt(
                 .ok_or(Error::MetricOverflow)
         },
     )?;
-    let mut pending = vec![(
-        value.root.clone(),
-        value.logical_hash,
-        0_u64,
-        base_length,
-        base_utf16,
-        0_usize,
-    )];
-    let mut total = 0_u64;
-    let mut walk = LogicalTraversal::new();
-    while let Some((node_ref, expected_hash, start, bytes_len, utf16_len, depth)) = pending.pop() {
-        walk.enter(depth)?;
-        let end = start.checked_add(bytes_len).ok_or(Error::MetricOverflow)?;
-        if range.start >= end || range.end <= start {
-            continue;
-        }
-        if range.start <= start && end <= range.end {
-            total = total.checked_add(utf16_len).ok_or(Error::MetricOverflow)?;
-            continue;
-        }
-        let Some(node) = walk.load(value, &node_ref, expected_hash, inputs)? else {
-            continue;
-        };
-        match node {
-            ChunkNode::Leaf { bytes, .. } => {
-                let a = usize::try_from(range.start.max(start) - start)
-                    .map_err(|_| Error::MetricOverflow)?;
-                let b = usize::try_from(range.end.min(end) - start)
-                    .map_err(|_| Error::MetricOverflow)?;
-                let text = std::str::from_utf8(&bytes[a..b]).map_err(|_| Error::InvalidUtf8)?;
-                total = total
-                    .checked_add(utf16_length_of(text)?)
-                    .ok_or(Error::MetricOverflow)?;
-            }
-            ChunkNode::Branch { children, .. } => {
-                walk.consume_many(children.len())?;
-                let mut child_start = start;
-                let mut next = Vec::with_capacity(children.len());
-                for child in children {
-                    let child_utf16 = child
-                        .metrics
-                        .utf16_length
-                        .ok_or(Error::DescriptorMismatch)?;
-                    next.push((
-                        child.node_ref,
-                        child.logical_hash,
-                        child_start,
-                        child.metrics.byte_length,
-                        child_utf16,
-                        depth + 1,
-                    ));
-                    child_start = child_start
-                        .checked_add(child.metrics.byte_length)
-                        .ok_or(Error::MetricOverflow)?;
-                }
-                pending.extend(next.into_iter().rev());
-            }
-        }
-    }
-    walk.finish()?;
-    Ok(total)
+    let root = WalkSpan {
+        start: 0,
+        len: base_length,
+        metrics: Some(NodeMetrics {
+            byte_length: base_length,
+            utf16_length: Some(base_utf16),
+        }),
+    };
+    let mut count = Utf16Count(range, 0);
+    walk_logical(value, root, &mut count, inputs)?;
+    Ok(count.1)
 }
 
 /// Compare an indirect logical scalar to inline source bytes, requesting one
@@ -4848,71 +4828,47 @@ fn base_range_attempt(
     unit: RangeUnit,
     inputs: &mut EvaluationInputs,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
+    /// Appends the in-range part of each intersecting leaf, in order.
+    struct RangeRead(std::ops::Range<u64>, RangeUnit, Vec<u8>);
+    impl LogicalVisitor for RangeRead {
+        const EXACT_COVER: bool = true;
+        fn wants(&mut self, span: &WalkSpan) -> Result<bool, Error> {
+            Ok(self.0.start < span.end()? && self.0.end > span.start)
+        }
+        fn leaf(&mut self, span: &WalkSpan, bytes: Vec<u8>) -> Result<(), Error> {
+            // UTF-16 slicing fails on its own past the end of the leaf.
+            if matches!(self.1, RangeUnit::Bytes)
+                && u64::try_from(bytes.len()).map_err(|_| Error::MetricOverflow)? != span.len
+            {
+                return Err(Error::DescriptorMismatch);
+            }
+            let (start, end) = (span.start, span.end()?);
+            let part = self.1.slice(
+                &bytes,
+                (self.0.start.max(start) - start)..(self.0.end.min(end) - start),
+            )?;
+            self.2.extend(part);
+            Ok(())
+        }
+        fn child_len(&self, metrics: &NodeMetrics) -> Result<u64, Error> {
+            self.1.child_length(metrics)
+        }
+    }
+
     if range.end > base_length {
         return Err(Error::MalformedScalar.into());
     }
     if range.is_empty() {
         return Ok(Vec::new());
     }
-    let mut pending = vec![(
-        value.root.clone(),
-        value.logical_hash,
-        0_u64,
-        base_length,
-        0_usize,
-    )];
-    let mut slices = Vec::<(u64, Vec<u8>)>::new();
-    let mut walk = LogicalTraversal::new();
-    while let Some((node_ref, expected_hash, start, length, depth)) = pending.pop() {
-        walk.enter(depth)?;
-        let end = start.checked_add(length).ok_or(Error::MetricOverflow)?;
-        if range.start >= end || range.end <= start {
-            continue;
-        }
-        let Some(node) = walk.load(value, &node_ref, expected_hash, inputs)? else {
-            continue;
-        };
-        match node {
-            ChunkNode::Leaf { bytes, .. } => {
-                // UTF-16 slicing fails on its own past the end of the leaf.
-                if matches!(unit, RangeUnit::Bytes)
-                    && u64::try_from(bytes.len()).map_err(|_| Error::MetricOverflow)? != length
-                {
-                    return Err(Error::DescriptorMismatch.into());
-                }
-                let part = unit.slice(
-                    &bytes,
-                    (range.start.max(start) - start)..(range.end.min(end) - start),
-                )?;
-                slices.push((start, part));
-            }
-            ChunkNode::Branch { children, .. } => {
-                walk.consume_many(children.len())?;
-                let mut child_start = start;
-                let mut next = Vec::with_capacity(children.len());
-                for child in children {
-                    let child_length = unit.child_length(&child.metrics)?;
-                    next.push((
-                        child.node_ref,
-                        child.logical_hash,
-                        child_start,
-                        child_length,
-                        depth + 1,
-                    ));
-                    child_start = child_start
-                        .checked_add(child_length)
-                        .ok_or(Error::MetricOverflow)?;
-                }
-                if child_start != end {
-                    return Err(Error::DescriptorMismatch.into());
-                }
-                pending.extend(next.into_iter().rev());
-            }
-        }
-    }
-    walk.finish()?;
-    slices.sort_by_key(|(start, _)| *start);
-    Ok(slices.into_iter().flat_map(|(_, bytes)| bytes).collect())
+    let root = WalkSpan {
+        start: 0,
+        len: base_length,
+        metrics: None,
+    };
+    let mut read = RangeRead(range, unit, Vec::new());
+    walk_logical(value, root, &mut read, inputs)?;
+    Ok(read.2)
 }
 
 fn hash_domain(domain: &[u8], bytes: &[u8]) -> ContentHash {
