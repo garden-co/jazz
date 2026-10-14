@@ -34,10 +34,10 @@ import {
 } from "../web/create-jazz-client.js";
 import {
   JazzContext,
-  deterministicBytes,
   type BackendContextConfig,
   type BackendSchemaInput,
 } from "./create-jazz-context.js";
+import { deterministicBytes } from "../runtime/deterministic-bytes.js";
 
 export type JazzSessionConfig = Omit<
   BackendContextConfig,
