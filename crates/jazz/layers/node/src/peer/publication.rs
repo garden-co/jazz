@@ -116,12 +116,39 @@ impl PeerState {
             .count()
     }
 
-    #[doc(hidden)]
-    pub fn has_maintained_subscription(&self, subscription: SubscriptionKey) -> bool {
+    fn maintained_view(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Option<&MaintainedSubscriptionViewSubscription> {
         self.publication_states
             .get(&subscription)
             .and_then(|state| state.maintained_subscription_view.as_ref())
-            .is_some()
+    }
+
+    /// The tier and read view the subscription was prepared with.
+    fn prepared_context(
+        &self,
+        subscription: SubscriptionKey,
+        missing: &'static str,
+    ) -> Result<(DurabilityTier, std::sync::Arc<ReadViewSpec>), Error> {
+        self.publication_states
+            .get(&subscription)
+            .and_then(|state| state.prepared_query.as_ref())
+            .map(CachedPeerQueryPlan::context)
+            .ok_or(Error::InvalidStoredValue(missing))
+    }
+
+    /// The membership last shipped to the subscription (empty if none).
+    fn member_result_set(&self, subscription: SubscriptionKey) -> BTreeSet<ResultMemberEntry> {
+        self.publication_states
+            .get(&subscription)
+            .map(PeerSubscriptionState::member_result_set)
+            .unwrap_or_default()
+    }
+
+    #[doc(hidden)]
+    pub fn has_maintained_subscription(&self, subscription: SubscriptionKey) -> bool {
+        self.maintained_view(subscription).is_some()
     }
 
     #[doc(hidden)]
@@ -129,9 +156,7 @@ impl PeerState {
         &self,
         subscription: SubscriptionKey,
     ) -> bool {
-        self.publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
+        self.maintained_view(subscription)
             .is_some_and(|maintained| !maintained.initial_received)
     }
 
@@ -570,14 +595,7 @@ impl PeerState {
         if self
             .publication_states
             .get(&subscription)
-            .is_some_and(|state| {
-                state
-                    .groove_runtime_token
-                    .is_some_and(|token| token != current_token)
-                    || state.physical_identity_generation.is_some_and(|generation| {
-                        generation != node.physical_identity_generation()
-                    })
-            })
+            .is_some_and(|state| state.runtime_is_stale(node))
         {
             if let Some(state) = self.publication_states.get_mut(&subscription) {
                 // UUID adoption can invalidate metadata while the underlying
@@ -728,24 +746,12 @@ impl PeerState {
             self.publication_states.entry(subscription).or_default();
         }
         let (tier, read_view): (DurabilityTier, std::sync::Arc<ReadViewSpec>) = self
-            .publication_states
-            .get(&subscription)
-            .and_then(|state| state.prepared_query.as_ref())
-            .map(CachedPeerQueryPlan::context)
-            .ok_or(Error::InvalidStoredValue(
+            .prepared_context(
+                subscription,
                 "maintained subscription view is missing prepared state",
-            ))?;
-        let previous_member_result_set = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::member_result_set)
-            .unwrap_or_default();
-        if self
-            .publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
-            .is_none()
-        {
+            )?;
+        let previous_member_result_set = self.member_result_set(subscription);
+        if self.maintained_view(subscription).is_none() {
             if let Some(update) = self
                 .rehydrate_query_maintained_subscription_view(
                     node,
@@ -772,12 +778,7 @@ impl PeerState {
             }
             node.drive_query_runtime().await?;
         }
-        if self
-            .publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
-            .is_some()
-        {
+        if self.maintained_view(subscription).is_some() {
             if let Some(update) = self
                 .query_update_maintained_subscription_view(
                     node,
@@ -821,7 +822,13 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        self.query_update_inner(node, shape, binding).await
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: Default::default(),
+        };
+        self.query_update_for_subscription(node, subscription, shape, binding)
+            .await
     }
 
     /// Build an incremental view update addressed to a usage-site subscription.
@@ -901,30 +908,6 @@ impl PeerState {
         })
     }
 
-    async fn query_update_inner<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-    ) -> Result<SyncMessage, Error>
-    where
-        S: OrderedKvStorage,
-    {
-        let subscription = SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: Default::default(),
-        };
-        self.await_query_update_for_subscription_with_opts(
-            node,
-            subscription,
-            shape,
-            binding,
-            RegisterShapeOptions::default(),
-        )
-        .await
-    }
-
     async fn await_query_update_for_subscription_with_opts<S>(
         &mut self,
         node: &mut NodeState<S>,
@@ -937,7 +920,7 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         if let Some(update) = self
-            .query_update_inner_for_subscription(
+            .query_update_inner_for_subscription_with_metadata(
                 node,
                 subscription,
                 shape,
@@ -947,38 +930,22 @@ impl PeerState {
             )
             .await?
         {
-            return Ok(update);
+            return Ok(update.update);
         }
         node.drive_query_runtime().await?;
-        self.query_update_inner_for_subscription(node, subscription, shape, binding, opts, None)
-            .await?
-            .ok_or(Error::InvalidStoredValue(
-                "maintained hydration ended without a query publication",
-            ))
-    }
-
-    async fn query_update_inner_for_subscription<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        subscription: SubscriptionKey,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        opts: RegisterShapeOptions,
-        progress_waker: Option<&std::task::Waker>,
-    ) -> Result<Option<SyncMessage>, Error>
-    where
-        S: OrderedKvStorage,
-    {
         self.query_update_inner_for_subscription_with_metadata(
             node,
             subscription,
             shape,
             binding,
             opts,
-            progress_waker,
+            None,
         )
-        .await
-        .map(|update| update.map(|update| update.update))
+        .await?
+        .map(|update| update.update)
+        .ok_or(Error::InvalidStoredValue(
+            "maintained hydration ended without a query publication",
+        ))
     }
 
     // Normal delivery and late-usage cloning must share runtime recovery.
@@ -1002,19 +969,10 @@ impl PeerState {
         let metadata_was_stale = self
             .publication_states
             .get(&subscription)
-            .is_some_and(|state| {
-                state
-                    .groove_runtime_token
-                    .is_some_and(|token| token != node.groove_runtime_token())
-                    || state.physical_identity_generation.is_some_and(|generation| {
-                        generation != node.physical_identity_generation()
-                    })
-            });
+            .is_some_and(|state| state.runtime_is_stale(node));
         if metadata_was_stale
             && self
-                .publication_states
-                .get(&subscription)
-                .and_then(|state| state.maintained_subscription_view.as_ref())
+                .maintained_view(subscription)
                 .is_some_and(|maintained| maintained.initial_received)
         {
             self.metrics
@@ -1060,11 +1018,7 @@ impl PeerState {
                 )
                 .await;
         }
-        let previous_member_result_set = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::member_result_set)
-            .unwrap_or_default();
+        let previous_member_result_set = self.member_result_set(subscription);
         let cached_context = self
             .publication_states
             .get(&subscription)
@@ -1164,9 +1118,7 @@ impl PeerState {
         // publication: a receiver cannot infer a reset from an incremental
         // CoveredInput delta and must never install one before its manifest.
         let initial_received_before_drain = self
-            .publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .maintained_view(subscription)
             .is_some_and(|maintained| maintained.initial_received);
         let transitions = self
             .drain_maintained_subscription_view_changes(
@@ -1177,10 +1129,7 @@ impl PeerState {
                 progress_waker,
             )
             .await?;
-        let initial_state = self
-            .publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref());
+        let initial_state = self.maintained_view(subscription);
         if !initial_state.is_some_and(|maintained| maintained.initial_received) {
             return Ok(None);
         }
@@ -1217,23 +1166,15 @@ impl PeerState {
             && program_fact_removes.is_empty()
             && (requires_authoritative_membership_reconcile || observed_result_delta_batches > 0)
         {
-            let (tier, read_view) = self
-                .publication_states
-                .get(&subscription)
-                .and_then(|state| state.prepared_query.as_ref())
-                .map(CachedPeerQueryPlan::context)
-                .ok_or(Error::InvalidStoredValue(
-                    "maintained subscription view is missing prepared state",
-                ))?;
+            let (tier, read_view) = self.prepared_context(
+                subscription,
+                "maintained subscription view is missing prepared state",
+            )?;
             self.metrics
                 .maintained_subscription_view
                 .full_diff_fallbacks
                 .membership_reconciliations += 1;
-            let previous_member_result_set = self
-                .publication_states
-                .get(&subscription)
-                .map(PeerSubscriptionState::member_result_set)
-                .unwrap_or_default();
+            let previous_member_result_set = self.member_result_set(subscription);
             return self
                 .rehydrate_query_maintained_subscription_view(
                     node,
@@ -1315,10 +1256,7 @@ impl PeerState {
         {
             let changed = initial_snapshot_completed || supporting_rows.is_snapshot();
             if let Some(state) = self.publication_states.get_mut(&subscription) {
-                state.supporting_revision = Some(supporting_rows.revision());
-                if let Some(view) = &mut state.maintained_subscription_view {
-                    view.maintained.acknowledge_peer_source_closure();
-                }
+                state.acknowledge_published(supporting_rows.revision());
             }
             return Ok(Some(MaintainedCanonicalUpdate {
                 changed,
@@ -1331,14 +1269,10 @@ impl PeerState {
                 }),
             }));
         }
-        let (tier, read_view) = self
-            .publication_states
-            .get(&subscription)
-            .and_then(|state| state.prepared_query.as_ref())
-            .map(CachedPeerQueryPlan::context)
-            .ok_or(Error::InvalidStoredValue(
-                "maintained subscription view is missing prepared state",
-            ))?;
+        let (tier, read_view) = self.prepared_context(
+            subscription,
+            "maintained subscription view is missing prepared state",
+        )?;
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
         let known_state = self.downstream_known_states.get(&subscription).cloned();
         let bundle_start = Instant::now();
@@ -1351,9 +1285,7 @@ impl PeerState {
         let update = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
-                .publication_states
-                .get(&subscription)
-                .and_then(|state| state.maintained_subscription_view.as_ref())
+                .maintained_view(subscription)
                 .ok_or(Error::InvalidStoredValue(
                     "maintained subscription view subscription missing",
                 ))?
@@ -1430,14 +1362,10 @@ impl PeerState {
             &result_member_removes,
         );
         if let SyncMessage::ViewUpdate(view) = &update {
-            let state = self
-                .publication_states
+            self.publication_states
                 .entry(view.subscription)
-                .or_default();
-            state.supporting_revision = Some(supporting_rows.revision());
-            if let Some(view) = &mut state.maintained_subscription_view {
-                view.maintained.acknowledge_peer_source_closure();
-            }
+                .or_default()
+                .acknowledge_published(supporting_rows.revision());
         }
         Ok(Some(MaintainedCanonicalUpdate {
             changed: true,
@@ -1509,15 +1437,11 @@ impl PeerState {
         node.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
         let output_tables = self
-            .publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .maintained_view(subscription)
             .map(|maintained| std::sync::Arc::clone(&maintained.tables))
             .unwrap_or_default();
         let maintained_source_authority_result = self
-            .publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .maintained_view(subscription)
             .and_then(|maintained| maintained.source_authority_result.clone());
         // A Local+Full relay read opens immediately against worker-local
         // knowledge, so its maintained receiver deliberately has no selected
@@ -1628,15 +1552,9 @@ impl PeerState {
             }
         }
         if initial_deletion_witness {
-            let previous_member_result_set = self
-                .publication_states
-                .get(&subscription)
-                .map(PeerSubscriptionState::member_result_set)
-                .unwrap_or_default();
+            let previous_member_result_set = self.member_result_set(subscription);
             let (hydrated_active_members, hydrated_published_members) = self
-                .publication_states
-                .get(&subscription)
-                .and_then(|state| state.maintained_subscription_view.as_ref())
+                .maintained_view(subscription)
                 .map(|view| {
                     (
                         view.maintained
@@ -1865,7 +1783,7 @@ impl PeerState {
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                     supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
                 });
-                self.record_outgoing_view_update(node, shape.schema_version(), &update)?;
+                self.record_outgoing_view_update(&update);
                 self.publication_states
                     .entry(subscription)
                     .or_default()
@@ -2125,7 +2043,7 @@ impl PeerState {
         let current_members = current_member_result_set.into_iter().collect::<Vec<_>>();
         self.apply_outgoing_view_delta(subscription, true, &current_members, &[]);
         self.replace_maintained_subscription_view(node, subscription, maintained_subscription);
-        self.record_outgoing_view_update(node, shape.schema_version(), &update)?;
+        self.record_outgoing_view_update(&update);
         self.publication_states
             .entry(subscription)
             .or_default()
@@ -2255,20 +2173,17 @@ impl PeerState {
     /// Retiring a view that already published its initial result replaces
     /// incremental maintenance with a full recompute. A first open or a retry
     /// of a still-cold view is ordinary hydration and is not counted.
-    fn note_full_diff_reopen(
-        &mut self,
-        subscription: SubscriptionKey,
-        purpose: RehydratePurpose,
-    ) {
+    fn note_full_diff_reopen(&mut self, subscription: SubscriptionKey, purpose: RehydratePurpose) {
         let published = self
-            .publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .maintained_view(subscription)
             .is_some_and(|maintained| maintained.initial_received);
         if !published {
             return;
         }
-        let fallbacks = &mut self.metrics.maintained_subscription_view.full_diff_fallbacks;
+        let fallbacks = &mut self
+            .metrics
+            .maintained_subscription_view
+            .full_diff_fallbacks;
         match purpose {
             RehydratePurpose::Query => fallbacks.query_reopens += 1,
             RehydratePurpose::AuthorizationSupport => fallbacks.authorization_support_reopens += 1,
@@ -2328,11 +2243,7 @@ impl PeerState {
         }
         self.note_full_diff_reopen(subscription, purpose);
         self.clear_stale_groove_runtime_handles(node, subscription);
-        let previous_member_result_set = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::member_result_set)
-            .unwrap_or_default();
+        let previous_member_result_set = self.member_result_set(subscription);
         let previous_member_index = self
             .publication_states
             .get(&subscription)
@@ -2534,9 +2445,7 @@ impl PeerState {
             )
             .await?;
         if !self
-            .publication_states
-            .get(&maintained_subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .maintained_view(maintained_subscription)
             .is_some_and(|maintained| maintained.initial_received)
         {
             return Ok(None);
@@ -2647,9 +2556,7 @@ impl PeerState {
 
     /// Assemble a usage-site reset after the caller has published the canonical
     /// transition to every established sibling.
-    pub async fn rehydrate_query_for_subscription_from_reconciled_maintained_subscription<
-        S,
-    >(
+    pub async fn rehydrate_query_for_subscription_from_reconciled_maintained_subscription<S>(
         &mut self,
         node: &mut NodeState<S>,
         maintained_subscription: SubscriptionKey,
@@ -2777,14 +2684,10 @@ impl PeerState {
         } else {
             Vec::new()
         };
-        let (tier, read_view) = self
-            .publication_states
-            .get(&maintained_subscription)
-            .and_then(|state| state.prepared_query.as_ref())
-            .map(CachedPeerQueryPlan::context)
-            .ok_or(Error::InvalidStoredValue(
-                "coverage group subscription is missing prepared state",
-            ))?;
+        let (tier, read_view) = self.prepared_context(
+            maintained_subscription,
+            "coverage group subscription is missing prepared state",
+        )?;
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
         let result_member_adds = if current_program_fact_set.is_empty()
             && !authorization_mismatch
@@ -2858,9 +2761,7 @@ impl PeerState {
         let target_reset = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
-                .publication_states
-                .get(&maintained_subscription)
-                .and_then(|state| state.maintained_subscription_view.as_ref())
+                .maintained_view(maintained_subscription)
                 .ok_or(Error::InvalidStoredValue(
                     "coverage group subscription is missing maintained state",
                 ))?
@@ -2962,10 +2863,8 @@ async fn watermark_catch_up<'a, S: OrderedKvStorage>(
     let mut update = node
         .supporting_catch_up_after(table, physical_table, rows, *position, *supporting_revision)
         .await?;
-    if let (
-        Some(pinned),
-        crate::protocol::SupportingRowsUpdate::CatchUp { revision, .. },
-    ) = (revision, &mut update)
+    if let (Some(pinned), crate::protocol::SupportingRowsUpdate::CatchUp { revision, .. }) =
+        (revision, &mut update)
     {
         *revision = pinned;
     }
@@ -2981,9 +2880,10 @@ pub(crate) fn read_policy_admits_every_row(policy: &crate::query::Query) -> bool
         && policy.reachable.is_empty()
         && policy.inherits.is_empty()
         && policy.relation.is_none()
-        && policy.filters.iter().all(
-            |filter| matches!(filter, crate::query::Predicate::All(all) if all.is_empty()),
-        )
+        && policy
+            .filters
+            .iter()
+            .all(|filter| matches!(filter, crate::query::Predicate::All(all) if all.is_empty()))
 }
 
 /// Membership of a row in this query depends only on the row's own image.

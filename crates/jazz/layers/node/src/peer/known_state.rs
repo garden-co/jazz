@@ -1,16 +1,4 @@
 impl PeerState {
-    /// Build a reset current-row view for `table`.
-    pub async fn reset_current_rows<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        table: &str,
-    ) -> Result<SyncMessage, Error>
-    where
-        S: OrderedKvStorage,
-    {
-        self.rehydrate_current_rows(node, table).await
-    }
-
     /// Drops only the per-subscription result_set cache. Version payload dedup
     /// is per-peer and survives subscription rehydration.
     pub fn forget_subscription(&mut self, subscription: SubscriptionKey) {
@@ -229,9 +217,7 @@ impl PeerState {
         &self,
         subscription: SubscriptionKey,
     ) -> Option<MaintainedSubscriptionViewMetricsFootprint> {
-        self.publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
+        self.maintained_view(subscription)
             .map(|maintained| maintained.maintained.footprint())
     }
 }
