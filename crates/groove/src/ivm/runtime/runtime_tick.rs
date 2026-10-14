@@ -259,17 +259,6 @@ impl PendingIncrementalState {
     /// evaluation which is temporally ahead of it on any registered node.
     /// Repeat to closure because one predecessor may itself wait behind an
     /// evaluation on a different node.
-    /// Whether a pending evaluation stages, or waits in temporal order on,
-    /// any of `nodes`.
-    fn touches(&self, nodes: &HashSet<NodeId>) -> bool {
-        self.evaluations
-            .values()
-            .any(|evaluation| evaluation.work_queue().overlaps(nodes))
-            || nodes
-                .iter()
-                .any(|node| self.waiters_by_node.contains_key(node))
-    }
-
     fn hydration_admission_evaluations(&self, nodes: &HashSet<NodeId>) -> HashSet<u64> {
         let mut selected = self
             .evaluations
@@ -3478,36 +3467,6 @@ impl IvmRuntime {
 
     pub(crate) async fn drive_pending_incremental(&mut self) -> Result<(), IvmRuntimeError> {
         std::future::poll_fn(|cx| self.poll_pending_incremental(cx)).await
-    }
-
-    /// Whether a pending evaluation still stages or awaits any of `nodes`.
-    pub(super) fn pending_evaluation_touches(&self, nodes: &HashSet<NodeId>) -> bool {
-        self.pending_incremental.0.borrow().touches(nodes)
-    }
-
-    /// A tick over a graph slice no pending evaluation touches, run to
-    /// completion beside them. Unlike [`Self::tick_with_params`] it does not
-    /// first drive unrelated pending work, so a cold graph elsewhere cannot
-    /// hold it hostage.
-    pub(super) async fn tick_beside_pending<'a>(
-        &mut self,
-        binding_deltas: Vec<BindingDelta>,
-        storage: OwnedStorage<'a>,
-    ) -> Result<TickMetrics, IvmRuntimeError> {
-        if self.persistence_indeterminate.get() {
-            return Err(IvmRuntimeError::PersistenceOutcomeIndeterminate);
-        }
-        let mut evaluation = self
-            .begin_tick_with_params(Vec::new(), binding_deltas, storage, None)
-            .await?;
-        debug_assert!(
-            !self.pending_evaluation_touches(&evaluation.affected_nodes),
-            "a tick beside pending work must not share its graph slice"
-        );
-        std::future::poll_fn(|cx| evaluation.poll(self, cx))
-            .await
-            .map_err(EvaluationFailure::into_error)?;
-        Ok(evaluation.metrics)
     }
 
     pub(super) async fn tick_with_params<'a>(

@@ -111,13 +111,6 @@ The check is the safety net; lowering paths that keep routes (closure joins
 key on routes both sides carry, include-deleted policy sources declare their
 routes) are what let a program share.
 
-A later binding of a shared program attaches live: one tick admits it through
-the shared nodes, and only its own nodes hydrate. Only an evaluation still
-pending over the shape's nodes, or over what admitting the binding changes,
-sends a bind to full hydration, which evaluates the shared graph for every
-live binding. Pending work elsewhere does not, and the attach does not wait on
-it, so a crowd reconnecting together costs each member its own rows.
-
 ### 14.2 Schema → groove
 
 A jazz schema lowers its fixed system tables and direct record stores through
