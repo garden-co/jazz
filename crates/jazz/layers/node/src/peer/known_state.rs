@@ -232,6 +232,6 @@ impl PeerState {
         self.publication_states
             .get(&subscription)
             .and_then(|state| state.maintained_subscription_view.as_ref())
-            .map(|maintained| maintained.maintained.footprint().into())
+            .map(|maintained| maintained.maintained.footprint())
     }
 }

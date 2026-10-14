@@ -191,6 +191,13 @@ pub struct LocalMaintainedViewSubscriptionFootprint {
     pub total_heap_bytes: usize,
 }
 
+/// Encoded postcard size of `value`, the footprint's proxy for its heap
+/// bytes; an unencodable value counts as zero.
+#[cfg(feature = "testing")]
+fn postcard_len(value: &impl serde::Serialize) -> usize {
+    postcard::to_allocvec(value).map_or(0, |bytes| bytes.len())
+}
+
 impl LocalMaintainedViewSubscription {
     #[doc(hidden)]
     pub fn subscription_id(&self) -> groove::ivm::SubscriptionId {
@@ -250,38 +257,15 @@ impl LocalMaintainedViewSubscription {
             .map(|(name, schema)| name.len() + std::mem::size_of_val(schema))
             .sum::<usize>()
             + self.tables.len() * 96;
-        let result_set_bytes = self
-            .result_set
-            .iter()
-            .map(|member| {
-                postcard::to_allocvec(member)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(0)
-            })
-            .sum::<usize>()
-            + self.result_set.len() * 64;
+        let result_set_bytes =
+            self.result_set.iter().map(postcard_len).sum::<usize>() + self.result_set.len() * 64;
         let result_payloads_bytes = self
             .result_payloads
             .iter()
-            .map(|(member, payload)| {
-                postcard::to_allocvec(member)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(0)
-                    + postcard::to_allocvec(payload)
-                        .map(|bytes| bytes.len())
-                        .unwrap_or(0)
-            })
+            .map(|(member, payload)| postcard_len(member) + postcard_len(payload))
             .sum::<usize>()
             + self.result_payloads.len() * 96;
-        let program_facts_bytes = self
-            .program_facts
-            .iter()
-            .map(|fact| {
-                postcard::to_allocvec(fact)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(0)
-            })
-            .sum::<usize>()
+        let program_facts_bytes = self.program_facts.iter().map(postcard_len).sum::<usize>()
             + self.program_facts.len() * 64;
         let control_state_bytes = terminal_schemas.terminal_schemas_bytes
             + tables_bytes
@@ -294,22 +278,14 @@ impl LocalMaintainedViewSubscription {
             + self
                 .result_relation_projection
                 .as_ref()
-                .map(|columns| {
-                    postcard::to_allocvec(columns)
-                        .map(|bytes| bytes.len())
-                        .unwrap_or_default()
-                })
+                .map(postcard_len)
                 .unwrap_or_default()
             + result_set_bytes
             + result_payloads_bytes
             + self
                 .result_relation_projections
                 .as_ref()
-                .map(|projections| {
-                    postcard::to_allocvec(projections)
-                        .map(|bytes| bytes.len())
-                        .unwrap_or_default()
-                })
+                .map(postcard_len)
                 .unwrap_or_default()
             + program_facts_bytes;
         LocalMaintainedViewSubscriptionFootprint {

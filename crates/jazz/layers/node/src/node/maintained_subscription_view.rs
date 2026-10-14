@@ -199,36 +199,36 @@ impl Default for MaintainedSubscriptionView {
     }
 }
 
+/// On-demand maintained subscription view index sizes for one subscription.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[doc(hidden)]
 pub struct MaintainedSubscriptionViewFootprint {
-    #[doc(hidden)]
+    /// Active result-current rows in the maintained index.
     pub result_rows: usize,
-    #[doc(hidden)]
+    /// Result weight map entries, including non-positive transient entries.
     pub result_weights: usize,
-    #[doc(hidden)]
+    /// Result payload map entries retained for projected/synthetic output.
     pub result_payloads: usize,
-    #[doc(hidden)]
-    pub structured_app_rows: usize,
-    #[doc(hidden)]
+    /// Active readable version identities retained by full record identity.
     pub version_identities: usize,
-    #[doc(hidden)]
+    /// Entries reachable through the version-by-transaction index.
     pub version_tx_entries: usize,
-    #[doc(hidden)]
+    /// Active replacement winner entries across content and deletion maps.
     pub replacement_entries: usize,
-    #[doc(hidden)]
+    /// Active recursive app-row roots retained for structured array output.
+    pub structured_app_rows: usize,
+    /// Approximate heap bytes retained by result_weights.
     pub result_weights_bytes: usize,
-    #[doc(hidden)]
+    /// Approximate heap bytes retained by result_payloads.
     pub result_payloads_bytes: usize,
-    #[doc(hidden)]
-    pub structured_app_rows_bytes: usize,
-    #[doc(hidden)]
+    /// Approximate heap bytes retained by WeightedVersionIndex.
     pub versions_bytes: usize,
-    #[doc(hidden)]
+    /// Approximate heap bytes retained by the physical support frontier and journal.
     pub supporting_frontier_bytes: usize,
-    #[doc(hidden)]
+    /// Approximate heap bytes retained by ReplacementIndex.
     pub replacements_bytes: usize,
-    #[doc(hidden)]
+    /// Approximate heap bytes retained by recursive app-row roots.
+    pub structured_app_rows_bytes: usize,
+    /// Approximate heap bytes retained by maintained-view indexes.
     pub total_heap_bytes: usize,
 }
 
