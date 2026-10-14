@@ -558,24 +558,16 @@ where
         cells: RowCells,
         mut options: InsertOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        // Reject a bad provenance time before consuming a row id.
         validate_updated_at_ms(options.updated_at_ms)?;
         let row = options
             .row_id
             .unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
-        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        let now_ms = self.queued_now_ms(&mut options.updated_at_ms)?;
         options.row_id = Some(row);
-        options.updated_at_ms = Some(now_ms);
-        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
-        let db = self.clone_for_reserved_transaction(tx_id);
-        let status = self.node.enqueue_mutation(
-            tx_id,
-            Box::pin(async move {
-                let write = db.insert(&table, cells, options).await?;
-                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
-                Ok(())
-            }),
-        );
-        Ok(self.queued_write_handle(row, tx_id, status, None))
+        self.enqueue_write(row, now_ms, move |db| async move {
+            db.insert(&table, cells, options).await
+        })
     }
 
     #[doc(hidden)]
@@ -586,9 +578,7 @@ where
         patch: RowCells,
         mut options: UpdateOptions,
     ) -> Result<WriteHandle<S>, Error> {
-        validate_updated_at_ms(options.updated_at_ms)?;
-        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        options.updated_at_ms = Some(now_ms);
+        let now_ms = self.queued_now_ms(&mut options.updated_at_ms)?;
         let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
         let db = self.clone_for_reserved_transaction(tx_id);
         let empty_patch = patch.is_empty();
@@ -622,22 +612,11 @@ where
         cells: RowCells,
         mut options: UpsertOptions,
     ) -> Result<WriteHandle<S>, Error> {
-        validate_updated_at_ms(options.updated_at_ms)?;
-        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        options.updated_at_ms = Some(now_ms);
-        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
-        let db = self.clone_for_reserved_transaction(tx_id);
-        let status = self.node.enqueue_mutation(
-            tx_id,
-            Box::pin(async move {
-                let write = db
-                    .upsert_with_insert_validation(&table, row, cells, options, true)
-                    .await?;
-                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
-                Ok(())
-            }),
-        );
-        Ok(self.queued_write_handle(row, tx_id, status, None))
+        let now_ms = self.queued_now_ms(&mut options.updated_at_ms)?;
+        self.enqueue_write(row, now_ms, move |db| async move {
+            db.upsert_with_insert_validation(&table, row, cells, options, true)
+                .await
+        })
     }
 
     #[doc(hidden)]
@@ -647,20 +626,10 @@ where
         row: RowUuid,
         mut options: DeleteOptions,
     ) -> Result<WriteHandle<S>, Error> {
-        validate_updated_at_ms(options.updated_at_ms)?;
-        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        options.updated_at_ms = Some(now_ms);
-        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
-        let db = self.clone_for_reserved_transaction(tx_id);
-        let status = self.node.enqueue_mutation(
-            tx_id,
-            Box::pin(async move {
-                let write = db.delete(&table, row, options).await?;
-                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
-                Ok(())
-            }),
-        );
-        Ok(self.queued_write_handle(row, tx_id, status, None))
+        let now_ms = self.queued_now_ms(&mut options.updated_at_ms)?;
+        self.enqueue_write(row, now_ms, move |db| async move {
+            db.delete(&table, row, options).await
+        })
     }
 
     #[doc(hidden)]
@@ -671,20 +640,10 @@ where
         cells: Option<RowCells>,
         mut options: RestoreOptions,
     ) -> Result<WriteHandle<S>, Error> {
-        validate_updated_at_ms(options.updated_at_ms)?;
-        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        options.updated_at_ms = Some(now_ms);
-        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
-        let db = self.clone_for_reserved_transaction(tx_id);
-        let status = self.node.enqueue_mutation(
-            tx_id,
-            Box::pin(async move {
-                let write = db.restore(&table, row, cells, options).await?;
-                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
-                Ok(())
-            }),
-        );
-        Ok(self.queued_write_handle(row, tx_id, status, None))
+        let now_ms = self.queued_now_ms(&mut options.updated_at_ms)?;
+        self.enqueue_write(row, now_ms, move |db| async move {
+            db.restore(&table, row, cells, options).await
+        })
     }
 
     #[doc(hidden)]
@@ -694,18 +653,41 @@ where
         row: RowUuid,
         patch: RowCells,
         mutations: Vec<LargeValueUpdate>,
-        updated_at_ms: Option<u64>,
+        mut updated_at_ms: Option<u64>,
     ) -> Result<WriteHandle<S>, Error> {
-        validate_updated_at_ms(updated_at_ms)?;
+        let now_ms = self.queued_now_ms(&mut updated_at_ms)?;
+        self.enqueue_write(row, now_ms, move |db| async move {
+            db.update_with_large_value_mutations_at_ms(&table, row, patch, mutations, now_ms)
+                .await
+        })
+    }
+
+    /// Validate a queued write's provenance time and pin it (defaulting to
+    /// now), so the reserved transaction id and the queued write agree.
+    fn queued_now_ms(&self, updated_at_ms: &mut Option<u64>) -> Result<u64, Error> {
+        validate_updated_at_ms(*updated_at_ms)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        *updated_at_ms = Some(now_ms);
+        Ok(now_ms)
+    }
+
+    /// Reserve a queued write's final transaction id at `now_ms` and queue
+    /// `write`, run on a facade bound to that id, behind earlier owner work.
+    fn enqueue_write<F>(
+        &self,
+        row: RowUuid,
+        now_ms: u64,
+        write: impl FnOnce(Self) -> F,
+    ) -> Result<WriteHandle<S>, Error>
+    where
+        F: Future<Output = Result<WriteHandle<S>, Error>> + 'static,
+    {
         let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
-        let db = self.clone_for_reserved_transaction(tx_id);
+        let write = write(self.clone_for_reserved_transaction(tx_id));
         let status = self.node.enqueue_mutation(
             tx_id,
             Box::pin(async move {
-                let write = db
-                    .update_with_large_value_mutations_at_ms(&table, row, patch, mutations, now_ms)
-                    .await?;
+                let write = write.await?;
                 debug_assert_eq!(write.mergeable_tx_id(), tx_id);
                 Ok(())
             }),
@@ -2985,15 +2967,7 @@ where
         published: PublishedTransaction,
     ) -> Result<WriteHandle<S>, Error> {
         let tx_id = published.tx_id;
-        let local_tier = if self.node.defer_local_persistence.get() {
-            self.finish_deferred_local_publication(published, None)
-                .await?;
-            DurabilityTier::None
-        } else {
-            self.finish_publication_outcome(PublicationOutcome::published((), published))
-                .await?;
-            self.finalize_local_commit(tx_id)?
-        };
+        let local_tier = self.settle_local_publication(published, None).await?;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.node.node),
             row_uuid: row,
@@ -3002,6 +2976,32 @@ where
             queued_status: None,
             queued_alias: None,
         })
+    }
+
+    /// Hand a published transaction to deferred local persistence, or settle
+    /// its publication now and queue its upload (`unit` is an exclusive
+    /// commit's bound sync unit). Returns the authored commit's local tier;
+    /// `None` while deferred and for exclusive commits, which report only ids.
+    pub(super) async fn settle_local_publication(
+        &self,
+        published: PublishedTransaction,
+        unit: Option<SyncMessage>,
+    ) -> Result<DurabilityTier, Error> {
+        if self.node.defer_local_persistence.get() {
+            self.finish_deferred_local_publication(published, unit)
+                .await?;
+            return Ok(DurabilityTier::None);
+        }
+        let tx_id = published.tx_id;
+        self.finish_publication_outcome(PublicationOutcome::published((), published))
+            .await?;
+        match unit {
+            None => self.finalize_local_commit(tx_id),
+            Some(unit) => {
+                self.node.queue_pending_upload(tx_id, Some(unit));
+                Ok(DurabilityTier::None)
+            }
+        }
     }
 
     /// Transfer a published ordered slot into node ownership before resident
