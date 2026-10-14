@@ -38,6 +38,8 @@ pub struct RuntimeStats {
     pub arrangement_encoded_bytes: usize,
     /// Arrangements read from storage by key instead of held.
     pub stored_arrangement_count: usize,
+    /// Estimated bytes of the resident buckets of stored arrangements.
+    pub stored_arrangement_resident_bytes: usize,
     pub recursive_state_count: usize,
     pub recursive_accumulated_rows: usize,
     pub recursive_accumulated_encoded_bytes: usize,

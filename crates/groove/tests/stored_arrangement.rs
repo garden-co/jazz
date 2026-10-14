@@ -2,9 +2,11 @@
 //! key-preserving operators and keyed on its primary key, is read from
 //! storage by the keys a tick touches instead of being held.
 //!
-//! Every maintained case runs on two databases fed the same edits, one with
-//! stored arrangements and one without, and their results must agree after
-//! every edit, with each other and with one-shot queries.
+//! Every maintained case runs on databases fed the same edits, one without
+//! stored arrangements and others with them under several memory budgets:
+//! unbounded, zero (every bucket read from storage), and small enough to
+//! evict buckets between edits. Their results must agree after every edit,
+//! with each other and with one-shot queries.
 
 use std::collections::BTreeMap;
 
@@ -78,6 +80,16 @@ async fn open_db(stored: bool) -> Database {
     db.set_stored_arrangements_enabled(stored);
     db
 }
+
+async fn open_budgeted(budget: Option<usize>) -> Database {
+    let mut db = open_db(true).await;
+    db.set_arrangement_memory_budget(budget);
+    db
+}
+
+/// Arrangement budgets every maintained case runs under: unbounded, none
+/// resident, and a few buckets resident.
+const BUDGETS: [Option<usize>; 3] = [None, Some(0), Some(400)];
 
 fn branch(table: &str) -> GraphBuilder {
     GraphBuilder::table_scan(
@@ -209,11 +221,21 @@ fn edits() -> Vec<Edit> {
     ]
 }
 
-/// Subscribe to `graph` with and without stored arrangements and check both
-/// against each other and against one-shot queries after every edit.
-/// Returns how many arrangements the stored database reads from storage.
+/// Subscribe to `graph` with and without stored arrangements, under each
+/// budget, and check both against each other and against one-shot queries
+/// after every edit. Returns how many arrangements the stored database
+/// reads from storage.
 async fn check_maintained(graph: GraphBuilder) -> usize {
-    let mut stored = open_db(true).await;
+    let mut counts = Vec::new();
+    for budget in BUDGETS {
+        counts.push(check_maintained_under(graph.clone(), budget).await);
+    }
+    assert!(counts.iter().all(|count| *count == counts[0]), "{counts:?}");
+    counts[0]
+}
+
+async fn check_maintained_under(graph: GraphBuilder, budget: Option<usize>) -> usize {
+    let mut stored = open_budgeted(budget).await;
     let mut held = open_db(false).await;
     seed(&mut stored).await;
     seed(&mut held).await;
@@ -231,7 +253,7 @@ async fn check_maintained(graph: GraphBuilder) -> usize {
         &mut held_live,
         held_sub.recv().unwrap().to_values().unwrap(),
     );
-    assert_eq!(stored_live, held_live, "hydration");
+    assert_eq!(stored_live, held_live, "hydration, budget {budget:?}");
     for (step, (stored_edit, held_edit)) in edits().into_iter().zip(edits()).enumerate() {
         apply(&mut stored, stored_edit).await;
         apply(&mut held, held_edit).await;
@@ -241,7 +263,7 @@ async fn check_maintained(graph: GraphBuilder) -> usize {
         while let Ok(deltas) = held_sub.try_recv() {
             add(&mut held_live, deltas.to_values().unwrap());
         }
-        assert_eq!(stored_live, held_live, "step {step}");
+        assert_eq!(stored_live, held_live, "step {step}, budget {budget:?}");
         assert_eq!(
             held_live,
             snapshot(&mut held, graph.clone()).await,
@@ -250,8 +272,12 @@ async fn check_maintained(graph: GraphBuilder) -> usize {
         assert_eq!(
             stored_live,
             snapshot(&mut stored, graph.clone()).await,
-            "stored one-shot, step {step}"
+            "stored one-shot, step {step}, budget {budget:?}"
         );
+        if let Some(budget) = budget {
+            let resident = stored.runtime_stats().stored_arrangement_resident_bytes;
+            assert!(resident <= budget, "{resident} resident over {budget}");
+        }
     }
     count
 }
@@ -367,10 +393,12 @@ async fn joins_on_other_columns_hold_their_arrangements() {
     assert_eq!(check_maintained(by_name).await, 0);
 }
 
-/// A stored arrangement holds only a tick's changes; the held plan arranges
-/// every project and every latest version.
+/// Under a zero budget a stored arrangement holds only a tick's changes;
+/// under a small one, only the buckets read most recently. The held plan,
+/// like an unbounded budget after hydration, arranges every project and
+/// every latest version.
 #[futures_test::test]
-async fn stored_arrangements_hold_no_table_rows() {
+async fn budgets_bound_the_rows_stored_arrangements_hold() {
     let graph = GraphBuilder::join(
         GraphBuilder::table("docs"),
         project_source(),
@@ -378,8 +406,9 @@ async fn stored_arrangements_hold_no_table_rows() {
         ["id"],
     );
     let mut rows = Vec::new();
-    for stored in [true, false] {
-        let mut db = open_db(stored).await;
+    let mut resident = Vec::new();
+    for budget in [Some(0), Some(2_000), None] {
+        let mut db = open_budgeted(budget).await;
         apply(&mut db, |b| {
             for id in 1..=2_000 {
                 b.insert("projects", project(id, 1, "p"));
@@ -398,13 +427,67 @@ async fn stored_arrangements_hold_no_table_rows() {
             add(&mut live, deltas.to_values().unwrap());
         }
         assert_eq!(live.len(), 3);
-        // A one-shot query sharing the arrangement rebuilds it for its own
-        // evaluation only.
+        // A one-shot query sharing the arrangement rebuilds it, then
+        // keeps what its budget allows.
         assert_eq!(snapshot(&mut db, graph.clone()).await, live);
         rows.push(db.runtime_stats().arrangement_rows);
+        resident.push(db.runtime_stats().stored_arrangement_resident_bytes);
     }
-    assert!(rows[0] < 20, "stored plan holds {rows:?}");
-    assert!(rows[1] >= 4_000, "held plan holds {rows:?}");
+    let mut held = open_db(false).await;
+    apply(&mut held, |b| {
+        for id in 1..=2_000 {
+            b.insert("projects", project(id, 1, "p"));
+            b.insert("versions", version(10_000 + id, 1, "v"));
+        }
+    })
+    .await;
+    let _sub = held.subscribe_one_sink(graph.clone()).await.unwrap();
+    let held_rows = held.runtime_stats().arrangement_rows;
+    assert!(rows[0] < 20, "zero budget holds {rows:?}");
+    assert_eq!(resident[0], 0);
+    assert!(rows[1] < 100, "small budget holds {rows:?}");
+    assert!(resident[1] > 0 && resident[1] <= 2_000, "{resident:?}");
+    assert!(rows[2] >= 4_000, "unbounded budget holds {rows:?}");
+    assert!(held_rows >= 4_000, "held plan holds {held_rows}");
+}
+
+/// Lowering the budget evicts at once; the evicted buckets are read from
+/// storage again when a tick needs them.
+#[futures_test::test]
+async fn lowering_the_budget_evicts_resident_buckets() {
+    let graph = GraphBuilder::join(
+        GraphBuilder::table("docs"),
+        project_source(),
+        ["project"],
+        ["id"],
+    );
+    let mut db = open_budgeted(None).await;
+    apply(&mut db, |b| {
+        for id in 1..=500 {
+            b.insert("projects", project(id, 1, "p"));
+        }
+        b.insert("docs", doc(1, 7, 1));
+    })
+    .await;
+    let sub = db.subscribe_one_sink(graph.clone()).await.unwrap();
+    let mut live = Bag::new();
+    add(&mut live, sub.recv().unwrap().to_values().unwrap());
+    let before = db.runtime_stats().stored_arrangement_resident_bytes;
+    assert!(before > 10_000, "{before}");
+    db.set_arrangement_memory_budget(Some(1_000));
+    let after = db.runtime_stats().stored_arrangement_resident_bytes;
+    assert!(after <= 1_000, "{after}");
+    apply(&mut db, |b| {
+        b.insert("docs", doc(2, 300, 1));
+        b.update("projects", project(7, 1, "seven"));
+    })
+    .await;
+    while let Ok(deltas) = sub.try_recv() {
+        add(&mut live, deltas.to_values().unwrap());
+    }
+    assert_eq!(live.len(), 2);
+    assert_eq!(live, snapshot(&mut db, graph).await);
+    assert!(db.runtime_stats().stored_arrangement_resident_bytes <= 1_000);
 }
 
 /// A new subscription sharing a stored arrangement probes it by its own

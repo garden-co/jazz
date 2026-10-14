@@ -1297,6 +1297,7 @@ impl<'a> IncrementalEvaluation<'a> {
         runtime
             .arrangement_states
             .extend(std::mem::take(&mut self.arrangement_states));
+        runtime.enforce_arrangement_budget();
         // Each input's key set is replaced, except for the keys of nodes
         // written back earlier, which the live set keeps.
         for (node, keys) in std::mem::take(&mut self.arrangement_keys_by_input) {
@@ -2265,6 +2266,7 @@ impl<'a> EvaluationSession<'a> {
             state.value_mut().commit_overlay();
         }
         runtime.arrangement_states.extend(self.arrangement_states);
+        runtime.enforce_arrangement_budget();
         for node in &self.relevant_nodes {
             runtime.arrangement_keys_by_input.remove(node);
         }

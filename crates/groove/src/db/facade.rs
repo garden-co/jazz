@@ -646,9 +646,16 @@ impl Database {
     }
 
     /// Read arrangements of stored tables by primary key from storage instead
-    /// of holding them, for arrangements compiled from now on. Off by default.
+    /// of holding them, for arrangements compiled from now on. On by default.
     pub fn set_stored_arrangements_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_stored_arrangements_enabled(enabled);
+    }
+
+    /// Bound the memory the buckets of stored arrangements keep resident;
+    /// `None` (the default) is unbounded. See
+    /// `IvmRuntime::set_arrangement_memory_budget`.
+    pub fn set_arrangement_memory_budget(&mut self, budget: Option<usize>) {
+        self.ivm_runtime.set_arrangement_memory_budget(budget);
     }
 
     /// Enable or disable generic root positions (insert indices and moves in

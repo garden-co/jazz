@@ -13,6 +13,12 @@ use std::path::Path;
 const ROCKSDB_CACHE_SHARE_PERCENT: u64 = 15;
 const ROCKSDB_CACHE_MIN_BYTES: u64 = 32 * 1024 * 1024;
 const ROCKSDB_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+/// Share of the process memory limit the resident buckets of stored
+/// arrangements may use while memory is plentiful.
+const ARRANGEMENT_CEILING_SHARE_PERCENT: u64 = 25;
+/// Resident set size the arrangement budget governor steers toward, as a
+/// share of the process memory limit.
+const RSS_TARGET_SHARE_PERCENT: u64 = 80;
 
 /// Limits the server process applies to itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +57,74 @@ impl ServerResourceLimits {
             write_buffer_bytes: default.write_buffer_bytes.min(block_cache_bytes / 4),
         }
     }
+}
+
+/// Steers the process-wide budget of stored arrangement buckets (see
+/// `groove::ivm::set_process_arrangement_budget`) from the process's
+/// resident set: over the target, the budget drops by the overshoot, so
+/// queries read more buckets from storage; under it, the budget grows back
+/// towards its ceiling a step at a time. The trade between memory and
+/// storage reads is continuous, with no switch between modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArrangementBudgetGovernor {
+    target_rss_bytes: u64,
+    ceiling_bytes: usize,
+}
+
+impl ServerResourceLimits {
+    /// The governor for this process's limit, or `None` when nothing limits
+    /// memory and arrangements keep every bucket they read.
+    pub fn arrangement_budget_governor(&self) -> Option<ArrangementBudgetGovernor> {
+        let limit = self.memory_limit_bytes?;
+        Some(ArrangementBudgetGovernor {
+            target_rss_bytes: limit / 100 * RSS_TARGET_SHARE_PERCENT,
+            ceiling_bytes: usize::try_from(limit / 100 * ARRANGEMENT_CEILING_SHARE_PERCENT)
+                .unwrap_or(usize::MAX),
+        })
+    }
+}
+
+impl ArrangementBudgetGovernor {
+    /// The budget while memory is plentiful.
+    pub fn ceiling_bytes(&self) -> usize {
+        self.ceiling_bytes
+    }
+
+    /// The budget to set next, given the process's resident set, the
+    /// arrangements' resident bytes, and the current budget.
+    pub fn next_budget(&self, rss_bytes: u64, resident_bytes: usize, current: usize) -> usize {
+        let to_usize = |bytes: u64| usize::try_from(bytes).unwrap_or(usize::MAX);
+        if rss_bytes > self.target_rss_bytes {
+            // Evicting the overshoot from the cache brings the process back
+            // to its target, as far as the cache can.
+            let overshoot = to_usize(rss_bytes - self.target_rss_bytes);
+            return resident_bytes.saturating_sub(overshoot).min(current);
+        }
+        // Grow back a tenth of the ceiling per step, and no further than the
+        // headroom, so reclaimed memory does not refill the cache at once.
+        let headroom = to_usize(self.target_rss_bytes - rss_bytes);
+        current
+            .saturating_add(self.ceiling_bytes / 10)
+            .min(resident_bytes.saturating_add(headroom))
+            .max(current)
+            .min(self.ceiling_bytes)
+    }
+}
+
+/// This process's resident set size, where the platform reports it.
+pub fn process_rss_bytes() -> Option<u64> {
+    parse_vm_rss(&std::fs::read_to_string("/proc/self/status").ok()?)
+}
+
+fn parse_vm_rss(status: &str) -> Option<u64> {
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    let kib = line["VmRSS:".len()..]
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(kib * 1024)
 }
 
 /// The memory limit of the cgroup this process runs in, if it has one.
@@ -108,6 +182,58 @@ mod tests {
     fn missing_cgroup_files_mean_no_limit() {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(cgroup_memory_limit_bytes(root.path()), None);
+    }
+
+    #[test]
+    fn reads_resident_set_from_proc_status() {
+        let status = "Name:\tjazz\nVmPeak:\t  900 kB\nVmRSS:\t  2048 kB\nThreads:\t4\n";
+        assert_eq!(parse_vm_rss(status), Some(2048 * 1024));
+        assert_eq!(parse_vm_rss("Name:\tjazz\n"), None);
+    }
+
+    #[test]
+    fn arrangement_budget_follows_memory_pressure_smoothly() {
+        let limits = |limit: Option<u64>| ServerResourceLimits {
+            memory_limit_bytes: limit,
+            ..ServerResourceLimits::default()
+        };
+        assert_eq!(limits(None).arrangement_budget_governor(), None);
+        let governor = limits(Some(1000 * MIB))
+            .arrangement_budget_governor()
+            .unwrap();
+        let ceiling = governor.ceiling_bytes();
+        assert_eq!(ceiling as u64, 1000 * MIB / 100 * 25);
+        let target = 1000 * MIB / 100 * 80;
+        let mib = MIB as usize;
+
+        // Plenty of room: the budget stays at its ceiling.
+        assert_eq!(governor.next_budget(100 * MIB, 50 * mib, ceiling), ceiling);
+        // Over the target, the budget drops by the overshoot below what the
+        // arrangements hold, and to nothing when they cannot cover it.
+        assert_eq!(
+            governor.next_budget(target + 30 * MIB, 200 * mib, ceiling),
+            170 * mib
+        );
+        assert_eq!(
+            governor.next_budget(target + 300 * MIB, 200 * mib, ceiling),
+            0
+        );
+        // A higher resident set never raises a lowered budget.
+        assert_eq!(
+            governor.next_budget(target + 10 * MIB, 200 * mib, 100 * mib),
+            100 * mib
+        );
+        // Back under the target it grows a tenth of the ceiling per step,
+        // within the headroom.
+        assert_eq!(governor.next_budget(target - 500 * MIB, 0, 0), ceiling / 10);
+        assert_eq!(
+            governor.next_budget(target - 5 * MIB, 0, 10 * mib),
+            10 * mib
+        );
+        assert_eq!(
+            governor.next_budget(target - 20 * MIB, 0, 10 * mib),
+            20 * mib
+        );
     }
 
     #[test]

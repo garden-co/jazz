@@ -56,8 +56,12 @@ mod persist;
 pub(crate) mod pipeline;
 mod rank_index;
 mod recursion;
+mod residency;
 mod state;
 mod stored_arrangement;
+pub use residency::{
+    process_arrangement_budget, process_arrangement_resident_bytes, set_process_arrangement_budget,
+};
 mod terminal;
 mod typed_template;
 
@@ -257,6 +261,15 @@ pub struct IvmRuntime {
     /// Whether new arrangements over stored tables, keyed on their primary
     /// key, are read from storage instead of held (`stored_arrangement`).
     stored_arrangements_enabled: bool,
+    /// Bytes the resident buckets of this runtime's stored arrangements may
+    /// hold after an install; `None` follows the process budget
+    /// (`residency`).
+    arrangement_budget: Option<usize>,
+    /// Shared with every stored arrangement plan: whether reads record the
+    /// buckets they use, which only a finite budget needs.
+    arrangement_use_tracking: Arc<std::sync::atomic::AtomicBool>,
+    /// This runtime's part of the process's resident bytes.
+    resident_share: residency::ResidentShare,
     /// Whether plain ordered outputs receive generic root positions (insert
     /// indices and moves). A consumer that never reads them turns this off,
     /// so an unbounded TopBy keeps its delta-only path.
@@ -381,7 +394,12 @@ impl IvmRuntime {
             next_shape_id: 1,
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
-            stored_arrangements_enabled: false,
+            stored_arrangements_enabled: true,
+            arrangement_budget: None,
+            arrangement_use_tracking: Arc::new(std::sync::atomic::AtomicBool::new(
+                residency::process_arrangement_budget().is_some(),
+            )),
+            resident_share: residency::ResidentShare::default(),
             plain_output_root_positions: true,
             collect_tick_runtime_stats: false,
             prepared_shapes: HashMap::default(),

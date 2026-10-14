@@ -113,6 +113,8 @@ struct JoinBucket {
     overlay: Rc<JoinBucketMap<Option<i64>>>,
     total_weight: i64,
     record_count: usize,
+    /// Encoded bytes of the records with a nonzero weight.
+    record_bytes: usize,
 }
 
 impl JoinBucket {
@@ -153,8 +155,13 @@ impl JoinBucket {
             (previous, next)
         };
         self.total_weight += delta;
-        self.record_count += usize::from(previous == 0 && next != 0);
-        self.record_count -= usize::from(previous != 0 && next == 0);
+        if previous == 0 && next != 0 {
+            self.record_count += 1;
+            self.record_bytes += record.len();
+        } else if previous != 0 && next == 0 {
+            self.record_count -= 1;
+            self.record_bytes -= record.len();
+        }
         next
     }
 
@@ -196,6 +203,7 @@ impl JoinBucket {
         Self {
             total_weight: records.values().sum(),
             record_count: records.len(),
+            record_bytes: records.keys().map(Bytes::len).sum(),
             base: Rc::new(JoinBucketMap::Many(records)),
             overlay: Rc::default(),
         }
@@ -296,17 +304,46 @@ pub(super) struct ArrangementState {
     /// allocation identity from being reused without retaining its row vector.
     snapshot: Weak<RecordDeltas>,
     /// How to read buckets from storage when this arrangement is backed by a
-    /// stored table instead of held (see `stored_arrangement`).
+    /// stored table (see `stored_arrangement`). Its `index` and `overlay`
+    /// then hold only resident buckets: a cache over storage.
     stored: Option<Arc<StoredArrangementPlan>>,
-    /// A stored arrangement holds its whole index only within the evaluation
-    /// that rebuilt it (Replace); otherwise only `probed` buckets are known.
+    /// A stored arrangement with every bucket resident, as a rebuild leaves
+    /// it until a bucket is evicted.
     full: bool,
-    /// Buckets of a stored arrangement read for this evaluation, by key;
-    /// `None` is a key with no rows.
-    probed: Rc<HashMap<JoinKey, Option<JoinBucket>>>,
-    /// A stored arrangement was asked for a bucket nobody probed: an engine
-    /// bug that would otherwise read as an empty bucket.
+    /// A stored arrangement rebuilt in this evaluation; its resident bytes
+    /// are recounted at commit.
+    rebuilt: bool,
+    /// Resident keys of a partly resident stored arrangement that have no
+    /// rows. Keys neither here nor in the index must be read from storage.
+    absent: Rc<HashSet<JoinKey>>,
+    /// Estimated bytes of the committed resident buckets and absent keys.
+    resident_bytes: usize,
+    /// When each resident key was last read, by `residency_tick`, while a
+    /// budget asks for it to be tracked.
+    last_used: Rc<HashMap<JoinKey, u64>>,
+    /// Keys read from storage in this evaluation. Storage already holds
+    /// this evaluation's transitions, so their buckets must not take them
+    /// again.
+    probed: Rc<HashSet<JoinKey>>,
+    /// Keys read in this evaluation, while use is tracked.
+    touched: std::cell::RefCell<Vec<JoinKey>>,
+    /// A stored arrangement was asked for a bucket that is neither resident
+    /// nor probed: an engine bug that would otherwise read as empty.
     probe_missed: std::cell::Cell<bool>,
+}
+
+/// Estimated bytes one resident bucket or absent key holds beyond its
+/// encoded key and records: map entries and bucket bookkeeping.
+const RESIDENT_KEY_OVERHEAD: usize = 64;
+/// Estimated bytes per resident record beyond its encoding.
+const RESIDENT_RECORD_OVERHEAD: usize = 48;
+
+fn resident_bucket_bytes(key: &JoinKey, bucket: Option<&JoinBucket>) -> usize {
+    key.len()
+        + RESIDENT_KEY_OVERHEAD
+        + bucket.map_or(0, |bucket| {
+            bucket.record_bytes + bucket.record_count * RESIDENT_RECORD_OVERHEAD
+        })
 }
 
 /// A delta slice may optionally prove the identity of a complete snapshot.
@@ -726,8 +763,8 @@ impl ArrangementState {
         }
     }
 
-    /// The storage plan of an arrangement that holds only probed buckets
-    /// right now; `None` when every bucket is in memory.
+    /// The storage plan of a stored arrangement some of whose buckets are
+    /// not resident; `None` when every bucket is in memory.
     pub(super) fn probe_plan(&self) -> Option<&Arc<StoredArrangementPlan>> {
         self.stored.as_ref().filter(|_| !self.full)
     }
@@ -736,19 +773,25 @@ impl ArrangementState {
         self.stored.is_some()
     }
 
-    pub(super) fn is_probed(&self, key: &JoinKey) -> bool {
-        self.probed.contains_key(key)
+    /// Whether the bucket of `key` is known without reading storage.
+    pub(super) fn is_known(&self, key: &JoinKey) -> bool {
+        self.probe_plan().is_none()
+            || self.overlay.contains_key(key)
+            || self.index.contains_key(key)
+            || self.absent.contains(key)
     }
 
+    /// Buckets read from storage in this evaluation. They reflect this
+    /// evaluation's state and become resident at commit.
     pub(super) fn insert_probed(
         &mut self,
         buckets: impl IntoIterator<Item = (JoinKey, Option<ProbedBucket>)>,
     ) {
-        Rc::make_mut(&mut self.probed).extend(
-            buckets
-                .into_iter()
-                .map(|(key, bucket)| (key, bucket.map(|ProbedBucket(bucket)| bucket))),
-        );
+        let probed = Rc::make_mut(&mut self.probed);
+        Rc::make_mut(&mut self.overlay).extend(buckets.into_iter().map(|(key, bucket)| {
+            probed.insert(key.clone());
+            (key, bucket.map(|ProbedBucket(bucket)| bucket))
+        }));
     }
 
     /// Whether a read missed a bucket nobody probed since the last check.
@@ -756,13 +799,63 @@ impl ArrangementState {
         self.probe_missed.replace(false)
     }
 
-    /// Drop everything a stored arrangement held for one evaluation; storage
-    /// holds its contents between evaluations.
-    fn forget_stored_contents(&mut self) {
-        *self = Self {
-            stored: self.stored.take(),
-            ..Self::default()
-        };
+    /// Estimated bytes of the resident buckets of a stored arrangement, as of
+    /// its last commit.
+    pub(super) fn resident_bytes(&self) -> usize {
+        self.resident_bytes
+    }
+
+    /// The resident keys of a stored arrangement with their last use and
+    /// estimated bytes, for eviction.
+    pub(super) fn resident_entries(&self) -> impl Iterator<Item = (u64, JoinKey, usize)> + '_ {
+        let last_used = |key: &JoinKey| self.last_used.get(key).copied().unwrap_or_default();
+        self.index
+            .iter()
+            .map(move |(key, bucket)| {
+                (
+                    last_used(key),
+                    key.clone(),
+                    resident_bucket_bytes(key, Some(bucket)),
+                )
+            })
+            .chain(self.absent.iter().map(move |key| {
+                (
+                    last_used(key),
+                    key.clone(),
+                    resident_bucket_bytes(key, None),
+                )
+            }))
+    }
+
+    /// Drop resident buckets of a committed stored arrangement; later reads
+    /// of their keys go to storage.
+    pub(super) fn evict(&mut self, keys: &[JoinKey]) {
+        if keys.is_empty() || self.stored.is_none() {
+            return;
+        }
+        // Keys outside the index of a full arrangement have no rows, but
+        // once it is partial they are unknown, which reads them from storage.
+        self.full = false;
+        // A Replace reusing the snapshot it was built from would otherwise
+        // skip rebuilding the buckets evicted here.
+        self.snapshot = Weak::new();
+        let index = Rc::make_mut(&mut self.index);
+        let absent = Rc::make_mut(&mut self.absent);
+        let last_used = Rc::make_mut(&mut self.last_used);
+        for key in keys {
+            if let Some(bucket) = index.remove(key) {
+                self.resident_bytes -= resident_bucket_bytes(key, Some(&bucket));
+            } else if absent.remove(key) {
+                self.resident_bytes -= resident_bucket_bytes(key, None);
+            }
+            last_used.remove(key);
+        }
+    }
+
+    fn track_use(&self, key: &JoinKey) {
+        if self.stored.as_ref().is_some_and(|plan| plan.tracks_use()) {
+            self.touched.borrow_mut().push(key.clone());
+        }
     }
 
     /// Every key with a bucket. A Replace evaluation probes the stored side
@@ -791,7 +884,7 @@ impl ArrangementState {
     pub(super) fn release_changes(&mut self) {
         self.changes = None;
         if self.stored.is_some() {
-            self.forget_stored_contents();
+            self.commit_resident();
         }
     }
 
@@ -801,7 +894,7 @@ impl ArrangementState {
     pub(super) fn commit_overlay(&mut self) {
         self.changes = None;
         if self.stored.is_some() {
-            self.forget_stored_contents();
+            self.commit_resident();
             return;
         }
         if self.overlay.is_empty() {
@@ -826,6 +919,64 @@ impl ArrangementState {
                     bucket.commit_overlay();
                 }
                 index.insert(key, bucket);
+            }
+        }
+    }
+
+    /// Fold a stored arrangement's evaluation into its resident buckets:
+    /// changed and probed buckets become resident, keys found empty become
+    /// absent, and reads stamp their keys' last use.
+    fn commit_resident(&mut self) {
+        self.probed = Rc::default();
+        let overlay = std::mem::take(&mut self.overlay);
+        let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
+        let index = Rc::make_mut(&mut self.index);
+        if !overlay.is_empty() {
+            let absent = Rc::make_mut(&mut self.absent);
+            for (key, bucket) in overlay {
+                if let Some(old) = index.remove(&key) {
+                    self.resident_bytes -= resident_bucket_bytes(&key, Some(&old));
+                } else if absent.remove(&key) {
+                    self.resident_bytes -= resident_bucket_bytes(&key, None);
+                }
+                match bucket {
+                    Some(mut bucket) => {
+                        if Rc::strong_count(&bucket.base) == 1
+                            && Rc::strong_count(&bucket.overlay) == 1
+                        {
+                            bucket.commit_overlay();
+                        }
+                        self.resident_bytes += resident_bucket_bytes(&key, Some(&bucket));
+                        index.insert(key, bucket);
+                    }
+                    // A full arrangement knows every key outside its index is
+                    // empty; a partial one remembers the empty keys it read.
+                    None if !self.full => {
+                        self.resident_bytes += resident_bucket_bytes(&key, None);
+                        absent.insert(key);
+                    }
+                    None => {}
+                }
+            }
+        }
+        if std::mem::take(&mut self.rebuilt) {
+            self.absent = Rc::default();
+            if !self.last_used.is_empty() {
+                Rc::make_mut(&mut self.last_used).retain(|key, _| index.contains_key(key));
+            }
+            self.resident_bytes = index
+                .iter()
+                .map(|(key, bucket)| resident_bucket_bytes(key, Some(bucket)))
+                .sum();
+        }
+        let touched = std::mem::take(self.touched.get_mut());
+        if !touched.is_empty() {
+            let now = super::residency::residency_tick();
+            let last_used = Rc::make_mut(&mut self.last_used);
+            for key in touched {
+                if index.contains_key(&key) || self.absent.contains(&key) {
+                    last_used.insert(key, now);
+                }
             }
         }
     }
@@ -908,8 +1059,33 @@ impl ArrangementState {
         // retain the previous transition or allocate an empty shared index.
         self.changes = (!deltas.is_empty()).then(|| Rc::new(build_join_delta_index(deltas)));
         match update_mode {
-            // Storage already holds this transition; readers probe it.
-            ArrangementUpdateMode::Accumulate if self.probe_plan().is_some() => {}
+            // Storage already holds this transition: readers probe keys that
+            // are not resident, and resident buckets follow it here.
+            ArrangementUpdateMode::Accumulate if self.probe_plan().is_some() => {
+                let index = &self.index;
+                let absent = &self.absent;
+                let probed = &self.probed;
+                let overlay = Rc::make_mut(&mut self.overlay);
+                for delta in deltas {
+                    if probed.contains(&delta.key) {
+                        continue;
+                    }
+                    let slot = match overlay.get_mut(&delta.key) {
+                        Some(slot) => slot,
+                        None if index.contains_key(&delta.key) || absent.contains(&delta.key) => {
+                            overlay
+                                .entry(delta.key.clone())
+                                .or_insert_with(|| index.get(&delta.key).cloned())
+                        }
+                        None => continue,
+                    };
+                    let bucket = slot.get_or_insert_with(JoinBucket::default);
+                    bucket.add_weight(&delta.delta.record, delta.delta.weight);
+                    if bucket.is_empty() {
+                        *slot = None;
+                    }
+                }
+            }
             ArrangementUpdateMode::Accumulate => {
                 if deltas.is_empty() {
                     return;
@@ -933,7 +1109,11 @@ impl ArrangementState {
             ArrangementUpdateMode::Replace => {
                 self.index = self.changes.clone().unwrap_or_default();
                 self.overlay = Rc::default();
-                self.full = true;
+                if self.stored.is_some() {
+                    self.probed = Rc::default();
+                    self.full = true;
+                    self.rebuilt = true;
+                }
             }
         }
     }
@@ -946,18 +1126,18 @@ impl ArrangementState {
 
     fn bucket(&self, key: &[u8]) -> Option<&JoinBucket> {
         let key = JoinKey::from_slice(key);
-        if self.probe_plan().is_some() {
-            return match self.probed.get(&key) {
-                Some(bucket) => bucket.as_ref(),
-                None => {
-                    self.probe_missed.set(true);
-                    None
-                }
-            };
-        }
+        self.track_use(&key);
         match self.overlay.get(&key) {
             Some(bucket) => bucket.as_ref(),
-            None => self.index.get(&key),
+            None => match self.index.get(&key) {
+                Some(bucket) => Some(bucket),
+                None => {
+                    if self.probe_plan().is_some() && !self.absent.contains(&key) {
+                        self.probe_missed.set(true);
+                    }
+                    None
+                }
+            },
         }
     }
 
