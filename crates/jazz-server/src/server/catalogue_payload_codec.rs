@@ -23,6 +23,32 @@ use jazz::tools::public_schema::{
 
 use jazz::tools::schema_lens::{LensOp, LensTransform};
 
+/// Defines an `encode`/`decode` pair for a fieldless enum stored as one tag
+/// byte, from a single variant-to-tag table so the two directions cannot
+/// drift. Unknown tags decode to `InvalidTypeTag` with the given context.
+macro_rules! tag_codec {
+    (
+        $encode:ident, $decode:ident, $ty:ty, $context:literal;
+        $($variant:path => $tag:tt),+ $(,)?
+    ) => {
+        fn $encode(buf: &mut Vec<u8>, value: &$ty) {
+            buf.push(match value {
+                $($variant => $tag,)+
+            });
+        }
+
+        fn $decode(data: &[u8], offset: &mut usize) -> Result<$ty, CatalogueEncodingError> {
+            match read_u8(data, offset)? {
+                $($tag => Ok($variant),)+
+                tag => Err(CatalogueEncodingError::InvalidTypeTag {
+                    tag,
+                    context: $context,
+                }),
+            }
+        }
+    };
+}
+
 /// Frozen storage-epoch-one outer envelope versions.
 const SCHEMA_VERSION: u8 = 1;
 const SCHEMA_COMPOSITE_VERSION: u8 = 2;
@@ -338,12 +364,7 @@ fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
         write_string(buf, table.as_str())
     });
     write_opt(buf, col.default.as_ref(), encode_value);
-    write_opt(buf, col.merge_strategy.as_ref(), |buf, strategy| {
-        buf.push(match strategy {
-            ColumnMergeStrategy::Counter => 1,
-            ColumnMergeStrategy::GSet => 2,
-        })
-    });
+    write_opt(buf, col.merge_strategy.as_ref(), encode_merge_strategy);
 }
 
 fn decode_column_descriptor(
@@ -358,14 +379,7 @@ fn decode_column_descriptor(
         Ok(TableName::new(read_string(data, offset, "column_ref")?))
     })?;
     let default = read_opt(data, offset, decode_value)?;
-    let merge_strategy = read_opt(data, offset, |data, offset| match read_u8(data, offset)? {
-        1 => Ok(ColumnMergeStrategy::Counter),
-        2 => Ok(ColumnMergeStrategy::GSet),
-        tag => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "column_merge_strategy",
-        }),
-    })?;
+    let merge_strategy = read_opt(data, offset, decode_merge_strategy)?;
     Ok(ColumnDescriptor {
         name: ColumnName::new(name),
         column_type,
@@ -375,6 +389,12 @@ fn decode_column_descriptor(
         merge_strategy,
     })
 }
+
+tag_codec!(
+    encode_merge_strategy, decode_merge_strategy, ColumnMergeStrategy, "column_merge_strategy";
+    ColumnMergeStrategy::Counter => 1,
+    ColumnMergeStrategy::GSet => 2,
+);
 
 /// Column type tags.
 const TYPE_INTEGER: u8 = 1;
@@ -1079,10 +1099,7 @@ fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
                     encode_relation_column_ref(buf, &c.left);
                     encode_relation_column_ref(buf, &c.right);
                 });
-                buf.push(match kind {
-                    RelJoinKind::Inner => REL_JOIN_INNER,
-                    RelJoinKind::Left => REL_JOIN_LEFT,
-                });
+                encode_relation_join_kind(buf, kind);
             }
             RelationEncodeTask::ProjectTail(columns) => write_seq(buf, columns, |buf, c| {
                 write_string(buf, &c.alias);
@@ -1466,16 +1483,7 @@ fn read_join_tail(
             right: decode_relation_column_ref(data, offset)?,
         })
     })?;
-    let kind = match read_u8(data, offset)? {
-        REL_JOIN_INNER => RelJoinKind::Inner,
-        REL_JOIN_LEFT => RelJoinKind::Left,
-        tag => {
-            return Err(CatalogueEncodingError::InvalidTypeTag {
-                tag,
-                context: "relation_join_kind",
-            });
-        }
-    };
+    let kind = decode_relation_join_kind(data, offset)?;
     Ok((on, kind))
 }
 fn read_project_tail(
@@ -1556,7 +1564,7 @@ fn encode_relation_predicate_task<'a>(
         RelPredicateExpr::Cmp { left, op, right } => {
             buf.push(REL_PREDICATE_CMP);
             encode_relation_column_ref(buf, left);
-            encode_relation_cmp_op(buf, *op);
+            encode_relation_cmp_op(buf, op);
             encode_relation_value_ref(buf, right);
         }
         RelPredicateExpr::IsNull { column } => {
@@ -1668,57 +1676,28 @@ fn decode_relation_value_ref(
     }
 }
 
-fn encode_relation_cmp_op(buf: &mut Vec<u8>, op: RelPredicateCmpOp) {
-    buf.push(match op {
-        RelPredicateCmpOp::Eq => 1,
-        RelPredicateCmpOp::Ne => 2,
-        RelPredicateCmpOp::Lt => 3,
-        RelPredicateCmpOp::Le => 4,
-        RelPredicateCmpOp::Gt => 5,
-        RelPredicateCmpOp::Ge => 6,
-    });
-}
+tag_codec!(
+    encode_relation_cmp_op, decode_relation_cmp_op, RelPredicateCmpOp, "relation_cmp_op";
+    RelPredicateCmpOp::Eq => 1,
+    RelPredicateCmpOp::Ne => 2,
+    RelPredicateCmpOp::Lt => 3,
+    RelPredicateCmpOp::Le => 4,
+    RelPredicateCmpOp::Gt => 5,
+    RelPredicateCmpOp::Ge => 6,
+);
 
-fn decode_relation_cmp_op(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<RelPredicateCmpOp, CatalogueEncodingError> {
-    match read_u8(data, offset)? {
-        1 => Ok(RelPredicateCmpOp::Eq),
-        2 => Ok(RelPredicateCmpOp::Ne),
-        3 => Ok(RelPredicateCmpOp::Lt),
-        4 => Ok(RelPredicateCmpOp::Le),
-        5 => Ok(RelPredicateCmpOp::Gt),
-        6 => Ok(RelPredicateCmpOp::Ge),
-        tag => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "relation_cmp_op",
-        }),
-    }
-}
+tag_codec!(
+    encode_relation_row_id, decode_relation_row_id, RowIdRef, "relation_row_id";
+    RowIdRef::Current => REL_ROW_ID_CURRENT,
+    RowIdRef::Outer => REL_ROW_ID_OUTER,
+    RowIdRef::Frontier => REL_ROW_ID_FRONTIER,
+);
 
-fn encode_relation_row_id(buf: &mut Vec<u8>, row_id: &RowIdRef) {
-    buf.push(match row_id {
-        RowIdRef::Current => REL_ROW_ID_CURRENT,
-        RowIdRef::Outer => REL_ROW_ID_OUTER,
-        RowIdRef::Frontier => REL_ROW_ID_FRONTIER,
-    });
-}
-
-fn decode_relation_row_id(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<RowIdRef, CatalogueEncodingError> {
-    match read_u8(data, offset)? {
-        REL_ROW_ID_CURRENT => Ok(RowIdRef::Current),
-        REL_ROW_ID_OUTER => Ok(RowIdRef::Outer),
-        REL_ROW_ID_FRONTIER => Ok(RowIdRef::Frontier),
-        tag => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "relation_row_id",
-        }),
-    }
-}
+tag_codec!(
+    encode_relation_join_kind, decode_relation_join_kind, RelJoinKind, "relation_join_kind";
+    RelJoinKind::Inner => REL_JOIN_INNER,
+    RelJoinKind::Left => REL_JOIN_LEFT,
+);
 
 fn encode_relation_key_ref(buf: &mut Vec<u8>, key: &RelKeyRef) {
     match key {
@@ -2140,7 +2119,7 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             } else {
                 POLICY_EXPR_INHERITS
             });
-            encode_policy_operation(buf, *operation);
+            encode_policy_operation(buf, operation);
             write_string(buf, via_column);
             if let Some(depth) = max_depth {
                 write_u32(buf, *depth as u32);
@@ -2153,7 +2132,7 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             max_depth,
         } => {
             buf.push(POLICY_EXPR_INHERITS_REFERENCING);
-            encode_policy_operation(buf, *operation);
+            encode_policy_operation(buf, operation);
             write_string(buf, source_table);
             write_string(buf, via_column);
             write_opt(buf, max_depth.as_ref(), |buf, &depth| {
@@ -2443,60 +2422,23 @@ fn decode_policy_value(
     }
 }
 
-fn encode_cmp_op(buf: &mut Vec<u8>, op: &CmpOp) {
-    let tag = match op {
-        CmpOp::Eq => 1,
-        CmpOp::Ne => 2,
-        CmpOp::Lt => 3,
-        CmpOp::Le => 4,
-        CmpOp::Gt => 5,
-        CmpOp::Ge => 6,
-    };
-    buf.push(tag);
-}
+tag_codec!(
+    encode_cmp_op, decode_cmp_op, CmpOp, "policy_cmp_op";
+    CmpOp::Eq => 1,
+    CmpOp::Ne => 2,
+    CmpOp::Lt => 3,
+    CmpOp::Le => 4,
+    CmpOp::Gt => 5,
+    CmpOp::Ge => 6,
+);
 
-fn decode_cmp_op(data: &[u8], offset: &mut usize) -> Result<CmpOp, CatalogueEncodingError> {
-    let tag = read_u8(data, offset)?;
-    match tag {
-        1 => Ok(CmpOp::Eq),
-        2 => Ok(CmpOp::Ne),
-        3 => Ok(CmpOp::Lt),
-        4 => Ok(CmpOp::Le),
-        5 => Ok(CmpOp::Gt),
-        6 => Ok(CmpOp::Ge),
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "policy_cmp_op",
-        }),
-    }
-}
-
-fn encode_policy_operation(buf: &mut Vec<u8>, operation: Operation) {
-    let tag = match operation {
-        Operation::Select => 1,
-        Operation::Insert => 2,
-        Operation::Update => 3,
-        Operation::Delete => 4,
-    };
-    buf.push(tag);
-}
-
-fn decode_policy_operation(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<Operation, CatalogueEncodingError> {
-    let tag = read_u8(data, offset)?;
-    match tag {
-        1 => Ok(Operation::Select),
-        2 => Ok(Operation::Insert),
-        3 => Ok(Operation::Update),
-        4 => Ok(Operation::Delete),
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "policy_operation",
-        }),
-    }
-}
+tag_codec!(
+    encode_policy_operation, decode_policy_operation, Operation, "policy_operation";
+    Operation::Select => 1,
+    Operation::Insert => 2,
+    Operation::Update => 3,
+    Operation::Delete => 4,
+);
 
 // ============================================================================
 // Value Encoding
