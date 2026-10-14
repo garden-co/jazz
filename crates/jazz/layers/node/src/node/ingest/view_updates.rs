@@ -546,9 +546,6 @@ where
         version: &VersionRow,
         global_time: GlobalTime,
     ) -> Result<(), Error> {
-        let schema_version = self
-            .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
         let plan =
             self.prepared_physical_write_plan_for_row(version, PhysicalWriteTarget::GlobalCurrent)?;
         // Validate node-local authored column aliases before deriving
