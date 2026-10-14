@@ -954,7 +954,6 @@ impl NodeState {
         node.recover_from_storage().await?;
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
-        node.discard_legacy_subscription_scopes().await?;
         node.recover_local_availability_records().await?;
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {

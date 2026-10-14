@@ -97,6 +97,9 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
                 ],
                 "{store}"
             );
+            let mut expected_unknown = expected_unknown.to_vec();
+            expected_unknown.push("jazz.subscription-program-fact-key.v1");
+            expected_unknown.sort();
             assert_eq!(unknown, expected_unknown, "{store}");
         }
         Err(other) => panic!("{store}: expected a typed format refusal, got {other}"),

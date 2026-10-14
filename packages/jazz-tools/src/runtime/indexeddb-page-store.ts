@@ -80,7 +80,6 @@ export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
   // (alpha.54 to alpha.57) or by the unreleased v2/v3 row layouts lacks this
   // family and fails manifest admission.
   "jazz.history-version-current.v4",
-  "jazz.subscription-program-fact-key.v1",
   "jazz.transaction-durability.v2",
 ] as const;
 

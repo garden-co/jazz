@@ -33,10 +33,6 @@ pub use crate::model::public_schema_convert::SchemaConversionError;
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("61b9ef21-3195-50e8-87fc-2aa83a6f74e3");
 
-/// Retired cursor store, reserved only to discard legacy entries on open.
-pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
-/// Retired scope store, reserved only to discard legacy entries on open.
-pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
 /// Collision-checked directory from a fixed policy-binding digest to its full
 /// authority identity. Result-store keys remain bounded without reducing the
 /// runtime policy boundary to a hash-only identity.
@@ -546,39 +542,6 @@ impl RuntimeSchema {
                         ),
                     ),
                 ]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                KNOWN_STATE_FACTS_STORE,
-                RecordDescriptor::new([
-                    ("shape_id", ValueType::Uuid),
-                    ("binding_id", ValueType::Uuid),
-                    ("read_view_id", ValueType::Uuid),
-                    ("policy_scope", ValueType::U8),
-                    ("policy_binding_digest", ValueType::Bytes),
-                ]),
-                RecordDescriptor::new([
-                    ("settled_through", ValueType::U64),
-                    ("authorization_progress", ValueType::U64),
-                    // A nonzero generation proves the persisted program
-                    // facts are an exact CoveredInput closure. It is
-                    // deliberately distinct from the live authority receipt.
-                    ("source_closure_generation", ValueType::U64),
-                ]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                SETTLED_PROGRAM_FACTS_STORE,
-                RecordDescriptor::new([
-                    ("shape_id", ValueType::Uuid),
-                    ("binding_id", ValueType::Uuid),
-                    ("read_view_id", ValueType::Uuid),
-                    ("policy_scope", ValueType::U8),
-                    ("policy_binding_digest", ValueType::Bytes),
-                    // Canonical source closure facts are addressed by digest.
-                    // Their exact source roles and version references remain
-                    // in the validated record body.
-                    ("fact_digest", ValueType::Bytes),
-                ]),
-                RecordDescriptor::new([("fact", ValueType::Bytes)]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 SUBSCRIPTION_WATERMARKS_STORE,

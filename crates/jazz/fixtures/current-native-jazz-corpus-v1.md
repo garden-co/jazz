@@ -44,7 +44,6 @@ the same inputs.
 | `jazz_authority_policy_bindings`    |       1 |
 | `jazz_catalogue`                    |       8 |
 | `jazz_catalogue_pointer`            |       2 |
-| `jazz_known_state_facts`            |       0 |
 | `jazz_nodes`                        |       1 |
 | `jazz_physical_1_ahead_current`     |       1 |
 | `jazz_physical_1_global_current`    |       1 |
@@ -56,7 +55,6 @@ the same inputs.
 | `jazz_physical_2_rejected_versions` |       0 |
 | `jazz_rejected_transactions`        |       0 |
 | `jazz_schema_versions`              |       2 |
-| `jazz_settled_program_facts`        |       0 |
 | `jazz_subscription_watermarks_v1`   |       1 |
 | `jazz_transactions`                 |       4 |
 | `jazz_tx_touched_rows`              |       4 |
@@ -78,7 +76,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `fb64e19c3811a1fddfd419d6d1e573616af7f5bbab070614fff76ed7b3947367` |
-| SQLite payload      | `f234db40bd5f4397126a9061b74730b9e69ae3040387b1cc211dd925d0248379` |
-| gzip SQLite archive | `1037325abb4b9c2013f6d028710e8f4d0c68cf7f818e449e0be2a366c6ee8e70` |
-| RocksDB archive     | `2fe9b8e60728a1f1804821ab26349794ef8f1b2a5b85dc57c462bf155c677491` |
+| logical pack        | `6e492425d0ff10088ec004ea454d0ee1e654f5ade198992058953605ac26279f` |
+| SQLite payload      | `4a44883ddb10fdcaaf07f9ff25fca4635bc32d8c3c952f9479b5f3d1e72adb97` |
+| gzip SQLite archive | `b8233d012eb8fc5122c206f9ada9f166e9ee00397ae888e6a5611db8b7212ef2` |
+| RocksDB archive     | `c2f638eccd174d39bac75bf9cd96770d17ea798a04eccc00d852014ae1f13baf` |

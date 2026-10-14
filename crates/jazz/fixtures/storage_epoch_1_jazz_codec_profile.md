@@ -13,11 +13,10 @@ that root at the epoch-one settlement baseline.
   `jazz.catalogue.activation.v1`, `jazz.catalogue.bootstrap-ready.v1`,
   `jazz.catalogue.lens.v1`, `jazz.catalogue.lineage.v1`, `jazz.catalogue.physical-mapping.v1`,
   `jazz.catalogue.schema.v1`, `jazz.catalogue.write-pointer.v1`,
-  `jazz.subscription-program-fact-key.v1`,
   `jazz.transaction-durability.v2`
 - adapter parameter: `key-order=unsigned-lexicographic`
 - SHA-256 of the committed canonical `JSM1` bytes:
-  `72683cdf9083aa6fd76f3b523d5c541c93b57b4d502411ade0d8baff4a2aad36`
+  `49d663d41fe044385d3dd25dfe49b0e4f2af53c73552edfbb52cab1112ac36d7`
 - receipt: `storage_codec_profile::tests::epoch_one_jazz_profile_has_a_pinned_manifest_receipt`
 
 An omitted, added, duplicate, or substituted ID fails profile admission before
@@ -51,11 +50,12 @@ account registry and catalogue-entry store) keep the base profile unchanged.
 - codec registry, in canonical order: the base list with
   `groove.durable-index.v2` inserted first and
   `jazz.history-version-current.v4` inserted after
-  `jazz.catalogue.write-pointer.v1` (15 families)
+  `jazz.catalogue.write-pointer.v1` (14 families)
 - SHA-256 of the committed canonical `JSM1` bytes (adapter sample `memory`,
   `key-order=unsigned-lexicographic`):
-  `5c976ed2a3e64d20c72d230145673be62b1d4b320aef36ccc57acf3d0bdfedf1`
-  (14 families without `groove.durable-index.v2`:
+  `073b0fa63c80f85b1703a73cedcb5525271be866aa3e828988d9853e476dc987`
+  (historical durability-v2 profile, before cache removal and without
+  `groove.durable-index.v2`, 14 families:
   `b0d8e4455d94b9a7e62dc625e5d65ca89403d35481e42681da27709ed87e9c73`)
 - receipt: `storage_codec_profile::tests::node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots`
 

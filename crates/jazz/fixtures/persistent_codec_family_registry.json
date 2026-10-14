@@ -326,29 +326,6 @@
       ]
     },
     {
-      "id": "jazz.subscription-program-fact-key.v1",
-      "boundary": "durable-storage",
-      "profile": "jazz-root",
-      "spec": {
-        "path": "crates/jazz/SPEC/16_maintained_subscription_views.md",
-        "anchor": "#### Volatile subscription scope and retired cache stores"
-      },
-      "semantic_fixture": {
-        "path": "crates/jazz/layers/node/src/node/tests/sync/known_state.rs",
-        "anchor": "legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows"
-      },
-      "rejection_receipt": {
-        "path": "crates/jazz/layers/node/src/node/tests/sync/known_state.rs",
-        "anchor": "retired_scope_payloads_never_restore_authority"
-      },
-      "evidence": [
-        {
-          "path": "crates/jazz/layers/node/src/node/tests/sync/known_state.rs",
-          "anchor": "scope_updates_are_volatile_while_native_rows_survive_reopen"
-        }
-      ]
-    },
-    {
       "id": "jazz.server-catalogue-entry.v1",
       "boundary": "durable-storage",
       "profile": "server-catalogue-root",

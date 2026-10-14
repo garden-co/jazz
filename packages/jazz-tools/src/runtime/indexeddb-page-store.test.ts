@@ -628,6 +628,11 @@ describe("IndexedDbPageStore", () => {
     for (const [requiredCodecIds, missing, unknown] of [
       [withoutLinearHistory, ["groove.durable-index.v2", "jazz.history-version-current.v4"], []],
       [[...required, "jazz.future.v2"], [], ["jazz.future.v2"]],
+      [
+        [...required, "jazz.subscription-program-fact-key.v1"].sort(),
+        [],
+        ["jazz.subscription-program-fact-key.v1"],
+      ],
     ] as const) {
       const name = databaseName();
       await installRawEpochOneFixture(name, { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds });

@@ -29,8 +29,6 @@ const NATIVE_CORPUS_REQUIRED_STORES: &[&str] = &[
     "jazz_transactions",
     "jazz_tx_touched_rows",
     "jazz_authority_policy_bindings",
-    "jazz_known_state_facts",
-    "jazz_settled_program_facts",
     groove::db::LARGE_VALUE_METADATA_CF,
 ];
 const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
@@ -45,25 +43,25 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "fb64e19c3811a1fddfd419d6d1e573616af7f5bbab070614fff76ed7b3947367";
+    "6e492425d0ff10088ec004ea454d0ee1e654f5ade198992058953605ac26279f";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "54b59d30c4cf7461979322c050554b835b03de1ad56bb448646febe4ee90bbca";
+    "753557a67cbb3f5fd77c8d5bbe1e9e98da786dc0c6648a910e211e784fb4cbb6";
 // Pinned alongside the physical SQLite/RocksDB images below so their contents
 // are checked independently of a newly produced store.
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
-    "fb64e19c3811a1fddfd419d6d1e573616af7f5bbab070614fff76ed7b3947367";
+    "6e492425d0ff10088ec004ea454d0ee1e654f5ade198992058953605ac26279f";
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "1037325abb4b9c2013f6d028710e8f4d0c68cf7f818e449e0be2a366c6ee8e70";
+    "b8233d012eb8fc5122c206f9ada9f166e9ee00397ae888e6a5611db8b7212ef2";
 const CURRENT_NATIVE_SQLITE_SHA256: &str =
-    "f234db40bd5f4397126a9061b74730b9e69ae3040387b1cc211dd925d0248379";
+    "4a44883ddb10fdcaaf07f9ff25fca4635bc32d8c3c952f9479b5f3d1e72adb97";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
 const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
-    "2fe9b8e60728a1f1804821ab26349794ef8f1b2a5b85dc57c462bf155c677491";
+    "c2f638eccd174d39bac75bf9cd96770d17ea798a04eccc00d852014ae1f13baf";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -119,18 +117,6 @@ fn native_corpus_pack(receipt: &NativeCorpusReceipt) -> String {
         }
     }
     pack
-}
-
-fn native_pack_without_derived_scope_entries(pack: &str) -> String {
-    // Subscription caches are explicitly invalidated on this format upgrade;
-    // every native family, its registry entry and every primary byte still match.
-    pack.lines()
-        .filter(|line| {
-            !line.starts_with("entry\tjazz_known_state_facts\t")
-                && !line.starts_with("entry\tjazz_settled_program_facts\t")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn epoch_1_native_corpus_pack() -> String {
@@ -1515,8 +1501,7 @@ fn verify_historical_native_corpus<S>(
         let prefixes = upgraded_keys.into_iter().map(|(store, key)|
             format!("entry\t{store}\t{}\t", hex::encode(key))
         ).collect::<Vec<_>>();
-        let historical = |pack: &str| native_pack_without_derived_scope_entries(pack)
-            .lines().filter(|line| !prefixes.iter().any(|prefix| line.starts_with(prefix)))
+        let historical = |pack: &str| pack.lines().filter(|line| !prefixes.iter().any(|prefix| line.starts_with(prefix)))
             .collect::<Vec<_>>().join("\n");
         assert_eq!(historical(&native_corpus_pack(&before_write)), historical(&expected_pack()),
             "current Jazz preserves every historical byte outside upgraded selection metadata");
@@ -2457,7 +2442,7 @@ fn rocksdb_family_entries(
 /// A pre-linear (DAG layout, alpha.54 to alpha.59) node root is refused at
 /// manifest admission with the typed error naming exactly the three families
 /// it lacks (durable index, linear row history and the compact durability
-/// encoding). It declares no family this build does not read.
+/// encoding), and its retired subscription-cache family.
 fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>, store: &str) {
     match result {
         Err(groove::storage::Error::UnsupportedStorageCodecs {
@@ -2475,7 +2460,7 @@ fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>,
                 ],
                 "{store}"
             );
-            assert!(unknown.is_empty(), "{store}: {unknown:?}");
+            assert_eq!(unknown, ["jazz.subscription-program-fact-key.v1"], "{store}");
         }
         Err(other) => panic!("{store}: expected UnsupportedStorageCodecs, got {other}"),
         Ok(()) => panic!("{store}: a pre-linear root must not open"),
