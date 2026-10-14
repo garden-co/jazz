@@ -270,15 +270,15 @@ impl VisibilityState {
     }
 }
 
+/// Published visibility of a semi join (`SEMI`: left rows with a right match)
+/// or an anti join (left rows without one).
 #[derive(Clone, Debug, Default)]
-pub(super) struct AntiJoinState {
+pub(super) struct ThresholdJoinState<const SEMI: bool> {
     published: VisibilityState,
 }
 
-#[derive(Clone, Debug, Default)]
-pub(super) struct SemiJoinState {
-    published: VisibilityState,
-}
+pub(super) type SemiJoinState = ThresholdJoinState<true>;
+pub(super) type AntiJoinState = ThresholdJoinState<false>;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct ArrangementState {
@@ -570,7 +570,7 @@ pub(super) fn threshold_snapshot(
     ))
 }
 
-impl SemiJoinState {
+impl<const SEMI: bool> ThresholdJoinState<SEMI> {
     pub(super) fn commit_published_overlay(&mut self) {
         self.published.commit();
     }
@@ -586,28 +586,7 @@ impl SemiJoinState {
             left,
             right,
             mode == ArrangementUpdateMode::Replace,
-            true,
-        )
-    }
-}
-
-impl AntiJoinState {
-    pub(super) fn commit_published_overlay(&mut self) {
-        self.published.commit();
-    }
-
-    pub(super) fn evaluate(
-        &mut self,
-        left: ArrangementTransition<'_>,
-        right: ArrangementTransition<'_>,
-        mode: ArrangementUpdateMode,
-    ) -> Vec<RecordDelta> {
-        threshold_transition(
-            &mut self.published,
-            left,
-            right,
-            mode == ArrangementUpdateMode::Replace,
-            false,
+            SEMI,
         )
     }
 }
