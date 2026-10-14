@@ -18,9 +18,7 @@ const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
 export {
   createRecord,
-  decodeRecordBool,
   decodeRecordBytes,
-  decodeRecordString,
   fieldIndex,
   nativeRowDescriptorPublicName,
   readNativeRowBatch,
